@@ -11,6 +11,7 @@
 
 pub mod client;
 pub mod command_context;
+pub mod commandlog;
 pub mod connection;
 pub mod db;
 pub mod object;
