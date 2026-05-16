@@ -11,6 +11,7 @@
 
 pub mod blocked;
 pub mod client;
+pub mod expire;
 pub mod command_context;
 pub mod commandlog;
 pub mod connection;
