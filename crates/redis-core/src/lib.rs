@@ -14,6 +14,7 @@ pub mod command_context;
 pub mod commandlog;
 pub mod connection;
 pub mod db;
+pub mod lazyfree;
 pub mod object;
 pub mod server;
 pub mod unix;
