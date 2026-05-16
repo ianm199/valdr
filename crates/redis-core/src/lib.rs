@@ -3,17 +3,23 @@
 //! Owners (per `harness/type-vocabulary.tsv`):
 //!   - `Client`          — `src/client.rs`
 //!   - `CommandContext`  — `src/command_context.rs`
-//!   - `RedisServer`     — `src/server.rs`     (TODO: Phase 2-3 architect packet)
-//!   - `RedisDb`         — `src/db.rs`         (TODO: Phase 3 architect packet)
-//!   - `RedisObject`     — `src/object.rs`     (TODO: Phase 3 architect packet)
+//!   - `RedisServer`     — `src/server.rs`     (STUB; expand in Phase 3)
+//!   - `RedisDb`         — `src/db.rs`         (STUB; HashMap-backed; kvstore in Phase 4)
+//!   - `RedisObject`     — `src/object.rs`     (STUB; encoding sub-variants in Phase 4)
 //!
 //! Phases 2-3 of the pilot land here.
 
 pub mod client;
 pub mod command_context;
+pub mod db;
+pub mod object;
+pub mod server;
 
 pub use client::{Client, ClientId};
 pub use command_context::CommandContext;
+pub use db::RedisDb;
+pub use object::RedisObject;
+pub use server::{RedisServer, ServerConfig};
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS

@@ -10,10 +10,10 @@
 # This is the cross-cutting vocabulary whose duplication fragments the
 # architecture. Per REDIS_PORT_HARNESS_SPEC.md §"Type Vocabulary".
 
-RedisServer       struct  crates/redis-core/src/server.rs           audit    TODO: define in pilot Phase 2-3
+RedisServer       struct  crates/redis-core/src/server.rs           enforce  stub defined 2026-05-16 architect packet
 Client            struct  crates/redis-core/src/client.rs           enforce  defined 2026-05-16 architect packet
-RedisDb           struct  crates/redis-core/src/db.rs               audit    TODO: define in pilot Phase 3
-RedisObject       enum    crates/redis-core/src/object.rs           audit    TODO: define in pilot Phase 3
+RedisDb           struct  crates/redis-core/src/db.rs               enforce  stub defined 2026-05-16 architect packet
+RedisObject       enum    crates/redis-core/src/object.rs           enforce  stub defined 2026-05-16 architect packet
 RedisString       struct  crates/redis-types/src/string.rs          enforce  defined 2026-05-16 architect packet
 RedisError        enum    crates/redis-types/src/error.rs           enforce  defined 2026-05-16 architect packet
 RespFrame         enum    crates/redis-protocol/src/frame.rs        enforce  defined 2026-05-16 architect packet
