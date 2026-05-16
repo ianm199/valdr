@@ -1,0 +1,11 @@
+[class: byte_exact]
+[description: DEL / EXISTS — return counts, handle missing keys]
+[suite: smoke,strings]
+
+SET a 1
+SET b 2
+EXISTS a
+EXISTS missing
+EXISTS a b missing
+DEL a b missing
+EXISTS a b

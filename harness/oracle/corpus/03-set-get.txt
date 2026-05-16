@@ -1,0 +1,9 @@
+[class: byte_exact]
+[description: SET / GET / GET-missing-key — most basic key/value cycle]
+[suite: smoke,strings]
+
+SET foo bar
+GET foo
+GET missing
+DEL foo
+GET foo

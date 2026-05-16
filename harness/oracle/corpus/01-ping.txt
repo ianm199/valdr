@@ -1,0 +1,7 @@
+[class: byte_exact]
+[description: PING liveness, with and without echo arg]
+[suite: smoke,protocol]
+
+PING
+PING hello
+PING "with spaces"

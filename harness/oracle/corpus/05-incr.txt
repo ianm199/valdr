@@ -1,0 +1,10 @@
+[class: byte_exact]
+[description: INCR — counter creation, increment, error on non-integer]
+[suite: smoke,strings]
+
+INCR counter
+INCR counter
+INCR counter
+GET counter
+SET notnum "foo"
+INCR notnum

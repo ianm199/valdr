@@ -10,6 +10,8 @@
 //! Pilot commands: PING, ECHO, HELLO, COMMAND (Phase 2); SET, GET, DEL,
 //! EXISTS, INCR (Phase 3).
 
+pub mod generated;
+
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
 //   source:        (none — scaffolding placeholder)

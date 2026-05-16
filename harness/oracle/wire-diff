@@ -1,0 +1,338 @@
+#!/usr/bin/env python3
+"""wire-diff — RESP behavioral oracle. Compares C Valkey vs Rust redis-server.
+
+See harness/oracle/README.md for the contract. This script is THE
+in-loop oracle that test-fixer agents call. Exit codes are load-bearing:
+0=match, 1=diverge, 2=infrastructure, 3=diff-only-mode.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import os
+import shlex
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+CORPUS_DIR = ROOT / "harness" / "oracle" / "corpus"
+NORMALIZERS_DIR = ROOT / "harness" / "oracle" / "normalizers"
+VALKEY_BIN = ROOT / "reference" / "valkey" / "src" / "valkey-server"
+RUST_BIN = ROOT / "target" / "debug" / "redis-server"
+
+# ────────────────────────────────────────────────────────────────────────
+# RESP encoder + decoder (just enough for the pilot command set)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def resp_encode(parts: list[bytes]) -> bytes:
+    """Encode a command as a RESP2 array of bulk strings."""
+    out = [b"*" + str(len(parts)).encode() + b"\r\n"]
+    for p in parts:
+        out.append(b"$" + str(len(p)).encode() + b"\r\n")
+        out.append(p + b"\r\n")
+    return b"".join(out)
+
+
+def resp_decode(buf: bytes) -> tuple[object, int]:
+    """Decode one RESP frame from the head of buf. Returns (value, bytes_consumed)."""
+    if not buf:
+        raise ValueError("empty buffer")
+    typ = buf[0:1]
+    end = buf.index(b"\r\n", 1)
+    head = buf[1:end].decode("latin-1")  # latin-1 round-trips arbitrary bytes
+    rest_start = end + 2
+    if typ in (b"+", b"-", b":"):
+        return (typ + head.encode("latin-1"), rest_start)
+    if typ == b"$":
+        n = int(head)
+        if n == -1:
+            return (b"$-1", rest_start)
+        data = buf[rest_start : rest_start + n]
+        return (b"$" + data, rest_start + n + 2)
+    if typ == b"*":
+        n = int(head)
+        if n == -1:
+            return ([b"*-1"], rest_start)
+        items = []
+        pos = rest_start
+        for _ in range(n):
+            v, used = resp_decode(buf[pos:])
+            items.append(v)
+            pos += used
+        return (items, pos)
+    raise ValueError(f"unknown RESP type byte: {typ!r}")
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Corpus parsing
+# ────────────────────────────────────────────────────────────────────────
+
+
+def parse_corpus_file(path: Path) -> dict:
+    """Returns {description, suites, klass, commands: [[bytes, ...], ...]}."""
+    description = ""
+    suites: list[str] = []
+    klass = "byte_exact"
+    commands: list[list[bytes]] = []
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            inner = line[1:-1]
+            if ":" not in inner:
+                continue
+            k, v = (s.strip() for s in inner.split(":", 1))
+            if k == "description":
+                description = v
+            elif k == "suite":
+                suites = [s.strip() for s in v.split(",")]
+            elif k == "class":
+                klass = v
+            continue
+        try:
+            parts = [p.encode("latin-1") for p in shlex.split(line)]
+            commands.append(parts)
+        except ValueError as e:
+            print(f"  WARN: skipping unparseable line in {path.name}: {line!r} ({e})", file=sys.stderr)
+    return {"description": description, "suites": suites, "klass": klass, "commands": commands}
+
+
+def select_corpus(suite_filter: str | None) -> list[tuple[str, dict]]:
+    out = []
+    for path in sorted(CORPUS_DIR.glob("*.txt")):
+        c = parse_corpus_file(path)
+        if suite_filter is None or suite_filter in c["suites"]:
+            out.append((path.stem, c))
+    return out
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Server spawning + RESP I/O
+# ────────────────────────────────────────────────────────────────────────
+
+
+def pick_free_port() -> int:
+    with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+@contextlib.contextmanager
+def spawn_server(binary: Path, port: int, label: str):
+    """Spawn `binary --port <port>` with a temp dir as workdir. Yields after the port is reachable."""
+    if not binary.exists():
+        raise FileNotFoundError(f"{label} binary not found at {binary}")
+    with tempfile.TemporaryDirectory(prefix=f"wire-diff-{label}-") as tmp:
+        log_path = Path(tmp) / "server.log"
+        with open(log_path, "wb") as log:
+            proc = subprocess.Popen(
+                [str(binary), "--port", str(port), "--bind", "127.0.0.1",
+                 "--save", "", "--appendonly", "no", "--daemonize", "no"],
+                cwd=tmp,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        # Wait for port to accept connections (up to 5s)
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                    break
+            except OSError:
+                if proc.poll() is not None:
+                    log_tail = log_path.read_text(errors="replace")[-1000:] if log_path.exists() else ""
+                    raise RuntimeError(f"{label} server exited early: {log_tail}")
+                time.sleep(0.05)
+        else:
+            proc.terminate()
+            raise TimeoutError(f"{label} server didn't accept connections within 5s on port {port}")
+        try:
+            yield port
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+
+def send_commands(port: int, commands: list[list[bytes]]) -> list[object]:
+    """Open one connection, send all commands, decode all replies, return them in order."""
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+        for cmd in commands:
+            sock.sendall(resp_encode(cmd))
+        # Read until we have one frame per command. Naive accumulate-and-decode loop.
+        buf = b""
+        replies = []
+        while len(replies) < len(commands):
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+            while len(replies) < len(commands):
+                try:
+                    val, used = resp_decode(buf)
+                except (ValueError, IndexError):
+                    break  # need more bytes
+                replies.append(val)
+                buf = buf[used:]
+        return replies
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Comparison
+# ────────────────────────────────────────────────────────────────────────
+
+
+def repr_frame(v) -> str:
+    if isinstance(v, list):
+        return "[" + ", ".join(repr_frame(x) for x in v) + "]"
+    if isinstance(v, bytes):
+        try:
+            return v.decode("utf-8")
+        except UnicodeDecodeError:
+            return repr(v)
+    return repr(v)
+
+
+def compare(klass: str, c_reply, rust_reply) -> bool:
+    if klass == "byte_exact":
+        return c_reply == rust_reply
+    if klass == "frame_exact":
+        return _frame_eq(c_reply, rust_reply)
+    if klass == "normalized":
+        # TODO: load per-command normalizer from harness/oracle/normalizers/
+        return c_reply == rust_reply
+    if klass == "state_digest":
+        # Only the final reply (DEBUG DIGEST output) matters
+        return c_reply == rust_reply
+    return c_reply == rust_reply
+
+
+def _frame_eq(a, b) -> bool:
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) == len(b) and all(_frame_eq(x, y) for x, y in zip(a, b))
+    return a == b
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Main
+# ────────────────────────────────────────────────────────────────────────
+
+
+def run_suite(c_port: int, rust_port: int | None, suite: str | None, diff_only: bool) -> int:
+    cases = select_corpus(suite)
+    if not cases:
+        print(f"no corpus cases match suite={suite}", file=sys.stderr)
+        return 2
+
+    total = 0
+    failed = 0
+    for name, body in cases:
+        cmds = body["commands"]
+        klass = body["klass"]
+        c_replies = send_commands(c_port, cmds)
+        rust_replies = None
+        if rust_port is not None:
+            try:
+                rust_replies = send_commands(rust_port, cmds)
+            except Exception as e:
+                print(f"{name:<22} ERROR(rust): {e}", file=sys.stderr)
+                failed += 1
+                total += 1
+                continue
+        for i, cmd in enumerate(cmds):
+            total += 1
+            cmd_repr = " ".join(p.decode("latin-1", errors="replace") for p in cmd)
+            c_r = c_replies[i] if i < len(c_replies) else "<missing>"
+            if rust_port is None:
+                # No Rust server — just print the C reply for visibility
+                print(f"{name:<22} [{klass}] {cmd_repr!s:<30} → C: {repr_frame(c_r)}")
+                continue
+            r_r = rust_replies[i] if i < len(rust_replies) else "<missing>"
+            ok = compare(klass, c_r, r_r)
+            if ok:
+                print(f"{name:<22} [{klass}] {cmd_repr!s:<30} PASS")
+            else:
+                failed += 1
+                print(f"{name:<22} [{klass}] {cmd_repr!s:<30} FAIL")
+                print(f"  C:    {repr_frame(c_r)}")
+                print(f"  Rust: {repr_frame(r_r)}")
+
+    print()
+    print(f"─── total: {total}  failed: {failed} ───")
+    if rust_port is None:
+        print("(Rust server unavailable — observed C behavior only.)")
+        return 0  # not an error; expected during pre-Phase-2 scaffolding
+    if diff_only:
+        return 3 if failed else 0
+    return 1 if failed else 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--suite", default=None,
+                    help="Run only this suite (e.g. smoke, protocol, strings). Default: all.")
+    ap.add_argument("--c-port", type=int, default=None,
+                    help="Use already-running C server on this port (else spawn).")
+    ap.add_argument("--rust-port", type=int, default=None,
+                    help="Use already-running Rust server on this port (else spawn if binary exists).")
+    ap.add_argument("--diff-only", action="store_true",
+                    help="Print diffs without failing (returns 3 on diff, 0 on match).")
+    ap.add_argument("--check-infrastructure", action="store_true",
+                    help="Just verify the C server starts and accepts commands; don't run corpus.")
+    args = ap.parse_args()
+
+    if not VALKEY_BIN.exists() and args.c_port is None:
+        print(f"ERROR: Valkey binary not built at {VALKEY_BIN}", file=sys.stderr)
+        print("       Run: ./harness/bootstrap-upstream.sh", file=sys.stderr)
+        print("       Then: cd reference/valkey && make -j4 BUILD_TLS=no DISABLE_WERRORS=yes", file=sys.stderr)
+        return 2
+
+    rust_available = args.rust_port is not None or RUST_BIN.exists()
+
+    # Spawn or use existing
+    if args.c_port is not None:
+        c_port = args.c_port
+        c_cm = contextlib.nullcontext(c_port)
+    else:
+        c_port = pick_free_port()
+        c_cm = spawn_server(VALKEY_BIN, c_port, "valkey")
+
+    if args.rust_port is not None:
+        rust_port = args.rust_port
+        rust_cm = contextlib.nullcontext(rust_port)
+    elif RUST_BIN.exists():
+        rust_port = pick_free_port()
+        rust_cm = spawn_server(RUST_BIN, rust_port, "rust")
+    else:
+        rust_port = None
+        rust_cm = contextlib.nullcontext(None)
+
+    with c_cm as c_p, rust_cm as r_p:
+        if args.check_infrastructure:
+            # Just verify C reachable
+            replies = send_commands(c_p, [[b"PING"]])
+            ok = replies and replies[0] == b"+PONG"
+            print(f"infrastructure: c={ok}  rust={'yes' if r_p is not None else 'no-binary'}")
+            return 0 if ok else 2
+        return run_suite(c_p, r_p, args.suite, args.diff_only)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except (FileNotFoundError, TimeoutError, RuntimeError) as e:
+        print(f"INFRASTRUCTURE ERROR: {e}", file=sys.stderr)
+        sys.exit(2)

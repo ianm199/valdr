@@ -1,0 +1,7 @@
+[class: byte_exact]
+[description: ECHO mirrors the bulk-string argument verbatim]
+[suite: smoke,protocol]
+
+ECHO "hello"
+ECHO ""
+ECHO "with newline\nin it"
