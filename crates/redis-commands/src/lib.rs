@@ -11,6 +11,7 @@
 //! EXISTS, INCR (Phase 3).
 
 pub mod generated;
+pub mod pubsub;
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
