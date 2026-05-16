@@ -6,8 +6,10 @@
 //! Phase 2 of the pilot lives here.
 
 pub mod frame;
+pub mod parser;
 
 pub use frame::{RespFrame, encode_resp2};
+pub use parser::{ParserCallbacks, ParserCursor};
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
