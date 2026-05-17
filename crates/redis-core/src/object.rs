@@ -20,7 +20,7 @@
 // C: object.c:31-41 (includes)
 use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use redis_types::{RedisError, RedisString};
 
@@ -100,15 +100,23 @@ pub enum StringEncoding {
 }
 
 /// Encoding sub-variants for `RedisObject::List`.
-/// Phase 4: replace `ListPack(Vec<u8>)` with `redis_ds::ListPack`
-///           and `QuickList(Vec<RedisString>)` with `redis_ds::QuickList`.
+///
+/// Phase 4 will replace `ListPack` and `QuickList` with real `redis_ds`
+/// types. Until then, list commands operate over `Inline`, a `VecDeque` of
+/// `RedisString` providing O(1) head/tail ops and trivial index access.
 #[derive(Debug, Clone)]
 pub enum ListEncoding {
+    /// Pragmatic interim encoding used by the in-tree list commands.
+    ///
+    /// Provides O(1) push/pop on both ends and O(n) middle ops, which is
+    /// sufficient for byte-exact Redis semantics. Phase 4 replaces this with
+    /// the real ListPack/QuickList encodings once `redis-ds` is ready.
+    Inline(VecDeque<RedisString>),
     /// Compact list-pack byte array (OBJ_ENCODING_LISTPACK).
-    // TODO(architect): need dependency edge from redis-core to redis-ds for ListPack type
+    // TODO(architect): replace VecDeque with real encoding in Phase 4
     ListPack(Vec<u8>),
     /// Doubly-linked list of list-pack nodes (OBJ_ENCODING_QUICKLIST).
-    // TODO(architect): need dependency edge from redis-core to redis-ds for QuickList type
+    // TODO(architect): replace VecDeque with real encoding in Phase 4
     QuickList(Vec<RedisString>),
 }
 
@@ -297,6 +305,16 @@ impl RedisObject {
         Self::bare(ObjectKind::String(StringEncoding::Int(value)))
     }
 
+    /// Create an empty list object with the pragmatic Inline encoding.
+    ///
+    /// Phase 4 will replace this with one of the real `redis-ds` encodings
+    /// (ListPack for small lists, QuickList for larger ones). For now the
+    /// `Inline` `VecDeque<RedisString>` is the single working encoding used
+    /// by every list command in the redis-commands crate.
+    pub fn new_list() -> Self {
+        Self::bare(ObjectKind::List(ListEncoding::Inline(VecDeque::new())))
+    }
+
     /// Create a list object with QuickList encoding.
     /// C: createQuicklistObject(fill, compress) → object.c:481
     pub fn new_quicklist(_fill: i32, _compress: i32) -> Self {
@@ -308,6 +326,25 @@ impl RedisObject {
     /// C: createListListpackObject() → object.c:488
     pub fn new_list_listpack() -> Self {
         Self::bare(ObjectKind::List(ListEncoding::ListPack(Vec::new())))
+    }
+
+    /// Borrow the inner list `VecDeque` for a list-encoded object.
+    ///
+    /// Returns `None` for non-list objects and for the stub `ListPack`/
+    /// `QuickList` encodings that this round does not populate.
+    pub fn list(&self) -> Option<&VecDeque<RedisString>> {
+        match &self.kind {
+            ObjectKind::List(ListEncoding::Inline(d)) => Some(d),
+            _ => None,
+        }
+    }
+
+    /// Mutably borrow the inner list `VecDeque` for a list-encoded object.
+    pub fn list_mut(&mut self) -> Option<&mut VecDeque<RedisString>> {
+        match &mut self.kind {
+            ObjectKind::List(ListEncoding::Inline(d)) => Some(d),
+            _ => None,
+        }
     }
 
     /// Create a set object with full hash-table encoding.
@@ -410,6 +447,7 @@ impl RedisObject {
             ObjectKind::String(StringEncoding::Raw(_)) => "raw",
             ObjectKind::String(StringEncoding::Embstr(_)) => "embstr",
             ObjectKind::String(StringEncoding::Int(_)) => "int",
+            ObjectKind::List(ListEncoding::Inline(_)) => "listpack",
             ObjectKind::List(ListEncoding::QuickList(_)) => "quicklist",
             ObjectKind::List(ListEncoding::ListPack(_)) => "listpack",
             ObjectKind::Set(SetEncoding::HashTable(_)) => "hashtable",
@@ -1134,6 +1172,10 @@ pub fn object_compute_size(
             std::mem::size_of::<RedisObject>() + s.len()
         }
         ObjectKind::String(StringEncoding::Int(_)) => std::mem::size_of::<RedisObject>(),
+        ObjectKind::List(ListEncoding::Inline(d)) => {
+            std::mem::size_of::<RedisObject>()
+                + d.iter().map(|s| s.len() + std::mem::size_of::<usize>()).sum::<usize>()
+        }
         ObjectKind::List(ListEncoding::ListPack(lp)) => {
             std::mem::size_of::<RedisObject>() + lp.len()
         }
@@ -1398,6 +1440,7 @@ impl RedisObject {
     /// Returns 0 for non-collection types.
     pub fn collection_len(&self) -> usize {
         match &self.kind {
+            ObjectKind::List(ListEncoding::Inline(d))    => d.len(),
             ObjectKind::List(ListEncoding::QuickList(v)) => v.len(),
             ObjectKind::List(ListEncoding::ListPack(_))  => 0,
             ObjectKind::Set(SetEncoding::HashTable(h))   => h.len(),
@@ -1416,6 +1459,7 @@ impl RedisObject {
     /// TODO(port): Phase 4 — proper iter for ListPack encoding (yields empty today).
     pub fn iter_list(&self) -> Box<dyn Iterator<Item = &RedisString> + '_> {
         match &self.kind {
+            ObjectKind::List(ListEncoding::Inline(d)) => Box::new(d.iter()),
             ObjectKind::List(ListEncoding::QuickList(v)) => Box::new(v.iter()),
             _ => Box::new(std::iter::empty()),
         }

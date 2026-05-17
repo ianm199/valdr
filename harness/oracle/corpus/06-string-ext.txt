@@ -1,0 +1,20 @@
+[class: byte_exact]
+[description: APPEND STRLEN MSET MGET GETRANGE SETRANGE SETNX GETSET GETDEL SUBSTR]
+[suite: smoke,strings]
+
+FLUSHDB
+SET k hello
+APPEND k " world"
+STRLEN k
+MSET a 1 b 2 c 3
+MGET a b c missing
+GETRANGE k 0 4
+SETRANGE k 6 Redis
+GET k
+SETNX a new
+SETNX newkey val
+GETSET b 99
+GET b
+GETDEL c
+GET c
+SUBSTR k 0 4

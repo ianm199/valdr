@@ -1,0 +1,30 @@
+[class: byte_exact]
+[description: TYPE RENAME RENAMENX DBSIZE KEYS TOUCH UNLINK COPY FLUSHDB]
+[suite: smoke,keyops]
+
+FLUSHDB
+SET mystr hello
+TYPE mystr
+TYPE missing
+RENAME mystr renamed
+GET renamed
+RENAME missing x
+SET a 1
+SET b 2
+RENAMENX a b
+RENAMENX a newkey
+DBSIZE
+SET onlyone v
+KEYS only*
+KEYS nope*
+SET touchme v
+TOUCH touchme b missing
+UNLINK touchme b
+DBSIZE
+SET src copyval
+COPY src dst
+GET dst
+COPY src dst
+COPY src dst REPLACE
+FLUSHDB
+DBSIZE

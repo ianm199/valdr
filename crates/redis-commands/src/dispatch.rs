@@ -144,6 +144,22 @@ pub static HANDLERS: &[DispatchEntry] = &[
     DispatchEntry { name: b"GETRANGE", handler: crate::string::getrange_command },
     DispatchEntry { name: b"SETRANGE", handler: crate::string::setrange_command },
     DispatchEntry { name: b"SUBSTR", handler: crate::string::getrange_command },
+    // ── LIST (Round 2) ─────────────────────────────────────────────────────
+    DispatchEntry { name: b"LPUSH", handler: crate::list::lpush_command },
+    DispatchEntry { name: b"RPUSH", handler: crate::list::rpush_command },
+    DispatchEntry { name: b"LPUSHX", handler: crate::list::lpushx_command },
+    DispatchEntry { name: b"RPUSHX", handler: crate::list::rpushx_command },
+    DispatchEntry { name: b"LPOP", handler: crate::list::lpop_command },
+    DispatchEntry { name: b"RPOP", handler: crate::list::rpop_command },
+    DispatchEntry { name: b"LLEN", handler: crate::list::llen_command },
+    DispatchEntry { name: b"LRANGE", handler: crate::list::lrange_command },
+    DispatchEntry { name: b"LINDEX", handler: crate::list::lindex_command },
+    DispatchEntry { name: b"LSET", handler: crate::list::lset_command },
+    DispatchEntry { name: b"LREM", handler: crate::list::lrem_command },
+    DispatchEntry { name: b"LTRIM", handler: crate::list::ltrim_command },
+    DispatchEntry { name: b"LINSERT", handler: crate::list::linsert_command },
+    DispatchEntry { name: b"LMOVE", handler: crate::list::lmove_command },
+    DispatchEntry { name: b"RPOPLPUSH", handler: crate::list::rpoplpush_command },
 ];
 
 #[cfg(test)]

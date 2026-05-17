@@ -1,0 +1,10 @@
+[class: byte_exact]
+[description: SELECT CLIENT-SETNAME CLIENT-GETNAME RESET]
+[suite: smoke,server]
+
+FLUSHDB
+SELECT 0
+CLIENT SETNAME test-client
+CLIENT GETNAME
+RESET
+PING
