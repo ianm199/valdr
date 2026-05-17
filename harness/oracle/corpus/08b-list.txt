@@ -1,0 +1,54 @@
+[class: byte_exact]
+[description: LPUSH RPUSH LLEN LRANGE LINDEX LSET LREM LTRIM LINSERT LPOP RPOP LMOVE RPOPLPUSH LPUSHX RPUSHX WRONGTYPE]
+[suite: smoke,list]
+
+FLUSHDB
+RPUSH mylist a
+RPUSH mylist b c
+LPUSH mylist x
+LLEN mylist
+LRANGE mylist 0 -1
+LRANGE mylist 1 2
+LRANGE mylist -2 -1
+LRANGE mylist 0 100
+LRANGE missing 0 -1
+LINDEX mylist 0
+LINDEX mylist -1
+LINDEX mylist 99
+LSET mylist 0 X
+LRANGE mylist 0 -1
+RPUSH rlist a b a c a
+LREM rlist 2 a
+LRANGE rlist 0 -1
+RPUSH rlist2 a b a c a
+LREM rlist2 -1 a
+LRANGE rlist2 0 -1
+RPUSH tlist a b c d e
+LTRIM tlist 1 3
+LRANGE tlist 0 -1
+RPUSH ilist a b c
+LINSERT ilist BEFORE b X
+LRANGE ilist 0 -1
+LINSERT ilist AFTER b Y
+LRANGE ilist 0 -1
+LINSERT ilist BEFORE nope Z
+LINSERT missing BEFORE a b
+RPUSH plist 1 2 3 4 5
+LPOP plist
+RPOP plist
+LPOP plist 2
+RPOP plist 10
+LPOP missing
+RPUSH src a b c
+LMOVE src dst LEFT RIGHT
+LRANGE src 0 -1
+LRANGE dst 0 -1
+RPUSH src2 x y z
+RPOPLPUSH src2 dst2
+LRANGE src2 0 -1
+LRANGE dst2 0 -1
+LPUSHX nosuch val
+RPUSHX nosuch val
+EXISTS nosuch
+SET strkey hello
+LPUSH strkey val

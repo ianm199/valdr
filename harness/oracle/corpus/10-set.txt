@@ -1,0 +1,40 @@
+[class: byte_exact]
+[description: SADD SREM SISMEMBER SMISMEMBER SCARD SINTERCARD SINTERSTORE SUNIONSTORE SDIFFSTORE SMOVE]
+[suite: smoke,set]
+
+FLUSHDB
+SADD s a b c
+SADD s a d
+SCARD s
+SISMEMBER s a
+SISMEMBER s zzz
+SMISMEMBER s a zzz d
+SREM s b zzz
+SCARD s
+SADD t c d e
+SINTERCARD 2 s t
+SINTERSTORE inter s t
+SCARD inter
+SUNIONSTORE u s t
+SCARD u
+SDIFFSTORE diff s t
+SCARD diff
+SISMEMBER diff a
+SMOVE s t a
+SISMEMBER s a
+SISMEMBER t a
+SADD se x
+SCARD se
+SISMEMBER se x
+SADD onlyone solo
+SCARD onlyone
+SMEMBERS onlyone
+SREM onlyone solo
+EXISTS onlyone
+SCARD missing
+SISMEMBER missing x
+SET str hi
+SADD str x
+TYPE str
+FLUSHDB
+DBSIZE

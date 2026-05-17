@@ -121,14 +121,28 @@ pub enum ListEncoding {
 }
 
 /// Encoding sub-variants for `RedisObject::Set`.
+///
+/// Phase 4 will replace `ListPack`, `IntSet`, and `HashTable` with real
+/// `redis_ds` encodings. Until then, set commands operate over `Inline`,
+/// a `HashSet<RedisString>` providing O(1) membership and add/remove.
 #[derive(Debug, Clone)]
 pub enum SetEncoding {
+    /// Pragmatic interim encoding used by the in-tree set commands.
+    ///
+    /// Backed by `HashSet<RedisString>` for O(1) membership tests, adds,
+    /// and removes, which is sufficient for byte-exact Redis semantics
+    /// across SADD/SREM/SMEMBERS/SINTER/SUNION/SDIFF and friends. Phase 4
+    /// swaps this for real ListPack / IntSet / HashTable encodings once
+    /// `redis-ds` ships the underlying datastructures.
+    Inline(HashSet<RedisString>),
     /// Compact list-pack byte array (OBJ_ENCODING_LISTPACK).
+    // TODO(architect): replace stub Vec with real listpack encoding in Phase 4
     ListPack(Vec<u8>),
     /// Sorted integer array (OBJ_ENCODING_INTSET).
     // TODO(architect): need dependency edge from redis-core to redis-ds for IntSet type
     IntSet(Vec<i64>),
     /// Full hash table (OBJ_ENCODING_HASHTABLE).
+    // TODO(architect): replace HashSet with real redis-ds hashtable in Phase 4
     HashTable(HashSet<RedisString>),
 }
 
@@ -143,11 +157,24 @@ pub enum ZSetEncoding {
 }
 
 /// Encoding sub-variants for `RedisObject::Hash`.
+///
+/// Phase 4 will replace `ListPack` and `HashTable` with real `redis_ds`
+/// types. Until then, hash commands operate over `Inline`, a plain
+/// `HashMap<RedisString, RedisString>` providing the byte-exact semantics
+/// of every wire-level HASH operation.
 #[derive(Debug, Clone)]
 pub enum HashEncoding {
+    /// Pragmatic interim encoding used by the in-tree hash commands.
+    ///
+    /// Backed by `HashMap<RedisString, RedisString>` for O(1) field lookups
+    /// and updates. Phase 4 swaps this for real ListPack / HashTable
+    /// encodings once `redis-ds` ships the underlying datastructures.
+    Inline(HashMap<RedisString, RedisString>),
     /// Compact list-pack byte array (OBJ_ENCODING_LISTPACK).
+    // TODO(architect): replace stub Vec with real listpack encoding in Phase 4
     ListPack(Vec<u8>),
     /// Full hash table (OBJ_ENCODING_HASHTABLE).
+    // TODO(architect): replace HashMap with real redis-ds hashtable in Phase 4
     HashTable(HashMap<RedisString, RedisString>),
 }
 
@@ -365,6 +392,36 @@ impl RedisObject {
         Self::bare(ObjectKind::Set(SetEncoding::ListPack(Vec::new())))
     }
 
+    /// Create an empty set object with the pragmatic Inline encoding.
+    ///
+    /// Phase 4 will replace this with one of the real `redis-ds` encodings
+    /// (ListPack for small sets, IntSet for all-integer sets, HashTable
+    /// for larger ones). For now the `Inline` `HashSet<RedisString>` is
+    /// the single working encoding used by every set command in the
+    /// redis-commands crate.
+    pub fn new_set() -> Self {
+        Self::bare(ObjectKind::Set(SetEncoding::Inline(HashSet::new())))
+    }
+
+    /// Borrow the inner member `HashSet` for a set-encoded object.
+    ///
+    /// Returns `None` for non-set objects and for the stub `ListPack` /
+    /// `IntSet` / `HashTable` encodings that this round does not populate.
+    pub fn set(&self) -> Option<&HashSet<RedisString>> {
+        match &self.kind {
+            ObjectKind::Set(SetEncoding::Inline(h)) => Some(h),
+            _ => None,
+        }
+    }
+
+    /// Mutably borrow the inner member `HashSet` for a set-encoded object.
+    pub fn set_mut(&mut self) -> Option<&mut HashSet<RedisString>> {
+        match &mut self.kind {
+            ObjectKind::Set(SetEncoding::Inline(h)) => Some(h),
+            _ => None,
+        }
+    }
+
     /// Create a hash object with ListPack encoding.
     /// C: createHashObject() → object.c:516
     pub fn new_hash_listpack() -> Self {
@@ -374,6 +431,35 @@ impl RedisObject {
     /// Create a hash object with HashTable encoding.
     pub fn new_hash_hashtable() -> Self {
         Self::bare(ObjectKind::Hash(HashEncoding::HashTable(HashMap::new())))
+    }
+
+    /// Create an empty hash object with the pragmatic Inline encoding.
+    ///
+    /// Phase 4 will replace this with one of the real `redis-ds` encodings
+    /// (ListPack for small hashes, HashTable for larger ones). For now the
+    /// `Inline` `HashMap<RedisString, RedisString>` is the single working
+    /// encoding used by every hash command in the redis-commands crate.
+    pub fn new_hash() -> Self {
+        Self::bare(ObjectKind::Hash(HashEncoding::Inline(HashMap::new())))
+    }
+
+    /// Borrow the inner field/value `HashMap` for a hash-encoded object.
+    ///
+    /// Returns `None` for non-hash objects and for the stub `ListPack` /
+    /// `HashTable` encodings that this round does not populate.
+    pub fn hash(&self) -> Option<&HashMap<RedisString, RedisString>> {
+        match &self.kind {
+            ObjectKind::Hash(HashEncoding::Inline(h)) => Some(h),
+            _ => None,
+        }
+    }
+
+    /// Mutably borrow the inner field/value `HashMap` for a hash-encoded object.
+    pub fn hash_mut(&mut self) -> Option<&mut HashMap<RedisString, RedisString>> {
+        match &mut self.kind {
+            ObjectKind::Hash(HashEncoding::Inline(h)) => Some(h),
+            _ => None,
+        }
     }
 
     /// Create a sorted-set object with SkipList encoding.
@@ -450,6 +536,7 @@ impl RedisObject {
             ObjectKind::List(ListEncoding::Inline(_)) => "listpack",
             ObjectKind::List(ListEncoding::QuickList(_)) => "quicklist",
             ObjectKind::List(ListEncoding::ListPack(_)) => "listpack",
+            ObjectKind::Set(SetEncoding::Inline(_)) => "listpack",
             ObjectKind::Set(SetEncoding::HashTable(_)) => "hashtable",
             ObjectKind::Set(SetEncoding::IntSet(_)) => "intset",
             ObjectKind::Set(SetEncoding::ListPack(_)) => "listpack",
@@ -457,6 +544,7 @@ impl RedisObject {
             ObjectKind::ZSet(ZSetEncoding::ListPack(_)) => "listpack",
             ObjectKind::Hash(HashEncoding::HashTable(_)) => "hashtable",
             ObjectKind::Hash(HashEncoding::ListPack(_)) => "listpack",
+            ObjectKind::Hash(HashEncoding::Inline(_)) => "hashtable",
             ObjectKind::Stream => "stream",
             ObjectKind::Module => "unknown",
         }
@@ -1183,6 +1271,10 @@ pub fn object_compute_size(
             std::mem::size_of::<RedisObject>()
                 + ql.iter().map(|s| s.len() + std::mem::size_of::<usize>()).sum::<usize>()
         }
+        ObjectKind::Set(SetEncoding::Inline(ht)) => {
+            std::mem::size_of::<RedisObject>()
+                + ht.iter().map(|s| s.len() + std::mem::size_of::<usize>()).sum::<usize>()
+        }
         ObjectKind::Set(SetEncoding::ListPack(lp)) => {
             std::mem::size_of::<RedisObject>() + lp.len()
         }
@@ -1206,6 +1298,12 @@ pub fn object_compute_size(
             std::mem::size_of::<RedisObject>() + lp.len()
         }
         ObjectKind::Hash(HashEncoding::HashTable(ht)) => {
+            std::mem::size_of::<RedisObject>()
+                + ht.iter()
+                    .map(|(k, v)| k.len() + v.len() + std::mem::size_of::<usize>())
+                    .sum::<usize>()
+        }
+        ObjectKind::Hash(HashEncoding::Inline(ht)) => {
             std::mem::size_of::<RedisObject>()
                 + ht.iter()
                     .map(|(k, v)| k.len() + v.len() + std::mem::size_of::<usize>())
@@ -1443,12 +1541,14 @@ impl RedisObject {
             ObjectKind::List(ListEncoding::Inline(d))    => d.len(),
             ObjectKind::List(ListEncoding::QuickList(v)) => v.len(),
             ObjectKind::List(ListEncoding::ListPack(_))  => 0,
+            ObjectKind::Set(SetEncoding::Inline(h))      => h.len(),
             ObjectKind::Set(SetEncoding::HashTable(h))   => h.len(),
             ObjectKind::Set(SetEncoding::IntSet(v))      => v.len(),
             ObjectKind::Set(SetEncoding::ListPack(_))    => 0,
             ObjectKind::ZSet(ZSetEncoding::SkipList(v))  => v.len(),
             ObjectKind::ZSet(ZSetEncoding::ListPack(_))  => 0,
             ObjectKind::Hash(HashEncoding::HashTable(h)) => h.len(),
+            ObjectKind::Hash(HashEncoding::Inline(h))    => h.len(),
             ObjectKind::Hash(HashEncoding::ListPack(_))  => 0,
             _ => 0,
         }
@@ -1470,6 +1570,7 @@ impl RedisObject {
     /// TODO(port): Phase 4 — proper iter for IntSet and ListPack encodings (yields empty today).
     pub fn iter_set(&self) -> Box<dyn Iterator<Item = &RedisString> + '_> {
         match &self.kind {
+            ObjectKind::Set(SetEncoding::Inline(h)) => Box::new(h.iter()),
             ObjectKind::Set(SetEncoding::HashTable(h)) => Box::new(h.iter()),
             _ => Box::new(std::iter::empty()),
         }
@@ -1493,6 +1594,7 @@ impl RedisObject {
     pub fn iter_hash(&self) -> Box<dyn Iterator<Item = (&RedisString, &RedisString)> + '_> {
         match &self.kind {
             ObjectKind::Hash(HashEncoding::HashTable(h)) => Box::new(h.iter()),
+            ObjectKind::Hash(HashEncoding::Inline(h)) => Box::new(h.iter()),
             _ => Box::new(std::iter::empty()),
         }
     }

@@ -1,0 +1,32 @@
+[class: byte_exact]
+[description: HASH family — HSET HGET HDEL HEXISTS HLEN HSTRLEN HMGET HMSET HSETNX HINCRBY HKEYS HVALS deterministic on single-field hashes]
+[suite: smoke,hash]
+
+FLUSHDB
+HSET h f1 v1
+HSET h f1 V1
+HGET h f1
+HGET h missing
+HLEN h
+HEXISTS h f1
+HEXISTS h zzz
+HSTRLEN h f1
+HSETNX h f2 v2
+HSETNX h f2 v2-other
+HMGET h f1 f2 missing
+HDEL h f1 f2 missing
+EXISTS h
+HMSET m only 7
+HINCRBY m only 5
+HINCRBY m fresh 10
+HSET m bad notint
+HINCRBY m bad 1
+HKEYS solo
+HVALS solo
+HGETALL solo
+HSET solo only one
+HKEYS solo
+HVALS solo
+HGETALL solo
+SET str hi
+HSET str a 1

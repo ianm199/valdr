@@ -14,9 +14,11 @@ pub mod bitops;
 pub mod connection;
 pub mod dispatch;
 pub mod generated;
+pub mod hash;
 pub mod list;
 pub mod multi;
 pub mod pubsub;
+pub mod set;
 pub mod stream;
 pub mod string;
 
