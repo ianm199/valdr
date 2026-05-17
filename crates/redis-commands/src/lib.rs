@@ -12,6 +12,7 @@
 
 pub mod bitops;
 pub mod generated;
+pub mod hash;
 pub mod pubsub;
 
 // ──────────────────────────────────────────────────────────────────────────
