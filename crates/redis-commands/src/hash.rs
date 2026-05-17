@@ -40,6 +40,7 @@
 use std::collections::HashMap;
 
 use redis_core::command_context::CommandContext;
+use redis_core::db::glob_match;
 use redis_core::object::RedisObject;
 use redis_types::{RedisError, RedisResult, RedisString};
 
@@ -641,6 +642,106 @@ pub fn hrandfield_command(ctx: &mut CommandContext) -> RedisResult<()> {
             Ok(())
         }
     }
+}
+
+/// HSCAN key cursor [MATCH pattern] [COUNT count] [NOVALUES]
+///
+/// Linear-cursor iteration over the field/value pairs of a hash. Matches
+/// real Redis's reply shape — a two-element array of `[next_cursor, items]`
+/// — but uses the simplified Phase-B cursor scheme (a `u64` offset into a
+/// snapshot). `NOVALUES` (Redis 7.4+) emits only the field bulks instead
+/// of interleaved field/value pairs.
+///
+/// TODO(architect): swap for the resize-safe reverse-binary cursor once
+/// the kvstore primitive lands.
+pub fn hscan_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    let argc = ctx.arg_count();
+    if argc < 3 {
+        return Err(RedisError::wrong_number_of_args(b"hscan"));
+    }
+    let key = ctx.arg_owned(1usize)?;
+    let cursor = parse_u64_cursor(ctx.arg(2)?.as_bytes())?;
+
+    let mut pattern: Option<Vec<u8>> = None;
+    let mut count: i64 = 10;
+    let mut no_values = false;
+    let mut j = 3usize;
+    while j < argc {
+        let opt = ctx.arg(j)?;
+        let bytes = opt.as_bytes();
+        if bytes.eq_ignore_ascii_case(b"MATCH") {
+            if j + 1 >= argc {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            pattern = Some(ctx.arg(j + 1)?.as_bytes().to_vec());
+            j += 2;
+        } else if bytes.eq_ignore_ascii_case(b"COUNT") {
+            if j + 1 >= argc {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            let n = parse_strict_i64(ctx.arg(j + 1)?.as_bytes())?;
+            if n < 1 {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            count = n;
+            j += 2;
+        } else if bytes.eq_ignore_ascii_case(b"NOVALUES") {
+            no_values = true;
+            j += 1;
+        } else {
+            return Err(RedisError::syntax(b"syntax error"));
+        }
+    }
+
+    let pairs: Vec<(RedisString, RedisString)> = match as_hash_ref(ctx.db().lookup_key_read(&key))?
+    {
+        None => Vec::new(),
+        Some(h) => h.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+    };
+    let total = pairs.len() as u64;
+    let start = cursor as usize;
+    let stop = (start + count as usize).min(pairs.len());
+    let next_cursor: u64 = if stop as u64 >= total { 0 } else { stop as u64 };
+
+    let mut matched: Vec<(RedisString, RedisString)> = Vec::new();
+    for (f, v) in pairs.into_iter().skip(start).take(count as usize) {
+        if let Some(ref pat) = pattern {
+            if !glob_match(pat, f.as_bytes()) {
+                continue;
+            }
+        }
+        matched.push((f, v));
+    }
+
+    ctx.reply_array_header(2usize)?;
+    ctx.reply_bulk(next_cursor.to_string().as_bytes())?;
+    let header = if no_values { matched.len() } else { matched.len() * 2 };
+    ctx.reply_array_header(header)?;
+    for (f, v) in matched {
+        ctx.reply_bulk_string(f)?;
+        if !no_values {
+            ctx.reply_bulk_string(v)?;
+        }
+    }
+    Ok(())
+}
+
+/// Parse a `RedisString` as an unsigned cursor value.
+fn parse_u64_cursor(bytes: &[u8]) -> Result<u64, RedisError> {
+    if bytes.is_empty() {
+        return Err(RedisError::runtime(b"ERR invalid cursor"));
+    }
+    let mut n: u64 = 0;
+    for &c in bytes {
+        if !c.is_ascii_digit() {
+            return Err(RedisError::runtime(b"ERR invalid cursor"));
+        }
+        n = n
+            .checked_mul(10)
+            .and_then(|v| v.checked_add((c - b'0') as u64))
+            .ok_or_else(|| RedisError::runtime(b"ERR invalid cursor"))?;
+    }
+    Ok(n)
 }
 
 // ──────────────────────────────────────────────────────────────────────────

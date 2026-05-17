@@ -16,7 +16,7 @@ use std::sync::OnceLock;
 use redis_types::{RedisError, RedisString};
 
 use crate::command_context::CommandContext;
-use crate::db::RedisDb;
+use crate::db::{LOOKUP_NOTOUCH, RedisDb};
 use crate::object::RedisObject;
 use crate::server::RedisServer;
 
@@ -758,73 +758,86 @@ pub fn convert_expire_argument_to_unix_time(
 /// `unit`: `UNIT_SECONDS` or `UNIT_MILLISECONDS`.
 pub fn expire_generic_command(
     ctx: &mut CommandContext,
-    server: &RedisServer,
     basetime: MsTime,
     unit: i32,
 ) -> Result<(), RedisError> {
-    // TODO(architect): CommandContext needs &mut RedisServer access (Phase 3).
     let mut flag: i32 = 0;
     let argc = ctx.arg_count();
+    if argc < 3 {
+        return Err(RedisError::wrong_number_of_args(ctx.command_name().to_vec()));
+    }
     parse_extended_expire_arguments(ctx, &mut flag, argc)?;
 
     let param = ctx.arg(2)?.clone();
     let mut when: MsTime = parse_i64_from_redis_string(&param)?;
 
-    // C: expire.c:778-789 — overflow check for unit conversion and basetime addition.
     if unit == UNIT_SECONDS {
         if when > i64::MAX / 1000 || when < i64::MIN / 1000 {
             return Err(expire_time_error());
         }
         when *= 1000;
     }
-    if when > i64::MAX - basetime {
+    if basetime > 0 && when > i64::MAX - basetime {
         return Err(expire_time_error());
     }
     when += basetime;
 
-    // C: expire.c:795-797 — clamp negative expiry to 0 to avoid crash during active expiry.
-    if when < 0 {
-        when = 0;
-    }
-
     let key = ctx.arg(1)?.clone();
 
-    // TODO(architect): ctx.db_mut() not yet available — Phase 3 adds server/db to CommandContext.
-    // TODO(port): lookupKeyWrite(c->db, key) — returns None if key absent.
-    // Placeholder: reply 0 (key not found) until db access is wired in Phase 3.
-    let _ = (key, flag, when, server);
-    ctx.reply_integer(0)?;
+    let current_expire = ctx.db().get_expire(&key);
+    let key_exists = ctx.db_mut().lookup_key_write(&key).is_some();
+    if !key_exists {
+        return ctx.reply_integer(0);
+    }
 
-    // C: expire.c:807-874 — NX/XX/GT/LT flag checks, checkAlreadyExpired,
-    // setExpire, signalModifiedKey, notifyKeyspaceEvent, rewriteClientCommandArgument.
-    // TODO(port): implement fully once CommandContext exposes db/server in Phase 3.
+    let has_expire = current_expire != crate::object::EXPIRY_NONE;
+    if flag & EXPIRE_NX != 0 && has_expire {
+        return ctx.reply_integer(0);
+    }
+    if flag & EXPIRE_XX != 0 && !has_expire {
+        return ctx.reply_integer(0);
+    }
+    if flag & EXPIRE_GT != 0 && has_expire && when <= current_expire {
+        return ctx.reply_integer(0);
+    }
+    if flag & EXPIRE_LT != 0 && has_expire && when >= current_expire {
+        return ctx.reply_integer(0);
+    }
+    if flag & EXPIRE_LT != 0 && !has_expire {
+        return ctx.reply_integer(0);
+    }
 
-    Ok(())
+    let now = ms_time_now();
+    if when <= now {
+        ctx.db_mut().sync_delete(&key);
+        return ctx.reply_integer(1);
+    }
+
+    ctx.db_mut().set_expire(&key, when);
+    ctx.db().signal_modified(&key);
+    ctx.reply_integer(1)
 }
 
-// ── expire.c:878-895, expireCommand / expireatCommand / pexpire / pexpireat
-
 /// EXPIRE key seconds [ NX | XX | GT | LT ]
-pub fn expire_command(ctx: &mut CommandContext, server: &RedisServer) -> Result<(), RedisError> {
-    // TODO(port): commandTimeSnapshot() should derive from ctx/server in Phase 3.
+pub fn expire_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let now = ms_time_now();
-    expire_generic_command(ctx, server, now, UNIT_SECONDS)
+    expire_generic_command(ctx, now, UNIT_SECONDS)
 }
 
 /// EXPIREAT key unix-time-seconds [ NX | XX | GT | LT ]
-pub fn expireat_command(ctx: &mut CommandContext, server: &RedisServer) -> Result<(), RedisError> {
-    expire_generic_command(ctx, server, 0, UNIT_SECONDS)
+pub fn expireat_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
+    expire_generic_command(ctx, 0, UNIT_SECONDS)
 }
 
 /// PEXPIRE key milliseconds [ NX | XX | GT | LT ]
-pub fn pexpire_command(ctx: &mut CommandContext, server: &RedisServer) -> Result<(), RedisError> {
+pub fn pexpire_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let now = ms_time_now();
-    expire_generic_command(ctx, server, now, UNIT_MILLISECONDS)
+    expire_generic_command(ctx, now, UNIT_MILLISECONDS)
 }
 
 /// PEXPIREAT key unix-time-milliseconds [ NX | XX | GT | LT ]
-pub fn pexpireat_command(ctx: &mut CommandContext, server: &RedisServer) -> Result<(), RedisError> {
-    expire_generic_command(ctx, server, 0, UNIT_MILLISECONDS)
+pub fn pexpireat_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
+    expire_generic_command(ctx, 0, UNIT_MILLISECONDS)
 }
 
 // ── expire.c:897-920, ttlGenericCommand ──────────────────────────────────
@@ -834,83 +847,59 @@ pub fn pexpireat_command(ctx: &mut CommandContext, server: &RedisServer) -> Resu
 /// `output_abs`: reply as absolute Unix timestamp when true, relative TTL when false.
 pub fn ttl_generic_command(
     ctx: &mut CommandContext,
-    server: &RedisServer,
     output_ms: bool,
     output_abs: bool,
 ) -> Result<(), RedisError> {
-    // TODO(architect): ctx.db() not yet available — Phase 3.
-    // TODO(port): lookupKeyReadWithFlags(c->db, argv[1], LOOKUP_NOTOUCH) not yet on stub.
-    let _key = ctx.arg(1)?;
-    let _ = (server, output_ms, output_abs);
-
-    // C: expire.c:903 — reply -2 if key does not exist.
-    // Placeholder: always reply -2 until db access is wired.
-    ctx.reply_integer(-2)?;
-
-    // Full C logic preserved for Phase B reference:
-    // C: expire.c:910-919
-    //   expire = objectGetExpire(o);  // -1 if no expire
-    //   if expire != -1:
-    //     ttl = if output_abs { expire } else { expire - commandTimeSnapshot() }
-    //     if ttl < 0 { ttl = 0 }
-    //   if ttl == -1: addReplyLongLong(c, -1)
-    //   else: addReplyLongLong(c, if output_ms { ttl } else { (ttl + 500) / 1000 })
-
-    Ok(())
+    let key = ctx.arg(1)?.clone();
+    let exists = ctx.db_mut().lookup_key_read_with_flags(&key, LOOKUP_NOTOUCH).is_some();
+    if !exists {
+        return ctx.reply_integer(-2);
+    }
+    let expire = ctx.db().get_expire(&key);
+    if expire == crate::object::EXPIRY_NONE {
+        return ctx.reply_integer(-1);
+    }
+    let raw_ttl: i64 = if output_abs { expire } else { expire - ms_time_now() };
+    let ttl = raw_ttl.max(0);
+    let out = if output_ms { ttl } else { (ttl + 500) / 1000 };
+    ctx.reply_integer(out)
 }
 
 /// TTL key
-pub fn ttl_command(ctx: &mut CommandContext, server: &RedisServer) -> Result<(), RedisError> {
-    ttl_generic_command(ctx, server, false, false)
+pub fn ttl_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
+    ttl_generic_command(ctx, false, false)
 }
 
 /// PTTL key
-pub fn pttl_command(ctx: &mut CommandContext, server: &RedisServer) -> Result<(), RedisError> {
-    ttl_generic_command(ctx, server, true, false)
+pub fn pttl_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
+    ttl_generic_command(ctx, true, false)
 }
 
-/// EXPIRETIME key
-pub fn expiretime_command(ctx: &mut CommandContext, server: &RedisServer) -> Result<(), RedisError> {
-    ttl_generic_command(ctx, server, false, true)
+/// EXPIRETIME key — absolute seconds, `-1` for no TTL, `-2` for missing key.
+pub fn expiretime_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
+    ttl_generic_command(ctx, false, true)
 }
 
-/// PEXPIRETIME key
-pub fn pexpiretime_command(ctx: &mut CommandContext, server: &RedisServer) -> Result<(), RedisError> {
-    ttl_generic_command(ctx, server, true, true)
+/// PEXPIRETIME key — absolute milliseconds, `-1` for no TTL, `-2` for missing key.
+pub fn pexpiretime_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
+    ttl_generic_command(ctx, true, true)
 }
 
-// ── expire.c:942-956, persistCommand ─────────────────────────────────────
 /// PERSIST key — remove the TTL from a key, making it persistent.
-pub fn persist_command(ctx: &mut CommandContext, server: &RedisServer) -> Result<(), RedisError> {
-    // TODO(architect): ctx.db_mut() not yet available — Phase 3.
-    // TODO(port): lookupKeyWrite / removeExpire / signalModifiedKey / notifyKeyspaceEvent.
-    let _key = ctx.arg(1)?;
-    let _ = server;
-
-    // C logic:
-    //   if lookupKeyWrite(c->db, key):
-    //     if removeExpire(c->db, key):
-    //       signalModifiedKey(c, c->db, key)
-    //       notifyKeyspaceEvent(NOTIFY_GENERIC, "persist", key, c->db->id)
-    //       addReply(c, shared.cone); server.dirty++
-    //     else: addReply(c, shared.czero)
-    //   else: addReply(c, shared.czero)
-
-    ctx.reply_integer(0) // placeholder
+pub fn persist_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
+    let key = ctx.arg(1)?.clone();
+    let exists = ctx.db_mut().lookup_key_write(&key).is_some();
+    if !exists {
+        return ctx.reply_integer(0);
+    }
+    if ctx.db_mut().remove_expire(&key) {
+        ctx.db().signal_modified(&key);
+        ctx.reply_integer(1)
+    } else {
+        ctx.reply_integer(0)
+    }
 }
 
-// ── expire.c:958-964, touchCommand ───────────────────────────────────────
-/// TOUCH key [key ...] — count existing keys without updating LRU.
-pub fn touch_command(ctx: &mut CommandContext, server: &RedisServer) -> Result<(), RedisError> {
-    // TODO(architect): ctx.db() not yet available — Phase 3.
-    // TODO(port): lookupKeyRead not wired; placeholder returns 0 touched.
-    let argc = ctx.arg_count();
-    let _ = (argc, server);
-
-    // C: for (j = 1; j < c->argc; j++) if (lookupKeyRead(c->db, c->argv[j]) != NULL) touched++;
-    let touched: i64 = 0;
-    ctx.reply_integer(touched)
-}
 
 // ── expire.c:968-975, timestampIsExpired ─────────────────────────────────
 /// Returns `true` if `when` represents an already-elapsed Unix millisecond timestamp.

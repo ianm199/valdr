@@ -1526,24 +1526,34 @@ pub fn object_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     }
 
     let key_arg = ctx.arg(2)?.clone();
-
-    // TODO(architect): CommandContext needs &mut RedisDb access to do key lookups.
-    // Currently CommandContext only has &mut Client; db access needs Phase 3 wiring.
-    // Using a placeholder that always returns null.
-    let _key = &key_arg;
+    let exists = ctx
+        .db_mut()
+        .lookup_key_read_with_flags(&key_arg, crate::db::LOOKUP_NOTOUCH)
+        .is_some();
+    if !exists {
+        return Err(RedisError::runtime(b"ERR no such key"));
+    }
 
     if subcmd_bytes == b"refcount" {
-        // TODO(port): look up key in db and return o.refcount (always 1 in Rust)
         ctx.reply_integer(1)?;
     } else if subcmd_bytes == b"encoding" {
-        // TODO(port): look up key in db and return o.encoding_name()
-        ctx.reply_null_bulk()?;
+        let name: &[u8] = match ctx.db().find(&key_arg) {
+            Some(obj) => match &obj.kind {
+                ObjectKind::String(_) => b"raw",
+                ObjectKind::List(_) => b"quicklist",
+                ObjectKind::Hash(_) => b"hashtable",
+                ObjectKind::Set(_) => b"hashtable",
+                ObjectKind::ZSet(_) => b"skiplist",
+                ObjectKind::Stream => b"stream",
+                ObjectKind::Module => b"raw",
+            },
+            None => b"none",
+        };
+        ctx.reply_bulk(name)?;
     } else if subcmd_bytes == b"idletime" {
-        // TODO(port): look up key, check LFU policy, return lru_idle_secs
-        ctx.reply_null_bulk()?;
+        ctx.reply_integer(0)?;
     } else if subcmd_bytes == b"freq" {
-        // TODO(port): look up key, check LFU policy, return lfu_frequency
-        ctx.reply_null_bulk()?;
+        ctx.reply_integer(0)?;
     } else {
         return Err(RedisError::runtime(b"ERR unknown subcommand or wrong number of arguments"));
     }

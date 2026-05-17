@@ -30,7 +30,10 @@
 //! ZDIFFSTORE / ZUNION / ZINTER / ZDIFF / ZINTERCARD / ZRANDMEMBER /
 //! ZMPOP / ZSCAN / BZPOPMIN / BZPOPMAX land in follow-on rounds.
 
+use std::collections::HashMap;
+
 use redis_core::command_context::CommandContext;
+use redis_core::db::glob_match;
 use redis_core::object::{InlineZSet, RedisObject};
 use redis_types::{RedisError, RedisResult, RedisString};
 
@@ -936,6 +939,996 @@ pub fn zremrangebyscore_command(ctx: &mut CommandContext) -> RedisResult<()> {
     };
     delete_if_empty(ctx, &key);
     ctx.reply_integer(removed)
+}
+
+/// Lex-range bound: `-` / `+` / `[member` / `(member`.
+///
+/// Mirrors the `zslLexRangeSpec` C struct. Comparison is byte-wise on the
+/// member; the two infinity sentinels short-circuit comparison so any real
+/// member is strictly between `Min` and `Max`.
+#[derive(Debug, Clone)]
+enum LexBound {
+    Min,
+    Max,
+    Inclusive(Vec<u8>),
+    Exclusive(Vec<u8>),
+}
+
+/// Parse one side of a lex range.
+fn parse_lex_bound(bytes: &[u8]) -> Result<LexBound, RedisError> {
+    match bytes.first() {
+        None => Err(RedisError::runtime(b"ERR min or max not valid string range item")),
+        Some(b'-') if bytes.len() == 1 => Ok(LexBound::Min),
+        Some(b'+') if bytes.len() == 1 => Ok(LexBound::Max),
+        Some(b'[') => Ok(LexBound::Inclusive(bytes[1..].to_vec())),
+        Some(b'(') => Ok(LexBound::Exclusive(bytes[1..].to_vec())),
+        _ => Err(RedisError::runtime(b"ERR min or max not valid string range item")),
+    }
+}
+
+/// Test whether `member` is `>=` (or `>` when exclusive) the lower bound.
+fn lex_above_min(member: &[u8], min: &LexBound) -> bool {
+    match min {
+        LexBound::Min => true,
+        LexBound::Max => false,
+        LexBound::Inclusive(b) => member >= b.as_slice(),
+        LexBound::Exclusive(b) => member > b.as_slice(),
+    }
+}
+
+/// Test whether `member` is `<=` (or `<` when exclusive) the upper bound.
+fn lex_below_max(member: &[u8], max: &LexBound) -> bool {
+    match max {
+        LexBound::Min => false,
+        LexBound::Max => true,
+        LexBound::Inclusive(b) => member <= b.as_slice(),
+        LexBound::Exclusive(b) => member < b.as_slice(),
+    }
+}
+
+/// Apply LIMIT offset/count to an iterator of `(score, member)` pairs.
+fn apply_limit(
+    items: Vec<(f64, RedisString)>,
+    offset: i64,
+    count: i64,
+) -> Vec<(f64, RedisString)> {
+    let skipped: Box<dyn Iterator<Item = (f64, RedisString)>> = if offset > 0 {
+        Box::new(items.into_iter().skip(offset as usize))
+    } else {
+        Box::new(items.into_iter())
+    };
+    if count < 0 {
+        skipped.collect()
+    } else {
+        skipped.take(count as usize).collect()
+    }
+}
+
+/// Shared body for ZRANGEBYLEX and ZREVRANGEBYLEX.
+fn rangebylex_inner(ctx: &mut CommandContext, reverse: bool, cmd: &[u8]) -> RedisResult<()> {
+    let argc = ctx.arg_count();
+    if argc < 4 {
+        return Err(RedisError::wrong_number_of_args(cmd));
+    }
+    let key = ctx.arg_owned(1usize)?;
+    let arg_a = ctx.arg_owned(2usize)?;
+    let arg_b = ctx.arg_owned(3usize)?;
+
+    let mut offset: i64 = 0;
+    let mut count: i64 = -1;
+    let mut idx = 4usize;
+    while idx < argc {
+        let opt = ctx.arg(idx)?;
+        if opt.as_bytes().eq_ignore_ascii_case(b"LIMIT") {
+            if idx + 2 >= argc {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            offset = parse_strict_i64(ctx.arg(idx + 1)?.as_bytes())?;
+            count = parse_strict_i64(ctx.arg(idx + 2)?.as_bytes())?;
+            idx += 3;
+        } else {
+            return Err(RedisError::syntax(b"syntax error"));
+        }
+    }
+
+    let (min, max) = if reverse {
+        (parse_lex_bound(arg_b.as_bytes())?, parse_lex_bound(arg_a.as_bytes())?)
+    } else {
+        (parse_lex_bound(arg_a.as_bytes())?, parse_lex_bound(arg_b.as_bytes())?)
+    };
+
+    let mut entries: Vec<(f64, RedisString)> = match as_zset_ref(ctx.db().lookup_key_read(&key))? {
+        None => Vec::new(),
+        Some(z) => z
+            .iter_ascending()
+            .filter(|(_, m)| lex_above_min(m.as_bytes(), &min) && lex_below_max(m.as_bytes(), &max))
+            .map(|(s, m)| (s, m.clone()))
+            .collect(),
+    };
+    if reverse {
+        entries.reverse();
+    }
+    let limited = apply_limit(entries, offset, count);
+    ctx.reply_array_header(limited.len())?;
+    for (_, m) in limited {
+        ctx.reply_bulk_string(m)?;
+    }
+    Ok(())
+}
+
+/// ZRANGEBYLEX key min max [LIMIT offset count]
+pub fn zrangebylex_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    rangebylex_inner(ctx, false, b"zrangebylex")
+}
+
+/// ZREVRANGEBYLEX key max min [LIMIT offset count]
+pub fn zrevrangebylex_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    rangebylex_inner(ctx, true, b"zrevrangebylex")
+}
+
+/// ZLEXCOUNT key min max
+pub fn zlexcount_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    if ctx.arg_count() != 4 {
+        return Err(RedisError::wrong_number_of_args(b"zlexcount"));
+    }
+    let key = ctx.arg_owned(1usize)?;
+    let min = parse_lex_bound(ctx.arg(2)?.as_bytes())?;
+    let max = parse_lex_bound(ctx.arg(3)?.as_bytes())?;
+    let count: i64 = match as_zset_ref(ctx.db().lookup_key_read(&key))? {
+        None => 0,
+        Some(z) => z
+            .iter_ascending()
+            .filter(|(_, m)| lex_above_min(m.as_bytes(), &min) && lex_below_max(m.as_bytes(), &max))
+            .count() as i64,
+    };
+    ctx.reply_integer(count)
+}
+
+/// ZREMRANGEBYLEX key min max
+pub fn zremrangebylex_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    if ctx.arg_count() != 4 {
+        return Err(RedisError::wrong_number_of_args(b"zremrangebylex"));
+    }
+    let key = ctx.arg_owned(1usize)?;
+    let min = parse_lex_bound(ctx.arg(2)?.as_bytes())?;
+    let max = parse_lex_bound(ctx.arg(3)?.as_bytes())?;
+    let removed = {
+        let zset = match as_zset_mut(ctx.db_mut().lookup_key_write(&key))? {
+            None => return ctx.reply_integer(0),
+            Some(z) => z,
+        };
+        let targets: Vec<RedisString> = zset
+            .iter_ascending()
+            .filter(|(_, m)| lex_above_min(m.as_bytes(), &min) && lex_below_max(m.as_bytes(), &max))
+            .map(|(_, m)| m.clone())
+            .collect();
+        let count = targets.len() as i64;
+        for m in targets {
+            zset.remove(&m);
+        }
+        count
+    };
+    delete_if_empty(ctx, &key);
+    ctx.reply_integer(removed)
+}
+
+/// Aggregation mode for ZUNIONSTORE / ZINTERSTORE.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Aggregate {
+    Sum,
+    Min,
+    Max,
+}
+
+/// Parsed `WEIGHTS` / `AGGREGATE` / `WITHSCORES` modifiers shared by the
+/// zset set-algebra commands.
+#[derive(Debug, Clone)]
+struct ZAlgebraOpts {
+    weights: Vec<f64>,
+    aggregate: Aggregate,
+    withscores: bool,
+}
+
+/// Snapshot one source key as a `(member -> score)` map. Plain sets are
+/// promoted to score `1.0` per real Redis. Returns `Err(WRONGTYPE)` for any
+/// other type and `Ok(empty)` for missing keys.
+fn snapshot_zset_or_set(
+    ctx: &CommandContext,
+    key: &RedisString,
+) -> Result<HashMap<RedisString, f64>, RedisError> {
+    let obj = ctx.db().lookup_key_read(key);
+    match obj {
+        None => Ok(HashMap::new()),
+        Some(o) => {
+            if let Some(z) = o.zset() {
+                let mut out = HashMap::with_capacity(z.len());
+                for (s, m) in z.iter_ascending() {
+                    out.insert(m.clone(), s);
+                }
+                Ok(out)
+            } else if let Some(s) = o.set() {
+                let mut out = HashMap::with_capacity(s.len());
+                for m in s {
+                    out.insert(m.clone(), 1.0);
+                }
+                Ok(out)
+            } else {
+                Err(RedisError::wrong_type())
+            }
+        }
+    }
+}
+
+/// Parse the trailing `[WEIGHTS w1 ...] [AGGREGATE SUM|MIN|MAX]
+/// [WITHSCORES]` block. `withscores_allowed` controls whether
+/// `WITHSCORES` is accepted (only on the non-`*STORE` variants).
+fn parse_zalgebra_opts(
+    ctx: &CommandContext,
+    start: usize,
+    numkeys: usize,
+    withscores_allowed: bool,
+) -> Result<ZAlgebraOpts, RedisError> {
+    let argc = ctx.arg_count();
+    let mut weights: Vec<f64> = vec![1.0; numkeys];
+    let mut aggregate = Aggregate::Sum;
+    let mut withscores = false;
+    let mut idx = start;
+    while idx < argc {
+        let opt = ctx.arg(idx)?;
+        let bytes = opt.as_bytes();
+        if bytes.eq_ignore_ascii_case(b"WEIGHTS") {
+            if idx + numkeys >= argc {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            for (j, slot) in weights.iter_mut().enumerate() {
+                *slot = parse_score(ctx.arg(idx + 1 + j)?.as_bytes())?;
+            }
+            idx += 1 + numkeys;
+        } else if bytes.eq_ignore_ascii_case(b"AGGREGATE") {
+            if idx + 1 >= argc {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            let mode = ctx.arg(idx + 1)?;
+            let mb = mode.as_bytes();
+            aggregate = if mb.eq_ignore_ascii_case(b"SUM") {
+                Aggregate::Sum
+            } else if mb.eq_ignore_ascii_case(b"MIN") {
+                Aggregate::Min
+            } else if mb.eq_ignore_ascii_case(b"MAX") {
+                Aggregate::Max
+            } else {
+                return Err(RedisError::syntax(b"syntax error"));
+            };
+            idx += 2;
+        } else if withscores_allowed && bytes.eq_ignore_ascii_case(b"WITHSCORES") {
+            withscores = true;
+            idx += 1;
+        } else {
+            return Err(RedisError::syntax(b"syntax error"));
+        }
+    }
+    Ok(ZAlgebraOpts { weights, aggregate, withscores })
+}
+
+/// Combine two scores per the requested aggregation mode.
+fn combine_scores(existing: f64, new: f64, mode: Aggregate) -> f64 {
+    match mode {
+        Aggregate::Sum => existing + new,
+        Aggregate::Min => existing.min(new),
+        Aggregate::Max => existing.max(new),
+    }
+}
+
+/// Compute the union of `sources` with per-source `weights` and the given
+/// aggregation mode. Returns a `(member, final_score)` vector sorted by
+/// score ascending (and member byte-wise for ties).
+fn zunion_inner(
+    sources: Vec<HashMap<RedisString, f64>>,
+    opts: &ZAlgebraOpts,
+) -> Vec<(RedisString, f64)> {
+    let mut acc: HashMap<RedisString, f64> = HashMap::new();
+    for (i, src) in sources.into_iter().enumerate() {
+        let w = opts.weights[i];
+        for (m, s) in src {
+            let weighted = s * w;
+            acc.entry(m)
+                .and_modify(|cur| *cur = combine_scores(*cur, weighted, opts.aggregate))
+                .or_insert(weighted);
+        }
+    }
+    let mut out: Vec<(RedisString, f64)> = acc.into_iter().collect();
+    out.sort_by(|a, b| {
+        a.1.total_cmp(&b.1).then_with(|| a.0.as_bytes().cmp(b.0.as_bytes()))
+    });
+    out
+}
+
+/// Compute the intersection of `sources` with per-source `weights`. A
+/// member must appear in every source to survive; aggregation is then
+/// applied to the weighted scores.
+fn zinter_inner(
+    sources: Vec<HashMap<RedisString, f64>>,
+    opts: &ZAlgebraOpts,
+) -> Vec<(RedisString, f64)> {
+    if sources.is_empty() || sources.iter().any(|s| s.is_empty()) {
+        return Vec::new();
+    }
+    let mut iter = sources.into_iter();
+    let first = iter.next().expect("non-empty sources");
+    let first_w = opts.weights[0];
+    let rest: Vec<(HashMap<RedisString, f64>, f64)> = iter
+        .enumerate()
+        .map(|(i, m)| (m, opts.weights[i + 1]))
+        .collect();
+    let mut acc: HashMap<RedisString, f64> = HashMap::new();
+    for (m, s) in first {
+        let mut score = s * first_w;
+        let mut all = true;
+        for (other, w) in &rest {
+            match other.get(&m) {
+                None => {
+                    all = false;
+                    break;
+                }
+                Some(os) => {
+                    score = combine_scores(score, os * w, opts.aggregate);
+                }
+            }
+        }
+        if all {
+            acc.insert(m, score);
+        }
+    }
+    let mut out: Vec<(RedisString, f64)> = acc.into_iter().collect();
+    out.sort_by(|a, b| {
+        a.1.total_cmp(&b.1).then_with(|| a.0.as_bytes().cmp(b.0.as_bytes()))
+    });
+    out
+}
+
+/// Compute `sources[0]` minus every following source. WEIGHTS / AGGREGATE
+/// are not applied — ZDIFF emits the first source's scores unchanged.
+fn zdiff_inner(sources: Vec<HashMap<RedisString, f64>>) -> Vec<(RedisString, f64)> {
+    if sources.is_empty() {
+        return Vec::new();
+    }
+    let mut iter = sources.into_iter();
+    let mut acc = iter.next().expect("non-empty sources");
+    for other in iter {
+        for k in other.keys() {
+            acc.remove(k);
+        }
+    }
+    let mut out: Vec<(RedisString, f64)> = acc.into_iter().collect();
+    out.sort_by(|a, b| {
+        a.1.total_cmp(&b.1).then_with(|| a.0.as_bytes().cmp(b.0.as_bytes()))
+    });
+    out
+}
+
+/// Collect `numkeys` source-key snapshots starting at `start`.
+fn collect_zalgebra_sources(
+    ctx: &CommandContext,
+    start: usize,
+    numkeys: usize,
+) -> Result<Vec<HashMap<RedisString, f64>>, RedisError> {
+    let mut out = Vec::with_capacity(numkeys);
+    for j in 0..numkeys {
+        let key = ctx.arg(start + j)?.clone();
+        out.push(snapshot_zset_or_set(ctx, &key)?);
+    }
+    Ok(out)
+}
+
+/// Replace `dst` with a new zset built from `entries`. Deletes `dst` when
+/// `entries` is empty, matching real Redis's `*STORE` semantics.
+fn store_zset(
+    ctx: &mut CommandContext,
+    dst: RedisString,
+    entries: Vec<(RedisString, f64)>,
+) -> i64 {
+    if entries.is_empty() {
+        ctx.db_mut().sync_delete(&dst);
+        return 0;
+    }
+    let len = entries.len() as i64;
+    let mut obj = RedisObject::new_zset();
+    {
+        let z = obj.zset_mut().expect("new_zset constructs an Inline zset");
+        for (m, s) in entries {
+            z.upsert(m, s);
+        }
+    }
+    ctx.db_mut().set_key(dst, obj, 0);
+    len
+}
+
+/// Emit a zset-algebra result as a wire array, with or without scores.
+fn emit_zalgebra_reply(
+    ctx: &mut CommandContext,
+    entries: Vec<(RedisString, f64)>,
+    withscores: bool,
+) -> RedisResult<()> {
+    let header = if withscores { entries.len() * 2 } else { entries.len() };
+    ctx.reply_array_header(header)?;
+    for (m, s) in entries {
+        ctx.reply_bulk_string(m)?;
+        if withscores {
+            ctx.reply_bulk(&format_score(s))?;
+        }
+    }
+    Ok(())
+}
+
+/// Shared body for ZUNIONSTORE / ZINTERSTORE.
+fn algebra_store_inner(
+    ctx: &mut CommandContext,
+    cmd: &[u8],
+    op: AlgebraOp,
+) -> RedisResult<()> {
+    let argc = ctx.arg_count();
+    if argc < 4 {
+        return Err(RedisError::wrong_number_of_args(cmd));
+    }
+    let dst = ctx.arg_owned(1usize)?;
+    let numkeys = parse_strict_i64(ctx.arg(2)?.as_bytes())?;
+    if numkeys <= 0 {
+        return Err(RedisError::runtime(b"ERR at least 1 input key is needed"));
+    }
+    let numkeys = numkeys as usize;
+    if argc < 3 + numkeys {
+        return Err(RedisError::syntax(b"syntax error"));
+    }
+    let opts = parse_zalgebra_opts(ctx, 3 + numkeys, numkeys, false)?;
+    let sources = collect_zalgebra_sources(ctx, 3, numkeys)?;
+    let result = match op {
+        AlgebraOp::Union => zunion_inner(sources, &opts),
+        AlgebraOp::Inter => zinter_inner(sources, &opts),
+    };
+    let stored = store_zset(ctx, dst, result);
+    ctx.reply_integer(stored)
+}
+
+/// Shared body for ZUNION / ZINTER.
+fn algebra_inner(
+    ctx: &mut CommandContext,
+    cmd: &[u8],
+    op: AlgebraOp,
+) -> RedisResult<()> {
+    let argc = ctx.arg_count();
+    if argc < 3 {
+        return Err(RedisError::wrong_number_of_args(cmd));
+    }
+    let numkeys = parse_strict_i64(ctx.arg(1)?.as_bytes())?;
+    if numkeys <= 0 {
+        return Err(RedisError::runtime(b"ERR at least 1 input key is needed"));
+    }
+    let numkeys = numkeys as usize;
+    if argc < 2 + numkeys {
+        return Err(RedisError::syntax(b"syntax error"));
+    }
+    let opts = parse_zalgebra_opts(ctx, 2 + numkeys, numkeys, true)?;
+    let sources = collect_zalgebra_sources(ctx, 2, numkeys)?;
+    let result = match op {
+        AlgebraOp::Union => zunion_inner(sources, &opts),
+        AlgebraOp::Inter => zinter_inner(sources, &opts),
+    };
+    emit_zalgebra_reply(ctx, result, opts.withscores)
+}
+
+/// Which set-algebra operation a shared helper should perform.
+#[derive(Debug, Clone, Copy)]
+enum AlgebraOp {
+    Union,
+    Inter,
+}
+
+/// ZUNIONSTORE destination numkeys key [key ...] [WEIGHTS w1 ...] [AGGREGATE SUM|MIN|MAX]
+pub fn zunionstore_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    algebra_store_inner(ctx, b"zunionstore", AlgebraOp::Union)
+}
+
+/// ZINTERSTORE destination numkeys key [key ...] [WEIGHTS w1 ...] [AGGREGATE SUM|MIN|MAX]
+pub fn zinterstore_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    algebra_store_inner(ctx, b"zinterstore", AlgebraOp::Inter)
+}
+
+/// ZDIFFSTORE destination numkeys key [key ...]
+pub fn zdiffstore_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    let argc = ctx.arg_count();
+    if argc < 4 {
+        return Err(RedisError::wrong_number_of_args(b"zdiffstore"));
+    }
+    let dst = ctx.arg_owned(1usize)?;
+    let numkeys = parse_strict_i64(ctx.arg(2)?.as_bytes())?;
+    if numkeys <= 0 {
+        return Err(RedisError::runtime(b"ERR at least 1 input key is needed"));
+    }
+    let numkeys = numkeys as usize;
+    if argc != 3 + numkeys {
+        return Err(RedisError::syntax(b"syntax error"));
+    }
+    let sources = collect_zalgebra_sources(ctx, 3, numkeys)?;
+    let result = zdiff_inner(sources);
+    let stored = store_zset(ctx, dst, result);
+    ctx.reply_integer(stored)
+}
+
+/// ZUNION numkeys key [key ...] [WEIGHTS w1 ...] [AGGREGATE SUM|MIN|MAX] [WITHSCORES]
+pub fn zunion_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    algebra_inner(ctx, b"zunion", AlgebraOp::Union)
+}
+
+/// ZINTER numkeys key [key ...] [WEIGHTS w1 ...] [AGGREGATE SUM|MIN|MAX] [WITHSCORES]
+pub fn zinter_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    algebra_inner(ctx, b"zinter", AlgebraOp::Inter)
+}
+
+/// ZDIFF numkeys key [key ...] [WITHSCORES]
+pub fn zdiff_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    let argc = ctx.arg_count();
+    if argc < 3 {
+        return Err(RedisError::wrong_number_of_args(b"zdiff"));
+    }
+    let numkeys = parse_strict_i64(ctx.arg(1)?.as_bytes())?;
+    if numkeys <= 0 {
+        return Err(RedisError::runtime(b"ERR at least 1 input key is needed"));
+    }
+    let numkeys = numkeys as usize;
+    if argc < 2 + numkeys {
+        return Err(RedisError::syntax(b"syntax error"));
+    }
+    let mut withscores = false;
+    let trailing = argc - (2 + numkeys);
+    if trailing == 1 {
+        if !ctx.arg(2 + numkeys)?.as_bytes().eq_ignore_ascii_case(b"WITHSCORES") {
+            return Err(RedisError::syntax(b"syntax error"));
+        }
+        withscores = true;
+    } else if trailing > 1 {
+        return Err(RedisError::syntax(b"syntax error"));
+    }
+    let sources = collect_zalgebra_sources(ctx, 2, numkeys)?;
+    let result = zdiff_inner(sources);
+    emit_zalgebra_reply(ctx, result, withscores)
+}
+
+/// ZINTERCARD numkeys key [key ...] [LIMIT N]
+pub fn zintercard_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    let argc = ctx.arg_count();
+    if argc < 3 {
+        return Err(RedisError::wrong_number_of_args(b"zintercard"));
+    }
+    let numkeys = parse_strict_i64(ctx.arg(1)?.as_bytes())?;
+    if numkeys <= 0 {
+        return Err(RedisError::runtime(b"ERR at least 1 input key is needed"));
+    }
+    let numkeys = numkeys as usize;
+    if argc < 2 + numkeys {
+        return Err(RedisError::syntax(b"syntax error"));
+    }
+    let mut limit: i64 = 0;
+    let trailing_start = 2 + numkeys;
+    if argc == trailing_start + 2 {
+        let opt = ctx.arg(trailing_start)?;
+        if !opt.as_bytes().eq_ignore_ascii_case(b"LIMIT") {
+            return Err(RedisError::syntax(b"syntax error"));
+        }
+        let n = parse_strict_i64(ctx.arg(trailing_start + 1)?.as_bytes())?;
+        if n < 0 {
+            return Err(RedisError::runtime(b"ERR LIMIT can't be negative"));
+        }
+        limit = n;
+    } else if argc != trailing_start {
+        return Err(RedisError::syntax(b"syntax error"));
+    }
+    let sources = collect_zalgebra_sources(ctx, 2, numkeys)?;
+    let opts = ZAlgebraOpts {
+        weights: vec![1.0; numkeys],
+        aggregate: Aggregate::Sum,
+        withscores: false,
+    };
+    let result = zinter_inner(sources, &opts);
+    let card = if limit > 0 {
+        (result.len() as i64).min(limit)
+    } else {
+        result.len() as i64
+    };
+    ctx.reply_integer(card)
+}
+
+/// ZRANGESTORE dst src min max [BYSCORE|BYLEX] [REV] [LIMIT offset count]
+///
+/// Computes the same range as `ZRANGE` would, then stores the resulting
+/// `(member, score)` pairs at `dst`. Empty results delete `dst`.
+pub fn zrangestore_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    let argc = ctx.arg_count();
+    if argc < 5 {
+        return Err(RedisError::wrong_number_of_args(b"zrangestore"));
+    }
+    let dst = ctx.arg_owned(1usize)?;
+    let src = ctx.arg_owned(2usize)?;
+    let start_bytes = ctx.arg_owned(3usize)?;
+    let stop_bytes = ctx.arg_owned(4usize)?;
+
+    let mut by_score = false;
+    let mut by_lex = false;
+    let mut reverse = false;
+    let mut offset: i64 = 0;
+    let mut count: i64 = -1;
+    let mut have_limit = false;
+
+    let mut idx = 5usize;
+    while idx < argc {
+        let opt = ctx.arg(idx)?;
+        let bytes = opt.as_bytes();
+        if bytes.eq_ignore_ascii_case(b"BYSCORE") {
+            by_score = true;
+            idx += 1;
+        } else if bytes.eq_ignore_ascii_case(b"BYLEX") {
+            by_lex = true;
+            idx += 1;
+        } else if bytes.eq_ignore_ascii_case(b"REV") {
+            reverse = true;
+            idx += 1;
+        } else if bytes.eq_ignore_ascii_case(b"LIMIT") {
+            if idx + 2 >= argc {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            offset = parse_strict_i64(ctx.arg(idx + 1)?.as_bytes())?;
+            count = parse_strict_i64(ctx.arg(idx + 2)?.as_bytes())?;
+            have_limit = true;
+            idx += 3;
+        } else {
+            return Err(RedisError::syntax(b"syntax error"));
+        }
+    }
+
+    if have_limit && !by_score && !by_lex {
+        return Err(RedisError::runtime(
+            b"ERR syntax error, LIMIT is only supported in combination with either BYSCORE or BYLEX",
+        ));
+    }
+
+    let entries: Vec<(RedisString, f64)> = if by_lex {
+        let (min, max) = if reverse {
+            (parse_lex_bound(stop_bytes.as_bytes())?, parse_lex_bound(start_bytes.as_bytes())?)
+        } else {
+            (parse_lex_bound(start_bytes.as_bytes())?, parse_lex_bound(stop_bytes.as_bytes())?)
+        };
+        let mut items: Vec<(f64, RedisString)> = match as_zset_ref(ctx.db().lookup_key_read(&src))?
+        {
+            None => Vec::new(),
+            Some(z) => z
+                .iter_ascending()
+                .filter(|(_, m)| {
+                    lex_above_min(m.as_bytes(), &min) && lex_below_max(m.as_bytes(), &max)
+                })
+                .map(|(s, m)| (s, m.clone()))
+                .collect(),
+        };
+        if reverse {
+            items.reverse();
+        }
+        apply_limit(items, offset, count)
+            .into_iter()
+            .map(|(s, m)| (m, s))
+            .collect()
+    } else if by_score {
+        let (a_score, a_excl) = parse_score_range(start_bytes.as_bytes())?;
+        let (b_score, b_excl) = parse_score_range(stop_bytes.as_bytes())?;
+        let (min, min_excl, max, max_excl) = if reverse {
+            (b_score, b_excl, a_score, a_excl)
+        } else {
+            (a_score, a_excl, b_score, b_excl)
+        };
+        let mut items: Vec<(f64, RedisString)> = match as_zset_ref(ctx.db().lookup_key_read(&src))?
+        {
+            None => Vec::new(),
+            Some(z) => z
+                .iter_ascending()
+                .filter(|(s, _)| score_in_range(*s, min, min_excl, max, max_excl))
+                .map(|(s, m)| (s, m.clone()))
+                .collect(),
+        };
+        if reverse {
+            items.reverse();
+        }
+        apply_limit(items, offset, count)
+            .into_iter()
+            .map(|(s, m)| (m, s))
+            .collect()
+    } else {
+        let start = parse_strict_i64(start_bytes.as_bytes())?;
+        let stop = parse_strict_i64(stop_bytes.as_bytes())?;
+        let items: Vec<(f64, RedisString)> = match as_zset_ref(ctx.db().lookup_key_read(&src))? {
+            None => Vec::new(),
+            Some(z) => {
+                let len = z.len() as i64;
+                match clamp_rank_range(start, stop, len) {
+                    None => Vec::new(),
+                    Some((lo, hi)) => {
+                        if reverse {
+                            z.iter_ascending()
+                                .rev()
+                                .skip(lo)
+                                .take(hi - lo + 1)
+                                .map(|(s, m)| (s, m.clone()))
+                                .collect()
+                        } else {
+                            z.iter_ascending()
+                                .skip(lo)
+                                .take(hi - lo + 1)
+                                .map(|(s, m)| (s, m.clone()))
+                                .collect()
+                        }
+                    }
+                }
+            }
+        };
+        items.into_iter().map(|(s, m)| (m, s)).collect()
+    };
+
+    let stored = store_zset(ctx, dst, entries);
+    ctx.reply_integer(stored)
+}
+
+/// ZRANDMEMBER key [count [WITHSCORES]]
+///
+/// Sampling is deterministic (first-iter-order) for now — real Redis
+/// uses the server PRNG. The behavioural difference is invisible to the
+/// wire-diff oracle only on single-member sets.
+///
+/// TODO(architect): seeded RNG plumbing for true randomness.
+pub fn zrandmember_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    let argc = ctx.arg_count();
+    if argc < 2 || argc > 4 {
+        return Err(RedisError::wrong_number_of_args(b"zrandmember"));
+    }
+    let key = ctx.arg_owned(1usize)?;
+    let count_opt: Option<i64> = if argc >= 3 {
+        Some(parse_strict_i64(ctx.arg(2)?.as_bytes())?)
+    } else {
+        None
+    };
+    let withscores: bool = if argc == 4 {
+        if !ctx.arg(3)?.as_bytes().eq_ignore_ascii_case(b"WITHSCORES") {
+            return Err(RedisError::syntax(b"syntax error"));
+        }
+        true
+    } else {
+        false
+    };
+    if argc == 4 && count_opt.is_none() {
+        return Err(RedisError::syntax(b"syntax error"));
+    }
+
+    let entries: Vec<(f64, RedisString)> = match as_zset_ref(ctx.db().lookup_key_read(&key))? {
+        None => Vec::new(),
+        Some(z) => z.iter_ascending().map(|(s, m)| (s, m.clone())).collect(),
+    };
+
+    match count_opt {
+        None => {
+            if entries.is_empty() {
+                return ctx.reply_null_bulk();
+            }
+            let (_, m) = &entries[0];
+            ctx.reply_bulk_string(m.clone())
+        }
+        Some(count) => {
+            if entries.is_empty() || count == 0 {
+                return ctx.reply_array_header(0usize);
+            }
+            let mut emitted: Vec<(f64, RedisString)> = Vec::new();
+            if count > 0 {
+                let take = (count as usize).min(entries.len());
+                for item in entries.iter().take(take) {
+                    emitted.push(item.clone());
+                }
+            } else {
+                let take = count.unsigned_abs() as usize;
+                for i in 0..take {
+                    emitted.push(entries[i % entries.len()].clone());
+                }
+            }
+            let header = if withscores { emitted.len() * 2 } else { emitted.len() };
+            ctx.reply_array_header(header)?;
+            for (s, m) in emitted {
+                ctx.reply_bulk_string(m)?;
+                if withscores {
+                    ctx.reply_bulk(&format_score(s))?;
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+/// ZMPOP numkeys key [key ...] MIN|MAX [COUNT count]
+///
+/// Pops up to `count` (default 1) members from the first non-empty source
+/// key. Replies with `[key, [[member, score], ...]]`, or `*-1\r\n` when
+/// every supplied key is empty or missing.
+pub fn zmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    let argc = ctx.arg_count();
+    if argc < 4 {
+        return Err(RedisError::wrong_number_of_args(b"zmpop"));
+    }
+    let numkeys = parse_strict_i64(ctx.arg(1)?.as_bytes())?;
+    if numkeys <= 0 {
+        return Err(RedisError::runtime(b"ERR at least 1 input key is needed"));
+    }
+    let numkeys = numkeys as usize;
+    if argc < 3 + numkeys {
+        return Err(RedisError::syntax(b"syntax error"));
+    }
+    let where_arg = ctx.arg(1 + numkeys + 1)?.clone();
+    let reverse = if where_arg.as_bytes().eq_ignore_ascii_case(b"MIN") {
+        false
+    } else if where_arg.as_bytes().eq_ignore_ascii_case(b"MAX") {
+        true
+    } else {
+        return Err(RedisError::syntax(b"syntax error"));
+    };
+    let mut count: i64 = 1;
+    let trailing_start = 1 + numkeys + 2;
+    if argc == trailing_start + 2 {
+        let opt = ctx.arg(trailing_start)?;
+        if !opt.as_bytes().eq_ignore_ascii_case(b"COUNT") {
+            return Err(RedisError::syntax(b"syntax error"));
+        }
+        let n = parse_strict_i64(ctx.arg(trailing_start + 1)?.as_bytes())?;
+        if n < 1 {
+            return Err(RedisError::runtime(b"ERR count should be greater than 0"));
+        }
+        count = n;
+    } else if argc != trailing_start {
+        return Err(RedisError::syntax(b"syntax error"));
+    }
+
+    let mut keys: Vec<RedisString> = Vec::with_capacity(numkeys);
+    for j in 0..numkeys {
+        keys.push(ctx.arg(2 + j)?.clone());
+    }
+
+    for key in keys {
+        if let Some(o) = ctx.db().lookup_key_read(&key) {
+            if !o.is_zset() {
+                return Err(RedisError::wrong_type());
+            }
+        }
+        let popped: Vec<(f64, RedisString)> = {
+            let zset = match as_zset_mut(ctx.db_mut().lookup_key_write(&key))? {
+                None => continue,
+                Some(z) => z,
+            };
+            if zset.is_empty() {
+                continue;
+            }
+            let take = (count as usize).min(zset.len());
+            let mut targets: Vec<(f64, RedisString)> = Vec::with_capacity(take);
+            if reverse {
+                for (s, m) in zset.iter_ascending().rev().take(take) {
+                    targets.push((s, m.clone()));
+                }
+            } else {
+                for (s, m) in zset.iter_ascending().take(take) {
+                    targets.push((s, m.clone()));
+                }
+            }
+            for (_, m) in &targets {
+                zset.remove(m);
+            }
+            targets
+        };
+        if popped.is_empty() {
+            continue;
+        }
+        delete_if_empty(ctx, &key);
+        ctx.reply_array_header(2usize)?;
+        ctx.reply_bulk_string(key)?;
+        ctx.reply_array_header(popped.len())?;
+        for (s, m) in popped {
+            ctx.reply_array_header(2usize)?;
+            ctx.reply_bulk_string(m)?;
+            ctx.reply_bulk(&format_score(s))?;
+        }
+        return Ok(());
+    }
+    ctx.reply_null_array()
+}
+
+/// ZSCAN key cursor [MATCH pattern] [COUNT count]
+///
+/// Linear-cursor iteration over the `(member, score)` pairs of a sorted
+/// set in ascending score order. Reply shape mirrors HSCAN — a two-element
+/// array of `[next_cursor, items]` where `items` is interleaved
+/// `member, score` bulks.
+///
+/// TODO(architect): MATCH currently filters on member bytes only. Real
+/// Redis also surfaces the score in `OBJ_ENCODING_LISTPACK` zsets but the
+/// glob matcher's input is the member key.
+pub fn zscan_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    let argc = ctx.arg_count();
+    if argc < 3 {
+        return Err(RedisError::wrong_number_of_args(b"zscan"));
+    }
+    let key = ctx.arg_owned(1usize)?;
+    let cursor = parse_u64_cursor(ctx.arg(2)?.as_bytes())?;
+
+    let mut pattern: Option<Vec<u8>> = None;
+    let mut count: i64 = 10;
+    let mut j = 3usize;
+    while j < argc {
+        let opt = ctx.arg(j)?;
+        let bytes = opt.as_bytes();
+        if bytes.eq_ignore_ascii_case(b"MATCH") {
+            if j + 1 >= argc {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            pattern = Some(ctx.arg(j + 1)?.as_bytes().to_vec());
+            j += 2;
+        } else if bytes.eq_ignore_ascii_case(b"COUNT") {
+            if j + 1 >= argc {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            let n = parse_strict_i64(ctx.arg(j + 1)?.as_bytes())?;
+            if n < 1 {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            count = n;
+            j += 2;
+        } else {
+            return Err(RedisError::syntax(b"syntax error"));
+        }
+    }
+
+    let entries: Vec<(f64, RedisString)> = match as_zset_ref(ctx.db().lookup_key_read(&key))? {
+        None => Vec::new(),
+        Some(z) => z.iter_ascending().map(|(s, m)| (s, m.clone())).collect(),
+    };
+    let total = entries.len() as u64;
+    let start = cursor as usize;
+    let stop = (start + count as usize).min(entries.len());
+    let next_cursor: u64 = if stop as u64 >= total { 0 } else { stop as u64 };
+
+    let mut matched: Vec<(f64, RedisString)> = Vec::new();
+    for (s, m) in entries.into_iter().skip(start).take(count as usize) {
+        if let Some(ref pat) = pattern {
+            if !glob_match(pat, m.as_bytes()) {
+                continue;
+            }
+        }
+        matched.push((s, m));
+    }
+
+    ctx.reply_array_header(2usize)?;
+    ctx.reply_bulk(next_cursor.to_string().as_bytes())?;
+    ctx.reply_array_header(matched.len() * 2)?;
+    for (s, m) in matched {
+        ctx.reply_bulk_string(m)?;
+        ctx.reply_bulk(&format_score(s))?;
+    }
+    Ok(())
+}
+
+/// Parse an unsigned decimal cursor.
+fn parse_u64_cursor(bytes: &[u8]) -> Result<u64, RedisError> {
+    if bytes.is_empty() {
+        return Err(RedisError::runtime(b"ERR invalid cursor"));
+    }
+    let mut n: u64 = 0;
+    for &c in bytes {
+        if !c.is_ascii_digit() {
+            return Err(RedisError::runtime(b"ERR invalid cursor"));
+        }
+        n = n
+            .checked_mul(10)
+            .and_then(|v| v.checked_add((c - b'0') as u64))
+            .ok_or_else(|| RedisError::runtime(b"ERR invalid cursor"))?;
+    }
+    Ok(n)
 }
 
 // ──────────────────────────────────────────────────────────────────────────

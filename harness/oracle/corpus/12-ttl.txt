@@ -1,0 +1,36 @@
+[class: byte_exact]
+[description: TTL / EXPIRE / PERSIST / SET-with-expire-options]
+[suite: smoke,ttl]
+
+FLUSHDB
+SET k1 v1
+TTL k1
+TTL missing
+PTTL missing
+EXPIRE k1 100
+TTL k1
+PERSIST k1
+TTL k1
+EXPIRE k1 0
+EXISTS k1
+SET k2 v2 EX 100
+TTL k2
+SET k2 v3
+TTL k2
+SET k3 v3 EX 50
+SET k3 v4 KEEPTTL
+TTL k3
+SET nx1 hello NX
+SET nx1 world NX
+GET nx1
+SET xx1 hello XX
+PEXPIRE k2 1000
+PTTL k2
+EXPIREAT k1 1
+EXISTS k1
+PEXPIREAT k2 1
+EXISTS k2
+PERSIST missing
+EXPIRE missing 10
+EXPIRETIME missing
+PEXPIRETIME missing

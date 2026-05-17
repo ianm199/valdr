@@ -314,19 +314,14 @@ impl RedisDb {
     /// High-level key setter: insert or overwrite, handle TTL + signals.
     ///
     /// C: db.c:417 setKey
-    pub fn set_key(&mut self, key: RedisString, value: RedisObject, flags: u32) {
-        // TODO(port): SETKEY_ADD_OR_UPDATE → dbAddInternal(update_if_existing=1) path
-        let exists = self.dict.contains_key(&key);
-        if !exists {
-            // TODO(port): dbAddInternal (signals, LRU init, volatile tracking)
-            self.dict.insert(key.clone(), value);
+    pub fn set_key(&mut self, key: RedisString, mut value: RedisObject, flags: u32) {
+        let preserved_expire = if flags & SETKEY_KEEPTTL != 0 {
+            self.dict.get(&key).map(|o| o.expire).unwrap_or(EXPIRY_NONE)
         } else {
-            // TODO(port): dbSetValue overwrite path (LRU copy, module notify, lazy-free)
-            self.dict.insert(key.clone(), value);
-        }
-        if flags & SETKEY_KEEPTTL == 0 {
-            self.remove_expire(&key);
-        }
+            EXPIRY_NONE
+        };
+        value.expire = preserved_expire;
+        self.dict.insert(key.clone(), value);
         if flags & SETKEY_NO_SIGNAL == 0 {
             self.signal_modified(&key);
         }
@@ -471,6 +466,24 @@ impl RedisDb {
             .filter(|(_, obj)| obj.expire == EXPIRY_NONE || obj.expire >= now)
             .filter(|(k, _)| all || glob_match(pattern, k.as_bytes()))
             .map(|(k, _)| k.clone())
+            .collect()
+    }
+
+    /// Return a stable snapshot of every live (non-expired) key paired with
+    /// its `TYPE` byte-string name (`string`, `list`, `hash`, `set`, `zset`,
+    /// `stream`, `none`).
+    ///
+    /// Used by the linear-cursor SCAN implementation in `scan_command`; the
+    /// iteration order is whatever the underlying `HashMap` yields and is
+    /// only stable within a single mutation-free window. Real Redis hashes
+    /// the cursor for resize safety — see the TODO in `scan_command` for
+    /// the deferred parity work.
+    pub fn keys_snapshot_with_types(&self) -> Vec<(RedisString, &'static [u8])> {
+        let now = Self::now_ms();
+        self.dict
+            .iter()
+            .filter(|(_, obj)| obj.expire == EXPIRY_NONE || obj.expire >= now)
+            .map(|(k, obj)| (k.clone(), object_kind_name(&obj.kind)))
             .collect()
     }
 
@@ -732,12 +745,117 @@ pub fn keys_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     Ok(())
 }
 
+/// Return the canonical `TYPE` reply byte-string for an `ObjectKind`.
+///
+/// Mirrors the dispatch table in `t_string.c`'s `typeCommand`; used by
+/// SCAN's `TYPE` filter and by `keys_snapshot_with_types`.
+pub fn object_kind_name(kind: &ObjectKind) -> &'static [u8] {
+    match kind {
+        ObjectKind::String(_) => b"string",
+        ObjectKind::List(_) => b"list",
+        ObjectKind::Hash(_) => b"hash",
+        ObjectKind::Set(_) => b"set",
+        ObjectKind::ZSet(_) => b"zset",
+        ObjectKind::Stream => b"stream",
+        ObjectKind::Module => b"none",
+    }
+}
+
 /// C: db.c:1402 scanCommand — SCAN cursor [MATCH pat] [COUNT n] [TYPE type]
+///
+/// Phase-B linear cursor: the cursor is a `u64` byte-offset into the
+/// snapshot returned by `keys_snapshot_with_types`. Each call walks up to
+/// `COUNT` entries (default `10`), applies any `MATCH` glob and `TYPE`
+/// filter, and replies with the next cursor (or `0` on completion) plus
+/// the matched key array. Pattern matching reuses `glob_match`.
+///
+/// TODO(port): resize-safe reverse-binary cursor mixing (db.c hashCursor)
+/// once kvstore lands in Phase 4.
 pub fn scan_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
-    // TODO(port): parseScanCursorOrReply, parseScanOptionsOrReply, scanGenericCommand
-    // Full SCAN requires kvstore cursor-based iteration — deferred to Phase 4.
-    let _ = ctx.arg(1)?;
-    Err(RedisError::runtime(b"SCAN: TODO(port): cursor-based scan deferred to Phase 4"))
+    let cursor_str = ctx.arg(1)?.clone();
+    let cursor = parse_u64_from_bytes(cursor_str.as_bytes())
+        .ok_or_else(|| RedisError::runtime(b"ERR invalid cursor"))?;
+
+    let argc = ctx.arg_count();
+    let mut pattern: Option<Vec<u8>> = None;
+    let mut count: i64 = DEFAULT_SCAN_COUNT;
+    let mut type_filter: Option<Vec<u8>> = None;
+
+    let mut j: usize = 2;
+    while j < argc {
+        let opt = ctx.arg(j)?.clone();
+        let bytes = opt.as_bytes();
+        if eq_ignore_ascii_case(bytes, b"MATCH") {
+            if j + 1 >= argc {
+                return Err(RedisError::runtime(b"ERR syntax error"));
+            }
+            pattern = Some(ctx.arg(j + 1)?.as_bytes().to_vec());
+            j += 2;
+        } else if eq_ignore_ascii_case(bytes, b"COUNT") {
+            if j + 1 >= argc {
+                return Err(RedisError::runtime(b"ERR syntax error"));
+            }
+            let n = parse_i64_from_bytes(ctx.arg(j + 1)?.as_bytes())
+                .ok_or_else(|| RedisError::runtime(b"ERR value is not an integer or out of range"))?;
+            if n < 1 {
+                return Err(RedisError::runtime(b"ERR syntax error"));
+            }
+            count = n;
+            j += 2;
+        } else if eq_ignore_ascii_case(bytes, b"TYPE") {
+            if j + 1 >= argc {
+                return Err(RedisError::runtime(b"ERR syntax error"));
+            }
+            type_filter = Some(ctx.arg(j + 1)?.as_bytes().to_vec());
+            j += 2;
+        } else {
+            return Err(RedisError::runtime(b"ERR syntax error"));
+        }
+    }
+
+    let snapshot = ctx.db().keys_snapshot_with_types();
+    let total = snapshot.len() as u64;
+    let start = cursor as usize;
+    let stop = (start + count as usize).min(snapshot.len());
+    let next_cursor: u64 = if stop as u64 >= total { 0 } else { stop as u64 };
+
+    let mut matched: Vec<RedisString> = Vec::new();
+    for (key, kind_name) in snapshot.into_iter().skip(start).take(count as usize) {
+        if let Some(ref pat) = pattern {
+            if !glob_match(pat, key.as_bytes()) {
+                continue;
+            }
+        }
+        if let Some(ref tf) = type_filter {
+            if tf.as_slice() != kind_name {
+                continue;
+            }
+        }
+        matched.push(key);
+    }
+
+    ctx.reply_array_header(2usize)?;
+    ctx.reply_bulk(next_cursor.to_string().as_bytes())?;
+    ctx.reply_array_header(matched.len())?;
+    for key in matched {
+        ctx.reply_bulk_string(key)?;
+    }
+    Ok(())
+}
+
+/// Parse an unsigned decimal cursor from a byte slice.
+fn parse_u64_from_bytes(b: &[u8]) -> Option<u64> {
+    if b.is_empty() {
+        return None;
+    }
+    let mut n: u64 = 0;
+    for &c in b {
+        if !c.is_ascii_digit() {
+            return None;
+        }
+        n = n.checked_mul(10)?.checked_add((c - b'0') as u64)?;
+    }
+    Some(n)
 }
 
 /// C: db.c:1408 dbsizeCommand — DBSIZE

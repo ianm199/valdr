@@ -259,28 +259,166 @@ pub(crate) fn get_generic_command(ctx: &mut CommandContext) -> Result<(), RedisE
 // Public command entry points
 // ──────────────────────────────────────────────────────────────────────────
 
-/// SET key value [NX|XX|IFEQ cmp] [GET]
+/// SET key value [NX|XX] [GET]
 ///     [EX s | PX ms | EXAT ts | PXAT ms-ts | KEEPTTL]
-///
-/// Wave C1 scope: only the two-argument `SET key value` form is honored.
-/// All optional clauses (NX/XX/IFEQ/GET/EX/PX/EXAT/PXAT/KEEPTTL) yield a
-/// not-yet-implemented error so we never silently accept and drop them.
 ///
 /// C: `setCommand` (t_string.c:251).
 pub fn set_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
-    if ctx.arg_count() < 3 {
+    let argc = ctx.arg_count();
+    if argc < 3 {
         return Err(RedisError::wrong_number_of_args(b"set"));
-    }
-    if ctx.arg_count() > 3 {
-        return Err(RedisError::runtime(
-            b"ERR SET options (NX/XX/EX/PX/EXAT/PXAT/KEEPTTL/GET/IFEQ) not implemented yet",
-        ));
     }
     let key = ctx.arg_owned(1usize)?;
     let value = ctx.arg_owned(2usize)?;
+
+    let mut flags: u32 = 0;
+    let mut expire_at_ms: Option<i64> = None;
+    let mut j = 3usize;
+    while j < argc {
+        let opt = ctx.arg_owned(j)?;
+        let opt_bytes = opt.as_bytes();
+        if opt_bytes.eq_ignore_ascii_case(b"NX") {
+            if flags & SET_FLAG_XX != 0 {
+                return Err(RedisError::runtime(b"ERR syntax error"));
+            }
+            flags |= SET_FLAG_NX;
+            j += 1;
+        } else if opt_bytes.eq_ignore_ascii_case(b"XX") {
+            if flags & SET_FLAG_NX != 0 {
+                return Err(RedisError::runtime(b"ERR syntax error"));
+            }
+            flags |= SET_FLAG_XX;
+            j += 1;
+        } else if opt_bytes.eq_ignore_ascii_case(b"GET") {
+            flags |= SET_FLAG_GET;
+            j += 1;
+        } else if opt_bytes.eq_ignore_ascii_case(b"KEEPTTL") {
+            if flags & (SET_FLAG_EX | SET_FLAG_PX | SET_FLAG_EXAT | SET_FLAG_PXAT) != 0 {
+                return Err(RedisError::runtime(b"ERR syntax error"));
+            }
+            flags |= SET_FLAG_KEEPTTL;
+            j += 1;
+        } else if opt_bytes.eq_ignore_ascii_case(b"EX")
+            || opt_bytes.eq_ignore_ascii_case(b"PX")
+            || opt_bytes.eq_ignore_ascii_case(b"EXAT")
+            || opt_bytes.eq_ignore_ascii_case(b"PXAT")
+        {
+            if flags & (SET_FLAG_EX | SET_FLAG_PX | SET_FLAG_EXAT | SET_FLAG_PXAT | SET_FLAG_KEEPTTL) != 0 {
+                return Err(RedisError::runtime(b"ERR syntax error"));
+            }
+            if j + 1 >= argc {
+                return Err(RedisError::runtime(b"ERR syntax error"));
+            }
+            let bit = if opt_bytes.eq_ignore_ascii_case(b"EX") {
+                SET_FLAG_EX
+            } else if opt_bytes.eq_ignore_ascii_case(b"PX") {
+                SET_FLAG_PX
+            } else if opt_bytes.eq_ignore_ascii_case(b"EXAT") {
+                SET_FLAG_EXAT
+            } else {
+                SET_FLAG_PXAT
+            };
+            flags |= bit;
+            let value_arg = ctx.arg_owned(j + 1)?;
+            let raw = parse_strict_i64(value_arg.as_bytes())
+                .ok_or_else(|| RedisError::runtime(b"ERR value is not an integer or out of range"))?;
+            if raw <= 0 && (bit == SET_FLAG_EX || bit == SET_FLAG_PX) {
+                return Err(RedisError::runtime(b"ERR invalid expire time in 'set' command"));
+            }
+            if raw < 0 {
+                return Err(RedisError::runtime(b"ERR invalid expire time in 'set' command"));
+            }
+            let now_ms: i64 = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            let abs_ms: i64 = match bit {
+                b if b == SET_FLAG_EX => raw
+                    .checked_mul(1000)
+                    .and_then(|v| v.checked_add(now_ms))
+                    .ok_or_else(|| RedisError::runtime(b"ERR invalid expire time in 'set' command"))?,
+                b if b == SET_FLAG_PX => raw
+                    .checked_add(now_ms)
+                    .ok_or_else(|| RedisError::runtime(b"ERR invalid expire time in 'set' command"))?,
+                b if b == SET_FLAG_EXAT => raw
+                    .checked_mul(1000)
+                    .ok_or_else(|| RedisError::runtime(b"ERR invalid expire time in 'set' command"))?,
+                _ => raw,
+            };
+            expire_at_ms = Some(abs_ms);
+            j += 2;
+        } else {
+            return Err(RedisError::runtime(b"ERR syntax error"));
+        }
+    }
+
+    let key_exists = ctx.db_mut().lookup_key_write(&key).is_some();
+    if flags & SET_FLAG_NX != 0 && key_exists {
+        if flags & SET_FLAG_GET != 0 {
+            return reply_get_value(ctx, &key);
+        }
+        return ctx.reply_null_bulk();
+    }
+    if flags & SET_FLAG_XX != 0 && !key_exists {
+        if flags & SET_FLAG_GET != 0 {
+            return ctx.reply_null_bulk();
+        }
+        return ctx.reply_null_bulk();
+    }
+
+    let mut prev_bytes: Option<Vec<u8>> = None;
+    if flags & SET_FLAG_GET != 0 {
+        match ctx.db().find(&key) {
+            None => prev_bytes = None,
+            Some(obj) => match &obj.kind {
+                ObjectKind::String(_) => prev_bytes = Some(obj.as_bytes().to_vec()),
+                _ => return Err(RedisError::wrong_type()),
+            },
+        }
+    }
+
+    let setkey_flags = if flags & SET_FLAG_KEEPTTL != 0 {
+        SETKEY_KEEPTTL
+    } else {
+        0
+    };
     let obj = RedisObject::new_raw_string(value.as_bytes());
-    ctx.db_mut().set_key(key, obj, 0);
-    ctx.reply_simple_string(b"OK")
+    ctx.db_mut().set_key(key.clone(), obj, setkey_flags);
+
+    if let Some(abs_ms) = expire_at_ms {
+        let now_ms: i64 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        if abs_ms <= now_ms {
+            ctx.db_mut().sync_delete(&key);
+        } else {
+            ctx.db_mut().set_expire(&key, abs_ms);
+        }
+    }
+
+    if flags & SET_FLAG_GET != 0 {
+        match prev_bytes {
+            None => ctx.reply_null_bulk(),
+            Some(b) => ctx.reply_bulk_string(RedisString::from_bytes(&b)),
+        }
+    } else {
+        ctx.reply_simple_string(b"OK")
+    }
+}
+
+/// Helper for SET with NX+GET when the key already existed.
+fn reply_get_value(ctx: &mut CommandContext, key: &RedisString) -> Result<(), RedisError> {
+    match ctx.db().find(key) {
+        None => ctx.reply_null_bulk(),
+        Some(obj) => match &obj.kind {
+            ObjectKind::String(_) => {
+                let bytes = obj.as_bytes().to_vec();
+                ctx.reply_bulk_string(RedisString::from_bytes(&bytes))
+            }
+            _ => Err(RedisError::wrong_type()),
+        },
+    }
 }
 
 /// SETNX key value

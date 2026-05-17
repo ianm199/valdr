@@ -32,6 +32,7 @@
 use std::collections::HashSet;
 
 use redis_core::command_context::CommandContext;
+use redis_core::db::glob_match;
 use redis_core::object::RedisObject;
 use redis_types::{RedisError, RedisResult, RedisString};
 
@@ -677,6 +678,94 @@ pub fn sdiffstore_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let result = diff_sets(snapshots);
     let stored = store_set(ctx, dst, result);
     ctx.reply_integer(stored)
+}
+
+/// SSCAN key cursor [MATCH pattern] [COUNT count]
+///
+/// Linear-cursor iteration over the members of a set. Returns a two-element
+/// reply `[next_cursor, members]`, matching real Redis's wire shape. The
+/// cursor is a `u64` byte-offset into the snapshot taken at call time;
+/// the resize-safe reverse-binary cursor lands once the kvstore primitive
+/// is ported.
+pub fn sscan_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    let argc = ctx.arg_count();
+    if argc < 3 {
+        return Err(RedisError::wrong_number_of_args(b"sscan"));
+    }
+    let key = ctx.arg_owned(1usize)?;
+    let cursor = parse_u64_cursor(ctx.arg(2)?.as_bytes())?;
+
+    let mut pattern: Option<Vec<u8>> = None;
+    let mut count: i64 = 10;
+    let mut j = 3usize;
+    while j < argc {
+        let opt = ctx.arg(j)?;
+        let bytes = opt.as_bytes();
+        if bytes.eq_ignore_ascii_case(b"MATCH") {
+            if j + 1 >= argc {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            pattern = Some(ctx.arg(j + 1)?.as_bytes().to_vec());
+            j += 2;
+        } else if bytes.eq_ignore_ascii_case(b"COUNT") {
+            if j + 1 >= argc {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            let n = parse_strict_i64(ctx.arg(j + 1)?.as_bytes())?;
+            if n < 1 {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            count = n;
+            j += 2;
+        } else {
+            return Err(RedisError::syntax(b"syntax error"));
+        }
+    }
+
+    let members: Vec<RedisString> = match as_set_ref(ctx.db().lookup_key_read(&key))? {
+        None => Vec::new(),
+        Some(h) => h.iter().cloned().collect(),
+    };
+    let total = members.len() as u64;
+    let start = cursor as usize;
+    let stop = (start + count as usize).min(members.len());
+    let next_cursor: u64 = if stop as u64 >= total { 0 } else { stop as u64 };
+
+    let mut matched: Vec<RedisString> = Vec::new();
+    for m in members.into_iter().skip(start).take(count as usize) {
+        if let Some(ref pat) = pattern {
+            if !glob_match(pat, m.as_bytes()) {
+                continue;
+            }
+        }
+        matched.push(m);
+    }
+
+    ctx.reply_array_header(2usize)?;
+    ctx.reply_bulk(next_cursor.to_string().as_bytes())?;
+    ctx.reply_array_header(matched.len())?;
+    for m in matched {
+        ctx.reply_bulk_string(m)?;
+    }
+    Ok(())
+}
+
+/// Parse an unsigned decimal cursor.
+fn parse_u64_cursor(bytes: &[u8]) -> Result<u64, RedisError> {
+    if bytes.is_empty() {
+        return Err(RedisError::runtime(b"ERR invalid cursor"));
+    }
+    let mut n: u64 = 0;
+    for &c in bytes {
+        if !c.is_ascii_digit() {
+            return Err(RedisError::runtime(b"ERR invalid cursor"));
+        }
+        n = n
+            .checked_mul(10)
+            .and_then(|v| v.checked_add((c - b'0') as u64))
+            .ok_or_else(|| RedisError::runtime(b"ERR invalid cursor"))?;
+    }
+    Ok(n)
 }
 
 // ──────────────────────────────────────────────────────────────────────────

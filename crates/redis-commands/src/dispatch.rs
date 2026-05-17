@@ -193,6 +193,17 @@ pub static HANDLERS: &[DispatchEntry] = &[
     DispatchEntry { name: b"SUNIONSTORE", handler: crate::set::sunionstore_command },
     DispatchEntry { name: b"SDIFF", handler: crate::set::sdiff_command },
     DispatchEntry { name: b"SDIFFSTORE", handler: crate::set::sdiffstore_command },
+    // ── TTL / EXPIRATION (Round 6) ─────────────────────────────────────────
+    DispatchEntry { name: b"EXPIRE", handler: redis_core::expire::expire_command },
+    DispatchEntry { name: b"PEXPIRE", handler: redis_core::expire::pexpire_command },
+    DispatchEntry { name: b"EXPIREAT", handler: redis_core::expire::expireat_command },
+    DispatchEntry { name: b"PEXPIREAT", handler: redis_core::expire::pexpireat_command },
+    DispatchEntry { name: b"PERSIST", handler: redis_core::expire::persist_command },
+    DispatchEntry { name: b"TTL", handler: redis_core::expire::ttl_command },
+    DispatchEntry { name: b"PTTL", handler: redis_core::expire::pttl_command },
+    DispatchEntry { name: b"EXPIRETIME", handler: redis_core::expire::expiretime_command },
+    DispatchEntry { name: b"PEXPIRETIME", handler: redis_core::expire::pexpiretime_command },
+    DispatchEntry { name: b"OBJECT", handler: redis_core::object::object_command },
     // ── ZSET (Round 5) ─────────────────────────────────────────────────────
     DispatchEntry { name: b"ZADD", handler: crate::zset::zadd_command },
     DispatchEntry { name: b"ZSCORE", handler: crate::zset::zscore_command },
@@ -211,6 +222,25 @@ pub static HANDLERS: &[DispatchEntry] = &[
     DispatchEntry { name: b"ZPOPMAX", handler: crate::zset::zpopmax_command },
     DispatchEntry { name: b"ZREMRANGEBYRANK", handler: crate::zset::zremrangebyrank_command },
     DispatchEntry { name: b"ZREMRANGEBYSCORE", handler: crate::zset::zremrangebyscore_command },
+    // ── SCAN + ZSET-EXTRAS (Round 7) ───────────────────────────────────────
+    DispatchEntry { name: b"SCAN", handler: redis_core::db::scan_command },
+    DispatchEntry { name: b"HSCAN", handler: crate::hash::hscan_command },
+    DispatchEntry { name: b"SSCAN", handler: crate::set::sscan_command },
+    DispatchEntry { name: b"ZSCAN", handler: crate::zset::zscan_command },
+    DispatchEntry { name: b"ZRANGEBYLEX", handler: crate::zset::zrangebylex_command },
+    DispatchEntry { name: b"ZREVRANGEBYLEX", handler: crate::zset::zrevrangebylex_command },
+    DispatchEntry { name: b"ZLEXCOUNT", handler: crate::zset::zlexcount_command },
+    DispatchEntry { name: b"ZREMRANGEBYLEX", handler: crate::zset::zremrangebylex_command },
+    DispatchEntry { name: b"ZUNIONSTORE", handler: crate::zset::zunionstore_command },
+    DispatchEntry { name: b"ZINTERSTORE", handler: crate::zset::zinterstore_command },
+    DispatchEntry { name: b"ZDIFFSTORE", handler: crate::zset::zdiffstore_command },
+    DispatchEntry { name: b"ZUNION", handler: crate::zset::zunion_command },
+    DispatchEntry { name: b"ZINTER", handler: crate::zset::zinter_command },
+    DispatchEntry { name: b"ZDIFF", handler: crate::zset::zdiff_command },
+    DispatchEntry { name: b"ZINTERCARD", handler: crate::zset::zintercard_command },
+    DispatchEntry { name: b"ZRANGESTORE", handler: crate::zset::zrangestore_command },
+    DispatchEntry { name: b"ZRANDMEMBER", handler: crate::zset::zrandmember_command },
+    DispatchEntry { name: b"ZMPOP", handler: crate::zset::zmpop_command },
 ];
 
 #[cfg(test)]
