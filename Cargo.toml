@@ -6,6 +6,7 @@ members = [
     "crates/redis-core",
     "crates/redis-commands",
     "crates/redis-server",
+    "crates/redis-ds",
 ]
 
 [workspace.package]
@@ -18,3 +19,4 @@ redis-types = { path = "crates/redis-types" }
 redis-protocol = { path = "crates/redis-protocol" }
 redis-core = { path = "crates/redis-core" }
 redis-commands = { path = "crates/redis-commands" }
+redis-ds = { path = "crates/redis-ds" }

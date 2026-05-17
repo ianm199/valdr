@@ -19,10 +19,17 @@ RedisError        enum    crates/redis-types/src/error.rs           enforce  def
 RespFrame         enum    crates/redis-protocol/src/frame.rs        enforce  defined 2026-05-16 architect packet
 CommandSpec       struct  crates/redis-commands/src/spec.rs         audit    TODO: define in pilot Phase 2 (from command JSON)
 CommandContext    struct  crates/redis-core/src/command_context.rs  enforce  defined 2026-05-16 architect packet
-StreamId          struct  crates/redis-ds/src/stream.rs             audit  Phase 5: streams (crate not in pilot)
-ListPack          struct  crates/redis-ds/src/listpack.rs           audit  Phase 4: data-structure encodings
-QuickList         struct  crates/redis-ds/src/quicklist.rs          audit  Phase 4: data-structure encodings
-RadixTree         struct  crates/redis-ds/src/rax.rs                audit  Phase 4/5: rax for streams + cluster
+StreamId          struct  crates/redis-ds/src/stream.rs             enforce  skeleton stub defined 2026-05-17 architect packet
+ListPack          struct  crates/redis-ds/src/listpack.rs           enforce  skeleton stub defined 2026-05-17 architect packet
+QuickList         struct  crates/redis-ds/src/quicklist.rs          enforce  skeleton stub defined 2026-05-17 architect packet
+RadixTree         struct  crates/redis-ds/src/rax.rs                enforce  skeleton stub defined 2026-05-17 architect packet
+IntSet            struct  crates/redis-ds/src/intset.rs             enforce  skeleton stub defined 2026-05-17 architect packet
+Dict              struct  crates/redis-ds/src/dict.rs               enforce  skeleton stub defined 2026-05-17 architect packet
+LinkedList        struct  crates/redis-ds/src/adlist.rs             enforce  skeleton stub defined 2026-05-17 architect packet
+ZSkiplist         struct  crates/redis-ds/src/zskiplist.rs          enforce  skeleton stub defined 2026-05-17 architect packet
+HashTable         struct  crates/redis-ds/src/hashtable.rs          enforce  skeleton stub defined 2026-05-17 architect packet
+Kvstore           struct  crates/redis-ds/src/kvstore.rs            enforce  skeleton stub defined 2026-05-17 architect packet
+Ziplist           struct  crates/redis-ds/src/ziplist.rs            enforce  skeleton stub defined 2026-05-17 architect packet
 ModuleApi         struct  crates/redis-modules/src/api.rs           audit  Phase 10: modules (crate not in pilot)
 MultiState        struct  crates/redis-core/src/client.rs           audit    moved from salvaged multi.rs; per Phase B compile-fix
 MultiCmd          struct  crates/redis-core/src/client.rs           audit    moved from salvaged multi.rs
