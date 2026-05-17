@@ -1384,9 +1384,8 @@ pub fn xadd_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         ));
     }
 
-    // TODO(architect): lookup stream from DB; using placeholder error.
-    let key = ctx.arg(1)?;
-    let _s = stream_type_lookup_write_or_create(ctx, key, parsed_args.no_mkstream)?;
+    let key = ctx.arg(1)?.clone();
+    let _s = stream_type_lookup_write_or_create(ctx, key.as_slice(), parsed_args.no_mkstream)?;
 
     // TODO(port): stream_append_item call once DB integration is available.
     // TODO(architect): reply with the generated ID.

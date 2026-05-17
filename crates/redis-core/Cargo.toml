@@ -8,3 +8,4 @@ description = "Core server state: RedisServer, Client, RedisDb, RedisObject, Com
 [dependencies]
 redis-types = { workspace = true }
 redis-protocol = { workspace = true }
+log = "0.4"

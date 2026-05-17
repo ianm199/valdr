@@ -58,6 +58,53 @@ impl RedisString {
     pub fn clear(&mut self) {
         self.0.clear()
     }
+
+    /// Byte-slice view (alias of `as_bytes`, named for compatibility with
+    /// `Vec<u8>::as_slice` callers in translated command code).
+    pub fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// Owned `Vec<u8>` copy of the bytes.
+    pub fn to_vec(&self) -> Vec<u8> {
+        self.0.clone()
+    }
+
+    /// Iterator over the bytes (alias of `as_bytes().iter()`).
+    pub fn iter(&self) -> std::slice::Iter<'_, u8> {
+        self.0.iter()
+    }
+}
+
+impl std::ops::Deref for RedisString {
+    type Target = [u8];
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl PartialEq<[u8]> for RedisString {
+    fn eq(&self, other: &[u8]) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&[u8]> for RedisString {
+    fn eq(&self, other: &&[u8]) -> bool {
+        self.0 == *other
+    }
+}
+
+impl<const N: usize> PartialEq<[u8; N]> for RedisString {
+    fn eq(&self, other: &[u8; N]) -> bool {
+        self.0 == other
+    }
+}
+
+impl<const N: usize> PartialEq<&[u8; N]> for RedisString {
+    fn eq(&self, other: &&[u8; N]) -> bool {
+        self.0 == *other
+    }
 }
 
 impl fmt::Debug for RedisString {

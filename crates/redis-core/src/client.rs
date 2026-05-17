@@ -64,6 +64,65 @@ impl Client {
         // TODO(port): port networking.c::processInputBuffer here.
         todo!("port networking.c::processInputBuffer in Phase 2")
     }
+
+    /// Whether the client is currently blocked (BLPOP, WAIT, etc).
+    ///
+    /// STUB — Phase B placeholder; real blocking state lives in a future
+    /// `bstate` field tracking `flag.blocked` plus the per-blocktype payload.
+    pub fn is_blocked(&self) -> bool {
+        false
+    }
+
+    /// Whether the client is in pub/sub mode (SUBSCRIBE / PSUBSCRIBE).
+    ///
+    /// STUB — Phase B placeholder; full pub/sub state lands with notify.c.
+    pub fn is_pubsub(&self) -> bool {
+        false
+    }
+
+    /// Whether the client is a replica (slave) connection.
+    ///
+    /// STUB — Phase B placeholder; replication state is Phase 6+.
+    pub fn is_replica(&self) -> bool {
+        false
+    }
+
+    /// Whether the client carries the `must-obey` flag (used by AOF/RDB
+    /// loaders and the master-link).
+    ///
+    /// STUB — Phase B placeholder.
+    pub fn must_obey(&self) -> bool {
+        false
+    }
+
+    /// Blocking deadline in milliseconds (0 = block forever).
+    ///
+    /// STUB — Phase B placeholder; real value lives in the future `bstate`.
+    pub fn blocking_timeout(&self) -> i64 {
+        0
+    }
+
+    /// Whether this client is currently registered in the
+    /// `clients_timeout_table` radix tree.
+    ///
+    /// STUB — Phase B placeholder; backing flag lands when bstate is added.
+    pub fn in_timeout_table(&self) -> bool {
+        false
+    }
+
+    /// Set/clear the in-timeout-table flag.
+    ///
+    /// STUB — Phase B placeholder; no backing storage yet.
+    pub fn set_in_timeout_table(&mut self, _value: bool) {
+        // TODO(port): persist on Client when bstate field is added.
+    }
+
+    /// Unix-time seconds of the last client interaction (read or write).
+    ///
+    /// STUB — Phase B placeholder; updated by the event loop in Phase 3.
+    pub fn last_interaction(&self) -> i64 {
+        0
+    }
 }
 
 #[cfg(test)]

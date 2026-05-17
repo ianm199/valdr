@@ -22,12 +22,18 @@ impl RedisDb {
         Self { id, dict: HashMap::new() }
     }
 
-    pub fn lookup_key_read(&self, key: &RedisString) -> Option<&RedisObject> {
-        self.dict.get(key)
+    /// Look up `key` for read.
+    ///
+    /// Accepts anything that views as bytes (`&RedisString`, `&[u8]`,
+    /// `&Vec<u8>`), since translated command code mixes all three.
+    pub fn lookup_key_read(&self, key: impl AsRef<[u8]>) -> Option<&RedisObject> {
+        let k = RedisString::from_bytes(key.as_ref());
+        self.dict.get(&k)
     }
 
-    pub fn lookup_key_write(&mut self, key: &RedisString) -> Option<&mut RedisObject> {
-        self.dict.get_mut(key)
+    pub fn lookup_key_write(&mut self, key: impl AsRef<[u8]>) -> Option<&mut RedisObject> {
+        let k = RedisString::from_bytes(key.as_ref());
+        self.dict.get_mut(&k)
     }
 
     /// Add a new key. Returns false if the key already existed.
@@ -40,12 +46,23 @@ impl RedisDb {
         self.dict.insert(key, value)
     }
 
-    pub fn delete(&mut self, key: &RedisString) -> bool {
-        self.dict.remove(key).is_some()
+    pub fn delete(&mut self, key: impl AsRef<[u8]>) -> bool {
+        let k = RedisString::from_bytes(key.as_ref());
+        self.dict.remove(&k).is_some()
     }
 
-    pub fn exists(&self, key: &RedisString) -> bool {
-        self.dict.contains_key(key)
+    pub fn exists(&self, key: impl AsRef<[u8]>) -> bool {
+        let k = RedisString::from_bytes(key.as_ref());
+        self.dict.contains_key(&k)
+    }
+
+    /// Mark `key` as modified (for WATCH / replication / keyspace notify).
+    ///
+    /// STUB — Phase B placeholder; full signaling lives in db.c's
+    /// `signalModifiedKey` (replication backlog, WATCH dirty bit, key-space
+    /// notifications) and lands in Phase 3+.
+    pub fn signal_modified(&mut self, _key: impl AsRef<[u8]>) {
+        // TODO(port): wire replication / WATCH / keyspace notify.
     }
 
     pub fn len(&self) -> usize {

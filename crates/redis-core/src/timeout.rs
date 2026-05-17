@@ -60,7 +60,17 @@ pub enum TimeUnit {
 /// and returns `true`.  Returns `false` and performs no operation otherwise.
 ///
 /// C: timeout.c:39-47, checkBlockedClientTimeout
-pub fn check_blocked_client_timeout(client: &mut Client, now: i64) -> bool {
+///
+/// PORT NOTE(Phase B): added `server: &mut RedisServer` to match the canonical
+/// `unblock_client_on_timeout` signature in `blocked.rs`, which needs server
+/// state to drive `reply_to_blocked_client_timed_out` and `unblock_client`.
+/// The original C `checkBlockedClientTimeout(client *c, mstime_t now)` got
+/// the server implicitly via the global; Rust passes it explicitly.
+pub fn check_blocked_client_timeout(
+    client: &mut Client,
+    server: &mut RedisServer,
+    now: i64,
+) -> bool {
     // TODO(port): Client needs `is_blocked()` and `blocking_timeout() -> i64`
     // accessors once blocking state (c->flag.blocked, c->bstate->timeout) is
     // added to the Client struct.
@@ -68,7 +78,7 @@ pub fn check_blocked_client_timeout(client: &mut Client, now: i64) -> bool {
         let timeout = client.blocking_timeout();
         if timeout != 0 && timeout < now {
             // C: unblockClientOnTimeout(c)
-            crate::blocked::unblock_client_on_timeout(client);
+            let _ = crate::blocked::unblock_client_on_timeout(client, server);
             return true;
         }
     }

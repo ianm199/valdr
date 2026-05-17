@@ -8,20 +8,65 @@
 //! packet adds it).
 
 use crate::client::Client;
+use crate::db::RedisDb;
+use crate::object::RedisObject;
 use redis_protocol::RespFrame;
 use redis_types::{RedisError, RedisResult, RedisString};
 
 /// Bundle of context every command receives. Wraps a mutable Client and
 /// exposes argument access + reply-writer methods.
+///
+/// PORT NOTE: `db` is an owned `RedisDb` in this stub. Phase 3 will replace
+/// it with `&'a mut RedisServer` (and `db()` will route through the server's
+/// db list keyed by `client.db_index`).
 pub struct CommandContext<'a> {
     pub client: &'a mut Client,
-    // TODO(architect): Phase 3 — add `&mut RedisServer` here, then
-    // commands can reach global state (config, db list, replication, etc.).
+    /// Per-context DB scratch. STUB — Phase 3 replaces with server-owned dbs.
+    pub stub_db: RedisDb,
+}
+
+/// Flexible reply-array length argument.
+///
+/// Translated callers pass `usize`, `i64`, and `i32` interchangeably; this
+/// trait normalises them to `i64` for the underlying writer. Phase 3 may
+/// tighten this once we settle on a single int type for protocol sizes.
+pub trait ReplyArrayLen {
+    fn into_reply_len(self) -> i64;
+}
+
+impl ReplyArrayLen for i64 {
+    fn into_reply_len(self) -> i64 { self }
+}
+impl ReplyArrayLen for usize {
+    fn into_reply_len(self) -> i64 { self as i64 }
+}
+impl ReplyArrayLen for i32 {
+    fn into_reply_len(self) -> i64 { self as i64 }
+}
+
+/// Flexible argv-index trait. Translated code mixes `usize`, `i32`, and
+/// arithmetic on `i64` for indexing into `client.argv`.
+pub trait ArgIndex {
+    fn into_arg_index(self) -> RedisResult<usize>;
+}
+
+impl ArgIndex for usize {
+    fn into_arg_index(self) -> RedisResult<usize> { Ok(self) }
+}
+impl ArgIndex for i64 {
+    fn into_arg_index(self) -> RedisResult<usize> {
+        usize::try_from(self).map_err(|_| RedisError::runtime(b"argv index out of range"))
+    }
+}
+impl ArgIndex for i32 {
+    fn into_arg_index(self) -> RedisResult<usize> {
+        usize::try_from(self).map_err(|_| RedisError::runtime(b"argv index out of range"))
+    }
 }
 
 impl<'a> CommandContext<'a> {
     pub fn new(client: &'a mut Client) -> Self {
-        Self { client }
+        Self { client, stub_db: RedisDb::new(0) }
     }
 
     // ── Args ──────────────────────────────────────────────────────
@@ -73,18 +118,8 @@ impl<'a> CommandContext<'a> {
         Ok(())
     }
 
-    pub fn reply_array_header(&mut self, len: usize) -> RedisResult<()> {
-        // Architect note: streaming-array reply is the common case; full
-        // RespFrame::Array(Some(vec![...])) is for when the array is
-        // already materialized. Header-then-elements is the equivalent of
-        // C's addReplyArrayLen + element-by-element addReply* calls.
-        let mut buf = Vec::new();
-        buf.push(b'*');
-        use std::io::Write;
-        let _ = write!(buf, "{}", len);
-        buf.extend_from_slice(b"\r\n");
-        self.client.reply_buf.extend_from_slice(&buf);
-        Ok(())
+    pub fn reply_array_header<L: ReplyArrayLen>(&mut self, len: L) -> RedisResult<()> {
+        self.reply_array_header_i64(len.into_reply_len())
     }
 
     pub fn reply_null_array(&mut self) -> RedisResult<()> {
@@ -103,6 +138,73 @@ impl<'a> CommandContext<'a> {
         self.client
             .write_frame(&RespFrame::Error(err.to_resp_payload()));
         Ok(())
+    }
+
+    // ── Phase-B stubs needed by translated command code ────────────
+
+    /// Argument count, C-style (alias of `arg_count`).
+    pub fn argc(&self) -> usize {
+        self.client.arg_count()
+    }
+
+    /// Owned-copy argv accessor.
+    ///
+    /// Returns a cloned `RedisString` for the given index. Translated code
+    /// uses this where it wants to retain a copy across borrows of `ctx`.
+    pub fn arg_owned<I: ArgIndex>(&self, i: I) -> RedisResult<RedisString> {
+        let idx = i.into_arg_index()?;
+        self.client
+            .arg(idx)
+            .cloned()
+            .ok_or_else(|| RedisError::wrong_number_of_args(self.command_name()))
+    }
+
+    /// Argv accessor returning a `RedisObject::String` wrapper.
+    ///
+    /// STUB — Phase B placeholder mapping a raw argv `RedisString` into the
+    /// `RedisObject::String` variant. Eventually arguments will already be
+    /// `RedisObject`-typed once shared-object interning lands.
+    pub fn arg_as_object<I: ArgIndex>(&self, i: I) -> RedisResult<RedisObject> {
+        let s = self.arg_owned(i)?;
+        Ok(RedisObject::String(s))
+    }
+
+    /// Null bulk reply (alias of `reply_null_bulk`).
+    pub fn reply_null(&mut self) -> RedisResult<()> {
+        self.reply_null_bulk()
+    }
+
+    /// Push or array header — RESP3 push frame in client RESP3 mode,
+    /// fall back to RESP2 array header otherwise.
+    ///
+    /// STUB — Phase B emits an array header regardless of protocol mode.
+    /// Full RESP3 push-frame support lands when networking is ported.
+    pub fn reply_push_or_array_header<L: ReplyArrayLen>(
+        &mut self,
+        len: L,
+    ) -> RedisResult<()> {
+        self.reply_array_header_i64(len.into_reply_len())
+    }
+
+    fn reply_array_header_i64(&mut self, len: i64) -> RedisResult<()> {
+        let mut buf = Vec::new();
+        buf.push(b'*');
+        use std::io::Write;
+        let _ = write!(buf, "{}", len);
+        buf.extend_from_slice(b"\r\n");
+        self.client.reply_buf.extend_from_slice(&buf);
+        Ok(())
+    }
+
+    /// Per-context database. STUB — Phase 3 routes through the server.
+    pub fn db(&self) -> &RedisDb {
+        &self.stub_db
+    }
+
+    /// Mutable view of the per-context database. STUB — Phase 3 routes through
+    /// the server keyed by `client.db_index`.
+    pub fn db_mut(&mut self) -> &mut RedisDb {
+        &mut self.stub_db
     }
 }
 

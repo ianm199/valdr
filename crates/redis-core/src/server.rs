@@ -69,6 +69,22 @@ impl RedisServer {
         }
         self.dbs.truncate(n);
     }
+
+    /// Whether cluster mode is enabled (maps to C `server.cluster_enabled`).
+    ///
+    /// STUB — Phase B placeholder; cluster wiring is Phase 3+.
+    pub fn cluster_enabled(&self) -> bool {
+        false
+    }
+
+    /// Maximum idle time, in seconds, before an idle client is closed
+    /// (maps to C `server.maxidletime`).
+    ///
+    /// STUB — Phase B placeholder returning 0 (disabled). Real value comes
+    /// from CONFIG once config.c is fully wired.
+    pub fn max_idle_time(&self) -> i64 {
+        0
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────

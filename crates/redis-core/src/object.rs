@@ -42,6 +42,16 @@ impl RedisObject {
             _ => None,
         }
     }
+
+    /// Expiration deadline in absolute milliseconds, if one is set.
+    ///
+    /// STUB — Phase B placeholder. Expiry tracking is owned by `RedisDb`'s
+    /// expires-dict in the real Valkey implementation; this method is
+    /// invoked by translated expire-cycle code and returns `None`
+    /// (meaning "no expiry") until that storage lands in Phase 4.
+    pub fn expire_ms(&self) -> Option<i64> {
+        None
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────
