@@ -13,6 +13,7 @@
 pub mod bitops;
 pub mod generated;
 pub mod pubsub;
+pub mod stream;
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
