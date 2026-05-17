@@ -22,6 +22,7 @@ use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
+use redis_ds::stream::InlineStream;
 use redis_types::{RedisError, RedisString};
 
 use crate::command_context::CommandContext;
@@ -331,6 +332,17 @@ pub struct RedisObject {
     pub kind: ObjectKind,
 }
 
+/// Encoding sub-variants for `RedisObject::Stream`.
+///
+/// Round 9 introduces the pragmatic `Inline` encoding backed by
+/// `redis_ds::stream::InlineStream` (sorted Vec of entries). Phase 5
+/// will replace this with the real rax + listpack representation once
+/// those data structures ship.
+#[derive(Debug, Clone)]
+pub enum StreamEncoding {
+    Inline(InlineStream),
+}
+
 /// The discriminated union of all Redis value types + encodings.
 #[derive(Debug, Clone)]
 pub enum ObjectKind {
@@ -339,9 +351,7 @@ pub enum ObjectKind {
     Hash(HashEncoding),
     Set(SetEncoding),
     ZSet(ZSetEncoding),
-    /// Phase 5: streams. Placeholder until redis-ds::Stream is available.
-    // TODO(architect): replace with redis_ds::Stream when Phase 5 lands
-    Stream,
+    Stream(StreamEncoding),
     /// Phase 10: module-defined types.
     // TODO(architect): replace with redis_modules::ModuleValue when Phase 10 lands
     Module,
@@ -623,10 +633,26 @@ impl RedisObject {
         }
     }
 
-    /// Create a stream object.
+    /// Create a stream object with the pragmatic Inline encoding.
     /// C: createStreamObject() → object.c:541
     pub fn new_stream() -> Self {
-        Self::bare(ObjectKind::Stream)
+        Self::bare(ObjectKind::Stream(StreamEncoding::Inline(InlineStream::new())))
+    }
+
+    /// Borrow the inner `InlineStream` for a stream-encoded object.
+    pub fn stream(&self) -> Option<&InlineStream> {
+        match &self.kind {
+            ObjectKind::Stream(StreamEncoding::Inline(s)) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Mutably borrow the inner `InlineStream` for a stream-encoded object.
+    pub fn stream_mut(&mut self) -> Option<&mut InlineStream> {
+        match &mut self.kind {
+            ObjectKind::Stream(StreamEncoding::Inline(s)) => Some(s),
+            _ => None,
+        }
     }
 
     // ── Back-compat shims for the architect stub ──────────────────────────
@@ -657,7 +683,7 @@ impl RedisObject {
             ObjectKind::Hash(_) => "hash",
             ObjectKind::Set(_) => "set",
             ObjectKind::ZSet(_) => "zset",
-            ObjectKind::Stream => "stream",
+            ObjectKind::Stream(_) => "stream",
             ObjectKind::Module => "module",
         }
     }
@@ -670,7 +696,7 @@ impl RedisObject {
             ObjectKind::Hash(_) => ObjectType::Hash,
             ObjectKind::Set(_) => ObjectType::Set,
             ObjectKind::ZSet(_) => ObjectType::ZSet,
-            ObjectKind::Stream => ObjectType::Stream,
+            ObjectKind::Stream(_) => ObjectType::Stream,
             ObjectKind::Module => ObjectType::Module,
         }
     }
@@ -695,7 +721,7 @@ impl RedisObject {
             ObjectKind::Hash(HashEncoding::HashTable(_)) => "hashtable",
             ObjectKind::Hash(HashEncoding::ListPack(_)) => "listpack",
             ObjectKind::Hash(HashEncoding::Inline(_)) => "hashtable",
-            ObjectKind::Stream => "stream",
+            ObjectKind::Stream(StreamEncoding::Inline(_)) => "stream",
             ObjectKind::Module => "unknown",
         }
     }
@@ -1466,7 +1492,7 @@ pub fn object_compute_size(
                     .map(|(k, v)| k.len() + v.len() + std::mem::size_of::<usize>())
                     .sum::<usize>()
         }
-        ObjectKind::Stream | ObjectKind::Module => std::mem::size_of::<RedisObject>(),
+        ObjectKind::Stream(_) | ObjectKind::Module => std::mem::size_of::<RedisObject>(),
     }
 }
 
@@ -1544,7 +1570,7 @@ pub fn object_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
                 ObjectKind::Hash(_) => b"hashtable",
                 ObjectKind::Set(_) => b"hashtable",
                 ObjectKind::ZSet(_) => b"skiplist",
-                ObjectKind::Stream => b"stream",
+                ObjectKind::Stream(_) => b"stream",
                 ObjectKind::Module => b"raw",
             },
             None => b"none",
@@ -1677,7 +1703,7 @@ impl RedisObject {
             ObjectKind::Hash(e)   => Flat::Hash(e),
             ObjectKind::Set(e)    => Flat::Set(e),
             ObjectKind::ZSet(e)   => Flat::ZSet(e),
-            ObjectKind::Stream    => Flat::Stream,
+            ObjectKind::Stream(_) => Flat::Stream,
             ObjectKind::Module    => Flat::Module,
         }
     }
@@ -1687,7 +1713,7 @@ impl RedisObject {
     pub fn is_hash(&self)   -> bool { matches!(self.kind, ObjectKind::Hash(_)) }
     pub fn is_set(&self)    -> bool { matches!(self.kind, ObjectKind::Set(_)) }
     pub fn is_zset(&self)   -> bool { matches!(self.kind, ObjectKind::ZSet(_)) }
-    pub fn is_stream(&self) -> bool { matches!(self.kind, ObjectKind::Stream) }
+    pub fn is_stream(&self) -> bool { matches!(self.kind, ObjectKind::Stream(_)) }
 
     /// Return the raw byte string if the object is `String(Raw|Embstr)`.
     /// `None` for Int-encoded strings or non-strings.

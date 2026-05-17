@@ -9,3 +9,4 @@ description = "Command registry (generated from Valkey's src/commands/*.json) an
 redis-types = { workspace = true }
 redis-protocol = { workspace = true }
 redis-core = { workspace = true }
+redis-ds = { workspace = true }

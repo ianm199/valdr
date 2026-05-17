@@ -170,6 +170,12 @@ pub static HANDLERS: &[DispatchEntry] = &[
     DispatchEntry { name: b"GETRANGE", handler: crate::string::getrange_command },
     DispatchEntry { name: b"SETRANGE", handler: crate::string::setrange_command },
     DispatchEntry { name: b"SUBSTR", handler: crate::string::getrange_command },
+    DispatchEntry { name: b"SETEX", handler: crate::string::setex_command },
+    DispatchEntry { name: b"PSETEX", handler: crate::string::psetex_command },
+    DispatchEntry { name: b"GETEX", handler: crate::string::getex_command },
+    DispatchEntry { name: b"MSETEX", handler: crate::string::msetex_command },
+    DispatchEntry { name: b"INCRBYFLOAT", handler: crate::string::incrbyfloat_command },
+    DispatchEntry { name: b"LCS", handler: crate::string::lcs_command },
     // ── LIST (Round 2) ─────────────────────────────────────────────────────
     DispatchEntry { name: b"LPUSH", handler: crate::list::lpush_command },
     DispatchEntry { name: b"RPUSH", handler: crate::list::rpush_command },
@@ -281,6 +287,10 @@ pub static HANDLERS: &[DispatchEntry] = &[
     DispatchEntry { name: b"DISCARD", handler: crate::multi::discard_command },
     DispatchEntry { name: b"WATCH", handler: crate::multi::watch_command },
     DispatchEntry { name: b"UNWATCH", handler: crate::multi::unwatch_command },
+    // ── TCL HARNESS STUBS (Round 9) ────────────────────────────────────────
+    DispatchEntry { name: b"FUNCTION", handler: crate::connection::function_command },
+    DispatchEntry { name: b"CONFIG", handler: crate::connection::config_command },
+    DispatchEntry { name: b"MEMORY", handler: crate::connection::memory_command },
     // ── PUB/SUB (Round 8a) ─────────────────────────────────────────────────
     DispatchEntry { name: b"SUBSCRIBE", handler: crate::pubsub::subscribe_command },
     DispatchEntry { name: b"UNSUBSCRIBE", handler: crate::pubsub::unsubscribe_command },
@@ -288,6 +298,22 @@ pub static HANDLERS: &[DispatchEntry] = &[
     DispatchEntry { name: b"PUNSUBSCRIBE", handler: crate::pubsub::punsubscribe_command },
     DispatchEntry { name: b"PUBLISH", handler: crate::pubsub::publish_command },
     DispatchEntry { name: b"PUBSUB", handler: crate::pubsub::pubsub_command },
+    // ── HYPERLOGLOG (Round 9 HLL) ──────────────────────────────────────────
+    DispatchEntry { name: b"PFADD", handler: crate::hyperloglog::pfadd_command },
+    DispatchEntry { name: b"PFCOUNT", handler: crate::hyperloglog::pfcount_command },
+    DispatchEntry { name: b"PFMERGE", handler: crate::hyperloglog::pfmerge_command },
+    // ── INTROSPECTION (Round 9 INFO/CONFIG) ────────────────────────────────
+    DispatchEntry { name: b"INFO", handler: crate::info::info_command },
+    DispatchEntry { name: b"LASTSAVE", handler: crate::info::lastsave_command },
+    // ── STREAMS (Round 9) ──────────────────────────────────────────────────
+    DispatchEntry { name: b"XADD", handler: crate::stream::xadd_command },
+    DispatchEntry { name: b"XLEN", handler: crate::stream::xlen_command },
+    DispatchEntry { name: b"XRANGE", handler: crate::stream::xrange_command },
+    DispatchEntry { name: b"XREVRANGE", handler: crate::stream::xrevrange_command },
+    DispatchEntry { name: b"XDEL", handler: crate::stream::xdel_command },
+    DispatchEntry { name: b"XTRIM", handler: crate::stream::xtrim_command },
+    DispatchEntry { name: b"XREAD", handler: crate::stream::xread_command },
+    DispatchEntry { name: b"XINFO", handler: crate::stream::xinfo_command },
 ];
 
 #[cfg(test)]

@@ -37,6 +37,31 @@ use redis_core::command_context::CommandContext;
 use redis_core::object::RedisObject;
 use redis_types::{RedisError, RedisString};
 
+/// Sparse-encoded buffer size limit before promotion to dense.
+///
+/// Redis default is 3000 bytes. Setting this very low (e.g. 0) forces immediate
+/// dense encoding on every PFADD. We hard-code 3000 since the server config
+/// system is not yet wired into `CommandContext`.
+const HLL_SPARSE_MAX_BYTES_DEFAULT: usize = 3000;
+
+/// Build the canonical HLL WRONGTYPE error payload.
+fn hll_wrong_type_error() -> RedisError {
+    RedisError::runtime(b"WRONGTYPE Key is not a valid HyperLogLog string value.")
+}
+
+/// Validate `obj` as a HyperLogLog string and return an owned copy of its bytes.
+///
+/// Returns `Err` with the HLL-specific WRONGTYPE message if `obj` is not a
+/// string-encoded value carrying a well-formed `HYLL` header. The bytes are
+/// cloned so the caller can mutate them without holding a borrow on the DB.
+fn require_hll_bytes(obj: &RedisObject) -> Result<Vec<u8>, RedisError> {
+    let bytes = obj.as_string_bytes().ok_or_else(hll_wrong_type_error)?;
+    if !is_hll_valid(bytes) {
+        return Err(hll_wrong_type_error());
+    }
+    Ok(bytes.to_vec())
+}
+
 // ── HLL algorithm constants ───────────────────────────────────────────────────
 
 /// Precision parameter: bits used to index a register.
@@ -947,47 +972,39 @@ fn require_hll_object(obj: &RedisObject) -> Result<&[u8], RedisError> {
 // ── Command entry points ──────────────────────────────────────────────────────
 
 /// PFADD key element [element ...]
-/// Adds elements to the HLL, returns 1 if the cardinality estimate changed.
+///
+/// Adds elements to the HyperLogLog stored at `key`, creating a fresh sparse
+/// HLL when the key is missing. Replies `:1` when any register was updated
+/// (i.e. the cardinality estimate changed), `:0` otherwise. Returns WRONGTYPE
+/// when the existing key is not a valid HLL string. With no elements supplied
+/// (just the key) replies `:1` iff a new HLL was created.
 // C: hyperloglog.c:1664-1696, pfaddCommand
-// TODO(architect): CommandContext::db_mut() / db().lookup_key_write() / db().add() —
-//   blocked on Phase 3 RedisServer access API.
-// TODO(architect): CommandContext::server_dirty_incr() — dirty counter increment.
-// TODO(architect): CommandContext::notify_keyspace_event(NOTIFY_STRING, "pfadd", key) — keyspace events.
-// TODO(architect): CommandContext::signal_modified_key(key) — WATCH invalidation.
-// TODO(architect): CommandContext::hll_sparse_max_bytes() — server config accessor.
 pub fn pfadd_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
-    let key = ctx.arg(1)?;
-    let sparse_max_bytes: usize = 3000; // TODO(architect): read from server config
-    let mut updated = false;
-
-    // TODO(port): integrate with actual DB lookup/create pattern once CommandContext
-    // provides db_mut() in Phase 3. The logic below matches the C faithfully.
-
-    // Look up or create the HLL object.
-    // TODO(port): replace placeholder with: ctx.db_mut().lookup_key_write(key)
-    let obj_opt: Option<&mut RedisObject> = None; // placeholder
-    let buf: Vec<u8>;
-
-    if obj_opt.is_none() {
-        buf = create_hll_object();
-        updated = true;
-        // TODO(port): ctx.db_mut().add(key, RedisObject::String(RedisString::from_bytes(&buf)))?;
-    } else {
-        // TODO(port): validate + unshare + extract bytes
-        return Err(RedisError::runtime(b"TODO pfadd_command not yet wired to DB"));
+    if ctx.arg_count() < 2 {
+        return Err(RedisError::wrong_number_of_args(b"pfadd"));
     }
-
-    // Iterate over elements and add each.
+    let key = ctx.arg_owned(1usize)?;
     let argc = ctx.argc();
+
+    let mut buf: Vec<u8> = match ctx.db_mut().lookup_key_write(&key) {
+        None => create_hll_object(),
+        Some(obj) => require_hll_bytes(obj)?,
+    };
+    let was_missing = ctx.db().lookup_key_read(key.as_bytes()).is_none();
+    let mut updated = was_missing;
+
     for j in 2..argc {
-        let ele = ctx.arg(j)?;
-        // TODO(port): hll_add on the actual mutable buf
-        let _ = ele;
-        let _ = sparse_max_bytes;
+        let ele = ctx.arg_owned(j)?;
+        let changed = hll_add(&mut buf, ele.as_bytes(), HLL_SPARSE_MAX_BYTES_DEFAULT)?;
+        if changed {
+            updated = true;
+        }
     }
 
     if updated {
-        // TODO(port): hll_invalidate_cache, signal_modified_key, notify, dirty++
+        hll_invalidate_cache(&mut buf);
+        let stored = RedisObject::from_string(RedisString::from_vec(buf));
+        ctx.db_mut().set_key(key, stored, 0);
     }
 
     if updated {
@@ -998,65 +1015,138 @@ pub fn pfadd_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 }
 
 /// PFCOUNT key [key ...]
-/// Returns the approximate cardinality. For multiple keys, returns the cardinality
-/// of the union.
+///
+/// Returns the approximate cardinality of the HyperLogLog at `key`. With more
+/// than one key the cardinality of the union of all source HLLs is reported.
+/// Missing keys are treated as empty HLLs (their registers are all zero).
+/// Returns WRONGTYPE if any supplied key holds a non-HLL value.
+///
+/// The single-key path mirrors the C source's cache-write optimisation: on a
+/// cache miss the freshly-computed cardinality is written back into the HLL
+/// header so subsequent reads are O(1).
 // C: hyperloglog.c:1698-1792, pfcountCommand
-// TODO(architect): CommandContext::db() read-access, lookup_key_read.
-// TODO(architect): CommandContext::signal_modified_key — needed because PFCOUNT
-//   updates the cached cardinality as a side effect (even though it's a read cmd).
-// TODO(architect): CommandContext::server_dirty_incr().
 pub fn pfcount_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
+    if ctx.arg_count() < 2 {
+        return Err(RedisError::wrong_number_of_args(b"pfcount"));
+    }
     let argc = ctx.argc();
 
     if argc > 2 {
-        // Multi-key: compute cardinality of the union.
         let mut max_buf = vec![0u8; HLL_HDR_SIZE + HLL_REGISTERS];
+        max_buf[HDR_MAGIC_OFF..HDR_MAGIC_OFF + 4].copy_from_slice(b"HYLL");
         max_buf[HDR_ENCODING_OFF] = HLL_RAW;
 
         for j in 1..argc {
-            let key = ctx.arg(j)?;
-            let _ = key;
-            // TODO(port): lookup_key_read; if None skip; validate; hll_merge
+            let key = ctx.arg_owned(j)?;
+            match ctx.db().lookup_key_read(key.as_bytes()) {
+                None => continue,
+                Some(obj) => {
+                    let bytes = obj.as_string_bytes().ok_or_else(hll_wrong_type_error)?;
+                    if !is_hll_valid(bytes) {
+                        return Err(hll_wrong_type_error());
+                    }
+                    hll_merge(&mut max_buf[HLL_HDR_SIZE..], bytes)?;
+                }
+            }
         }
 
         let card = hll_count(&max_buf)?;
         return ctx.reply_integer(card as i64);
     }
 
-    // Single key.
-    let key = ctx.arg(1)?;
-    let _ = key;
-    // TODO(port): lookup_key_read; if None reply 0; validate; unshare;
-    // check HLL_VALID_CACHE → use cached card;
-    // else recompute, write back, signal_modified_key, dirty++
-    ctx.reply_integer(0)
+    let key = ctx.arg_owned(1usize)?;
+    let buf_opt: Option<Vec<u8>> = match ctx.db_mut().lookup_key_write(&key) {
+        None => None,
+        Some(obj) => Some(require_hll_bytes(obj)?),
+    };
+
+    let mut buf = match buf_opt {
+        None => return ctx.reply_integer(0),
+        Some(b) => b,
+    };
+
+    if hll_valid_cache(&buf) {
+        let card = hll_card_read(&buf);
+        return ctx.reply_integer(card as i64);
+    }
+
+    let card = hll_count(&buf)?;
+    hll_card_write(&mut buf, card);
+    let stored = RedisObject::from_string(RedisString::from_vec(buf));
+    ctx.db_mut().set_key(key, stored, redis_core::db::SETKEY_KEEPTTL);
+    ctx.reply_integer(card as i64)
 }
 
 /// PFMERGE dest src1 [src2 ...]
-/// Merge source HLLs into dest.
+///
+/// Merges the HyperLogLog values stored at `src1`, `src2`, ... and the
+/// existing value at `dest` into a single HLL written back to `dest`. The
+/// merge takes the maximum value for each of the 16384 registers. When no
+/// source keys are provided this still produces a valid HLL at `dest`
+/// (either created empty or left untouched). The destination is promoted to
+/// dense encoding whenever any participating HLL is already dense.
 // C: hyperloglog.c:1794-1871, pfmergeCommand
-// TODO(architect): db_mut() lookup_key_read/write, hll_sparse_max_bytes config.
 pub fn pfmerge_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
+    if ctx.arg_count() < 2 {
+        return Err(RedisError::wrong_number_of_args(b"pfmerge"));
+    }
     let argc = ctx.argc();
-    let mut max = vec![0u8; HLL_REGISTERS];
+    let dest_key = ctx.arg_owned(1usize)?;
+
+    let mut max_registers = vec![0u8; HLL_REGISTERS];
     let mut use_dense = false;
 
-    // Merge all source keys.
     for j in 1..argc {
-        let key = ctx.arg(j)?;
-        let _ = key;
-        // TODO(port): lookup_key_read; if None continue; validate;
-        // if dense → use_dense=true; hll_merge(&mut max, src_buf)?;
+        let key = ctx.arg_owned(j)?;
+        match ctx.db().lookup_key_read(key.as_bytes()) {
+            None => continue,
+            Some(obj) => {
+                let bytes = obj.as_string_bytes().ok_or_else(hll_wrong_type_error)?;
+                if !is_hll_valid(bytes) {
+                    return Err(hll_wrong_type_error());
+                }
+                if bytes[HDR_ENCODING_OFF] == HLL_DENSE {
+                    use_dense = true;
+                }
+                hll_merge(&mut max_registers, bytes)?;
+            }
+        }
     }
 
-    // Create or look up destination.
-    let dest_key = ctx.arg(1)?;
-    let _ = dest_key;
-    // TODO(port): lookup_key_write dest; create or unshare;
-    // if use_dense → hll_sparse_to_dense(dest_buf)?;
-    // write max[] registers into dest;
-    // hll_invalidate_cache(dest_buf);
-    // signal_modified_key, notify, dirty++
+    let mut dest_buf: Vec<u8> = match ctx.db().lookup_key_read(dest_key.as_bytes()) {
+        None => create_hll_object(),
+        Some(obj) => {
+            let bytes = obj.as_string_bytes().ok_or_else(hll_wrong_type_error)?;
+            if !is_hll_valid(bytes) {
+                return Err(hll_wrong_type_error());
+            }
+            bytes.to_vec()
+        }
+    };
+
+    if use_dense {
+        hll_sparse_to_dense(&mut dest_buf)?;
+    }
+
+    if dest_buf[HDR_ENCODING_OFF] == HLL_DENSE {
+        let registers = &mut dest_buf[HLL_HDR_SIZE..];
+        for i in 0..HLL_REGISTERS {
+            let cur = hll_dense_get_register(registers, i);
+            if max_registers[i] > cur {
+                hll_dense_set_register(registers, i, max_registers[i]);
+            }
+        }
+    } else {
+        for i in 0..HLL_REGISTERS {
+            if max_registers[i] != 0 {
+                hll_sparse_set(&mut dest_buf, i, max_registers[i], HLL_SPARSE_MAX_BYTES_DEFAULT)?;
+            }
+        }
+    }
+
+    hll_invalidate_cache(&mut dest_buf);
+    let stored = RedisObject::from_string(RedisString::from_vec(dest_buf));
+    ctx.db_mut().set_key(dest_key, stored, 0);
 
     ctx.reply_simple_string(b"OK")
 }

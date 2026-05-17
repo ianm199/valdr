@@ -15,6 +15,8 @@ pub mod connection;
 pub mod dispatch;
 pub mod generated;
 pub mod hash;
+pub mod hyperloglog;
+pub mod info;
 pub mod list;
 pub mod multi;
 pub mod pubsub;

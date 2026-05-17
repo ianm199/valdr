@@ -1,0 +1,27 @@
+[class: byte_exact]
+[description: HYPERLOGLOG commands — PFADD PFCOUNT PFMERGE]
+[suite: smoke,hll]
+
+FLUSHDB
+PFADD h a
+PFADD h a
+PFADD h b
+PFADD h c
+PFADD h a b c
+PFCOUNT h
+PFCOUNT missing
+PFADD empty
+PFCOUNT empty
+PFADD h2 x y z
+PFCOUNT h2
+PFCOUNT h h2
+PFMERGE dest h h2
+PFCOUNT dest
+PFADD many e1 e2 e3 e4 e5 e6 e7 e8 e9 e10
+PFCOUNT many
+PFMERGE dest2 many h h2
+PFCOUNT dest2
+PFMERGE only_dest
+PFCOUNT only_dest
+FLUSHDB
+DBSIZE

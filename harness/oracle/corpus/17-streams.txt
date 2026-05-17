@@ -1,0 +1,33 @@
+[class: byte_exact]
+[description: STREAMS — XADD XLEN XRANGE XREVRANGE XDEL XTRIM XREAD (explicit IDs only)]
+[suite: smoke,streams]
+
+FLUSHDB
+XADD s 1-1 f1 v1
+XADD s 2-1 f1 v1 f2 v2
+XADD s 3-1 a 1
+XADD s 2-0 oops bad
+XLEN s
+XLEN missing
+XRANGE s - +
+XRANGE s 2 +
+XRANGE s - 2
+XRANGE s - + COUNT 2
+XRANGE s (1-1 +
+XREVRANGE s + -
+XREVRANGE s + - COUNT 1
+XDEL s 2-1
+XDEL s 999-999
+XLEN s
+XADD s 4-0 a 1
+XADD s 5-0 a 1
+XTRIM s MAXLEN 2
+XLEN s
+XRANGE s - +
+XREAD COUNT 10 STREAMS s 0
+XREAD STREAMS s 4-0
+XREAD STREAMS s $
+XADD missing NOMKSTREAM 1-1 a b
+EXISTS missing
+SET str hi
+XADD str 1-1 f v

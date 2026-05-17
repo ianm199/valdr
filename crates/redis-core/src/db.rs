@@ -848,7 +848,7 @@ pub fn object_kind_name(kind: &ObjectKind) -> &'static [u8] {
         ObjectKind::Hash(_) => b"hash",
         ObjectKind::Set(_) => b"set",
         ObjectKind::ZSet(_) => b"zset",
-        ObjectKind::Stream => b"stream",
+        ObjectKind::Stream(_) => b"stream",
         ObjectKind::Module => b"none",
     }
 }
@@ -972,7 +972,7 @@ pub fn type_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
             ObjectKind::Hash(_)   => b"hash",
             ObjectKind::Set(_)    => b"set",
             ObjectKind::ZSet(_)   => b"zset",
-            ObjectKind::Stream    => b"stream",
+            ObjectKind::Stream(_) => b"stream",
             ObjectKind::Module    => b"none", // TODO(port): return module type name
         },
     };

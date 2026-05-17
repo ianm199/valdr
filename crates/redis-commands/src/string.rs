@@ -443,16 +443,60 @@ pub fn setnx_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 
 /// SETEX key seconds value
 ///
+/// Atomically set `key` to `value` with an absolute expire of `seconds`
+/// seconds from now. Equivalent to `SET key value EX seconds`. Replies
+/// `+OK\r\n`.
+///
 /// C: `setexCommand` (t_string.c:272).
 pub fn setex_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
-    todo!("C: t_string.c:272, setexCommand")
+    setex_generic(ctx, b"setex", 1000)
 }
 
 /// PSETEX key milliseconds value
 ///
+/// Same as SETEX but with millisecond resolution. Replies `+OK\r\n`.
+///
 /// C: `psetexCommand` (t_string.c:277).
 pub fn psetex_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
-    todo!("C: t_string.c:277, psetexCommand")
+    setex_generic(ctx, b"psetex", 1)
+}
+
+/// Shared SETEX / PSETEX logic. `multiplier` converts the user-supplied
+/// expire amount into milliseconds.
+fn setex_generic(ctx: &mut CommandContext, name: &[u8], multiplier: i64) -> Result<(), RedisError> {
+    if ctx.arg_count() != 4 {
+        return Err(RedisError::wrong_number_of_args(name));
+    }
+    let key = ctx.arg_owned(1usize)?;
+    let secs_arg = ctx.arg_owned(2usize)?;
+    let value = ctx.arg_owned(3usize)?;
+    let raw = parse_strict_i64(secs_arg.as_bytes())
+        .ok_or_else(|| RedisError::runtime(b"ERR value is not an integer or out of range"))?;
+    if raw <= 0 {
+        let mut buf = Vec::with_capacity(b"ERR invalid expire time in '".len() + name.len() + 2);
+        buf.extend_from_slice(b"ERR invalid expire time in '");
+        buf.extend_from_slice(name);
+        buf.extend_from_slice(b"' command");
+        return Err(RedisError::runtime(buf));
+    }
+    let now_ms: i64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let abs_ms = raw
+        .checked_mul(multiplier)
+        .and_then(|v| v.checked_add(now_ms))
+        .ok_or_else(|| {
+            let mut buf = Vec::with_capacity(b"ERR invalid expire time in '".len() + name.len() + 2);
+            buf.extend_from_slice(b"ERR invalid expire time in '");
+            buf.extend_from_slice(name);
+            buf.extend_from_slice(b"' command");
+            RedisError::runtime(buf)
+        })?;
+    let obj = RedisObject::new_raw_string(value.as_bytes());
+    ctx.db_mut().set_key(key.clone(), obj, 0);
+    ctx.db_mut().set_expire(&key, abs_ms);
+    ctx.reply_simple_string(b"OK")
 }
 
 /// DELIFEQ key value — delete key only if its current value equals `value`.
@@ -488,9 +532,88 @@ pub fn get_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 
 /// GETEX key [PERSIST|EX s|PX ms|EXAT ts|PXAT ms-ts]
 ///
+/// Returns the current bulk-string value of `key` and optionally updates its
+/// TTL. With no extra option behaves like GET. With `PERSIST` removes any
+/// expire on the key. `EX|PX|EXAT|PXAT` set an absolute expire in seconds or
+/// milliseconds (relative or unix epoch).
+///
 /// C: `getexCommand` (t_string.c:340).
 pub fn getex_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
-    todo!("C: t_string.c:340, getexCommand")
+    let argc = ctx.arg_count();
+    if argc < 2 || argc > 4 {
+        return Err(RedisError::wrong_number_of_args(b"getex"));
+    }
+    let key = ctx.arg_owned(1usize)?;
+    let mut persist = false;
+    let mut expire_at_ms: Option<i64> = None;
+    let mut remove_expire = false;
+    let now_ms: i64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    if argc >= 3 {
+        let opt = ctx.arg_owned(2usize)?;
+        let ob = opt.as_bytes();
+        if ob.eq_ignore_ascii_case(b"PERSIST") {
+            if argc != 3 {
+                return Err(RedisError::runtime(b"ERR syntax error"));
+            }
+            persist = true;
+            remove_expire = true;
+        } else if ob.eq_ignore_ascii_case(b"EX")
+            || ob.eq_ignore_ascii_case(b"PX")
+            || ob.eq_ignore_ascii_case(b"EXAT")
+            || ob.eq_ignore_ascii_case(b"PXAT")
+        {
+            if argc != 4 {
+                return Err(RedisError::runtime(b"ERR syntax error"));
+            }
+            let val_arg = ctx.arg_owned(3usize)?;
+            let raw = parse_strict_i64(val_arg.as_bytes())
+                .ok_or_else(|| RedisError::runtime(b"ERR value is not an integer or out of range"))?;
+            let abs_ms = if ob.eq_ignore_ascii_case(b"EX") {
+                if raw <= 0 {
+                    return Err(RedisError::runtime(b"ERR invalid expire time in 'getex' command"));
+                }
+                raw.checked_mul(1000).and_then(|v| v.checked_add(now_ms))
+            } else if ob.eq_ignore_ascii_case(b"PX") {
+                if raw <= 0 {
+                    return Err(RedisError::runtime(b"ERR invalid expire time in 'getex' command"));
+                }
+                raw.checked_add(now_ms)
+            } else if ob.eq_ignore_ascii_case(b"EXAT") {
+                raw.checked_mul(1000)
+            } else {
+                Some(raw)
+            }
+            .ok_or_else(|| RedisError::runtime(b"ERR invalid expire time in 'getex' command"))?;
+            expire_at_ms = Some(abs_ms);
+        } else {
+            return Err(RedisError::runtime(b"ERR syntax error"));
+        }
+    }
+    let bytes: Option<Vec<u8>> = match ctx.db_mut().lookup_key_write(&key) {
+        None => None,
+        Some(obj) => match &obj.kind {
+            ObjectKind::String(_) => Some(obj.as_bytes().to_vec()),
+            _ => return Err(RedisError::wrong_type()),
+        },
+    };
+    let _ = persist;
+    if let Some(b) = bytes {
+        if remove_expire {
+            ctx.db_mut().remove_expire(&key);
+        } else if let Some(abs_ms) = expire_at_ms {
+            if abs_ms <= now_ms {
+                ctx.db_mut().sync_delete(&key);
+            } else {
+                ctx.db_mut().set_expire(&key, abs_ms);
+            }
+        }
+        ctx.reply_bulk_string(RedisString::from_bytes(&b))
+    } else {
+        ctx.reply_null_bulk()
+    }
 }
 
 /// GETDEL key — atomic get-then-delete.
@@ -739,7 +862,123 @@ pub fn msetnx_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 ///
 /// C: `msetexCommand` (t_string.c:604).
 pub fn msetex_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
-    todo!("C: t_string.c:604, msetexCommand")
+    let argc = ctx.arg_count();
+    if argc < 4 {
+        return Err(RedisError::wrong_number_of_args(b"msetex"));
+    }
+    let numkeys_arg = ctx.arg_owned(1usize)?;
+    let numkeys_signed = parse_strict_i64(numkeys_arg.as_bytes())
+        .ok_or_else(|| RedisError::runtime(b"ERR invalid numkeys value or out of range"))?;
+    if !(1..=i64::from(i32::MAX)).contains(&numkeys_signed) {
+        return Err(RedisError::runtime(b"ERR invalid numkeys value or out of range"));
+    }
+    let numkeys = numkeys_signed as usize;
+    let pairs_end = match numkeys.checked_mul(2).and_then(|p| 2usize.checked_add(p)) {
+        Some(v) => v,
+        None => return Err(RedisError::runtime(b"ERR syntax error")),
+    };
+    if pairs_end > argc {
+        return Err(RedisError::runtime(b"ERR syntax error"));
+    }
+    let mut nx = false;
+    let mut xx = false;
+    let mut keepttl = false;
+    let mut expire_at_ms: Option<i64> = None;
+    let mut got_expire_flag = false;
+    let now_ms: i64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let mut j = pairs_end;
+    while j < argc {
+        let opt = ctx.arg_owned(j)?;
+        let ob = opt.as_bytes();
+        if ob.eq_ignore_ascii_case(b"NX") {
+            if xx {
+                return Err(RedisError::runtime(b"ERR syntax error"));
+            }
+            nx = true;
+            j += 1;
+        } else if ob.eq_ignore_ascii_case(b"XX") {
+            if nx {
+                return Err(RedisError::runtime(b"ERR syntax error"));
+            }
+            xx = true;
+            j += 1;
+        } else if ob.eq_ignore_ascii_case(b"KEEPTTL") {
+            if got_expire_flag {
+                return Err(RedisError::runtime(b"ERR syntax error"));
+            }
+            keepttl = true;
+            got_expire_flag = true;
+            j += 1;
+        } else if ob.eq_ignore_ascii_case(b"EX")
+            || ob.eq_ignore_ascii_case(b"PX")
+            || ob.eq_ignore_ascii_case(b"EXAT")
+            || ob.eq_ignore_ascii_case(b"PXAT")
+        {
+            if got_expire_flag || j + 1 >= argc {
+                return Err(RedisError::runtime(b"ERR syntax error"));
+            }
+            let val_arg = ctx.arg_owned(j + 1)?;
+            let raw = parse_strict_i64(val_arg.as_bytes())
+                .ok_or_else(|| RedisError::runtime(b"ERR value is not an integer or out of range"))?;
+            let abs = if ob.eq_ignore_ascii_case(b"EX") {
+                if raw <= 0 {
+                    return Err(RedisError::runtime(b"ERR invalid expire time in 'msetex' command"));
+                }
+                raw.checked_mul(1000).and_then(|v| v.checked_add(now_ms))
+            } else if ob.eq_ignore_ascii_case(b"PX") {
+                if raw <= 0 {
+                    return Err(RedisError::runtime(b"ERR invalid expire time in 'msetex' command"));
+                }
+                raw.checked_add(now_ms)
+            } else if ob.eq_ignore_ascii_case(b"EXAT") {
+                raw.checked_mul(1000)
+            } else {
+                Some(raw)
+            }
+            .ok_or_else(|| RedisError::runtime(b"ERR invalid expire time in 'msetex' command"))?;
+            expire_at_ms = Some(abs);
+            got_expire_flag = true;
+            j += 2;
+        } else {
+            return Err(RedisError::runtime(b"ERR syntax error"));
+        }
+    }
+    if nx {
+        for p in 0..numkeys {
+            let k = ctx.arg_owned(2 + 2 * p)?;
+            if ctx.db().find(&k).is_some() {
+                return ctx.reply_integer(0);
+            }
+        }
+    }
+    if xx {
+        for p in 0..numkeys {
+            let k = ctx.arg_owned(2 + 2 * p)?;
+            if ctx.db().find(&k).is_none() {
+                return ctx.reply_integer(0);
+            }
+        }
+    }
+    for p in 0..numkeys {
+        let k = ctx.arg_owned(2 + 2 * p)?;
+        let v = ctx.arg_owned(3 + 2 * p)?;
+        let obj = RedisObject::new_raw_string(v.as_bytes());
+        let flags = if keepttl { SETKEY_KEEPTTL } else { 0 };
+        ctx.db_mut().set_key(k.clone(), obj, flags);
+        if let Some(abs_ms) = expire_at_ms {
+            if abs_ms <= now_ms {
+                ctx.db_mut().sync_delete(&k);
+            } else {
+                ctx.db_mut().set_expire(&k, abs_ms);
+            }
+        } else if !keepttl {
+            ctx.db_mut().remove_expire(&k);
+        }
+    }
+    ctx.reply_integer(1)
 }
 
 /// Parse a `RedisString` as an `i64` using Redis' strict semantics.
@@ -849,8 +1088,10 @@ pub fn decrby_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 /// INCRBYFLOAT key increment
 ///
 /// C: `incrbyfloatCommand` (t_string.c:758).
-pub fn incrbyfloat_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
-    todo!("C: t_string.c:758, incrbyfloatCommand")
+pub fn incrbyfloat_command(_ctx: &mut CommandContext) -> Result<(), RedisError> {
+    Err(RedisError::runtime(
+        b"ERR INCRBYFLOAT not yet implemented in the Rust port",
+    ))
 }
 
 /// APPEND key value
@@ -915,8 +1156,10 @@ pub fn strlen_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 /// O(n·m) dynamic programming.
 ///
 /// C: `lcsCommand` (t_string.c:841).
-pub fn lcs_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
-    todo!("C: t_string.c:841, lcsCommand")
+pub fn lcs_command(_ctx: &mut CommandContext) -> Result<(), RedisError> {
+    Err(RedisError::runtime(
+        b"ERR LCS not yet implemented in the Rust port",
+    ))
 }
 
 // ──────────────────────────────────────────────────────────────────────────

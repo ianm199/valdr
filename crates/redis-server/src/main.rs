@@ -14,12 +14,15 @@
 //!   * Multi-DB routing (every command sees DB 0).
 //!   * Replication, cluster, persistence, modules.
 
+use std::fs;
 use std::io::{self, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use redis_commands::{dispatch, pubsub};
 use redis_core::command_context::CommandContext;
@@ -48,10 +51,23 @@ impl Default for CliArgs {
     }
 }
 
-/// Parse the supported `--port <N>` and `--bind <addr>` flags from CLI args.
+/// Parse CLI flags and (optionally) a Valkey-style config file path.
+///
+/// The Valkey TCL harness invokes the server as `valkey-server /path/to/conf`,
+/// so when `argv[1]` does not start with `--` we treat it as a config-file
+/// path and parse `key value` lines from it. Recognised directives are `port`
+/// and `bind`; everything else is silently skipped so the unknown directives
+/// the harness writes (`enable-protected-configs`, `unixsocket`, `loglevel`,
+/// `notify-keyspace-events`, etc.) do not abort startup.
 fn parse_args(argv: Vec<String>) -> Result<CliArgs, String> {
     let mut out = CliArgs::default();
-    let mut it = argv.into_iter().skip(1);
+    let mut it = argv.into_iter().skip(1).peekable();
+    if let Some(first) = it.peek() {
+        if !first.starts_with("--") {
+            let path = it.next().expect("peek then next");
+            apply_config_file(&mut out, Path::new(&path))?;
+        }
+    }
     while let Some(flag) = it.next() {
         match flag.as_str() {
             "--port" | "-p" => {
@@ -63,7 +79,7 @@ fn parse_args(argv: Vec<String>) -> Result<CliArgs, String> {
                 out.bind = v;
             }
             "--help" | "-h" => {
-                println!("Usage: redis-server [--port N] [--bind addr]");
+                println!("Usage: redis-server [<config-file>] [--port N] [--bind addr]");
                 std::process::exit(0);
             }
             other => {
@@ -72,6 +88,59 @@ fn parse_args(argv: Vec<String>) -> Result<CliArgs, String> {
         }
     }
     Ok(out)
+}
+
+/// Read a Valkey-style config file and update `args` with the directives we
+/// understand. Lines are split on the first run of whitespace; blank lines and
+/// `#`-prefixed comments are skipped; unknown directives are ignored.
+fn apply_config_file(args: &mut CliArgs, path: &Path) -> Result<(), String> {
+    let contents = fs::read_to_string(path)
+        .map_err(|e| format!("cannot read config file '{}': {}", path.display(), e))?;
+    for raw_line in contents.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.splitn(2, char::is_whitespace);
+        let key = match parts.next() {
+            Some(k) if !k.is_empty() => k,
+            _ => continue,
+        };
+        let value = parts.next().unwrap_or("").trim();
+        match key {
+            "port" => {
+                let v: u16 = value.parse().map_err(|_| format!("invalid port: {}", value))?;
+                args.port = v;
+            }
+            "bind" => {
+                let first_addr = value.split_whitespace().next().unwrap_or("");
+                if !first_addr.is_empty() {
+                    args.bind = first_addr.to_string();
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Emit the startup-log sentinels the Valkey TCL harness greps for.
+///
+/// `wait_server_started` in `tests/support/server.tcl` scans the server's
+/// stdout for ` PID: <pid>` followed by `Server initialized`. Once those two
+/// tokens appear in the same stream the harness considers the server alive
+/// and proceeds to dial the configured port. We emit the conventional
+/// `<pid>:M <ts> * …` triplet so the regex matches without further tweaks.
+fn emit_startup_log() {
+    let pid = std::process::id();
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    println!("{}:M {} * PID: {}", pid, ts, pid);
+    println!("{}:M {} * Server initialized", pid, ts);
+    println!("{}:M {} * Ready to accept connections tcp", pid, ts);
+    let _ = io::stdout().flush();
 }
 
 fn main() {
@@ -111,6 +180,7 @@ fn main() {
         eprintln!("redis-server: set_nonblocking(false) failed: {}", e);
     }
     eprintln!("redis-server: listening on {}", addr);
+    emit_startup_log();
 
     let db = Arc::new(Mutex::new(RedisDb::new(0)));
     let next_client_id = Arc::new(AtomicU64::new(1));
