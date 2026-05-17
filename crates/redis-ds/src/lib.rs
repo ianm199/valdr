@@ -28,6 +28,7 @@ pub mod quicklist;
 pub mod rax;
 pub mod stream;
 pub mod ziplist;
+pub mod zipmap;
 pub mod zskiplist;
 
 pub use adlist::LinkedList;
