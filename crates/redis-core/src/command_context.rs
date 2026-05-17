@@ -205,7 +205,7 @@ impl<'a> CommandContext<'a> {
     /// `RedisObject`-typed once shared-object interning lands.
     pub fn arg_as_object<I: ArgIndex>(&self, i: I) -> RedisResult<RedisObject> {
         let s = self.arg_owned(i)?;
-        Ok(RedisObject::String(s))
+        Ok(RedisObject::from_string(s))
     }
 
     /// Null bulk reply (alias of `reply_null_bulk`).

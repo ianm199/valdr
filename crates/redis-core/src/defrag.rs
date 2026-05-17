@@ -538,37 +538,29 @@ fn defrag_key(defrag_ctx: &mut DefragContext, db: &mut RedisDb, ob: &mut RedisOb
     //    is a hash with volatile fields.
     // TODO(port): expire/volatile-item table pointer updates require kvstore hashtable.
 
-    match ob {
-        RedisObject::String(_) => {
-            // C: Already handled in activeDefragStringOb; nothing further to do.
-        }
-        RedisObject::List(_) => {
-            // C: OBJ_ENCODING_QUICKLIST → defragQuicklist(ob)
-            //    OBJ_ENCODING_LISTPACK  → activeDefragAlloc(listpack ptr)
-            // PORT NOTE: encoding sub-variants not yet modelled on RedisObject::List.
-            defrag_quicklist(defrag_ctx, ob);
-        }
-        RedisObject::Set(_) => {
-            // C: OBJ_ENCODING_HASHTABLE     → defragSet(ob)
-            //    OBJ_ENCODING_INTSET
-            //    | OBJ_ENCODING_LISTPACK    → activeDefragAlloc(ptr)
-            // PORT NOTE: encoding sub-variants not yet modelled on RedisObject::Set.
-            defrag_set(defrag_ctx, ob);
-        }
-        RedisObject::ZSet(_) => {
-            // C: OBJ_ENCODING_LISTPACK  → activeDefragAlloc(listpack ptr)
-            //    OBJ_ENCODING_SKIPLIST  → defragZsetSkiplist(ob)
-            // PORT NOTE: encoding sub-variants not yet modelled on RedisObject::ZSet.
-            defrag_zset_skiplist(defrag_ctx, ob);
-        }
-        RedisObject::Hash(_) => {
-            defrag_hash(defrag_ctx, ob);
-        }
-        RedisObject::Stream => {
-            defrag_stream(defrag_ctx, ob);
-        }
-        // TODO(port): OBJ_MODULE → defrag_module(defrag_ctx, db, ob) — Phase 10
+    if ob.is_string() {
+        // C: Already handled in activeDefragStringOb; nothing further to do.
+    } else if ob.is_list() {
+        // C: OBJ_ENCODING_QUICKLIST → defragQuicklist(ob)
+        //    OBJ_ENCODING_LISTPACK  → activeDefragAlloc(listpack ptr)
+        // PORT NOTE: encoding sub-variants now modelled on ObjectKind::List but
+        // the defrag work still treats them uniformly.
+        defrag_quicklist(defrag_ctx, ob);
+    } else if ob.is_set() {
+        // C: OBJ_ENCODING_HASHTABLE     → defragSet(ob)
+        //    OBJ_ENCODING_INTSET
+        //    | OBJ_ENCODING_LISTPACK    → activeDefragAlloc(ptr)
+        defrag_set(defrag_ctx, ob);
+    } else if ob.is_zset() {
+        // C: OBJ_ENCODING_LISTPACK  → activeDefragAlloc(listpack ptr)
+        //    OBJ_ENCODING_SKIPLIST  → defragZsetSkiplist(ob)
+        defrag_zset_skiplist(defrag_ctx, ob);
+    } else if ob.is_hash() {
+        defrag_hash(defrag_ctx, ob);
+    } else if ob.is_stream() {
+        defrag_stream(defrag_ctx, ob);
     }
+    // TODO(port): OBJ_MODULE → defrag_module(defrag_ctx, db, ob) — Phase 10
 }
 
 // ── Scan callbacks ─────────────────────────────────────────────────────────────
@@ -615,18 +607,24 @@ fn defrag_later_item(
         *cursor = 0; // C: object deleted; reset cursor and continue
         return false;
     };
-    match ob {
-        RedisObject::List(_)  => scan_later_list(ob, cursor, endtime),
-        RedisObject::Set(_)   => { scan_later_set(ob,  cursor); false }
-        RedisObject::ZSet(_)  => { scan_later_zset(ob, cursor); false }
-        RedisObject::Hash(_)  => { scan_later_hash(ob, cursor); false }
-        RedisObject::Stream   => scan_later_stream_listpacks(ob, cursor, endtime),
+    if ob.is_list() {
+        scan_later_list(ob, cursor, endtime)
+    } else if ob.is_set() {
+        scan_later_set(ob, cursor);
+        false
+    } else if ob.is_zset() {
+        scan_later_zset(ob, cursor);
+        false
+    } else if ob.is_hash() {
+        scan_later_hash(ob, cursor);
+        false
+    } else if ob.is_stream() {
+        scan_later_stream_listpacks(ob, cursor, endtime)
+    } else {
         // TODO(port): OBJ_MODULE → moduleLateDefrag(key, ob, cursor, endtime, dbid) — Phase 10
-        _ => {
-            // C: type/encoding may have changed since scheduling; just reset.
-            *cursor = 0;
-            false
-        }
+        // C: type/encoding may have changed since scheduling; just reset.
+        *cursor = 0;
+        false
     }
 }
 

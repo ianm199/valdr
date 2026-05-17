@@ -192,12 +192,10 @@ pub enum ObjectTypeHint {
 
 impl From<&RedisObject> for ObjectTypeHint {
     fn from(obj: &RedisObject) -> Self {
-        match obj {
-            RedisObject::List(_) => ObjectTypeHint::List,
-            RedisObject::ZSet(_) => ObjectTypeHint::ZSet,
-            RedisObject::Stream  => ObjectTypeHint::Stream,
-            _                    => ObjectTypeHint::Other,
-        }
+        if obj.is_list()   { return ObjectTypeHint::List; }
+        if obj.is_zset()   { return ObjectTypeHint::ZSet; }
+        if obj.is_stream() { return ObjectTypeHint::Stream; }
+        ObjectTypeHint::Other
     }
 }
 

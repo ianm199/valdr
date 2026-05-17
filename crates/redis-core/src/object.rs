@@ -1338,6 +1338,140 @@ pub fn memory_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     Err(RedisError::runtime(b"ERR unknown subcommand or wrong number of arguments for MEMORY"))
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Back-compat shim layer
+//
+// Migration helpers that let callers written against the old flat-enum stub
+// (`RedisObject::String(s)`, `RedisObject::List(items)`, ...) compile against
+// the full-port struct/enum split. See `harness/loop/MERGE_PLAN.md`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Flat view of an object's variant for `matches!` macro use at call sites.
+///
+/// Migration shim — existing callers wrote `matches!(o, RedisObject::String(_))`
+/// against the old flat-enum stub. They are mechanically rewritten to
+/// `matches!(o.flat(), Flat::String)` or, equivalently, `o.is_string()`.
+pub enum Flat<'a> {
+    String(&'a StringEncoding),
+    List(&'a ListEncoding),
+    Hash(&'a HashEncoding),
+    Set(&'a SetEncoding),
+    ZSet(&'a ZSetEncoding),
+    Stream,
+    Module,
+}
+
+impl RedisObject {
+    /// Flat view of the object's variant — see [`Flat`].
+    pub fn flat(&self) -> Flat<'_> {
+        match &self.kind {
+            ObjectKind::String(e) => Flat::String(e),
+            ObjectKind::List(e)   => Flat::List(e),
+            ObjectKind::Hash(e)   => Flat::Hash(e),
+            ObjectKind::Set(e)    => Flat::Set(e),
+            ObjectKind::ZSet(e)   => Flat::ZSet(e),
+            ObjectKind::Stream    => Flat::Stream,
+            ObjectKind::Module    => Flat::Module,
+        }
+    }
+
+    pub fn is_string(&self) -> bool { matches!(self.kind, ObjectKind::String(_)) }
+    pub fn is_list(&self)   -> bool { matches!(self.kind, ObjectKind::List(_)) }
+    pub fn is_hash(&self)   -> bool { matches!(self.kind, ObjectKind::Hash(_)) }
+    pub fn is_set(&self)    -> bool { matches!(self.kind, ObjectKind::Set(_)) }
+    pub fn is_zset(&self)   -> bool { matches!(self.kind, ObjectKind::ZSet(_)) }
+    pub fn is_stream(&self) -> bool { matches!(self.kind, ObjectKind::Stream) }
+
+    /// Return the raw byte string if the object is `String(Raw|Embstr)`.
+    /// `None` for Int-encoded strings or non-strings.
+    pub fn as_string_bytes(&self) -> Option<&[u8]> {
+        self.as_string().map(|s| s.as_bytes())
+    }
+
+    /// Byte view of the object's payload when string-encoded; empty slice for
+    /// every other variant. Migration shim for the architect-stub `as_bytes()`.
+    pub fn as_bytes(&self) -> &[u8] {
+        self.as_string_bytes().unwrap_or(&[])
+    }
+
+    /// Number of items in a List/Set/ZSet/Hash (best-effort across encodings).
+    /// Returns 0 for non-collection types.
+    pub fn collection_len(&self) -> usize {
+        match &self.kind {
+            ObjectKind::List(ListEncoding::QuickList(v)) => v.len(),
+            ObjectKind::List(ListEncoding::ListPack(_))  => 0,
+            ObjectKind::Set(SetEncoding::HashTable(h))   => h.len(),
+            ObjectKind::Set(SetEncoding::IntSet(v))      => v.len(),
+            ObjectKind::Set(SetEncoding::ListPack(_))    => 0,
+            ObjectKind::ZSet(ZSetEncoding::SkipList(v))  => v.len(),
+            ObjectKind::ZSet(ZSetEncoding::ListPack(_))  => 0,
+            ObjectKind::Hash(HashEncoding::HashTable(h)) => h.len(),
+            ObjectKind::Hash(HashEncoding::ListPack(_))  => 0,
+            _ => 0,
+        }
+    }
+
+    /// Iterate List items as `&RedisString`.
+    ///
+    /// TODO(port): Phase 4 — proper iter for ListPack encoding (yields empty today).
+    pub fn iter_list(&self) -> Box<dyn Iterator<Item = &RedisString> + '_> {
+        match &self.kind {
+            ObjectKind::List(ListEncoding::QuickList(v)) => Box::new(v.iter()),
+            _ => Box::new(std::iter::empty()),
+        }
+    }
+
+    /// Iterate Set members as `&RedisString`.
+    ///
+    /// TODO(port): Phase 4 — proper iter for IntSet and ListPack encodings (yields empty today).
+    pub fn iter_set(&self) -> Box<dyn Iterator<Item = &RedisString> + '_> {
+        match &self.kind {
+            ObjectKind::Set(SetEncoding::HashTable(h)) => Box::new(h.iter()),
+            _ => Box::new(std::iter::empty()),
+        }
+    }
+
+    /// Iterate ZSet `(member, score)` pairs.
+    ///
+    /// TODO(port): Phase 4 — proper iter for ListPack encoding (yields empty today).
+    pub fn iter_zset(&self) -> Box<dyn Iterator<Item = (&RedisString, f64)> + '_> {
+        match &self.kind {
+            ObjectKind::ZSet(ZSetEncoding::SkipList(v)) => {
+                Box::new(v.iter().map(|(m, s)| (m, *s)))
+            }
+            _ => Box::new(std::iter::empty()),
+        }
+    }
+
+    /// Iterate Hash `(field, value)` pairs.
+    ///
+    /// TODO(port): Phase 4 — proper iter for ListPack encoding (yields empty today).
+    pub fn iter_hash(&self) -> Box<dyn Iterator<Item = (&RedisString, &RedisString)> + '_> {
+        match &self.kind {
+            ObjectKind::Hash(HashEncoding::HashTable(h)) => Box::new(h.iter()),
+            _ => Box::new(std::iter::empty()),
+        }
+    }
+
+    /// Migration alias for the architect-stub `expire_ms()` accessor.
+    /// Returns the absolute expiry timestamp in ms, or `None` if no TTL.
+    pub fn expire_ms(&self) -> Option<i64> {
+        self.get_expire()
+    }
+}
+
+impl From<RedisString> for RedisObject {
+    fn from(s: RedisString) -> Self {
+        Self::new_string(s.as_bytes())
+    }
+}
+
+impl From<&[u8]> for RedisObject {
+    fn from(b: &[u8]) -> Self {
+        Self::new_string(b)
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // PORT STATUS
 //   source:        src/object.c  (1931 lines, ~58 functions)
@@ -1354,6 +1488,7 @@ pub fn memory_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 //                  getMemoryOverheadData are stubs pending redis-ds types (Phase 4/5).
 //                  long double → f64 (precision caveat documented). strcoll → byte-wise
 //                  placeholder (Phase C+ needs locale crate). Shared integer pool needs
-//                  lazy_static Arc array (TODO(architect)). Validator shows only expected
-//                  name-resolution errors (E0432, E0282); zero real syntax errors.
+//                  lazy_static Arc array (TODO(architect)). Back-compat shim layer appended
+//                  (Flat view, is_*, as_string_bytes, From<RedisString>, iter_*, collection_len)
+//                  to ease the migration from the flat-enum stub.
 // ──────────────────────────────────────────────────────────────────────────────

@@ -252,50 +252,27 @@ pub fn lazyfree_reset_stats() {
 ///
 /// C: lazyfree.c:137-182, `lazyfreeGetFreeEffort`
 pub fn lazyfree_get_free_effort(key: &RedisObject, obj: &RedisObject, dbid: i32) -> usize {
-    // C: lazyfree.c:138-149 — type + encoding dispatch
-    match obj {
-        RedisObject::List(items) => {
-            // C: OBJ_LIST && OBJ_ENCODING_QUICKLIST → ql->len
-            // PORT NOTE: using Vec len as quicklist node-count approximation.
-            // PERF(port): C ql->len counts quicklist *nodes*, not elements;
-            //   our Vec len counts elements — may overestimate. Profile in Phase 4.
-            items.len()
-        }
-
-        RedisObject::Set(set) => {
-            // C: OBJ_SET && OBJ_ENCODING_HASHTABLE → hashtableSize(ht)
-            set.len()
-        }
-
-        RedisObject::ZSet(pairs) => {
-            // C: OBJ_ZSET && OBJ_ENCODING_SKIPLIST → zslGetLength(zs->zsl)
-            pairs.len()
-        }
-
-        RedisObject::Hash(map) => {
-            // C: OBJ_HASH && OBJ_ENCODING_HASHTABLE → hashtableSize(ht)
-            map.len()
-        }
-
-        RedisObject::Stream => {
-            // C: lazyfree.c:150-173 — elaborate stream effort: rax node count
-            // plus consumer-group PEL sizes.
-            // TODO(port): stream internals (rax numnodes, cgroups, PEL sizes)
-            // are not yet accessible from RedisObject::Stream (Phase 5 stub).
-            // Returning 1 means streams will always be freed synchronously,
-            // which is safe but not optimal for large streams.
-            let _ = (key, dbid); // silence unused-variable warnings
-            1
-        }
-
-        RedisObject::String(_) => {
-            // C: lazyfree.c:174-178 — OBJ_MODULE case with moduleGetFreeEffort.
-            // String and module fall here; module not yet implemented.
-            // TODO(port): OBJ_MODULE → moduleGetFreeEffort(key, obj, dbid);
-            //   return ULONG_MAX if effort == 0. Blocked on Phase 10 modules.
-            1
-        }
+    // C: lazyfree.c:138-149 — type + encoding dispatch.
+    //
+    // PORT NOTE: collapsed to `collection_len()` plus per-type tail cases. The
+    // collection-length shim covers List/Set/ZSet/Hash uniformly; Stream and
+    // String fall through to a constant.
+    if obj.is_list() || obj.is_set() || obj.is_zset() || obj.is_hash() {
+        return obj.collection_len();
     }
+    if obj.is_stream() {
+        // C: lazyfree.c:150-173 — elaborate stream effort: rax node count
+        // plus consumer-group PEL sizes.
+        // TODO(port): stream internals (rax numnodes, cgroups, PEL sizes)
+        // are not yet accessible from ObjectKind::Stream (Phase 5 stub).
+        let _ = (key, dbid); // silence unused-variable warnings
+        return 1;
+    }
+    // String / Module fall here.
+    // TODO(port): OBJ_MODULE → moduleGetFreeEffort(key, obj, dbid);
+    //   return ULONG_MAX if effort == 0. Blocked on Phase 10 modules.
+    let _ = (key, dbid);
+    1
 }
 
 // ── Conditional async-free entry points ───────────────────────────────────────

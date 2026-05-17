@@ -263,11 +263,11 @@ impl Client {
     /// Move out the current argv and reset to empty.
     ///
     /// PORT NOTE: returns `Vec<RedisObject>` (not `Vec<RedisString>`) because
-    /// translated MULTI code stores queued args as `RedisObject::String`.
+    /// translated MULTI code stores queued args as string-encoded objects.
     pub fn take_argv(&mut self) -> Vec<RedisObject> {
         std::mem::take(&mut self.argv)
             .into_iter()
-            .map(RedisObject::String)
+            .map(RedisObject::from_string)
             .collect()
     }
 

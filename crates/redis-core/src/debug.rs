@@ -125,23 +125,19 @@ pub(crate) fn xor_object_digest(
     //   List / Set / ZSet / Hash / Stream / Module encodings exist.
     // PERF(port): C uses htonl for deterministic byte order in the hash tag
     //   — need the same big-endian u32 encoding here.
-    let type_tag: u32 = match obj {
-        RedisObject::String(_) => 0,
-        _ => {
-            // TODO(port): assign stable discriminants matching C OBJ_* constants.
-            0
-        }
+    let type_tag: u32 = if obj.is_string() {
+        0
+    } else {
+        // TODO(port): assign stable discriminants matching C OBJ_* constants.
+        0
     };
     let tag_be = type_tag.to_be_bytes();
     mix_digest(digest, &tag_be);
 
-    match obj {
-        RedisObject::String(_) => {
-            mix_string_object_digest(digest, obj);
-        }
-        _ => {
-            // TODO(port): implement List / Set / ZSet / Hash / Stream / Module digests.
-        }
+    if obj.is_string() {
+        mix_string_object_digest(digest, obj);
+    } else {
+        // TODO(port): implement List / Set / ZSet / Hash / Stream / Module digests.
     }
 
     // TODO(port): if the key has an expiry, xor_digest(digest, b"!!expire!!", 10)
@@ -929,10 +925,7 @@ pub fn log_current_client(cc: Option<()>, title: &str) {
 ///
 /// C: debug.c:1140-1173, serverLogObjectDebugInfo
 pub fn log_object_debug_info(obj: &RedisObject) {
-    let type_name = match obj {
-        RedisObject::String(_) => "String",
-        _ => "unknown",
-    };
+    let type_name = if obj.is_string() { "String" } else { "unknown" };
     log::warn!("Object type: {}", type_name);
 }
 

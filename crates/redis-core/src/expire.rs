@@ -622,9 +622,9 @@ pub fn remember_replica_key_with_expire(db: &RedisDb, key: &RedisObject) {
 
     // TODO(port): objectGetVal not yet on RedisObject stub; extracting bytes from
     // String variant as a placeholder — should handle all types uniformly.
-    let key_bytes: RedisString = match key {
-        RedisObject::String(s) => s.clone(),
-        _ => {
+    let key_bytes: RedisString = match key.as_string() {
+        Some(s) => s.clone(),
+        None => {
             // TODO(port): other RedisObject variants need objectGetVal equivalent.
             return;
         }

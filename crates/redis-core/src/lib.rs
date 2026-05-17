@@ -34,7 +34,7 @@ pub mod util;
 pub use client::{Client, ClientId};
 pub use command_context::CommandContext;
 pub use db::RedisDb;
-pub use object::RedisObject;
+pub use object::{ObjectKind, RedisObject};
 pub use server::{RedisServer, ServerConfig};
 
 // ──────────────────────────────────────────────────────────────────────────

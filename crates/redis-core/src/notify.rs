@@ -259,8 +259,8 @@ pub fn notify_keyspace_event(
         chan.extend_from_slice(b"__:");
         chan.extend_from_slice(key_bytes);
 
-        let chan_obj = RedisObject::String(RedisString::from_bytes(&chan));
-        let event_obj = RedisObject::String(RedisString::from_bytes(event));
+        let chan_obj = RedisObject::new_string(&chan);
+        let event_obj = RedisObject::new_string(event);
 
         // TODO(port): pubsub_publish_message(&chan_obj, &event_obj, false)?;
         // Blocked on TODO(architect) dep-edge decision above.
@@ -278,7 +278,7 @@ pub fn notify_keyspace_event(
         chan.extend_from_slice(b"__:");
         chan.extend_from_slice(event);
 
-        let chan_obj = RedisObject::String(RedisString::from_bytes(&chan));
+        let chan_obj = RedisObject::new_string(&chan);
 
         // C: pubsubPublishMessage(chanobj, key, 0) — message payload is the key.
         // TODO(port): pubsub_publish_message(&chan_obj, key, false)?;
@@ -300,10 +300,7 @@ pub fn notify_keyspace_event(
 ///
 /// C: cf. `objectGetVal` macro in `object.h`
 fn object_to_bytes(obj: &RedisObject) -> Result<&[u8], RedisError> {
-    match obj {
-        RedisObject::String(s) => Ok(s.as_slice()),
-        _ => Err(RedisError::wrong_type()),
-    }
+    obj.as_string_bytes().ok_or_else(RedisError::wrong_type)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
