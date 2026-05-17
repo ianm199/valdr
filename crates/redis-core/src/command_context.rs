@@ -7,9 +7,12 @@
 //! `RedisServer` reference comes via the orchestrator (Phase 3 architect
 //! packet adds it).
 
+use std::sync::{Arc, Mutex};
+
 use crate::client::Client;
 use crate::db::RedisDb;
 use crate::object::RedisObject;
+use crate::pubsub_registry::PubSubRegistry;
 use crate::server::RedisServer;
 use redis_protocol::RespFrame;
 use redis_types::{RedisError, RedisResult, RedisString};
@@ -57,6 +60,11 @@ pub struct CommandContext<'a> {
     /// Per-context server scratch. STUB — Phase 3 replaces with a `&'a mut
     /// RedisServer` carried into every command.
     pub stub_server: RedisServer,
+    /// Optional shared pub/sub registry handle.
+    ///
+    /// `None` in unit tests; `Some` for the live server, where every
+    /// connection's accept-loop wraps the same registry in `Arc<Mutex<>>`.
+    pub pubsub: Option<Arc<Mutex<PubSubRegistry>>>,
 }
 
 /// Argument type accepted by `CommandContext::reply_error`.
@@ -136,6 +144,7 @@ impl<'a> CommandContext<'a> {
             client,
             db: DbStorage::Owned(RedisDb::new(0)),
             stub_server: RedisServer::default(),
+            pubsub: None,
         }
     }
 
@@ -148,6 +157,22 @@ impl<'a> CommandContext<'a> {
             client,
             db: DbStorage::Borrowed(db),
             stub_server: RedisServer::default(),
+            pubsub: None,
+        }
+    }
+
+    /// Construct a context with both a shared database and a shared pub/sub
+    /// registry. Used by the live server accept loop.
+    pub fn with_db_and_pubsub(
+        client: &'a mut Client,
+        db: &'a mut RedisDb,
+        pubsub: Arc<Mutex<PubSubRegistry>>,
+    ) -> Self {
+        Self {
+            client,
+            db: DbStorage::Borrowed(db),
+            stub_server: RedisServer::default(),
+            pubsub: Some(pubsub),
         }
     }
 

@@ -101,6 +101,14 @@ pub struct Client {
     /// MULTI/EXEC transaction state (lazily initialised; `None` when the client
     /// is not in a transaction).
     pub mstate: Option<Box<MultiState>>,
+    /// Raw `argv` of each command queued inside a MULTI block.
+    ///
+    /// PORT NOTE: complements `mstate.commands` (which uses `RedisObject` /
+    /// command-function-pointer shape from the salvaged C port). The Round 8b
+    /// dispatch-level integration re-routes queued bytes through the same
+    /// dispatcher used for non-MULTI commands, so it operates on raw
+    /// `RedisString` argv vectors here.
+    pub queued_argvs: Vec<Vec<RedisString>>,
     /// Cluster slot for the current command (`-1` when clustering disabled).
     ///
     /// STUB — Phase B placeholder.
@@ -142,6 +150,14 @@ pub struct Client {
     /// Defaults to 2 (the version implied by every legacy RESP2 client).
     /// RESP3 upgrade path is a TODO.
     pub resp_proto: i32,
+    /// Channels this client is subscribed to.
+    ///
+    /// Round 8a per-client pub/sub bookkeeping; mirrors the channel half of
+    /// `PubSubRegistry` so the read loop can tell when the client is in
+    /// subscribe mode without consulting the global lock.
+    pub subscribed_channels: HashSet<RedisString>,
+    /// Glob patterns this client is subscribed to.
+    pub subscribed_patterns: HashSet<RedisString>,
 }
 
 /// Per-client transient flags.
@@ -166,6 +182,7 @@ impl Client {
             reply_buf: Vec::new(),
             db_index: 0,
             mstate: None,
+            queued_argvs: Vec::new(),
             slot: -1,
             flags: ClientFlags::default(),
             conn: None,
@@ -174,6 +191,8 @@ impl Client {
             should_close: false,
             addr: None,
             resp_proto: 2,
+            subscribed_channels: HashSet::new(),
+            subscribed_patterns: HashSet::new(),
         }
     }
 
@@ -211,10 +230,25 @@ impl Client {
     pub fn reset_state(&mut self) {
         self.name = None;
         self.mstate = None;
+        self.queued_argvs.clear();
         self.reply_buf.clear();
         self.db_index = 0;
         self.flags = ClientFlags::default();
         self.resp_proto = 2;
+        self.subscribed_channels.clear();
+        self.subscribed_patterns.clear();
+        crate::db::watched_keys_index_remove_client(self.id);
+        let _ = crate::db::watched_keys_take_dirty(self.id);
+    }
+
+    /// Total per-client pub/sub subscriptions across channels and patterns.
+    pub fn pubsub_subscription_count(&self) -> usize {
+        self.subscribed_channels.len() + self.subscribed_patterns.len()
+    }
+
+    /// Whether this client is currently in pub/sub subscribe mode.
+    pub fn in_pubsub_mode(&self) -> bool {
+        self.pubsub_subscription_count() > 0
     }
 
     /// Append an encoded RESP frame to the pending-reply buffer.
@@ -243,10 +277,8 @@ impl Client {
     }
 
     /// Whether the client is in pub/sub mode (SUBSCRIBE / PSUBSCRIBE).
-    ///
-    /// STUB — Phase B placeholder; full pub/sub state lands with notify.c.
     pub fn is_pubsub(&self) -> bool {
-        false
+        self.in_pubsub_mode()
     }
 
     /// Whether the client is a replica (slave) connection.

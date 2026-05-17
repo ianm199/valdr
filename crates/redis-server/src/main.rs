@@ -4,24 +4,30 @@
 //! connection, reads RESP requests, dispatches through `redis-commands`,
 //! and writes the reply back to the socket.
 //!
+//! Round 8a adds a per-connection writer thread (driven by an `mpsc::Sender`)
+//! so PUBLISH running on a foreign connection can deliver bytes to subscriber
+//! sockets without re-acquiring the subscriber's transport from a foreign
+//! thread.
+//!
 //! Out of scope for Wave A:
 //!   * Event-loop based I/O (no `mio` / `tokio`); blocking thread-per-conn.
 //!   * Multi-DB routing (every command sees DB 0).
-//!   * Real command bodies — Waves B/C/D fill those in.
-//!   * Replication, cluster, persistence, pub/sub, modules.
+//!   * Replication, cluster, persistence, modules.
 
-use std::io;
+use std::io::{self, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
-use redis_commands::dispatch;
-use redis_core::{Client, Connection};
+use redis_commands::{dispatch, pubsub};
 use redis_core::command_context::CommandContext;
 use redis_core::db::RedisDb;
+use redis_core::pubsub_registry::PubSubRegistry;
+use redis_core::{Client, Connection};
+use redis_protocol::frame::{encode_resp2, RespFrame};
 use redis_protocol::parse_inline_or_multibulk;
-use redis_protocol::frame::{RespFrame, encode_resp2};
 use redis_types::{RedisError, RedisString};
 
 const DEFAULT_PORT: u16 = 6379;
@@ -43,10 +49,6 @@ impl Default for CliArgs {
 }
 
 /// Parse the supported `--port <N>` and `--bind <addr>` flags from CLI args.
-///
-/// Unrecognised flags are reported to stderr but do not abort startup; that
-/// matches the Wave A "minimal CLI" goal. Phase 3+ will wire the full
-/// `config.c` argument parser.
 fn parse_args(argv: Vec<String>) -> Result<CliArgs, String> {
     let mut out = CliArgs::default();
     let mut it = argv.into_iter().skip(1);
@@ -112,18 +114,12 @@ fn main() {
 
     let db = Arc::new(Mutex::new(RedisDb::new(0)));
     let next_client_id = Arc::new(AtomicU64::new(1));
-    serve(listener, shutdown, db, next_client_id);
+    let registry = Arc::new(Mutex::new(PubSubRegistry::new()));
+    serve(listener, shutdown, db, next_client_id, registry);
 }
 
-/// Best-effort SIGINT/SIGTERM handler. Without any signal-handling deps we
-/// install nothing and rely on the OS to terminate the process on Ctrl-C.
-///
-/// TODO(architect): wire a proper graceful-shutdown handler (signal-hook,
-/// ctrlc, or a hand-rolled `sigaction` via libc) in Phase 3.
-fn install_shutdown_handler(_shutdown: Arc<AtomicBool>) {
-    // No-op — the AtomicBool exists so the accept loop can be wired to it
-    // once a signal-handling dependency lands.
-}
+/// Best-effort SIGINT/SIGTERM handler stub.
+fn install_shutdown_handler(_shutdown: Arc<AtomicBool>) {}
 
 /// Accept loop. One std::thread per accepted connection.
 fn serve(
@@ -131,6 +127,7 @@ fn serve(
     shutdown: Arc<AtomicBool>,
     db: Arc<Mutex<RedisDb>>,
     next_client_id: Arc<AtomicU64>,
+    registry: Arc<Mutex<PubSubRegistry>>,
 ) {
     for incoming in listener.incoming() {
         if shutdown.load(Ordering::SeqCst) {
@@ -148,10 +145,11 @@ fn serve(
                     .unwrap_or_else(|_| "<unknown>".to_string());
                 let shutdown = Arc::clone(&shutdown);
                 let db = Arc::clone(&db);
+                let registry = Arc::clone(&registry);
                 let id = next_client_id.fetch_add(1, Ordering::Relaxed);
                 let _ = thread::Builder::new()
                     .name(format!("client-{}", peer))
-                    .spawn(move || handle_connection(stream, shutdown, db, id, peer));
+                    .spawn(move || handle_connection(stream, shutdown, db, id, peer, registry));
             }
             Err(e) => {
                 eprintln!("redis-server: accept failed: {}", e);
@@ -163,15 +161,51 @@ fn serve(
     }
 }
 
+/// Spawn a writer thread that drains an `mpsc::Receiver<Vec<u8>>` and writes
+/// each payload to the connection. Returns the matching sender that the read
+/// loop and the pub/sub registry both hold.
+fn spawn_writer(
+    mut writer: TcpStream,
+    peer: String,
+) -> Sender<Vec<u8>> {
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    let _ = thread::Builder::new()
+        .name(format!("writer-{}", peer))
+        .spawn(move || {
+            for payload in rx {
+                if writer.write_all(&payload).is_err() {
+                    break;
+                }
+            }
+            let _ = writer.shutdown(std::net::Shutdown::Both);
+        });
+    tx
+}
+
 /// Per-connection event loop. Reads from the socket, feeds the incremental
-/// parser, dispatches each completed command, writes the reply.
+/// parser, dispatches each completed command, then ships replies through the
+/// outbound mpsc so the writer thread owns all socket writes.
 fn handle_connection(
     stream: TcpStream,
     shutdown: Arc<AtomicBool>,
     db: Arc<Mutex<RedisDb>>,
     id: u64,
     peer_addr: String,
+    registry: Arc<Mutex<PubSubRegistry>>,
 ) {
+    let writer_clone = match stream.try_clone() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("redis-server: try_clone failed for {}: {}", peer_addr, e);
+            return;
+        }
+    };
+    let outbound = spawn_writer(writer_clone, peer_addr.clone());
+
+    if let Ok(mut guard) = registry.lock() {
+        guard.register_sender(id, outbound.clone());
+    }
+
     let mut client = Client::with_connection(Connection::Tcp(stream));
     client.id = id;
     client.addr = Some(peer_addr);
@@ -179,68 +213,82 @@ fn handle_connection(
 
     loop {
         if shutdown.load(Ordering::SeqCst) {
-            return;
+            break;
         }
 
         let conn = match client.conn.as_mut() {
             Some(c) => c,
-            None => return,
+            None => break,
         };
 
         let n = match conn.read(&mut read_buf) {
-            Ok(0) => return,
+            Ok(0) => break,
             Ok(n) => n,
             Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(_) => return,
+            Err(_) => break,
         };
 
         client.query_buf.extend_from_slice(&read_buf[..n]);
 
+        let mut disconnect = false;
         loop {
             let parsed = parse_inline_or_multibulk(&client.query_buf);
             match parsed {
                 Ok(Some((argv, consumed))) => {
                     client.query_buf.drain(..consumed);
-                    process_command(&mut client, argv, &db);
+                    process_command(&mut client, argv, &db, &registry);
                 }
                 Ok(None) => break,
                 Err(err) => {
-                    write_error_and_disconnect(&mut client, &err);
-                    return;
+                    queue_error_reply(&mut client, &err);
+                    let _ = flush_reply(&mut client, &outbound);
+                    disconnect = true;
+                    break;
                 }
             }
 
-            if !flush_reply(&mut client) {
-                return;
+            if !flush_reply(&mut client, &outbound) {
+                disconnect = true;
+                break;
             }
 
             if client.should_close {
-                return;
+                disconnect = true;
+                break;
             }
         }
 
-        if !flush_reply(&mut client) {
-            return;
+        if disconnect {
+            break;
+        }
+
+        if !flush_reply(&mut client, &outbound) {
+            break;
         }
 
         if client.should_close {
-            return;
+            break;
         }
     }
+
+    let _ = pubsub::drop_client_from_registry(&registry, id);
+    drop(outbound);
 }
 
 /// Install `argv` as the current command and route through the dispatcher.
-///
-/// On error, the error is written to the reply buffer as a RESP `-...` line so
-/// the I/O layer can flush it like any other reply.
-fn process_command(client: &mut Client, argv: Vec<RedisString>, db: &Arc<Mutex<RedisDb>>) {
+fn process_command(
+    client: &mut Client,
+    argv: Vec<RedisString>,
+    db: &Arc<Mutex<RedisDb>>,
+    registry: &Arc<Mutex<PubSubRegistry>>,
+) {
     client.set_args(argv);
     let result = {
         let mut guard = match db.lock() {
             Ok(g) => g,
             Err(poison) => poison.into_inner(),
         };
-        let mut ctx = CommandContext::with_db(client, &mut guard);
+        let mut ctx = CommandContext::with_db_and_pubsub(client, &mut guard, Arc::clone(registry));
         dispatch(&mut ctx)
     };
     if let Err(err) = result {
@@ -250,38 +298,31 @@ fn process_command(client: &mut Client, argv: Vec<RedisString>, db: &Arc<Mutex<R
     client.reset_args();
 }
 
-/// Drain `client.reply_buf` to the socket. Returns `false` if the connection
-/// should be torn down (write failure).
-fn flush_reply(client: &mut Client) -> bool {
+/// Drain `client.reply_buf` through the outbound sender. Returns `false` if
+/// the writer thread has already exited (connection should tear down).
+fn flush_reply(client: &mut Client, outbound: &Sender<Vec<u8>>) -> bool {
     if client.reply_buf.is_empty() {
         return true;
     }
-    let conn = match client.conn.as_mut() {
-        Some(c) => c,
-        None => return false,
-    };
     let bytes = std::mem::take(&mut client.reply_buf);
-    conn.write_all(&bytes).is_ok()
+    outbound.send(bytes).is_ok()
 }
 
-/// Encode `err` as a RESP error and try to flush it before dropping the
-/// connection. Used on fatal protocol errors.
-fn write_error_and_disconnect(client: &mut Client, err: &RedisError) {
+/// Append a RESP error line to the pending reply buffer for later flushing.
+fn queue_error_reply(client: &mut Client, err: &RedisError) {
     let payload = err.to_resp_payload();
     encode_resp2(&RespFrame::Error(payload), &mut client.reply_buf);
-    let _ = flush_reply(client);
 }
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        architect packet (Wave A — main entry + accept loop)
+//   source:        architect packet (Wave A main + Round 8a pub/sub wiring)
 //   target_crate:  redis-server
 //   confidence:    high
 //   todos:         1
 //   port_notes:    0
 //   unsafe_blocks: 0
-//   notes:         Blocking thread-per-conn TCP server. SIGINT handler is a
-//                  no-op stub (no ctrlc/signal-hook dep yet). Dispatch routes
-//                  every command through redis-commands::dispatch; unknown +
-//                  unimplemented commands return clean RESP error replies.
+//   notes:         Blocking thread-per-conn TCP server with a per-conn
+//                  writer thread driven by mpsc. Pub/sub registry is shared
+//                  via Arc<Mutex<>>. SIGINT handler is a no-op stub.
 // ──────────────────────────────────────────────────────────────────────────

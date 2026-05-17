@@ -1,0 +1,32 @@
+[class: byte_exact]
+[description: MULTI / EXEC / DISCARD / WATCH / UNWATCH — single-connection transaction semantics]
+[suite: smoke,transactions]
+
+FLUSHDB
+MULTI
+SET tx_k1 v1
+SET tx_k2 v2
+GET tx_k1
+EXEC
+GET tx_k1
+GET tx_k2
+
+MULTI
+SET tx_disc d
+DISCARD
+GET tx_disc
+
+DISCARD
+
+MULTI
+MULTI
+DISCARD
+
+WATCH tx_k1
+UNWATCH
+GET tx_k1
+
+MULTI
+WATCH tx_k1
+
+DISCARD

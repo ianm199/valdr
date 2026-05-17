@@ -23,12 +23,95 @@
 //! which handles `*` and `?` but not `[...]` character classes yet.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use redis_types::{RedisError, RedisString};
 
+use crate::client::ClientId;
 use crate::command_context::CommandContext;
 use crate::object::{ObjectKind, RedisObject, EXPIRY_NONE};
+
+/// Global cross-connection MULTI/WATCH support.
+///
+/// `watched`: every WATCH-registered key maps to the set of client ids that
+/// asked to be notified. `dirty`: every client id whose watched set has been
+/// touched since the last EXEC. WATCH adds to `watched`; UNWATCH/EXEC clears
+/// the client from `watched`; `set_key`/`sync_delete` adds to `dirty`; EXEC
+/// reads-and-clears `dirty` for its own client id.
+///
+/// PORT NOTE: deliberate architectural shortcut for Phase B. Real Redis stores
+/// the per-key watcher list on `serverDb.watched_keys` and mutates each
+/// watching `client` directly via the global client list. Until `RedisServer`
+/// owns the client list and is reachable from `db.rs::set_key`, this global
+/// `OnceLock` carries the same information. Initialise from `main.rs` startup.
+#[derive(Debug, Default)]
+pub struct WatchedKeysIndex {
+    pub watched: HashMap<RedisString, HashSet<ClientId>>,
+    pub dirty: HashSet<ClientId>,
+}
+
+static WATCHED_KEYS_INDEX: OnceLock<Arc<Mutex<WatchedKeysIndex>>> = OnceLock::new();
+
+/// Install or fetch the global watched-keys index.
+///
+/// First caller installs an empty index; subsequent callers receive the same
+/// `Arc`. Safe to call from the binary entry point and from per-command
+/// handlers without synchronisation concerns beyond the inner `Mutex`.
+pub fn watched_keys_index() -> &'static Arc<Mutex<WatchedKeysIndex>> {
+    WATCHED_KEYS_INDEX.get_or_init(|| Arc::new(Mutex::new(WatchedKeysIndex::default())))
+}
+
+/// Register `client_id` as a watcher of `key` in the global index.
+pub fn watched_keys_index_add(key: &RedisString, client_id: ClientId) {
+    let idx = watched_keys_index();
+    let mut guard = match idx.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    guard.watched.entry(key.clone()).or_default().insert(client_id);
+}
+
+/// Remove `client_id` from every watch list.
+pub fn watched_keys_index_remove_client(client_id: ClientId) {
+    let idx = watched_keys_index();
+    let mut guard = match idx.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    guard.watched.retain(|_, watchers| {
+        watchers.remove(&client_id);
+        !watchers.is_empty()
+    });
+}
+
+/// Mark every client watching `key` as dirty.
+///
+/// C: db.c → multi.c::touchWatchedKey. Called after every write to `key`.
+pub fn watched_keys_touch(key: &RedisString) {
+    let idx = watched_keys_index();
+    let mut guard = match idx.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let watchers = match guard.watched.get(key) {
+        Some(s) if !s.is_empty() => s.clone(),
+        _ => return,
+    };
+    for cid in watchers {
+        guard.dirty.insert(cid);
+    }
+}
+
+/// Return `true` and clear the dirty flag if `client_id` was marked dirty.
+pub fn watched_keys_take_dirty(client_id: ClientId) -> bool {
+    let idx = watched_keys_index();
+    let mut guard = match idx.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    guard.dirty.remove(&client_id)
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Lookup flags  (C: server.h LOOKUP_*)
@@ -357,7 +440,11 @@ impl RedisDb {
         // TODO(port): moduleNotifyKeyUnlink(key, val, db->id, flags)
         // TODO(port): signalDeletedKeyAsReady(db, key, val->type)
         // TODO(port): dbUntrackKeyWithVolatileItems if OBJ_HASH with volatile fields
-        self.dict.remove(key).is_some()
+        let existed = self.dict.remove(key).is_some();
+        if existed {
+            watched_keys_touch(key);
+        }
+        existed
     }
 
     /// Async delete (lazy-free). Phase A falls through to synchronous delete.
@@ -423,8 +510,12 @@ impl RedisDb {
     /// C: db.c:601 emptyDbStructure (single-db path)
     pub fn clear(&mut self) {
         // TODO(port): emptyDbAsync, kvstoreEmpty callback, resetDbExpiryState
+        let watched_keys: Vec<RedisString> = self.dict.keys().cloned().collect();
         self.dict.clear();
         self.avg_ttl = 0;
+        for k in &watched_keys {
+            watched_keys_touch(k);
+        }
     }
 
     /// Raw (no expiry check) key lookup. Used by internal scans.
@@ -520,11 +611,12 @@ impl RedisDb {
     ///
     /// MIGRATION SHIM: accepts anything that views as bytes (the architect
     /// stub took `impl AsRef<[u8]>`) so callers passing `&RedisString`,
-    /// `&Vec<u8>`, or `&[u8]` all compile.
+    /// `&Vec<u8>`, or `&[u8]` all compile. Notifies every WATCH watcher of
+    /// `key` via the global watched-keys index (see [`watched_keys_index`]).
     pub fn signal_modified(&self, key: impl AsRef<[u8]>) {
-        // TODO(port): touchWatchedKey(db, key)
         // TODO(port): trackingInvalidateKey(c, key, 1)
-        let _ = key.as_ref();
+        let k = RedisString::from_bytes(key.as_ref());
+        watched_keys_touch(&k);
     }
 
     // ── Migration shims for the architect stub ──────────────────────────────

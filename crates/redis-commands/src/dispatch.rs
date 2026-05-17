@@ -40,14 +40,40 @@ pub fn lookup_command(name: &[u8]) -> Option<&'static DispatchEntry> {
 /// Returns an error if argv is empty or the command is unknown. The handler's
 /// result is returned verbatim — handlers may write a reply *and* return `Ok`,
 /// or return `Err` (which the I/O layer renders as a `-ERR ...` reply).
+///
+/// When the client is inside a MULTI block (`client.flag_multi()` is true)
+/// every command except the transaction-control set (MULTI / EXEC / DISCARD /
+/// WATCH / UNWATCH / RESET) is appended to `client.queued_argvs` and the
+/// client receives `+QUEUED\r\n` instead of executing immediately.
 pub fn dispatch(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     let name: RedisString = match ctx.client_ref().arg(0) {
         Some(s) => s.clone(),
         None => return Err(RedisError::runtime(b"ERR empty command")),
     };
-    match lookup_command(name.as_bytes()) {
+    if ctx.client_ref().flag_multi() {
+        if crate::multi::is_no_multi_command(name.as_bytes()) {
+            return Err(crate::multi::reject_no_multi_command(name.as_bytes()));
+        }
+        if !crate::multi::is_tx_control_command(name.as_bytes()) {
+            return crate::multi::queue_current_command(ctx);
+        }
+    }
+    if ctx.client_ref().in_pubsub_mode()
+        && !crate::pubsub::is_allowed_in_subscribe_mode(name.as_bytes())
+    {
+        return Err(crate::pubsub::subscribe_mode_error(name.as_bytes()));
+    }
+    dispatch_command_name(ctx, name.as_bytes())
+}
+
+/// Dispatch using an externally-supplied command name.
+///
+/// Skips the MULTI-queueing pre-check. Used by `EXEC` to drain each queued
+/// argv without re-entering the queue logic.
+pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> RedisResult<()> {
+    match lookup_command(name) {
         Some(entry) => (entry.handler)(ctx),
-        None => Err(unknown_command_error(name.as_bytes())),
+        None => Err(unknown_command_error(name)),
     }
 }
 
@@ -241,6 +267,27 @@ pub static HANDLERS: &[DispatchEntry] = &[
     DispatchEntry { name: b"ZRANGESTORE", handler: crate::zset::zrangestore_command },
     DispatchEntry { name: b"ZRANDMEMBER", handler: crate::zset::zrandmember_command },
     DispatchEntry { name: b"ZMPOP", handler: crate::zset::zmpop_command },
+    // ── BITMAP (Round 8c) ──────────────────────────────────────────────────
+    DispatchEntry { name: b"SETBIT", handler: crate::bitops::setbit_command },
+    DispatchEntry { name: b"GETBIT", handler: crate::bitops::getbit_command },
+    DispatchEntry { name: b"BITCOUNT", handler: crate::bitops::bitcount_command },
+    DispatchEntry { name: b"BITPOS", handler: crate::bitops::bitpos_command },
+    DispatchEntry { name: b"BITOP", handler: crate::bitops::bitop_command },
+    DispatchEntry { name: b"BITFIELD", handler: crate::bitops::bitfield_command },
+    DispatchEntry { name: b"BITFIELD_RO", handler: crate::bitops::bitfield_ro_command },
+    // ── TRANSACTIONS (Round 8b) ────────────────────────────────────────────
+    DispatchEntry { name: b"MULTI", handler: crate::multi::multi_command },
+    DispatchEntry { name: b"EXEC", handler: crate::multi::exec_command },
+    DispatchEntry { name: b"DISCARD", handler: crate::multi::discard_command },
+    DispatchEntry { name: b"WATCH", handler: crate::multi::watch_command },
+    DispatchEntry { name: b"UNWATCH", handler: crate::multi::unwatch_command },
+    // ── PUB/SUB (Round 8a) ─────────────────────────────────────────────────
+    DispatchEntry { name: b"SUBSCRIBE", handler: crate::pubsub::subscribe_command },
+    DispatchEntry { name: b"UNSUBSCRIBE", handler: crate::pubsub::unsubscribe_command },
+    DispatchEntry { name: b"PSUBSCRIBE", handler: crate::pubsub::psubscribe_command },
+    DispatchEntry { name: b"PUNSUBSCRIBE", handler: crate::pubsub::punsubscribe_command },
+    DispatchEntry { name: b"PUBLISH", handler: crate::pubsub::publish_command },
+    DispatchEntry { name: b"PUBSUB", handler: crate::pubsub::pubsub_command },
 ];
 
 #[cfg(test)]

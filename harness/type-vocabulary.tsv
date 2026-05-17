@@ -41,3 +41,4 @@ ModuleApi         struct  crates/redis-modules/src/api.rs           audit  Phase
 MultiState        struct  crates/redis-core/src/client.rs           audit    moved from salvaged multi.rs; per Phase B compile-fix
 MultiCmd          struct  crates/redis-core/src/client.rs           audit    moved from salvaged multi.rs
 WatchedKey        struct  crates/redis-core/src/client.rs           audit    moved from salvaged multi.rs
+WatchedKeysIndex  struct  crates/redis-core/src/db.rs               audit    Round 8b cross-conn WATCH dirty-bit propagation (global OnceLock)

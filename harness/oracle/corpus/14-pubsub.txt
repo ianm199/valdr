@@ -1,0 +1,11 @@
+[class: byte_exact]
+[description: PUBSUB single-connection introspection commands]
+[suite: smoke,pubsub]
+
+PUBLISH ch1 hello
+PUBSUB CHANNELS
+PUBSUB CHANNELS *
+PUBSUB NUMSUB
+PUBSUB NUMSUB ch1
+PUBSUB NUMSUB ch1 ch2 ch3
+PUBSUB NUMPAT

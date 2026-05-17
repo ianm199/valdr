@@ -25,6 +25,7 @@ pub mod db;
 pub mod latency;
 pub mod lazyfree;
 pub mod object;
+pub mod pubsub_registry;
 pub mod server;
 pub mod strtod;
 pub mod timeout;
@@ -36,6 +37,7 @@ pub use client::{Client, ClientId};
 pub use command_context::CommandContext;
 pub use db::RedisDb;
 pub use object::{ObjectKind, RedisObject};
+pub use pubsub_registry::PubSubRegistry;
 pub use server::{RedisServer, ServerConfig};
 pub use transport::Connection;
 
