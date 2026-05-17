@@ -208,35 +208,33 @@ thread_local! {
 ///
 /// C: `bioInit` in `bio.c` (lines 158-184).
 pub fn bio_init() -> Result<(), RedisError> {
-    BIO_WORKERS.get_or_try_init(|| -> Result<Vec<BioWorkerHandle>, RedisError> {
-        let mut workers = Vec::with_capacity(WORKER_TITLES.len());
+    if BIO_WORKERS.get().is_some() {
+        return Ok(());
+    }
 
-        for (idx, title) in WORKER_TITLES.iter().enumerate() {
-            let (sender, receiver) = mpsc::channel::<BioJob>();
+    let mut workers = Vec::with_capacity(WORKER_TITLES.len());
 
-            let builder = thread::Builder::new()
-                .name(title.to_string())
-                .stack_size(THREAD_STACK_SIZE);
+    for (idx, title) in WORKER_TITLES.iter().enumerate() {
+        let (sender, receiver) = mpsc::channel::<BioJob>();
 
-            let handle = builder
-                .spawn(move || bio_process_background_jobs(receiver, title, idx))
-                .map_err(|e| RedisError::runtime(
-                    format!("Fatal: Can't initialize Background Jobs. Error message: {}", e)
-                        .into_bytes()
-                        .into_boxed_slice(),
-                ))?;
+        let builder = thread::Builder::new()
+            .name(title.to_string())
+            .stack_size(THREAD_STACK_SIZE);
 
-            workers.push(BioWorkerHandle {
-                title,
-                sender,
-                thread: Mutex::new(Some(handle)),
-            });
-        }
+        let handle = builder
+            .spawn(move || bio_process_background_jobs(receiver, title, idx))
+            .map_err(|_| RedisError::runtime(b"Fatal: Can't initialize Background Jobs"))?;
 
-        Ok(workers)
-    })?;
+        workers.push(BioWorkerHandle {
+            title,
+            sender,
+            thread: Mutex::new(Some(handle)),
+        });
+    }
 
-    Ok(())
+    BIO_WORKERS
+        .set(workers)
+        .map_err(|_| RedisError::runtime(b"bio workers already initialised"))
 }
 
 // ─── Job submission ───────────────────────────────────────────────────────────
@@ -249,12 +247,12 @@ fn bio_submit_job(job_type: BioJobType, job: BioJob) -> Result<(), RedisError> {
 
     let workers = BIO_WORKERS
         .get()
-        .ok_or_else(|| RedisError::runtime(b"bio workers not initialised".as_ref().into()))?;
+        .ok_or_else(|| RedisError::runtime(b"bio workers not initialised"))?;
 
     workers[worker_idx]
         .sender
         .send(job)
-        .map_err(|_| RedisError::runtime(b"bio worker channel closed".as_ref().into()))?;
+        .map_err(|_| RedisError::runtime(b"bio worker channel closed"))?;
 
     BIO_JOBS_COUNTER[job_type as usize].fetch_add(1, Ordering::Relaxed);
     Ok(())
@@ -529,12 +527,13 @@ pub fn in_bio_thread() -> bool {
 //   source:        src/bio.c  (359 lines, 11 functions)  +  src/bio.h  (59 lines)
 //   target_crate:  redis-core
 //   confidence:    medium
-//   todos:         10
-//   port_notes:    4
+//   todos:         19
+//   port_notes:    7
 //   unsafe_blocks: 0
 //   notes: Structure, enums, counters, and channel-based queue are faithfully
 //          ported. The syscall sites (fsync, close, posix_fadvise) are stubbed
 //          with TODO(architect) because they require unsafe or an approved safe
 //          wrapper crate. The lazy-free variadic API is replaced with a closure.
 //          bio_kill_threads lacks true pthread_cancel semantics (TODO(port)).
+//          OnceLock::get_or_try_init (unstable) replaced with build-then-set.
 // ──────────────────────────────────────────────────────────────────────────────
