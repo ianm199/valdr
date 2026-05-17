@@ -9,6 +9,7 @@
 //!
 //! Phases 2-3 of the pilot land here.
 
+pub mod acl;
 pub mod blocked;
 pub mod defrag;
 pub mod client;
