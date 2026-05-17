@@ -631,6 +631,475 @@ pub fn rpoplpush_command(ctx: &mut CommandContext) -> RedisResult<()> {
     lmove_generic(ctx, src_key, dst_key, ListPosition::Tail, ListPosition::Head)
 }
 
+/// LMPOP numkeys key [key ...] LEFT|RIGHT [COUNT count]
+///
+/// Pops one or more elements from the first non-empty list among `numkeys`
+/// keys. Replies a two-element array of `[key, [popped elements]]`, or a
+/// null array if every key is missing or empty.
+///
+/// C: `lmpopCommand` (t_list.c).
+pub fn lmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    let argc = ctx.arg_count();
+    if argc < 4 {
+        return Err(RedisError::wrong_number_of_args(b"lmpop"));
+    }
+    let numkeys_signed = parse_strict_i64(ctx.arg(1)?.as_bytes())
+        .map_err(|_| RedisError::runtime(b"ERR numkeys should be greater than 0"))?;
+    if numkeys_signed <= 0 {
+        return Err(RedisError::runtime(
+            b"ERR numkeys should be greater than 0",
+        ));
+    }
+    let numkeys = numkeys_signed as usize;
+    if numkeys + 3 > argc {
+        return Err(RedisError::syntax(b"syntax error"));
+    }
+    let mut keys: Vec<RedisString> = Vec::with_capacity(numkeys);
+    for i in 0..numkeys {
+        keys.push(ctx.arg_owned(2 + i)?);
+    }
+    let dir_arg = ctx.arg(2 + numkeys)?;
+    let position = parse_list_position(dir_arg.as_bytes())?;
+    let mut count: i64 = 1;
+    let mut got_count = false;
+    let mut j = 3 + numkeys;
+    while j < argc {
+        let opt = ctx.arg(j)?;
+        if !opt.as_bytes().eq_ignore_ascii_case(b"COUNT") {
+            return Err(RedisError::syntax(b"syntax error"));
+        }
+        if got_count || j + 1 >= argc {
+            return Err(RedisError::syntax(b"syntax error"));
+        }
+        count = parse_strict_i64(ctx.arg(j + 1)?.as_bytes())
+            .map_err(|_| RedisError::runtime(b"ERR count should be greater than 0"))?;
+        if count <= 0 {
+            return Err(RedisError::runtime(
+                b"ERR count should be greater than 0",
+            ));
+        }
+        got_count = true;
+        j += 2;
+    }
+    for key in &keys {
+        let has_data = match ctx.db().find(key) {
+            Some(o) if o.is_list() => o.list().map(|d| !d.is_empty()).unwrap_or(false),
+            Some(_) => return Err(RedisError::wrong_type()),
+            None => false,
+        };
+        if !has_data {
+            continue;
+        }
+        let mut popped: Vec<RedisString> = Vec::with_capacity(count as usize);
+        if let Some(obj) = ctx.db_mut().lookup_key_write(key) {
+            let deque = obj
+                .list_mut()
+                .expect("is_list confirmed above");
+            let take = (count as usize).min(deque.len());
+            for _ in 0..take {
+                let next = match position {
+                    ListPosition::Head => deque.pop_front(),
+                    ListPosition::Tail => deque.pop_back(),
+                };
+                match next {
+                    Some(v) => popped.push(v),
+                    None => break,
+                }
+            }
+        }
+        let empty_after = matches!(
+            ctx.db().lookup_key_read(key),
+            Some(o) if o.list().map(|d| d.is_empty()).unwrap_or(false)
+        );
+        if empty_after {
+            ctx.db_mut().sync_delete(key);
+        }
+        ctx.reply_array_header(2)?;
+        ctx.reply_bulk_string(key.clone())?;
+        ctx.reply_array_header(popped.len())?;
+        for v in popped {
+            ctx.reply_bulk_string(v)?;
+        }
+        return Ok(());
+    }
+    ctx.reply_null_array()
+}
+
+/// LPOS key element [RANK rank] [COUNT num-matches] [MAXLEN len]
+///
+/// Returns the index (or indices) of `element` in the list at `key`. With
+/// `RANK` negative, scans the list from tail to head. `COUNT 0` returns all
+/// matches; positive `COUNT n` caps the result at `n`. `MAXLEN n` limits how
+/// many list entries are examined (0 means unlimited).
+///
+/// Replies with `:integer` (single match), `*array` of indices (with COUNT),
+/// or `$-1` / `*0` for a no-match case.
+///
+/// C: `lposCommand` (t_list.c).
+pub fn lpos_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    let argc = ctx.arg_count();
+    if argc < 3 {
+        return Err(RedisError::wrong_number_of_args(b"lpos"));
+    }
+    let key = ctx.arg_owned(1usize)?;
+    let element = ctx.arg_owned(2usize)?;
+    let mut rank: i64 = 1;
+    let mut count: Option<i64> = None;
+    let mut maxlen: i64 = 0;
+    let mut j = 3usize;
+    while j < argc {
+        let opt = ctx.arg(j)?;
+        let ob = opt.as_bytes();
+        if j + 1 >= argc {
+            return Err(RedisError::syntax(b"syntax error"));
+        }
+        let val = ctx.arg(j + 1)?;
+        let parsed = parse_strict_i64(val.as_bytes())?;
+        if ob.eq_ignore_ascii_case(b"RANK") {
+            if parsed == 0 {
+                return Err(RedisError::runtime(
+                    b"ERR RANK can't be zero: use 1 to start from the first match, 2 from the second ... or use negative to start from the end of the list",
+                ));
+            }
+            if parsed.checked_neg().is_none() {
+                return Err(RedisError::runtime(
+                    b"ERR value is out of range",
+                ));
+            }
+            rank = parsed;
+        } else if ob.eq_ignore_ascii_case(b"COUNT") {
+            if parsed < 0 {
+                return Err(RedisError::runtime(
+                    b"ERR COUNT can't be negative",
+                ));
+            }
+            count = Some(parsed);
+        } else if ob.eq_ignore_ascii_case(b"MAXLEN") {
+            if parsed < 0 {
+                return Err(RedisError::runtime(
+                    b"ERR MAXLEN can't be negative",
+                ));
+            }
+            maxlen = parsed;
+        } else {
+            return Err(RedisError::syntax(b"syntax error"));
+        }
+        j += 2;
+    }
+    let list_opt = as_list_ref(ctx.db().lookup_key_read(&key))?;
+    let list = match list_opt {
+        None => {
+            return match count {
+                None => ctx.reply_null_bulk(),
+                Some(_) => ctx.reply_array_header(0),
+            };
+        }
+        Some(d) => d,
+    };
+    let len = list.len();
+    let forward = rank > 0;
+    let skip = rank.unsigned_abs() as usize - 1;
+    let mut matches: Vec<i64> = Vec::new();
+    let mut seen = 0usize;
+    let mut scanned = 0usize;
+    let want_all = matches!(count, Some(0));
+    let want_one = count.is_none();
+    let limit = count.map(|c| c as usize);
+    if forward {
+        for (idx, item) in list.iter().enumerate() {
+            if maxlen != 0 && scanned >= maxlen as usize {
+                break;
+            }
+            scanned += 1;
+            if item.as_bytes() == element.as_bytes() {
+                if seen >= skip {
+                    matches.push(idx as i64);
+                    if want_one {
+                        break;
+                    }
+                    if let Some(c) = limit {
+                        if !want_all && matches.len() >= c {
+                            break;
+                        }
+                    }
+                }
+                seen += 1;
+            }
+        }
+    } else {
+        for (rev_idx, item) in list.iter().rev().enumerate() {
+            let idx = len - 1 - rev_idx;
+            if maxlen != 0 && scanned >= maxlen as usize {
+                break;
+            }
+            scanned += 1;
+            if item.as_bytes() == element.as_bytes() {
+                if seen >= skip {
+                    matches.push(idx as i64);
+                    if want_one {
+                        break;
+                    }
+                    if let Some(c) = limit {
+                        if !want_all && matches.len() >= c {
+                            break;
+                        }
+                    }
+                }
+                seen += 1;
+            }
+        }
+    }
+    if want_one {
+        match matches.first() {
+            None => ctx.reply_null_bulk(),
+            Some(v) => ctx.reply_integer(*v),
+        }
+    } else {
+        ctx.reply_array_header(matches.len())?;
+        for v in matches {
+            ctx.reply_integer(v)?;
+        }
+        Ok(())
+    }
+}
+
+/// Parse a BLPOP-style timeout value (decimal seconds, non-negative).
+///
+/// Real Redis accepts both integer and floating-point timeouts. A negative
+/// timeout is rejected with the canonical `ERR timeout is negative` error;
+/// non-numeric values are rejected with `ERR timeout is not a float or out
+/// of range`. The blocking stubs treat the parsed value as advisory only —
+/// they never actually block — but the parse must still happen so callers
+/// learn about invalid arguments.
+fn parse_blocking_timeout(bytes: &[u8]) -> Result<f64, RedisError> {
+    let s = core::str::from_utf8(bytes).map_err(|_| {
+        RedisError::runtime(b"ERR timeout is not a float or out of range")
+    })?;
+    if s.starts_with(char::is_whitespace) || s.ends_with(char::is_whitespace) {
+        return Err(RedisError::runtime(
+            b"ERR timeout is not a float or out of range",
+        ));
+    }
+    let parsed = if let Some(stripped) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        i64::from_str_radix(stripped, 16)
+            .map(|v| v as f64)
+            .map_err(|_| RedisError::runtime(b"ERR timeout is not a float or out of range"))?
+    } else if let Some(stripped) = s.strip_prefix("-0x").or_else(|| s.strip_prefix("-0X")) {
+        i64::from_str_radix(stripped, 16)
+            .map(|v| -(v as f64))
+            .map_err(|_| RedisError::runtime(b"ERR timeout is not a float or out of range"))?
+    } else {
+        s.parse::<f64>()
+            .map_err(|_| RedisError::runtime(b"ERR timeout is not a float or out of range"))?
+    };
+    if !parsed.is_finite() {
+        return Err(RedisError::runtime(
+            b"ERR timeout is not a float or out of range",
+        ));
+    }
+    if parsed < 0.0 {
+        return Err(RedisError::runtime(b"ERR timeout is negative"));
+    }
+    let ms = parsed * 1000.0;
+    if ms > i64::MAX as f64 || ms.is_nan() {
+        return Err(RedisError::runtime(b"ERR timeout is out of range"));
+    }
+    Ok(parsed)
+}
+
+/// Shared implementation for BLPOP / BRPOP.
+///
+/// Args: `name key [key ...] timeout`. Validates the timeout, then pops one
+/// element from the first non-empty list. Returns `[key, value]` on success
+/// or a null array immediately when every key is empty — the blocking-wait
+/// path is not yet wired up so the stub degrades gracefully into the same
+/// shape that a timed-out blocking call would return.
+fn bpop_generic(ctx: &mut CommandContext, position: ListPosition) -> RedisResult<()> {
+    let argc = ctx.arg_count();
+    if argc < 3 {
+        return Err(RedisError::wrong_number_of_args(ctx.command_name()));
+    }
+    let timeout_raw = ctx.arg_owned(argc - 1)?;
+    let _ = parse_blocking_timeout(timeout_raw.as_bytes())?;
+    let mut keys: Vec<RedisString> = Vec::with_capacity(argc - 2);
+    for j in 1..(argc - 1) {
+        keys.push(ctx.arg_owned(j)?);
+    }
+    for key in &keys {
+        let has_data = match ctx.db().find(key) {
+            None => false,
+            Some(o) => {
+                if !o.is_list() {
+                    return Err(RedisError::wrong_type());
+                }
+                o.list().map(|d| !d.is_empty()).unwrap_or(false)
+            }
+        };
+        if !has_data {
+            continue;
+        }
+        let popped = match ctx.db_mut().lookup_key_write(key) {
+            None => None,
+            Some(obj) => {
+                let deque = obj.list_mut().expect("is_list confirmed above");
+                match position {
+                    ListPosition::Head => deque.pop_front(),
+                    ListPosition::Tail => deque.pop_back(),
+                }
+            }
+        };
+        let value = match popped {
+            None => continue,
+            Some(v) => v,
+        };
+        let empty_after = matches!(
+            ctx.db().lookup_key_read(key),
+            Some(o) if o.list().map(|d| d.is_empty()).unwrap_or(false)
+        );
+        if empty_after {
+            ctx.db_mut().sync_delete(key);
+        }
+        ctx.reply_array_header(2)?;
+        ctx.reply_bulk_string(key.clone())?;
+        return ctx.reply_bulk_string(value);
+    }
+    ctx.reply_null_array()
+}
+
+/// BLPOP key [key ...] timeout
+///
+/// Non-blocking stub: behaves like LPOP on the first non-empty key and
+/// returns null-array immediately when every key is empty rather than
+/// suspending the client. Real blocking requires the `blockForKeys`
+/// scheduler in `redis-core::blocked` to be wired into the I/O loop.
+pub fn blpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    bpop_generic(ctx, ListPosition::Head)
+}
+
+/// BRPOP key [key ...] timeout — non-blocking stub mirroring `blpop_command`.
+pub fn brpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    bpop_generic(ctx, ListPosition::Tail)
+}
+
+/// BLMOVE source destination LEFT|RIGHT LEFT|RIGHT timeout
+///
+/// Non-blocking stub: delegates to the LMOVE path. Returns a null bulk
+/// immediately when the source list is empty or missing.
+pub fn blmove_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    if ctx.arg_count() != 6 {
+        return Err(RedisError::wrong_number_of_args(b"blmove"));
+    }
+    let src_key = ctx.arg_owned(1usize)?;
+    let dst_key = ctx.arg_owned(2usize)?;
+    let wherefrom = parse_list_position(ctx.arg(3)?.as_bytes())?;
+    let whereto = parse_list_position(ctx.arg(4)?.as_bytes())?;
+    let timeout_raw = ctx.arg_owned(5usize)?;
+    let _ = parse_blocking_timeout(timeout_raw.as_bytes())?;
+    lmove_generic(ctx, src_key, dst_key, wherefrom, whereto)
+}
+
+/// BRPOPLPUSH source destination timeout
+///
+/// Non-blocking stub: delegates to the RPOPLPUSH path.
+pub fn brpoplpush_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    if ctx.arg_count() != 4 {
+        return Err(RedisError::wrong_number_of_args(b"brpoplpush"));
+    }
+    let src_key = ctx.arg_owned(1usize)?;
+    let dst_key = ctx.arg_owned(2usize)?;
+    let timeout_raw = ctx.arg_owned(3usize)?;
+    let _ = parse_blocking_timeout(timeout_raw.as_bytes())?;
+    lmove_generic(ctx, src_key, dst_key, ListPosition::Tail, ListPosition::Head)
+}
+
+/// BLMPOP timeout numkeys key [key ...] LEFT|RIGHT [COUNT count]
+///
+/// Non-blocking stub: validates args and delegates to LMPOP's pop loop.
+pub fn blmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    let argc = ctx.arg_count();
+    if argc < 5 {
+        return Err(RedisError::wrong_number_of_args(b"blmpop"));
+    }
+    let timeout_raw = ctx.arg_owned(1usize)?;
+    let _ = parse_blocking_timeout(timeout_raw.as_bytes())?;
+    let numkeys_signed = parse_strict_i64(ctx.arg(2)?.as_bytes())
+        .map_err(|_| RedisError::runtime(b"ERR numkeys should be greater than 0"))?;
+    if numkeys_signed <= 0 {
+        return Err(RedisError::runtime(
+            b"ERR numkeys should be greater than 0",
+        ));
+    }
+    let numkeys = numkeys_signed as usize;
+    if numkeys + 4 > argc {
+        return Err(RedisError::syntax(b"syntax error"));
+    }
+    let mut keys: Vec<RedisString> = Vec::with_capacity(numkeys);
+    for i in 0..numkeys {
+        keys.push(ctx.arg_owned(3 + i)?);
+    }
+    let dir_arg = ctx.arg(3 + numkeys)?;
+    let position = parse_list_position(dir_arg.as_bytes())?;
+    let mut count: i64 = 1;
+    let mut got_count = false;
+    let mut j = 4 + numkeys;
+    while j < argc {
+        let opt = ctx.arg(j)?;
+        if !opt.as_bytes().eq_ignore_ascii_case(b"COUNT") {
+            return Err(RedisError::syntax(b"syntax error"));
+        }
+        if got_count || j + 1 >= argc {
+            return Err(RedisError::syntax(b"syntax error"));
+        }
+        count = parse_strict_i64(ctx.arg(j + 1)?.as_bytes())
+            .map_err(|_| RedisError::runtime(b"ERR count should be greater than 0"))?;
+        if count <= 0 {
+            return Err(RedisError::runtime(b"ERR count should be greater than 0"));
+        }
+        got_count = true;
+        j += 2;
+    }
+    for key in &keys {
+        let has_data = match ctx.db().find(key) {
+            Some(o) if o.is_list() => o.list().map(|d| !d.is_empty()).unwrap_or(false),
+            Some(_) => return Err(RedisError::wrong_type()),
+            None => false,
+        };
+        if !has_data {
+            continue;
+        }
+        let mut popped: Vec<RedisString> = Vec::with_capacity(count as usize);
+        if let Some(obj) = ctx.db_mut().lookup_key_write(key) {
+            let deque = obj.list_mut().expect("is_list confirmed above");
+            let take = (count as usize).min(deque.len());
+            for _ in 0..take {
+                let next = match position {
+                    ListPosition::Head => deque.pop_front(),
+                    ListPosition::Tail => deque.pop_back(),
+                };
+                match next {
+                    Some(v) => popped.push(v),
+                    None => break,
+                }
+            }
+        }
+        let empty_after = matches!(
+            ctx.db().lookup_key_read(key),
+            Some(o) if o.list().map(|d| d.is_empty()).unwrap_or(false)
+        );
+        if empty_after {
+            ctx.db_mut().sync_delete(key);
+        }
+        ctx.reply_array_header(2)?;
+        ctx.reply_bulk_string(key.clone())?;
+        ctx.reply_array_header(popped.len())?;
+        for v in popped {
+            ctx.reply_bulk_string(v)?;
+        }
+        return Ok(());
+    }
+    ctx.reply_null_array()
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
 //   source:        src/t_list.c
@@ -643,9 +1112,11 @@ pub fn rpoplpush_command(ctx: &mut CommandContext) -> RedisResult<()> {
 //                  LPUSHX, RPUSHX, LPOP, RPOP, LLEN, LRANGE, LINDEX,
 //                  LSET, LREM, LTRIM, LINSERT, LMOVE, RPOPLPUSH backed by
 //                  the pragmatic ListEncoding::Inline encoding from
-//                  redis-core::object. Blocking variants (BLPOP, BRPOP,
-//                  BLMOVE, BRPOPLPUSH, BLMPOP) and LPOS / LMPOP remain
-//                  TODO until blocked-key infra and deferred-reply
-//                  protocol land. Phase 4 will swap Inline for real
-//                  ListPack / QuickList encodings from redis-ds.
+//                  redis-core::object. Round 10 adds non-blocking stubs
+//                  for BLPOP, BRPOP, BLMOVE, BRPOPLPUSH, BLMPOP that
+//                  short-circuit to a null reply when the source list is
+//                  empty rather than suspending the client; the real
+//                  blockForKeys infrastructure remains TODO. Phase 4 will
+//                  swap Inline for real ListPack / QuickList encodings
+//                  from redis-ds.
 // ──────────────────────────────────────────────────────────────────────────

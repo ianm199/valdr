@@ -280,7 +280,7 @@ fn read_string_bytes(ctx: &CommandContext, key: &RedisString) -> Result<Vec<u8>,
             if !obj.is_string() {
                 return Err(RedisError::wrong_type());
             }
-            Ok(obj.as_bytes().to_vec())
+            Ok(obj.string_bytes_owned())
         }
     }
 }

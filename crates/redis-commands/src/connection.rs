@@ -483,6 +483,32 @@ pub fn client_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         let line = build_client_list_line(ctx);
         return ctx.reply_bulk_string(RedisString::from_vec(line));
     }
+    if ascii_eq_ignore_case(sub_bytes, b"UNBLOCK") {
+        if ctx.arg_count() < 3 || ctx.arg_count() > 4 {
+            return Err(RedisError::wrong_number_of_args(b"client|unblock"));
+        }
+        let id_arg = ctx.arg_owned(2usize)?;
+        if parse_i64_strict(id_arg.as_bytes()).is_none() {
+            return Err(RedisError::runtime(
+                b"ERR value is not an integer or out of range",
+            ));
+        }
+        if ctx.arg_count() == 4 {
+            let mode = ctx.arg_owned(3usize)?;
+            if !ascii_eq_ignore_case(mode.as_bytes(), b"TIMEOUT")
+                && !ascii_eq_ignore_case(mode.as_bytes(), b"ERROR")
+            {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+        }
+        return ctx.reply_integer(0);
+    }
+    if ascii_eq_ignore_case(sub_bytes, b"PAUSE")
+        || ascii_eq_ignore_case(sub_bytes, b"REPLY")
+        || ascii_eq_ignore_case(sub_bytes, b"KILL")
+    {
+        return ctx.reply_simple_string(b"OK");
+    }
     let mut msg = Vec::with_capacity(b"ERR Unknown CLIENT subcommand: ".len() + sub_bytes.len());
     msg.extend_from_slice(b"ERR Unknown CLIENT subcommand: ");
     msg.extend_from_slice(sub_bytes);

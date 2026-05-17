@@ -80,6 +80,15 @@ pub const SETKEY_ADD_OR_UPDATE: u32 = 1 << 3;
 pub const NOTIFY_STRING: u32  = 1 << 3;
 pub const NOTIFY_GENERIC: u32 = 1 << 2;
 
+/// Default maximum length of a single bulk string in bytes (512 MiB).
+///
+/// Matches Valkey's `PROTO_MAX_BULK_LEN_DEFAULT` (server.h). Commands that
+/// would grow a stored string beyond this limit must reject with the
+/// canonical `ERR string exceeds maximum allowed size` reply. Until the
+/// `CommandContext` exposes a server-config accessor for the runtime value,
+/// this hard-coded constant gates SETRANGE/APPEND.
+pub const PROTO_MAX_BULK_LEN_DEFAULT: usize = 512 * 1024 * 1024;
+
 /// Expiry-time unit for SET / GETEX / MSETEX.
 ///
 /// C: `UNIT_SECONDS` = 0, `UNIT_MILLISECONDS` = 1 (server.h).
@@ -371,7 +380,7 @@ pub fn set_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         match ctx.db().find(&key) {
             None => prev_bytes = None,
             Some(obj) => match &obj.kind {
-                ObjectKind::String(_) => prev_bytes = Some(obj.as_bytes().to_vec()),
+                ObjectKind::String(_) => prev_bytes = Some(obj.string_bytes_owned()),
                 _ => return Err(RedisError::wrong_type()),
             },
         }
@@ -382,7 +391,7 @@ pub fn set_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     } else {
         0
     };
-    let obj = RedisObject::new_raw_string(value.as_bytes());
+    let obj = RedisObject::new_string_try_encoded(value.as_bytes());
     ctx.db_mut().set_key(key.clone(), obj, setkey_flags);
 
     if let Some(abs_ms) = expire_at_ms {
@@ -413,7 +422,7 @@ fn reply_get_value(ctx: &mut CommandContext, key: &RedisString) -> Result<(), Re
         None => ctx.reply_null_bulk(),
         Some(obj) => match &obj.kind {
             ObjectKind::String(_) => {
-                let bytes = obj.as_bytes().to_vec();
+                let bytes = obj.string_bytes_owned();
                 ctx.reply_bulk_string(RedisString::from_bytes(&bytes))
             }
             _ => Err(RedisError::wrong_type()),
@@ -436,7 +445,7 @@ pub fn setnx_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     if ctx.db_mut().lookup_key_write(&key).is_some() {
         return ctx.reply_integer(0);
     }
-    let obj = RedisObject::new_raw_string(value.as_bytes());
+    let obj = RedisObject::new_string_try_encoded(value.as_bytes());
     ctx.db_mut().set_key(key, obj, 0);
     ctx.reply_integer(1)
 }
@@ -493,17 +502,38 @@ fn setex_generic(ctx: &mut CommandContext, name: &[u8], multiplier: i64) -> Resu
             buf.extend_from_slice(b"' command");
             RedisError::runtime(buf)
         })?;
-    let obj = RedisObject::new_raw_string(value.as_bytes());
+    let obj = RedisObject::new_string_try_encoded(value.as_bytes());
     ctx.db_mut().set_key(key.clone(), obj, 0);
     ctx.db_mut().set_expire(&key, abs_ms);
     ctx.reply_simple_string(b"OK")
 }
 
-/// DELIFEQ key value — delete key only if its current value equals `value`.
+/// DELIFEQ key value — delete `key` only if its current value equals `value`.
+///
+/// Replies `:1` when the key existed, matched, and was deleted; `:0` when the
+/// key was absent or its current value differs. WRONGTYPE if the key holds a
+/// non-string value.
 ///
 /// C: `delifeqCommand` (t_string.c:283).
 pub fn delifeq_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
-    todo!("C: t_string.c:283, delifeqCommand")
+    if ctx.arg_count() != 3 {
+        return Err(RedisError::wrong_number_of_args(b"delifeq"));
+    }
+    let key = ctx.arg_owned(1usize)?;
+    let cmp = ctx.arg_owned(2usize)?;
+    let matched = match ctx.db_mut().lookup_key_write(&key) {
+        None => false,
+        Some(obj) => match &obj.kind {
+            ObjectKind::String(_) => obj.string_bytes_owned() == cmp.as_bytes(),
+            _ => return Err(RedisError::wrong_type()),
+        },
+    };
+    if matched {
+        ctx.db_mut().sync_delete(&key);
+        ctx.reply_integer(1)
+    } else {
+        ctx.reply_integer(0)
+    }
 }
 
 /// GET key
@@ -520,7 +550,7 @@ pub fn get_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let bytes: Option<Vec<u8>> = match ctx.db_mut().lookup_key_read_with_flags(&key, LOOKUP_NONE) {
         None => None,
         Some(obj) => match &obj.kind {
-            ObjectKind::String(_) => Some(obj.as_bytes().to_vec()),
+            ObjectKind::String(_) => Some(obj.string_bytes_owned()),
             _ => return Err(RedisError::wrong_type()),
         },
     };
@@ -595,7 +625,7 @@ pub fn getex_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let bytes: Option<Vec<u8>> = match ctx.db_mut().lookup_key_write(&key) {
         None => None,
         Some(obj) => match &obj.kind {
-            ObjectKind::String(_) => Some(obj.as_bytes().to_vec()),
+            ObjectKind::String(_) => Some(obj.string_bytes_owned()),
             _ => return Err(RedisError::wrong_type()),
         },
     };
@@ -630,7 +660,7 @@ pub fn getdel_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let bytes: Option<Vec<u8>> = match ctx.db_mut().lookup_key_write(&key) {
         None => None,
         Some(obj) => match &obj.kind {
-            ObjectKind::String(_) => Some(obj.as_bytes().to_vec()),
+            ObjectKind::String(_) => Some(obj.string_bytes_owned()),
             _ => return Err(RedisError::wrong_type()),
         },
     };
@@ -659,11 +689,11 @@ pub fn getset_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let prev: Option<Vec<u8>> = match ctx.db_mut().lookup_key_write(&key) {
         None => None,
         Some(obj) => match &obj.kind {
-            ObjectKind::String(_) => Some(obj.as_bytes().to_vec()),
+            ObjectKind::String(_) => Some(obj.string_bytes_owned()),
             _ => return Err(RedisError::wrong_type()),
         },
     };
-    let obj = RedisObject::new_raw_string(value.as_bytes());
+    let obj = RedisObject::new_string_try_encoded(value.as_bytes());
     ctx.db_mut().set_key(key, obj, 0);
     match prev {
         None => ctx.reply_null_bulk(),
@@ -677,6 +707,8 @@ pub fn getset_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 /// the offset extends past the current length. Replies with the resulting
 /// string length. If the key is missing and `value` is empty, the key is
 /// not created and `:0` is returned. A non-string `key` yields WRONGTYPE.
+/// Rejects with the `proto-max-bulk-len` size error when the resulting
+/// length would exceed `PROTO_MAX_BULK_LEN_DEFAULT` (512 MiB).
 ///
 /// C: `setrangeCommand` (t_string.c:432).
 pub fn setrange_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
@@ -692,10 +724,18 @@ pub fn setrange_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     }
     let offset = offset as usize;
     let value_bytes = value.as_bytes();
+    if !value_bytes.is_empty() {
+        let needed = offset.saturating_add(value_bytes.len());
+        if needed > PROTO_MAX_BULK_LEN_DEFAULT {
+            return Err(RedisError::runtime(
+                b"ERR string exceeds maximum allowed size (proto-max-bulk-len)",
+            ));
+        }
+    }
     let existing: Option<Vec<u8>> = match ctx.db_mut().lookup_key_write(&key) {
         None => None,
         Some(obj) => match &obj.kind {
-            ObjectKind::String(_) => Some(obj.as_bytes().to_vec()),
+            ObjectKind::String(_) => Some(obj.string_bytes_owned()),
             _ => return Err(RedisError::wrong_type()),
         },
     };
@@ -748,7 +788,7 @@ pub fn getrange_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let bytes: Vec<u8> = match ctx.db_mut().lookup_key_read_with_flags(&key, LOOKUP_NONE) {
         None => return ctx.reply_bulk_string(RedisString::from_bytes(b"")),
         Some(obj) => match &obj.kind {
-            ObjectKind::String(_) => obj.as_bytes().to_vec(),
+            ObjectKind::String(_) => obj.string_bytes_owned(),
             _ => return Err(RedisError::wrong_type()),
         },
     };
@@ -789,7 +829,7 @@ pub fn mget_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         let bytes: Option<Vec<u8>> = match ctx.db_mut().lookup_key_read_with_flags(key, LOOKUP_NONE) {
             None => None,
             Some(obj) => match &obj.kind {
-                ObjectKind::String(_) => Some(obj.as_bytes().to_vec()),
+                ObjectKind::String(_) => Some(obj.string_bytes_owned()),
                 _ => None,
             },
         };
@@ -820,7 +860,7 @@ pub fn mset_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     while j < argc {
         let key = ctx.arg_owned(j)?;
         let value = ctx.arg_owned(j + 1)?;
-        let obj = RedisObject::new_raw_string(value.as_bytes());
+        let obj = RedisObject::new_string_try_encoded(value.as_bytes());
         ctx.db_mut().set_key(key, obj, 0);
         j += 2;
     }
@@ -852,7 +892,7 @@ pub fn msetnx_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         }
     }
     for (key, value) in pairs {
-        let obj = RedisObject::new_raw_string(value.as_bytes());
+        let obj = RedisObject::new_string_try_encoded(value.as_bytes());
         ctx.db_mut().set_key(key, obj, 0);
     }
     ctx.reply_integer(1)
@@ -923,15 +963,14 @@ pub fn msetex_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
             let val_arg = ctx.arg_owned(j + 1)?;
             let raw = parse_strict_i64(val_arg.as_bytes())
                 .ok_or_else(|| RedisError::runtime(b"ERR value is not an integer or out of range"))?;
+            if raw <= 0 {
+                return Err(RedisError::runtime(
+                    b"ERR invalid expire time in 'msetex' command",
+                ));
+            }
             let abs = if ob.eq_ignore_ascii_case(b"EX") {
-                if raw <= 0 {
-                    return Err(RedisError::runtime(b"ERR invalid expire time in 'msetex' command"));
-                }
                 raw.checked_mul(1000).and_then(|v| v.checked_add(now_ms))
             } else if ob.eq_ignore_ascii_case(b"PX") {
-                if raw <= 0 {
-                    return Err(RedisError::runtime(b"ERR invalid expire time in 'msetex' command"));
-                }
                 raw.checked_add(now_ms)
             } else if ob.eq_ignore_ascii_case(b"EXAT") {
                 raw.checked_mul(1000)
@@ -965,7 +1004,7 @@ pub fn msetex_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     for p in 0..numkeys {
         let k = ctx.arg_owned(2 + 2 * p)?;
         let v = ctx.arg_owned(3 + 2 * p)?;
-        let obj = RedisObject::new_raw_string(v.as_bytes());
+        let obj = RedisObject::new_string_try_encoded(v.as_bytes());
         let flags = if keepttl { SETKEY_KEEPTTL } else { 0 };
         ctx.db_mut().set_key(k.clone(), obj, flags);
         if let Some(abs_ms) = expire_at_ms {
@@ -1003,16 +1042,10 @@ fn incr_decr_apply(ctx: &mut CommandContext, key: RedisString, delta: i64) -> Re
     let current: i64 = match ctx.db_mut().lookup_key_write(&key) {
         None => 0,
         Some(obj) => match &obj.kind {
-            ObjectKind::String(_) => {
-                let bytes = obj.as_bytes();
-                if bytes.is_empty() {
-                    return Err(RedisError::not_integer());
-                }
-                match parse_strict_i64(bytes) {
-                    Some(n) => n,
-                    None => return Err(RedisError::not_integer()),
-                }
-            }
+            ObjectKind::String(_) => match obj.get_long_long() {
+                Ok(n) => n,
+                Err(_) => return Err(RedisError::not_integer()),
+            },
             _ => return Err(RedisError::wrong_type()),
         },
     };
@@ -1024,7 +1057,7 @@ fn incr_decr_apply(ctx: &mut CommandContext, key: RedisString, delta: i64) -> Re
             ))
         }
     };
-    let stored = RedisObject::new_raw_string(&long_long_to_bytes(next));
+    let stored = RedisObject::new_int_string(next);
     ctx.db_mut().set_key(key, stored, SETKEY_KEEPTTL);
     ctx.reply_integer(next)
 }
@@ -1109,15 +1142,20 @@ pub fn append_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let value = ctx.arg_owned(2usize)?;
     let new_len: i64 = match ctx.db_mut().lookup_key_write(&key) {
         None => {
-            let obj = RedisObject::new_raw_string(value.as_bytes());
+            let obj = RedisObject::new_string_try_encoded(value.as_bytes());
             let len = value.as_bytes().len() as i64;
             ctx.db_mut().set_key(key, obj, 0);
             len
         }
         Some(obj) => match &obj.kind {
             ObjectKind::String(_) => {
-                let mut combined = obj.as_bytes().to_vec();
+                let mut combined = obj.string_bytes_owned();
                 combined.extend_from_slice(value.as_bytes());
+                if combined.len() > PROTO_MAX_BULK_LEN_DEFAULT {
+                    return Err(RedisError::runtime(
+                        b"ERR string exceeds maximum allowed size (proto-max-bulk-len)",
+                    ));
+                }
                 let len = combined.len() as i64;
                 let stored = RedisObject::new_raw_string(&combined);
                 ctx.db_mut().set_key(key, stored, SETKEY_KEEPTTL);
@@ -1143,7 +1181,7 @@ pub fn strlen_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let len: i64 = match ctx.db_mut().lookup_key_read_with_flags(&key, LOOKUP_NONE) {
         None => 0,
         Some(obj) => match &obj.kind {
-            ObjectKind::String(_) => obj.as_bytes().len() as i64,
+            ObjectKind::String(_) => obj.string_len()? as i64,
             _ => return Err(RedisError::wrong_type()),
         },
     };

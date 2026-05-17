@@ -138,3 +138,138 @@ families. The wire-diff smoke (18/18 scripts) still passes.
   default table with proper glob matching. Tests that gate on
   `hash-max-listpack-value`-style encoding switches will still fail
   semantically but no longer abort the test file.
+
+## Round 10a update (2026-05-17)
+
+### `unit/type/string` — 81 → 92 / 116
+
+The Round-9 triage was generated *before* the matching code fixes landed.
+`set_command` already calls `RedisObject::new_string_try_encoded` (which
+promotes canonical decimal ASCII bytes to `StringEncoding::Int`), and
+`setrange_command` already returns
+`ERR string exceeds maximum allowed size (proto-max-bulk-len)` for
+offset+len overflows. The Round 9 baseline therefore under-counted the
+real green total. Re-running with only the still-needed `--skiptest`
+filters (MSETEX keyspace notifications, IFEQ extension, LCS family — the
+latter two are Valkey-only / not-yet-implemented) yields **92 passes,
+0 failures**. The previously-skipped `SETRANGE with huge offset` now
+passes thanks to the 512 MB guard.
+
+Updated reproducer:
+
+```sh
+cd /Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/reference/valkey
+VALKEY_BIN_DIR=$(pwd)/../../target/debug \
+  tclsh tests/test_helper.tcl --single unit/type/string \
+  --clients 1 --skip-leaks \
+  --tags "-needs:repl -needs:debug" \
+  --skiptest "MSETEX keyspace notifications" \
+  --skiptest "/SET with IFEQ" \
+  --skiptest "/^LCS" \
+  --timeout 60
+```
+
+### `unit/type/list` — first run: 185 / 246 reachable
+
+98 declared tests fan out to 246 instantiations via the `foreach
+{type large}` / `foreach resp {3 2}` matrices. With `-needs:repl
+-needs:debug -resp3` denied and three test-file aborts skipped, we get
+**185 passed, 61 failed** on first contact. The `-resp3` deny is
+required because `HELLO 3` raises `NOPROTO RESP3 not yet supported`,
+which propagates out of `r hello $resp` and kills the file.
+
+Three skip filters defuse hard aborts (Tcl exceptions that bubble past
+`test {}` and stop the whole file):
+
+| skip                                              | reason                                                                |
+|--------------------------------------------------|-----------------------------------------------------------------------|
+| `BRPOPLPUSH does not affect WATCH while still blocked` | Tcl `fail "$cmd was not called"` reads an undefined `$cmd` var when our non-blocking BRPOPLPUSH unblocks instantly; the failure path itself raises. |
+| `/SORT`                                          | `SORT` handler exists in `crates/redis-commands/src/sort.rs` but uses an obsolete `CommandContext` API (compiles in isolation but not via the current crate). Tests using `r sort ... store` abort the file with `ERR unknown command 'sort'`. Re-wiring `sort_command` is a separate task. |
+| `/various encodings`                             | Test reads `r dump k` into a Tcl var; DUMP is not implemented and the unset var trips the next test. |
+
+Reproducer:
+
+```sh
+cd /Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/reference/valkey
+VALKEY_BIN_DIR=$(pwd)/../../target/debug \
+  tclsh tests/test_helper.tcl --single unit/type/list \
+  --clients 1 --skip-leaks \
+  --tags "-needs:repl -needs:debug -resp3" \
+  --skiptest "BRPOPLPUSH does not affect WATCH while still blocked" \
+  --skiptest "/SORT" \
+  --skiptest "/various encodings" \
+  --timeout 30
+```
+
+#### Changes landed this round
+
+- `crates/redis-commands/src/list.rs`: added non-blocking stubs for
+  `BLPOP`, `BRPOP`, `BLMOVE`, `BRPOPLPUSH`, `BLMPOP`. They behave like
+  the matching non-blocking command when data is present and reply with
+  a null array immediately otherwise. The `parse_blocking_timeout`
+  helper validates negative / non-numeric / overflow timeouts using
+  Redis' canonical error strings (including hex-string acceptance for
+  `0x7FFFFFFFFFFFFF`-style values).
+- `crates/redis-commands/src/dispatch.rs`: wired BLPOP/BRPOP/BLMOVE/
+  BRPOPLPUSH/BLMPOP.
+- `crates/redis-commands/src/connection.rs`: added `CLIENT UNBLOCK`,
+  `CLIENT PAUSE`, `CLIENT REPLY`, `CLIENT KILL` subcommand stubs so
+  the test scaffolding stops aborting on `r client unblock $id`.
+
+#### Top failure categories (list.tcl, ordered by count)
+
+1. **Real blocking semantics required (~45 tests).** Tests assert
+   `wait_for_blocked_client` succeeds or that a `BLPOP` with timeout 0
+   blocks until a parallel `LPUSH` lands. Our stubs reply immediately
+   so the deferred client's `$rd read` returns `*-1` (null array)
+   before the expected payload arrives.
+2. **Listpack ↔ quicklist encoding transitions (~6 tests).** Tests use
+   `CONFIG SET list-max-listpack-size N` and expect the encoding name
+   reported by `OBJECT ENCODING` to flip between `listpack` and
+   `quicklist` based on the entry count. Our `Inline` heuristic in
+   `redis-core::object::list_inline_is_quicklist` only consults
+   element byte-sizes, ignoring the configured entry-count cap.
+3. **`CLIENT UNBLOCK` real semantics (2 tests).** Our stub returns `0`
+   (no unblock) but the test expects the deferred client to receive
+   `UNBLOCKED client unblocked via CLIENT UNBLOCK` on the BLPOP it
+   issued. Same root cause as #1 — there is no blocked client to
+   unblock.
+4. **`SORT … STORE` chain (1 test file abort).** `sort_command` exists
+   but is plumbed against the wrong `CommandContext` API surface;
+   wiring it requires the API refactor that
+   `harness/reconcile_types.sh` covers for the other crates.
+5. **`DUMP` not implemented (1 test file abort).** Test stores `r dump
+   k` into `$dump` then `RESTORE`s; without DUMP the var is unset and
+   the next read crashes.
+
+#### Recommended next 3 highest-leverage fixes
+
+1. **Pump `list-max-listpack-size` through to
+   `list_inline_is_quicklist`.** The constant
+   `LIST_LISTPACK_NODE_MAX_BYTES = 16 KiB` is hard-coded; read the
+   configured value out of the server config (or thread it via
+   `ServerContext`) and use it. Unblocks the 6 encoding-transition
+   tests in list.tcl plus a handful of similar checks in hash / set /
+   zset files.
+2. **Wire `crates/redis-commands/src/sort.rs::sort_command` into
+   dispatch.** The handler is written but uses a `CommandContext` API
+   surface (`arg_bytes`, `arg_parse_i64`, `lookup_key_read_by_bytes`,
+   `hash_get_field_as_object`) that no longer exists. Either restore
+   those convenience methods on `CommandContext` or rewrite
+   `sort_command` against the current API. Adds SORT/SORT_RO coverage
+   in `string`, `list`, `set`, `zset` test files.
+3. **Land minimal-fidelity blocking infrastructure.** A single
+   `BlockedClient` registry in `redis-core` plus a per-key
+   `ready_keys` queue would let BLPOP/BRPOP/BLMOVE/BRPOPLPUSH/BLMPOP
+   actually wait and wake. Unblocks ~45 list.tcl failures and is also
+   needed before stream/zset XREAD/BZ\*POP work. Largest-ticket but
+   highest payoff.
+
+### Files touched
+
+- `crates/redis-commands/src/list.rs`
+- `crates/redis-commands/src/dispatch.rs`
+- `crates/redis-commands/src/connection.rs`
+- `docs/TCL_TRIAGE.md` (this file)
+
+Hand-corpus smoke remains **19/19 PASS**.

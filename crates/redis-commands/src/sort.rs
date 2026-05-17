@@ -154,11 +154,8 @@ fn lookup_key_by_pattern(
     subst: &RedisObject,
 ) -> Result<Option<RedisObject>, RedisError> {
     // C: sort.c:77-80 — pattern == "#" short-circuit.
-    let pat_bytes: &[u8] = pattern
-        .as_string_bytes()
-        // TODO(port): pattern must be a string object; non-string patterns
-        // are an internal contract violation; returning None is safe here.
-        .unwrap_or(b"");
+    let pat_cow = pattern.string_bytes();
+    let pat_bytes: &[u8] = pat_cow.as_ref();
 
     if is_return_subst_pattern(pat_bytes) {
         return Ok(Some(subst.clone()));
@@ -167,10 +164,10 @@ fn lookup_key_by_pattern(
     // C: sort.c:86-88 — decode `subst` to a raw byte string.
     // PORT NOTE: `getDecodedObject` in C either returns `subst` with
     // incremented refcount (for string objects) or a freshly-created decoded
-    // clone.  Here we call `as_string_bytes` which handles both cases.
-    let sub_bytes: &[u8] = subst
-        .as_string_bytes()
-        .unwrap_or(b"");
+    // clone.  Here we call `string_bytes` which handles both cases including
+    // Int-encoded values.
+    let sub_cow = subst.string_bytes();
+    let sub_bytes: &[u8] = sub_cow.as_ref();
 
     // C: sort.c:90-95 — find '*' in pattern.
     let star_pos = match pat_bytes.iter().position(|&b| b == b'*') {
@@ -320,9 +317,9 @@ fn sort_compare(a: &SortObject, b: &SortObject, params: &SortParams) -> std::cmp
 /// result for equal-length decimal strings but not in general.  Phase B
 /// should call the real `compare_string_objects` from `redis-core`.
 fn compare_string_objects(a: &RedisObject, b: &RedisObject) -> std::cmp::Ordering {
-    let ba = a.as_string_bytes().unwrap_or(b"");
-    let bb = b.as_string_bytes().unwrap_or(b"");
-    ba.cmp(bb)
+    let ca = a.string_bytes();
+    let cb = b.string_bytes();
+    ca.as_ref().cmp(cb.as_ref())
 }
 
 /// Locale-aware collation of two `RedisObject` string values.
@@ -355,8 +352,13 @@ fn collate_string_objects(a: &RedisObject, b: &RedisObject) -> std::cmp::Orderin
 /// The Rust `f64::from_str` / `parse::<f64>` returns `Err` for those cases,
 /// so this should be equivalent — but verify against the oracle.
 fn parse_score_from_object(obj: &RedisObject) -> Result<f64, ()> {
-    // C: sort.c:484-489 — sdsEncodedObject path.
-    let bytes = obj.as_string_bytes().ok_or(())?;
+    // C: sort.c:484-489 — sdsEncodedObject path. Int-encoded strings are
+    // converted to ASCII via `string_bytes` to keep the parser uniform.
+    if !obj.is_string() {
+        return Err(());
+    }
+    let cow = obj.string_bytes();
+    let bytes = cow.as_ref();
     // TODO(port): Rust `f64` parse requires valid UTF-8.  Redis byte strings
     // are arbitrary bytes.  Use lossy conversion for the number-parsing path
     // only (scores are expected to be ASCII).

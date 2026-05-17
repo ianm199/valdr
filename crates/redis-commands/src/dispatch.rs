@@ -174,6 +174,7 @@ pub static HANDLERS: &[DispatchEntry] = &[
     DispatchEntry { name: b"PSETEX", handler: crate::string::psetex_command },
     DispatchEntry { name: b"GETEX", handler: crate::string::getex_command },
     DispatchEntry { name: b"MSETEX", handler: crate::string::msetex_command },
+    DispatchEntry { name: b"DELIFEQ", handler: crate::string::delifeq_command },
     DispatchEntry { name: b"INCRBYFLOAT", handler: crate::string::incrbyfloat_command },
     DispatchEntry { name: b"LCS", handler: crate::string::lcs_command },
     // ── LIST (Round 2) ─────────────────────────────────────────────────────
@@ -192,6 +193,13 @@ pub static HANDLERS: &[DispatchEntry] = &[
     DispatchEntry { name: b"LINSERT", handler: crate::list::linsert_command },
     DispatchEntry { name: b"LMOVE", handler: crate::list::lmove_command },
     DispatchEntry { name: b"RPOPLPUSH", handler: crate::list::rpoplpush_command },
+    DispatchEntry { name: b"LPOS", handler: crate::list::lpos_command },
+    DispatchEntry { name: b"LMPOP", handler: crate::list::lmpop_command },
+    DispatchEntry { name: b"BLPOP", handler: crate::list::blpop_command },
+    DispatchEntry { name: b"BRPOP", handler: crate::list::brpop_command },
+    DispatchEntry { name: b"BLMOVE", handler: crate::list::blmove_command },
+    DispatchEntry { name: b"BRPOPLPUSH", handler: crate::list::brpoplpush_command },
+    DispatchEntry { name: b"BLMPOP", handler: crate::list::blmpop_command },
     // ── HASH (Round 3) ─────────────────────────────────────────────────────
     DispatchEntry { name: b"HSET", handler: crate::hash::hset_command },
     DispatchEntry { name: b"HSETNX", handler: crate::hash::hsetnx_command },

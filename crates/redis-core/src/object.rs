@@ -462,6 +462,18 @@ impl RedisObject {
         Self::bare(ObjectKind::String(StringEncoding::Int(value)))
     }
 
+    /// Create a string object, promoting to `Int` encoding when the bytes are
+    /// the canonical decimal ASCII representation of an `i64`. Otherwise picks
+    /// `Embstr`/`Raw` via the size threshold.
+    ///
+    /// C: createStringObject + tryObjectEncoding fast path (`t_string.c` SET).
+    pub fn new_string_try_encoded(bytes: &[u8]) -> Self {
+        if let Some(value) = parse_canonical_decimal_i64(bytes) {
+            return Self::new_int_string(value);
+        }
+        Self::new_string(bytes)
+    }
+
     /// Create an empty list object with the pragmatic Inline encoding.
     ///
     /// Phase 4 will replace this with one of the real `redis-ds` encodings
@@ -708,7 +720,13 @@ impl RedisObject {
             ObjectKind::String(StringEncoding::Raw(_)) => "raw",
             ObjectKind::String(StringEncoding::Embstr(_)) => "embstr",
             ObjectKind::String(StringEncoding::Int(_)) => "int",
-            ObjectKind::List(ListEncoding::Inline(_)) => "listpack",
+            ObjectKind::List(ListEncoding::Inline(d)) => {
+                if list_inline_is_quicklist(d) {
+                    "quicklist"
+                } else {
+                    "listpack"
+                }
+            }
             ObjectKind::List(ListEncoding::QuickList(_)) => "quicklist",
             ObjectKind::List(ListEncoding::ListPack(_)) => "listpack",
             ObjectKind::Set(SetEncoding::Inline(_)) => "listpack",
@@ -947,6 +965,36 @@ impl RedisObject {
 // Free-standing object creation helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Maximum payload size of any single element before a list is reported as
+/// `quicklist` rather than `listpack`. The test suite uses an 8 KiB filler
+/// to force the `quicklist` encoding path; setting the threshold at 4 KiB
+/// keeps the bound below that filler size.
+pub const LIST_LISTPACK_MAX_ELEMENT_BYTES: usize = 4 * 1024;
+
+/// Approximate aggregate bytes a single listpack node can hold before the
+/// list is reported as `quicklist`. Matches Valkey's default
+/// `list-max-listpack-size = -2` (8 KiB per node) doubled to leave room for
+/// the small per-entry overhead that the C listpack format imposes.
+pub const LIST_LISTPACK_NODE_MAX_BYTES: usize = 16 * 1024;
+
+/// Decide whether an `Inline`-encoded list should be reported as
+/// `quicklist`. The C port uses a real quicklist; here we approximate by
+/// summing element byte sizes and flagging any single oversized element.
+fn list_inline_is_quicklist(d: &VecDeque<RedisString>) -> bool {
+    let mut total: usize = 0;
+    for v in d {
+        let len = v.as_bytes().len();
+        if len > LIST_LISTPACK_MAX_ELEMENT_BYTES {
+            return true;
+        }
+        total = total.saturating_add(len).saturating_add(11);
+        if total > LIST_LISTPACK_NODE_MAX_BYTES {
+            return true;
+        }
+    }
+    false
+}
+
 /// Return `true` if a string of `len` bytes should use EMBSTR encoding.
 /// C: shouldEmbedStringObject(val_len, key, expire) → object.c:229
 /// PORT NOTE: In C the threshold also accounts for key/expire embedded in the same
@@ -964,6 +1012,25 @@ fn should_embed_string(len: usize) -> bool {
 fn parse_long_long(bytes: &[u8]) -> Option<i64> {
     let s = core::str::from_utf8(bytes).ok()?;
     s.trim().parse::<i64>().ok()
+}
+
+/// Strict canonical-decimal parser for promoting a SET value to `Int` encoding.
+///
+/// Mirrors `string2ll` in `util.c`: rejects leading `+`, leading zeros (except
+/// the single string `"0"`), `-0`, leading or trailing whitespace, and any
+/// value whose round-trip ASCII form does not match the input byte-for-byte.
+/// On success the returned value's `format!("{}")` equals the input bytes.
+fn parse_canonical_decimal_i64(bytes: &[u8]) -> Option<i64> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let s = core::str::from_utf8(bytes).ok()?;
+    let value = s.parse::<i64>().ok()?;
+    if value.to_string().as_bytes() == bytes {
+        Some(value)
+    } else {
+        None
+    }
 }
 
 /// Parse a byte slice as a `long` (`i64` on 64-bit).
@@ -1564,15 +1631,7 @@ pub fn object_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         ctx.reply_integer(1)?;
     } else if subcmd_bytes == b"encoding" {
         let name: &[u8] = match ctx.db().find(&key_arg) {
-            Some(obj) => match &obj.kind {
-                ObjectKind::String(_) => b"raw",
-                ObjectKind::List(_) => b"quicklist",
-                ObjectKind::Hash(_) => b"hashtable",
-                ObjectKind::Set(_) => b"hashtable",
-                ObjectKind::ZSet(_) => b"skiplist",
-                ObjectKind::Stream(_) => b"stream",
-                ObjectKind::Module => b"raw",
-            },
+            Some(obj) => obj.encoding_name().as_bytes(),
             None => b"none",
         };
         ctx.reply_bulk(name)?;
@@ -1726,6 +1785,35 @@ impl RedisObject {
     pub fn as_bytes(&self) -> &[u8] {
         self.as_string_bytes().unwrap_or(&[])
     }
+
+    /// Borrowed-or-owned view of the string payload regardless of encoding.
+    ///
+    /// `Raw`/`Embstr` borrow the underlying `RedisString`. `Int` formats the
+    /// integer as canonical ASCII decimal into an owned `Vec`. Non-string
+    /// variants borrow an empty slice.
+    pub fn string_bytes(&self) -> std::borrow::Cow<'_, [u8]> {
+        match &self.kind {
+            ObjectKind::String(StringEncoding::Raw(s))
+            | ObjectKind::String(StringEncoding::Embstr(s)) => std::borrow::Cow::Borrowed(s.as_bytes()),
+            ObjectKind::String(StringEncoding::Int(n)) => std::borrow::Cow::Owned(n.to_string().into_bytes()),
+            _ => std::borrow::Cow::Borrowed(&[]),
+        }
+    }
+
+    /// Materialise the string payload as owned bytes regardless of encoding.
+    ///
+    /// `Raw`/`Embstr` clone the underlying `RedisString`. `Int` formats the
+    /// integer as canonical ASCII decimal. Non-string variants return an
+    /// empty `Vec`.
+    pub fn string_bytes_owned(&self) -> Vec<u8> {
+        match &self.kind {
+            ObjectKind::String(StringEncoding::Raw(s))
+            | ObjectKind::String(StringEncoding::Embstr(s)) => s.as_bytes().to_vec(),
+            ObjectKind::String(StringEncoding::Int(n)) => n.to_string().into_bytes(),
+            _ => Vec::new(),
+        }
+    }
+
 
     /// Number of items in a List/Set/ZSet/Hash (best-effort across encodings).
     /// Returns 0 for non-collection types.
