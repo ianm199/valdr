@@ -24,3 +24,6 @@ ListPack          struct  crates/redis-ds/src/listpack.rs           audit  Phase
 QuickList         struct  crates/redis-ds/src/quicklist.rs          audit  Phase 4: data-structure encodings
 RadixTree         struct  crates/redis-ds/src/rax.rs                audit  Phase 4/5: rax for streams + cluster
 ModuleApi         struct  crates/redis-modules/src/api.rs           audit  Phase 10: modules (crate not in pilot)
+MultiState        struct  crates/redis-core/src/client.rs           audit    moved from salvaged multi.rs; per Phase B compile-fix
+MultiCmd          struct  crates/redis-core/src/client.rs           audit    moved from salvaged multi.rs
+WatchedKey        struct  crates/redis-core/src/client.rs           audit    moved from salvaged multi.rs

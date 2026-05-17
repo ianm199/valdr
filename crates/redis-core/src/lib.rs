@@ -21,8 +21,10 @@ pub mod latency;
 pub mod lazyfree;
 pub mod object;
 pub mod server;
+pub mod strtod;
 pub mod timeout;
 pub mod unix;
+pub mod util;
 
 pub use client::{Client, ClientId};
 pub use command_context::CommandContext;

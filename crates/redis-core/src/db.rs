@@ -5,6 +5,7 @@
 //! shape that command implementations call against. Expiry not yet
 //! tracked.
 
+use crate::client::ClientId;
 use crate::object::RedisObject;
 use redis_types::RedisString;
 use std::collections::HashMap;
@@ -15,11 +16,26 @@ pub struct RedisDb {
     pub id: u32,
     /// Main keyspace.
     dict: HashMap<RedisString, RedisObject>,
+    /// Per-key watcher list for MULTI/EXEC CAS.
+    ///
+    /// STUB — Phase B placeholder mapping a watched key to the list of client
+    /// ids watching it. The full intrusive-list structure of C's
+    /// `watched_keys` hashtable lands in Phase 3.
+    watched_keys: HashMap<RedisString, Vec<ClientId>>,
 }
 
 impl RedisDb {
     pub fn new(id: u32) -> Self {
-        Self { id, dict: HashMap::new() }
+        Self {
+            id,
+            dict: HashMap::new(),
+            watched_keys: HashMap::new(),
+        }
+    }
+
+    /// Database id as `i32` (matches the C `redisDb.id` type used by callers).
+    pub fn id(&self) -> i32 {
+        self.id as i32
     }
 
     /// Look up `key` for read.
@@ -75,6 +91,30 @@ impl RedisDb {
 
     pub fn clear(&mut self) {
         self.dict.clear()
+    }
+
+    /// Whether `key` has an active expiry that is already in the past.
+    ///
+    /// STUB — Phase B placeholder. Expiry tracking is owned by the future
+    /// `expires` dict on `RedisDb`; returns `false` until that lands.
+    pub fn key_is_expired(&self, _key: &RedisObject) -> bool {
+        false
+    }
+
+    /// Whether this db has any watched keys at all.
+    ///
+    /// STUB — Phase B placeholder backed by the per-key watcher map.
+    pub fn watched_keys_is_empty(&self) -> bool {
+        self.watched_keys.is_empty()
+    }
+
+    /// Register `client_id` as a watcher of `key` in this db.
+    ///
+    /// STUB — Phase B placeholder. Real implementation in `multi.c` chains
+    /// watchedKey records into both client- and db-side intrusive lists.
+    pub fn watched_keys_add_client(&mut self, key: &RedisObject, client_id: ClientId) {
+        let k = RedisString::from_bytes(key.as_bytes());
+        self.watched_keys.entry(k).or_default().push(client_id);
     }
 }
 

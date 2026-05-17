@@ -85,6 +85,14 @@ impl RedisServer {
     pub fn max_idle_time(&self) -> i64 {
         0
     }
+
+    /// Set the server-wide `in_exec` flag (true while EXEC is mid-flight).
+    ///
+    /// STUB — Phase B placeholder; no backing storage yet. The full
+    /// implementation lands when EXEC dispatches queued commands in Phase 3.
+    pub fn set_in_exec(&mut self, _value: bool) {
+        // TODO(port): persist on RedisServer when in_exec field is added.
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────

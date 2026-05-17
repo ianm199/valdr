@@ -12,6 +12,8 @@
 
 pub mod bitops;
 pub mod generated;
+pub mod list;
+pub mod multi;
 pub mod pubsub;
 pub mod stream;
 

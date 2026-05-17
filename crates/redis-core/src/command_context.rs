@@ -10,6 +10,7 @@
 use crate::client::Client;
 use crate::db::RedisDb;
 use crate::object::RedisObject;
+use crate::server::RedisServer;
 use redis_protocol::RespFrame;
 use redis_types::{RedisError, RedisResult, RedisString};
 
@@ -23,6 +24,37 @@ pub struct CommandContext<'a> {
     pub client: &'a mut Client,
     /// Per-context DB scratch. STUB — Phase 3 replaces with server-owned dbs.
     pub stub_db: RedisDb,
+    /// Per-context server scratch. STUB — Phase 3 replaces with a `&'a mut
+    /// RedisServer` carried into every command.
+    pub stub_server: RedisServer,
+}
+
+/// Argument type accepted by `CommandContext::reply_error`.
+///
+/// STUB — Phase B placeholder. Implemented for `&RedisError` (the canonical
+/// case) and `&[u8]` (used by translated code that builds raw error message
+/// bytes inline). Once all translated code switches to `RedisError`, the
+/// `&[u8]` impl can be removed.
+pub trait ReplyErrorArg {
+    fn into_reply_error_payload(self) -> RedisString;
+}
+
+impl ReplyErrorArg for &RedisError {
+    fn into_reply_error_payload(self) -> RedisString {
+        self.to_resp_payload()
+    }
+}
+
+impl ReplyErrorArg for &[u8] {
+    fn into_reply_error_payload(self) -> RedisString {
+        RedisString::from_bytes(self)
+    }
+}
+
+impl<const N: usize> ReplyErrorArg for &[u8; N] {
+    fn into_reply_error_payload(self) -> RedisString {
+        RedisString::from_bytes(self)
+    }
 }
 
 /// Flexible reply-array length argument.
@@ -66,7 +98,11 @@ impl ArgIndex for i32 {
 
 impl<'a> CommandContext<'a> {
     pub fn new(client: &'a mut Client) -> Self {
-        Self { client, stub_db: RedisDb::new(0) }
+        Self {
+            client,
+            stub_db: RedisDb::new(0),
+            stub_server: RedisServer::default(),
+        }
     }
 
     // ── Args ──────────────────────────────────────────────────────
@@ -132,11 +168,14 @@ impl<'a> CommandContext<'a> {
         Ok(())
     }
 
-    /// Reply with a RedisError. Equivalent of C's addReplyError* family.
-    /// The error becomes a `-...` RESP error line; doesn't return Err.
-    pub fn reply_error(&mut self, err: &RedisError) -> RedisResult<()> {
+    /// Reply with an error. Equivalent of C's addReplyError* family.
+    ///
+    /// Accepts either a `&RedisError` (preferred) or raw `&[u8]` bytes; both
+    /// are dispatched through [`ReplyErrorArg`]. The error becomes a `-...`
+    /// RESP error line; this does not return `Err`.
+    pub fn reply_error<E: ReplyErrorArg>(&mut self, err: E) -> RedisResult<()> {
         self.client
-            .write_frame(&RespFrame::Error(err.to_resp_payload()));
+            .write_frame(&RespFrame::Error(err.into_reply_error_payload()));
         Ok(())
     }
 
@@ -205,6 +244,55 @@ impl<'a> CommandContext<'a> {
     /// the server keyed by `client.db_index`.
     pub fn db_mut(&mut self) -> &mut RedisDb {
         &mut self.stub_db
+    }
+
+    /// Mutable borrow of the underlying `Client`.
+    pub fn client_mut(&mut self) -> &mut Client {
+        self.client
+    }
+
+    /// Shared borrow of the underlying `Client`.
+    pub fn client_ref(&self) -> &Client {
+        self.client
+    }
+
+    /// Mutable borrow of the per-context `RedisServer` scratch.
+    ///
+    /// STUB — Phase B placeholder; Phase 3 routes through the real server
+    /// reference carried in `CommandContext`.
+    pub fn server_mut(&mut self) -> &mut RedisServer {
+        &mut self.stub_server
+    }
+
+    /// Empty-array reply (RESP `*0\r\n`).
+    pub fn reply_empty_array(&mut self) -> RedisResult<()> {
+        self.reply_array_header_i64(0)
+    }
+
+    /// Argv accessor returning a `RedisObject` (alias of `arg_as_object`).
+    pub fn arg_object<I: ArgIndex>(&self, i: I) -> RedisResult<RedisObject> {
+        self.arg_as_object(i)
+    }
+
+    /// Begin watching `key` for MULTI/EXEC CAS semantics.
+    ///
+    /// STUB — Phase B placeholder. The full implementation in
+    /// `redis-commands::multi::watch_for_key` needs both `&mut Client` and
+    /// `&mut RedisDb`; this thin wrapper bridges via the per-context db
+    /// scratch until Phase 3 wires real db routing.
+    pub fn watch_for_key(&mut self, _key: &RedisObject) -> RedisResult<()> {
+        // TODO(port): call multi::watch_for_key once cross-crate dispatch
+        // resolves the borrow conflict between &mut Client and &mut RedisDb.
+        Ok(())
+    }
+
+    /// Dispatch the currently-installed queued command with the given flags.
+    ///
+    /// STUB — Phase B placeholder; real implementation depends on the Phase 3
+    /// command-dispatch table.
+    pub fn call_queued(&mut self, _flags: u32) -> RedisResult<()> {
+        // TODO(port): wire when command dispatch lands.
+        Ok(())
     }
 }
 

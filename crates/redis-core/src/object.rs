@@ -43,6 +43,19 @@ impl RedisObject {
         }
     }
 
+    /// Byte-view of the object when it carries a `RedisString` payload.
+    ///
+    /// STUB — Phase B placeholder. Returns the inner `RedisString` bytes for
+    /// `RedisObject::String`, an empty slice otherwise. Translated callers use
+    /// this where the C source called `obj->ptr` directly on a `RedisString`-
+    /// backed object.
+    pub fn as_bytes(&self) -> &[u8] {
+        match self {
+            RedisObject::String(s) => s.as_bytes(),
+            _ => &[],
+        }
+    }
+
     /// Expiration deadline in absolute milliseconds, if one is set.
     ///
     /// STUB — Phase B placeholder. Expiry tracking is owned by `RedisDb`'s
