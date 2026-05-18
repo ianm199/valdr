@@ -19,11 +19,13 @@ use crate::object::EXPIRY_NONE;
 use redis_types::RedisString;
 
 use super::crc::crc64;
+use super::hash::load_hash_object;
 use super::header::{
     read_magic, read_rdb_string, RDB_OPCODE_AUX, RDB_OPCODE_EOF, RDB_OPCODE_EXPIRETIME,
     RDB_OPCODE_EXPIRETIME_MS, RDB_OPCODE_FREQ, RDB_OPCODE_FUNCTION2, RDB_OPCODE_IDLE,
     RDB_OPCODE_MODULE_AUX, RDB_OPCODE_RESIZEDB, RDB_OPCODE_SELECTDB, RDB_OPCODE_SLOT_IMPORT,
-    RDB_OPCODE_SLOT_INFO, RDB_TYPE_STRING,
+    RDB_OPCODE_SLOT_INFO, RDB_TYPE_HASH, RDB_TYPE_HASH_2, RDB_TYPE_HASH_LISTPACK,
+    RDB_TYPE_HASH_ZIPLIST, RDB_TYPE_STRING,
 };
 use super::string::load_string_object;
 use super::varint::load_len;
@@ -193,16 +195,30 @@ pub fn load_into(db: &mut RedisDb, path: &Path) -> io::Result<String> {
 
 /// Load the value payload for a given RDB type byte, returning a `RedisObject`.
 ///
-/// `RDB_TYPE_STRING` uses the encoding-aware `load_string_object` so that
-/// `StringEncoding::Int`, `Embstr`, and `Raw` are preserved across a round-trip.
-/// Unknown type bytes are rejected; later rounds (20–23) will expand coverage.
+/// `RDB_TYPE_STRING` uses the encoding-aware `load_string_object`.
+/// `RDB_TYPE_HASH` uses `load_hash_object` (flat field/value pairs).
+/// `RDB_TYPE_HASH_ZIPLIST`, `RDB_TYPE_HASH_LISTPACK`, and `RDB_TYPE_HASH_2`
+/// return a graceful error so the caller can decide whether to skip or abort.
+/// Unknown type bytes are rejected with an unsupported error.
 fn load_value(reader: &mut impl Read, type_byte: u8) -> io::Result<crate::object::RedisObject> {
-    if type_byte == RDB_TYPE_STRING {
-        load_string_object(reader)
-    } else {
-        Err(io::Error::new(
+    match type_byte {
+        RDB_TYPE_STRING => load_string_object(reader),
+        RDB_TYPE_HASH => load_hash_object(reader),
+        RDB_TYPE_HASH_ZIPLIST => Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            format!("RDB type 0x{:02x} not yet handled (Rounds 20-23)", type_byte),
-        ))
+            "RDB_TYPE_HASH_ZIPLIST (13) not yet supported on load; set hash-max-listpack-entries 0 in C Valkey before SAVE",
+        )),
+        RDB_TYPE_HASH_LISTPACK => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "RDB_TYPE_HASH_LISTPACK (16) not yet supported on load; set hash-max-listpack-entries 0 in C Valkey before SAVE",
+        )),
+        RDB_TYPE_HASH_2 => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "RDB_TYPE_HASH_2 (22) field-level expiry not yet supported on load",
+        )),
+        _ => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("RDB type 0x{:02x} not yet handled (Rounds 21-23)", type_byte),
+        )),
     }
 }

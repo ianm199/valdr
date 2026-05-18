@@ -586,6 +586,14 @@ impl RedisObject {
         Self::bare(ObjectKind::Hash(HashEncoding::Inline(HashMap::new())))
     }
 
+    /// Create a hash object from an existing `HashMap`, using the Inline encoding.
+    ///
+    /// Used by the RDB loader to construct a hash object from a deserialized
+    /// field/value map without an intermediate empty-insert loop.
+    pub fn new_hash_from_map(map: HashMap<RedisString, RedisString>) -> Self {
+        Self::bare(ObjectKind::Hash(HashEncoding::Inline(map)))
+    }
+
     /// Borrow the inner field/value `HashMap` for a hash-encoded object.
     ///
     /// Returns `None` for non-hash objects and for the stub `ListPack` /
@@ -1275,7 +1283,7 @@ fn zset_inline_observed_encoding(z: &InlineZSet) -> &'static str {
 /// the literal `"0"`, no whitespace, no leading `+`). Used by the
 /// set-encoding heuristic to decide whether an `Inline` set qualifies for
 /// the `intset` label.
-fn is_canonical_i64_ascii(bytes: &[u8]) -> bool {
+pub(crate) fn is_canonical_i64_ascii(bytes: &[u8]) -> bool {
     if bytes.is_empty() || bytes.len() > 20 {
         return false;
     }

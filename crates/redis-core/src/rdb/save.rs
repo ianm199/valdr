@@ -22,9 +22,10 @@ use crate::db::RedisDb;
 use crate::object::{ObjectKind, EXPIRY_NONE};
 
 use super::crc::crc64;
+use super::hash::save_hash_object;
 use super::header::{
     write_aux_fields, write_magic, write_rdb_string, RDB_OPCODE_EOF, RDB_OPCODE_EXPIRETIME_MS,
-    RDB_OPCODE_RESIZEDB, RDB_OPCODE_SELECTDB, RDB_TYPE_STRING,
+    RDB_OPCODE_RESIZEDB, RDB_OPCODE_SELECTDB, RDB_TYPE_HASH, RDB_TYPE_STRING,
 };
 use super::string::save_string_object;
 use super::varint::write_len;
@@ -61,11 +62,17 @@ fn write_rdb_to_buf(db: &RedisDb, buf: &mut Vec<u8>) -> io::Result<()> {
             buf.write_all(&obj.expire.to_le_bytes())?;
         }
 
-        buf.write_all(&[RDB_TYPE_STRING])?;
+        let type_byte = match &obj.kind {
+            ObjectKind::String(_) => RDB_TYPE_STRING,
+            ObjectKind::Hash(_) => RDB_TYPE_HASH,
+            _ => continue,
+        };
+        buf.write_all(&[type_byte])?;
         write_rdb_string(buf, key.as_bytes())?;
         match &obj.kind {
             ObjectKind::String(_) => save_string_object(buf, obj)?,
-            _ => write_len(buf, 0)?,
+            ObjectKind::Hash(_) => save_hash_object(buf, obj)?,
+            _ => unreachable!(),
         }
     }
 

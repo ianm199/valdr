@@ -31,6 +31,10 @@ pub const RDB_OPCODE_SLOT_IMPORT: u8 = 243;
 
 /// RDB type constants.
 pub const RDB_TYPE_STRING: u8 = 0;
+pub const RDB_TYPE_HASH: u8 = 4;
+pub const RDB_TYPE_HASH_ZIPLIST: u8 = 13;
+pub const RDB_TYPE_HASH_LISTPACK: u8 = 16;
+pub const RDB_TYPE_HASH_2: u8 = 22;
 
 /// Write an RDB string (raw bytes prefixed by length).
 ///

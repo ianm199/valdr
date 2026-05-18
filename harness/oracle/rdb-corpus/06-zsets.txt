@@ -1,0 +1,66 @@
+# 06-zsets.txt — exercises RDB_TYPE_ZSET save/load fidelity
+#
+# CONFIG SET forces skiplist encoding on C Valkey so both sides write the
+# same on-disk format.  ZRANGE / ZRANGEBYSCORE are deterministic because
+# Valkey sorts by score, then lexicographically by member on ties.
+
+CONFIG SET zset-max-listpack-entries 0
+
+# Small zset — 3 members with distinct integer scores
+ZADD z_small 1 alpha 2 beta 3 gamma
+
+# Single-member zset
+ZADD z_one 42 only
+
+# Zset with float scores including negative and zero
+ZADD z_float -1.5 neg 0.0 zero 0.5 half 1.0 one 3.14159 pi 100.0 hundred
+
+# Zset with tied scores — ordering within tie is lexicographic
+ZADD z_ties 1 apple 1 banana 1 cherry 2 delta 2 echo
+
+# Larger zset — 55 members to force skiplist regardless of config
+ZADD z_large 1 m1 2 m2 3 m3 4 m4 5 m5 6 m6 7 m7 8 m8 9 m9 10 m10
+ZADD z_large 11 m11 12 m12 13 m13 14 m14 15 m15 16 m16 17 m17 18 m18 19 m19 20 m20
+ZADD z_large 21 m21 22 m22 23 m23 24 m24 25 m25 26 m26 27 m27 28 m28 29 m29 30 m30
+ZADD z_large 31 m31 32 m32 33 m33 34 m34 35 m35 36 m36 37 m37 38 m38 39 m39 40 m40
+ZADD z_large 41 m41 42 m42 43 m43 44 m44 45 m45 46 m46 47 m47 48 m48 49 m49 50 m50
+ZADD z_large 51 m51 52 m52 53 m53 54 m54 55 m55
+
+VERIFY
+
+DBSIZE
+TYPE z_small
+TYPE z_one
+TYPE z_float
+TYPE z_ties
+TYPE z_large
+ZCARD z_small
+ZCARD z_one
+ZCARD z_float
+ZCARD z_ties
+ZCARD z_large
+ZSCORE z_small alpha
+ZSCORE z_small beta
+ZSCORE z_small gamma
+ZSCORE z_small missing
+ZSCORE z_one only
+ZSCORE z_float neg
+ZSCORE z_float zero
+ZSCORE z_float pi
+ZSCORE z_large m1
+ZSCORE z_large m55
+ZSCORE z_large m28
+ZSCORE z_large notamember
+ZRANGE z_small 0 -1 WITHSCORES
+ZRANGE z_one 0 -1 WITHSCORES
+ZRANGE z_float 0 -1 WITHSCORES
+ZRANGE z_ties 0 -1 WITHSCORES
+ZRANGEBYSCORE z_small 1 2 WITHSCORES
+ZRANGEBYSCORE z_small 2 3 WITHSCORES
+ZRANGEBYSCORE z_small -inf +inf WITHSCORES
+ZRANGEBYSCORE z_float -inf 0.0 WITHSCORES
+ZRANGEBYSCORE z_float 0.0 1.0 WITHSCORES
+ZRANGEBYSCORE z_large 10 20 WITHSCORES
+ZRANGEBYSCORE z_large 50 55 WITHSCORES
+ZRANGE z_large 0 4 WITHSCORES
+ZRANGE z_large 50 54 WITHSCORES

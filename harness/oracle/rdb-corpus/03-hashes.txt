@@ -1,0 +1,68 @@
+# 03-hashes.txt — exercises RDB_TYPE_HASH save/load fidelity
+#
+# CONFIG SET forces C Valkey to write HASHTABLE encoding (bypasses listpack),
+# so both sides are exercising the same on-disk format.
+
+CONFIG SET hash-max-listpack-entries 0
+
+# Small hash — 1 field
+HSET h_small field1 value1
+
+# Two-field hash
+HSET h_two alpha hello beta world
+
+# Medium hash — 7 fields
+HSET h_med k1 v1 k2 v2 k3 v3 k4 v4 k5 v5 k6 v6 k7 v7
+
+# Hash with empty-string field values
+HSET h_empty_vals present "" absent ""
+
+# Hash with numeric string values (tests integer-encoding promotion paths)
+HSET h_num count 0 max 9999 min -128 big 2147483647 zero 0
+
+# Larger hash — 52 fields — forces HASHTABLE form regardless of config
+HSET h_large f1 v1 f2 v2 f3 v3 f4 v4 f5 v5 f6 v6 f7 v7 f8 v8 f9 v9 f10 v10
+HSET h_large f11 v11 f12 v12 f13 v13 f14 v14 f15 v15 f16 v16 f17 v17 f18 v18 f19 v19 f20 v20
+HSET h_large f21 v21 f22 v22 f23 v23 f24 v24 f25 v25 f26 v26 f27 v27 f28 v28 f29 v29 f30 v30
+HSET h_large f31 v31 f32 v32 f33 v33 f34 v34 f35 v35 f36 v36 f37 v37 f38 v38 f39 v39 f40 v40
+HSET h_large f41 v41 f42 v42 f43 v43 f44 v44 f45 v45 f46 v46 f47 v47 f48 v48 f49 v49 f50 v50
+HSET h_large f51 v51 f52 v52
+
+VERIFY
+
+DBSIZE
+TYPE h_small
+TYPE h_two
+TYPE h_med
+TYPE h_num
+TYPE h_large
+HLEN h_small
+HLEN h_two
+HLEN h_med
+HLEN h_num
+HLEN h_large
+HGET h_small field1
+HGET h_two alpha
+HGET h_two beta
+HGET h_med k1
+HGET h_med k7
+HEXISTS h_small field1
+HEXISTS h_small missing
+HEXISTS h_two alpha
+HEXISTS h_two nosuchfield
+HMGET h_med k1 k3 k5 k7
+HMGET h_med k1 missing k7
+HMGET h_empty_vals present absent
+HGET h_num count
+HGET h_num max
+HGET h_num min
+HGET h_num big
+HGET h_num zero
+HEXISTS h_num count
+HEXISTS h_num notafield
+HGET h_large f1
+HGET h_large f52
+HGET h_large f26
+HEXISTS h_large f1
+HEXISTS h_large f53
+HMGET h_large f1 f10 f20 f30 f40 f50 f52

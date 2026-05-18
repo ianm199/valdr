@@ -17,7 +17,7 @@
 
 use std::io::{self, Read, Write};
 
-use crate::object::{ObjectKind, RedisObject, StringEncoding};
+use crate::object::{is_canonical_i64_ascii, ObjectKind, RedisObject, StringEncoding};
 
 use super::varint::{load_len, write_len, RDB_ENC_INT16, RDB_ENC_INT32, RDB_ENC_INT8, RDB_ENC_LZF, RDB_ENCVAL};
 
@@ -102,6 +102,13 @@ fn load_encoded_string(r: &mut impl Read, enc: u8) -> io::Result<RedisObject> {
 fn load_raw_bytes(r: &mut impl Read, len: usize) -> io::Result<RedisObject> {
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf)?;
+    if is_canonical_i64_ascii(&buf) {
+        if let Ok(s) = std::str::from_utf8(&buf) {
+            if let Ok(n) = s.parse::<i64>() {
+                return Ok(RedisObject::new_int_string(n));
+            }
+        }
+    }
     if len <= EMBSTR_LIMIT {
         Ok(RedisObject::new_embstr(&buf))
     } else {
@@ -162,15 +169,13 @@ mod tests {
     }
 
     #[test]
-    fn int64_too_large_falls_through_to_raw() {
+    fn int64_too_large_for_rdb_int_encoding_is_promoted_on_load() {
         let n: i64 = i32::MAX as i64 + 1;
         let obj = RedisObject::new_int_string(n);
         let loaded = roundtrip(obj);
         match loaded.kind {
-            ObjectKind::String(StringEncoding::Embstr(s)) => {
-                assert_eq!(s.as_bytes(), n.to_string().as_bytes())
-            }
-            other => panic!("expected Embstr for large int, got {:?}", other),
+            ObjectKind::String(StringEncoding::Int(v)) => assert_eq!(v, n),
+            other => panic!("expected Int after load promotion, got {:?}", other),
         }
     }
 

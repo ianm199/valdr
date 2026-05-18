@@ -10,6 +10,7 @@
 //! Re-exported entry points: `save_rdb`, `load_into`.
 
 pub mod crc;
+pub mod hash;
 pub mod header;
 pub mod load;
 pub mod save;

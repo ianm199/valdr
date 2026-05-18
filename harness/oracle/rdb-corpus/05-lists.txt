@@ -1,0 +1,64 @@
+# 05-lists.txt — exercises RDB_TYPE_LIST save/load fidelity
+#
+# list-max-listpack-size -2 caps each quicklist node at 8kb; setting it to
+# a small positive integer (1) forces each node to hold at most 1 element,
+# guaranteeing multi-node quicklist for any non-trivial list.  Round 21 must
+# handle both quicklist and plain listpack; the verification here focuses on
+# deterministic positional commands (LLEN, LINDEX, LRANGE) so results are
+# stable regardless of the internal node layout.
+
+CONFIG SET list-max-listpack-size 1
+
+# Short list — 3 elements, pushed left-to-right order preserved via RPUSH
+RPUSH l_short a b c
+
+# Single-element list
+RPUSH l_one only
+
+# Medium list — 15 elements
+RPUSH l_med e1 e2 e3 e4 e5 e6 e7 e8 e9 e10 e11 e12 e13 e14 e15
+
+# List with a long element and an empty element
+RPUSH l_special "this-is-a-longer-element-that-exceeds-typical-sizes-and-tests-raw-string-storage" "" short
+
+# Larger list — 110 elements to ensure multi-node quicklist territory
+RPUSH l_large x1 x2 x3 x4 x5 x6 x7 x8 x9 x10 x11 x12 x13 x14 x15 x16 x17 x18 x19 x20
+RPUSH l_large x21 x22 x23 x24 x25 x26 x27 x28 x29 x30 x31 x32 x33 x34 x35 x36 x37 x38 x39 x40
+RPUSH l_large x41 x42 x43 x44 x45 x46 x47 x48 x49 x50 x51 x52 x53 x54 x55 x56 x57 x58 x59 x60
+RPUSH l_large x61 x62 x63 x64 x65 x66 x67 x68 x69 x70 x71 x72 x73 x74 x75 x76 x77 x78 x79 x80
+RPUSH l_large x81 x82 x83 x84 x85 x86 x87 x88 x89 x90 x91 x92 x93 x94 x95 x96 x97 x98 x99 x100
+RPUSH l_large x101 x102 x103 x104 x105 x106 x107 x108 x109 x110
+
+VERIFY
+
+DBSIZE
+TYPE l_short
+TYPE l_one
+TYPE l_med
+TYPE l_special
+TYPE l_large
+LLEN l_short
+LLEN l_one
+LLEN l_med
+LLEN l_special
+LLEN l_large
+LINDEX l_short 0
+LINDEX l_short 1
+LINDEX l_short 2
+LINDEX l_short -1
+LINDEX l_short 99
+LINDEX l_one 0
+LRANGE l_short 0 -1
+LRANGE l_med 0 4
+LRANGE l_med 10 14
+LRANGE l_med -3 -1
+LINDEX l_special 0
+LINDEX l_special 1
+LINDEX l_special 2
+LRANGE l_special 0 -1
+LINDEX l_large 0
+LINDEX l_large 99
+LINDEX l_large 109
+LINDEX l_large -1
+LRANGE l_large 0 4
+LRANGE l_large 105 109

@@ -1,0 +1,55 @@
+# 04-sets.txt — exercises RDB_TYPE_SET save/load fidelity
+#
+# CONFIG SET forces C Valkey to write HASHTABLE encoding for all sets,
+# avoiding intset and listpack encodings so both sides share the same path.
+
+CONFIG SET set-max-intset-entries 0
+CONFIG SET set-max-listpack-entries 0
+
+# Small integer set — would be intset without the CONFIG SET above
+SADD s_ints 1 2 3 4
+
+# Small mixed-content set
+SADD s_mixed apple banana cherry
+
+# Set with a single member
+SADD s_single only
+
+# Medium set — 12 members with varied content
+SADD s_med alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu
+
+# Larger set — 55 members to ensure HASHTABLE regardless
+SADD s_large m1 m2 m3 m4 m5 m6 m7 m8 m9 m10 m11 m12 m13 m14 m15 m16 m17 m18 m19 m20
+SADD s_large m21 m22 m23 m24 m25 m26 m27 m28 m29 m30 m31 m32 m33 m34 m35 m36 m37 m38 m39 m40
+SADD s_large m41 m42 m43 m44 m45 m46 m47 m48 m49 m50 m51 m52 m53 m54 m55
+
+VERIFY
+
+DBSIZE
+TYPE s_ints
+TYPE s_mixed
+TYPE s_single
+TYPE s_med
+TYPE s_large
+SCARD s_ints
+SCARD s_mixed
+SCARD s_single
+SCARD s_med
+SCARD s_large
+SISMEMBER s_ints 1
+SISMEMBER s_ints 2
+SISMEMBER s_ints 4
+SISMEMBER s_ints 5
+SISMEMBER s_mixed apple
+SISMEMBER s_mixed banana
+SISMEMBER s_mixed notamember
+SISMEMBER s_single only
+SISMEMBER s_single missing
+SMISMEMBER s_ints 1 2 3 4 5
+SMISMEMBER s_mixed apple banana cherry durian
+SMISMEMBER s_med alpha gamma epsilon iota mu nosuch
+SISMEMBER s_large m1
+SISMEMBER s_large m55
+SISMEMBER s_large m28
+SISMEMBER s_large notamember
+SMISMEMBER s_large m1 m10 m20 m30 m40 m50 m55 nope
