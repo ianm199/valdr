@@ -14,8 +14,8 @@ use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use redis_core::memory::approximate_memory_used;
 use redis_core::metrics::{rss_bytes, server_metrics};
-use redis_core::object::{HashEncoding, ListEncoding, ObjectKind, SetEncoding, StringEncoding, ZSetEncoding};
 use redis_core::CommandContext;
 use redis_types::{RedisError, RedisResult, RedisString};
 
@@ -44,69 +44,6 @@ fn now_unix_seconds() -> u64 {
         .unwrap_or(0)
 }
 
-/// Estimate the in-memory footprint of a database using the heuristic from
-/// `docs/PATH_TO_DEF3.md` §Memory-estimator:
-///
-///   `bytes_in_strings + dict.len() * 80`
-///
-/// The 80-byte-per-entry overhead approximates key string allocation plus
-/// HashMap bucket overhead. Non-string values contribute a fixed placeholder
-/// per element rather than an exact allocator walk.
-fn estimate_memory_used(ctx: &CommandContext) -> u64 {
-    let db = ctx.db();
-    let mut bytes: u64 = db.len() as u64 * 80;
-
-    let snapshot = db.keys_snapshot_with_types();
-    for (key, _kind_name) in &snapshot {
-        bytes += key.as_bytes().len() as u64;
-    }
-
-    for (key, _) in &snapshot {
-        if let Some(obj) = db.find(key) {
-            bytes += estimate_object_bytes(&obj.kind);
-        }
-    }
-    bytes
-}
-
-/// Coarse byte estimate for the value payload of one object.
-fn estimate_object_bytes(kind: &ObjectKind) -> u64 {
-    match kind {
-        ObjectKind::String(enc) => match enc {
-            StringEncoding::Int(_) => 8,
-            StringEncoding::Raw(s) | StringEncoding::Embstr(s) => s.as_bytes().len() as u64,
-        },
-        ObjectKind::List(enc) => match enc {
-            ListEncoding::Inline(d) => d.iter().map(|s| s.as_bytes().len() as u64 + 16).sum(),
-            ListEncoding::ListPack(b) => b.len() as u64,
-            ListEncoding::QuickList(v) => v.iter().map(|s| s.as_bytes().len() as u64 + 16).sum(),
-        },
-        ObjectKind::Hash(enc) => match enc {
-            HashEncoding::Inline(m) => m.iter().map(|(k, v)| {
-                k.as_bytes().len() as u64 + v.as_bytes().len() as u64 + 32
-            }).sum(),
-            HashEncoding::ListPack(b) => b.len() as u64,
-            HashEncoding::HashTable(m) => m.iter().map(|(k, v)| {
-                k.as_bytes().len() as u64 + v.as_bytes().len() as u64 + 32
-            }).sum(),
-        },
-        ObjectKind::Set(enc) => match enc {
-            SetEncoding::Inline(h) => h.iter().map(|s| s.as_bytes().len() as u64 + 16).sum(),
-            SetEncoding::ListPack(b) => b.len() as u64,
-            SetEncoding::IntSet(v) => v.len() as u64 * 8,
-            SetEncoding::HashTable(h) => h.iter().map(|s| s.as_bytes().len() as u64 + 16).sum(),
-        },
-        ObjectKind::ZSet(enc) => match enc {
-            ZSetEncoding::Inline(z) => {
-                z.by_member.iter().map(|(k, _)| k.as_bytes().len() as u64 + 24).sum()
-            }
-            ZSetEncoding::ListPack(b) => b.len() as u64,
-            ZSetEncoding::SkipList(v) => v.iter().map(|(k, _)| k.as_bytes().len() as u64 + 24).sum(),
-        },
-        ObjectKind::Stream(_) => 64,
-        ObjectKind::Module => 0,
-    }
-}
 
 fn format_human_bytes(bytes: u64) -> String {
     if bytes >= 1024 * 1024 * 1024 {
@@ -208,7 +145,7 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let _ = writeln!(buf, "\r");
     }
     if want(b"memory") {
-        let used_memory = estimate_memory_used(ctx);
+        let used_memory = approximate_memory_used(ctx.db());
         let used_memory_human = format_human_bytes(used_memory);
         let peak = metrics.max_clients_seen.load(Ordering::Relaxed);
         let (rss, rss_source) = match rss_bytes() {
@@ -225,8 +162,10 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let _ = writeln!(buf, "used_memory_peak_human:{}\r", format_human_bytes(used_memory));
         let _ = writeln!(buf, "used_memory_estimated:true\r");
         let _ = writeln!(buf, "total_system_memory:0\r");
-        let _ = writeln!(buf, "maxmemory:0\r");
-        let _ = writeln!(buf, "maxmemory_policy:noeviction\r");
+        let live_maxmemory = ctx.live_config().maxmemory();
+        let live_policy = ctx.live_config().maxmemory_policy();
+        let _ = writeln!(buf, "maxmemory:{}\r", live_maxmemory);
+        let _ = writeln!(buf, "maxmemory_policy:{}\r", live_policy.as_config_str());
         let _ = writeln!(buf, "mem_fragmentation_ratio:1.00\r");
         let _ = writeln!(buf, "mem_allocator:rust-std\r");
         let _ = writeln!(buf, "max_clients_seen:{}\r", peak);

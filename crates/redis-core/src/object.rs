@@ -21,7 +21,7 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
 use redis_ds::stream::InlineStream;
 use redis_types::{RedisError, RedisString};
@@ -1020,34 +1020,80 @@ impl Default for EncodingThresholds {
     }
 }
 
-/// Process-wide encoding threshold table, initialised to Valkey defaults on
-/// first access. CONFIG SET writes through to this global; the encoding
-/// heuristics read from it on every call.
-static ENCODING_THRESHOLDS: OnceLock<Mutex<EncodingThresholds>> = OnceLock::new();
-
-/// Returns a clone of the current encoding thresholds.
+/// Process-wide handle to the live config used by the encoding heuristics.
 ///
-/// Initialises the global to Valkey defaults on the first call.
-pub fn get_encoding_thresholds() -> EncodingThresholds {
-    let lock = ENCODING_THRESHOLDS.get_or_init(|| Mutex::new(EncodingThresholds::default()));
-    lock.lock()
-        .map(|g| g.clone())
-        .unwrap_or_else(|_| EncodingThresholds::default())
+/// The accept loop calls [`install_live_config`] once at startup with the
+/// `Arc<LiveConfig>` it shares with `RedisServer`. Encoding heuristics
+/// (`hash_inline_observed_encoding`, etc.) read thresholds through this
+/// handle, so `CONFIG SET hash-max-listpack-entries N` propagates to every
+/// `OBJECT ENCODING` call immediately.
+///
+/// Falls back to a defaulted `LiveConfig` when no install has happened yet
+/// (unit tests that exercise encoding helpers without a live server).
+static LIVE_CONFIG: OnceLock<Arc<crate::live_config::LiveConfig>> = OnceLock::new();
+
+/// Register the process-wide live config. Called once from the binary's main
+/// before any command runs. Subsequent calls are no-ops (OnceLock semantics).
+pub fn install_live_config(config: Arc<crate::live_config::LiveConfig>) {
+    let _ = LIVE_CONFIG.set(config);
 }
 
-/// Writes a partial update to the encoding threshold table.
+fn live_config_or_default() -> Arc<crate::live_config::LiveConfig> {
+    LIVE_CONFIG
+        .get_or_init(|| Arc::new(crate::live_config::LiveConfig::new()))
+        .clone()
+}
+
+/// Snapshot the active encoding thresholds.
 ///
-/// `updater` receives a mutable reference to the current thresholds and may
-/// modify any subset of fields. A poisoned mutex falls back to a fresh default
-/// so callers never receive an error.
+/// Reads each field from the registered `LiveConfig`. The returned struct is
+/// a value snapshot — mutating the returned `EncodingThresholds` does not
+/// affect the live state.
+pub fn get_encoding_thresholds() -> EncodingThresholds {
+    let cfg = live_config_or_default();
+    EncodingThresholds {
+        hash_max_listpack_entries: cfg.hash_max_listpack_entries(),
+        hash_max_listpack_value: cfg.hash_max_listpack_value(),
+        list_max_listpack_size: cfg.list_max_listpack_size(),
+        set_max_intset_entries: cfg.set_max_intset_entries(),
+        set_max_listpack_entries: cfg.set_max_listpack_entries(),
+        set_max_listpack_value: cfg.set_max_listpack_value(),
+        zset_max_listpack_entries: cfg.zset_max_listpack_entries(),
+        zset_max_listpack_value: cfg.zset_max_listpack_value(),
+    }
+}
+
+/// Mutate the live encoding thresholds in place.
+///
+/// `updater` receives an `EncodingThresholds` initialised from the current
+/// live values; whatever fields it changes are written back through the
+/// `LiveConfig` atomics. The default-only path (no install) is supported but
+/// has no observable effect because every command-handler `LiveConfig` read
+/// also falls back to the same default.
 pub fn update_encoding_thresholds<F>(updater: F)
 where
     F: FnOnce(&mut EncodingThresholds),
 {
-    let lock = ENCODING_THRESHOLDS.get_or_init(|| Mutex::new(EncodingThresholds::default()));
-    if let Ok(mut guard) = lock.lock() {
-        updater(&mut guard);
-    }
+    let cfg = live_config_or_default();
+    let mut snapshot = EncodingThresholds {
+        hash_max_listpack_entries: cfg.hash_max_listpack_entries(),
+        hash_max_listpack_value: cfg.hash_max_listpack_value(),
+        list_max_listpack_size: cfg.list_max_listpack_size(),
+        set_max_intset_entries: cfg.set_max_intset_entries(),
+        set_max_listpack_entries: cfg.set_max_listpack_entries(),
+        set_max_listpack_value: cfg.set_max_listpack_value(),
+        zset_max_listpack_entries: cfg.zset_max_listpack_entries(),
+        zset_max_listpack_value: cfg.zset_max_listpack_value(),
+    };
+    updater(&mut snapshot);
+    cfg.set_hash_max_listpack_entries(snapshot.hash_max_listpack_entries);
+    cfg.set_hash_max_listpack_value(snapshot.hash_max_listpack_value);
+    cfg.set_list_max_listpack_size(snapshot.list_max_listpack_size);
+    cfg.store_set_max_intset_entries(snapshot.set_max_intset_entries);
+    cfg.store_set_max_listpack_entries(snapshot.set_max_listpack_entries);
+    cfg.store_set_max_listpack_value(snapshot.set_max_listpack_value);
+    cfg.set_zset_max_listpack_entries(snapshot.zset_max_listpack_entries);
+    cfg.set_zset_max_listpack_value(snapshot.zset_max_listpack_value);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

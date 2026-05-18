@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use redis_commands::connection::{get_max_clients, set_max_clients};
+use redis_commands::connection::get_max_clients;
 use redis_commands::{dispatch, pubsub};
 use redis_core::blocked_keys::{blocked_keys_index, current_time_ms};
 use redis_core::command_context::CommandContext;
@@ -194,7 +194,16 @@ fn main() {
     emit_startup_log();
 
     server_metrics().set_tcp_port(args.port);
-    set_max_clients(args.maxclients);
+
+    let live_config = Arc::new(redis_core::live_config::LiveConfig::new());
+    live_config.set_maxclients(args.maxclients);
+    redis_core::object::install_live_config(Arc::clone(&live_config));
+    redis_commands::install_live_config_handle(Arc::clone(&live_config));
+
+    let server = Arc::new(redis_core::RedisServer::with_live_config(
+        args.port,
+        Arc::clone(&live_config),
+    ));
 
     let db = Arc::new(Mutex::new(RedisDb::new(0)));
     let next_client_id = Arc::new(AtomicU64::new(1));
@@ -203,7 +212,7 @@ fn main() {
     let active_expire_cfg = Arc::clone(active_expire_config());
     let metrics_arc = Arc::clone(server_metrics());
     let _ = spawn_active_expire_thread(Arc::clone(&db), active_expire_cfg, Some(metrics_arc));
-    serve(listener, shutdown, db, next_client_id, registry, args.port);
+    serve(listener, shutdown, db, next_client_id, registry, server, args.port);
 }
 
 /// Background scanner that wakes blocked BLPOP/BRPOP/BLMOVE waiters once
@@ -248,6 +257,7 @@ fn serve(
     db: Arc<Mutex<RedisDb>>,
     next_client_id: Arc<AtomicU64>,
     registry: Arc<Mutex<PubSubRegistry>>,
+    server: Arc<redis_core::RedisServer>,
     tcp_port: u16,
 ) {
     for incoming in listener.incoming() {
@@ -277,12 +287,17 @@ fn serve(
                 let shutdown = Arc::clone(&shutdown);
                 let db = Arc::clone(&db);
                 let registry = Arc::clone(&registry);
+                let server_clone = Arc::clone(&server);
                 let id = next_client_id.fetch_add(1, Ordering::Relaxed);
                 metrics.on_connect();
                 metrics.total_connections_received.fetch_add(1, Ordering::Relaxed);
                 let _ = thread::Builder::new()
                     .name(format!("client-{}", peer))
-                    .spawn(move || handle_connection(stream, shutdown, db, id, peer, registry, tcp_port));
+                    .spawn(move || {
+                        handle_connection(
+                            stream, shutdown, db, id, peer, registry, server_clone, tcp_port,
+                        )
+                    });
             }
             Err(e) => {
                 eprintln!("redis-server: accept failed: {}", e);
@@ -325,6 +340,7 @@ fn handle_connection(
     id: u64,
     peer_addr: String,
     registry: Arc<Mutex<PubSubRegistry>>,
+    server: Arc<redis_core::RedisServer>,
     tcp_port: u16,
 ) {
     let _ = tcp_port;
@@ -371,7 +387,7 @@ fn handle_connection(
             match parsed {
                 Ok(Some((argv, consumed))) => {
                     client.query_buf.drain(..consumed);
-                    process_command(&mut client, argv, &db, &registry);
+                    process_command(&mut client, argv, &db, &registry, &server);
                 }
                 Ok(None) => break,
                 Err(err) => {
@@ -423,6 +439,7 @@ fn process_command(
     argv: Vec<RedisString>,
     db: &Arc<Mutex<RedisDb>>,
     registry: &Arc<Mutex<PubSubRegistry>>,
+    server: &Arc<redis_core::RedisServer>,
 ) {
     client.clear_blocked_on_keys();
     client.set_args(argv);
@@ -434,7 +451,12 @@ fn process_command(
             Ok(g) => g,
             Err(poison) => poison.into_inner(),
         };
-        let mut ctx = CommandContext::with_db_and_pubsub(client, &mut guard, Arc::clone(registry));
+        let mut ctx = CommandContext::with_server(
+            client,
+            &mut guard,
+            Arc::clone(server),
+            Arc::clone(registry),
+        );
         dispatch(&mut ctx)
     };
     let elapsed_us = t0

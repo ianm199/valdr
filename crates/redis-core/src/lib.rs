@@ -10,6 +10,8 @@
 //! Phases 2-3 of the pilot land here.
 
 pub mod evict;
+pub mod live_config;
+pub mod memory;
 pub mod metrics;
 pub mod monotonic;
 pub mod blocked;
@@ -26,6 +28,7 @@ pub mod connection;
 pub mod db;
 pub mod latency;
 pub mod lazyfree;
+pub mod notify;
 pub mod object;
 pub mod pubsub_registry;
 pub mod server;

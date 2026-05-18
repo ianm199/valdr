@@ -28,6 +28,32 @@ pub mod zset;
 
 pub use dispatch::{dispatch, lookup_command, DispatchEntry, Handler};
 
+use std::sync::{Arc, OnceLock};
+
+use redis_core::live_config::LiveConfig;
+
+/// Process-wide handle to the live config, registered once at startup.
+///
+/// `connection::config_command` writes through this handle so CONFIG SET takes
+/// effect immediately even when the writing connection is not the one reading
+/// (live state is shared, not per-context). The accept loop installs the same
+/// `Arc<LiveConfig>` it shares with `RedisServer` via
+/// [`install_live_config_handle`].
+static LIVE_CONFIG_HANDLE: OnceLock<Arc<LiveConfig>> = OnceLock::new();
+
+/// Install the process-wide live config. Idempotent.
+pub fn install_live_config_handle(config: Arc<LiveConfig>) {
+    let _ = LIVE_CONFIG_HANDLE.set(config);
+}
+
+/// Return the active live config. Falls back to a fresh default `LiveConfig`
+/// when no install has happened (unit tests).
+pub fn live_config_handle() -> Arc<LiveConfig> {
+    LIVE_CONFIG_HANDLE
+        .get_or_init(|| Arc::new(LiveConfig::new()))
+        .clone()
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
 //   source:        (none — scaffolding placeholder)

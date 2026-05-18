@@ -5,32 +5,30 @@
 //! they never need to touch the keyspace.
 
 use std::io::Write;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use redis_core::expire::active_expire_config;
-use redis_core::object::{get_encoding_thresholds, update_encoding_thresholds};
+use redis_core::live_config::{LiveConfig, MaxmemoryPolicyCode};
+use redis_core::notify::keyspace_events_string_to_flags;
 use redis_core::CommandContext;
 use redis_protocol::frame::RespFrame;
 use redis_types::{RedisError, RedisResult, RedisString};
 
-/// Default Valkey `maxclients` value. Matches upstream server.c default.
-pub const DEFAULT_MAX_CLIENTS: u64 = 10_000;
+use crate::live_config_handle;
 
-static MAX_CLIENTS: OnceLock<AtomicU64> = OnceLock::new();
+/// Default Valkey `maxclients` value. Re-exported from `LiveConfig`.
+pub const DEFAULT_MAX_CLIENTS: u64 = redis_core::live_config::DEFAULT_MAX_CLIENTS;
 
-/// Return the process-global `maxclients` limit (atomic; updated by CONFIG SET).
+/// Return the process-global `maxclients` limit. Read directly from the live
+/// config; the accept loop calls this on every connection attempt.
 pub fn get_max_clients() -> u64 {
-    MAX_CLIENTS
-        .get_or_init(|| AtomicU64::new(DEFAULT_MAX_CLIENTS))
-        .load(Ordering::Relaxed)
+    live_config_handle().maxclients()
 }
 
+/// Update the live `maxclients` limit. Called once at startup with the CLI
+/// override and again from `CONFIG SET maxclients <n>`.
 pub fn set_max_clients(n: u64) {
-    MAX_CLIENTS
-        .get_or_init(|| AtomicU64::new(DEFAULT_MAX_CLIENTS))
-        .store(n, Ordering::Relaxed);
+    live_config_handle().set_maxclients(n);
 }
 
 /// `PING [message]`.
@@ -135,16 +133,16 @@ pub fn config_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     }
     let sub = ctx.arg_owned(1usize)?;
     let sub_bytes = sub.as_bytes();
+    let live_config: Arc<LiveConfig> = Arc::clone(&ctx.server().live_config);
     if ascii_eq_ignore_case(sub_bytes, b"GET") {
         if ctx.arg_count() < 3 {
             return Err(RedisError::wrong_number_of_args(b"config|get"));
         }
-        let thresholds = get_encoding_thresholds();
         let mut items: Vec<RespFrame> = Vec::new();
         for i in 2..ctx.arg_count() {
             let pat = ctx.arg_owned(i)?;
             let pat_bytes = pat.as_bytes();
-            for (name, value) in config_pairs_with_dynamic(&thresholds) {
+            for (name, value) in config_pairs_with_dynamic(&live_config) {
                 if glob_match_ascii_ci(pat_bytes, name.as_bytes()) {
                     items.push(RespFrame::bulk(RedisString::from_bytes(name.as_bytes())));
                     items.push(RespFrame::bulk(RedisString::from_bytes(value.as_bytes())));
@@ -154,11 +152,18 @@ pub fn config_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         return ctx.reply_frame(&RespFrame::array(items));
     }
     if ascii_eq_ignore_case(sub_bytes, b"SET") {
+        if ctx.arg_count() < 3 {
+            return Err(RedisError::wrong_number_of_args(b"config|set"));
+        }
         let mut i = 2usize;
-        while i + 1 < ctx.arg_count() {
+        while i < ctx.arg_count() {
             let key = ctx.arg_owned(i)?;
-            let val = ctx.arg_owned(i + 1)?;
-            apply_config_set(key.as_bytes(), val.as_bytes());
+            let value_bytes: Vec<u8> = if i + 1 < ctx.arg_count() {
+                ctx.arg_owned(i + 1)?.as_bytes().to_vec()
+            } else {
+                Vec::new()
+            };
+            apply_config_set(&live_config, key.as_bytes(), &value_bytes);
             i += 2;
         }
         return ctx.reply_simple_string(b"OK");
@@ -183,6 +188,7 @@ fn default_config_pairs() -> &'static [(&'static str, &'static str)] {
         ("maxmemory-policy", "noeviction"),
         ("maxmemory-samples", "5"),
         ("maxclients", "10000"),
+        ("requirepass", ""),
         ("appendonly", "no"),
         ("appendfsync", "everysec"),
         ("save", ""),
@@ -224,43 +230,54 @@ fn default_config_pairs() -> &'static [(&'static str, &'static str)] {
     ]
 }
 
-/// Builds the full CONFIG parameter list with dynamic values substituted in.
-///
-/// The static pairs in `default_config_pairs` are reproduced verbatim except
-/// for the encoding-threshold keys and `maxclients`, whose values are taken from
-/// the live atomic state. This ensures that `CONFIG GET` reflects any
-/// `CONFIG SET` that has already been applied.
-fn config_pairs_with_dynamic(
-    t: &redis_core::object::EncodingThresholds,
-) -> Vec<(String, String)> {
-    let live_maxclients = get_max_clients().to_string();
-    let slowlog_handle = crate::slowlog_cmd::global_slowlog();
-    let (live_slowlog_threshold, live_slowlog_max_len) = {
-        let log = match slowlog_handle.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        (log.threshold.to_string(), log.max_len.to_string())
-    };
-    let (live_effort, live_hz) = active_expire_config().snapshot();
-    let live_effort_str = live_effort.to_string();
-    let live_hz_str = live_hz.to_string();
+/// Build the full CONFIG GET parameter list reading every live value from
+/// the supplied `LiveConfig`. Static pairs in `default_config_pairs` are
+/// reproduced verbatim for keys with no behavioural backing.
+fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
+    let live_maxmemory = cfg.maxmemory().to_string();
+    let live_maxmemory_policy = cfg.maxmemory_policy().as_config_str().to_string();
+    let live_maxclients = cfg.maxclients().to_string();
+    let live_requirepass = cfg
+        .requirepass()
+        .map(|s| String::from_utf8_lossy(s.as_bytes()).into_owned())
+        .unwrap_or_default();
+    let live_notify = redis_core::notify::keyspace_events_flags_to_string(
+        cfg.notify_keyspace_events_flags() as i32,
+    );
+    let live_notify_str = String::from_utf8_lossy(live_notify.as_bytes()).into_owned();
+    let live_slowlog_threshold = cfg.slowlog_threshold_micros().to_string();
+    let live_slowlog_max_len = cfg.slowlog_max_len().to_string();
+    let live_effort_str = cfg.active_expire_effort().to_string();
+    let live_hz_str = cfg.hz().to_string();
+    let live_hash_entries = cfg.hash_max_listpack_entries().to_string();
+    let live_hash_value = cfg.hash_max_listpack_value().to_string();
+    let live_list_size = cfg.list_max_listpack_size().to_string();
+    let live_set_intset = cfg.set_max_intset_entries().to_string();
+    let live_set_entries = cfg.set_max_listpack_entries().to_string();
+    let live_set_value = cfg.set_max_listpack_value().to_string();
+    let live_zset_entries = cfg.zset_max_listpack_entries().to_string();
+    let live_zset_value = cfg.zset_max_listpack_value().to_string();
+
     let mut out: Vec<(String, String)> = Vec::new();
     for &(name, value) in default_config_pairs() {
         let dynamic = match name {
-            "hash-max-listpack-entries" => Some(t.hash_max_listpack_entries.to_string()),
-            "hash-max-listpack-value" => Some(t.hash_max_listpack_value.to_string()),
-            "list-max-listpack-size" => Some(t.list_max_listpack_size.to_string()),
-            "set-max-intset-entries" => Some(t.set_max_intset_entries.to_string()),
-            "set-max-listpack-entries" => Some(t.set_max_listpack_entries.to_string()),
-            "set-max-listpack-value" => Some(t.set_max_listpack_value.to_string()),
-            "zset-max-listpack-entries" => Some(t.zset_max_listpack_entries.to_string()),
-            "zset-max-listpack-value" => Some(t.zset_max_listpack_value.to_string()),
+            "maxmemory" => Some(live_maxmemory.clone()),
+            "maxmemory-policy" => Some(live_maxmemory_policy.clone()),
             "maxclients" => Some(live_maxclients.clone()),
+            "requirepass" => Some(live_requirepass.clone()),
+            "notify-keyspace-events" => Some(live_notify_str.clone()),
             "slowlog-log-slower-than" => Some(live_slowlog_threshold.clone()),
             "slowlog-max-len" => Some(live_slowlog_max_len.clone()),
             "active-expire-effort" => Some(live_effort_str.clone()),
             "hz" => Some(live_hz_str.clone()),
+            "hash-max-listpack-entries" => Some(live_hash_entries.clone()),
+            "hash-max-listpack-value" => Some(live_hash_value.clone()),
+            "list-max-listpack-size" => Some(live_list_size.clone()),
+            "set-max-intset-entries" => Some(live_set_intset.clone()),
+            "set-max-listpack-entries" => Some(live_set_entries.clone()),
+            "set-max-listpack-value" => Some(live_set_value.clone()),
+            "zset-max-listpack-entries" => Some(live_zset_entries.clone()),
+            "zset-max-listpack-value" => Some(live_zset_value.clone()),
             _ => None,
         };
         out.push((
@@ -271,88 +288,140 @@ fn config_pairs_with_dynamic(
     out
 }
 
-/// Applies a single `CONFIG SET key value` pair to the encoding-threshold
-/// global.
+/// Apply a single `CONFIG SET key value` pair to the `LiveConfig`.
 ///
-/// Unknown keys are silently ignored so that the TCL test harness can issue
-/// arbitrary `CONFIG SET` calls without aborting. Threshold values that cannot
-/// be parsed as integers are also silently ignored — the existing threshold
-/// remains in effect. This matches the lenient behaviour the test harness
-/// depends on for unrecognised parameters.
-fn apply_config_set(key: &[u8], value: &[u8]) {
+/// Unknown keys are silently ignored so the TCL test harness can issue
+/// arbitrary `CONFIG SET` calls without aborting. Values that cannot be
+/// parsed are also silently ignored — the existing value remains in effect.
+fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
     let key_lower: Vec<u8> = key.iter().map(|b| b.to_ascii_lowercase()).collect();
     match key_lower.as_slice() {
-        b"hash-max-listpack-entries" => {
-            if let Some(n) = parse_usize_strict(value) {
-                update_encoding_thresholds(|t| t.hash_max_listpack_entries = n);
+        b"maxmemory" => {
+            if let Some(n) = parse_memsize(value) {
+                cfg.set_maxmemory(n);
             }
         }
-        b"hash-max-listpack-value" => {
-            if let Some(n) = parse_usize_strict(value) {
-                update_encoding_thresholds(|t| t.hash_max_listpack_value = n);
-            }
-        }
-        b"list-max-listpack-size" => {
-            if let Some(n) = parse_i64_strict(value) {
-                update_encoding_thresholds(|t| t.list_max_listpack_size = n);
-            }
-        }
-        b"set-max-intset-entries" => {
-            if let Some(n) = parse_usize_strict(value) {
-                update_encoding_thresholds(|t| t.set_max_intset_entries = n);
-            }
-        }
-        b"set-max-listpack-entries" => {
-            if let Some(n) = parse_usize_strict(value) {
-                update_encoding_thresholds(|t| t.set_max_listpack_entries = n);
-            }
-        }
-        b"set-max-listpack-value" => {
-            if let Some(n) = parse_usize_strict(value) {
-                update_encoding_thresholds(|t| t.set_max_listpack_value = n);
-            }
-        }
-        b"zset-max-listpack-entries" => {
-            if let Some(n) = parse_usize_strict(value) {
-                update_encoding_thresholds(|t| t.zset_max_listpack_entries = n);
-            }
-        }
-        b"zset-max-listpack-value" => {
-            if let Some(n) = parse_usize_strict(value) {
-                update_encoding_thresholds(|t| t.zset_max_listpack_value = n);
+        b"maxmemory-policy" => {
+            if let Some(policy) = MaxmemoryPolicyCode::parse(value) {
+                cfg.set_maxmemory_policy(policy);
             }
         }
         b"maxclients" => {
             if let Some(n) = parse_usize_strict(value) {
                 if n >= 1 {
-                    set_max_clients(n as u64);
+                    cfg.set_maxclients(n as u64);
                 }
+            }
+        }
+        b"requirepass" => {
+            if value.is_empty() {
+                cfg.set_requirepass(None);
+            } else {
+                cfg.set_requirepass(Some(RedisString::from_bytes(value)));
+            }
+        }
+        b"notify-keyspace-events" => {
+            if let Ok(flags) = keyspace_events_string_to_flags(value) {
+                cfg.set_notify_keyspace_events_flags(flags as u32);
+            }
+        }
+        b"hash-max-listpack-entries" => {
+            if let Some(n) = parse_usize_strict(value) {
+                cfg.set_hash_max_listpack_entries(n);
+            }
+        }
+        b"hash-max-listpack-value" => {
+            if let Some(n) = parse_usize_strict(value) {
+                cfg.set_hash_max_listpack_value(n);
+            }
+        }
+        b"list-max-listpack-size" => {
+            if let Some(n) = parse_i64_strict(value) {
+                cfg.set_list_max_listpack_size(n);
+            }
+        }
+        b"set-max-intset-entries" => {
+            if let Some(n) = parse_usize_strict(value) {
+                cfg.store_set_max_intset_entries(n);
+            }
+        }
+        b"set-max-listpack-entries" => {
+            if let Some(n) = parse_usize_strict(value) {
+                cfg.store_set_max_listpack_entries(n);
+            }
+        }
+        b"set-max-listpack-value" => {
+            if let Some(n) = parse_usize_strict(value) {
+                cfg.store_set_max_listpack_value(n);
+            }
+        }
+        b"zset-max-listpack-entries" => {
+            if let Some(n) = parse_usize_strict(value) {
+                cfg.set_zset_max_listpack_entries(n);
+            }
+        }
+        b"zset-max-listpack-value" => {
+            if let Some(n) = parse_usize_strict(value) {
+                cfg.set_zset_max_listpack_value(n);
             }
         }
         b"slowlog-log-slower-than" => {
             if let Some(n) = parse_i64_strict(value) {
+                cfg.set_slowlog_threshold_micros(n);
                 crate::slowlog_cmd::set_slowlog_threshold(n);
             }
         }
         b"slowlog-max-len" => {
             if let Some(n) = parse_usize_strict(value) {
+                cfg.set_slowlog_max_len(n);
                 crate::slowlog_cmd::set_slowlog_max_len(n);
             }
         }
         b"active-expire-effort" => {
             if let Some(n) = parse_usize_strict(value) {
                 let clamped = n.min(u8::MAX as usize) as u8;
-                active_expire_config().set_effort(clamped);
+                cfg.set_active_expire_effort(clamped);
+                redis_core::expire::active_expire_config().set_effort(clamped);
             }
         }
         b"hz" => {
             if let Some(n) = parse_usize_strict(value) {
                 let clamped = n.min(u32::MAX as usize) as u32;
-                active_expire_config().set_hz(clamped);
+                cfg.set_hz(clamped);
+                redis_core::expire::active_expire_config().set_hz(clamped);
             }
         }
         _ => {}
     }
+}
+
+/// Parse a Redis memory-size literal: bare digits or a digit run followed by
+/// `b`, `k`/`kb`, `m`/`mb`, `g`/`gb` (case-insensitive). Suffixes follow the
+/// upstream Valkey convention of base-2 multipliers (1k = 1024). Returns
+/// `None` on any parse failure so callers can preserve the prior value.
+fn parse_memsize(bytes: &[u8]) -> Option<u64> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let mut end = bytes.len();
+    while end > 0 && !bytes[end - 1].is_ascii_digit() {
+        end -= 1;
+    }
+    let digits = &bytes[..end];
+    let suffix: Vec<u8> = bytes[end..]
+        .iter()
+        .map(|b| b.to_ascii_lowercase())
+        .collect();
+    let multiplier: u64 = match suffix.as_slice() {
+        b"" | b"b" => 1,
+        b"k" | b"kb" => 1024,
+        b"m" | b"mb" => 1024 * 1024,
+        b"g" | b"gb" => 1024 * 1024 * 1024,
+        _ => return None,
+    };
+    let digits_str = std::str::from_utf8(digits).ok()?;
+    let base: u64 = digits_str.parse().ok()?;
+    base.checked_mul(multiplier)
 }
 
 /// Parses a non-negative integer from ASCII decimal bytes. Returns `None` if

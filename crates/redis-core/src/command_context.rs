@@ -11,9 +11,14 @@ use std::sync::{Arc, Mutex};
 
 use crate::client::Client;
 use crate::db::RedisDb;
+use crate::live_config::LiveConfig;
+use crate::notify::{
+    NOTIFY_KEYEVENT, NOTIFY_KEYSPACE,
+};
 use crate::object::RedisObject;
 use crate::pubsub_registry::PubSubRegistry;
 use crate::server::RedisServer;
+use redis_protocol::frame::encode_resp2;
 use redis_protocol::RespFrame;
 use redis_types::{RedisError, RedisResult, RedisString};
 
@@ -57,9 +62,10 @@ impl<'a> DbStorage<'a> {
 pub struct CommandContext<'a> {
     pub client: &'a mut Client,
     db: DbStorage<'a>,
-    /// Per-context server scratch. STUB — Phase 3 replaces with a `&'a mut
-    /// RedisServer` carried into every command.
-    pub stub_server: RedisServer,
+    /// Shared handle to the live server state. Wrapped in `Arc` so the same
+    /// instance is reachable from every command-dispatch thread without giving
+    /// out a `&mut` borrow.
+    server: Arc<RedisServer>,
     /// Optional shared pub/sub registry handle.
     ///
     /// `None` in unit tests; `Some` for the live server, where every
@@ -138,25 +144,25 @@ impl<'a> CommandContext<'a> {
     /// Construct a context with an isolated owned scratch database.
     ///
     /// Intended for unit tests; production code paths should use
-    /// [`Self::with_db`] so that state persists across commands.
+    /// [`Self::with_server`] so the live server's config and pubsub registry
+    /// thread through every dispatch.
     pub fn new(client: &'a mut Client) -> Self {
         Self {
             client,
             db: DbStorage::Owned(RedisDb::new(0)),
-            stub_server: RedisServer::default(),
+            server: Arc::new(RedisServer::default()),
             pubsub: None,
         }
     }
 
     /// Construct a context sharing the caller-supplied database.
     ///
-    /// The server's accept loop calls this so every command for every client
-    /// sees the same keyspace.
+    /// Test-only helper; production callers go through [`Self::with_server`].
     pub fn with_db(client: &'a mut Client, db: &'a mut RedisDb) -> Self {
         Self {
             client,
             db: DbStorage::Borrowed(db),
-            stub_server: RedisServer::default(),
+            server: Arc::new(RedisServer::default()),
             pubsub: None,
         }
     }
@@ -171,7 +177,24 @@ impl<'a> CommandContext<'a> {
         Self {
             client,
             db: DbStorage::Borrowed(db),
-            stub_server: RedisServer::default(),
+            server: Arc::new(RedisServer::default()),
+            pubsub: Some(pubsub),
+        }
+    }
+
+    /// Construct a fully-wired context: live database, shared pub/sub
+    /// registry, and the actual `Arc<RedisServer>` carrying the live config.
+    /// This is the production accept-loop constructor.
+    pub fn with_server(
+        client: &'a mut Client,
+        db: &'a mut RedisDb,
+        server: Arc<RedisServer>,
+        pubsub: Arc<Mutex<PubSubRegistry>>,
+    ) -> Self {
+        Self {
+            client,
+            db: DbStorage::Borrowed(db),
+            server,
             pubsub: Some(pubsub),
         }
     }
@@ -327,12 +350,80 @@ impl<'a> CommandContext<'a> {
         self.client
     }
 
-    /// Mutable borrow of the per-context `RedisServer` scratch.
+    /// Shared borrow of the live `RedisServer`. Returns the actual server
+    /// that the accept loop built at startup — not a per-context scratch
+    /// copy — so CONFIG SET writes and other live mutations are visible.
+    pub fn server(&self) -> &RedisServer {
+        &self.server
+    }
+
+    /// Clone the `Arc<RedisServer>` for handlers that need to outlive the
+    /// current command (background threads, deferred callbacks).
+    pub fn server_arc(&self) -> Arc<RedisServer> {
+        Arc::clone(&self.server)
+    }
+
+    /// Shared borrow of the live config. Convenience for
+    /// `ctx.server().live_config.as_ref()`.
+    pub fn live_config(&self) -> &LiveConfig {
+        &self.server.live_config
+    }
+
+    /// Fire a keyspace-notification for one database operation.
     ///
-    /// STUB — Phase B placeholder; Phase 3 routes through the real server
-    /// reference carried in `CommandContext`.
-    pub fn server_mut(&mut self) -> &mut RedisServer {
-        &mut self.stub_server
+    /// `event_type` is one or more `NOTIFY_*` flags OR'd together (the class
+    /// of the triggering command, e.g. `NOTIFY_STRING` for `SET`). `event` is
+    /// the raw event-name bytes (e.g. `b"set"`). `key` is the key the
+    /// operation touched. The current database id comes from `client.db_index`.
+    ///
+    /// The helper consults `live_config.notify_keyspace_events_flags` and
+    /// returns early when the configured mask does not intersect `event_type`
+    /// (matches the C semantics in `notifyKeyspaceEvent`).
+    ///
+    /// Publishes to `__keyspace@<db>__:<key>` and/or `__keyevent@<db>__:<event>`
+    /// channels via the shared pub/sub registry; ignores callers that have no
+    /// pubsub handle attached (unit tests).
+    pub fn notify_keyspace_event(
+        &self,
+        event_type: i32,
+        event: &[u8],
+        key: &RedisString,
+    ) {
+        let flags = self.live_config().notify_keyspace_events_flags() as i32;
+        if flags & event_type == 0 {
+            return;
+        }
+        let pubsub = match &self.pubsub {
+            Some(p) => p,
+            None => return,
+        };
+        let dbid = self.client.db_index;
+        let dbid_bytes = format!("{}", dbid).into_bytes();
+
+        if flags & NOTIFY_KEYSPACE != 0 {
+            let mut chan: Vec<u8> = Vec::with_capacity(
+                b"__keyspace@".len() + dbid_bytes.len() + b"__:".len() + key.as_bytes().len(),
+            );
+            chan.extend_from_slice(b"__keyspace@");
+            chan.extend_from_slice(&dbid_bytes);
+            chan.extend_from_slice(b"__:");
+            chan.extend_from_slice(key.as_bytes());
+            let chan_str = RedisString::from_vec(chan);
+            let event_str = RedisString::from_bytes(event);
+            publish_keyspace_message(pubsub, &chan_str, &event_str);
+        }
+
+        if flags & NOTIFY_KEYEVENT != 0 {
+            let mut chan: Vec<u8> = Vec::with_capacity(
+                b"__keyevent@".len() + dbid_bytes.len() + b"__:".len() + event.len(),
+            );
+            chan.extend_from_slice(b"__keyevent@");
+            chan.extend_from_slice(&dbid_bytes);
+            chan.extend_from_slice(b"__:");
+            chan.extend_from_slice(event);
+            let chan_str = RedisString::from_vec(chan);
+            publish_keyspace_message(pubsub, &chan_str, key);
+        }
     }
 
     /// Empty-array reply (RESP `*0\r\n`).
@@ -365,6 +456,92 @@ impl<'a> CommandContext<'a> {
         // TODO(port): wire when command dispatch lands.
         Ok(())
     }
+}
+
+/// Encode a `*3 message channel payload` push frame and ship it to every
+/// subscriber that matches `channel` (exact or pattern). Used by the
+/// `notify_keyspace_event` helper.
+fn publish_keyspace_message(
+    registry: &Arc<Mutex<PubSubRegistry>>,
+    channel: &RedisString,
+    message: &RedisString,
+) {
+    let frame_bytes = {
+        let mut buf = Vec::with_capacity(32 + channel.as_bytes().len() + message.as_bytes().len());
+        encode_resp2(
+            &RespFrame::array(vec![
+                RespFrame::bulk(RedisString::from_static(b"message")),
+                RespFrame::bulk(channel.clone()),
+                RespFrame::bulk(message.clone()),
+            ]),
+            &mut buf,
+        );
+        buf
+    };
+    let (channel_subs, pattern_pairs) = {
+        let guard = match registry.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let subs = guard.channel_subscribers(channel);
+        let pats = guard.pattern_matches(channel, glob_match_ascii_ci);
+        (subs, pats)
+    };
+    let guard = match registry.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    for sub in channel_subs {
+        guard.send_to(sub, frame_bytes.clone());
+    }
+    for (pattern, subs) in pattern_pairs {
+        let pmessage_bytes = {
+            let mut buf =
+                Vec::with_capacity(64 + channel.as_bytes().len() + message.as_bytes().len());
+            encode_resp2(
+                &RespFrame::array(vec![
+                    RespFrame::bulk(RedisString::from_static(b"pmessage")),
+                    RespFrame::bulk(pattern.clone()),
+                    RespFrame::bulk(channel.clone()),
+                    RespFrame::bulk(message.clone()),
+                ]),
+                &mut buf,
+            );
+            buf
+        };
+        for sub in subs {
+            guard.send_to(sub, pmessage_bytes.clone());
+        }
+    }
+}
+
+fn glob_match_ascii_ci(pattern: &[u8], text: &[u8]) -> bool {
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let (mut star_p, mut star_t) = (usize::MAX, 0usize);
+    let lower = |b: u8| if b.is_ascii_uppercase() { b + 32 } else { b };
+    while ti < text.len() {
+        if pi < pattern.len() && pattern[pi] == b'?' {
+            pi += 1;
+            ti += 1;
+        } else if pi < pattern.len() && lower(pattern[pi]) == lower(text[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < pattern.len() && pattern[pi] == b'*' {
+            star_p = pi;
+            star_t = ti;
+            pi += 1;
+        } else if star_p != usize::MAX {
+            pi = star_p + 1;
+            star_t += 1;
+            ti = star_t;
+        } else {
+            return false;
+        }
+    }
+    while pi < pattern.len() && pattern[pi] == b'*' {
+        pi += 1;
+    }
+    pi == pattern.len()
 }
 
 #[cfg(test)]
@@ -415,6 +592,75 @@ mod tests {
             c.drain_reply(),
             b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
         );
+    }
+
+    #[test]
+    fn notify_keyspace_event_publishes_to_both_channel_families() {
+        use crate::notify::{NOTIFY_KEYEVENT, NOTIFY_KEYSPACE, NOTIFY_STRING};
+        use std::sync::mpsc;
+
+        let registry = Arc::new(Mutex::new(PubSubRegistry::new()));
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        {
+            let mut guard = registry.lock().unwrap();
+            guard.register_sender(99, tx);
+            guard.subscribe_channel(RedisString::from_bytes(b"__keyspace@0__:foo"), 99);
+            guard.subscribe_channel(RedisString::from_bytes(b"__keyevent@0__:set"), 99);
+        }
+
+        let server = Arc::new(RedisServer::default());
+        server
+            .live_config
+            .set_notify_keyspace_events_flags((NOTIFY_KEYSPACE | NOTIFY_KEYEVENT | NOTIFY_STRING) as u32);
+
+        let mut c = Client::new(1);
+        c.set_args(vec![RedisString::from_bytes(b"SET")]);
+        let mut db = RedisDb::new(0);
+        let ctx = CommandContext::with_server(
+            &mut c,
+            &mut db,
+            Arc::clone(&server),
+            Arc::clone(&registry),
+        );
+
+        let key = RedisString::from_bytes(b"foo");
+        ctx.notify_keyspace_event(NOTIFY_STRING, b"set", &key);
+
+        let mut received: Vec<Vec<u8>> = Vec::new();
+        while let Ok(bytes) = rx.try_recv() {
+            received.push(bytes);
+        }
+        assert_eq!(received.len(), 2, "expected one keyspace and one keyevent frame");
+        let joined: Vec<u8> = received.concat();
+        assert!(joined.windows(b"__keyspace@0__:foo".len()).any(|w| w == b"__keyspace@0__:foo"));
+        assert!(joined.windows(b"__keyevent@0__:set".len()).any(|w| w == b"__keyevent@0__:set"));
+    }
+
+    #[test]
+    fn notify_keyspace_event_respects_disabled_flags() {
+        use crate::notify::NOTIFY_STRING;
+        use std::sync::mpsc;
+
+        let registry = Arc::new(Mutex::new(PubSubRegistry::new()));
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        {
+            let mut guard = registry.lock().unwrap();
+            guard.register_sender(100, tx);
+            guard.subscribe_channel(RedisString::from_bytes(b"__keyspace@0__:foo"), 100);
+        }
+        let server = Arc::new(RedisServer::default());
+        let mut c = Client::new(2);
+        c.set_args(vec![RedisString::from_bytes(b"SET")]);
+        let mut db = RedisDb::new(0);
+        let ctx = CommandContext::with_server(
+            &mut c,
+            &mut db,
+            Arc::clone(&server),
+            Arc::clone(&registry),
+        );
+        let key = RedisString::from_bytes(b"foo");
+        ctx.notify_keyspace_event(NOTIFY_STRING, b"set", &key);
+        assert!(rx.try_recv().is_err(), "no notification should fire when flags are 0");
     }
 }
 

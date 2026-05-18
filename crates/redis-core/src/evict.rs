@@ -424,9 +424,8 @@ pub fn get_maxmemory_state(server: &RedisServer) -> Result<MaxmemoryState, Maxme
     let mem_reported: usize = 0; // TODO(port): zmalloc_used_memory()
     state.total = mem_reported;
 
-    let maxmemory = server.config.max_memory as usize;
+    let maxmemory = server.live_config.maxmemory() as usize;
     if maxmemory == 0 {
-        // No limit configured.
         state.level = 0.0;
         return Ok(state);
     }
@@ -459,7 +458,7 @@ pub fn get_maxmemory_state(server: &RedisServer) -> Result<MaxmemoryState, Maxme
 ///
 /// C: `overMaxmemoryAfterAlloc()` — evict.c:306
 pub fn over_maxmemory_after_alloc(server: &RedisServer, moremem: usize) -> bool {
-    let maxmemory = server.config.max_memory as usize;
+    let maxmemory = server.live_config.maxmemory() as usize;
     if maxmemory == 0 {
         return false;
     }
@@ -497,7 +496,7 @@ static IS_EVICTION_PROC_RUNNING: AtomicBool = AtomicBool::new(false);
 ///             interface (`aeEventLoop *`, `long long id`, `void *clientData`).
 ///             The event loop is in the defer phase; wire this once
 ///             `crates/redis-core/src/event_loop.rs` is available.
-pub fn eviction_time_proc(server: &mut RedisServer) -> i64 {
+pub fn eviction_time_proc(server: &RedisServer) -> i64 {
     const AE_NOMORE: i64 = -1;
     if perform_evictions(server) == EvictResult::Running {
         return 0; // keep firing
@@ -512,7 +511,7 @@ pub fn eviction_time_proc(server: &mut RedisServer) -> i64 {
 ///
 /// TODO(port): Call `aeCreateTimeEvent(server.el, 0, eviction_time_proc, ...)`
 ///             once `event_loop.rs` (defer phase) is available.
-pub fn start_eviction_time_proc(server: &mut RedisServer) {
+pub fn start_eviction_time_proc(server: &RedisServer) {
     let _ = server; // server.el needed for event registration — TODO(port)
     if !IS_EVICTION_PROC_RUNNING.load(Ordering::Relaxed) {
         IS_EVICTION_PROC_RUNNING.store(true, Ordering::Relaxed);
@@ -607,7 +606,7 @@ fn eviction_time_limit_us(server: &RedisServer) -> u64 {
 ///
 /// PORT NOTE: C uses `goto cant_free` / `goto update_metrics`; translated here
 ///            as labeled-loop break and early-return respectively.
-pub fn perform_evictions(server: &mut RedisServer) -> EvictResult {
+pub fn perform_evictions(server: &RedisServer) -> EvictResult {
     // C: evict.c:407 — skip even metric updates if eviction is unsafe ("fake EVICT_OK").
     if !is_safe_to_perform_evictions(server) {
         return EvictResult::Ok;
@@ -679,14 +678,18 @@ pub fn perform_evictions(server: &mut RedisServer) -> EvictResult {
 
                 // C: evict.c:485 — scan pool from best (highest idle) to worst.
                 for k in (0..EVPOOL_SIZE).rev() {
-                    // Take the key out of the pool slot (always clears it).
-                    let pool_key = match server.eviction_pool.entries[k].key.take() {
+                    let mut pool_guard = match server.eviction_pool.lock() {
+                        Ok(g) => g,
+                        Err(p) => p.into_inner(),
+                    };
+                    let pool_key = match pool_guard.entries[k].key.take() {
                         Some(k) => k,
                         None => continue,
                     };
-                    let entry_dbid = server.eviction_pool.entries[k].dbid;
-                    let entry_slot = server.eviction_pool.entries[k].slot;
-                    server.eviction_pool.entries[k].idle = 0;
+                    let entry_dbid = pool_guard.entries[k].dbid;
+                    let entry_slot = pool_guard.entries[k].slot;
+                    pool_guard.entries[k].idle = 0;
+                    drop(pool_guard);
 
                     // C: evict.c:497 — kvstoreHashtableFind: confirm key still exists.
                     // TODO(port): real kvstore lookup; for now all pool entries are treated as ghosts.
@@ -716,12 +719,16 @@ pub fn perform_evictions(server: &mut RedisServer) -> EvictResult {
             // TODO(port): server.dbnum, db.keys / db.expires kvstore,
             //             kvstoreGetFairRandomHashtableIndex,
             //             kvstoreHashtableRandomEntry
-            let db_count: usize = server.db_count(); // existing method on RedisServer
+            let db_count: usize = server.db_count();
             let is_allkeys = maxmemory_policy.is_allkeys();
             for _ in 0..db_count {
-                server.eviction_pool.next_db =
-                    server.eviction_pool.next_db.wrapping_add(1);
-                let _j = (server.eviction_pool.next_db as usize) % db_count.max(1);
+                let mut pool_guard = match server.eviction_pool.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                pool_guard.next_db = pool_guard.next_db.wrapping_add(1);
+                let _j = (pool_guard.next_db as usize) % db_count.max(1);
+                drop(pool_guard);
                 // TODO(port): slot = kvstoreGetFairRandomHashtableIndex(db[j].keys or expires)
                 // TODO(port): if slot == KVSTORE_INDEX_NOT_FOUND: continue
                 // TODO(port): if kvstoreHashtableRandomEntry(db[j], slot, &entry):
@@ -835,7 +842,7 @@ pub fn perform_evictions(server: &mut RedisServer) -> EvictResult {
 /// Update the server's eviction-exceeded timing statistics and return `result`.
 ///
 /// C: `update_metrics:` label in `performEvictions()` — evict.c:637
-fn update_eviction_metrics(server: &mut RedisServer, result: EvictResult) -> EvictResult {
+fn update_eviction_metrics(server: &RedisServer, result: EvictResult) -> EvictResult {
     // C: evict.c:638–645
     // TODO(port): server.stat_last_eviction_exceeded_time and
     //             server.stat_total_eviction_exceeded_time fields needed.
