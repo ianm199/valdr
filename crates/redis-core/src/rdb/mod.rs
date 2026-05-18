@@ -17,6 +17,7 @@ pub mod listpack;
 pub mod load;
 pub mod save;
 pub mod set;
+pub mod stream;
 pub mod string;
 pub mod varint;
 pub mod zset;

@@ -49,6 +49,17 @@ pub const RDB_TYPE_ZSET_2: u8 = 5;
 pub const RDB_TYPE_ZSET_ZIPLIST: u8 = 12;
 pub const RDB_TYPE_ZSET_LISTPACK: u8 = 17;
 
+/// STREAM type constants — Round 23.
+///
+/// We always emit `RDB_TYPE_STREAM_LISTPACKS_3` (with consumer `active_time`)
+/// on save. On load we accept `_3` and `_2`. The legacy `RDB_TYPE_STREAM_LISTPACKS`
+/// (v1) is rejected because it lacks the explicit `first_id`, `max_deleted_id`,
+/// and `entries_added` metadata fields that our `InlineStream` model requires
+/// to round-trip without inference.
+pub const RDB_TYPE_STREAM_LISTPACKS: u8 = 15;
+pub const RDB_TYPE_STREAM_LISTPACKS_2: u8 = 19;
+pub const RDB_TYPE_STREAM_LISTPACKS_3: u8 = 21;
+
 /// Write an RDB string (raw bytes prefixed by length).
 ///
 /// For this round we always emit raw bytes without integer encoding or LZF.

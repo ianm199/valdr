@@ -1,0 +1,98 @@
+# 07-streams.txt — exercises RDB_TYPE_STREAM_LISTPACKS_3 save/load fidelity
+#
+# CONFIG SET stream-node-max-entries 1 forces C Valkey to write a single-entry
+# listpack per stream entry. Our Rust saver always emits 1-entry-per-listpack
+# nodes (Phase 1 MVP), so this guarantees byte-comparable structure.
+#
+# Coverage:
+#   - Plain stream with multiple XADD entries
+#   - Trimmed / deleted stream (XDEL + XTRIM)
+#   - Empty stream created via XADD + XDEL of every entry (MKSTREAM equivalent)
+#   - Group with no PEL (XGROUP CREATE, never read)
+#   - Group with PEL (XGROUP CREATE + XREADGROUP)
+#   - Multiple consumers within one group
+#
+# Verification uses XLEN, XRANGE, XPENDING summary — all commands whose
+# replies are already byte-equivalent between C Valkey and our Rust impl
+# (the wire-diff 17-streams.txt corpus exercises these on the same code paths).
+
+CONFIG SET stream-node-max-entries 1
+CONFIG SET rdbcompression no
+
+# Plain stream — 3 entries
+XADD s_plain 1-0 f1 v1
+XADD s_plain 2-0 f1 v1 f2 v2
+XADD s_plain 3-0 a 1
+
+# Stream with XDEL — leaves max-deleted-entry-id metadata
+XADD s_del 10-0 a 1
+XADD s_del 20-0 b 2
+XADD s_del 30-0 c 3
+XDEL s_del 20-0
+
+# Stream trimmed with XTRIM MAXLEN
+XADD s_trim 1-0 v 1
+XADD s_trim 2-0 v 2
+XADD s_trim 3-0 v 3
+XADD s_trim 4-0 v 4
+XADD s_trim 5-0 v 5
+XTRIM s_trim MAXLEN 2
+
+# Empty stream (every entry deleted) — preserves last_id + max_deleted_id
+XADD s_empty 100-0 x 1
+XDEL s_empty 100-0
+
+# Stream with one group, no PEL (no XREADGROUP issued)
+XADD s_group_no_pel 1-0 k v
+XADD s_group_no_pel 2-0 k v
+XGROUP CREATE s_group_no_pel grp1 0
+
+# Stream with one group and PEL via XREADGROUP
+XADD s_group_pel 1-0 k a
+XADD s_group_pel 2-0 k b
+XADD s_group_pel 3-0 k c
+XGROUP CREATE s_group_pel g 0
+XREADGROUP GROUP g c1 COUNT 2 STREAMS s_group_pel >
+
+# Stream with one group, two consumers, both with PEL entries
+XADD s_multi 1-0 k a
+XADD s_multi 2-0 k b
+XADD s_multi 3-0 k c
+XADD s_multi 4-0 k d
+XGROUP CREATE s_multi g 0
+XREADGROUP GROUP g c1 COUNT 2 STREAMS s_multi >
+XREADGROUP GROUP g c2 COUNT 2 STREAMS s_multi >
+
+VERIFY
+
+DBSIZE
+TYPE s_plain
+TYPE s_del
+TYPE s_trim
+TYPE s_empty
+TYPE s_group_no_pel
+TYPE s_group_pel
+TYPE s_multi
+
+XLEN s_plain
+XLEN s_del
+XLEN s_trim
+XLEN s_empty
+XLEN s_group_no_pel
+XLEN s_group_pel
+XLEN s_multi
+
+XRANGE s_plain - +
+XRANGE s_del - +
+XRANGE s_trim - +
+XRANGE s_empty - +
+XRANGE s_group_no_pel - +
+XRANGE s_group_pel - +
+XRANGE s_multi - +
+
+XREVRANGE s_plain + -
+XREVRANGE s_del + -
+
+XPENDING s_group_no_pel grp1
+XPENDING s_group_pel g
+XPENDING s_multi g

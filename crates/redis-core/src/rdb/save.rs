@@ -26,10 +26,11 @@ use super::hash::save_hash_object;
 use super::header::{
     write_aux_fields, write_magic, write_rdb_string, RDB_OPCODE_EOF, RDB_OPCODE_EXPIRETIME_MS,
     RDB_OPCODE_RESIZEDB, RDB_OPCODE_SELECTDB, RDB_TYPE_HASH, RDB_TYPE_LIST, RDB_TYPE_SET,
-    RDB_TYPE_STRING, RDB_TYPE_ZSET_2,
+    RDB_TYPE_STREAM_LISTPACKS_3, RDB_TYPE_STRING, RDB_TYPE_ZSET_2,
 };
 use super::list::save_list_object;
 use super::set::save_set_object;
+use super::stream::save_stream_object;
 use super::string::save_string_object;
 use super::varint::write_len;
 use super::zset::save_zset_object;
@@ -72,6 +73,7 @@ fn write_rdb_to_buf(db: &RedisDb, buf: &mut Vec<u8>) -> io::Result<()> {
             ObjectKind::List(_) => RDB_TYPE_LIST,
             ObjectKind::Set(_) => RDB_TYPE_SET,
             ObjectKind::ZSet(_) => RDB_TYPE_ZSET_2,
+            ObjectKind::Stream(_) => RDB_TYPE_STREAM_LISTPACKS_3,
             _ => continue,
         };
         buf.write_all(&[type_byte])?;
@@ -82,6 +84,7 @@ fn write_rdb_to_buf(db: &RedisDb, buf: &mut Vec<u8>) -> io::Result<()> {
             ObjectKind::List(_) => save_list_object(buf, obj)?,
             ObjectKind::Set(_) => save_set_object(buf, obj)?,
             ObjectKind::ZSet(_) => save_zset_object(buf, obj)?,
+            ObjectKind::Stream(_) => save_stream_object(buf, obj)?,
             _ => unreachable!(),
         }
     }

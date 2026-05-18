@@ -101,116 +101,106 @@ struct EntryResult {
 fn decode_entry(blob: &[u8], pos: usize) -> io::Result<EntryResult> {
     let enc = blob[pos];
 
-    if (enc & LP_ENCODING_7BIT_UINT_MASK) == 0 {
+    let (value, encoded_size): (Vec<u8>, usize) = if (enc & LP_ENCODING_7BIT_UINT_MASK) == 0 {
         let val = (enc & 0x7F) as i64;
-        let backlen_pos = pos + 1;
-        let advance = 1 + 1;
-        check_bounds(blob, backlen_pos, advance)?;
-        return Ok(EntryResult {
-            value: val.to_string().into_bytes(),
-            advance,
-        });
-    }
-
-    if (enc & LP_ENCODING_6BIT_STR_MASK) == LP_ENCODING_6BIT_STR {
+        (val.to_string().into_bytes(), 1)
+    } else if (enc & LP_ENCODING_6BIT_STR_MASK) == LP_ENCODING_6BIT_STR {
         let slen = (enc & 0x3F) as usize;
         let data_start = pos + 1;
-        let backlen_pos = data_start + slen;
-        let advance = 1 + slen + 1;
-        check_bounds(blob, backlen_pos, advance)?;
-        return Ok(EntryResult {
-            value: blob[data_start..data_start + slen].to_vec(),
-            advance,
-        });
-    }
-
-    if (enc & LP_ENCODING_13BIT_INT_MASK) == LP_ENCODING_13BIT_INT {
-        if pos + 1 >= blob.len() {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "listpack 13-bit int truncated"));
-        }
+        need_bytes(blob, pos, 1 + slen)?;
+        (blob[data_start..data_start + slen].to_vec(), 1 + slen)
+    } else if (enc & LP_ENCODING_13BIT_INT_MASK) == LP_ENCODING_13BIT_INT {
+        need_bytes(blob, pos, 2)?;
         let high = ((enc & 0x1F) as i16) << 8;
         let low = blob[pos + 1] as i16;
         let val = sign_extend_13bit(high | low);
-        let advance = 2 + 1;
-        check_bounds(blob, pos + 2, advance)?;
-        return Ok(EntryResult {
-            value: val.to_string().into_bytes(),
-            advance,
-        });
-    }
-
-    if (enc & LP_ENCODING_12BIT_STR_MASK) == LP_ENCODING_12BIT_STR {
+        (val.to_string().into_bytes(), 2)
+    } else if (enc & LP_ENCODING_12BIT_STR_MASK) == LP_ENCODING_12BIT_STR {
         need_bytes(blob, pos, 2)?;
         let slen = (((enc & 0x0F) as usize) << 8) | (blob[pos + 1] as usize);
         let data_start = pos + 2;
-        need_bytes(blob, pos, 2 + slen + 1)?;
-        return Ok(EntryResult {
-            value: blob[data_start..data_start + slen].to_vec(),
-            advance: 2 + slen + 1,
-        });
-    }
+        need_bytes(blob, pos, 2 + slen)?;
+        (blob[data_start..data_start + slen].to_vec(), 2 + slen)
+    } else {
+        match enc {
+            LP_ENCODING_16BIT_INT => {
+                need_bytes(blob, pos, 3)?;
+                let val = i16::from_le_bytes([blob[pos + 1], blob[pos + 2]]) as i64;
+                (val.to_string().into_bytes(), 3)
+            }
+            LP_ENCODING_24BIT_INT => {
+                need_bytes(blob, pos, 4)?;
+                let raw = [blob[pos + 1], blob[pos + 2], blob[pos + 3], 0];
+                let unsigned = u32::from_le_bytes(raw);
+                let val = sign_extend_24bit(unsigned);
+                (val.to_string().into_bytes(), 4)
+            }
+            LP_ENCODING_32BIT_INT => {
+                need_bytes(blob, pos, 5)?;
+                let val = i32::from_le_bytes([
+                    blob[pos + 1],
+                    blob[pos + 2],
+                    blob[pos + 3],
+                    blob[pos + 4],
+                ]) as i64;
+                (val.to_string().into_bytes(), 5)
+            }
+            LP_ENCODING_64BIT_INT => {
+                need_bytes(blob, pos, 9)?;
+                let val = i64::from_le_bytes([
+                    blob[pos + 1],
+                    blob[pos + 2],
+                    blob[pos + 3],
+                    blob[pos + 4],
+                    blob[pos + 5],
+                    blob[pos + 6],
+                    blob[pos + 7],
+                    blob[pos + 8],
+                ]);
+                (val.to_string().into_bytes(), 9)
+            }
+            LP_ENCODING_32BIT_STR => {
+                need_bytes(blob, pos, 5)?;
+                let slen = u32::from_le_bytes([
+                    blob[pos + 1],
+                    blob[pos + 2],
+                    blob[pos + 3],
+                    blob[pos + 4],
+                ]) as usize;
+                let data_start = pos + 5;
+                need_bytes(blob, pos, 5 + slen)?;
+                (blob[data_start..data_start + slen].to_vec(), 5 + slen)
+            }
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("unknown listpack encoding byte 0x{:02x} at offset {}", enc, pos),
+                ));
+            }
+        }
+    };
 
-    match enc {
-        LP_ENCODING_16BIT_INT => {
-            need_bytes(blob, pos, 2 + 1 + 1)?;
-            let val = i16::from_le_bytes([blob[pos + 1], blob[pos + 2]]) as i64;
-            Ok(EntryResult {
-                value: val.to_string().into_bytes(),
-                advance: 3 + 1,
-            })
-        }
-        LP_ENCODING_24BIT_INT => {
-            need_bytes(blob, pos, 3 + 1 + 1)?;
-            let raw = [blob[pos + 1], blob[pos + 2], blob[pos + 3], 0];
-            let unsigned = u32::from_le_bytes(raw);
-            let val = sign_extend_24bit(unsigned);
-            Ok(EntryResult {
-                value: val.to_string().into_bytes(),
-                advance: 4 + 1,
-            })
-        }
-        LP_ENCODING_32BIT_INT => {
-            need_bytes(blob, pos, 4 + 1 + 1)?;
-            let val = i32::from_le_bytes([blob[pos + 1], blob[pos + 2], blob[pos + 3], blob[pos + 4]]) as i64;
-            Ok(EntryResult {
-                value: val.to_string().into_bytes(),
-                advance: 5 + 1,
-            })
-        }
-        LP_ENCODING_64BIT_INT => {
-            need_bytes(blob, pos, 8 + 1 + 1)?;
-            let val = i64::from_le_bytes([
-                blob[pos + 1], blob[pos + 2], blob[pos + 3], blob[pos + 4],
-                blob[pos + 5], blob[pos + 6], blob[pos + 7], blob[pos + 8],
-            ]);
-            Ok(EntryResult {
-                value: val.to_string().into_bytes(),
-                advance: 9 + 1,
-            })
-        }
-        LP_ENCODING_32BIT_STR => {
-            need_bytes(blob, pos, 4 + 1)?;
-            let slen = u32::from_le_bytes([blob[pos + 1], blob[pos + 2], blob[pos + 3], blob[pos + 4]]) as usize;
-            let data_start = pos + 5;
-            need_bytes(blob, pos, 5 + slen + 1)?;
-            Ok(EntryResult {
-                value: blob[data_start..data_start + slen].to_vec(),
-                advance: 5 + slen + 1,
-            })
-        }
-        _ => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("unknown listpack encoding byte 0x{:02x} at offset {}", enc, pos),
-        )),
-    }
+    let backlen_size = backlen_byte_count(encoded_size as u64);
+    need_bytes(blob, pos, encoded_size + backlen_size)?;
+    Ok(EntryResult {
+        value,
+        advance: encoded_size + backlen_size,
+    })
 }
 
-fn check_bounds(blob: &[u8], backlen_pos: usize, advance: usize) -> io::Result<()> {
-    let _ = advance;
-    if backlen_pos >= blob.len() {
-        Err(io::Error::new(io::ErrorKind::InvalidData, "listpack entry out of bounds"))
+/// Number of bytes the backlen field consumes for an entry whose
+/// `encoding+value` size is `l`. Matches `lpEncodeBacklen` in listpack.c.
+fn backlen_byte_count(l: u64) -> usize {
+    if l <= 127 {
+        1
+    } else if l <= 16_383 {
+        2
+    } else if l <= 2_097_151 {
+        3
+    } else if l <= 268_435_455 {
+        4
     } else {
-        Ok(())
+        5
     }
 }
 
@@ -235,6 +225,178 @@ fn sign_extend_24bit(v: u32) -> i64 {
         (v | 0xFF000000) as i32 as i64
     } else {
         v as i64
+    }
+}
+
+/// Incremental listpack encoder used by the stream RDB serializer.
+///
+/// Entries are appended one at a time as either integers (`append_int`) or
+/// raw byte strings (`append_string`). `finalize` produces the complete
+/// listpack blob with header, body, backlens, and `0xFF` EOF terminator
+/// matching the on-disk layout produced by C Valkey's `lpAppendInteger` /
+/// `lpAppendString`.
+pub struct ListpackBuilder {
+    body: Vec<u8>,
+    num_elements: usize,
+}
+
+impl Default for ListpackBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ListpackBuilder {
+    pub fn new() -> Self {
+        Self {
+            body: Vec::new(),
+            num_elements: 0,
+        }
+    }
+
+    /// Append an integer entry using the smallest encoding that fits `v`.
+    pub fn append_int(&mut self, v: i64) {
+        let mut enc_buf = [0u8; 9];
+        let enc_len = encode_integer(v, &mut enc_buf);
+        let entry_payload = &enc_buf[..enc_len];
+        self.body.extend_from_slice(entry_payload);
+        let backlen_bytes = encode_backlen(enc_len as u64);
+        self.body.extend_from_slice(&backlen_bytes);
+        self.num_elements += 1;
+    }
+
+    /// Append a byte-string entry using the smallest string encoding that fits.
+    pub fn append_string(&mut self, s: &[u8]) {
+        let slen = s.len();
+        if slen < 64 {
+            self.body.push(LP_ENCODING_6BIT_STR | (slen as u8));
+            self.body.extend_from_slice(s);
+            let total = 1 + slen;
+            self.body.extend_from_slice(&encode_backlen(total as u64));
+        } else if slen < 4096 {
+            self.body.push(LP_ENCODING_12BIT_STR | ((slen >> 8) as u8 & 0x0F));
+            self.body.push((slen & 0xFF) as u8);
+            self.body.extend_from_slice(s);
+            let total = 2 + slen;
+            self.body.extend_from_slice(&encode_backlen(total as u64));
+        } else {
+            self.body.push(LP_ENCODING_32BIT_STR);
+            let slen_u32 = slen as u32;
+            self.body.push((slen_u32 & 0xFF) as u8);
+            self.body.push(((slen_u32 >> 8) & 0xFF) as u8);
+            self.body.push(((slen_u32 >> 16) & 0xFF) as u8);
+            self.body.push(((slen_u32 >> 24) & 0xFF) as u8);
+            self.body.extend_from_slice(s);
+            let total = 5 + slen;
+            self.body.extend_from_slice(&encode_backlen(total as u64));
+        }
+        self.num_elements += 1;
+    }
+
+    /// Number of entries appended so far.
+    pub fn num_elements(&self) -> usize {
+        self.num_elements
+    }
+
+    /// Build the final blob: 6-byte header + entries + 0xFF EOF byte.
+    ///
+    /// `num_elements` is clamped to `UINT16_MAX` to match C's
+    /// `LP_HDR_NUMELE_UNKNOWN` sentinel; the loader treats values >= UINT16_MAX
+    /// as "unknown" and walks the body to count entries.
+    pub fn finalize(self) -> Vec<u8> {
+        let total = LP_HDR_SIZE + self.body.len() + 1;
+        let mut out = Vec::with_capacity(total);
+        out.extend_from_slice(&(total as u32).to_le_bytes());
+        let num_elements_field: u16 = if self.num_elements > u16::MAX as usize {
+            u16::MAX
+        } else {
+            self.num_elements as u16
+        };
+        out.extend_from_slice(&num_elements_field.to_le_bytes());
+        out.extend_from_slice(&self.body);
+        out.push(LP_EOF);
+        out
+    }
+}
+
+/// Encode a signed integer using the smallest fitting listpack encoding,
+/// writing into `buf` and returning the number of bytes written (1..=9).
+fn encode_integer(v: i64, buf: &mut [u8; 9]) -> usize {
+    if (0..=127).contains(&v) {
+        buf[0] = v as u8;
+        1
+    } else if (-4096..=4095).contains(&v) {
+        let adj = if v < 0 { ((1i64 << 13) + v) as u64 } else { v as u64 };
+        buf[0] = ((adj >> 8) as u8) | LP_ENCODING_13BIT_INT;
+        buf[1] = (adj & 0xFF) as u8;
+        2
+    } else if (-32_768..=32_767).contains(&v) {
+        let adj = if v < 0 { ((1i64 << 16) + v) as u64 } else { v as u64 };
+        buf[0] = LP_ENCODING_16BIT_INT;
+        buf[1] = (adj & 0xFF) as u8;
+        buf[2] = ((adj >> 8) & 0xFF) as u8;
+        3
+    } else if (-8_388_608..=8_388_607).contains(&v) {
+        let adj = if v < 0 { ((1i64 << 24) + v) as u64 } else { v as u64 };
+        buf[0] = LP_ENCODING_24BIT_INT;
+        buf[1] = (adj & 0xFF) as u8;
+        buf[2] = ((adj >> 8) & 0xFF) as u8;
+        buf[3] = ((adj >> 16) & 0xFF) as u8;
+        4
+    } else if (-2_147_483_648..=2_147_483_647).contains(&v) {
+        let adj = if v < 0 { ((1i64 << 32) + v) as u64 } else { v as u64 };
+        buf[0] = LP_ENCODING_32BIT_INT;
+        buf[1] = (adj & 0xFF) as u8;
+        buf[2] = ((adj >> 8) & 0xFF) as u8;
+        buf[3] = ((adj >> 16) & 0xFF) as u8;
+        buf[4] = ((adj >> 24) & 0xFF) as u8;
+        5
+    } else {
+        let uv = v as u64;
+        buf[0] = LP_ENCODING_64BIT_INT;
+        buf[1] = (uv & 0xFF) as u8;
+        buf[2] = ((uv >> 8) & 0xFF) as u8;
+        buf[3] = ((uv >> 16) & 0xFF) as u8;
+        buf[4] = ((uv >> 24) & 0xFF) as u8;
+        buf[5] = ((uv >> 32) & 0xFF) as u8;
+        buf[6] = ((uv >> 40) & 0xFF) as u8;
+        buf[7] = ((uv >> 48) & 0xFF) as u8;
+        buf[8] = ((uv >> 56) & 0xFF) as u8;
+        9
+    }
+}
+
+/// Encode the backlen of an entry whose `encoding+value` size is `l`.
+///
+/// The encoded form is 1..=5 bytes. Every byte except the last has its
+/// top bit set; the last byte's top bit is clear. The most significant
+/// 7-bit chunk is written first.
+fn encode_backlen(l: u64) -> Vec<u8> {
+    if l <= 127 {
+        vec![l as u8]
+    } else if l <= 16_383 {
+        vec![(l >> 7) as u8, ((l & 127) | 128) as u8]
+    } else if l <= 2_097_151 {
+        vec![
+            (l >> 14) as u8,
+            (((l >> 7) & 127) | 128) as u8,
+            ((l & 127) | 128) as u8,
+        ]
+    } else if l <= 268_435_455 {
+        vec![
+            (l >> 21) as u8,
+            (((l >> 14) & 127) | 128) as u8,
+            (((l >> 7) & 127) | 128) as u8,
+            ((l & 127) | 128) as u8,
+        ]
+    } else {
+        vec![
+            (l >> 28) as u8,
+            (((l >> 21) & 127) | 128) as u8,
+            (((l >> 14) & 127) | 128) as u8,
+            (((l >> 7) & 127) | 128) as u8,
+            ((l & 127) | 128) as u8,
+        ]
     }
 }
 
@@ -304,5 +466,74 @@ mod tests {
         let result = decode_listpack(&lp).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], b"42");
+    }
+
+    #[test]
+    fn builder_empty_roundtrip() {
+        let blob = ListpackBuilder::new().finalize();
+        let entries = decode_listpack(&blob).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn builder_int_roundtrip_all_widths() {
+        let values: [i64; 11] = [
+            0,
+            1,
+            127,
+            -1,
+            -4096,
+            4095,
+            -32_768,
+            32_767,
+            i32::MIN as i64,
+            i32::MAX as i64,
+            i64::MIN,
+        ];
+        let mut builder = ListpackBuilder::new();
+        for &v in &values {
+            builder.append_int(v);
+        }
+        let blob = builder.finalize();
+        let entries = decode_listpack(&blob).unwrap();
+        assert_eq!(entries.len(), values.len());
+        for (i, &v) in values.iter().enumerate() {
+            assert_eq!(entries[i], v.to_string().into_bytes(), "value {} at index {}", v, i);
+        }
+    }
+
+    #[test]
+    fn builder_string_roundtrip_all_widths() {
+        let short = b"hello".to_vec();
+        let medium: Vec<u8> = (0..200).map(|i| (i % 256) as u8).collect();
+        let large: Vec<u8> = (0..5000).map(|i| ((i * 7) % 256) as u8).collect();
+        let mut builder = ListpackBuilder::new();
+        builder.append_string(&short);
+        builder.append_string(&medium);
+        builder.append_string(&large);
+        let blob = builder.finalize();
+        let entries = decode_listpack(&blob).unwrap();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0], short);
+        assert_eq!(entries[1], medium);
+        assert_eq!(entries[2], large);
+    }
+
+    #[test]
+    fn builder_mixed_roundtrip() {
+        let mut builder = ListpackBuilder::new();
+        builder.append_int(1);
+        builder.append_string(b"hello");
+        builder.append_int(256);
+        builder.append_int(-1);
+        builder.append_string(b"");
+        let blob = builder.finalize();
+        let entries = decode_listpack(&blob).unwrap();
+        assert_eq!(entries.len(), 5);
+        assert_eq!(entries[0], b"1");
+        assert_eq!(entries[1], b"hello");
+        assert_eq!(entries[2], b"256");
+        assert_eq!(entries[3], b"-1");
+        assert_eq!(entries[4], b"");
     }
 }

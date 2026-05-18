@@ -27,11 +27,13 @@ use super::header::{
     RDB_OPCODE_SLOT_INFO, RDB_TYPE_HASH, RDB_TYPE_HASH_2, RDB_TYPE_HASH_LISTPACK,
     RDB_TYPE_HASH_ZIPLIST, RDB_TYPE_LIST, RDB_TYPE_LIST_QUICKLIST, RDB_TYPE_LIST_QUICKLIST_2,
     RDB_TYPE_LIST_ZIPLIST, RDB_TYPE_SET, RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK,
+    RDB_TYPE_STREAM_LISTPACKS, RDB_TYPE_STREAM_LISTPACKS_2, RDB_TYPE_STREAM_LISTPACKS_3,
     RDB_TYPE_STRING, RDB_TYPE_ZSET, RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK,
     RDB_TYPE_ZSET_ZIPLIST,
 };
 use super::list::{load_list_object, load_quicklist2_object};
 use super::set::load_set_object;
+use super::stream::{load_stream_object_2, load_stream_object_3};
 use super::string::load_string_object;
 use super::varint::load_len;
 use super::zset::load_zset_object;
@@ -245,6 +247,12 @@ fn load_value(reader: &mut impl Read, type_byte: u8) -> io::Result<crate::object
         RDB_TYPE_ZSET_LISTPACK => Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "RDB_TYPE_ZSET_LISTPACK (17) not supported on load; set zset-max-listpack-entries 0 before SAVE",
+        )),
+        RDB_TYPE_STREAM_LISTPACKS_3 => load_stream_object_3(reader),
+        RDB_TYPE_STREAM_LISTPACKS_2 => load_stream_object_2(reader),
+        RDB_TYPE_STREAM_LISTPACKS => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "RDB_TYPE_STREAM_LISTPACKS (15) is a pre-Redis-7 legacy format without first_id / max_deleted_id / entries_added metadata; not supported on load — use Redis 7+ which writes RDB_TYPE_STREAM_LISTPACKS_2 (19) or _3 (21)",
         )),
         _ => Err(io::Error::new(
             io::ErrorKind::Unsupported,
