@@ -19,6 +19,7 @@ use std::io::{self, Read, Write};
 
 use crate::object::{is_canonical_i64_ascii, ObjectKind, RedisObject, StringEncoding};
 
+use super::lzf::lzf_decompress;
 use super::varint::{load_len, write_len, RDB_ENC_INT16, RDB_ENC_INT32, RDB_ENC_INT8, RDB_ENC_LZF, RDB_ENCVAL};
 
 /// Threshold in bytes below which a loaded raw string gets `Embstr` encoding.
@@ -88,10 +89,14 @@ fn load_encoded_string(r: &mut impl Read, enc: u8) -> io::Result<RedisObject> {
             r.read_exact(&mut buf)?;
             Ok(RedisObject::new_int_string(i32::from_le_bytes(buf) as i64))
         }
-        RDB_ENC_LZF => Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "LZF-compressed strings not supported (Round 27)",
-        )),
+        RDB_ENC_LZF => {
+            let (clen, _) = load_len(r)?;
+            let (ulen, _) = load_len(r)?;
+            let mut compressed = vec![0u8; clen as usize];
+            r.read_exact(&mut compressed)?;
+            let bytes = lzf_decompress(&compressed, ulen as usize)?;
+            load_raw_bytes(&mut std::io::Cursor::new(bytes), ulen as usize)
+        }
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("unknown RDB string encoding byte: 0x{:02x}", enc),

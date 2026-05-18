@@ -7,8 +7,8 @@
 # deterministic positional commands (LLEN, LINDEX, LRANGE) so results are
 # stable regardless of the internal node layout.
 
+FLUSHALL
 CONFIG SET list-max-listpack-size 1
-CONFIG SET rdbcompression no
 
 # Short list — 3 elements, pushed left-to-right order preserved via RPUSH
 RPUSH l_short a b c

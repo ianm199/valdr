@@ -15,6 +15,7 @@ pub mod header;
 pub mod list;
 pub mod listpack;
 pub mod load;
+pub mod lzf;
 pub mod save;
 pub mod set;
 pub mod stream;
