@@ -31,8 +31,11 @@ use redis_types::{RedisError, RedisString};
 
 use crate::client::ClientId;
 use crate::command_context::CommandContext;
+use crate::live_config::LiveConfig;
 use crate::metrics::server_metrics;
+use crate::notify::{NOTIFY_EXPIRED, NOTIFY_GENERIC, NOTIFY_KEYEVENT, NOTIFY_KEYSPACE};
 use crate::object::{ObjectKind, RedisObject, EXPIRY_NONE};
+use crate::pubsub_registry::PubSubRegistry;
 
 /// Global cross-connection MULTI/WATCH support.
 ///
@@ -54,6 +57,149 @@ pub struct WatchedKeysIndex {
 }
 
 static WATCHED_KEYS_INDEX: OnceLock<Arc<Mutex<WatchedKeysIndex>>> = OnceLock::new();
+
+/// Carry-all for the components needed to fire keyspace notifications from
+/// code paths that do not have a `CommandContext` (lazy expiry, active expiry).
+///
+/// Installed once at server startup via `install_global_notify_handle`.
+pub struct GlobalNotifyHandle {
+    pub pubsub: Arc<Mutex<PubSubRegistry>>,
+    pub live_config: Arc<LiveConfig>,
+}
+
+static GLOBAL_NOTIFY_HANDLE: OnceLock<Arc<GlobalNotifyHandle>> = OnceLock::new();
+
+/// Install the global notification handle used by lazy/active expiry paths.
+///
+/// Should be called once during server initialisation, before any connection
+/// is accepted. Subsequent calls are no-ops (OnceLock semantics).
+pub fn install_global_notify_handle(pubsub: Arc<Mutex<PubSubRegistry>>, live_config: Arc<LiveConfig>) {
+    let _ = GLOBAL_NOTIFY_HANDLE.set(Arc::new(GlobalNotifyHandle { pubsub, live_config }));
+}
+
+/// Publish a keyspace notification from a code path that has no `CommandContext`.
+///
+/// `event_type` is a `NOTIFY_*` flag from `crate::notify`. `event` is the
+/// raw event-name bytes. `key` is the affected key. `dbid` is the database
+/// index. Returns immediately when no handle is installed (unit tests) or
+/// when the configured flags do not include `event_type`.
+pub fn notify_keyspace_event_global(event_type: i32, event: &[u8], key: &RedisString, dbid: u32) {
+    let handle = match GLOBAL_NOTIFY_HANDLE.get() {
+        Some(h) => h,
+        None => return,
+    };
+    let flags = handle.live_config.notify_keyspace_events_flags() as i32;
+    if flags & event_type == 0 {
+        return;
+    }
+    let dbid_bytes = format!("{}", dbid).into_bytes();
+    if flags & NOTIFY_KEYSPACE != 0 {
+        let mut chan: Vec<u8> = Vec::with_capacity(
+            b"__keyspace@".len() + dbid_bytes.len() + b"__:".len() + key.as_bytes().len(),
+        );
+        chan.extend_from_slice(b"__keyspace@");
+        chan.extend_from_slice(&dbid_bytes);
+        chan.extend_from_slice(b"__:");
+        chan.extend_from_slice(key.as_bytes());
+        let chan_str = RedisString::from_vec(chan);
+        let event_str = RedisString::from_bytes(event);
+        publish_to_registry(&handle.pubsub, &chan_str, &event_str);
+    }
+    if flags & NOTIFY_KEYEVENT != 0 {
+        let mut chan: Vec<u8> = Vec::with_capacity(
+            b"__keyevent@".len() + dbid_bytes.len() + b"__:".len() + event.len(),
+        );
+        chan.extend_from_slice(b"__keyevent@");
+        chan.extend_from_slice(&dbid_bytes);
+        chan.extend_from_slice(b"__:");
+        chan.extend_from_slice(event);
+        let chan_str = RedisString::from_vec(chan);
+        publish_to_registry(&handle.pubsub, &chan_str, key);
+    }
+}
+
+fn publish_to_registry(registry: &Arc<Mutex<PubSubRegistry>>, channel: &RedisString, message: &RedisString) {
+    use redis_protocol::frame::encode_resp2;
+    use redis_protocol::RespFrame;
+    let frame_bytes = {
+        let mut buf = Vec::with_capacity(32 + channel.as_bytes().len() + message.as_bytes().len());
+        encode_resp2(
+            &RespFrame::array(vec![
+                RespFrame::bulk(RedisString::from_static(b"message")),
+                RespFrame::bulk(channel.clone()),
+                RespFrame::bulk(message.clone()),
+            ]),
+            &mut buf,
+        );
+        buf
+    };
+    let (channel_subs, pattern_pairs) = {
+        let guard = match registry.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let subs = guard.channel_subscribers(channel);
+        let pats = guard.pattern_matches(channel, glob_match_ascii_ci_db);
+        (subs, pats)
+    };
+    let guard = match registry.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    for sub in channel_subs {
+        guard.send_to(sub, frame_bytes.clone());
+    }
+    for (pattern, subs) in pattern_pairs {
+        let pmessage_bytes = {
+            use redis_protocol::frame::encode_resp2;
+            use redis_protocol::RespFrame;
+            let mut buf =
+                Vec::with_capacity(64 + channel.as_bytes().len() + message.as_bytes().len());
+            encode_resp2(
+                &RespFrame::array(vec![
+                    RespFrame::bulk(RedisString::from_static(b"pmessage")),
+                    RespFrame::bulk(pattern.clone()),
+                    RespFrame::bulk(channel.clone()),
+                    RespFrame::bulk(message.clone()),
+                ]),
+                &mut buf,
+            );
+            buf
+        };
+        for sub in subs {
+            guard.send_to(sub, pmessage_bytes.clone());
+        }
+    }
+}
+
+fn glob_match_ascii_ci_db(pattern: &[u8], text: &[u8]) -> bool {
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let (mut star_p, mut star_t) = (usize::MAX, 0usize);
+    let lower = |b: u8| if b.is_ascii_uppercase() { b + 32 } else { b };
+    while ti < text.len() {
+        if pi < pattern.len() && pattern[pi] == b'?' {
+            pi += 1;
+            ti += 1;
+        } else if pi < pattern.len() && lower(pattern[pi]) == lower(text[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < pattern.len() && pattern[pi] == b'*' {
+            star_p = pi;
+            star_t = ti;
+            pi += 1;
+        } else if star_p != usize::MAX {
+            pi = star_p + 1;
+            star_t += 1;
+            ti = star_t;
+        } else {
+            return false;
+        }
+    }
+    while pi < pattern.len() && pattern[pi] == b'*' {
+        pi += 1;
+    }
+    pi == pattern.len()
+}
 
 /// Install or fetch the global watched-keys index.
 ///
@@ -310,10 +456,10 @@ impl RedisDb {
             return KeyStatus::Expired;
         }
         // TODO(port): EXPIRE_FORCE_DELETE_EXPIRED — check replica mode before deleting
-        // TODO(port): notifyKeyspaceEvent(NOTIFY_EXPIRED, "expired", keyobj, db->id)
         // TODO(port): signalModifiedKey(NULL, db, keyobj)
         // TODO(port): propagateDeletion to AOF + replicas
         self.dict.remove(key);
+        notify_keyspace_event_global(NOTIFY_EXPIRED, b"expired", key, self.id);
         server_metrics().expired_keys.fetch_add(1, Ordering::Relaxed);
         KeyStatus::Deleted
     }
@@ -324,13 +470,17 @@ impl RedisDb {
     ///
     /// C: db.c:80 lookupKey
     pub fn lookup_key(&mut self, key: &RedisString, flags: u32) -> Option<&RedisObject> {
-        // TODO(port): LRU touch (unless LOOKUP_NOTOUCH or active child process)
-        // TODO(port): keymiss keyspace notification (unless LOOKUP_NONOTIFY | LOOKUP_WRITE)
         if self.expire_if_needed(key, 0) != KeyStatus::Valid {
             if flags & (LOOKUP_NOSTATS | LOOKUP_WRITE) == 0 {
                 server_metrics().keyspace_misses.fetch_add(1, Ordering::Relaxed);
             }
             return None;
+        }
+        if flags & LOOKUP_NOTOUCH == 0 {
+            let now = crate::lru_clock::current_lru_clock();
+            if let Some(obj) = self.dict.get_mut(key) {
+                obj.lru = now;
+            }
         }
         let result = self.dict.get(key);
         if flags & (LOOKUP_NOSTATS | LOOKUP_WRITE) == 0 {
@@ -373,7 +523,13 @@ impl RedisDb {
         if self.expire_if_needed(key, EXPIRE_FORCE_DELETE_EXPIRED | flags) != KeyStatus::Valid {
             return None;
         }
-        self.dict.get_mut(key)
+        let touch = flags & LOOKUP_NOTOUCH == 0;
+        let now = crate::lru_clock::current_lru_clock();
+        let obj = self.dict.get_mut(key)?;
+        if touch {
+            obj.lru = now;
+        }
+        Some(obj)
     }
 
     /// Write-oriented lookup with no extra flags.
@@ -534,6 +690,15 @@ impl RedisDb {
     /// C: db.c:2271 dbFind
     pub fn find(&self, key: &RedisString) -> Option<&RedisObject> {
         self.dict.get(key)
+    }
+
+    /// Borrow the main dict for eviction sampling.
+    ///
+    /// Exposed here rather than going through `keys_snapshot_with_types` so
+    /// the eviction loop in `eviction.rs` can peek at `RedisObject.lru` for
+    /// each sample without allocating a snapshot of the entire keyspace.
+    pub fn iter_for_eviction(&self) -> impl Iterator<Item = (&RedisString, &RedisObject)> {
+        self.dict.iter()
     }
 
     /// True if the key is in the dict regardless of TTL.
@@ -784,8 +949,9 @@ pub fn propagate_deletion(_db_id: u32, _key: &RedisString, _lazy: bool, _slot: i
 /// C: db.c:1969 deleteExpiredKeyAndPropagate
 pub fn delete_expired_key_and_propagate(db: &mut RedisDb, key: &RedisString) {
     // TODO(port): latencyStartMonitor / latencyEndMonitor for "expire-del"
+    let db_id = db.id;
     db.sync_delete(key);
-    // TODO(port): notifyKeyspaceEvent(NOTIFY_EXPIRED, "expired", keyobj, db->id)
+    notify_keyspace_event_global(NOTIFY_EXPIRED, b"expired", key, db_id);
     // TODO(port): signalModifiedKey(NULL, db, keyobj)
     // TODO(port): propagateDeletion(db, keyobj, server.lazyfree_lazy_expire, dict_index)
     // TODO(port): server.stat_expiredkeys++
@@ -828,8 +994,8 @@ fn del_generic_command(ctx: &mut CommandContext, lazy: bool) -> Result<(), Redis
             ctx.db_mut().sync_delete(&key)
         };
         if deleted {
+            ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", &key);
             // TODO(port): signalModifiedKey(c, c->db, c->argv[j])
-            // TODO(port): notifyKeyspaceEvent(NOTIFY_GENERIC, "del", key, db->id)
             // TODO(port): server.dirty++
             num_deleted += 1;
         }
@@ -1071,8 +1237,9 @@ fn rename_generic_command(ctx: &mut CommandContext, nx: bool) -> Result<(), Redi
         }
     }
 
+    ctx.notify_keyspace_event(NOTIFY_GENERIC, b"rename_from", &src_key);
+    ctx.notify_keyspace_event(NOTIFY_GENERIC, b"rename_to", &dst_key);
     // TODO(port): signalModifiedKey(c, c->db, c->argv[1]) and c->argv[2]
-    // TODO(port): notifyKeyspaceEvent "rename_from" and "rename_to"
     // TODO(port): server.dirty++
 
     if nx { ctx.reply_integer(1) } else { ctx.reply_simple_string(b"OK") }
@@ -1116,6 +1283,8 @@ pub fn move_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         return ctx.reply_integer(0);
     }
     ctx.db_mut().sync_delete(&key);
+    ctx.notify_keyspace_event(NOTIFY_GENERIC, b"move_from", &key);
+    ctx.notify_keyspace_event(NOTIFY_GENERIC, b"move_to", &key);
     ctx.reply_integer(1)
 }
 
@@ -1182,6 +1351,7 @@ pub fn copy_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let mut new_obj = src_clone;
     new_obj.expire = expire;
     ctx.db_mut().insert(dst_key.clone(), new_obj);
+    ctx.notify_keyspace_event(NOTIFY_GENERIC, b"copy_to", &dst_key);
 
     ctx.reply_integer(1)
 }

@@ -30,6 +30,7 @@ use redis_core::blocked_keys::{blocked_keys_index, current_time_ms};
 use redis_core::command_context::CommandContext;
 use redis_core::db::RedisDb;
 use redis_core::expire::{active_expire_config, spawn_active_expire_thread};
+use redis_core::lru_clock::spawn_lru_clock_thread;
 use redis_core::metrics::server_metrics;
 use redis_core::pubsub_registry::PubSubRegistry;
 use redis_core::{Client, Connection};
@@ -208,10 +209,15 @@ fn main() {
     let db = Arc::new(Mutex::new(RedisDb::new(0)));
     let next_client_id = Arc::new(AtomicU64::new(1));
     let registry = Arc::new(Mutex::new(PubSubRegistry::new()));
+    redis_core::db::install_global_notify_handle(
+        Arc::clone(&registry),
+        Arc::clone(&live_config),
+    );
     spawn_blocked_timeout_thread(Arc::clone(&shutdown));
     let active_expire_cfg = Arc::clone(active_expire_config());
     let metrics_arc = Arc::clone(server_metrics());
     let _ = spawn_active_expire_thread(Arc::clone(&db), active_expire_cfg, Some(metrics_arc));
+    let _ = spawn_lru_clock_thread();
     serve(listener, shutdown, db, next_client_id, registry, server, args.port);
 }
 

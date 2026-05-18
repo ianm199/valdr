@@ -93,6 +93,7 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let misses = metrics.keyspace_misses.load(Ordering::Relaxed);
     let rejected = metrics.rejected_connections.load(Ordering::Relaxed);
     let expired_keys = metrics.expired_keys.load(Ordering::Relaxed);
+    let evicted_keys = metrics.evicted_keys.load(Ordering::Relaxed);
     let active_time_us = metrics.active_time_main_thread_us.load(Ordering::Relaxed);
     let maxclients = get_max_clients();
 
@@ -190,7 +191,7 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let _ = writeln!(buf, "total_net_output_bytes:0\r");
         let _ = writeln!(buf, "rejected_connections:{}\r", rejected);
         let _ = writeln!(buf, "expired_keys:{}\r", expired_keys);
-        let _ = writeln!(buf, "evicted_keys:0\r");
+        let _ = writeln!(buf, "evicted_keys:{}\r", evicted_keys);
         let _ = writeln!(buf, "keyspace_hits:{}\r", hits);
         let _ = writeln!(buf, "keyspace_misses:{}\r", misses);
         let _ = writeln!(buf, "pubsub_channels:0\r");

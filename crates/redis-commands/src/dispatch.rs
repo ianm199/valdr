@@ -14,6 +14,9 @@
 
 use std::time::Instant;
 
+use redis_core::eviction::{try_evict_to_fit, unimplemented_policy_reply, EvictionOutcome};
+use redis_core::live_config::MaxmemoryPolicyCode;
+use redis_core::memory::approximate_memory_used;
 use redis_core::CommandContext;
 use redis_types::{RedisError, RedisResult, RedisString};
 
@@ -80,6 +83,16 @@ fn command_has_no_auth_flag(name: &[u8]) -> bool {
     })
 }
 
+/// Returns `true` when the named command carries the `DENYOOM` flag in the
+/// generated command registry, meaning it must be rejected when the server
+/// is over its `maxmemory` budget and eviction cannot recover.
+fn command_has_denyoom_flag(name: &[u8]) -> bool {
+    COMMANDS.iter().any(|spec| {
+        ascii_eq_ignore_case(spec.name.as_bytes(), name)
+            && spec.flags.contains(&CommandFlag::DENYOOM)
+    })
+}
+
 /// Dispatch using an externally-supplied command name.
 ///
 /// Skips the MULTI-queueing pre-check. Used by `EXEC` to drain each queued
@@ -100,6 +113,11 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
         }
     }
 
+    if let Some(reply) = enforce_maxmemory_gate(ctx, name) {
+        ctx.client_mut().reply_buf.extend_from_slice(&reply);
+        return Ok(());
+    }
+
     let argv_snapshot: Vec<RedisString> = (0..ctx.arg_count())
         .filter_map(|i| ctx.client_ref().arg(i).cloned())
         .collect();
@@ -118,6 +136,41 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
     );
 
     result
+}
+
+/// Pre-handler maxmemory enforcement.
+///
+/// Returns `Some(reply_bytes)` when the command must be rejected because the
+/// server is over its `maxmemory` budget and the configured eviction policy
+/// either cannot or refuses to recover memory. Returns `None` when dispatch
+/// should proceed (either we were under the limit, or eviction trimmed the
+/// keyspace back under it, or the command is exempt from DENYOOM).
+fn enforce_maxmemory_gate(ctx: &mut CommandContext<'_>, name: &[u8]) -> Option<Vec<u8>> {
+    let maxmem = ctx.live_config().maxmemory();
+    if maxmem == 0 {
+        return None;
+    }
+    let used = approximate_memory_used(ctx.db());
+    if used <= maxmem {
+        return None;
+    }
+    if !command_has_denyoom_flag(name) {
+        return None;
+    }
+    let policy = ctx.live_config().maxmemory_policy();
+    let outcome = try_evict_to_fit(ctx.db_mut(), maxmem, policy);
+    match outcome {
+        EvictionOutcome::Sufficient | EvictionOutcome::Evicted(_) => None,
+        EvictionOutcome::StillOver => Some(oom_reply_for_policy(policy)),
+    }
+}
+
+fn oom_reply_for_policy(policy: MaxmemoryPolicyCode) -> Vec<u8> {
+    if redis_core::eviction::is_policy_supported(policy) {
+        b"-OOM command not allowed when used memory > 'maxmemory'.\r\n".to_vec()
+    } else {
+        unimplemented_policy_reply(policy)
+    }
 }
 
 /// Build the canonical `unknown command '<name>'` error.

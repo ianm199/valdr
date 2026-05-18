@@ -48,6 +48,8 @@ pub struct ServerMetrics {
     pub rejected_connections: AtomicU64,
     /// Keys removed by lazy or active expiration.
     pub expired_keys: AtomicU64,
+    /// Keys removed by the maxmemory eviction policy.
+    pub evicted_keys: AtomicU64,
     /// Cumulative microseconds spent inside command dispatch on the main thread.
     pub active_time_main_thread_us: AtomicU64,
 }
@@ -65,6 +67,7 @@ impl ServerMetrics {
             keyspace_misses: AtomicU64::new(0),
             rejected_connections: AtomicU64::new(0),
             expired_keys: AtomicU64::new(0),
+            evicted_keys: AtomicU64::new(0),
             active_time_main_thread_us: AtomicU64::new(0),
         }
     }

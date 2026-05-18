@@ -50,6 +50,7 @@
 
 use redis_core::command_context::CommandContext;
 use redis_core::db::LOOKUP_NONE;
+use redis_core::notify::{NOTIFY_GENERIC, NOTIFY_STRING};
 use redis_core::object::{ObjectKind, RedisObject};
 use redis_types::{RedisError, RedisString};
 use std::io::Write;
@@ -75,10 +76,6 @@ pub const SETKEY_KEEPTTL: u32       = 1 << 0;
 pub const SETKEY_DOESNT_EXIST: u32  = 1 << 1;
 pub const SETKEY_ALREADY_EXIST: u32 = 1 << 2;
 pub const SETKEY_ADD_OR_UPDATE: u32 = 1 << 3;
-
-// ── Keyspace notification type bits  (C: NOTIFY_* in server.h) ───────────
-pub const NOTIFY_STRING: u32  = 1 << 3;
-pub const NOTIFY_GENERIC: u32 = 1 << 2;
 
 /// Default maximum length of a single bulk string in bytes (512 MiB).
 ///
@@ -393,6 +390,7 @@ pub fn set_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     };
     let obj = RedisObject::new_string_try_encoded(value.as_bytes());
     ctx.db_mut().set_key(key.clone(), obj, setkey_flags);
+    ctx.notify_keyspace_event(NOTIFY_STRING, b"set", &key);
 
     if let Some(abs_ms) = expire_at_ms {
         let now_ms: i64 = std::time::SystemTime::now()
@@ -446,7 +444,8 @@ pub fn setnx_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         return ctx.reply_integer(0);
     }
     let obj = RedisObject::new_string_try_encoded(value.as_bytes());
-    ctx.db_mut().set_key(key, obj, 0);
+    ctx.db_mut().set_key(key.clone(), obj, 0);
+    ctx.notify_keyspace_event(NOTIFY_STRING, b"set", &key);
     ctx.reply_integer(1)
 }
 
@@ -505,6 +504,7 @@ fn setex_generic(ctx: &mut CommandContext, name: &[u8], multiplier: i64) -> Resu
     let obj = RedisObject::new_string_try_encoded(value.as_bytes());
     ctx.db_mut().set_key(key.clone(), obj, 0);
     ctx.db_mut().set_expire(&key, abs_ms);
+    ctx.notify_keyspace_event(NOTIFY_STRING, b"set", &key);
     ctx.reply_simple_string(b"OK")
 }
 
@@ -530,6 +530,7 @@ pub fn delifeq_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     };
     if matched {
         ctx.db_mut().sync_delete(&key);
+        ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", &key);
         ctx.reply_integer(1)
     } else {
         ctx.reply_integer(0)
@@ -668,6 +669,8 @@ pub fn getdel_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         None => ctx.reply_null_bulk(),
         Some(b) => {
             ctx.db_mut().sync_delete(&key);
+            ctx.notify_keyspace_event(NOTIFY_STRING, b"set", &key);
+            ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", &key);
             ctx.reply_bulk_string(RedisString::from_bytes(&b))
         }
     }
@@ -694,7 +697,8 @@ pub fn getset_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         },
     };
     let obj = RedisObject::new_string_try_encoded(value.as_bytes());
-    ctx.db_mut().set_key(key, obj, 0);
+    ctx.db_mut().set_key(key.clone(), obj, 0);
+    ctx.notify_keyspace_event(NOTIFY_STRING, b"set", &key);
     match prev {
         None => ctx.reply_null_bulk(),
         Some(b) => ctx.reply_bulk_string(RedisString::from_bytes(&b)),
@@ -748,7 +752,8 @@ pub fn setrange_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
             let mut buf = vec![0u8; total];
             buf[offset..offset + value_bytes.len()].copy_from_slice(value_bytes);
             let obj = RedisObject::new_raw_string(&buf);
-            ctx.db_mut().set_key(key, obj, 0);
+            ctx.db_mut().set_key(key.clone(), obj, 0);
+            ctx.notify_keyspace_event(NOTIFY_STRING, b"setrange", &key);
             ctx.reply_integer(total as i64)
         }
         Some(mut buf) => {
@@ -762,7 +767,8 @@ pub fn setrange_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
             buf[offset..offset + value_bytes.len()].copy_from_slice(value_bytes);
             let new_len = buf.len() as i64;
             let stored = RedisObject::new_raw_string(&buf);
-            ctx.db_mut().set_key(key, stored, SETKEY_KEEPTTL);
+            ctx.db_mut().set_key(key.clone(), stored, SETKEY_KEEPTTL);
+            ctx.notify_keyspace_event(NOTIFY_STRING, b"setrange", &key);
             ctx.reply_integer(new_len)
         }
     }
@@ -861,7 +867,8 @@ pub fn mset_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         let key = ctx.arg_owned(j)?;
         let value = ctx.arg_owned(j + 1)?;
         let obj = RedisObject::new_string_try_encoded(value.as_bytes());
-        ctx.db_mut().set_key(key, obj, 0);
+        ctx.db_mut().set_key(key.clone(), obj, 0);
+        ctx.notify_keyspace_event(NOTIFY_STRING, b"set", &key);
         j += 2;
     }
     ctx.reply_simple_string(b"OK")
@@ -893,7 +900,8 @@ pub fn msetnx_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     }
     for (key, value) in pairs {
         let obj = RedisObject::new_string_try_encoded(value.as_bytes());
-        ctx.db_mut().set_key(key, obj, 0);
+        ctx.db_mut().set_key(key.clone(), obj, 0);
+        ctx.notify_keyspace_event(NOTIFY_STRING, b"set", &key);
     }
     ctx.reply_integer(1)
 }
@@ -1007,6 +1015,7 @@ pub fn msetex_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         let obj = RedisObject::new_string_try_encoded(v.as_bytes());
         let flags = if keepttl { SETKEY_KEEPTTL } else { 0 };
         ctx.db_mut().set_key(k.clone(), obj, flags);
+        ctx.notify_keyspace_event(NOTIFY_STRING, b"set", &k);
         if let Some(abs_ms) = expire_at_ms {
             if abs_ms <= now_ms {
                 ctx.db_mut().sync_delete(&k);
@@ -1070,7 +1079,9 @@ pub fn incr_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         return Err(RedisError::wrong_number_of_args(b"incr"));
     }
     let key = ctx.arg_owned(1usize)?;
-    incr_decr_apply(ctx, key, 1)
+    incr_decr_apply(ctx, key.clone(), 1)?;
+    ctx.notify_keyspace_event(NOTIFY_STRING, b"incrby", &key);
+    Ok(())
 }
 
 /// DECR key
@@ -1081,7 +1092,9 @@ pub fn decr_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         return Err(RedisError::wrong_number_of_args(b"decr"));
     }
     let key = ctx.arg_owned(1usize)?;
-    incr_decr_apply(ctx, key, -1)
+    incr_decr_apply(ctx, key.clone(), -1)?;
+    ctx.notify_keyspace_event(NOTIFY_STRING, b"decrby", &key);
+    Ok(())
 }
 
 /// INCRBY key increment
@@ -1094,7 +1107,9 @@ pub fn incrby_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let key = ctx.arg_owned(1usize)?;
     let delta_raw = ctx.arg_owned(2usize)?;
     let delta = parse_strict_i64(delta_raw.as_bytes()).ok_or_else(RedisError::not_integer)?;
-    incr_decr_apply(ctx, key, delta)
+    incr_decr_apply(ctx, key.clone(), delta)?;
+    ctx.notify_keyspace_event(NOTIFY_STRING, b"incrby", &key);
+    Ok(())
 }
 
 /// DECRBY key decrement
@@ -1115,7 +1130,9 @@ pub fn decrby_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
             ))
         }
     };
-    incr_decr_apply(ctx, key, negated)
+    incr_decr_apply(ctx, key.clone(), negated)?;
+    ctx.notify_keyspace_event(NOTIFY_STRING, b"decrby", &key);
+    Ok(())
 }
 
 /// Format an `f64` value as ASCII decimal bytes matching Redis wire output.
@@ -1207,7 +1224,8 @@ pub fn incrbyfloat_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     }
     let result_bytes = format_float_redis(next);
     let stored = RedisObject::new_raw_string(&result_bytes);
-    ctx.db_mut().set_key(key, stored, SETKEY_KEEPTTL);
+    ctx.db_mut().set_key(key.clone(), stored, SETKEY_KEEPTTL);
+    ctx.notify_keyspace_event(NOTIFY_STRING, b"incrbyfloat", &key);
     ctx.reply_bulk_string(RedisString::from_bytes(&result_bytes))
 }
 
@@ -1228,7 +1246,7 @@ pub fn append_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         None => {
             let obj = RedisObject::new_string_try_encoded(value.as_bytes());
             let len = value.as_bytes().len() as i64;
-            ctx.db_mut().set_key(key, obj, 0);
+            ctx.db_mut().set_key(key.clone(), obj, 0);
             len
         }
         Some(obj) => match &obj.kind {
@@ -1242,12 +1260,13 @@ pub fn append_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
                 }
                 let len = combined.len() as i64;
                 let stored = RedisObject::new_raw_string(&combined);
-                ctx.db_mut().set_key(key, stored, SETKEY_KEEPTTL);
+                ctx.db_mut().set_key(key.clone(), stored, SETKEY_KEEPTTL);
                 len
             }
             _ => return Err(RedisError::wrong_type()),
         },
     };
+    ctx.notify_keyspace_event(NOTIFY_STRING, b"append", &key);
     ctx.reply_integer(new_len)
 }
 

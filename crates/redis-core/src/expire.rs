@@ -21,6 +21,7 @@ use redis_types::{RedisError, RedisString};
 use crate::command_context::CommandContext;
 use crate::db::{LOOKUP_NOTOUCH, RedisDb};
 use crate::metrics::ServerMetrics;
+use crate::notify::{NOTIFY_GENERIC};
 use crate::object::RedisObject;
 use crate::server::RedisServer;
 
@@ -820,11 +821,13 @@ pub fn expire_generic_command(
     let now = ms_time_now();
     if when <= now {
         ctx.db_mut().sync_delete(&key);
+        ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", &key);
         return ctx.reply_integer(1);
     }
 
     ctx.db_mut().set_expire(&key, when);
     ctx.db().signal_modified(&key);
+    ctx.notify_keyspace_event(NOTIFY_GENERIC, b"expire", &key);
     ctx.reply_integer(1)
 }
 
@@ -904,6 +907,7 @@ pub fn persist_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     }
     if ctx.db_mut().remove_expire(&key) {
         ctx.db().signal_modified(&key);
+        ctx.notify_keyspace_event(NOTIFY_GENERIC, b"persist", &key);
         ctx.reply_integer(1)
     } else {
         ctx.reply_integer(0)
@@ -1116,6 +1120,9 @@ fn run_active_expire_tick(
     effort: u8,
     metrics: Option<&ServerMetrics>,
 ) -> u64 {
+    use crate::db::notify_keyspace_event_global;
+    use crate::notify::NOTIFY_EXPIRED;
+
     let sample_size = ACTIVE_EXPIRE_KEYS_PER_EFFORT.saturating_mul(effort as usize);
     if sample_size == 0 {
         return 0;
@@ -1133,16 +1140,23 @@ fn run_active_expire_tick(
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
+            let db_id = guard.id;
             let sample = guard.sample_expiring_keys(sample_size, seed);
-            let mut deleted: u64 = 0;
+            let mut deleted_keys: Vec<RedisString> = Vec::new();
             for (key, expire_at) in &sample {
                 if *expire_at <= now_ms {
                     if guard.sync_delete(key) {
-                        deleted += 1;
+                        deleted_keys.push(key.clone());
                     }
                 }
             }
-            (sample.len(), deleted)
+            let deleted = deleted_keys.len() as u64;
+            let sampled = sample.len();
+            drop(guard);
+            for key in &deleted_keys {
+                notify_keyspace_event_global(NOTIFY_EXPIRED, b"expired", key, db_id);
+            }
+            (sampled, deleted)
         };
 
         let (sampled, deleted) = expired_in_pass;

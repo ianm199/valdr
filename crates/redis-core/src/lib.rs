@@ -10,7 +10,9 @@
 //! Phases 2-3 of the pilot land here.
 
 pub mod evict;
+pub mod eviction;
 pub mod live_config;
+pub mod lru_clock;
 pub mod memory;
 pub mod metrics;
 pub mod monotonic;
