@@ -150,6 +150,14 @@ pub struct Client {
     /// Defaults to 2 (the version implied by every legacy RESP2 client).
     /// RESP3 upgrade path is a TODO.
     pub resp_proto: i32,
+    /// Whether this client has successfully authenticated.
+    ///
+    /// Starts `true` when no requirepass is configured; set to `true` by a
+    /// successful AUTH command when requirepass is active. The accept loop
+    /// initialises this field based on whether requirepass is set at the
+    /// moment the connection is accepted. Authentication state persists across
+    /// RESET (real Redis behaviour).
+    pub authenticated: bool,
     /// Channels this client is subscribed to.
     ///
     /// Round 8a per-client pub/sub bookkeeping; mirrors the channel half of
@@ -211,6 +219,7 @@ impl Client {
             subscribed_patterns: HashSet::new(),
             blocked_on_keys: false,
             pending_wakes: Vec::new(),
+            authenticated: true,
         }
     }
 

@@ -41,6 +41,7 @@ use std::collections::HashMap;
 
 use redis_core::command_context::CommandContext;
 use redis_core::db::glob_match;
+use redis_core::notify::{NOTIFY_GENERIC, NOTIFY_HASH};
 use redis_core::object::RedisObject;
 use redis_types::{RedisError, RedisResult, RedisString};
 
@@ -114,20 +115,21 @@ fn long_long_to_bytes(n: i64) -> Vec<u8> {
     n.to_string().into_bytes()
 }
 
-/// Format an `f64` for HINCRBYFLOAT replies.
+/// Format an `f64` for HINCRBYFLOAT replies, matching Redis wire output.
 ///
-/// Uses Rust's default `Display` for now; see the module-level TODO for
-/// the long-double parity follow-up.
+/// Rust's `Display` for `f64` uses the shortest round-trip decimal, which
+/// matches Redis for most values. Scientific notation (e.g. `1e10`) is
+/// converted to fixed-point by stripping trailing zeros from a 17-decimal
+/// expansion. Redis does not append `.0` to integer-valued floats.
 fn float_to_bytes(v: f64) -> Vec<u8> {
-    let mut s = format!("{}", v);
-    if !s.contains('.') && !s.contains('e') && !s.contains('E') {
-        s.push('.');
-        s.push('0');
-    }
-    if let Some(stripped) = s.strip_suffix(".0") {
-        if stripped.contains('.') {
-            s = stripped.to_string();
+    let s = format!("{}", v);
+    if s.contains('e') || s.contains('E') {
+        let precise = format!("{:.17}", v);
+        let trimmed = precise.trim_end_matches('0').trim_end_matches('.');
+        if trimmed.is_empty() {
+            return b"0".to_vec();
         }
+        return trimmed.as_bytes().to_vec();
     }
     s.into_bytes()
 }
@@ -144,6 +146,7 @@ pub fn hset_command(ctx: &mut CommandContext) -> RedisResult<()> {
         return Err(RedisError::wrong_number_of_args(b"hset"));
     }
     let key = ctx.arg_owned(1usize)?;
+    let key_ref = key.clone();
     let mut pairs: Vec<(RedisString, RedisString)> = Vec::with_capacity((argc - 2) / 2);
     let mut j = 2;
     while j < argc {
@@ -185,6 +188,7 @@ pub fn hset_command(ctx: &mut CommandContext) -> RedisResult<()> {
             count
         }
     };
+    ctx.notify_keyspace_event(NOTIFY_HASH, b"hset", &key_ref);
     ctx.reply_integer(added)
 }
 
@@ -198,6 +202,7 @@ pub fn hmset_command(ctx: &mut CommandContext) -> RedisResult<()> {
         return Err(RedisError::wrong_number_of_args(b"hmset"));
     }
     let key = ctx.arg_owned(1usize)?;
+    let key_ref = key.clone();
     let mut pairs: Vec<(RedisString, RedisString)> = Vec::with_capacity((argc - 2) / 2);
     let mut j = 2;
     while j < argc {
@@ -229,6 +234,7 @@ pub fn hmset_command(ctx: &mut CommandContext) -> RedisResult<()> {
             }
         }
     }
+    ctx.notify_keyspace_event(NOTIFY_HASH, b"hset", &key_ref);
     ctx.reply_simple_string(b"OK")
 }
 
@@ -241,6 +247,7 @@ pub fn hsetnx_command(ctx: &mut CommandContext) -> RedisResult<()> {
         return Err(RedisError::wrong_number_of_args(b"hsetnx"));
     }
     let key = ctx.arg_owned(1usize)?;
+    let key_ref = key.clone();
     let field = ctx.arg_owned(2usize)?;
     let value = ctx.arg_owned(3usize)?;
     let inserted: i64 = match ctx.db_mut().lookup_key_write(&key) {
@@ -268,6 +275,9 @@ pub fn hsetnx_command(ctx: &mut CommandContext) -> RedisResult<()> {
             }
         }
     };
+    if inserted == 1 {
+        ctx.notify_keyspace_event(NOTIFY_HASH, b"hset", &key_ref);
+    }
     ctx.reply_integer(inserted)
 }
 
@@ -361,6 +371,12 @@ pub fn hdel_command(ctx: &mut CommandContext) -> RedisResult<()> {
     );
     if empty_after {
         ctx.db_mut().sync_delete(&key);
+    }
+    if removed > 0 {
+        ctx.notify_keyspace_event(NOTIFY_HASH, b"hdel", &key);
+        if empty_after {
+            ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", &key);
+        }
     }
     ctx.reply_integer(removed)
 }
@@ -518,9 +534,10 @@ pub fn hincrby_command(ctx: &mut CommandContext) -> RedisResult<()> {
                 .expect("new_hash constructs an Inline hash");
             map.insert(field, RedisString::from_bytes(&long_long_to_bytes(delta)));
         }
-        ctx.db_mut().set_key(key, obj, 0);
+        ctx.db_mut().set_key(key.clone(), obj, 0);
         delta
     };
+    ctx.notify_keyspace_event(NOTIFY_HASH, b"hincrby", &key);
     ctx.reply_integer(next)
 }
 
@@ -561,9 +578,10 @@ pub fn hincrbyfloat_command(ctx: &mut CommandContext) -> RedisResult<()> {
                 .expect("new_hash constructs an Inline hash");
             map.insert(field, RedisString::from_bytes(&bytes));
         }
-        ctx.db_mut().set_key(key, obj, 0);
+        ctx.db_mut().set_key(key.clone(), obj, 0);
         bytes
     };
+    ctx.notify_keyspace_event(NOTIFY_HASH, b"hincrbyfloat", &key);
     ctx.reply_bulk_string(RedisString::from_vec(result_bytes))
 }
 

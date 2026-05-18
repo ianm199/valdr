@@ -807,13 +807,13 @@ pub fn expire_generic_command(
     if flag & EXPIRE_XX != 0 && !has_expire {
         return ctx.reply_integer(0);
     }
+    if flag & EXPIRE_GT != 0 && !has_expire {
+        return ctx.reply_integer(0);
+    }
     if flag & EXPIRE_GT != 0 && has_expire && when <= current_expire {
         return ctx.reply_integer(0);
     }
     if flag & EXPIRE_LT != 0 && has_expire && when >= current_expire {
-        return ctx.reply_integer(0);
-    }
-    if flag & EXPIRE_LT != 0 && !has_expire {
         return ctx.reply_integer(0);
     }
 

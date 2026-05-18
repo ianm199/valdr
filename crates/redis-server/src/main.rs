@@ -360,6 +360,7 @@ fn handle_connection(
     let mut client = Client::with_connection(Connection::Tcp(stream));
     client.id = id;
     client.addr = Some(peer_addr);
+    client.authenticated = server.live_config.requirepass().is_none();
     let mut read_buf = [0u8; 16 * 1024];
 
     loop {

@@ -34,6 +34,7 @@ use redis_core::blocked_keys::{
 };
 use redis_core::command_context::CommandContext;
 use redis_core::db::RedisDb;
+use redis_core::notify::{NOTIFY_GENERIC, NOTIFY_LIST};
 use redis_core::object::RedisObject;
 use redis_types::{RedisError, RedisResult, RedisString};
 
@@ -358,6 +359,11 @@ fn push_generic(
         }
     };
     schedule_or_wake(ctx, &key);
+    let event = match position {
+        ListPosition::Head => b"lpush" as &[u8],
+        ListPosition::Tail => b"rpush" as &[u8],
+    };
+    ctx.notify_keyspace_event(NOTIFY_LIST, event, &key);
     ctx.reply_integer(new_len)
 }
 
@@ -427,12 +433,23 @@ fn pop_generic(ctx: &mut CommandContext, position: ListPosition) -> RedisResult<
         }
     };
 
+    let key_was_present = popped.is_some();
     let empty_after = matches!(
         ctx.db().lookup_key_read(&key),
         Some(o) if o.list().map(|d| d.is_empty()).unwrap_or(false)
     );
     if empty_after {
         ctx.db_mut().sync_delete(&key);
+    }
+    if key_was_present {
+        let event = match position {
+            ListPosition::Head => b"lpop" as &[u8],
+            ListPosition::Tail => b"rpop" as &[u8],
+        };
+        ctx.notify_keyspace_event(NOTIFY_LIST, event, &key);
+        if empty_after {
+            ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", &key);
+        }
     }
 
     match (count, popped) {
@@ -565,6 +582,7 @@ pub fn lset_command(ctx: &mut CommandContext) -> RedisResult<()> {
             if let Some(slot) = deque.get_mut(i) {
                 *slot = value;
             }
+            ctx.notify_keyspace_event(NOTIFY_LIST, b"lset", &key);
             ctx.reply_simple_string(b"OK")
         }
     }
@@ -624,6 +642,12 @@ pub fn lrem_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if empty_after {
         ctx.db_mut().sync_delete(&key);
     }
+    if removed > 0 {
+        ctx.notify_keyspace_event(NOTIFY_LIST, b"lrem", &key);
+        if empty_after {
+            ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", &key);
+        }
+    }
     ctx.reply_integer(removed)
 }
 
@@ -663,6 +687,10 @@ pub fn ltrim_command(ctx: &mut CommandContext) -> RedisResult<()> {
     };
     if key_empty {
         ctx.db_mut().sync_delete(&key);
+    }
+    ctx.notify_keyspace_event(NOTIFY_LIST, b"ltrim", &key);
+    if key_empty {
+        ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", &key);
     }
     ctx.reply_simple_string(b"OK")
 }
@@ -708,6 +736,9 @@ pub fn linsert_command(ctx: &mut CommandContext) -> RedisResult<()> {
             }
         }
     };
+    if outcome > 0 {
+        ctx.notify_keyspace_event(NOTIFY_LIST, b"linsert", &key);
+    }
     ctx.reply_integer(outcome)
 }
 
@@ -774,6 +805,19 @@ fn lmove_generic(
             ctx.db_mut().set_key(dst_key.clone(), obj, 0);
         }
     }
+    let src_pop_event = match wherefrom {
+        ListPosition::Head => b"lpop" as &[u8],
+        ListPosition::Tail => b"rpop" as &[u8],
+    };
+    ctx.notify_keyspace_event(NOTIFY_LIST, src_pop_event, &src_key);
+    if src_empty {
+        ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", &src_key);
+    }
+    let dst_push_event = match whereto {
+        ListPosition::Head => b"lpush" as &[u8],
+        ListPosition::Tail => b"rpush" as &[u8],
+    };
+    ctx.notify_keyspace_event(NOTIFY_LIST, dst_push_event, &dst_key);
     schedule_or_wake(ctx, &dst_key);
     ctx.reply_bulk_string(value)
 }
@@ -882,6 +926,14 @@ pub fn lmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
         );
         if empty_after {
             ctx.db_mut().sync_delete(key);
+        }
+        let pop_event = match position {
+            ListPosition::Head => b"lpop" as &[u8],
+            ListPosition::Tail => b"rpop" as &[u8],
+        };
+        ctx.notify_keyspace_event(NOTIFY_LIST, pop_event, key);
+        if empty_after {
+            ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", key);
         }
         ctx.reply_array_header(2)?;
         ctx.reply_bulk_string(key.clone())?;
@@ -1201,6 +1253,14 @@ fn bpop_generic(ctx: &mut CommandContext, position: ListPosition) -> RedisResult
         if empty_after {
             ctx.db_mut().sync_delete(key);
         }
+        let pop_event = match position {
+            ListPosition::Head => b"lpop" as &[u8],
+            ListPosition::Tail => b"rpop" as &[u8],
+        };
+        ctx.notify_keyspace_event(NOTIFY_LIST, pop_event, key);
+        if empty_after {
+            ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", key);
+        }
         ctx.reply_array_header(2)?;
         ctx.reply_bulk_string(key.clone())?;
         return ctx.reply_bulk_string(value);
@@ -1388,6 +1448,14 @@ pub fn blmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
         );
         if empty_after {
             ctx.db_mut().sync_delete(key);
+        }
+        let pop_event = match position {
+            ListPosition::Head => b"lpop" as &[u8],
+            ListPosition::Tail => b"rpop" as &[u8],
+        };
+        ctx.notify_keyspace_event(NOTIFY_LIST, pop_event, key);
+        if empty_after {
+            ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", key);
         }
         ctx.reply_array_header(2)?;
         ctx.reply_bulk_string(key.clone())?;

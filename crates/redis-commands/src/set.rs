@@ -33,6 +33,7 @@ use std::collections::HashSet;
 
 use redis_core::command_context::CommandContext;
 use redis_core::db::glob_match;
+use redis_core::notify::{NOTIFY_GENERIC, NOTIFY_SET};
 use redis_core::object::RedisObject;
 use redis_types::{RedisError, RedisResult, RedisString};
 
@@ -123,7 +124,7 @@ pub fn sadd_command(ctx: &mut CommandContext) -> RedisResult<()> {
                     count += 1;
                 }
             }
-            ctx.db_mut().set_key(key, obj, 0);
+            ctx.db_mut().set_key(key.clone(), obj, 0);
             count
         }
         Some(obj) => {
@@ -142,6 +143,9 @@ pub fn sadd_command(ctx: &mut CommandContext) -> RedisResult<()> {
             count
         }
     };
+    if added > 0 {
+        ctx.notify_keyspace_event(NOTIFY_SET, b"sadd", &key);
+    }
     ctx.reply_integer(added)
 }
 
@@ -178,6 +182,12 @@ pub fn srem_command(ctx: &mut CommandContext) -> RedisResult<()> {
     );
     if empty_after {
         ctx.db_mut().sync_delete(&key);
+    }
+    if removed > 0 {
+        ctx.notify_keyspace_event(NOTIFY_SET, b"srem", &key);
+        if empty_after {
+            ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", &key);
+        }
     }
     ctx.reply_integer(removed)
 }
@@ -313,6 +323,13 @@ pub fn spop_command(ctx: &mut CommandContext) -> RedisResult<()> {
     );
     if empty_after {
         ctx.db_mut().sync_delete(&key);
+    }
+    let did_pop = popped.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
+    if did_pop {
+        ctx.notify_keyspace_event(NOTIFY_SET, b"spop", &key);
+        if empty_after {
+            ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", &key);
+        }
     }
 
     match (count, popped) {
@@ -452,9 +469,14 @@ pub fn smove_command(ctx: &mut CommandContext) -> RedisResult<()> {
                 .set_mut()
                 .expect("new_set constructs an Inline set");
             h.insert(member);
-            ctx.db_mut().set_key(dst_key, obj, 0);
+            ctx.db_mut().set_key(dst_key.clone(), obj, 0);
         }
     }
+    ctx.notify_keyspace_event(NOTIFY_SET, b"srem", &src_key);
+    if src_empty {
+        ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", &src_key);
+    }
+    ctx.notify_keyspace_event(NOTIFY_SET, b"sadd", &dst_key);
     ctx.reply_integer(1)
 }
 
@@ -582,7 +604,8 @@ pub fn sinterstore_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let dst = ctx.arg_owned(1usize)?;
     let snapshots = collect_set_snapshots(ctx, 2, argc)?;
     let result = intersect_sets(snapshots);
-    let stored = store_set(ctx, dst, result);
+    let stored = store_set(ctx, dst.clone(), result);
+    ctx.notify_keyspace_event(NOTIFY_SET, b"sinterstore", &dst);
     ctx.reply_integer(stored)
 }
 
@@ -652,7 +675,8 @@ pub fn sunionstore_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let dst = ctx.arg_owned(1usize)?;
     let snapshots = collect_set_snapshots(ctx, 2, argc)?;
     let result = union_sets(snapshots);
-    let stored = store_set(ctx, dst, result);
+    let stored = store_set(ctx, dst.clone(), result);
+    ctx.notify_keyspace_event(NOTIFY_SET, b"sunionstore", &dst);
     ctx.reply_integer(stored)
 }
 
@@ -676,7 +700,8 @@ pub fn sdiffstore_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let dst = ctx.arg_owned(1usize)?;
     let snapshots = collect_set_snapshots(ctx, 2, argc)?;
     let result = diff_sets(snapshots);
-    let stored = store_set(ctx, dst, result);
+    let stored = store_set(ctx, dst.clone(), result);
+    ctx.notify_keyspace_event(NOTIFY_SET, b"sdiffstore", &dst);
     ctx.reply_integer(stored)
 }
 

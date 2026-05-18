@@ -34,6 +34,7 @@ use std::collections::HashMap;
 
 use redis_core::command_context::CommandContext;
 use redis_core::db::glob_match;
+use redis_core::notify::{NOTIFY_GENERIC, NOTIFY_ZSET};
 use redis_core::object::{InlineZSet, RedisObject};
 use redis_types::{RedisError, RedisResult, RedisString};
 
@@ -332,6 +333,10 @@ pub fn zadd_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
     delete_if_empty(ctx, &key);
 
+    if added > 0 || changed > 0 {
+        ctx.notify_keyspace_event(NOTIFY_ZSET, b"zadd", &key);
+    }
+
     if incr {
         match incr_reply {
             Some(Some(score)) => ctx.reply_bulk(&format_score(score)),
@@ -431,6 +436,7 @@ pub fn zincrby_command(ctx: &mut CommandContext) -> RedisResult<()> {
         ));
     }
     zset.upsert(member, new_score);
+    ctx.notify_keyspace_event(NOTIFY_ZSET, b"zincrby", &key);
     ctx.reply_bulk(&format_score(new_score))
 }
 
@@ -459,6 +465,13 @@ pub fn zrem_command(ctx: &mut CommandContext) -> RedisResult<()> {
         count
     };
     delete_if_empty(ctx, &key);
+    if removed > 0 {
+        ctx.notify_keyspace_event(NOTIFY_ZSET, b"zrem", &key);
+        let now_empty = ctx.db().lookup_key_read(&key).is_none();
+        if now_empty {
+            ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", &key);
+        }
+    }
     ctx.reply_integer(removed)
 }
 
@@ -844,6 +857,15 @@ fn popminmax_inner(ctx: &mut CommandContext, reverse: bool, cmd: &[u8]) -> Redis
     };
     delete_if_empty(ctx, &key);
 
+    if !popped.is_empty() {
+        let event = if reverse { b"zpopmax" as &[u8] } else { b"zpopmin" as &[u8] };
+        ctx.notify_keyspace_event(NOTIFY_ZSET, event, &key);
+        let now_empty = ctx.db().lookup_key_read(&key).is_none();
+        if now_empty {
+            ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", &key);
+        }
+    }
+
     match count_arg {
         None => {
             if popped.is_empty() {
@@ -910,6 +932,13 @@ pub fn zremrangebyrank_command(ctx: &mut CommandContext) -> RedisResult<()> {
         count
     };
     delete_if_empty(ctx, &key);
+    if removed > 0 {
+        ctx.notify_keyspace_event(NOTIFY_ZSET, b"zremrangebyrank", &key);
+        let now_empty = ctx.db().lookup_key_read(&key).is_none();
+        if now_empty {
+            ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", &key);
+        }
+    }
     ctx.reply_integer(removed)
 }
 
@@ -938,6 +967,13 @@ pub fn zremrangebyscore_command(ctx: &mut CommandContext) -> RedisResult<()> {
         count
     };
     delete_if_empty(ctx, &key);
+    if removed > 0 {
+        ctx.notify_keyspace_event(NOTIFY_ZSET, b"zremrangebyscore", &key);
+        let now_empty = ctx.db().lookup_key_read(&key).is_none();
+        if now_empty {
+            ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", &key);
+        }
+    }
     ctx.reply_integer(removed)
 }
 
@@ -1109,6 +1145,13 @@ pub fn zremrangebylex_command(ctx: &mut CommandContext) -> RedisResult<()> {
         count
     };
     delete_if_empty(ctx, &key);
+    if removed > 0 {
+        ctx.notify_keyspace_event(NOTIFY_ZSET, b"zremrangebylex", &key);
+        let now_empty = ctx.db().lookup_key_read(&key).is_none();
+        if now_empty {
+            ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", &key);
+        }
+    }
     ctx.reply_integer(removed)
 }
 
@@ -1385,7 +1428,12 @@ fn algebra_store_inner(
         AlgebraOp::Union => zunion_inner(sources, &opts),
         AlgebraOp::Inter => zinter_inner(sources, &opts),
     };
-    let stored = store_zset(ctx, dst, result);
+    let event = match op {
+        AlgebraOp::Union => b"zunionstore" as &[u8],
+        AlgebraOp::Inter => b"zinterstore" as &[u8],
+    };
+    let stored = store_zset(ctx, dst.clone(), result);
+    ctx.notify_keyspace_event(NOTIFY_ZSET, event, &dst);
     ctx.reply_integer(stored)
 }
 
@@ -1450,7 +1498,8 @@ pub fn zdiffstore_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
     let sources = collect_zalgebra_sources(ctx, 3, numkeys)?;
     let result = zdiff_inner(sources);
-    let stored = store_zset(ctx, dst, result);
+    let stored = store_zset(ctx, dst.clone(), result);
+    ctx.notify_keyspace_event(NOTIFY_ZSET, b"zdiffstore", &dst);
     ctx.reply_integer(stored)
 }
 
@@ -1669,7 +1718,8 @@ pub fn zrangestore_command(ctx: &mut CommandContext) -> RedisResult<()> {
         items.into_iter().map(|(s, m)| (m, s)).collect()
     };
 
-    let stored = store_zset(ctx, dst, entries);
+    let stored = store_zset(ctx, dst.clone(), entries);
+    ctx.notify_keyspace_event(NOTIFY_ZSET, b"zrangestore", &dst);
     ctx.reply_integer(stored)
 }
 

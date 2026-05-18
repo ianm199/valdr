@@ -1118,13 +1118,97 @@ pub fn decrby_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     incr_decr_apply(ctx, key, negated)
 }
 
+/// Format an `f64` value as ASCII decimal bytes matching Redis wire output.
+///
+/// Redis uses `ld2string` with `LD_STR_HUMAN` flag, which prints 17 significant
+/// digits and strips trailing zeros. Rust's `Display` for `f64` already uses
+/// Grisu/Dragon4 to produce the shortest decimal that round-trips, which
+/// matches Redis output for most values. For integer-valued floats the Display
+/// formatter omits the decimal point, so we append `.0` to match Redis
+/// (e.g. `10.0` not `10`). Scientific notation is rejected by Redis; values
+/// that Rust would format as `1e10` are formatted as `10000000000` via `{:.0}`.
+fn format_float_redis(v: f64) -> Vec<u8> {
+    let s = format!("{}", v);
+    if s.contains('e') || s.contains('E') {
+        let precise = format!("{:.17}", v);
+        let trimmed = precise.trim_end_matches('0').trim_end_matches('.');
+        if trimmed.is_empty() {
+            return b"0".to_vec();
+        }
+        return trimmed.as_bytes().to_vec();
+    }
+    s.as_bytes().to_vec()
+}
+
+/// Parse a byte slice as a `f64` for use as an INCRBYFLOAT increment.
+///
+/// Allows Inf so that `+inf` triggers the "would produce" error after the
+/// arithmetic rather than a generic "not a valid float" error. NaN literals
+/// (`nan`, `-nan`) are rejected immediately because no arithmetic on a
+/// finite value produces NaN via +inf.
+fn parse_float_strict(bytes: &[u8]) -> Result<f64, RedisError> {
+    if bytes.is_empty() {
+        return Err(RedisError::not_float());
+    }
+    let s = core::str::from_utf8(bytes).map_err(|_| RedisError::not_float())?;
+    if s.starts_with(char::is_whitespace) || s.ends_with(char::is_whitespace) {
+        return Err(RedisError::not_float());
+    }
+    let v: f64 = s.parse().map_err(|_| RedisError::not_float())?;
+    if v.is_nan() {
+        return Err(RedisError::not_float());
+    }
+    Ok(v)
+}
+
+/// Parse a byte slice as a stored `f64` value (rejects Inf and NaN).
+fn parse_stored_float(bytes: &[u8]) -> Result<f64, RedisError> {
+    let v = parse_float_strict(bytes)?;
+    if v.is_infinite() {
+        return Err(RedisError::not_float());
+    }
+    Ok(v)
+}
+
 /// INCRBYFLOAT key increment
 ///
+/// Parses the stored value as `f64` (defaulting to 0.0 for a missing key),
+/// adds the `increment` (also parsed as `f64`), stores the result as its
+/// canonical ASCII decimal representation, and replies with that string.
+/// Returns `WRONGTYPE` when the key is not a string, and
+/// `-ERR value is not a valid float` when either the stored value or the
+/// increment cannot be parsed.
+///
 /// C: `incrbyfloatCommand` (t_string.c:758).
-pub fn incrbyfloat_command(_ctx: &mut CommandContext) -> Result<(), RedisError> {
-    Err(RedisError::runtime(
-        b"ERR INCRBYFLOAT not yet implemented in the Rust port",
-    ))
+pub fn incrbyfloat_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
+    if ctx.arg_count() != 3 {
+        return Err(RedisError::wrong_number_of_args(b"incrbyfloat"));
+    }
+    let key = ctx.arg_owned(1usize)?;
+    let incr_arg = ctx.arg_owned(2usize)?;
+    let incr = parse_float_strict(incr_arg.as_bytes())?;
+
+    let current: f64 = match ctx.db_mut().lookup_key_write(&key) {
+        None => 0.0,
+        Some(obj) => match &obj.kind {
+            ObjectKind::String(_) => {
+                let bytes = obj.string_bytes_owned();
+                parse_stored_float(&bytes)?
+            }
+            _ => return Err(RedisError::wrong_type()),
+        },
+    };
+
+    let next = current + incr;
+    if next.is_nan() || next.is_infinite() {
+        return Err(RedisError::runtime(
+            b"ERR increment would produce NaN or Infinity",
+        ));
+    }
+    let result_bytes = format_float_redis(next);
+    let stored = RedisObject::new_raw_string(&result_bytes);
+    ctx.db_mut().set_key(key, stored, SETKEY_KEEPTTL);
+    ctx.reply_bulk_string(RedisString::from_bytes(&result_bytes))
 }
 
 /// APPEND key value

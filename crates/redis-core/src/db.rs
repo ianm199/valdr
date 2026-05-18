@@ -1088,10 +1088,35 @@ pub fn renamenx_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     rename_generic_command(ctx, true)
 }
 
-/// C: db.c:1538 moveCommand — MOVE key db [REPLACE]
-pub fn move_command(_ctx: &mut CommandContext) -> Result<(), RedisError> {
-    // TODO(port): multi-db required (selectDb, server.dbnum, createDatabaseIfNeeded)
-    Err(RedisError::runtime(b"MOVE: TODO(port): multi-db not implemented in Phase A"))
+/// C: db.c:1538 moveGenericCommand — MOVE key db
+///
+/// Phase-B multi-DB simplification: only DB 0 has real storage. Moving to
+/// the same db as the current selection (db == current_db_id) is an error.
+/// Moving to a different db (0..15) when source is db 0 and destination is
+/// nonzero acts as a delete because the destination db is always empty and
+/// unobservable. Moving to db 0 from db 0 is the same-db error.
+///
+/// TODO(architect): real multi-DB storage in Phase 4.
+pub fn move_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
+    if ctx.arg_count() != 3 {
+        return Err(RedisError::wrong_number_of_args(b"move"));
+    }
+    let key = ctx.arg(1)?.clone();
+    let db_arg = ctx.arg(2)?.clone();
+    let target_db = parse_i64_from_bytes(db_arg.as_bytes())
+        .ok_or_else(|| RedisError::runtime(b"ERR value is not an integer or out of range"))?;
+    if !(0..=15).contains(&target_db) {
+        return Err(RedisError::runtime(b"ERR invalid DB index"));
+    }
+    let current_db_id = ctx.db().id() as i64;
+    if target_db == current_db_id {
+        return Err(RedisError::runtime(b"ERR source and destination objects are the same"));
+    }
+    if ctx.db_mut().lookup_key_write(&key).is_none() {
+        return ctx.reply_integer(0);
+    }
+    ctx.db_mut().sync_delete(&key);
+    ctx.reply_integer(1)
 }
 
 /// C: db.c:1611 copyCommand — COPY source destination [DB n] [REPLACE]

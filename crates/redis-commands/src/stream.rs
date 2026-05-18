@@ -27,6 +27,7 @@ use redis_core::blocked_keys::{
 };
 use redis_core::command_context::CommandContext;
 use redis_core::db::RedisDb;
+use redis_core::notify::NOTIFY_STREAM;
 use redis_core::object::RedisObject;
 use redis_core::util::mstime;
 use redis_ds::stream::{
@@ -381,6 +382,7 @@ pub fn xadd_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let new_entry = StreamEntry { id: new_id, fields: fields_for_wake };
     wake_blocked_for_stream(ctx.db(), &key_for_wake, &new_entry);
 
+    ctx.notify_keyspace_event(NOTIFY_STREAM, b"xadd", &key_for_wake);
     ctx.reply_bulk_string(RedisString::from_vec(new_id.to_display_bytes()))
 }
 
@@ -570,6 +572,9 @@ pub fn xdel_command(ctx: &mut CommandContext) -> RedisResult<()> {
             count
         }
     };
+    if deleted > 0 {
+        ctx.notify_keyspace_event(NOTIFY_STREAM, b"xdel", &key);
+    }
     ctx.reply_integer(deleted)
 }
 
@@ -633,6 +638,9 @@ pub fn xtrim_command(ctx: &mut CommandContext) -> RedisResult<()> {
         None => 0,
         Some(stream) => apply_trim(stream, strategy) as i64,
     };
+    if evicted > 0 {
+        ctx.notify_keyspace_event(NOTIFY_STREAM, b"xtrim", &key);
+    }
     ctx.reply_integer(evicted)
 }
 

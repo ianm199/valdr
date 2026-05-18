@@ -17,6 +17,8 @@ use std::time::Instant;
 use redis_core::CommandContext;
 use redis_types::{RedisError, RedisResult, RedisString};
 
+use crate::generated::{CommandFlag, COMMANDS};
+
 /// A command handler.
 pub type Handler = fn(&mut CommandContext) -> RedisResult<()>;
 
@@ -68,6 +70,16 @@ pub fn dispatch(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     dispatch_command_name(ctx, name.as_bytes())
 }
 
+/// Returns `true` when the named command carries the `NO_AUTH` flag in the
+/// generated command registry, meaning it must be executable before the
+/// client has authenticated.
+fn command_has_no_auth_flag(name: &[u8]) -> bool {
+    COMMANDS.iter().any(|spec| {
+        ascii_eq_ignore_case(spec.name.as_bytes(), name)
+            && spec.flags.contains(&CommandFlag::NO_AUTH)
+    })
+}
+
 /// Dispatch using an externally-supplied command name.
 ///
 /// Skips the MULTI-queueing pre-check. Used by `EXEC` to drain each queued
@@ -78,6 +90,15 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
         Some(e) => e,
         None => return Err(unknown_command_error(name)),
     };
+
+    if ctx.live_config().requirepass().is_some() && !ctx.client_ref().authenticated {
+        if !command_has_no_auth_flag(name) {
+            ctx.client_mut()
+                .reply_buf
+                .extend_from_slice(b"-NOAUTH Authentication required.\r\n");
+            return Ok(());
+        }
+    }
 
     let argv_snapshot: Vec<RedisString> = (0..ctx.arg_count())
         .filter_map(|i| ctx.client_ref().arg(i).cloned())
@@ -160,6 +181,8 @@ pub static HANDLERS: &[DispatchEntry] = &[
     DispatchEntry { name: b"DEBUG", handler: crate::connection::debug_command },
     DispatchEntry { name: b"TIME", handler: crate::connection::time_command },
     DispatchEntry { name: b"RESET", handler: crate::connection::reset_command },
+    DispatchEntry { name: b"AUTH", handler: crate::connection::auth_command },
+    DispatchEntry { name: b"ACL", handler: crate::connection::acl_command },
     DispatchEntry { name: b"SET", handler: crate::string::set_command },
     DispatchEntry { name: b"GET", handler: crate::string::get_command },
     DispatchEntry { name: b"DEL", handler: redis_core::db::del_command },
@@ -180,6 +203,7 @@ pub static HANDLERS: &[DispatchEntry] = &[
     DispatchEntry { name: b"UNLINK", handler: redis_core::db::unlink_command },
     DispatchEntry { name: b"KEYS", handler: redis_core::db::keys_command },
     DispatchEntry { name: b"COPY", handler: redis_core::db::copy_command },
+    DispatchEntry { name: b"MOVE", handler: redis_core::db::move_command },
     // ── STRING (Round 1, agent E1) ─────────────────────────────────────────
     DispatchEntry { name: b"APPEND", handler: crate::string::append_command },
     DispatchEntry { name: b"STRLEN", handler: crate::string::strlen_command },
