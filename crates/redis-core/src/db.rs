@@ -424,6 +424,18 @@ impl RedisDb {
         Self { id, ..Default::default() }
     }
 
+    /// Construct a `RedisDb` from a snapshot of (key, object) pairs.
+    ///
+    /// Used by BGSAVE to build a throwaway DB containing only the entries
+    /// captured at snapshot time. The id is set to 0.
+    pub fn from_snapshot(entries: Vec<(RedisString, crate::object::RedisObject)>) -> Self {
+        let mut db = Self::new(0);
+        for (k, v) in entries {
+            db.dict.insert(k, v);
+        }
+        db
+    }
+
     // ── Internal helpers ─────────────────────────────────────────────────────
 
     /// Wall-clock time in milliseconds since the Unix epoch.

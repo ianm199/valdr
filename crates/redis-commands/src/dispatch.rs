@@ -432,6 +432,9 @@ pub static HANDLERS: &[DispatchEntry] = &[
     // ── SLOWLOG / LATENCY (OV-2) ───────────────────────────────────────────────
     DispatchEntry { name: b"SLOWLOG", handler: crate::slowlog_cmd::slowlog_command },
     DispatchEntry { name: b"LATENCY", handler: crate::slowlog_cmd::latency_command },
+    // ── PERSISTENCE (Round 18) ─────────────────────────────────────────────
+    DispatchEntry { name: b"SAVE", handler: crate::persist::save_command },
+    DispatchEntry { name: b"BGSAVE", handler: crate::persist::bgsave_command },
 ];
 
 #[cfg(test)]

@@ -46,6 +46,9 @@ struct CliArgs {
     port: u16,
     bind: String,
     maxclients: u64,
+    rdb_disabled: bool,
+    dir: String,
+    dbfilename: String,
 }
 
 impl Default for CliArgs {
@@ -54,6 +57,9 @@ impl Default for CliArgs {
             port: DEFAULT_PORT,
             bind: DEFAULT_BIND.to_string(),
             maxclients: get_max_clients(),
+            rdb_disabled: false,
+            dir: redis_core::live_config::DEFAULT_RDB_DIR.to_string(),
+            dbfilename: redis_core::live_config::DEFAULT_RDB_FILENAME.to_string(),
         }
     }
 }
@@ -85,8 +91,11 @@ fn parse_args(argv: Vec<String>) -> Result<CliArgs, String> {
                 let v = it.next().ok_or_else(|| "--bind requires a value".to_string())?;
                 out.bind = v;
             }
+            "--rdb-disabled" => {
+                out.rdb_disabled = true;
+            }
             "--help" | "-h" => {
-                println!("Usage: redis-server [<config-file>] [--port N] [--bind addr]");
+                println!("Usage: redis-server [<config-file>] [--port N] [--bind addr] [--rdb-disabled]");
                 std::process::exit(0);
             }
             other => {
@@ -128,6 +137,16 @@ fn apply_config_file(args: &mut CliArgs, path: &Path) -> Result<(), String> {
             "maxclients" => {
                 if let Ok(v) = value.parse::<u64>() {
                     args.maxclients = v;
+                }
+            }
+            "dir" => {
+                if !value.is_empty() {
+                    args.dir = value.to_string();
+                }
+            }
+            "dbfilename" => {
+                if !value.is_empty() {
+                    args.dbfilename = value.to_string();
                 }
             }
             _ => {}
@@ -198,6 +217,8 @@ fn main() {
 
     let live_config = Arc::new(redis_core::live_config::LiveConfig::new());
     live_config.set_maxclients(args.maxclients);
+    live_config.set_rdb_dir(args.dir.clone());
+    live_config.set_rdb_filename(args.dbfilename.clone());
     redis_core::object::install_live_config(Arc::clone(&live_config));
     redis_commands::install_live_config_handle(Arc::clone(&live_config));
 
@@ -207,6 +228,31 @@ fn main() {
     ));
 
     let db = Arc::new(Mutex::new(RedisDb::new(0)));
+
+    if !args.rdb_disabled {
+        let rdb_path = redis_core::rdb::rdb_path(
+            &live_config.rdb_dir(),
+            &live_config.rdb_filename(),
+        );
+        if rdb_path.exists() {
+            match db.lock() {
+                Ok(mut guard) => {
+                    match redis_core::rdb::load_into(&mut guard, &rdb_path) {
+                        Ok(msg) => eprintln!("redis-server: {}", msg),
+                        Err(e) => eprintln!("redis-server: RDB load failed ({}): {}", rdb_path.display(), e),
+                    }
+                }
+                Err(p) => {
+                    let mut guard = p.into_inner();
+                    match redis_core::rdb::load_into(&mut guard, &rdb_path) {
+                        Ok(msg) => eprintln!("redis-server: {}", msg),
+                        Err(e) => eprintln!("redis-server: RDB load failed ({}): {}", rdb_path.display(), e),
+                    }
+                }
+            }
+        }
+    }
+
     let next_client_id = Arc::new(AtomicU64::new(1));
     let registry = Arc::new(Mutex::new(PubSubRegistry::new()));
     redis_core::db::install_global_notify_handle(

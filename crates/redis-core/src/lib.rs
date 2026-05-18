@@ -12,6 +12,7 @@
 pub mod evict;
 pub mod eviction;
 pub mod live_config;
+pub mod rdb;
 pub mod lru_clock;
 pub mod memory;
 pub mod metrics;

@@ -19,6 +19,7 @@ pub mod hyperloglog;
 pub mod info;
 pub mod list;
 pub mod multi;
+pub mod persist;
 pub mod pubsub;
 pub mod set;
 pub mod slowlog_cmd;

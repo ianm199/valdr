@@ -246,15 +246,18 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
 /// `LASTSAVE`.
 ///
-/// Returns the unix timestamp of the last successful RDB save. The pilot
-/// server has no persistence, so this is reported as the process start time.
-/// Real clients (including the TCL test suite's bg-save assertion helpers)
-/// only check that the value is non-zero and monotonic.
+/// Returns the Unix timestamp (seconds) of the last successful RDB save,
+/// or the process start time when no save has occurred in this session.
 pub fn lastsave_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if ctx.arg_count() != 1 {
         return Err(RedisError::wrong_number_of_args(b"lastsave"));
     }
-    ctx.reply_integer(server_start_time() as i64)
+    let last = ctx.server().live_config.last_save_unix();
+    if last == 0 {
+        ctx.reply_integer(server_start_time() as i64)
+    } else {
+        ctx.reply_integer(last)
+    }
 }
 
 fn ascii_eq_ignore_case(a: &[u8], b: &[u8]) -> bool {

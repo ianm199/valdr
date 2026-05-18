@@ -24,6 +24,11 @@ use std::sync::Mutex;
 
 use redis_types::RedisString;
 
+/// Default `dir` for RDB/AOF files.
+pub const DEFAULT_RDB_DIR: &str = "./";
+/// Default `dbfilename` for RDB persistence.
+pub const DEFAULT_RDB_FILENAME: &str = "dump.rdb";
+
 /// Eviction policy discriminant matching the `MaxmemoryPolicy` enum in
 /// `evict.rs`. Stored as `u8` inside `AtomicU8` so reads are lock-free.
 #[repr(u8)]
@@ -110,6 +115,12 @@ pub struct LiveConfig {
     pub set_max_listpack_value: AtomicUsize,
     pub zset_max_listpack_entries: AtomicUsize,
     pub zset_max_listpack_value: AtomicUsize,
+    /// Directory where the RDB file is written (`dir` config key).
+    pub rdb_dir: Mutex<String>,
+    /// Filename for the RDB dump (`dbfilename` config key).
+    pub rdb_filename: Mutex<String>,
+    /// Unix timestamp (seconds) of the last successful RDB save.
+    pub last_save_unix: AtomicI64,
 }
 
 /// Default `maxclients` (matches upstream server.c).
@@ -171,6 +182,9 @@ impl Default for LiveConfig {
             set_max_listpack_value: AtomicUsize::new(DEFAULT_SET_MAX_LISTPACK_VALUE),
             zset_max_listpack_entries: AtomicUsize::new(DEFAULT_HASH_MAX_LISTPACK_ENTRIES),
             zset_max_listpack_value: AtomicUsize::new(DEFAULT_ZSET_MAX_LISTPACK_VALUE),
+            rdb_dir: Mutex::new(DEFAULT_RDB_DIR.to_string()),
+            rdb_filename: Mutex::new(DEFAULT_RDB_FILENAME.to_string()),
+            last_save_unix: AtomicI64::new(0),
         }
     }
 }
@@ -335,6 +349,49 @@ impl LiveConfig {
 
     pub fn set_zset_max_listpack_value(&self, n: usize) {
         self.zset_max_listpack_value.store(n, Ordering::Relaxed);
+    }
+
+    /// Return the current `dir` setting for RDB/AOF files.
+    pub fn rdb_dir(&self) -> String {
+        match self.rdb_dir.lock() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
+        }
+    }
+
+    /// Update the `dir` setting.
+    pub fn set_rdb_dir(&self, dir: String) {
+        match self.rdb_dir.lock() {
+            Ok(mut g) => *g = dir,
+            Err(p) => *p.into_inner() = dir,
+        }
+    }
+
+    /// Return the current `dbfilename` setting.
+    pub fn rdb_filename(&self) -> String {
+        match self.rdb_filename.lock() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
+        }
+    }
+
+    /// Update the `dbfilename` setting.
+    pub fn set_rdb_filename(&self, name: String) {
+        match self.rdb_filename.lock() {
+            Ok(mut g) => *g = name,
+            Err(p) => *p.into_inner() = name,
+        }
+    }
+
+    /// Return the Unix timestamp (seconds) of the last successful RDB save, or
+    /// 0 if no save has occurred this session.
+    pub fn last_save_unix(&self) -> i64 {
+        self.last_save_unix.load(Ordering::Relaxed)
+    }
+
+    /// Record the timestamp of a successful RDB save.
+    pub fn set_last_save_unix(&self, ts: i64) {
+        self.last_save_unix.store(ts, Ordering::Relaxed);
     }
 
     /// Snapshot of encoding thresholds — convenience for the encoding

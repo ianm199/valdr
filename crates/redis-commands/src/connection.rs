@@ -257,6 +257,8 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
     let live_set_value = cfg.set_max_listpack_value().to_string();
     let live_zset_entries = cfg.zset_max_listpack_entries().to_string();
     let live_zset_value = cfg.zset_max_listpack_value().to_string();
+    let live_dir = cfg.rdb_dir();
+    let live_dbfilename = cfg.rdb_filename();
 
     let mut out: Vec<(String, String)> = Vec::new();
     for &(name, value) in default_config_pairs() {
@@ -278,6 +280,8 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
             "set-max-listpack-value" => Some(live_set_value.clone()),
             "zset-max-listpack-entries" => Some(live_zset_entries.clone()),
             "zset-max-listpack-value" => Some(live_zset_value.clone()),
+            "dir" => Some(live_dir.clone()),
+            "dbfilename" => Some(live_dbfilename.clone()),
             _ => None,
         };
         out.push((
@@ -389,6 +393,16 @@ fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
                 let clamped = n.min(u32::MAX as usize) as u32;
                 cfg.set_hz(clamped);
                 redis_core::expire::active_expire_config().set_hz(clamped);
+            }
+        }
+        b"dir" => {
+            if let Ok(s) = std::str::from_utf8(value) {
+                cfg.set_rdb_dir(s.to_string());
+            }
+        }
+        b"dbfilename" => {
+            if let Ok(s) = std::str::from_utf8(value) {
+                cfg.set_rdb_filename(s.to_string());
             }
         }
         _ => {}
