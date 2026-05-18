@@ -1,10 +1,14 @@
 //! RDB save path — `RdbSaver` writes the complete RDB file.
 //!
-//! Round 18 framework:
+//! Round 19a: replaces the Round 18 empty-payload placeholder with real
+//! `RDB_TYPE_STRING` serialization for all three string encodings: Int,
+//! Embstr, Raw. Non-string types still emit an empty-payload placeholder
+//! (Rounds 20–23 will replace those).
+//!
+//! File layout:
 //!   - Magic header + AUX fields
 //!   - SELECTDB(0) + RESIZEDB hints
-//!   - Per-key: optional EXPIRETIME_MS + RDB_TYPE_STRING + empty-string payload
-//!     (placeholder; Round 19+ replaces the payload with real serialization)
+//!   - Per-key: optional EXPIRETIME_MS + type byte + value payload
 //!   - EOF + CRC64 trailer
 //!
 //! The saver accumulates everything in a `Vec<u8>` so the CRC can be computed
@@ -15,13 +19,14 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::db::RedisDb;
-use crate::object::EXPIRY_NONE;
+use crate::object::{ObjectKind, EXPIRY_NONE};
 
 use super::crc::crc64;
 use super::header::{
     write_aux_fields, write_magic, write_rdb_string, RDB_OPCODE_EOF, RDB_OPCODE_EXPIRETIME_MS,
     RDB_OPCODE_RESIZEDB, RDB_OPCODE_SELECTDB, RDB_TYPE_STRING,
 };
+use super::string::save_string_object;
 use super::varint::write_len;
 
 /// Write the complete RDB representation of `db` to the byte buffer `buf`.
@@ -58,7 +63,10 @@ fn write_rdb_to_buf(db: &RedisDb, buf: &mut Vec<u8>) -> io::Result<()> {
 
         buf.write_all(&[RDB_TYPE_STRING])?;
         write_rdb_string(buf, key.as_bytes())?;
-        write_rdb_string(buf, b"")?;
+        match &obj.kind {
+            ObjectKind::String(_) => save_string_object(buf, obj)?,
+            _ => write_len(buf, 0)?,
+        }
     }
 
     buf.write_all(&[RDB_OPCODE_EOF])?;

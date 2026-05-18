@@ -1,0 +1,37 @@
+# 02-strings-edge — empty string, boundary integers, binary-safe value.
+#
+# Tests the edges of integer encoding (int8/int16/int32 boundaries), an empty
+# string value, and the maximum 32-bit signed integer.  The binary-safe key
+# uses only printable ASCII so shlex can parse it; a separate raw-bytes test
+# would need a fixture RDB, which is out of scope for the corpus format.
+
+SET k_empty ""
+SET k_int8_max 127
+SET k_int8_min -128
+SET k_int16_max 32767
+SET k_int16_min -32768
+SET k_int32_max 2147483647
+SET k_int32_min -2147483648
+SET k_just_over_int32 2147483648
+SET k_zero 0
+SET k_one  1
+
+VERIFY
+
+DBSIZE
+GET k_empty
+STRLEN k_empty
+GET k_int8_max
+GET k_int8_min
+GET k_int16_max
+GET k_int16_min
+GET k_int32_max
+GET k_int32_min
+GET k_just_over_int32
+GET k_zero
+GET k_one
+TYPE k_empty
+TYPE k_int8_max
+OBJECT ENCODING k_empty
+OBJECT ENCODING k_int8_max
+OBJECT ENCODING k_just_over_int32

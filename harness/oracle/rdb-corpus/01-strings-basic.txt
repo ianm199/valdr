@@ -1,0 +1,29 @@
+# 01-strings-basic — short strings, long strings, and integer keys.
+#
+# Format:
+#   Lines before the VERIFY marker are "setup" commands run on the saving server.
+#   Lines after VERIFY are "verification" commands sent to both servers; replies
+#   must match frame-for-frame.
+
+SET k_short hello
+SET k_long  this_is_a_string_that_is_longer_than_44_bytes_to_force_raw_encoding
+SET k_int   42
+SET k_negint -9999
+INCR k_int
+
+VERIFY
+
+DBSIZE
+GET k_short
+GET k_long
+GET k_int
+GET k_negint
+GET k_missing
+EXISTS k_short
+EXISTS k_missing
+STRLEN k_short
+STRLEN k_long
+TYPE k_short
+TYPE k_int
+OBJECT ENCODING k_short
+OBJECT ENCODING k_int

@@ -1,9 +1,12 @@
 //! RDB load path — `load_into` reads an RDB file and populates a `RedisDb`.
 //!
-//! Round 18 reads the framework opcodes (SELECTDB, RESIZEDB, AUX, EXPIRETIME_MS,
-//! EXPIRETIME, EOF) and handles `RDB_TYPE_STRING` key-value pairs. The value
-//! payload is read and discarded for all types except STRING (where it is
-//! loaded as the key's value). Unknown type bytes are rejected.
+//! Round 19a: `RDB_TYPE_STRING` is now loaded with full encoding fidelity via
+//! `load_string_object` — producing `StringEncoding::Int`, `Embstr`, or `Raw`
+//! depending on the wire encoding. The `OBJECT ENCODING` command will report the
+//! correct encoding after a round-trip.
+//!
+//! Framework opcodes handled: SELECTDB, RESIZEDB, AUX, EXPIRETIME_MS,
+//! EXPIRETIME, IDLE, FREQ, EOF. Unknown type bytes are rejected.
 //!
 //! The CRC64 trailer is verified when present and non-zero.
 
@@ -12,7 +15,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::db::RedisDb;
-use crate::object::{RedisObject, EXPIRY_NONE};
+use crate::object::EXPIRY_NONE;
 use redis_types::RedisString;
 
 use super::crc::crc64;
@@ -22,6 +25,7 @@ use super::header::{
     RDB_OPCODE_MODULE_AUX, RDB_OPCODE_RESIZEDB, RDB_OPCODE_SELECTDB, RDB_OPCODE_SLOT_IMPORT,
     RDB_OPCODE_SLOT_INFO, RDB_TYPE_STRING,
 };
+use super::string::load_string_object;
 use super::varint::load_len;
 
 /// Read exactly one byte from `reader`.
@@ -164,7 +168,7 @@ pub fn load_into(db: &mut RedisDb, path: &Path) -> io::Result<String> {
 
             type_byte => {
                 let key_bytes = read_rdb_string(&mut reader)?;
-                let value_bytes = read_value(&mut reader, type_byte)?;
+                let mut obj = load_value(&mut reader, type_byte)?;
 
                 let expire = pending_expire;
                 pending_expire = EXPIRY_NONE;
@@ -173,9 +177,8 @@ pub fn load_into(db: &mut RedisDb, path: &Path) -> io::Result<String> {
                     continue;
                 }
 
-                let key = RedisString::from_vec(key_bytes);
-                let mut obj = RedisObject::new_raw_string(&value_bytes);
                 obj.expire = expire;
+                let key = RedisString::from_vec(key_bytes);
                 db.insert(key, obj);
                 keys_loaded += 1;
             }
@@ -188,18 +191,18 @@ pub fn load_into(db: &mut RedisDb, path: &Path) -> io::Result<String> {
     ))
 }
 
-/// Read the value payload for a given RDB type byte and return the raw bytes.
+/// Load the value payload for a given RDB type byte, returning a `RedisObject`.
 ///
-/// For `RDB_TYPE_STRING` the returned bytes are the string payload.
-/// For unknown types we return an error rather than silently skipping, since
-/// Round 18 only commits to handling STRING. Later rounds expand this.
-fn read_value(reader: &mut impl Read, type_byte: u8) -> io::Result<Vec<u8>> {
+/// `RDB_TYPE_STRING` uses the encoding-aware `load_string_object` so that
+/// `StringEncoding::Int`, `Embstr`, and `Raw` are preserved across a round-trip.
+/// Unknown type bytes are rejected; later rounds (20–23) will expand coverage.
+fn load_value(reader: &mut impl Read, type_byte: u8) -> io::Result<crate::object::RedisObject> {
     if type_byte == RDB_TYPE_STRING {
-        read_rdb_string(reader)
+        load_string_object(reader)
     } else {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            format!("RDB type 0x{:02x} not handled in Round 18", type_byte),
+            format!("RDB type 0x{:02x} not yet handled (Rounds 20-23)", type_byte),
         ))
     }
 }

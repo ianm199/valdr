@@ -5,7 +5,11 @@
 # corpus script independently, reports per-script pass/fail, then tears
 # down both servers unconditionally on exit.
 #
-# Usage: bash harness/oracle/smoke.sh [--skip-build]
+# Usage: bash harness/oracle/smoke.sh [--skip-build] [--with-rdb]
+#
+# --with-rdb   also run the RDB bidirectional oracle (rdb-diff) after the
+#              wire-diff suite.  Skipped by default because it is slower and
+#              depends on RDB save/load being wired in.
 #
 # Exit code: 0 = all scripts passed, 1 = one or more scripts failed,
 #             2 = infrastructure error (server did not start).
@@ -40,8 +44,10 @@ trap cleanup EXIT
 # ── build step ──────────────────────────────────────────────────────────────
 
 SKIP_BUILD=0
+WITH_RDB=0
 for arg in "$@"; do
     [[ "${arg}" == "--skip-build" ]] && SKIP_BUILD=1
+    [[ "${arg}" == "--with-rdb"   ]] && WITH_RDB=1
 done
 
 if [[ "${SKIP_BUILD}" -eq 0 ]]; then
@@ -205,6 +211,28 @@ if [[ "${C_AVAILABLE}" -eq 0 ]]; then
     echo "NOTE: C reference was unavailable; no comparisons were made."
     echo "      Install or build valkey-server to enable full smoke."
     exit 0
+fi
+
+# ── optional RDB bidirectional oracle ────────────────────────────────────────
+
+RDB_FAIL=0
+if [[ "${WITH_RDB}" -eq 1 ]]; then
+    RDB_ORACLE="${ROOT}/harness/oracle/rdb-diff"
+    echo ""
+    echo "═══════════════════════════════════════════════════════"
+    echo "  RDB bidirectional oracle (rdb-diff)"
+    echo "═══════════════════════════════════════════════════════"
+
+    python3 "${RDB_ORACLE}" --direction=all 2>&1 || RDB_FAIL=$?
+
+    if [[ "${RDB_FAIL}" -ne 0 ]]; then
+        echo ""
+        echo "  rdb-diff: FAIL (exit ${RDB_FAIL})"
+        FAIL_COUNT=$(( FAIL_COUNT + 1 ))
+    else
+        echo ""
+        echo "  rdb-diff: PASS"
+    fi
 fi
 
 [[ "${FAIL_COUNT}" -eq 0 ]] && exit 0 || exit 1

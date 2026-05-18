@@ -13,6 +13,7 @@ pub mod crc;
 pub mod header;
 pub mod load;
 pub mod save;
+pub mod string;
 pub mod varint;
 
 pub use load::load_into;

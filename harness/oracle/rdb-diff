@@ -1,0 +1,705 @@
+#!/usr/bin/env python3
+"""rdb-diff — bidirectional RDB oracle.
+
+Tests two directions:
+  A  our-save → C-load   (we write an RDB, C Valkey reads it)
+  B  C-save → our-load   (C Valkey writes an RDB, we read it)
+  C  byte-exact comparison of saved files (optional, simple fixtures only)
+
+Each direction is run per corpus file.  The corpus format is:
+
+  <setup lines>   — RESP commands run on the saving server
+  VERIFY          — separator keyword (its own line, case-insensitive)
+  <verify lines>  — RESP commands run on BOTH servers; replies must match
+
+Exit codes:
+  0  all pass
+  1  at least one mismatch
+  2  infrastructure error (server failed to start or missing binary)
+
+Usage:
+  rdb-diff [--direction=A|B|C|all] [--corpus=<path>] [--c-bin=<path>]
+           [--rust-bin=<path>] [--keep-tmp]
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import os
+import shlex
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+RDB_CORPUS_DIR = ROOT / "harness" / "oracle" / "rdb-corpus"
+VALKEY_BIN = ROOT / "reference" / "valkey" / "src" / "valkey-server"
+RUST_BIN = ROOT / "target" / "debug" / "redis-server"
+
+DEFAULT_DBFILENAME = "rdb-diff-test.rdb"
+
+
+# ---------------------------------------------------------------------------
+# RESP encoder / decoder (verbatim from wire-diff)
+# ---------------------------------------------------------------------------
+
+def resp_encode(parts: list[bytes]) -> bytes:
+    out = [b"*" + str(len(parts)).encode() + b"\r\n"]
+    for p in parts:
+        out.append(b"$" + str(len(p)).encode() + b"\r\n")
+        out.append(p + b"\r\n")
+    return b"".join(out)
+
+
+def resp_decode(buf: bytes) -> tuple[object, int]:
+    if not buf:
+        raise ValueError("empty buffer")
+    typ = buf[0:1]
+    end = buf.index(b"\r\n", 1)
+    head = buf[1:end].decode("latin-1")
+    rest_start = end + 2
+    if typ in (b"+", b"-", b":"):
+        return (typ + head.encode("latin-1"), rest_start)
+    if typ == b"$":
+        n = int(head)
+        if n == -1:
+            return (b"$-1", rest_start)
+        data = buf[rest_start : rest_start + n]
+        return (b"$" + data, rest_start + n + 2)
+    if typ == b"*":
+        n = int(head)
+        if n == -1:
+            return ([b"*-1"], rest_start)
+        items = []
+        pos = rest_start
+        for _ in range(n):
+            v, used = resp_decode(buf[pos:])
+            items.append(v)
+            pos += used
+        return (items, pos)
+    raise ValueError(f"unknown RESP type byte: {typ!r}")
+
+
+# ---------------------------------------------------------------------------
+# Corpus parsing
+# ---------------------------------------------------------------------------
+
+def parse_corpus(path: Path) -> tuple[list[list[bytes]], list[list[bytes]]]:
+    """Return (setup_cmds, verify_cmds) from a corpus file.
+
+    Lines before a bare VERIFY line (case-insensitive) are setup commands.
+    Lines after it are verification commands.  Blank lines and # comments
+    are skipped throughout.
+    """
+    setup: list[list[bytes]] = []
+    verify: list[list[bytes]] = []
+    in_verify = False
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.upper() == "VERIFY":
+            in_verify = True
+            continue
+        try:
+            parts = [p.encode("latin-1") for p in shlex.split(line)]
+        except ValueError as exc:
+            print(f"  WARN: unparseable line in {path.name}: {line!r} ({exc})", file=sys.stderr)
+            continue
+        if in_verify:
+            verify.append(parts)
+        else:
+            setup.append(parts)
+    return setup, verify
+
+
+def discover_corpora(corpus_arg: str | None) -> list[Path]:
+    if corpus_arg is not None:
+        p = Path(corpus_arg)
+        if not p.exists():
+            print(f"ERROR: corpus file not found: {corpus_arg}", file=sys.stderr)
+            sys.exit(2)
+        return [p]
+    return sorted(RDB_CORPUS_DIR.glob("*.txt"))
+
+
+# ---------------------------------------------------------------------------
+# Server management
+# ---------------------------------------------------------------------------
+
+def pick_free_port() -> int:
+    with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def wait_for_port(port: int, timeout: float = 8.0) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                return True
+        except OSError:
+            time.sleep(0.05)
+    return False
+
+
+def spawn_valkey(
+    c_bin: Path,
+    port: int,
+    rdb_dir: str,
+    dbfilename: str,
+    log_path: Path,
+) -> subprocess.Popen:
+    """Start C Valkey configured to load an existing RDB from rdb_dir/dbfilename."""
+    cmd = [
+        str(c_bin),
+        "--port", str(port),
+        "--bind", "127.0.0.1",
+        "--dir", rdb_dir,
+        "--dbfilename", dbfilename,
+        "--save", "",
+        "--appendonly", "no",
+        "--daemonize", "no",
+        "--loglevel", "warning",
+    ]
+    with open(log_path, "wb") as fh:
+        return subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT, start_new_session=True)
+
+
+def spawn_rust(
+    rust_bin: Path,
+    port: int,
+    rdb_dir: str,
+    dbfilename: str,
+    log_path: Path,
+    no_load: bool = False,
+) -> subprocess.Popen:
+    """Start our Rust server.
+
+    The Rust binary reads dir/dbfilename from a temp config file because its
+    CLI only accepts those settings via config file, not --dir/--dbfilename
+    flags.  Passing --rdb-disabled suppresses loading.
+    """
+    cfg_path = Path(rdb_dir) / "redis-server.conf"
+    cfg_path.write_text(
+        f"port {port}\n"
+        f"bind 127.0.0.1\n"
+        f"dir {rdb_dir}\n"
+        f"dbfilename {dbfilename}\n"
+    )
+    cmd = [str(rust_bin), str(cfg_path), "--port", str(port), "--bind", "127.0.0.1"]
+    if no_load:
+        cmd.append("--rdb-disabled")
+    with open(log_path, "wb") as fh:
+        return subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT, start_new_session=True)
+
+
+def kill_proc(proc: subprocess.Popen) -> None:
+    try:
+        proc.terminate()
+        proc.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# RESP I/O helpers
+# ---------------------------------------------------------------------------
+
+def send_commands(port: int, commands: list[list[bytes]], timeout: float = 5.0) -> list[object]:
+    with socket.create_connection(("127.0.0.1", port), timeout=timeout) as sock:
+        for cmd in commands:
+            sock.sendall(resp_encode(cmd))
+        buf = b""
+        replies: list[object] = []
+        while len(replies) < len(commands):
+            try:
+                chunk = sock.recv(65536)
+            except socket.timeout:
+                break
+            if not chunk:
+                break
+            buf += chunk
+            while len(replies) < len(commands):
+                try:
+                    val, used = resp_decode(buf)
+                except (ValueError, IndexError):
+                    break
+                replies.append(val)
+                buf = buf[used:]
+    return replies
+
+
+def send_save(port: int) -> bool:
+    """Issue SAVE and wait for +OK. Returns True on success."""
+    try:
+        replies = send_commands(port, [[b"SAVE"]], timeout=15.0)
+        return bool(replies) and replies[0] == b"+OK"
+    except OSError as exc:
+        print(f"  ERROR: SAVE failed: {exc}", file=sys.stderr)
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Frame comparison and display
+# ---------------------------------------------------------------------------
+
+def repr_frame(v: object) -> str:
+    if isinstance(v, list):
+        return "[" + ", ".join(repr_frame(x) for x in v) + "]"
+    if isinstance(v, bytes):
+        try:
+            return v.decode("utf-8")
+        except UnicodeDecodeError:
+            return repr(v)
+    return repr(v)
+
+
+def frames_equal(a: object, b: object) -> bool:
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) == len(b) and all(frames_equal(x, y) for x, y in zip(a, b))
+    return a == b
+
+
+# ---------------------------------------------------------------------------
+# Direction helpers
+# ---------------------------------------------------------------------------
+
+def run_setup(port: int, setup_cmds: list[list[bytes]], label: str) -> bool:
+    """Send setup commands to a server; return False if any fail badly."""
+    if not setup_cmds:
+        return True
+    try:
+        replies = send_commands(port, setup_cmds)
+    except OSError as exc:
+        print(f"  ERROR: setup on {label} failed: {exc}", file=sys.stderr)
+        return False
+    for cmd, reply in zip(setup_cmds, replies):
+        cmd_str = " ".join(p.decode("latin-1", errors="replace") for p in cmd)
+        if isinstance(reply, bytes) and reply.startswith(b"-"):
+            print(f"  WARN: setup cmd '{cmd_str}' returned error: {repr_frame(reply)}", file=sys.stderr)
+    return True
+
+
+def run_verify(
+    port_a: int,
+    port_b: int,
+    label_a: str,
+    label_b: str,
+    verify_cmds: list[list[bytes]],
+) -> tuple[int, int]:
+    """Run verify_cmds on both ports and compare.  Returns (pass_count, fail_count)."""
+    passes = 0
+    fails = 0
+    try:
+        replies_a = send_commands(port_a, verify_cmds)
+    except OSError as exc:
+        print(f"  ERROR: cannot reach {label_a}: {exc}", file=sys.stderr)
+        return 0, len(verify_cmds)
+
+    try:
+        replies_b = send_commands(port_b, verify_cmds)
+    except OSError as exc:
+        print(f"  ERROR: cannot reach {label_b}: {exc}", file=sys.stderr)
+        return 0, len(verify_cmds)
+
+    for i, cmd in enumerate(verify_cmds):
+        cmd_str = " ".join(p.decode("latin-1", errors="replace") for p in cmd)
+        ra = replies_a[i] if i < len(replies_a) else "<missing>"
+        rb = replies_b[i] if i < len(replies_b) else "<missing>"
+
+        if isinstance(ra, bytes) and ra.startswith(b"-ERR") and isinstance(rb, bytes) and rb.startswith(b"-ERR"):
+            print(f"    SKIP  {cmd_str!s:<40} (both returned error — command not supported)")
+            continue
+
+        if frames_equal(ra, rb):
+            print(f"    PASS  {cmd_str!s:<40} = {repr_frame(ra)}")
+            passes += 1
+        else:
+            print(f"    FAIL  {cmd_str!s:<40}")
+            print(f"      {label_a}: {repr_frame(ra)}")
+            print(f"      {label_b}: {repr_frame(rb)}")
+            fails += 1
+
+    return passes, fails
+
+
+# ---------------------------------------------------------------------------
+# Direction A: our-save → C-load
+# ---------------------------------------------------------------------------
+
+def direction_a(
+    c_bin: Path,
+    rust_bin: Path,
+    corpus_path: Path,
+    setup_cmds: list[list[bytes]],
+    verify_cmds: list[list[bytes]],
+    tmp_dir: str,
+) -> tuple[int, int]:
+    """Run Direction A for one corpus.  Returns (passes, fails)."""
+    print(f"  [A] our-save → C-load")
+
+    rust_port = pick_free_port()
+    rust_log = Path(tmp_dir) / "rust-save.log"
+    rust_proc = spawn_rust(rust_bin, rust_port, tmp_dir, DEFAULT_DBFILENAME, rust_log, no_load=True)
+    try:
+        if not wait_for_port(rust_port, timeout=8):
+            log_tail = rust_log.read_text(errors="replace")[-800:] if rust_log.exists() else ""
+            print(f"  ERROR: Rust server (save) did not start\n{log_tail}", file=sys.stderr)
+            return 0, len(verify_cmds)
+
+        if not run_setup(rust_port, setup_cmds, "rust-save"):
+            return 0, len(verify_cmds)
+
+        if not send_save(rust_port):
+            print("  ERROR: SAVE on Rust server failed", file=sys.stderr)
+            return 0, len(verify_cmds)
+    finally:
+        kill_proc(rust_proc)
+
+    rdb_path = Path(tmp_dir) / DEFAULT_DBFILENAME
+    if not rdb_path.exists():
+        print(f"  ERROR: RDB file not produced at {rdb_path}", file=sys.stderr)
+        return 0, len(verify_cmds)
+
+    c_port = pick_free_port()
+    c_log = Path(tmp_dir) / "c-load.log"
+    c_proc = spawn_valkey(c_bin, c_port, tmp_dir, DEFAULT_DBFILENAME, c_log)
+    rust2_port = pick_free_port()
+    rust2_log = Path(tmp_dir) / "rust-load.log"
+    rust2_proc = spawn_rust(rust_bin, rust2_port, tmp_dir, DEFAULT_DBFILENAME, rust2_log, no_load=False)
+
+    try:
+        c_ok = wait_for_port(c_port, timeout=8)
+        rust2_ok = wait_for_port(rust2_port, timeout=8)
+
+        if not c_ok:
+            log_tail = c_log.read_text(errors="replace")[-800:] if c_log.exists() else ""
+            print(f"  ERROR: C Valkey (load) did not start\n{log_tail}", file=sys.stderr)
+            return 0, len(verify_cmds)
+
+        if not rust2_ok:
+            log_tail = rust2_log.read_text(errors="replace")[-800:] if rust2_log.exists() else ""
+            print(f"  ERROR: Rust server (load) did not start\n{log_tail}", file=sys.stderr)
+            return 0, len(verify_cmds)
+
+        return run_verify(c_port, rust2_port, "C-load", "rust-load", verify_cmds)
+    finally:
+        kill_proc(c_proc)
+        kill_proc(rust2_proc)
+
+
+# ---------------------------------------------------------------------------
+# Direction B: C-save → our-load
+# ---------------------------------------------------------------------------
+
+def direction_b(
+    c_bin: Path,
+    rust_bin: Path,
+    corpus_path: Path,
+    setup_cmds: list[list[bytes]],
+    verify_cmds: list[list[bytes]],
+    tmp_dir: str,
+) -> tuple[int, int]:
+    """Run Direction B for one corpus.  Returns (passes, fails)."""
+    print(f"  [B] C-save → our-load")
+
+    c_port = pick_free_port()
+    c_log = Path(tmp_dir) / "c-save.log"
+    c_proc = spawn_valkey(c_bin, c_port, tmp_dir, DEFAULT_DBFILENAME, c_log)
+    try:
+        if not wait_for_port(c_port, timeout=8):
+            log_tail = c_log.read_text(errors="replace")[-800:] if c_log.exists() else ""
+            print(f"  ERROR: C Valkey (save) did not start\n{log_tail}", file=sys.stderr)
+            return 0, len(verify_cmds)
+
+        if not run_setup(c_port, setup_cmds, "c-save"):
+            return 0, len(verify_cmds)
+
+        if not send_save(c_port):
+            print("  ERROR: SAVE on C Valkey failed", file=sys.stderr)
+            return 0, len(verify_cmds)
+
+        c2_port = pick_free_port()
+        c2_log = Path(tmp_dir) / "c-save2.log"
+        c2_proc = spawn_valkey(c_bin, c2_port, tmp_dir, DEFAULT_DBFILENAME, c2_log)
+        try:
+            if not wait_for_port(c2_port, timeout=8):
+                log_tail = c2_log.read_text(errors="replace")[-800:] if c2_log.exists() else ""
+                print(f"  ERROR: C Valkey (reference) did not start\n{log_tail}", file=sys.stderr)
+                return 0, len(verify_cmds)
+            try:
+                expected_replies = send_commands(c2_port, verify_cmds)
+            except OSError as exc:
+                print(f"  ERROR: cannot reach C reference: {exc}", file=sys.stderr)
+                return 0, len(verify_cmds)
+        finally:
+            kill_proc(c2_proc)
+
+    finally:
+        kill_proc(c_proc)
+
+    rdb_path = Path(tmp_dir) / DEFAULT_DBFILENAME
+    if not rdb_path.exists():
+        print(f"  ERROR: RDB file not produced at {rdb_path}", file=sys.stderr)
+        return 0, len(verify_cmds)
+
+    rust_port = pick_free_port()
+    rust_log = Path(tmp_dir) / "rust-load-b.log"
+    rust_proc = spawn_rust(rust_bin, rust_port, tmp_dir, DEFAULT_DBFILENAME, rust_log, no_load=False)
+
+    try:
+        if not wait_for_port(rust_port, timeout=8):
+            log_tail = rust_log.read_text(errors="replace")[-800:] if rust_log.exists() else ""
+            print(f"  ERROR: Rust server (load) did not start\n{log_tail}", file=sys.stderr)
+            return 0, len(verify_cmds)
+
+        passes = 0
+        fails = 0
+        try:
+            rust_replies = send_commands(rust_port, verify_cmds)
+        except OSError as exc:
+            print(f"  ERROR: cannot reach rust-load: {exc}", file=sys.stderr)
+            return 0, len(verify_cmds)
+
+        for i, cmd in enumerate(verify_cmds):
+            cmd_str = " ".join(p.decode("latin-1", errors="replace") for p in cmd)
+            expected = expected_replies[i] if i < len(expected_replies) else "<missing>"
+            actual = rust_replies[i] if i < len(rust_replies) else "<missing>"
+
+            if isinstance(expected, bytes) and expected.startswith(b"-ERR") and isinstance(actual, bytes) and actual.startswith(b"-ERR"):
+                print(f"    SKIP  {cmd_str!s:<40} (both returned error — command not supported)")
+                continue
+
+            if frames_equal(expected, actual):
+                print(f"    PASS  {cmd_str!s:<40} = {repr_frame(expected)}")
+                passes += 1
+            else:
+                print(f"    FAIL  {cmd_str!s:<40}")
+                print(f"      expected (C): {repr_frame(expected)}")
+                print(f"      actual (rust): {repr_frame(actual)}")
+                fails += 1
+
+        return passes, fails
+    finally:
+        kill_proc(rust_proc)
+
+
+# ---------------------------------------------------------------------------
+# Direction C: byte-exact file comparison
+# ---------------------------------------------------------------------------
+
+def direction_c(
+    c_bin: Path,
+    rust_bin: Path,
+    corpus_path: Path,
+    setup_cmds: list[list[bytes]],
+    verify_cmds: list[list[bytes]],
+    tmp_dir: str,
+) -> tuple[int, int]:
+    """Run Direction C for one corpus.  Returns (passes, fails) where the
+    entire comparison is a single pass/fail entry."""
+    print(f"  [C] byte-exact save comparison")
+
+    rust_dir = os.path.join(tmp_dir, "rust-c")
+    c_dir = os.path.join(tmp_dir, "c-c")
+    os.makedirs(rust_dir, exist_ok=True)
+    os.makedirs(c_dir, exist_ok=True)
+
+    rust_port = pick_free_port()
+    rust_log = Path(rust_dir) / "rust.log"
+    rust_proc = spawn_rust(rust_bin, rust_port, rust_dir, DEFAULT_DBFILENAME, rust_log, no_load=True)
+    try:
+        if not wait_for_port(rust_port, timeout=8):
+            log_tail = rust_log.read_text(errors="replace")[-800:] if rust_log.exists() else ""
+            print(f"  ERROR: Rust server did not start\n{log_tail}", file=sys.stderr)
+            return 0, 1
+
+        run_setup(rust_port, setup_cmds, "rust-C")
+        if not send_save(rust_port):
+            print("  ERROR: SAVE on Rust failed", file=sys.stderr)
+            return 0, 1
+    finally:
+        kill_proc(rust_proc)
+
+    c_port = pick_free_port()
+    c_log = Path(c_dir) / "c.log"
+    c_proc = spawn_valkey(c_bin, c_port, c_dir, DEFAULT_DBFILENAME, c_log)
+    try:
+        if not wait_for_port(c_port, timeout=8):
+            log_tail = c_log.read_text(errors="replace")[-800:] if c_log.exists() else ""
+            print(f"  ERROR: C Valkey did not start\n{log_tail}", file=sys.stderr)
+            return 0, 1
+
+        run_setup(c_port, setup_cmds, "c-C")
+        if not send_save(c_port):
+            print("  ERROR: SAVE on C Valkey failed", file=sys.stderr)
+            return 0, 1
+    finally:
+        kill_proc(c_proc)
+
+    rust_rdb = Path(rust_dir) / DEFAULT_DBFILENAME
+    c_rdb = Path(c_dir) / DEFAULT_DBFILENAME
+
+    if not rust_rdb.exists() or not c_rdb.exists():
+        print("  ERROR: one or both RDB files missing", file=sys.stderr)
+        return 0, 1
+
+    rust_bytes = rust_rdb.read_bytes()
+    c_bytes = c_rdb.read_bytes()
+
+    if rust_bytes == c_bytes:
+        print(f"    PASS  byte-exact match ({len(rust_bytes)} bytes)")
+        return 1, 0
+
+    print(f"    DIFF  rust={len(rust_bytes)}B  c={len(c_bytes)}B  (byte-exact mismatch — tolerable if load-back passes)")
+    first_diff = next((i for i in range(min(len(rust_bytes), len(c_bytes))) if rust_bytes[i] != c_bytes[i]), None)
+    if first_diff is not None:
+        print(f"      first difference at byte {first_diff}: rust=0x{rust_bytes[first_diff]:02x} c=0x{c_bytes[first_diff]:02x}")
+    return 0, 0
+
+
+# ---------------------------------------------------------------------------
+# Per-corpus runner
+# ---------------------------------------------------------------------------
+
+def run_corpus(
+    c_bin: Path,
+    rust_bin: Path,
+    corpus_path: Path,
+    directions: list[str],
+    keep_tmp: bool,
+) -> tuple[int, int]:
+    """Run requested directions for one corpus file.  Returns (passes, fails)."""
+    setup_cmds, verify_cmds = parse_corpus(corpus_path)
+    if not verify_cmds:
+        print(f"  SKIP {corpus_path.name}: no VERIFY section")
+        return 0, 0
+
+    total_passes = 0
+    total_fails = 0
+
+    with tempfile.TemporaryDirectory(prefix="rdb-diff-", delete=not keep_tmp) as tmp_dir:
+        if keep_tmp:
+            print(f"  tmp: {tmp_dir}")
+
+        for direction in directions:
+            if direction == "A":
+                p, f = direction_a(c_bin, rust_bin, corpus_path, setup_cmds, verify_cmds, tmp_dir)
+            elif direction == "B":
+                p, f = direction_b(c_bin, rust_bin, corpus_path, setup_cmds, verify_cmds, tmp_dir)
+            elif direction == "C":
+                p, f = direction_c(c_bin, rust_bin, corpus_path, setup_cmds, verify_cmds, tmp_dir)
+            else:
+                print(f"  WARN: unknown direction {direction!r}", file=sys.stderr)
+                continue
+
+            dir_label = "PASS" if f == 0 else "FAIL"
+            print(f"  direction {direction}: {dir_label}  ({p} pass, {f} fail)")
+            total_passes += p
+            total_fails += f
+
+    return total_passes, total_fails
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description="Bidirectional RDB oracle — saves an RDB with one impl, loads with the other."
+    )
+    ap.add_argument(
+        "--direction",
+        default="all",
+        help="Which directions to run: A, B, C, or all (default: all).",
+    )
+    ap.add_argument(
+        "--corpus",
+        default=None,
+        help="Path to a single corpus .txt file.  Default: all files in harness/oracle/rdb-corpus/.",
+    )
+    ap.add_argument(
+        "--c-bin",
+        default=None,
+        help="Path to C Valkey binary (default: reference/valkey/src/valkey-server).",
+    )
+    ap.add_argument(
+        "--rust-bin",
+        default=None,
+        help="Path to Rust redis-server binary (default: target/debug/redis-server).",
+    )
+    ap.add_argument(
+        "--keep-tmp",
+        action="store_true",
+        help="Keep the temp directory after the run (useful for post-mortem inspection).",
+    )
+    args = ap.parse_args()
+
+    c_bin: Path = Path(args.c_bin) if args.c_bin else VALKEY_BIN
+    rust_bin: Path = Path(args.rust_bin) if args.rust_bin else RUST_BIN
+
+    if not c_bin.exists():
+        print(f"ERROR: C Valkey binary not found at {c_bin}", file=sys.stderr)
+        print("       Run: cd reference/valkey && make -j4 BUILD_TLS=no DISABLE_WERRORS=yes", file=sys.stderr)
+        return 2
+
+    if not rust_bin.exists():
+        print(f"ERROR: Rust binary not found at {rust_bin}", file=sys.stderr)
+        print("       Run: cargo build --bin redis-server", file=sys.stderr)
+        return 2
+
+    direction_str = args.direction.upper()
+    if direction_str == "ALL":
+        directions = ["A", "B", "C"]
+    else:
+        directions = [d.strip() for d in direction_str.split(",")]
+
+    corpora = discover_corpora(args.corpus)
+    if not corpora:
+        print(f"ERROR: no corpus files found in {RDB_CORPUS_DIR}", file=sys.stderr)
+        return 2
+
+    grand_passes = 0
+    grand_fails = 0
+    corpus_results: list[tuple[str, int, int]] = []
+
+    for corpus_path in corpora:
+        print(f"\n{'═'*60}")
+        print(f"corpus: {corpus_path.name}")
+        print(f"{'─'*60}")
+        p, f = run_corpus(c_bin, rust_bin, corpus_path, directions, args.keep_tmp)
+        grand_passes += p
+        grand_fails += f
+        corpus_results.append((corpus_path.name, p, f))
+
+    print(f"\n{'═'*60}")
+    print(f"SUMMARY  ({len(corpora)} corpora × {len(directions)} direction(s))")
+    print(f"{'─'*60}")
+    for name, p, f in corpus_results:
+        label = "PASS" if f == 0 else "FAIL"
+        print(f"  {label}  {name}  ({p} pass, {f} fail)")
+    print(f"{'─'*60}")
+    print(f"  total: {grand_passes + grand_fails} checks — {grand_passes} pass / {grand_fails} fail")
+    print(f"{'═'*60}")
+
+    return 0 if grand_fails == 0 else 1
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except (FileNotFoundError, TimeoutError, RuntimeError) as exc:
+        print(f"INFRASTRUCTURE ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
