@@ -25,10 +25,16 @@ use super::header::{
     RDB_OPCODE_EXPIRETIME_MS, RDB_OPCODE_FREQ, RDB_OPCODE_FUNCTION2, RDB_OPCODE_IDLE,
     RDB_OPCODE_MODULE_AUX, RDB_OPCODE_RESIZEDB, RDB_OPCODE_SELECTDB, RDB_OPCODE_SLOT_IMPORT,
     RDB_OPCODE_SLOT_INFO, RDB_TYPE_HASH, RDB_TYPE_HASH_2, RDB_TYPE_HASH_LISTPACK,
-    RDB_TYPE_HASH_ZIPLIST, RDB_TYPE_STRING,
+    RDB_TYPE_HASH_ZIPLIST, RDB_TYPE_LIST, RDB_TYPE_LIST_QUICKLIST, RDB_TYPE_LIST_QUICKLIST_2,
+    RDB_TYPE_LIST_ZIPLIST, RDB_TYPE_SET, RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK,
+    RDB_TYPE_STRING, RDB_TYPE_ZSET, RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK,
+    RDB_TYPE_ZSET_ZIPLIST,
 };
+use super::list::{load_list_object, load_quicklist2_object};
+use super::set::load_set_object;
 use super::string::load_string_object;
 use super::varint::load_len;
+use super::zset::load_zset_object;
 
 /// Read exactly one byte from `reader`.
 fn read_byte(reader: &mut impl Read) -> io::Result<u8> {
@@ -204,6 +210,8 @@ fn load_value(reader: &mut impl Read, type_byte: u8) -> io::Result<crate::object
     match type_byte {
         RDB_TYPE_STRING => load_string_object(reader),
         RDB_TYPE_HASH => load_hash_object(reader),
+        RDB_TYPE_LIST => load_list_object(reader),
+        RDB_TYPE_SET => load_set_object(reader),
         RDB_TYPE_HASH_ZIPLIST => Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "RDB_TYPE_HASH_ZIPLIST (13) not yet supported on load; set hash-max-listpack-entries 0 in C Valkey before SAVE",
@@ -216,9 +224,31 @@ fn load_value(reader: &mut impl Read, type_byte: u8) -> io::Result<crate::object
             io::ErrorKind::Unsupported,
             "RDB_TYPE_HASH_2 (22) field-level expiry not yet supported on load",
         )),
+        RDB_TYPE_LIST_QUICKLIST_2 => load_quicklist2_object(reader),
+        RDB_TYPE_LIST_ZIPLIST | RDB_TYPE_LIST_QUICKLIST => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "LIST ziplist/quicklist (v1) encoding not supported on load; these are obsolete formats from Redis < 7.0",
+        )),
+        RDB_TYPE_SET_INTSET | RDB_TYPE_SET_LISTPACK => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "SET intset/listpack encoding not supported on load; set set-max-intset-entries 0 and set-max-listpack-entries 0 in C Valkey before SAVE",
+        )),
+        RDB_TYPE_ZSET_2 => load_zset_object(reader),
+        RDB_TYPE_ZSET => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "RDB_TYPE_ZSET (3) text-encoded scores not supported; set zset-max-listpack-entries 0 in C Valkey 7+ and use SAVE to produce ZSET_2",
+        )),
+        RDB_TYPE_ZSET_ZIPLIST => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "RDB_TYPE_ZSET_ZIPLIST (12) not supported on load; set zset-max-listpack-entries 0 before SAVE",
+        )),
+        RDB_TYPE_ZSET_LISTPACK => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "RDB_TYPE_ZSET_LISTPACK (17) not supported on load; set zset-max-listpack-entries 0 before SAVE",
+        )),
         _ => Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            format!("RDB type 0x{:02x} not yet handled (Rounds 21-23)", type_byte),
+            format!("RDB type 0x{:02x} not yet handled (Round 23+)", type_byte),
         )),
     }
 }

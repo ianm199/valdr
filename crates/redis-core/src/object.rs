@@ -498,6 +498,15 @@ impl RedisObject {
         Self::bare(ObjectKind::List(ListEncoding::ListPack(Vec::new())))
     }
 
+    /// Create an `Inline` list object pre-populated from an existing `VecDeque`.
+    ///
+    /// Used by the RDB loader (`rdb/list.rs`) to wrap a deserialized element
+    /// sequence into a fully-formed `RedisObject` without an intermediate
+    /// empty-then-push construction.
+    pub fn new_list_from_vec(deque: VecDeque<RedisString>) -> Self {
+        Self::bare(ObjectKind::List(ListEncoding::Inline(deque)))
+    }
+
     /// Borrow the inner list `VecDeque` for a list-encoded object.
     ///
     /// Returns `None` for non-list objects and for the stub `ListPack`/
@@ -544,6 +553,15 @@ impl RedisObject {
     /// redis-commands crate.
     pub fn new_set() -> Self {
         Self::bare(ObjectKind::Set(SetEncoding::Inline(HashSet::new())))
+    }
+
+    /// Create an `Inline` set object pre-populated from an existing `HashSet`.
+    ///
+    /// Used by the RDB loader (`rdb/set.rs`) to wrap a deserialized member
+    /// collection into a fully-formed `RedisObject` without an intermediate
+    /// empty-then-insert construction.
+    pub fn new_set_from_set(members: HashSet<RedisString>) -> Self {
+        Self::bare(ObjectKind::Set(SetEncoding::Inline(members)))
     }
 
     /// Borrow the inner member `HashSet` for a set-encoded object.
@@ -633,6 +651,14 @@ impl RedisObject {
     /// zset command in the redis-commands crate.
     pub fn new_zset() -> Self {
         Self::bare(ObjectKind::ZSet(ZSetEncoding::Inline(InlineZSet::new())))
+    }
+
+    /// Create a zset object from an existing `InlineZSet`, using the Inline encoding.
+    ///
+    /// Used by the RDB loader (`rdb/zset.rs`) to construct a zset object from a
+    /// deserialized member/score collection without an intermediate empty-insert loop.
+    pub fn new_zset_from_inline(zset: InlineZSet) -> Self {
+        Self::bare(ObjectKind::ZSet(ZSetEncoding::Inline(zset)))
     }
 
     /// Borrow the inner `InlineZSet` for a zset-encoded object.

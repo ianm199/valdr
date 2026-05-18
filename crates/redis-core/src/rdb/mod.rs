@@ -12,10 +12,14 @@
 pub mod crc;
 pub mod hash;
 pub mod header;
+pub mod list;
+pub mod listpack;
 pub mod load;
 pub mod save;
+pub mod set;
 pub mod string;
 pub mod varint;
+pub mod zset;
 
 pub use load::load_into;
 pub use save::save_rdb;

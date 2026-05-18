@@ -25,10 +25,14 @@ use super::crc::crc64;
 use super::hash::save_hash_object;
 use super::header::{
     write_aux_fields, write_magic, write_rdb_string, RDB_OPCODE_EOF, RDB_OPCODE_EXPIRETIME_MS,
-    RDB_OPCODE_RESIZEDB, RDB_OPCODE_SELECTDB, RDB_TYPE_HASH, RDB_TYPE_STRING,
+    RDB_OPCODE_RESIZEDB, RDB_OPCODE_SELECTDB, RDB_TYPE_HASH, RDB_TYPE_LIST, RDB_TYPE_SET,
+    RDB_TYPE_STRING, RDB_TYPE_ZSET_2,
 };
+use super::list::save_list_object;
+use super::set::save_set_object;
 use super::string::save_string_object;
 use super::varint::write_len;
+use super::zset::save_zset_object;
 
 /// Write the complete RDB representation of `db` to the byte buffer `buf`.
 ///
@@ -65,6 +69,9 @@ fn write_rdb_to_buf(db: &RedisDb, buf: &mut Vec<u8>) -> io::Result<()> {
         let type_byte = match &obj.kind {
             ObjectKind::String(_) => RDB_TYPE_STRING,
             ObjectKind::Hash(_) => RDB_TYPE_HASH,
+            ObjectKind::List(_) => RDB_TYPE_LIST,
+            ObjectKind::Set(_) => RDB_TYPE_SET,
+            ObjectKind::ZSet(_) => RDB_TYPE_ZSET_2,
             _ => continue,
         };
         buf.write_all(&[type_byte])?;
@@ -72,6 +79,9 @@ fn write_rdb_to_buf(db: &RedisDb, buf: &mut Vec<u8>) -> io::Result<()> {
         match &obj.kind {
             ObjectKind::String(_) => save_string_object(buf, obj)?,
             ObjectKind::Hash(_) => save_hash_object(buf, obj)?,
+            ObjectKind::List(_) => save_list_object(buf, obj)?,
+            ObjectKind::Set(_) => save_set_object(buf, obj)?,
+            ObjectKind::ZSet(_) => save_zset_object(buf, obj)?,
             _ => unreachable!(),
         }
     }
