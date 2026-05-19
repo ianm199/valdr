@@ -60,6 +60,15 @@ pub const RDB_TYPE_STREAM_LISTPACKS: u8 = 15;
 pub const RDB_TYPE_STREAM_LISTPACKS_2: u8 = 19;
 pub const RDB_TYPE_STREAM_LISTPACKS_3: u8 = 21;
 
+/// Private opcodes for native types that have no byte-compatible counterpart in
+/// real Valkey.  These values are intentionally above all known standard type
+/// bytes (max 22 for HASH_2) and below the lowest opcode (0xF8 = 248) so they
+/// cannot be confused with either category.  Real Valkey will reject RDB files
+/// that contain these bytes; that is expected — they are only meaningful in a
+/// our-save ↔ our-load round-trip.
+pub const RDB_TYPE_JSON_NATIVE: u8 = 200;
+pub const RDB_TYPE_BLOOM_NATIVE: u8 = 201;
+
 /// Write an RDB string (raw bytes prefixed by length).
 ///
 /// For this round we always emit raw bytes without integer encoding or LZF.

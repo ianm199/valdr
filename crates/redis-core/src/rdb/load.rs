@@ -24,12 +24,12 @@ use super::header::{
     read_magic, read_rdb_string, RDB_OPCODE_AUX, RDB_OPCODE_EOF, RDB_OPCODE_EXPIRETIME,
     RDB_OPCODE_EXPIRETIME_MS, RDB_OPCODE_FREQ, RDB_OPCODE_FUNCTION2, RDB_OPCODE_IDLE,
     RDB_OPCODE_MODULE_AUX, RDB_OPCODE_RESIZEDB, RDB_OPCODE_SELECTDB, RDB_OPCODE_SLOT_IMPORT,
-    RDB_OPCODE_SLOT_INFO, RDB_TYPE_HASH, RDB_TYPE_HASH_2, RDB_TYPE_HASH_LISTPACK,
-    RDB_TYPE_HASH_ZIPLIST, RDB_TYPE_LIST, RDB_TYPE_LIST_QUICKLIST, RDB_TYPE_LIST_QUICKLIST_2,
-    RDB_TYPE_LIST_ZIPLIST, RDB_TYPE_SET, RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK,
-    RDB_TYPE_STREAM_LISTPACKS, RDB_TYPE_STREAM_LISTPACKS_2, RDB_TYPE_STREAM_LISTPACKS_3,
-    RDB_TYPE_STRING, RDB_TYPE_ZSET, RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK,
-    RDB_TYPE_ZSET_ZIPLIST,
+    RDB_OPCODE_SLOT_INFO, RDB_TYPE_BLOOM_NATIVE, RDB_TYPE_HASH, RDB_TYPE_HASH_2,
+    RDB_TYPE_HASH_LISTPACK, RDB_TYPE_HASH_ZIPLIST, RDB_TYPE_JSON_NATIVE, RDB_TYPE_LIST,
+    RDB_TYPE_LIST_QUICKLIST, RDB_TYPE_LIST_QUICKLIST_2, RDB_TYPE_LIST_ZIPLIST, RDB_TYPE_SET,
+    RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK, RDB_TYPE_STREAM_LISTPACKS,
+    RDB_TYPE_STREAM_LISTPACKS_2, RDB_TYPE_STREAM_LISTPACKS_3, RDB_TYPE_STRING, RDB_TYPE_ZSET,
+    RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK, RDB_TYPE_ZSET_ZIPLIST,
 };
 use super::list::{load_list_object, load_quicklist2_object};
 use super::set::load_set_object;
@@ -254,9 +254,68 @@ fn load_value(reader: &mut impl Read, type_byte: u8) -> io::Result<crate::object
             io::ErrorKind::Unsupported,
             "RDB_TYPE_STREAM_LISTPACKS (15) is a pre-Redis-7 legacy format without first_id / max_deleted_id / entries_added metadata; not supported on load — use Redis 7+ which writes RDB_TYPE_STREAM_LISTPACKS_2 (19) or _3 (21)",
         )),
+        RDB_TYPE_JSON_NATIVE => load_json_object(reader),
+        RDB_TYPE_BLOOM_NATIVE => load_bloom_object(reader),
         _ => Err(io::Error::new(
             io::ErrorKind::Unsupported,
             format!("RDB type 0x{:02x} not yet handled (Round 23+)", type_byte),
         )),
     }
+}
+
+/// Deserialize a `ObjectKind::Json` value from a length-prefixed UTF-8 JSON string.
+///
+/// Wire format: `read_rdb_string()` → UTF-8 bytes → `serde_json::from_slice`.
+fn load_json_object(reader: &mut impl Read) -> io::Result<crate::object::RedisObject> {
+    let bytes = read_rdb_string(reader)?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    Ok(crate::object::RedisObject::new_json(value))
+}
+
+/// Deserialize a `ObjectKind::Bloom` value from the fixed binary record written by
+/// `save_bloom_object`.
+///
+/// Wire format (all integers little-endian):
+///   capacity    u64  (8 bytes)
+///   item_count  u64  (8 bytes)
+///   n_hashes    u32  (4 bytes)
+///   error_rate  f64  (8 bytes, IEEE 754)
+///   expansion   u32  (4 bytes)
+///   nonscaling  u8   (1 byte, 0 or 1)
+///   bits        read_rdb_string() → Vec<u8>
+fn load_bloom_object(reader: &mut impl Read) -> io::Result<crate::object::RedisObject> {
+    let mut buf8 = [0u8; 8];
+    let mut buf4 = [0u8; 4];
+
+    reader.read_exact(&mut buf8)?;
+    let capacity = u64::from_le_bytes(buf8);
+
+    reader.read_exact(&mut buf8)?;
+    let item_count = u64::from_le_bytes(buf8);
+
+    reader.read_exact(&mut buf4)?;
+    let n_hashes = u32::from_le_bytes(buf4);
+
+    reader.read_exact(&mut buf8)?;
+    let error_rate = f64::from_le_bytes(buf8);
+
+    reader.read_exact(&mut buf4)?;
+    let expansion = u32::from_le_bytes(buf4);
+
+    let nonscaling_byte = read_byte(reader)?;
+    let nonscaling = nonscaling_byte != 0;
+
+    let bits = read_rdb_string(reader)?;
+
+    let bf = crate::object::BloomFilter {
+        capacity,
+        item_count,
+        n_hashes,
+        error_rate,
+        expansion,
+        nonscaling,
+        bits,
+    };
+    Ok(crate::object::RedisObject::new_bloom_from_filter(bf))
 }

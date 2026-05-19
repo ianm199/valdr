@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 
 use redis_core::db::RedisDb;
 use redis_core::object::{ObjectKind, EXPIRY_NONE};
+use redis_core::{Client, CommandContext, PubSubRegistry, RedisServer};
 use redis_types::RedisString;
 
 /// fsync policy discriminant stored inside `AtomicU8`.
@@ -541,6 +542,25 @@ pub fn replay_aof(path: &Path, db: &mut RedisDb) -> io::Result<usize> {
     Ok(replayed)
 }
 
+/// Route `argv` through the full command-dispatch machinery against `db`.
+///
+/// Constructs a minimal synthetic client (no live transport, authenticated as
+/// the default user) and calls [`crate::dispatch::dispatch_command_name`].
+/// Errors and unknown commands are silently dropped — replay is best-effort.
+fn dispatch_via_handler(argv: &[RedisString], db: &mut RedisDb) {
+    if argv.is_empty() {
+        return;
+    }
+    let name = argv[0].clone();
+    let mut client = Client::new(0);
+    client.authenticated_user = Some(RedisString::from_bytes(b"default"));
+    client.set_args(argv.to_vec());
+    let server = Arc::new(RedisServer::default());
+    let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
+    let mut ctx = CommandContext::with_server(&mut client, db, server, pubsub);
+    let _ = crate::dispatch::dispatch_command_name(&mut ctx, name.as_bytes());
+}
+
 /// Dispatch a single replayed command against `db` without a real client
 /// context. Implements a minimal subset covering the commands emitted by
 /// `write_aof_rewrite` and normal write operations.
@@ -726,6 +746,21 @@ fn dispatch_replay_command(argv: &[RedisString], db: &mut RedisDb) {
                 kind: ObjectKind::Hash(redis_core::object::HashEncoding::Inline(map)),
             };
             db.insert(key, obj);
+        }
+        b"xadd" if argv.len() >= 5 => {
+            dispatch_via_handler(argv, db);
+        }
+        b"xdel" if argv.len() >= 3 => {
+            dispatch_via_handler(argv, db);
+        }
+        b"xsetid" if argv.len() >= 3 => {
+            dispatch_via_handler(argv, db);
+        }
+        b"xgroup" if argv.len() >= 4 => {
+            dispatch_via_handler(argv, db);
+        }
+        b"xclaim" if argv.len() >= 6 => {
+            dispatch_via_handler(argv, db);
         }
         _ => {}
     }

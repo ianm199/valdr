@@ -25,8 +25,9 @@ use super::crc::crc64;
 use super::hash::save_hash_object;
 use super::header::{
     write_aux_fields, write_magic, write_rdb_string, RDB_OPCODE_EOF, RDB_OPCODE_EXPIRETIME_MS,
-    RDB_OPCODE_RESIZEDB, RDB_OPCODE_SELECTDB, RDB_TYPE_HASH, RDB_TYPE_LIST, RDB_TYPE_SET,
-    RDB_TYPE_STREAM_LISTPACKS_3, RDB_TYPE_STRING, RDB_TYPE_ZSET_2,
+    RDB_OPCODE_RESIZEDB, RDB_OPCODE_SELECTDB, RDB_TYPE_BLOOM_NATIVE, RDB_TYPE_HASH,
+    RDB_TYPE_JSON_NATIVE, RDB_TYPE_LIST, RDB_TYPE_SET, RDB_TYPE_STREAM_LISTPACKS_3,
+    RDB_TYPE_STRING, RDB_TYPE_ZSET_2,
 };
 use super::list::save_list_object;
 use super::set::save_set_object;
@@ -74,7 +75,9 @@ fn write_rdb_to_buf(db: &RedisDb, buf: &mut Vec<u8>) -> io::Result<()> {
             ObjectKind::Set(_) => RDB_TYPE_SET,
             ObjectKind::ZSet(_) => RDB_TYPE_ZSET_2,
             ObjectKind::Stream(_) => RDB_TYPE_STREAM_LISTPACKS_3,
-            _ => continue,
+            ObjectKind::Json(_) => RDB_TYPE_JSON_NATIVE,
+            ObjectKind::Bloom(_) => RDB_TYPE_BLOOM_NATIVE,
+            ObjectKind::Module => continue,
         };
         buf.write_all(&[type_byte])?;
         write_rdb_string(buf, key.as_bytes())?;
@@ -85,7 +88,9 @@ fn write_rdb_to_buf(db: &RedisDb, buf: &mut Vec<u8>) -> io::Result<()> {
             ObjectKind::Set(_) => save_set_object(buf, obj)?,
             ObjectKind::ZSet(_) => save_zset_object(buf, obj)?,
             ObjectKind::Stream(_) => save_stream_object(buf, obj)?,
-            _ => unreachable!(),
+            ObjectKind::Json(_) => save_json_object(buf, obj)?,
+            ObjectKind::Bloom(_) => save_bloom_object(buf, obj)?,
+            ObjectKind::Module => unreachable!(),
         }
     }
 
@@ -95,6 +100,47 @@ fn write_rdb_to_buf(db: &RedisDb, buf: &mut Vec<u8>) -> io::Result<()> {
     buf.write_all(&checksum.to_le_bytes())?;
 
     Ok(())
+}
+
+/// Serialize a `ObjectKind::Json` value as a length-prefixed UTF-8 JSON string.
+///
+/// Wire format: `write_rdb_string(serde_json::to_string(value))`.
+/// This is a private opcode (RDB_TYPE_JSON_NATIVE = 200) understood only by
+/// this implementation; real Valkey will reject the file.
+fn save_json_object(buf: &mut impl Write, obj: &crate::object::RedisObject) -> io::Result<()> {
+    let ObjectKind::Json(value) = &obj.kind else {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "expected Json kind"));
+    };
+    let json_str = serde_json::to_string(value)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    write_rdb_string(buf, json_str.as_bytes())
+}
+
+/// Serialize a `ObjectKind::Bloom` value as a fixed binary record followed by a
+/// length-prefixed byte slice for the bit array.
+///
+/// Wire format (all integers little-endian):
+///   capacity    u64  (8 bytes)
+///   item_count  u64  (8 bytes)
+///   n_hashes    u32  (4 bytes)
+///   error_rate  f64  (8 bytes, IEEE 754)
+///   expansion   u32  (4 bytes)
+///   nonscaling  u8   (1 byte, 0 or 1)
+///   bits        write_rdb_string(bf.bits)
+///
+/// This is a private opcode (RDB_TYPE_BLOOM_NATIVE = 201) understood only by
+/// this implementation; real Valkey will reject the file.
+fn save_bloom_object(buf: &mut impl Write, obj: &crate::object::RedisObject) -> io::Result<()> {
+    let ObjectKind::Bloom(bf) = &obj.kind else {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "expected Bloom kind"));
+    };
+    buf.write_all(&bf.capacity.to_le_bytes())?;
+    buf.write_all(&bf.item_count.to_le_bytes())?;
+    buf.write_all(&bf.n_hashes.to_le_bytes())?;
+    buf.write_all(&bf.error_rate.to_le_bytes())?;
+    buf.write_all(&bf.expansion.to_le_bytes())?;
+    buf.write_all(&[bf.nonscaling as u8])?;
+    write_rdb_string(buf, &bf.bits)
 }
 
 /// Save `db` to the file at `path`, using an atomic write-then-rename strategy.
