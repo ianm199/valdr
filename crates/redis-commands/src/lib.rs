@@ -37,6 +37,7 @@ pub mod string;
 pub mod zset;
 
 pub use dispatch::{dispatch, lookup_command, DispatchEntry, Handler};
+pub use list::wake_blocked_after_swapdb;
 
 use std::sync::{Arc, OnceLock};
 

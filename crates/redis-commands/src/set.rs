@@ -30,12 +30,70 @@
 //! usable.
 
 use std::collections::HashSet;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use redis_core::command_context::CommandContext;
 use redis_core::db::glob_match;
 use redis_core::notify::{NOTIFY_GENERIC, NOTIFY_SET};
-use redis_core::object::RedisObject;
+use redis_core::object::{
+    get_encoding_thresholds, is_canonical_i64_ascii, InlineSetEncoding, RedisObject,
+};
 use redis_types::{RedisError, RedisResult, RedisString};
+
+/// Advance the sticky encoding on an `InlineSet` to the minimum encoding
+/// required by its current members and the active configuration thresholds.
+///
+/// Real Redis promotes set encoding (intset → listpack → hashtable) but never
+/// automatically demotes it. After every SADD we call this to record any
+/// promotion so that subsequent SREM calls do not reset the observed encoding.
+fn update_sticky_encoding(s: &mut redis_core::object::InlineSet) {
+    let t = get_encoding_thresholds();
+    let mut all_integer = true;
+    let mut max_len: usize = 0;
+    for m in &s.data {
+        let bytes = m.as_bytes();
+        if bytes.len() > max_len {
+            max_len = bytes.len();
+        }
+        if all_integer && !is_canonical_i64_ascii(bytes) {
+            all_integer = false;
+        }
+    }
+    let computed = if all_integer && s.data.len() <= t.set_max_intset_entries {
+        InlineSetEncoding::Auto
+    } else if s.data.len() <= t.set_max_listpack_entries && max_len <= t.set_max_listpack_value {
+        InlineSetEncoding::ForcedListpack
+    } else {
+        InlineSetEncoding::ForcedHashtable
+    };
+    if computed > s.sticky {
+        s.sticky = computed;
+    }
+}
+
+/// Return a seed derived from the current system time in nanoseconds.
+///
+/// Used to bootstrap the xorshift64 PRNG in SRANDMEMBER and SPOP so that
+/// element selection is non-deterministic across commands. The seed is not
+/// cryptographically strong but is sufficient for the statistical distribution
+/// properties that the TCL test suite verifies (all members reachable over
+/// repeated calls).
+fn time_seed() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64 ^ (d.as_secs().wrapping_mul(6364136223846793005)))
+        .unwrap_or(12345678901234567)
+}
+
+/// Xorshift64 step — advances `state` and returns the new value.
+fn xorshift64(state: &mut u64) -> u64 {
+    let mut x = *state;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    *state = x;
+    x
+}
 
 /// Parse a `RedisString` as a base-10 `i64` using Redis' strict rules.
 ///
@@ -115,15 +173,16 @@ pub fn sadd_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let added = match ctx.db_mut().lookup_key_write(&key) {
         None => {
             let mut obj = RedisObject::new_set();
-            let h = obj
-                .set_mut()
+            let s = obj
+                .inline_set_mut()
                 .expect("new_set constructs an Inline set");
             let mut count: i64 = 0;
             for m in members {
-                if h.insert(m) {
+                if s.data.insert(m) {
                     count += 1;
                 }
             }
+            update_sticky_encoding(s);
             ctx.db_mut().set_key(key.clone(), obj, 0);
             count
         }
@@ -131,15 +190,16 @@ pub fn sadd_command(ctx: &mut CommandContext) -> RedisResult<()> {
             if !obj.is_set() {
                 return Err(RedisError::wrong_type());
             }
-            let h = obj
-                .set_mut()
+            let s = obj
+                .inline_set_mut()
                 .expect("is_set confirms set encoding");
             let mut count: i64 = 0;
             for m in members {
-                if h.insert(m) {
+                if s.data.insert(m) {
                     count += 1;
                 }
             }
+            update_sticky_encoding(s);
             count
         }
     };
@@ -274,10 +334,6 @@ pub fn scard_command(ctx: &mut CommandContext) -> RedisResult<()> {
 /// or `$-1\r\n` when the key is absent. With `count`: replies with an
 /// array of up to `count` distinct members in unspecified order. Deletes
 /// the key when the last element is removed.
-///
-/// TODO(architect): selection is deterministic (first iterator order)
-/// instead of random. Plumb a seeded RNG once the random infrastructure
-/// lands so the wire-diff oracle can be tightened.
 pub fn spop_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
     if argc < 2 || argc > 3 {
@@ -308,7 +364,13 @@ pub fn spop_command(ctx: &mut CommandContext) -> RedisResult<()> {
                     None => 1usize.min(h.len()),
                     Some(n) => (n as usize).min(h.len()),
                 };
-                let targets: Vec<RedisString> = h.iter().take(take).cloned().collect();
+                let mut rng = time_seed();
+                let mut all: Vec<RedisString> = h.iter().cloned().collect();
+                for i in 0..take.min(all.len()) {
+                    let j = i + (xorshift64(&mut rng) as usize) % (all.len() - i);
+                    all.swap(i, j);
+                }
+                let targets: Vec<RedisString> = all.into_iter().take(take).collect();
                 for m in &targets {
                     h.remove(m);
                 }
@@ -362,9 +424,6 @@ pub fn spop_command(ctx: &mut CommandContext) -> RedisResult<()> {
 /// with an array of up to `count` distinct members. With a negative
 /// `count`: replies with an array of `|count|` members allowing
 /// duplicates. The set is not modified.
-///
-/// TODO(architect): selection is deterministic (first iterator order)
-/// instead of random.
 pub fn srandmember_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
     if argc < 2 || argc > 3 {
@@ -372,7 +431,11 @@ pub fn srandmember_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
     let key = ctx.arg_owned(1usize)?;
     let count: Option<i64> = if argc == 3 {
-        Some(parse_strict_i64(ctx.arg(2)?.as_bytes())?)
+        let n = parse_strict_i64(ctx.arg(2)?.as_bytes())?;
+        if n < -i64::MAX {
+            return Err(RedisError::out_of_range());
+        }
+        Some(n)
     } else {
         None
     };
@@ -386,18 +449,25 @@ pub fn srandmember_command(ctx: &mut CommandContext) -> RedisResult<()> {
             if members.is_empty() {
                 ctx.reply_null_bulk()
             } else {
-                let first = members
-                    .into_iter()
-                    .next()
-                    .expect("non-empty members yields at least one element");
-                ctx.reply_bulk_string(first)
+                let mut rng = time_seed();
+                let idx = (xorshift64(&mut rng) as usize) % members.len();
+                ctx.reply_bulk_string(members.into_iter().nth(idx).expect("idx < len"))
             }
         }
         Some(n) if n >= 0 => {
             let take = (n as usize).min(members.len());
             ctx.reply_array_header(take)?;
-            for elem in members.into_iter().take(take) {
-                ctx.reply_bulk_string(elem)?;
+            if take == 0 {
+                return Ok(());
+            }
+            let mut rng = time_seed();
+            let mut indices: Vec<usize> = (0..members.len()).collect();
+            for i in 0..take {
+                let j = i + (xorshift64(&mut rng) as usize) % (members.len() - i);
+                indices.swap(i, j);
+            }
+            for i in 0..take {
+                ctx.reply_bulk_string(members[indices[i]].clone())?;
             }
             Ok(())
         }
@@ -407,9 +477,10 @@ pub fn srandmember_command(ctx: &mut CommandContext) -> RedisResult<()> {
             if members.is_empty() {
                 return Ok(());
             }
-            for i in 0..take {
-                let pick = members[i % members.len()].clone();
-                ctx.reply_bulk_string(pick)?;
+            let mut rng = time_seed();
+            for _ in 0..take {
+                let idx = (xorshift64(&mut rng) as usize) % members.len();
+                ctx.reply_bulk_string(members[idx].clone())?;
             }
             Ok(())
         }
@@ -618,33 +689,39 @@ pub fn sintercard_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if argc < 3 {
         return Err(RedisError::wrong_number_of_args(b"sintercard"));
     }
-    let numkeys = parse_strict_i64(ctx.arg(1)?.as_bytes())?;
-    if numkeys <= 0 {
+    let numkeys_raw = ctx.arg(1)?.as_bytes().to_vec();
+    let numkeys = parse_strict_i64(&numkeys_raw)
+        .ok()
+        .filter(|&n| n >= 1)
+        .ok_or_else(|| {
+            RedisError::runtime(b"ERR numkeys should be greater than 0")
+        })?;
+    let numkeys = numkeys as usize;
+    if numkeys > argc - 2 {
         return Err(RedisError::runtime(
-            b"ERR numkeys should be greater than 0",
+            b"ERR Number of keys can't be greater than number of args",
         ));
     }
-    let numkeys = numkeys as usize;
-    if argc < 2 + numkeys {
-        return Err(RedisError::syntax(b"syntax error"));
-    }
-    let limit = if argc == 2 + numkeys {
-        0i64
-    } else if argc == 4 + numkeys {
-        let opt = ctx.arg(2 + numkeys)?;
-        if !opt.as_bytes().eq_ignore_ascii_case(b"limit") {
+    let mut j = 2 + numkeys;
+    let mut limit: i64 = 0;
+    while j < argc {
+        let opt = ctx.arg(j)?.as_bytes().to_vec();
+        if opt.eq_ignore_ascii_case(b"limit") {
+            if j + 1 >= argc {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            let limit_raw = ctx.arg(j + 1)?.as_bytes().to_vec();
+            limit = parse_strict_i64(&limit_raw)
+                .ok()
+                .filter(|&n| n >= 0)
+                .ok_or_else(|| {
+                    RedisError::runtime(b"ERR LIMIT can't be negative")
+                })?;
+            j += 2;
+        } else {
             return Err(RedisError::syntax(b"syntax error"));
         }
-        let n = parse_strict_i64(ctx.arg(3 + numkeys)?.as_bytes())?;
-        if n < 0 {
-            return Err(RedisError::runtime(
-                b"ERR LIMIT can't be negative",
-            ));
-        }
-        n
-    } else {
-        return Err(RedisError::syntax(b"syntax error"));
-    };
+    }
     let snapshots = collect_set_snapshots(ctx, 2, 2 + numkeys)?;
     let result = intersect_sets(snapshots);
     let card = if limit > 0 {

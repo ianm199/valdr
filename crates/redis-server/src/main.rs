@@ -31,7 +31,9 @@ use libc;
 use redis_commands::connection::get_max_clients;
 use redis_commands::{dispatch, pubsub};
 use redis_core::blocked_keys::{blocked_keys_index, current_time_ms};
+use redis_core::client_info::client_info_registry;
 use redis_core::command_context::CommandContext;
+use redis_core::databases::global_databases;
 use redis_core::db::RedisDb;
 use redis_core::expire::{active_expire_config, spawn_active_expire_thread};
 use redis_core::lru_clock::spawn_lru_clock_thread;
@@ -56,6 +58,9 @@ struct CliArgs {
     appendonly: bool,
     appendfilename: String,
     appendfsync: u8,
+    set_max_intset_entries: usize,
+    set_max_listpack_entries: usize,
+    set_max_listpack_value: usize,
 }
 
 impl Default for CliArgs {
@@ -70,6 +75,9 @@ impl Default for CliArgs {
             appendonly: false,
             appendfilename: redis_core::live_config::DEFAULT_AOF_FILENAME.to_string(),
             appendfsync: redis_commands::aof::FSYNC_EVERYSEC,
+            set_max_intset_entries: redis_core::live_config::DEFAULT_SET_MAX_INTSET_ENTRIES,
+            set_max_listpack_entries: redis_core::live_config::DEFAULT_SET_MAX_LISTPACK_ENTRIES,
+            set_max_listpack_value: redis_core::live_config::DEFAULT_SET_MAX_LISTPACK_VALUE,
         }
     }
 }
@@ -186,6 +194,21 @@ fn apply_config_file(args: &mut CliArgs, path: &Path) -> Result<(), String> {
                     args.appendfsync = p;
                 }
             }
+            "set-max-intset-entries" => {
+                if let Ok(v) = value.parse::<usize>() {
+                    args.set_max_intset_entries = v;
+                }
+            }
+            "set-max-listpack-entries" => {
+                if let Ok(v) = value.parse::<usize>() {
+                    args.set_max_listpack_entries = v;
+                }
+            }
+            "set-max-listpack-value" => {
+                if let Ok(v) = value.parse::<usize>() {
+                    args.set_max_listpack_value = v;
+                }
+            }
             _ => {}
         }
     }
@@ -260,6 +283,9 @@ fn main() {
     live_config.set_appendonly(args.appendonly);
     live_config.set_appendfilename(args.appendfilename.clone());
     live_config.set_appendfsync(args.appendfsync);
+    live_config.store_set_max_intset_entries(args.set_max_intset_entries);
+    live_config.store_set_max_listpack_entries(args.set_max_listpack_entries);
+    live_config.store_set_max_listpack_value(args.set_max_listpack_value);
     redis_core::object::install_live_config(Arc::clone(&live_config));
     redis_commands::install_live_config_handle(Arc::clone(&live_config));
     redis_core::acl::install_acl_state();
@@ -274,10 +300,10 @@ fn main() {
         Arc::clone(&live_config),
     ));
 
-    let db = Arc::new(Mutex::new(RedisDb::new(0)));
+    let db_zero = global_databases().get(0);
 
     redis_commands::replica_dialer::install_dialer_resources(
-        Arc::clone(&db),
+        Arc::clone(&db_zero),
         Arc::clone(&server),
         args.port,
         args.dir.clone(),
@@ -289,7 +315,7 @@ fn main() {
             &live_config.rdb_filename(),
         );
         if rdb_path.exists() {
-            match db.lock() {
+            match db_zero.lock() {
                 Ok(mut guard) => {
                     match redis_core::rdb::load_into(&mut guard, &rdb_path) {
                         Ok(msg) => eprintln!("redis-server: {}", msg),
@@ -310,7 +336,7 @@ fn main() {
     if args.appendonly {
         let aof_path = std::path::Path::new(&args.dir).join(&args.appendfilename);
         if aof_path.exists() {
-            match db.lock() {
+            match db_zero.lock() {
                 Ok(mut guard) => {
                     match redis_commands::aof::replay_aof(&aof_path, &mut guard) {
                         Ok(n) => eprintln!("redis-server: AOF replay: {} commands", n),
@@ -339,15 +365,18 @@ fn main() {
         Arc::clone(&registry),
         Arc::clone(&live_config),
     );
+    redis_core::db::install_swapdb_wake_hook(Box::new(|other_db_id| {
+        redis_commands::wake_blocked_after_swapdb(other_db_id, other_db_id);
+    }));
     spawn_blocked_timeout_thread(Arc::clone(&shutdown));
     let active_expire_cfg = Arc::clone(active_expire_config());
     let metrics_arc = Arc::clone(server_metrics());
-    let _ = spawn_active_expire_thread(Arc::clone(&db), active_expire_cfg, Some(metrics_arc));
+    let _ = spawn_active_expire_thread(global_databases().get(0), active_expire_cfg, Some(metrics_arc));
     let _ = spawn_lru_clock_thread();
     spawn_bgsave_reaper(Arc::clone(&server), Arc::clone(&live_config));
     spawn_repl_bgsave_reaper();
 
-    let db_for_tls = Arc::clone(&db);
+    let db_for_tls = global_databases().get(0);
     let registry_for_tls = Arc::clone(&registry);
     let server_for_tls = Arc::clone(&server);
     let next_id_for_tls = Arc::clone(&next_client_id);
@@ -410,7 +439,7 @@ fn main() {
             });
     }));
 
-    serve(listener, shutdown, db, next_client_id, registry, server, args.port);
+    serve(listener, shutdown, db_zero, next_client_id, registry, server, args.port);
 }
 
 /// Reaper thread for BGSAVE child processes.
@@ -830,6 +859,9 @@ fn handle_connection(
     if let Ok(mut guard) = registry.lock() {
         guard.register_sender(id, outbound.clone());
     }
+    if let Ok(mut guard) = client_info_registry().lock() {
+        guard.register(id, peer_addr.clone());
+    }
 
     let mut client = Client::with_connection(Connection::Tcp(stream));
     client.id = id;
@@ -858,6 +890,9 @@ fn handle_connection_tls(
 
     if let Ok(mut guard) = registry.lock() {
         guard.register_sender(id, tx.clone());
+    }
+    if let Ok(mut guard) = client_info_registry().lock() {
+        guard.register(id, peer_addr.clone());
     }
 
     let mut client = Client::with_connection(conn);
@@ -946,6 +981,9 @@ fn run_client_loop(
     let _ = pubsub::drop_client_from_registry(&registry, id);
     redis_core::replication::global_replication_state().remove_replica(id);
     client.clear_blocked_on_keys();
+    if let Ok(mut guard) = client_info_registry().lock() {
+        guard.deregister(id);
+    }
     server_metrics().on_disconnect();
 }
 
@@ -1066,6 +1104,9 @@ fn run_client_loop_tls(
     let _ = pubsub::drop_client_from_registry(&registry, id);
     redis_core::replication::global_replication_state().remove_replica(id);
     client.clear_blocked_on_keys();
+    if let Ok(mut guard) = client_info_registry().lock() {
+        guard.deregister(id);
+    }
     drop(outbound_tx);
     server_metrics().on_disconnect();
 }
@@ -1079,17 +1120,32 @@ fn run_client_loop_tls(
 fn process_command(
     client: &mut Client,
     argv: Vec<RedisString>,
-    db: &Arc<Mutex<RedisDb>>,
+    _db: &Arc<Mutex<RedisDb>>,
     registry: &Arc<Mutex<PubSubRegistry>>,
     server: &Arc<redis_core::RedisServer>,
 ) {
     client.clear_blocked_on_keys();
     client.set_args(argv);
+
+    let cmd_name = client
+        .arg(0)
+        .map(|a| {
+            core::str::from_utf8(a.as_bytes())
+                .unwrap_or("")
+                .to_ascii_lowercase()
+        })
+        .unwrap_or_default();
+    if let Ok(mut guard) = client_info_registry().lock() {
+        guard.set_cmd(client.id, &cmd_name);
+        guard.set_db(client.id, client.db_index);
+    }
+
     let metrics = server_metrics();
     metrics.total_commands_processed.fetch_add(1, Ordering::Relaxed);
     let t0 = SystemTime::now();
     let result = {
-        let mut guard = match db.lock() {
+        let selected_db = global_databases().get(client.db_index);
+        let mut guard = match selected_db.lock() {
             Ok(g) => g,
             Err(poison) => poison.into_inner(),
         };
@@ -1099,7 +1155,12 @@ fn process_command(
             Arc::clone(server),
             Arc::clone(registry),
         );
-        dispatch(&mut ctx)
+        let r = dispatch(&mut ctx);
+        let deferred: Vec<RedisString> = std::mem::take(&mut ctx.client_mut().pending_wakes);
+        for key in &deferred {
+            redis_commands::list::wake_blocked_for_key(&mut guard, key);
+        }
+        r
     };
     let elapsed_us = t0
         .elapsed()
@@ -1108,6 +1169,11 @@ fn process_command(
     metrics
         .active_time_main_thread_us
         .fetch_add(elapsed_us, Ordering::Relaxed);
+    if client.blocked_on_keys {
+        if let Ok(mut guard) = client_info_registry().lock() {
+            guard.set_blocked(client.id, true);
+        }
+    }
     if let Err(err) = result {
         let payload = err.to_resp_payload();
         encode_resp2(&RespFrame::Error(payload), &mut client.reply_buf);

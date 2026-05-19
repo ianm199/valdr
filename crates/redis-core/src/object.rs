@@ -122,6 +122,40 @@ pub enum ListEncoding {
     QuickList(Vec<RedisString>),
 }
 
+/// Sticky minimum encoding for an `InlineSet`.
+///
+/// Real Redis never automatically downgrades a set's encoding (e.g. once
+/// elements have caused a promotion from intset to listpack, removing those
+/// elements does not revert back to intset). `InlineSet` records the highest
+/// encoding the set ever reached so that `OBJECT ENCODING` reports a value
+/// consistent with real Redis's sticky-promotion behaviour.
+///
+/// Ordering matters: `Auto < ForcedListpack < ForcedHashtable`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum InlineSetEncoding {
+    Auto,
+    ForcedListpack,
+    ForcedHashtable,
+}
+
+/// Wrapper around `HashSet<RedisString>` that tracks the highest encoding
+/// the set has ever reached, matching real Redis's sticky-promotion semantics.
+#[derive(Debug, Clone)]
+pub struct InlineSet {
+    pub data: HashSet<RedisString>,
+    pub sticky: InlineSetEncoding,
+}
+
+impl InlineSet {
+    pub fn new() -> Self {
+        Self { data: HashSet::new(), sticky: InlineSetEncoding::Auto }
+    }
+
+    pub fn from_hash_set(data: HashSet<RedisString>) -> Self {
+        Self { data, sticky: InlineSetEncoding::Auto }
+    }
+}
+
 /// Encoding sub-variants for `RedisObject::Set`.
 ///
 /// Phase 4 will replace `ListPack`, `IntSet`, and `HashTable` with real
@@ -136,7 +170,7 @@ pub enum SetEncoding {
     /// across SADD/SREM/SMEMBERS/SINTER/SUNION/SDIFF and friends. Phase 4
     /// swaps this for real ListPack / IntSet / HashTable encodings once
     /// `redis-ds` ships the underlying datastructures.
-    Inline(HashSet<RedisString>),
+    Inline(InlineSet),
     /// Compact list-pack byte array (OBJ_ENCODING_LISTPACK).
     // TODO(architect): replace stub Vec with real listpack encoding in Phase 4
     ListPack(Vec<u8>),
@@ -592,7 +626,7 @@ impl RedisObject {
     /// the single working encoding used by every set command in the
     /// redis-commands crate.
     pub fn new_set() -> Self {
-        Self::bare(ObjectKind::Set(SetEncoding::Inline(HashSet::new())))
+        Self::bare(ObjectKind::Set(SetEncoding::Inline(InlineSet::new())))
     }
 
     /// Create an `Inline` set object pre-populated from an existing `HashSet`.
@@ -601,7 +635,7 @@ impl RedisObject {
     /// collection into a fully-formed `RedisObject` without an intermediate
     /// empty-then-insert construction.
     pub fn new_set_from_set(members: HashSet<RedisString>) -> Self {
-        Self::bare(ObjectKind::Set(SetEncoding::Inline(members)))
+        Self::bare(ObjectKind::Set(SetEncoding::Inline(InlineSet::from_hash_set(members))))
     }
 
     /// Borrow the inner member `HashSet` for a set-encoded object.
@@ -610,7 +644,7 @@ impl RedisObject {
     /// `IntSet` / `HashTable` encodings that this round does not populate.
     pub fn set(&self) -> Option<&HashSet<RedisString>> {
         match &self.kind {
-            ObjectKind::Set(SetEncoding::Inline(h)) => Some(h),
+            ObjectKind::Set(SetEncoding::Inline(s)) => Some(&s.data),
             _ => None,
         }
     }
@@ -618,7 +652,23 @@ impl RedisObject {
     /// Mutably borrow the inner member `HashSet` for a set-encoded object.
     pub fn set_mut(&mut self) -> Option<&mut HashSet<RedisString>> {
         match &mut self.kind {
-            ObjectKind::Set(SetEncoding::Inline(h)) => Some(h),
+            ObjectKind::Set(SetEncoding::Inline(s)) => Some(&mut s.data),
+            _ => None,
+        }
+    }
+
+    /// Borrow the `InlineSet` (data + sticky encoding) for a set-encoded object.
+    pub fn inline_set(&self) -> Option<&InlineSet> {
+        match &self.kind {
+            ObjectKind::Set(SetEncoding::Inline(s)) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Mutably borrow the `InlineSet` for a set-encoded object.
+    pub fn inline_set_mut(&mut self) -> Option<&mut InlineSet> {
+        match &mut self.kind {
+            ObjectKind::Set(SetEncoding::Inline(s)) => Some(s),
             _ => None,
         }
     }
@@ -852,7 +902,7 @@ impl RedisObject {
             ObjectKind::List(ListEncoding::Inline(d)) => list_inline_observed_encoding(d),
             ObjectKind::List(ListEncoding::QuickList(_)) => "quicklist",
             ObjectKind::List(ListEncoding::ListPack(_)) => "listpack",
-            ObjectKind::Set(SetEncoding::Inline(h)) => set_inline_observed_encoding(h),
+            ObjectKind::Set(SetEncoding::Inline(s)) => set_inline_observed_encoding(s),
             ObjectKind::Set(SetEncoding::HashTable(_)) => "hashtable",
             ObjectKind::Set(SetEncoding::IntSet(_)) => "intset",
             ObjectKind::Set(SetEncoding::ListPack(_)) => "listpack",
@@ -1350,8 +1400,9 @@ fn hash_inline_observed_encoding(h: &HashMap<RedisString, RedisString>) -> &'sta
 /// anything larger reports `"hashtable"`. All thresholds are read from the
 /// process-wide `ENCODING_THRESHOLDS` global so that `CONFIG SET` takes effect
 /// immediately.
-fn set_inline_observed_encoding(h: &HashSet<RedisString>) -> &'static str {
+fn set_inline_observed_encoding(s: &InlineSet) -> &'static str {
     let t = get_encoding_thresholds();
+    let h = &s.data;
     let mut all_integer = true;
     let mut max_len: usize = 0;
     for m in h {
@@ -1363,13 +1414,19 @@ fn set_inline_observed_encoding(h: &HashSet<RedisString>) -> &'static str {
             all_integer = false;
         }
     }
-    if all_integer && h.len() <= t.set_max_intset_entries {
-        return "intset";
+    let computed = if all_integer && h.len() <= t.set_max_intset_entries {
+        InlineSetEncoding::Auto
+    } else if h.len() <= t.set_max_listpack_entries && max_len <= t.set_max_listpack_value {
+        InlineSetEncoding::ForcedListpack
+    } else {
+        InlineSetEncoding::ForcedHashtable
+    };
+    let effective = computed.max(s.sticky);
+    match effective {
+        InlineSetEncoding::Auto => "intset",
+        InlineSetEncoding::ForcedListpack => "listpack",
+        InlineSetEncoding::ForcedHashtable => "hashtable",
     }
-    if h.len() <= t.set_max_listpack_entries && max_len <= t.set_max_listpack_value {
-        return "listpack";
-    }
-    "hashtable"
 }
 
 /// Encoding name reported for an `Inline`-encoded sorted set.
@@ -1397,7 +1454,7 @@ fn zset_inline_observed_encoding(z: &InlineZSet) -> &'static str {
 /// the literal `"0"`, no whitespace, no leading `+`). Used by the
 /// set-encoding heuristic to decide whether an `Inline` set qualifies for
 /// the `intset` label.
-pub(crate) fn is_canonical_i64_ascii(bytes: &[u8]) -> bool {
+pub fn is_canonical_i64_ascii(bytes: &[u8]) -> bool {
     if bytes.is_empty() || bytes.len() > 20 {
         return false;
     }
@@ -1951,9 +2008,9 @@ pub fn object_compute_size(
             std::mem::size_of::<RedisObject>()
                 + ql.iter().map(|s| s.len() + std::mem::size_of::<usize>()).sum::<usize>()
         }
-        ObjectKind::Set(SetEncoding::Inline(ht)) => {
+        ObjectKind::Set(SetEncoding::Inline(s)) => {
             std::mem::size_of::<RedisObject>()
-                + ht.iter().map(|s| s.len() + std::mem::size_of::<usize>()).sum::<usize>()
+                + s.data.iter().map(|m| m.len() + std::mem::size_of::<usize>()).sum::<usize>()
         }
         ObjectKind::Set(SetEncoding::ListPack(lp)) => {
             std::mem::size_of::<RedisObject>() + lp.len()
@@ -2271,7 +2328,7 @@ impl RedisObject {
             ObjectKind::List(ListEncoding::Inline(d))    => d.len(),
             ObjectKind::List(ListEncoding::QuickList(v)) => v.len(),
             ObjectKind::List(ListEncoding::ListPack(_))  => 0,
-            ObjectKind::Set(SetEncoding::Inline(h))      => h.len(),
+            ObjectKind::Set(SetEncoding::Inline(s))      => s.data.len(),
             ObjectKind::Set(SetEncoding::HashTable(h))   => h.len(),
             ObjectKind::Set(SetEncoding::IntSet(v))      => v.len(),
             ObjectKind::Set(SetEncoding::ListPack(_))    => 0,
@@ -2301,7 +2358,7 @@ impl RedisObject {
     /// TODO(port): Phase 4 — proper iter for IntSet and ListPack encodings (yields empty today).
     pub fn iter_set(&self) -> Box<dyn Iterator<Item = &RedisString> + '_> {
         match &self.kind {
-            ObjectKind::Set(SetEncoding::Inline(h)) => Box::new(h.iter()),
+            ObjectKind::Set(SetEncoding::Inline(s)) => Box::new(s.data.iter()),
             ObjectKind::Set(SetEncoding::HashTable(h)) => Box::new(h.iter()),
             _ => Box::new(std::iter::empty()),
         }

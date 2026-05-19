@@ -58,6 +58,19 @@ pub struct WatchedKeysIndex {
 
 static WATCHED_KEYS_INDEX: OnceLock<Arc<Mutex<WatchedKeysIndex>>> = OnceLock::new();
 
+type SwapDbWakeFn = dyn Fn(u32) + Send + Sync;
+static SWAPDB_WAKE_HOOK: OnceLock<Box<SwapDbWakeFn>> = OnceLock::new();
+
+/// Install the SWAPDB wake hook.
+///
+/// The hook receives a single database index and wakes any clients blocked on
+/// keys that exist in that database. It acquires the database lock internally.
+/// Installed once at startup from `redis-commands`; subsequent calls are
+/// no-ops (OnceLock semantics).
+pub fn install_swapdb_wake_hook(f: Box<SwapDbWakeFn>) {
+    let _ = SWAPDB_WAKE_HOOK.set(f);
+}
+
 /// Carry-all for the components needed to fire keyspace notifications from
 /// code paths that do not have a `CommandContext` (lazy expiry, active expiry).
 ///
@@ -984,10 +997,15 @@ pub fn flushdb_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 
 /// C: db.c:856 flushallCommand — FLUSHALL [ASYNC|SYNC]
 pub fn flushall_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
-    // TODO(port): emptyData(-1, flags, NULL) — flush all databases
-    // TODO(port): killRDBChild / killSlotMigrationChild / rdbSave if saveparamslen > 0
-    // TODO(port): forceCommandPropagation, moduleFireServerEvent FLUSHDB_START/END
-    ctx.db_mut().clear();
+    let count = crate::databases::global_databases().count();
+    for i in 0..count {
+        let arc = crate::databases::global_databases().get(i as u32);
+        let mut guard = match arc.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard.clear();
+    }
     ctx.reply_simple_string(b"OK")
 }
 
@@ -1041,10 +1059,14 @@ pub fn exists_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 
 /// C: db.c:907 selectCommand — SELECT index
 pub fn select_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
-    // TODO(port): getIntFromObjectOrReply(c, c->argv[1], &id, NULL)
-    // TODO(port): selectDb(c, id) — multi-db support (server.dbnum, createDatabaseIfNeeded)
-    let _ = ctx.arg(1)?;
-    Err(RedisError::runtime(b"SELECT: TODO(port): multi-db not implemented in Phase A"))
+    let id_arg = ctx.arg(1)?.clone();
+    let id = parse_i64_from_bytes(id_arg.as_bytes())
+        .ok_or_else(|| RedisError::runtime(b"ERR value is not an integer or out of range"))?;
+    if id < 0 || id >= crate::databases::global_databases().count() as i64 {
+        return Err(RedisError::runtime(b"ERR DB index is out of range"));
+    }
+    ctx.client_mut().db_index = id as u32;
+    ctx.reply_simple_string(b"OK")
 }
 
 /// C: db.c:924 randomkeyCommand — RANDOMKEY
@@ -1389,6 +1411,17 @@ pub fn touch_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     ctx.reply_integer(count)
 }
 
+/// Wake any clients blocked on keys in `other_db_id` (the db not currently
+/// held by the command dispatch).
+///
+/// Delegates to the hook installed by `install_swapdb_wake_hook`. No-op when
+/// no hook is installed (unit tests).
+fn wake_blocked_in_other_db(other_db_id: u32) {
+    if let Some(hook) = SWAPDB_WAKE_HOOK.get() {
+        hook(other_db_id);
+    }
+}
+
 /// Case-insensitive ASCII equality for command option keywords.
 fn eq_ignore_ascii_case(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
@@ -1398,10 +1431,37 @@ fn eq_ignore_ascii_case(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// C: db.c:1861 swapdbCommand — SWAPDB index index
-pub fn swapdb_command(_ctx: &mut CommandContext) -> Result<(), RedisError> {
-    // TODO(port): cluster mode check (SWAPDB disallowed in cluster mode)
-    // TODO(port): getIntFromObjectOrReply for id1/id2; call db_swap_databases
-    Err(RedisError::runtime(b"SWAPDB: TODO(port): multi-db not implemented in Phase A"))
+pub fn swapdb_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
+    if ctx.arg_count() != 3 {
+        return Err(RedisError::wrong_number_of_args(b"swapdb"));
+    }
+    let id1_arg = ctx.arg(1)?.clone();
+    let id2_arg = ctx.arg(2)?.clone();
+    let db_count = crate::databases::global_databases().count() as i64;
+    let id1 = parse_i64_from_bytes(id1_arg.as_bytes())
+        .ok_or_else(|| RedisError::runtime(b"ERR value is not an integer or out of range"))?;
+    let id2 = parse_i64_from_bytes(id2_arg.as_bytes())
+        .ok_or_else(|| RedisError::runtime(b"ERR value is not an integer or out of range"))?;
+    if id1 < 0 || id1 >= db_count || id2 < 0 || id2 >= db_count {
+        return Err(RedisError::runtime(b"ERR invalid DB index"));
+    }
+    crate::databases::global_databases().swap(id1 as u32, id2 as u32);
+    let blocked_keys: Vec<RedisString> = {
+        let idx = match crate::blocked_keys::blocked_keys_index().lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        idx.all_blocked_keys()
+    };
+    let current_db_id = ctx.client_ref().db_index;
+    let other_db_id = if current_db_id == id1 as u32 { id2 as u32 } else { id1 as u32 };
+    for key in &blocked_keys {
+        if ctx.db().find(key).is_some() {
+            ctx.client_mut().pending_wakes.push(key.clone());
+        }
+    }
+    wake_blocked_in_other_db(other_db_id);
+    ctx.reply_simple_string(b"OK")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -33,7 +33,9 @@ pub enum BlockedSide {
 
 /// How a woken waiter consumes its element.
 ///
-/// `Pop` returns a `*2 [key, value]` reply (BLPOP / BRPOP / BLMPOP shape).
+/// `Pop` returns a `*2 [key, value]` reply when `count == 0` (BLPOP / BRPOP
+/// shape) or a `*2 [key, *N [...]]` reply when `count >= 1` (BLMPOP shape,
+/// pops up to `count` elements).
 /// `Move` pops from the source and pushes onto `dst_key` at `dst_side`, then
 /// replies with a bulk-string of the moved value (BLMOVE / BRPOPLPUSH shape).
 /// `Stream` parks the client until a new entry with id strictly greater than
@@ -42,7 +44,7 @@ pub enum BlockedSide {
 /// acknowledged `target_offset` or the timeout fires.
 #[derive(Debug, Clone)]
 pub enum BlockedAction {
-    Pop { side: BlockedSide },
+    Pop { side: BlockedSide, count: u64 },
     Move {
         side: BlockedSide,
         dst_key: RedisString,
@@ -207,6 +209,15 @@ impl BlockedKeysIndex {
         self.keys.get(key).is_some_and(|d| !d.is_empty())
     }
 
+    /// Snapshot of every key that has at least one waiter.
+    pub fn all_blocked_keys(&self) -> Vec<RedisString> {
+        self.keys
+            .keys()
+            .filter(|k| self.keys[*k].iter().any(|cid| self.waiters.contains_key(cid)))
+            .cloned()
+            .collect()
+    }
+
     /// Snapshot the number of currently-blocked clients (test/debug helper).
     pub fn len(&self) -> usize {
         self.waiters.len()
@@ -310,7 +321,7 @@ mod tests {
             client_id: id,
             sender: tx,
             keys,
-            action: BlockedAction::Pop { side: BlockedSide::Head },
+            action: BlockedAction::Pop { side: BlockedSide::Head, count: 0 },
             deadline_ms: deadline,
         }
     }

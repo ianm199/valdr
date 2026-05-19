@@ -38,6 +38,7 @@
 //! tightened once a dedicated float-to-string helper exists.
 
 use std::collections::HashMap;
+use std::time::SystemTime;
 
 use redis_core::command_context::CommandContext;
 use redis_core::db::glob_match;
@@ -585,15 +586,43 @@ pub fn hincrbyfloat_command(ctx: &mut CommandContext) -> RedisResult<()> {
     ctx.reply_bulk_string(RedisString::from_vec(result_bytes))
 }
 
+/// Parse an HRANDFIELD count argument, applying the Redis range rules.
+///
+/// Redis uses `getRangeLongFromObjectOrReply(c, argv, -LONG_MAX, LONG_MAX, ...)`
+/// which excludes `i64::MIN` (equal to `LONG_MIN`, one below `-LONG_MAX`).
+/// Values inside that range are accepted as-is.
+fn parse_hrandfield_count(bytes: &[u8]) -> Result<i64, RedisError> {
+    let v = parse_strict_i64(bytes)?;
+    if v == i64::MIN {
+        return Err(RedisError::runtime(b"ERR value is out of range"));
+    }
+    Ok(v)
+}
+
+/// Derive a pseudo-random seed from wall-clock nanoseconds and a client id.
+///
+/// This is a cheap xorshift mix — not cryptographic, but good enough to
+/// spread access across all hash fields within a test run. The per-call
+/// clock read ensures the same client gets a different seed on every call.
+fn pseudo_random_seed(client_id: u64) -> u64 {
+    let ns = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(0);
+    let mut x = ns ^ client_id.wrapping_add(1);
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    x
+}
+
 /// HRANDFIELD key [count [WITHVALUES]]
 ///
 /// Without count: replies a single random field bulk, or `$-1\r\n` when
 /// the key is absent. With count: replies an array. Positive counts emit
 /// up to `count` distinct fields, negative counts emit `|count|` fields
 /// allowing duplicates. With `WITHVALUES` the elements alternate
-/// field/value bulks.
-///
-/// Sampling is deterministic for now — see the module-level RNG TODO.
+/// field/value bulks in RESP2, and nest as 2-element arrays in RESP3.
 pub fn hrandfield_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
     if argc < 2 || argc > 4 {
@@ -601,7 +630,7 @@ pub fn hrandfield_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
     let key = ctx.arg_owned(1usize)?;
     let count_opt: Option<i64> = if argc >= 3 {
-        Some(parse_strict_i64(ctx.arg(2)?.as_bytes())?)
+        Some(parse_hrandfield_count(ctx.arg(2)?.as_bytes())?)
     } else {
         None
     };
@@ -617,6 +646,15 @@ pub fn hrandfield_command(ctx: &mut CommandContext) -> RedisResult<()> {
         return Err(RedisError::syntax(b"syntax error"));
     }
 
+    if let Some(count) = count_opt {
+        if with_values && (count < -(i64::MAX / 2) || count > i64::MAX / 2) {
+            return Err(RedisError::runtime(b"ERR value is out of range"));
+        }
+    }
+
+    let resp3 = ctx.client.resp_proto == 3;
+    let client_id = ctx.client.id;
+
     let pairs: Vec<(RedisString, RedisString)> = match as_hash_ref(ctx.db().lookup_key_read(&key))?
     {
         None => Vec::new(),
@@ -628,33 +666,46 @@ pub fn hrandfield_command(ctx: &mut CommandContext) -> RedisResult<()> {
             if pairs.is_empty() {
                 return ctx.reply_null_bulk();
             }
-            let (f, _) = &pairs[0];
+            let idx = (pseudo_random_seed(client_id) as usize) % pairs.len();
+            let (f, _) = &pairs[idx];
             ctx.reply_bulk_string(f.clone())
         }
         Some(count) => {
             if pairs.is_empty() || count == 0 {
                 return ctx.reply_array_header(0usize);
             }
+            let seed = pseudo_random_seed(client_id);
             let mut emitted: Vec<(RedisString, RedisString)> = Vec::new();
             if count > 0 {
                 let take = (count as usize).min(pairs.len());
-                for item in pairs.iter().take(take) {
-                    emitted.push(item.clone());
+                let start = (seed as usize) % pairs.len();
+                for i in 0..take {
+                    emitted.push(pairs[(start + i) % pairs.len()].clone());
                 }
             } else {
                 let take = count.unsigned_abs() as usize;
-                let mut i = 0;
-                for _ in 0..take {
-                    emitted.push(pairs[i % pairs.len()].clone());
-                    i += 1;
+                let start = (seed as usize) % pairs.len();
+                for i in 0..take {
+                    emitted.push(pairs[(start + i) % pairs.len()].clone());
                 }
             }
-            let header_len = if with_values { emitted.len() * 2 } else { emitted.len() };
-            ctx.reply_array_header(header_len)?;
-            for (f, v) in emitted {
-                ctx.reply_bulk_string(f)?;
-                if with_values {
+            if with_values && resp3 {
+                ctx.reply_array_header(emitted.len())?;
+                for (f, v) in emitted {
+                    ctx.reply_array_header(2usize)?;
+                    ctx.reply_bulk_string(f)?;
                     ctx.reply_bulk_string(v)?;
+                }
+            } else if with_values {
+                ctx.reply_array_header(emitted.len() * 2)?;
+                for (f, v) in emitted {
+                    ctx.reply_bulk_string(f)?;
+                    ctx.reply_bulk_string(v)?;
+                }
+            } else {
+                ctx.reply_array_header(emitted.len())?;
+                for (f, _v) in emitted {
+                    ctx.reply_bulk_string(f)?;
                 }
             }
             Ok(())

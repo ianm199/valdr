@@ -1021,6 +1021,7 @@ pub fn msetex_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
                 ctx.db_mut().sync_delete(&k);
             } else {
                 ctx.db_mut().set_expire(&k, abs_ms);
+                ctx.notify_keyspace_event(NOTIFY_GENERIC, b"expire", &k);
             }
         } else if !keepttl {
             ctx.db_mut().remove_expire(&k);

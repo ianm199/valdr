@@ -12,7 +12,9 @@ use redis_core::acl::{
     category as acl_category, category_name_to_bit, global_acl_state, hex_to_hash, sha256_hash,
     AclUser, ALL_CATEGORY_NAMES,
 };
+use redis_core::client_info::client_info_registry;
 use redis_core::live_config::{LiveConfig, MaxmemoryPolicyCode};
+use redis_core::metrics::server_metrics;
 use redis_core::notify::keyspace_events_string_to_flags;
 use redis_core::CommandContext;
 use redis_protocol::frame::RespFrame;
@@ -174,7 +176,11 @@ pub fn config_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         }
         return ctx.reply_simple_string(b"OK");
     }
-    if ascii_eq_ignore_case(sub_bytes, b"RESETSTAT") || ascii_eq_ignore_case(sub_bytes, b"REWRITE") {
+    if ascii_eq_ignore_case(sub_bytes, b"RESETSTAT") {
+        server_metrics().reset_stats();
+        return ctx.reply_simple_string(b"OK");
+    }
+    if ascii_eq_ignore_case(sub_bytes, b"REWRITE") {
         return ctx.reply_simple_string(b"OK");
     }
     let mut msg = Vec::with_capacity(b"ERR Unknown CONFIG subcommand: ".len() + sub_bytes.len());
@@ -216,6 +222,10 @@ fn default_config_pairs() -> &'static [(&'static str, &'static str)] {
         ("set-max-listpack-value", "64"),
         ("zset-max-listpack-entries", "128"),
         ("zset-max-listpack-value", "64"),
+        ("zset-max-ziplist-entries", "128"),
+        ("zset-max-ziplist-value", "64"),
+        ("hash-max-ziplist-entries", "128"),
+        ("hash-max-ziplist-value", "64"),
         ("hll-sparse-max-bytes", "3000"),
         ("stream-node-max-bytes", "4096"),
         ("stream-node-max-entries", "100"),
@@ -328,6 +338,10 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
             "set-max-listpack-value" => Some(live_set_value.clone()),
             "zset-max-listpack-entries" => Some(live_zset_entries.clone()),
             "zset-max-listpack-value" => Some(live_zset_value.clone()),
+            "zset-max-ziplist-entries" => Some(live_zset_entries.clone()),
+            "zset-max-ziplist-value" => Some(live_zset_value.clone()),
+            "hash-max-ziplist-entries" => Some(live_hash_entries.clone()),
+            "hash-max-ziplist-value" => Some(live_hash_value.clone()),
             "dir" => Some(live_dir.clone()),
             "dbfilename" => Some(live_dbfilename.clone()),
             "lfu-log-factor" => Some(live_lfu_log_factor.clone()),
@@ -392,12 +406,12 @@ fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
                 cfg.set_notify_keyspace_events_flags(flags as u32);
             }
         }
-        b"hash-max-listpack-entries" => {
+        b"hash-max-listpack-entries" | b"hash-max-ziplist-entries" => {
             if let Some(n) = parse_usize_strict(value) {
                 cfg.set_hash_max_listpack_entries(n);
             }
         }
-        b"hash-max-listpack-value" => {
+        b"hash-max-listpack-value" | b"hash-max-ziplist-value" => {
             if let Some(n) = parse_usize_strict(value) {
                 cfg.set_hash_max_listpack_value(n);
             }
@@ -422,12 +436,12 @@ fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
                 cfg.store_set_max_listpack_value(n);
             }
         }
-        b"zset-max-listpack-entries" => {
+        b"zset-max-listpack-entries" | b"zset-max-ziplist-entries" => {
             if let Some(n) = parse_usize_strict(value) {
                 cfg.set_zset_max_listpack_entries(n);
             }
         }
-        b"zset-max-listpack-value" => {
+        b"zset-max-listpack-value" | b"zset-max-ziplist-value" => {
             if let Some(n) = parse_usize_strict(value) {
                 cfg.set_zset_max_listpack_value(n);
             }
@@ -985,8 +999,46 @@ pub fn client_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         return ctx.reply_simple_string(b"OK");
     }
     if ascii_eq_ignore_case(sub_bytes, b"LIST") {
-        let line = build_client_list_line(ctx);
-        return ctx.reply_bulk_string(RedisString::from_vec(line));
+        let filter_id: Option<u64> = if ctx.arg_count() >= 4 {
+            let opt = ctx.arg(2).ok().map(|a| a.clone());
+            let val = ctx.arg(3).ok().map(|a| a.clone());
+            match (opt, val) {
+                (Some(o), Some(v))
+                    if o.as_bytes().eq_ignore_ascii_case(b"ID") =>
+                {
+                    parse_i64_strict(v.as_bytes()).map(|n| n as u64)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let snapshots = {
+            let guard = match client_info_registry().lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            guard.all()
+        };
+        let mut out: Vec<u8> = Vec::new();
+        for snap in &snapshots {
+            if let Some(id) = filter_id {
+                if snap.id != id {
+                    continue;
+                }
+            }
+            let flags = if snap.blocked { "b" } else { "N" };
+            let _ = write!(
+                out,
+                "id={} addr={} laddr= fd=0 name= age=0 idle=0 flags={} capa= db={} sub=0 psub=0 ssub=0 multi=-1 watch=0 qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 rbs=0 rbp=0 obl=0 oll=0 omem=0 tot-mem=0 events= cmd={} user=default redir=-1 resp=2 lib-name= lib-ver=\r\n",
+                snap.id,
+                snap.addr,
+                flags,
+                snap.db_index,
+                if snap.cmd.is_empty() { "NULL" } else { &snap.cmd },
+            );
+        }
+        return ctx.reply_bulk_string(RedisString::from_vec(out));
     }
     if ascii_eq_ignore_case(sub_bytes, b"UNBLOCK") {
         if ctx.arg_count() < 3 || ctx.arg_count() > 4 {

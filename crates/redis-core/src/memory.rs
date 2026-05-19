@@ -59,7 +59,7 @@ pub fn approximate_object_bytes(kind: &ObjectKind) -> u64 {
                 .sum(),
         },
         ObjectKind::Set(enc) => match enc {
-            SetEncoding::Inline(h) => h.iter().map(|s| s.as_bytes().len() as u64 + 16).sum(),
+            SetEncoding::Inline(s) => s.data.iter().map(|m| m.as_bytes().len() as u64 + 16).sum(),
             SetEncoding::ListPack(b) => b.len() as u64,
             SetEncoding::IntSet(v) => v.len() as u64 * 8,
             SetEncoding::HashTable(h) => h.iter().map(|s| s.as_bytes().len() as u64 + 16).sum(),

@@ -196,6 +196,26 @@ fn encode_pop_reply(key: &RedisString, value: &RedisString) -> Vec<u8> {
     buf
 }
 
+/// Encode a `*2 [key, *N [v1, v2...]]` BLMPOP multi-element reply.
+fn encode_blmpop_reply(key: &RedisString, values: &[RedisString]) -> Vec<u8> {
+    let mut buf: Vec<u8> = Vec::with_capacity(64);
+    buf.extend_from_slice(b"*2\r\n$");
+    buf.extend_from_slice(key.len().to_string().as_bytes());
+    buf.extend_from_slice(b"\r\n");
+    buf.extend_from_slice(key.as_bytes());
+    buf.extend_from_slice(b"\r\n*");
+    buf.extend_from_slice(values.len().to_string().as_bytes());
+    buf.extend_from_slice(b"\r\n");
+    for v in values {
+        buf.push(b'$');
+        buf.extend_from_slice(v.len().to_string().as_bytes());
+        buf.extend_from_slice(b"\r\n");
+        buf.extend_from_slice(v.as_bytes());
+        buf.extend_from_slice(b"\r\n");
+    }
+    buf
+}
+
 /// Encode a `$<len>\r\n<bytes>\r\n` bulk-string reply (BLMOVE / BRPOPLPUSH).
 fn encode_bulk_reply(value: &RedisString) -> Vec<u8> {
     let mut buf = Vec::with_capacity(16 + value.len());
@@ -255,7 +275,11 @@ fn schedule_or_wake(ctx: &mut CommandContext, key: &RedisString) {
     }
 }
 
-/// Pop one element to satisfy `waiter` and ship the encoded reply.
+/// Pop one or more elements to satisfy `waiter` and ship the encoded reply.
+///
+/// For `BlockedAction::Pop` with `count == 0` (BLPOP / BRPOP shape), pops
+/// one element and replies `*2 [key, value]`. With `count >= 1` (BLMPOP
+/// shape), pops up to `count` elements and replies `*2 [key, *N [...]]`.
 ///
 /// For BLMOVE/BRPOPLPUSH actions the destination type is verified at wake
 /// time: if it exists and is not a list, the source value is restored at the
@@ -263,42 +287,66 @@ fn schedule_or_wake(ctx: &mut CommandContext, key: &RedisString) {
 /// WRONGTYPE error. Returning the value to the source keeps the FIFO order
 /// invariant intact for the next waiter.
 fn deliver_to_waiter(db: &mut RedisDb, key: &RedisString, waiter: BlockedWaiter) {
-    let (side, dst): (BlockedSide, Option<(RedisString, BlockedSide)>) = match &waiter.action {
-        BlockedAction::Pop { side } => (*side, None),
-        BlockedAction::Move {
-            side,
-            dst_key,
-            dst_side,
-        } => (*side, Some((dst_key.clone(), *dst_side))),
-        BlockedAction::Stream { .. } => return,
-        BlockedAction::Wait { .. } => return,
-    };
-    if let Some((dst_key, _)) = &dst {
-        if let Some(dst_obj) = db.lookup_key_read(dst_key) {
-            if !dst_obj.is_list() {
-                let _ = waiter.sender.send(
-                    b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
-                        .to_vec(),
-                );
-                return;
+    match &waiter.action {
+        BlockedAction::Pop { side, count } => {
+            let side = *side;
+            let count = *count;
+            if count == 0 {
+                let value = match pop_one(db, key, side) {
+                    Some(v) => v,
+                    None => return,
+                };
+                let reply = encode_pop_reply(key, &value);
+                if waiter.sender.send(reply).is_err() {
+                    push_one(db, key, value, side);
+                }
+            } else {
+                let take = count as usize;
+                let mut values: Vec<RedisString> = Vec::with_capacity(take);
+                for _ in 0..take {
+                    match pop_one(db, key, side) {
+                        Some(v) => values.push(v),
+                        None => break,
+                    }
+                }
+                if values.is_empty() {
+                    return;
+                }
+                let reply = encode_blmpop_reply(key, &values);
+                if waiter.sender.send(reply).is_err() {
+                    for v in values.into_iter().rev() {
+                        push_one(db, key, v, side);
+                    }
+                }
             }
         }
-    }
-    let value = match pop_one(db, key, side) {
-        Some(v) => v,
-        None => return,
-    };
-    let reply = match &dst {
-        None => encode_pop_reply(key, &value),
-        Some(_) => encode_bulk_reply(&value),
-    };
-    if waiter.sender.send(reply).is_err() {
-        push_one(db, key, value, side);
-        return;
-    }
-    if let Some((dst_key, dst_side)) = dst {
-        push_one(db, &dst_key, value, dst_side);
-        wake_blocked_for_key(db, &dst_key);
+        BlockedAction::Move { side, dst_key, dst_side } => {
+            let side = *side;
+            let dst_key = dst_key.clone();
+            let dst_side = *dst_side;
+            if let Some(dst_obj) = db.lookup_key_read(&dst_key) {
+                if !dst_obj.is_list() {
+                    let _ = waiter.sender.send(
+                        b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+                            .to_vec(),
+                    );
+                    return;
+                }
+            }
+            let value = match pop_one(db, key, side) {
+                Some(v) => v,
+                None => return,
+            };
+            let reply = encode_bulk_reply(&value);
+            if waiter.sender.send(reply).is_err() {
+                push_one(db, key, value, side);
+                return;
+            }
+            push_one(db, &dst_key, value, dst_side);
+            wake_blocked_for_key(db, &dst_key);
+        }
+        BlockedAction::Stream { .. } => {}
+        BlockedAction::Wait { .. } => {}
     }
 }
 
@@ -1274,6 +1322,7 @@ fn bpop_generic(ctx: &mut CommandContext, position: ListPosition) -> RedisResult
         keys,
         BlockedAction::Pop {
             side: position_to_side(position),
+            count: 0,
         },
         timeout_secs,
     )
@@ -1474,9 +1523,36 @@ pub fn blmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
         keys,
         BlockedAction::Pop {
             side: position_to_side(position),
+            count: count as u64,
         },
         timeout_secs,
     )
+}
+
+/// Wake blocked clients that have keys in database `db_id`.
+///
+/// Acquires the database lock, iterates all blocked keys, and wakes any client
+/// whose blocking key is present in `db_id`. Called via the hook installed by
+/// `install_swapdb_wake_hook` for the database that is NOT the current
+/// dispatch-held db (to avoid re-entering an already-held lock).
+pub fn wake_blocked_after_swapdb(db_id: u32, _unused: u32) {
+    let db_arc = redis_core::databases::get_db(db_id);
+    let blocked_keys: Vec<RedisString> = {
+        let idx = match redis_core::blocked_keys::blocked_keys_index().lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        idx.all_blocked_keys()
+    };
+    let mut db = match db_arc.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    for key in blocked_keys {
+        if db.find(&key).is_some() {
+            wake_blocked_for_key(&mut db, &key);
+        }
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────

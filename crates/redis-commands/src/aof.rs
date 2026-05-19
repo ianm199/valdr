@@ -299,8 +299,8 @@ pub fn write_aof_rewrite<W: Write>(db: &RedisDb, writer: &mut W) -> io::Result<(
             }
             ObjectKind::Set(enc) => {
                 let members: Vec<RedisString> = match enc {
-                    redis_core::object::SetEncoding::Inline(hs) => {
-                        hs.iter().cloned().collect()
+                    redis_core::object::SetEncoding::Inline(s) => {
+                        s.data.iter().cloned().collect()
                     }
                     redis_core::object::SetEncoding::HashTable(hs) => {
                         hs.iter().cloned().collect()

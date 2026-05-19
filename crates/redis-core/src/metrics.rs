@@ -107,6 +107,24 @@ impl ServerMetrics {
     pub fn set_tcp_port(&self, port: u16) {
         self.tcp_port.store(port, Ordering::Relaxed);
     }
+
+    /// Reset all statistical counters to zero.
+    ///
+    /// Corresponds to `CONFIG RESETSTAT`. Preserves `start_time_ms`, `tcp_port`,
+    /// `connected_clients`, and `max_clients_seen` since those reflect live state
+    /// rather than historical counters.
+    pub fn reset_stats(&self) {
+        self.total_connections_received.store(0, Ordering::Relaxed);
+        self.total_commands_processed.store(0, Ordering::Relaxed);
+        self.keyspace_hits.store(0, Ordering::Relaxed);
+        self.keyspace_misses.store(0, Ordering::Relaxed);
+        self.rejected_connections.store(0, Ordering::Relaxed);
+        self.expired_keys.store(0, Ordering::Relaxed);
+        self.evicted_keys.store(0, Ordering::Relaxed);
+        self.active_time_main_thread_us.store(0, Ordering::Relaxed);
+        self.rdb_saves_succeeded.store(0, Ordering::Relaxed);
+        self.rdb_saves_failed.store(0, Ordering::Relaxed);
+    }
 }
 
 /// Return the resident set size of this process in bytes, or `None` if the
