@@ -345,6 +345,9 @@ fn deliver_to_waiter(db: &mut RedisDb, key: &RedisString, waiter: BlockedWaiter)
             push_one(db, &dst_key, value, dst_side);
             wake_blocked_for_key(db, &dst_key);
         }
+        BlockedAction::ZSetPop { .. } => {
+            crate::zset::deliver_zset_to_waiter(db, key, waiter);
+        }
         BlockedAction::Stream { .. } => {}
         BlockedAction::Wait { .. } => {}
     }
@@ -1201,6 +1204,7 @@ fn park_blocked_client(
         return match action {
             BlockedAction::Pop { .. } => ctx.reply_null_array(),
             BlockedAction::Move { .. } => ctx.reply_null_bulk(),
+            BlockedAction::ZSetPop { .. } => ctx.reply_null_array(),
             BlockedAction::Stream { .. } => ctx.reply_null_bulk(),
             BlockedAction::Wait { .. } => ctx.reply_integer(0),
         };
@@ -1211,6 +1215,7 @@ fn park_blocked_client(
             return match action {
                 BlockedAction::Pop { .. } => ctx.reply_null_array(),
                 BlockedAction::Move { .. } => ctx.reply_null_bulk(),
+                BlockedAction::ZSetPop { .. } => ctx.reply_null_array(),
                 BlockedAction::Stream { .. } => ctx.reply_null_bulk(),
                 BlockedAction::Wait { .. } => ctx.reply_integer(0),
             };
@@ -1229,6 +1234,7 @@ fn park_blocked_client(
             return match action {
                 BlockedAction::Pop { .. } => ctx.reply_null_array(),
                 BlockedAction::Move { .. } => ctx.reply_null_bulk(),
+                BlockedAction::ZSetPop { .. } => ctx.reply_null_array(),
                 BlockedAction::Stream { .. } => ctx.reply_null_bulk(),
                 BlockedAction::Wait { .. } => ctx.reply_integer(0),
             };

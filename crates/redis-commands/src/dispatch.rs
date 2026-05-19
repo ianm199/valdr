@@ -578,6 +578,9 @@ pub static HANDLERS: &[DispatchEntry] = &[
     DispatchEntry { name: b"ZRANGESTORE", handler: crate::zset::zrangestore_command },
     DispatchEntry { name: b"ZRANDMEMBER", handler: crate::zset::zrandmember_command },
     DispatchEntry { name: b"ZMPOP", handler: crate::zset::zmpop_command },
+    DispatchEntry { name: b"BZPOPMIN", handler: crate::zset::bzpopmin_command },
+    DispatchEntry { name: b"BZPOPMAX", handler: crate::zset::bzpopmax_command },
+    DispatchEntry { name: b"BZMPOP", handler: crate::zset::bzmpop_command },
     // ── BITMAP (Round 8c) ──────────────────────────────────────────────────
     DispatchEntry { name: b"SETBIT", handler: crate::bitops::setbit_command },
     DispatchEntry { name: b"GETBIT", handler: crate::bitops::getbit_command },

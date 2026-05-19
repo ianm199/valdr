@@ -38,6 +38,9 @@ pub enum BlockedSide {
 /// pops up to `count` elements).
 /// `Move` pops from the source and pushes onto `dst_key` at `dst_side`, then
 /// replies with a bulk-string of the moved value (BLMOVE / BRPOPLPUSH shape).
+/// `ZSetPop` returns a `*3 [key, member, score]` reply when `count == 0`
+/// (BZPOPMIN / BZPOPMAX shape) or `*2 [key, *N [[m1,s1],[m2,s2],...]]` when
+/// `count >= 1` (BZMPOP shape, pops up to `count` members).
 /// `Stream` parks the client until a new entry with id strictly greater than
 /// `id_after` arrives on the stream key (XREAD BLOCK shape).
 /// `Wait` parks the client until at least `numreplicas` replicas have
@@ -50,6 +53,7 @@ pub enum BlockedAction {
         dst_key: RedisString,
         dst_side: BlockedSide,
     },
+    ZSetPop { reverse: bool, count: u64 },
     Stream { id_after: StreamId },
     Wait { target_offset: i64, numreplicas: usize },
 }
@@ -69,6 +73,7 @@ impl BlockedAction {
         match self {
             BlockedAction::Pop { .. } => b"*-1\r\n".to_vec(),
             BlockedAction::Move { .. } => b"$-1\r\n".to_vec(),
+            BlockedAction::ZSetPop { .. } => b"*-1\r\n".to_vec(),
             BlockedAction::Stream { .. } => b"$-1\r\n".to_vec(),
             BlockedAction::Wait { .. } => {
                 format!(":{}\r\n", acked_count).into_bytes()
@@ -85,6 +90,7 @@ impl BlockedAction {
         match self {
             BlockedAction::Pop { .. } => b"*-1\r\n",
             BlockedAction::Move { .. } => b"$-1\r\n",
+            BlockedAction::ZSetPop { .. } => b"*-1\r\n",
             BlockedAction::Stream { .. } => b"$-1\r\n",
             BlockedAction::Wait { .. } => b":0\r\n",
         }
@@ -202,6 +208,51 @@ impl BlockedKeysIndex {
             }
         }
         out
+    }
+
+    /// Pop the FIFO-front `ZSetPop` waiter for `key` and return its full record.
+    ///
+    /// Skips any non-`ZSetPop` waiters at the head of the queue (they belong to
+    /// list commands that happen to share a key name). Removes the waiter from
+    /// every other key it was waiting on so a single ZADD can never satisfy the
+    /// same waiter twice.
+    pub fn take_zset_waiter(&mut self, key: &RedisString) -> Option<BlockedWaiter> {
+        let deque = self.keys.get(key)?;
+        let cid = deque
+            .iter()
+            .find(|cid| {
+                self.waiters
+                    .get(cid)
+                    .is_some_and(|w| matches!(w.action, BlockedAction::ZSetPop { .. }))
+            })
+            .copied()?;
+        if let Some(deque) = self.keys.get_mut(key) {
+            deque.retain(|c| *c != cid);
+            if deque.is_empty() {
+                self.keys.remove(key);
+            }
+        }
+        let waiter = self.waiters.remove(&cid)?;
+        for k in &waiter.keys {
+            if k == key {
+                continue;
+            }
+            if let Some(deque) = self.keys.get_mut(k) {
+                deque.retain(|c| *c != cid);
+                if deque.is_empty() {
+                    self.keys.remove(k);
+                }
+            }
+        }
+        Some(waiter)
+    }
+
+    /// Peek at the FIFO-front `ZSetPop` waiter for `key` and return a clone.
+    ///
+    /// Does not remove the waiter from the index. Used by
+    /// `zset::wake_blocked_zset_for_key` to drive the wake loop.
+    pub fn peek_zset_waiter(&mut self, key: &RedisString) -> Option<BlockedWaiter> {
+        self.take_zset_waiter(key)
     }
 
     /// Whether any waiter currently parks on `key`.

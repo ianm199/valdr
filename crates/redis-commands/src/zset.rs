@@ -32,8 +32,11 @@
 
 use std::collections::HashMap;
 
+use redis_core::blocked_keys::{
+    blocked_keys_index, deadline_from_timeout_secs, BlockedAction, BlockedWaiter,
+};
 use redis_core::command_context::CommandContext;
-use redis_core::db::glob_match;
+use redis_core::db::{glob_match, RedisDb};
 use redis_core::notify::{NOTIFY_GENERIC, NOTIFY_ZSET};
 use redis_core::object::{InlineZSet, RedisObject};
 use redis_types::{RedisError, RedisResult, RedisString};
@@ -335,6 +338,7 @@ pub fn zadd_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
     if added > 0 || changed > 0 {
         ctx.notify_keyspace_event(NOTIFY_ZSET, b"zadd", &key);
+        schedule_or_wake_zset(ctx, &key);
     }
 
     if incr {
@@ -437,6 +441,7 @@ pub fn zincrby_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
     zset.upsert(member, new_score);
     ctx.notify_keyspace_event(NOTIFY_ZSET, b"zincrby", &key);
+    schedule_or_wake_zset(ctx, &key);
     ctx.reply_bulk(&format_score(new_score))
 }
 
@@ -1979,6 +1984,454 @@ fn parse_u64_cursor(bytes: &[u8]) -> Result<u64, RedisError> {
             .ok_or_else(|| RedisError::runtime(b"ERR invalid cursor"))?;
     }
     Ok(n)
+}
+
+/// Pop one (member, score) pair from the zset at `key`.
+///
+/// Returns the lowest-scored member when `reverse` is false (BZPOPMIN),
+/// or the highest-scored member when `reverse` is true (BZPOPMAX). Returns
+/// `None` when the key is absent or holds an empty zset. Deletes the key when
+/// the pop leaves it empty.
+fn zset_pop_one(
+    db: &mut RedisDb,
+    key: &RedisString,
+    reverse: bool,
+) -> Option<(RedisString, f64)> {
+    let zset = db.lookup_key_write(key)?.zset_mut()?;
+    let target: (f64, RedisString) = if reverse {
+        zset.iter_ascending()
+            .next_back()
+            .map(|(s, m)| (s, m.clone()))?
+    } else {
+        zset.iter_ascending()
+            .next()
+            .map(|(s, m)| (s, m.clone()))?
+    };
+    let (score, member) = target;
+    zset.remove(&member);
+    let empty = matches!(
+        db.lookup_key_read(key),
+        Some(o) if o.zset().map(|z| z.is_empty()).unwrap_or(false)
+    );
+    if empty {
+        db.sync_delete(key);
+    }
+    Some((member, score))
+}
+
+/// Pop up to `count` (member, score) pairs from the zset at `key`.
+///
+/// Returns an empty vec when the key is absent or holds an empty zset. Deletes
+/// the key when the pops leave it empty.
+fn zset_pop_many(
+    db: &mut RedisDb,
+    key: &RedisString,
+    reverse: bool,
+    count: usize,
+) -> Vec<(RedisString, f64)> {
+    let zset = match db.lookup_key_write(key).and_then(|o| o.zset_mut()) {
+        Some(z) => z,
+        None => return Vec::new(),
+    };
+    let take = count.min(zset.len());
+    let mut targets: Vec<(f64, RedisString)> = Vec::with_capacity(take);
+    if reverse {
+        for (s, m) in zset.iter_ascending().rev().take(take) {
+            targets.push((s, m.clone()));
+        }
+    } else {
+        for (s, m) in zset.iter_ascending().take(take) {
+            targets.push((s, m.clone()));
+        }
+    }
+    for (_, m) in &targets {
+        zset.remove(m);
+    }
+    let out: Vec<(RedisString, f64)> =
+        targets.into_iter().map(|(s, m)| (m, s)).collect();
+    let empty = matches!(
+        db.lookup_key_read(key),
+        Some(o) if o.zset().map(|z| z.is_empty()).unwrap_or(false)
+    );
+    if empty {
+        db.sync_delete(key);
+    }
+    out
+}
+
+/// Encode a `*3 [key, member, score]` BZPOPMIN/BZPOPMAX reply.
+fn encode_bzpop_reply(key: &RedisString, member: &RedisString, score: f64) -> Vec<u8> {
+    let score_bytes = format_score(score);
+    let mut buf = Vec::with_capacity(64 + key.len() + member.len() + score_bytes.len());
+    buf.extend_from_slice(b"*3\r\n$");
+    buf.extend_from_slice(key.len().to_string().as_bytes());
+    buf.extend_from_slice(b"\r\n");
+    buf.extend_from_slice(key.as_bytes());
+    buf.extend_from_slice(b"\r\n$");
+    buf.extend_from_slice(member.len().to_string().as_bytes());
+    buf.extend_from_slice(b"\r\n");
+    buf.extend_from_slice(member.as_bytes());
+    buf.extend_from_slice(b"\r\n$");
+    buf.extend_from_slice(score_bytes.len().to_string().as_bytes());
+    buf.extend_from_slice(b"\r\n");
+    buf.extend_from_slice(&score_bytes);
+    buf.extend_from_slice(b"\r\n");
+    buf
+}
+
+/// Encode a `*2 [key, *N [[m1,s1],[m2,s2],...]]` BZMPOP wake reply.
+fn encode_bzmpop_reply(key: &RedisString, pairs: &[(RedisString, f64)]) -> Vec<u8> {
+    let mut buf: Vec<u8> = Vec::with_capacity(64);
+    buf.extend_from_slice(b"*2\r\n$");
+    buf.extend_from_slice(key.len().to_string().as_bytes());
+    buf.extend_from_slice(b"\r\n");
+    buf.extend_from_slice(key.as_bytes());
+    buf.extend_from_slice(b"\r\n*");
+    buf.extend_from_slice(pairs.len().to_string().as_bytes());
+    buf.extend_from_slice(b"\r\n");
+    for (member, score) in pairs {
+        let score_bytes = format_score(*score);
+        buf.extend_from_slice(b"*2\r\n$");
+        buf.extend_from_slice(member.len().to_string().as_bytes());
+        buf.extend_from_slice(b"\r\n");
+        buf.extend_from_slice(member.as_bytes());
+        buf.extend_from_slice(b"\r\n$");
+        buf.extend_from_slice(score_bytes.len().to_string().as_bytes());
+        buf.extend_from_slice(b"\r\n");
+        buf.extend_from_slice(&score_bytes);
+        buf.extend_from_slice(b"\r\n");
+    }
+    buf
+}
+
+/// Deliver a popped zset element or set of elements to a woken waiter.
+///
+/// Called from `list::deliver_to_waiter` when the action is `ZSetPop`. When
+/// `count == 0` (BZPOPMIN / BZPOPMAX shape) pops one element and replies
+/// `*3 [key, member, score]`. When `count >= 1` (BZMPOP shape) pops up to
+/// `count` elements and replies `*2 [key, *N [[m1,s1],...]]`.
+///
+/// If the sender is gone the popped values are restored by re-inserting them
+/// into the zset (creating it first when needed), preserving fairness for the
+/// next waiter.
+pub fn deliver_zset_to_waiter(db: &mut RedisDb, key: &RedisString, waiter: BlockedWaiter) {
+    let (reverse, count) = match waiter.action {
+        BlockedAction::ZSetPop { reverse, count } => (reverse, count),
+        _ => return,
+    };
+    if count == 0 {
+        let pair = match zset_pop_one(db, key, reverse) {
+            Some(p) => p,
+            None => return,
+        };
+        let reply = encode_bzpop_reply(key, &pair.0, pair.1);
+        if waiter.sender.send(reply).is_err() {
+            match db.lookup_key_write(key) {
+                Some(obj) => {
+                    if let Some(z) = obj.zset_mut() {
+                        z.upsert(pair.0, pair.1);
+                    }
+                }
+                None => {
+                    let mut obj = RedisObject::new_zset();
+                    if let Some(z) = obj.zset_mut() {
+                        z.upsert(pair.0, pair.1);
+                    }
+                    db.set_key(key.clone(), obj, 0);
+                }
+            }
+        }
+    } else {
+        let pairs = zset_pop_many(db, key, reverse, count as usize);
+        if pairs.is_empty() {
+            return;
+        }
+        let reply = encode_bzmpop_reply(key, &pairs);
+        if waiter.sender.send(reply).is_err() {
+            match db.lookup_key_write(key) {
+                Some(obj) => {
+                    if let Some(z) = obj.zset_mut() {
+                        for (m, s) in pairs {
+                            z.upsert(m, s);
+                        }
+                    }
+                }
+                None => {
+                    let mut obj = RedisObject::new_zset();
+                    if let Some(z) = obj.zset_mut() {
+                        for (m, s) in pairs {
+                            z.upsert(m, s);
+                        }
+                    }
+                    db.set_key(key.clone(), obj, 0);
+                }
+            }
+        }
+    }
+}
+
+/// Wake blocked zset waiters after data is added to `key`.
+///
+/// Should be called by ZADD and ZINCRBY after successfully inserting into a
+/// zset that has blocked waiters. Mirrors `list::wake_blocked_for_key` but
+/// dispatches through `deliver_zset_to_waiter`.
+pub fn wake_blocked_zset_for_key(db: &mut RedisDb, key: &RedisString) {
+    loop {
+        let has_data = matches!(
+            db.lookup_key_read(key),
+            Some(o) if o.zset().map(|z| !z.is_empty()).unwrap_or(false)
+        );
+        if !has_data {
+            return;
+        }
+        let waiter = {
+            let mut idx = match blocked_keys_index().lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            match idx.peek_zset_waiter(key) {
+                Some(w) => w,
+                None => return,
+            }
+        };
+        deliver_zset_to_waiter(db, key, waiter);
+    }
+}
+
+/// Parse a BLPOP-style timeout value (decimal seconds, non-negative).
+///
+/// Accepts integer and floating-point. Rejects negative values and
+/// non-numeric input with the canonical Redis error messages.
+fn parse_blocking_timeout_zset(bytes: &[u8]) -> Result<f64, RedisError> {
+    let s = core::str::from_utf8(bytes).map_err(|_| {
+        RedisError::runtime(b"ERR timeout is not a float or out of range")
+    })?;
+    if s.starts_with(char::is_whitespace) || s.ends_with(char::is_whitespace) {
+        return Err(RedisError::runtime(
+            b"ERR timeout is not a float or out of range",
+        ));
+    }
+    let parsed = s.parse::<f64>().map_err(|_| {
+        RedisError::runtime(b"ERR timeout is not a float or out of range")
+    })?;
+    if !parsed.is_finite() {
+        return Err(RedisError::runtime(
+            b"ERR timeout is not a float or out of range",
+        ));
+    }
+    if parsed < 0.0 {
+        return Err(RedisError::runtime(b"ERR timeout is negative"));
+    }
+    let ms = parsed * 1000.0;
+    if ms > i64::MAX as f64 {
+        return Err(RedisError::runtime(b"ERR timeout is out of range"));
+    }
+    Ok(parsed)
+}
+
+/// Park a client that is blocked waiting on one or more zset keys.
+///
+/// Mirrors `list::park_blocked_client` but the action is always `ZSetPop`.
+fn park_zset_blocked_client(
+    ctx: &mut CommandContext,
+    keys: Vec<RedisString>,
+    reverse: bool,
+    count: u64,
+    timeout_secs: f64,
+) -> RedisResult<()> {
+    if ctx.client_ref().flag_deny_blocking() {
+        return ctx.reply_null_array();
+    }
+    let registry = match ctx.pubsub.as_ref() {
+        Some(r) => r.clone(),
+        None => return ctx.reply_null_array(),
+    };
+    let sender = {
+        let guard = match registry.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard.sender_for(ctx.client_ref().id)
+    };
+    let sender = match sender {
+        Some(s) => s,
+        None => return ctx.reply_null_array(),
+    };
+    let waiter = BlockedWaiter {
+        client_id: ctx.client_ref().id,
+        sender,
+        keys: keys.clone(),
+        action: BlockedAction::ZSetPop { reverse, count },
+        deadline_ms: deadline_from_timeout_secs(timeout_secs),
+    };
+    {
+        let mut idx = match blocked_keys_index().lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        idx.add(waiter);
+    }
+    ctx.client_mut().blocked_on_keys = true;
+    Ok(())
+}
+
+/// Shared body for BZPOPMIN and BZPOPMAX.
+///
+/// For each key in order: if the zset is non-empty, pop the
+/// lowest-scored (or highest-scored when `reverse`) member and reply
+/// `*3 [key, member, score]` immediately. When every key is empty the
+/// client is parked in the global blocked-keys index until either a
+/// ZADD/ZINCRBY wakes it or the timeout elapses (replying `*-1`).
+fn bzpop_generic(ctx: &mut CommandContext, reverse: bool) -> RedisResult<()> {
+    let argc = ctx.arg_count();
+    if argc < 3 {
+        return Err(RedisError::wrong_number_of_args(ctx.command_name()));
+    }
+    let timeout_raw = ctx.arg_owned(argc - 1)?;
+    let timeout_secs = parse_blocking_timeout_zset(timeout_raw.as_bytes())?;
+    let mut keys: Vec<RedisString> = Vec::with_capacity(argc - 2);
+    for j in 1..(argc - 1) {
+        keys.push(ctx.arg_owned(j)?);
+    }
+    for key in &keys {
+        match ctx.db().find(key) {
+            None => continue,
+            Some(o) => {
+                if !o.is_zset() {
+                    return Err(RedisError::wrong_type());
+                }
+                if o.zset().map(|z| z.is_empty()).unwrap_or(true) {
+                    continue;
+                }
+            }
+        }
+        let pair = match zset_pop_one(ctx.db_mut(), key, reverse) {
+            Some(p) => p,
+            None => continue,
+        };
+        let empty_after = ctx.db().lookup_key_read(key).is_none();
+        let event = if reverse { b"zpopmax" as &[u8] } else { b"zpopmin" as &[u8] };
+        ctx.notify_keyspace_event(NOTIFY_ZSET, event, key);
+        if empty_after {
+            ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", key);
+        }
+        ctx.reply_array_header(3usize)?;
+        ctx.reply_bulk_string(key.clone())?;
+        ctx.reply_bulk_string(pair.0)?;
+        return ctx.reply_bulk(&format_score(pair.1));
+    }
+    park_zset_blocked_client(ctx, keys, reverse, 0, timeout_secs)
+}
+
+/// BZPOPMIN key [key ...] timeout
+///
+/// Pops the lowest-scored member from the first non-empty key. Blocks the
+/// client when all listed keys are empty. Replies `*3 [key, member, score]`
+/// on success or `*-1` on timeout.
+pub fn bzpopmin_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    bzpop_generic(ctx, false)
+}
+
+/// BZPOPMAX key [key ...] timeout
+///
+/// Pops the highest-scored member from the first non-empty key. Blocks the
+/// client when all listed keys are empty. Replies `*3 [key, member, score]`
+/// on success or `*-1` on timeout.
+pub fn bzpopmax_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    bzpop_generic(ctx, true)
+}
+
+/// BZMPOP timeout numkeys key [key ...] MIN|MAX [COUNT count]
+///
+/// When some key has data: pops up to `count` (default 1) members from the
+/// first non-empty key and replies `*2 [key, [[m1,s1],...]]`. Otherwise
+/// parks the client on every supplied key; a later ZADD on any one wakes the
+/// waiter and satisfies the `count` request. Timeout `0` blocks forever.
+pub fn bzmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    let argc = ctx.arg_count();
+    if argc < 5 {
+        return Err(RedisError::wrong_number_of_args(b"bzmpop"));
+    }
+    let timeout_raw = ctx.arg_owned(1usize)?;
+    let timeout_secs = parse_blocking_timeout_zset(timeout_raw.as_bytes())?;
+    let numkeys_signed = parse_strict_i64(ctx.arg(2)?.as_bytes())
+        .map_err(|_| RedisError::runtime(b"ERR numkeys should be greater than 0"))?;
+    if numkeys_signed <= 0 {
+        return Err(RedisError::runtime(b"ERR numkeys should be greater than 0"));
+    }
+    let numkeys = numkeys_signed as usize;
+    if numkeys + 4 > argc {
+        return Err(RedisError::syntax(b"syntax error"));
+    }
+    let mut keys: Vec<RedisString> = Vec::with_capacity(numkeys);
+    for i in 0..numkeys {
+        keys.push(ctx.arg_owned(3 + i)?);
+    }
+    let dir_arg = ctx.arg(3 + numkeys)?;
+    let reverse = if dir_arg.as_bytes().eq_ignore_ascii_case(b"MIN") {
+        false
+    } else if dir_arg.as_bytes().eq_ignore_ascii_case(b"MAX") {
+        true
+    } else {
+        return Err(RedisError::syntax(b"syntax error"));
+    };
+    let mut count: i64 = 1;
+    let mut got_count = false;
+    let mut j = 4 + numkeys;
+    while j < argc {
+        let opt = ctx.arg(j)?;
+        if !opt.as_bytes().eq_ignore_ascii_case(b"COUNT") {
+            return Err(RedisError::syntax(b"syntax error"));
+        }
+        if got_count || j + 1 >= argc {
+            return Err(RedisError::syntax(b"syntax error"));
+        }
+        count = parse_strict_i64(ctx.arg(j + 1)?.as_bytes())
+            .map_err(|_| RedisError::runtime(b"ERR count should be greater than 0"))?;
+        if count <= 0 {
+            return Err(RedisError::runtime(b"ERR count should be greater than 0"));
+        }
+        got_count = true;
+        j += 2;
+    }
+    for key in &keys {
+        match ctx.db().find(key) {
+            Some(o) if !o.is_zset() => return Err(RedisError::wrong_type()),
+            Some(o) if o.zset().map(|z| z.is_empty()).unwrap_or(true) => continue,
+            None => continue,
+            Some(_) => {}
+        }
+        let pairs = zset_pop_many(ctx.db_mut(), key, reverse, count as usize);
+        if pairs.is_empty() {
+            continue;
+        }
+        let empty_after = ctx.db().lookup_key_read(key).is_none();
+        let event = if reverse { b"zpopmax" as &[u8] } else { b"zpopmin" as &[u8] };
+        ctx.notify_keyspace_event(NOTIFY_ZSET, event, key);
+        if empty_after {
+            ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", key);
+        }
+        ctx.reply_array_header(2usize)?;
+        ctx.reply_bulk_string(key.clone())?;
+        ctx.reply_array_header(pairs.len())?;
+        for (member, score) in pairs {
+            ctx.reply_array_header(2usize)?;
+            ctx.reply_bulk_string(member)?;
+            ctx.reply_bulk(&format_score(score))?;
+        }
+        return Ok(());
+    }
+    park_zset_blocked_client(ctx, keys, reverse, count as u64, timeout_secs)
+}
+
+/// Emit a wake to any blocked zset waiters on `key` after a successful ZADD
+/// or ZINCRBY that added data to the zset.
+pub fn schedule_or_wake_zset(ctx: &mut CommandContext, key: &RedisString) {
+    if ctx.client_ref().flag_deny_blocking() {
+        ctx.client_mut().pending_wakes.push(key.clone());
+    } else {
+        wake_blocked_zset_for_key(ctx.db_mut(), key);
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────
