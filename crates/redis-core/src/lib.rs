@@ -35,6 +35,7 @@ pub mod lazyfree;
 pub mod notify;
 pub mod object;
 pub mod pubsub_registry;
+pub mod replication;
 pub mod server;
 pub mod strtod;
 pub mod timeout;

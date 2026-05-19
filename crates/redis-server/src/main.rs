@@ -263,6 +263,11 @@ fn main() {
     redis_core::object::install_live_config(Arc::clone(&live_config));
     redis_commands::install_live_config_handle(Arc::clone(&live_config));
     redis_core::acl::install_acl_state();
+    let repl_state = Arc::new(redis_core::replication::ReplicationState::new(
+        redis_core::replication::generate_runid(),
+        live_config.repl_backlog_size() as usize,
+    ));
+    redis_core::replication::install_replication_state(Arc::clone(&repl_state));
 
     let server = Arc::new(redis_core::RedisServer::with_live_config(
         args.port,
@@ -792,6 +797,7 @@ fn run_client_loop(
 
     let id = client.id;
     let _ = pubsub::drop_client_from_registry(&registry, id);
+    redis_core::replication::global_replication_state().remove_replica(id);
     client.clear_blocked_on_keys();
     server_metrics().on_disconnect();
 }
@@ -911,6 +917,7 @@ fn run_client_loop_tls(
     let _ = peer_addr;
     let id = client.id;
     let _ = pubsub::drop_client_from_registry(&registry, id);
+    redis_core::replication::global_replication_state().remove_replica(id);
     client.clear_blocked_on_keys();
     drop(outbound_tx);
     server_metrics().on_disconnect();

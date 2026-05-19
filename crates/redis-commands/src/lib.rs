@@ -26,6 +26,7 @@ pub mod list;
 pub mod multi;
 pub mod persist;
 pub mod pubsub;
+pub mod replication;
 pub mod set;
 pub mod slowlog_cmd;
 pub mod stream;

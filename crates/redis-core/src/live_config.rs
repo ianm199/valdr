@@ -144,6 +144,25 @@ pub struct LiveConfig {
     pub appendfilename: Mutex<String>,
     /// fsync policy: 0=no, 1=everysec, 2=always (`appendfsync` config key).
     pub appendfsync: AtomicU8,
+    /// Size of the replication backlog circular buffer
+    /// (`repl-backlog-size` config key). Default 1 MiB. Reducing it does
+    /// not shrink the live buffer until the next `ReplicationState` is
+    /// rebuilt; see `replication.rs`.
+    pub repl_backlog_size: AtomicU64,
+    /// Replica idle-link timeout in seconds (`repl-timeout`). Default 60.
+    /// Consumed by Wave B's replica-health watchdog; readback only here.
+    pub repl_timeout: AtomicU64,
+    /// Disable per-write TCP_NODELAY on the replication link
+    /// (`repl-disable-tcp-nodelay`). Default `false`. Wave B/C may consume
+    /// this once the master-link socket is owned.
+    pub repl_disable_tcp_nodelay: AtomicBool,
+    /// Replicas may serve read commands (`slave-read-only`/`replica-read-only`).
+    /// Default `true`; matches real Redis.
+    pub slave_read_only: AtomicBool,
+    /// Send the RDB snapshot diskless during full resync
+    /// (`repl-diskless-sync`). Default `true`. No-op until Wave B wires the
+    /// actual snapshot transfer.
+    pub repl_diskless_sync: AtomicBool,
 }
 
 /// Default `maxclients` (matches upstream server.c).
@@ -194,6 +213,12 @@ pub const DEFAULT_ZSET_MAX_LISTPACK_VALUE: usize = 64;
 /// Default AOF filename.
 pub const DEFAULT_AOF_FILENAME: &str = "appendonly.aof";
 
+/// Default `repl-backlog-size` (1 MiB).
+pub const DEFAULT_REPL_BACKLOG_SIZE: u64 = 1024 * 1024;
+
+/// Default `repl-timeout` (60 seconds).
+pub const DEFAULT_REPL_TIMEOUT: u64 = 60;
+
 impl Default for LiveConfig {
     fn default() -> Self {
         Self {
@@ -227,6 +252,11 @@ impl Default for LiveConfig {
             appendonly: AtomicBool::new(false),
             appendfilename: Mutex::new(DEFAULT_AOF_FILENAME.to_string()),
             appendfsync: AtomicU8::new(1),
+            repl_backlog_size: AtomicU64::new(DEFAULT_REPL_BACKLOG_SIZE),
+            repl_timeout: AtomicU64::new(DEFAULT_REPL_TIMEOUT),
+            repl_disable_tcp_nodelay: AtomicBool::new(false),
+            slave_read_only: AtomicBool::new(true),
+            repl_diskless_sync: AtomicBool::new(true),
         }
     }
 }
@@ -555,6 +585,61 @@ impl LiveConfig {
     /// Update the fsync policy.
     pub fn set_appendfsync(&self, policy: u8) {
         self.appendfsync.store(policy, Ordering::Relaxed);
+    }
+
+    /// Configured replication backlog size in bytes (`repl-backlog-size`).
+    pub fn repl_backlog_size(&self) -> u64 {
+        self.repl_backlog_size.load(Ordering::Relaxed)
+    }
+
+    /// Update the configured replication backlog size. Note that the live
+    /// backlog is not resized in place; consumers consult this for new
+    /// allocations only.
+    pub fn set_repl_backlog_size(&self, n: u64) {
+        self.repl_backlog_size.store(n, Ordering::Relaxed);
+    }
+
+    /// Replica idle-link timeout in seconds (`repl-timeout`).
+    pub fn repl_timeout(&self) -> u64 {
+        self.repl_timeout.load(Ordering::Relaxed)
+    }
+
+    /// Update the replica idle-link timeout.
+    pub fn set_repl_timeout(&self, n: u64) {
+        self.repl_timeout.store(n, Ordering::Relaxed);
+    }
+
+    /// Whether the replication link disables per-write TCP_NODELAY
+    /// (`repl-disable-tcp-nodelay`).
+    pub fn repl_disable_tcp_nodelay(&self) -> bool {
+        self.repl_disable_tcp_nodelay.load(Ordering::Relaxed)
+    }
+
+    /// Update the repl-disable-tcp-nodelay flag.
+    pub fn set_repl_disable_tcp_nodelay(&self, v: bool) {
+        self.repl_disable_tcp_nodelay.store(v, Ordering::Relaxed);
+    }
+
+    /// Whether replicas may serve read commands (`slave-read-only`/
+    /// `replica-read-only`).
+    pub fn slave_read_only(&self) -> bool {
+        self.slave_read_only.load(Ordering::Relaxed)
+    }
+
+    /// Update the slave-read-only flag.
+    pub fn set_slave_read_only(&self, v: bool) {
+        self.slave_read_only.store(v, Ordering::Relaxed);
+    }
+
+    /// Whether full-resync RDB transfer uses the diskless path
+    /// (`repl-diskless-sync`).
+    pub fn repl_diskless_sync(&self) -> bool {
+        self.repl_diskless_sync.load(Ordering::Relaxed)
+    }
+
+    /// Update the repl-diskless-sync flag.
+    pub fn set_repl_diskless_sync(&self, v: bool) {
+        self.repl_diskless_sync.store(v, Ordering::Relaxed);
     }
 
     /// Snapshot of encoding thresholds — convenience for the encoding

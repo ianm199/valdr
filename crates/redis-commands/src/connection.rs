@@ -241,6 +241,12 @@ fn default_config_pairs() -> &'static [(&'static str, &'static str)] {
         ("tls-key-file", ""),
         ("tls-ca-cert-file", ""),
         ("tls-auth-clients", "no"),
+        ("repl-backlog-size", "1048576"),
+        ("repl-timeout", "60"),
+        ("repl-disable-tcp-nodelay", "no"),
+        ("slave-read-only", "yes"),
+        ("replica-read-only", "yes"),
+        ("repl-diskless-sync", "yes"),
     ]
 }
 
@@ -296,6 +302,11 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
     let live_appendonly = if cfg.appendonly() { "yes".to_string() } else { "no".to_string() };
     let live_appendfsync = crate::aof::fsync_policy_str(cfg.appendfsync()).to_string();
     let live_appendfilename = cfg.appendfilename();
+    let live_repl_backlog_size = cfg.repl_backlog_size().to_string();
+    let live_repl_timeout = cfg.repl_timeout().to_string();
+    let live_repl_disable_nodelay = if cfg.repl_disable_tcp_nodelay() { "yes".to_string() } else { "no".to_string() };
+    let live_slave_read_only = if cfg.slave_read_only() { "yes".to_string() } else { "no".to_string() };
+    let live_repl_diskless = if cfg.repl_diskless_sync() { "yes".to_string() } else { "no".to_string() };
 
     let mut out: Vec<(String, String)> = Vec::new();
     for &(name, value) in default_config_pairs() {
@@ -329,6 +340,11 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
             "appendonly" => Some(live_appendonly.clone()),
             "appendfsync" => Some(live_appendfsync.clone()),
             "appendfilename" => Some(live_appendfilename.clone()),
+            "repl-backlog-size" => Some(live_repl_backlog_size.clone()),
+            "repl-timeout" => Some(live_repl_timeout.clone()),
+            "repl-disable-tcp-nodelay" => Some(live_repl_disable_nodelay.clone()),
+            "slave-read-only" | "replica-read-only" => Some(live_slave_read_only.clone()),
+            "repl-diskless-sync" => Some(live_repl_diskless.clone()),
             _ => None,
         };
         out.push((
@@ -530,6 +546,27 @@ fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
                     w.fsync_policy.store(policy, std::sync::atomic::Ordering::Relaxed);
                 }
             }
+        }
+        b"repl-backlog-size" => {
+            if let Some(n) = parse_memsize(value) {
+                cfg.set_repl_backlog_size(n);
+            }
+        }
+        b"repl-timeout" => {
+            if let Some(n) = parse_i64_strict(value) {
+                if n > 0 {
+                    cfg.set_repl_timeout(n as u64);
+                }
+            }
+        }
+        b"repl-disable-tcp-nodelay" => {
+            cfg.set_repl_disable_tcp_nodelay(value == b"yes");
+        }
+        b"slave-read-only" | b"replica-read-only" => {
+            cfg.set_slave_read_only(value == b"yes");
+        }
+        b"repl-diskless-sync" => {
+            cfg.set_repl_diskless_sync(value == b"yes");
         }
         _ => {}
     }

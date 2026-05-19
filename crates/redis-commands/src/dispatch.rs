@@ -57,6 +57,9 @@ pub fn dispatch(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         Some(s) => s.clone(),
         None => return Err(RedisError::runtime(b"ERR empty command")),
     };
+    if ctx.client_ref().is_replica() && !is_replica_allowed_command(name.as_bytes()) {
+        return Ok(());
+    }
     if ctx.client_ref().flag_multi() {
         if crate::multi::is_no_multi_command(name.as_bytes()) {
             return Err(crate::multi::reject_no_multi_command(name.as_bytes()));
@@ -288,6 +291,18 @@ fn enforce_maxmemory_gate(ctx: &mut CommandContext<'_>, name: &[u8]) -> Option<V
         EvictionOutcome::Sufficient | EvictionOutcome::Evicted(_) => None,
         EvictionOutcome::StillOver => Some(oom_error_reply()),
     }
+}
+
+/// Commands a replica client is allowed to issue back to the master after
+/// the PSYNC handshake. Real Redis treats the replica link as outbound-only
+/// from the master's perspective; the only frames the master expects from
+/// the replica are REPLCONF ACK heartbeats (Wave B) and the occasional
+/// REPLCONF GETACK / PING. Until Wave B parses REPLCONF, every other command
+/// is silently dropped on the master side.
+fn is_replica_allowed_command(name: &[u8]) -> bool {
+    ascii_eq_ignore_case(name, b"REPLCONF")
+        || ascii_eq_ignore_case(name, b"PING")
+        || ascii_eq_ignore_case(name, b"QUIT")
 }
 
 /// Build the canonical `unknown command '<name>'` error.
@@ -568,6 +583,11 @@ pub static HANDLERS: &[DispatchEntry] = &[
     DispatchEntry { name: b"EVAL", handler: crate::eval::eval_command },
     DispatchEntry { name: b"EVALSHA", handler: crate::eval::evalsha_command },
     DispatchEntry { name: b"SCRIPT", handler: crate::eval::script_command },
+    // ── REPLICATION (Session 3A) ───────────────────────────────────────────
+    DispatchEntry { name: b"REPLICAOF", handler: crate::replication::replicaof_command },
+    DispatchEntry { name: b"SLAVEOF", handler: crate::replication::replicaof_command },
+    DispatchEntry { name: b"PSYNC", handler: crate::replication::psync_command },
+    DispatchEntry { name: b"SYNC", handler: crate::replication::sync_command },
 ];
 
 #[cfg(test)]

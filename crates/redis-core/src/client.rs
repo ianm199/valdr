@@ -184,6 +184,15 @@ pub struct Client {
     /// this vec and fires the real `wake_blocked_for_key` for each entry in
     /// insertion order.
     pub pending_wakes: Vec<RedisString>,
+    /// True once this client has completed the PSYNC handshake on the master
+    /// side and is treated as a replica.
+    ///
+    /// When set, the dispatch path stops handing the client's argv to
+    /// command handlers (replicas do not issue commands to the master); the
+    /// reader thread keeps draining for REPLCONF ACK frames, which Wave B
+    /// will parse. The flag is cleared on disconnect via the standard
+    /// cleanup path.
+    pub is_replica: bool,
 }
 
 /// Per-client transient flags.
@@ -242,6 +251,7 @@ impl Client {
             blocked_on_keys: false,
             pending_wakes: Vec::new(),
             authenticated_user: initial_authenticated_user(),
+            is_replica: false,
         }
     }
 
@@ -354,9 +364,11 @@ impl Client {
 
     /// Whether the client is a replica (slave) connection.
     ///
-    /// STUB — Phase B placeholder; replication state is Phase 6+.
+    /// Set to true once the client completes the PSYNC handshake on the
+    /// master side (Session 3A). The dispatch path checks this flag and
+    /// rejects normal command bytes — replicas are write-only targets.
     pub fn is_replica(&self) -> bool {
-        false
+        self.is_replica
     }
 
     /// Whether the client carries the `must-obey` flag (used by AOF/RDB

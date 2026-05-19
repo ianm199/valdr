@@ -200,11 +200,40 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let _ = writeln!(buf, "\r");
     }
     if want(b"replication") {
+        let repl = redis_core::replication::global_replication_state();
+        let role = if repl.is_replica() { "slave" } else { "master" };
+        let runid_str = std::str::from_utf8(repl.runid())
+            .unwrap_or("0000000000000000000000000000000000000000");
+        let (backlog_first, master_offset, backlog_histlen, backlog_size) =
+            repl.backlog_snapshot();
+        let replicas = repl.replicas_snapshot();
+        let connected = replicas.len();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
         let _ = writeln!(buf, "# Replication\r");
-        let _ = writeln!(buf, "role:master\r");
-        let _ = writeln!(buf, "connected_slaves:0\r");
-        let _ = writeln!(buf, "master_replid:0000000000000000000000000000000000000000\r");
-        let _ = writeln!(buf, "master_repl_offset:0\r");
+        let _ = writeln!(buf, "role:{}\r", role);
+        let _ = writeln!(buf, "connected_slaves:{}\r", connected);
+        for (idx, (_cid, state, port, offset, last_ack_ms)) in replicas.iter().enumerate() {
+            let lag = if *last_ack_ms == 0 {
+                0
+            } else {
+                (now_ms - last_ack_ms) / 1000
+            };
+            let _ = writeln!(
+                buf,
+                "slave{}:ip=?,port={},state={},offset={},lag={}\r",
+                idx, port, state, offset, lag
+            );
+        }
+        let _ = writeln!(buf, "master_replid:{}\r", runid_str);
+        let _ = writeln!(buf, "master_repl_offset:{}\r", master_offset);
+        let backlog_active = if backlog_size > 0 && backlog_histlen > 0 { 1 } else { 0 };
+        let _ = writeln!(buf, "repl_backlog_active:{}\r", backlog_active);
+        let _ = writeln!(buf, "repl_backlog_size:{}\r", backlog_size);
+        let _ = writeln!(buf, "repl_backlog_first_byte_offset:{}\r", backlog_first);
+        let _ = writeln!(buf, "repl_backlog_histlen:{}\r", backlog_histlen);
         let _ = writeln!(buf, "\r");
     }
     if want(b"cpu") {
