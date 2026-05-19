@@ -594,7 +594,7 @@ pub fn hincrbyfloat_command(ctx: &mut CommandContext) -> RedisResult<()> {
 fn parse_hrandfield_count(bytes: &[u8]) -> Result<i64, RedisError> {
     let v = parse_strict_i64(bytes)?;
     if v == i64::MIN {
-        return Err(RedisError::runtime(b"ERR value is out of range"));
+        return Err(RedisError::out_of_range());
     }
     Ok(v)
 }

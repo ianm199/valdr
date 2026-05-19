@@ -1,0 +1,56 @@
+[class: byte_exact]
+[description: Regression corpus — one line per bug fixed in cleanup waves 1+2. Each command must not crash our server AND must match real Valkey's reply byte-for-byte. Any divergence here points back at a known historical bug, NOT a new feature. Non-deterministic cases (SRANDMEMBER/SPOP/HRANDFIELD with positive count returning shuffled order) are excluded — they need a set_equal comparator. The crash-prevention tests (i64::MIN inputs) below are the load-bearing ones; they exercise the OOM-abort fix.]
+[suite: smoke,regression]
+
+FLUSHDB
+HSET h f1 v1 f2 v2 f3 v3
+HRANDFIELD h -9223372036854775808
+HRANDFIELD h 4611686018427387904 WITHVALUES
+HRANDFIELD missing 5
+SADD s 1 2 3 4 5
+SRANDMEMBER s -9223372036854775808
+SRANDMEMBER nonexistent
+SRANDMEMBER nonexistent 0
+SRANDMEMBER nonexistent -3
+SADD mix 1 2 3 abc
+SREM mix abc
+OBJECT ENCODING mix
+DEL mix
+SADD intonly 1 2 3
+OBJECT ENCODING intonly
+SADD intonly hello
+OBJECT ENCODING intonly
+SREM intonly hello
+OBJECT ENCODING intonly
+DEL intonly
+CONFIG SET hash-max-ziplist-entries 64
+CONFIG GET hash-max-ziplist-entries
+CONFIG SET zset-max-ziplist-entries 128
+CONFIG GET zset-max-ziplist-entries
+CONFIG SET zset-max-ziplist-value 64
+CONFIG GET zset-max-ziplist-value
+CONFIG RESETSTAT
+SET key1 v1
+EXPIRE key1 -1
+EXISTS key1
+SET key2 v2
+EXPIREAT key2 1
+EXISTS key2
+SET key3 v3
+PEXPIRE key3 -1
+EXISTS key3
+SET key4 v4
+PEXPIREAT key4 1
+EXISTS key4
+SINTERCARD 0 foo
+SINTERCARD 5 foo bar
+SINTERCARD abc foo
+SINTERCARD 1 foo LIMIT -1
+SINTERCARD 1 foo LIMIT abc
+MSETEX 100 k1 v1 k2 v2
+TTL k1
+TTL k2
+LPUSH list1 a b c
+LPUSH list2 d e f
+LMPOP 2 list1 list2 LEFT
+LMPOP 2 missing1 missing2 LEFT COUNT 3

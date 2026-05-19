@@ -104,7 +104,9 @@ impl RedisError {
                 buf.extend_from_slice(b"NOPERM ");
                 buf.extend_from_slice(scope.as_bytes());
             }
-            OutOfRange => buf.extend_from_slice(b"ERR value is out of range"),
+            OutOfRange => buf.extend_from_slice(
+                b"ERR value is out of range, value must between -9223372036854775807 and 9223372036854775807",
+            ),
             NotInteger => buf.extend_from_slice(b"ERR value is not an integer or out of range"),
             NotFloat => buf.extend_from_slice(b"ERR value is not a valid float"),
             Io(kind) => {

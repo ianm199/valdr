@@ -1445,7 +1445,18 @@ pub fn swapdb_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     if id1 < 0 || id1 >= db_count || id2 < 0 || id2 >= db_count {
         return Err(RedisError::runtime(b"ERR invalid DB index"));
     }
-    crate::databases::global_databases().swap(id1 as u32, id2 as u32);
+    let current_db_id = ctx.client_ref().db_index;
+    let id1u = id1 as u32;
+    let id2u = id2 as u32;
+    let other_db_id = if current_db_id == id1u { id2u } else { id1u };
+    {
+        let other_arc = crate::databases::global_databases().get(other_db_id);
+        let mut other_guard = match other_arc.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        ctx.db_mut().swap_contents_with(&mut other_guard);
+    }
     let blocked_keys: Vec<RedisString> = {
         let idx = match crate::blocked_keys::blocked_keys_index().lock() {
             Ok(g) => g,
@@ -1453,8 +1464,6 @@ pub fn swapdb_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         };
         idx.all_blocked_keys()
     };
-    let current_db_id = ctx.client_ref().db_index;
-    let other_db_id = if current_db_id == id1 as u32 { id2 as u32 } else { id1 as u32 };
     for key in &blocked_keys {
         if ctx.db().find(key).is_some() {
             ctx.client_mut().pending_wakes.push(key.clone());

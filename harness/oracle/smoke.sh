@@ -21,6 +21,8 @@ ORACLE="${ROOT}/harness/oracle/wire-diff"
 CORPUS_DIR="${ROOT}/harness/oracle/corpus"
 VALKEY_BIN="${ROOT}/reference/valkey/src/valkey-server"
 RUST_BIN="${ROOT}/target/debug/redis-server"
+WIRE_DIFF_TSV="${ROOT}/harness/oracle/wire-diff.tsv"
+: > "${WIRE_DIFF_TSV}"
 
 C_PORT=16379
 RUST_PORT=16390
@@ -169,6 +171,7 @@ for script in "${CORPUS_DIR}"/*.txt; do
     if [[ "${C_AVAILABLE}" -eq 0 ]]; then
         # No C reference — print C-side behavior only (oracle returns 0).
         printf "  %-22s  C unavailable — skip\n" "${script_name}"
+        printf '%s\tSKIP\tC reference unavailable\n' "${script_name}" >> "${WIRE_DIFF_TSV}"
         SKIP_COUNT=$(( SKIP_COUNT + 1 ))
         rm -rf "${TMPDIR_CORPUS}"
         continue
@@ -192,9 +195,12 @@ for script in "${CORPUS_DIR}"/*.txt; do
 
     if [[ "${fail_n}" -gt 0 ]]; then
         printf "  %-22s  FAIL  (%d pass, %d fail)\n" "${script_name}" "${pass_n}" "${fail_n}"
+        first_fail=$(echo "${fail_lines}" | head -1 | tr '\t' ' ' | cut -c1-160)
+        printf '%s\tFAIL\t%s\n' "${script_name}" "${first_fail}" >> "${WIRE_DIFF_TSV}"
         FAIL_COUNT=$(( FAIL_COUNT + 1 ))
     else
         printf "  %-22s  PASS  (%d commands)\n" "${script_name}" "${pass_n}"
+        printf '%s\tPASS\t%d commands\n' "${script_name}" "${pass_n}" >> "${WIRE_DIFF_TSV}"
         PASS_COUNT=$(( PASS_COUNT + 1 ))
     fi
 

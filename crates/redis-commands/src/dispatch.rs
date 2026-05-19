@@ -426,6 +426,7 @@ pub static HANDLERS: &[DispatchEntry] = &[
     DispatchEntry { name: b"HELLO", handler: crate::connection::hello_command },
     DispatchEntry { name: b"COMMAND", handler: crate::connection::command_command },
     DispatchEntry { name: b"QUIT", handler: crate::connection::quit_command },
+    DispatchEntry { name: b"SHUTDOWN", handler: crate::connection::shutdown_command },
     DispatchEntry { name: b"SELECT", handler: crate::connection::select_command },
     DispatchEntry { name: b"CLIENT", handler: crate::connection::client_command },
     DispatchEntry { name: b"DEBUG", handler: crate::connection::debug_command },

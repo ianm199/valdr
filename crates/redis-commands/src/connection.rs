@@ -737,6 +737,55 @@ pub fn quit_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     ctx.reply_simple_string(b"OK")
 }
 
+/// `SHUTDOWN [NOSAVE | SAVE] [NOW] [FORCE] [ABORT]`.
+///
+/// Terminates the server process. The sequence mirrors real Valkey: parse any
+/// keyword flags, write `+OK\r\n` directly onto the client's transport so the
+/// caller receives a reply before the socket is closed, then call
+/// `std::process::exit(0)`.  The OS unbinds all listening sockets as part of
+/// process teardown, which is what releases the TCP port and allows the TCL
+/// harness to reuse it for the next `start_server` cycle.
+///
+/// Persistence behaviour:
+///   * `NOSAVE` (default when no save keyword is given) — skip any RDB/AOF
+///     flush.  Used by the TCL test harness for every non-persistence test.
+///   * `SAVE` — would normally trigger a foreground BGSAVE; not yet wired, so
+///     we treat it identically to NOSAVE for this release.
+///   * `ABORT` — cancels an in-progress shutdown; we return an error because
+///     no background shutdown can be in progress in our single-cycle model.
+///
+/// The reply is written directly to the live transport (bypassing the
+/// outbound mpsc channel) so the bytes reach the peer before `exit(0)` tears
+/// down the process.  Failures to write the reply are ignored — the caller
+/// gets a broken-pipe error instead, which the TCL harness treats equivalently
+/// to a clean +OK.
+///
+/// C: `shutdownCommand(client *c)` — db.c:1423, calling `prepareForShutdown`
+/// then `exit(0)`.
+pub fn shutdown_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
+    for i in 1..ctx.arg_count() {
+        let kw = ctx.arg(i)?;
+        let kw_bytes = kw.as_bytes();
+        if ascii_eq_ignore_case(kw_bytes, b"ABORT") {
+            return Err(RedisError::runtime(b"ERR No shutdown in progress."));
+        }
+        if ascii_eq_ignore_case(kw_bytes, b"NOSAVE")
+            || ascii_eq_ignore_case(kw_bytes, b"SAVE")
+            || ascii_eq_ignore_case(kw_bytes, b"NOW")
+            || ascii_eq_ignore_case(kw_bytes, b"FORCE")
+            || ascii_eq_ignore_case(kw_bytes, b"SAFE")
+            || ascii_eq_ignore_case(kw_bytes, b"FAILOVER")
+        {
+            continue;
+        }
+        return Err(RedisError::runtime(b"ERR syntax error"));
+    }
+    if let Some(conn) = ctx.client_mut().conn.as_mut() {
+        let _ = conn.write_all(b"+OK\r\n");
+    }
+    std::process::exit(0);
+}
+
 /// `RESET`.
 ///
 /// Resets the client's transient state (name, MULTI state, db, flags, queued

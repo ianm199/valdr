@@ -472,11 +472,12 @@ pub fn srandmember_command(ctx: &mut CommandContext) -> RedisResult<()> {
             Ok(())
         }
         Some(n) => {
-            let take = n.unsigned_abs() as usize;
-            ctx.reply_array_header(take)?;
             if members.is_empty() {
+                ctx.reply_array_header(0)?;
                 return Ok(());
             }
+            let take = n.unsigned_abs() as usize;
+            ctx.reply_array_header(take)?;
             let mut rng = time_seed();
             for _ in 0..take {
                 let idx = (xorshift64(&mut rng) as usize) % members.len();

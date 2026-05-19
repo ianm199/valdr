@@ -1032,9 +1032,7 @@ pub fn lpos_command(ctx: &mut CommandContext) -> RedisResult<()> {
                 ));
             }
             if parsed.checked_neg().is_none() {
-                return Err(RedisError::runtime(
-                    b"ERR value is out of range",
-                ));
+                return Err(RedisError::out_of_range());
             }
             rank = parsed;
         } else if ob.eq_ignore_ascii_case(b"COUNT") {
