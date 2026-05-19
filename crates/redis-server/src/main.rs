@@ -338,6 +338,7 @@ fn main() {
     let _ = spawn_active_expire_thread(Arc::clone(&db), active_expire_cfg, Some(metrics_arc));
     let _ = spawn_lru_clock_thread();
     spawn_bgsave_reaper(Arc::clone(&server), Arc::clone(&live_config));
+    spawn_repl_bgsave_reaper();
 
     let db_for_tls = Arc::clone(&db);
     let registry_for_tls = Arc::clone(&registry);
@@ -471,6 +472,126 @@ fn spawn_bgsave_reaper(
 ) {
 }
 
+/// Reaper for BGSAVE-for-replication child processes.
+///
+/// Tracked separately from the user-`BGSAVE` reaper because the two can run
+/// concurrently: a user invoking `BGSAVE` while a replica is mid-handshake
+/// keeps both children alive at once. On successful child exit this thread
+/// reads the temp RDB file into memory and ships it through each waiting
+/// replica's outbound channel, then sends the catch-up backlog window (from
+/// `snapshot_offset` to the current master offset) and flips the replica to
+/// `Online`.
+///
+/// On non-Unix the BGSAVE-for-replication path uses a thread fallback that
+/// drops the job onto `ReplicationState` after the save completes — no
+/// `waitpid` is needed there. For now the non-Unix path will leave the temp
+/// file in place; full disposition of the fallback is a future TODO.
+#[cfg(unix)]
+fn spawn_repl_bgsave_reaper() {
+    let _ = thread::Builder::new()
+        .name("repl-bgsave-reaper".to_string())
+        .spawn(move || loop {
+            thread::sleep(Duration::from_millis(200));
+            let repl = redis_core::replication::global_replication_state();
+            let child_pid = repl.repl_child_pid();
+            if child_pid == 0 {
+                continue;
+            }
+            let mut status: libc::c_int = 0;
+            let ret = unsafe { libc::waitpid(child_pid as libc::pid_t, &mut status, libc::WNOHANG) };
+            if ret == 0 {
+                continue;
+            }
+            if ret < 0 {
+                eprintln!(
+                    "redis-server: repl-bgsave waitpid({}) failed: ret={}",
+                    child_pid, ret
+                );
+                let _ = repl.take_repl_bgsave_job();
+                repl.set_repl_child_pid(0);
+                continue;
+            }
+            let exited_ok = libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0;
+            if !exited_ok {
+                eprintln!(
+                    "redis-server: BGSAVE-for-replication child {} exited with status {}",
+                    child_pid, status
+                );
+                if let Some(job) = repl.take_repl_bgsave_job() {
+                    let _ = std::fs::remove_file(&job.temp_path);
+                }
+                repl.set_repl_child_pid(0);
+                continue;
+            }
+            dispatch_full_sync_transfer();
+            repl.set_repl_child_pid(0);
+        });
+}
+
+#[cfg(not(unix))]
+fn spawn_repl_bgsave_reaper() {}
+
+/// Stream the freshly-baked RDB plus the catch-up backlog window to every
+/// replica registered on the current `ReplBgsaveJob`, then mark each one
+/// `Online`. Called by the repl-bgsave reaper after `waitpid` confirms the
+/// child exited cleanly.
+fn dispatch_full_sync_transfer() {
+    let repl = redis_core::replication::global_replication_state();
+    let job = match repl.take_repl_bgsave_job() {
+        Some(j) => j,
+        None => return,
+    };
+    let rdb_bytes = match fs::read(&job.temp_path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!(
+                "redis-server: failed to read RDB temp file {}: {}",
+                job.temp_path.display(),
+                e
+            );
+            let _ = std::fs::remove_file(&job.temp_path);
+            return;
+        }
+    };
+    let mut header = format!("${}\r\n", rdb_bytes.len()).into_bytes();
+    header.extend_from_slice(&rdb_bytes);
+
+    let snapshot_offset = job.snapshot_offset;
+    for client_id in &job.waiting_replicas {
+        repl.set_replica_state(*client_id, redis_core::replication::ReplicaState::SendingRdb);
+        if !repl.send_to_replica(*client_id, header.clone()) {
+            eprintln!(
+                "redis-server: full-sync RDB send failed for replica client_id={}",
+                client_id
+            );
+            continue;
+        }
+        let current_offset = repl.master_offset();
+        if current_offset > snapshot_offset {
+            let catch_up = {
+                let guard = match repl.backlog.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                guard.read_at(snapshot_offset, (current_offset - snapshot_offset) as usize)
+            };
+            if let Some(bytes) = catch_up {
+                if !bytes.is_empty() {
+                    let _ = repl.send_to_replica(*client_id, bytes);
+                }
+            }
+        }
+        repl.set_replica_state(*client_id, redis_core::replication::ReplicaState::Online);
+        eprintln!(
+            "redis-server: full-sync RDB delivered to replica client_id={} ({} bytes, snapshot_offset={})",
+            client_id,
+            rdb_bytes.len(),
+            snapshot_offset
+        );
+    }
+    let _ = std::fs::remove_file(&job.temp_path);
+}
+
 /// Background scanner that wakes blocked BLPOP/BRPOP/BLMOVE waiters once
 /// their deadline elapses.
 ///
@@ -492,8 +613,27 @@ fn spawn_blocked_timeout_thread(shutdown: Arc<AtomicBool>) {
                     idx.take_expired(current_time_ms())
                 };
                 for waiter in expired {
-                    let reply = waiter.action.timeout_reply_bytes();
-                    let _ = waiter.sender.send(reply.to_vec());
+                    let reply = match &waiter.action {
+                        redis_core::blocked_keys::BlockedAction::Wait { target_offset, .. } => {
+                            let repl = redis_core::replication::global_replication_state();
+                            let count = {
+                                let guard = match repl.replicas.lock() {
+                                    Ok(g) => g,
+                                    Err(p) => p.into_inner(),
+                                };
+                                guard
+                                    .values()
+                                    .filter(|r| {
+                                        r.offset.load(std::sync::atomic::Ordering::Relaxed)
+                                            >= *target_offset
+                                    })
+                                    .count()
+                            };
+                            waiter.action.timeout_reply_bytes_with_count(count)
+                        }
+                        other => other.timeout_reply_bytes().to_vec(),
+                    };
+                    let _ = waiter.sender.send(reply);
                 }
             }
         });

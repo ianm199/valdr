@@ -151,6 +151,9 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
                 eprintln!("redis-server: AOF append failed: {}", e);
             }
         }
+        if !ctx.client_ref().is_replica {
+            propagate_write_to_replicas(&argv_snapshot);
+        }
     }
 
     result
@@ -293,12 +296,39 @@ fn enforce_maxmemory_gate(ctx: &mut CommandContext<'_>, name: &[u8]) -> Option<V
     }
 }
 
+/// Append `argv` to the replication backlog and fan out to all online replicas.
+///
+/// Called from `dispatch_command_name` after every successful write command
+/// executed by a non-replica client. Failures to deliver to a specific
+/// replica are logged and skipped; they are non-fatal because the replica
+/// can re-sync via PSYNC.
+fn propagate_write_to_replicas(argv: &[RedisString]) {
+    let repl = redis_core::replication::global_replication_state();
+    let argv_bytes = crate::aof::encode_resp_command(argv);
+    repl.append_to_backlog(&argv_bytes);
+    let guard = match repl.replicas.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    for conn in guard.values() {
+        if redis_core::replication::ReplicaState::from_u8(
+            conn.state.load(std::sync::atomic::Ordering::Acquire),
+        ) == redis_core::replication::ReplicaState::Online
+        {
+            if conn.outbound_sender.send(argv_bytes.clone()).is_err() {
+                eprintln!(
+                    "redis-server: replication fan-out failed for client {}",
+                    conn.client_id
+                );
+            }
+        }
+    }
+}
+
 /// Commands a replica client is allowed to issue back to the master after
 /// the PSYNC handshake. Real Redis treats the replica link as outbound-only
 /// from the master's perspective; the only frames the master expects from
-/// the replica are REPLCONF ACK heartbeats (Wave B) and the occasional
-/// REPLCONF GETACK / PING. Until Wave B parses REPLCONF, every other command
-/// is silently dropped on the master side.
+/// the replica are REPLCONF ACK heartbeats and the occasional PING.
 fn is_replica_allowed_command(name: &[u8]) -> bool {
     ascii_eq_ignore_case(name, b"REPLCONF")
         || ascii_eq_ignore_case(name, b"PING")
@@ -583,11 +613,13 @@ pub static HANDLERS: &[DispatchEntry] = &[
     DispatchEntry { name: b"EVAL", handler: crate::eval::eval_command },
     DispatchEntry { name: b"EVALSHA", handler: crate::eval::evalsha_command },
     DispatchEntry { name: b"SCRIPT", handler: crate::eval::script_command },
-    // ── REPLICATION (Session 3A) ───────────────────────────────────────────
+    // ── REPLICATION (Session 3A / 3B) ─────────────────────────────────────
     DispatchEntry { name: b"REPLICAOF", handler: crate::replication::replicaof_command },
     DispatchEntry { name: b"SLAVEOF", handler: crate::replication::replicaof_command },
     DispatchEntry { name: b"PSYNC", handler: crate::replication::psync_command },
     DispatchEntry { name: b"SYNC", handler: crate::replication::sync_command },
+    DispatchEntry { name: b"REPLCONF", handler: crate::replication::replconf_command },
+    DispatchEntry { name: b"WAIT", handler: crate::replication::wait_command },
 ];
 
 #[cfg(test)]

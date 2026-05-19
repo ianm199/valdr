@@ -20,7 +20,8 @@
 //! reading the RDB blob, and applying streamed commands.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, AtomicU16, AtomicU32, AtomicU8, Ordering};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU16, AtomicU32, AtomicU8, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -249,6 +250,28 @@ impl ReplicaConn {
     }
 }
 
+/// Bookkeeping for an in-flight BGSAVE-for-replication job.
+///
+/// Disk-based full-sync forks a child that writes an RDB snapshot to a temp
+/// file. While the child is alive, additional replicas may PSYNC ? -1 and
+/// they join the same job's `waiting_replicas` list — every waiter gets the
+/// same RDB and the same catch-up window once the child exits successfully.
+pub struct ReplBgsaveJob {
+    /// PID of the forked child writing the RDB.
+    pub child_pid: i32,
+    /// Path of the temp RDB file the child is producing. Deleted after the
+    /// transfer completes (success or failure).
+    pub temp_path: PathBuf,
+    /// `client_id`s of replicas waiting for this RDB to land. New replicas
+    /// joining mid-snapshot are appended to this list.
+    pub waiting_replicas: Vec<ClientId>,
+    /// Master replication offset at the moment the BGSAVE was forked. Catch-up
+    /// backlog after the RDB send streams bytes from this offset to the
+    /// current master offset, so the replica receives every write that arrived
+    /// during the snapshot window.
+    pub snapshot_offset: i64,
+}
+
 /// Process-wide replication state.
 ///
 /// One instance is installed via [`install_replication_state`] at startup and
@@ -270,6 +293,14 @@ pub struct ReplicationState {
     pub replica_of: Mutex<Option<(RedisString, u16)>>,
     /// Top-level role/state code; see [`repl_state_code`].
     pub repl_state: AtomicU8,
+    /// PID of the in-flight BGSAVE-for-replication child, or 0 when no such
+    /// child is running. Tracked separately from `RedisServer::rdb_child_pid`
+    /// so a user-issued `BGSAVE` does not interfere with replica full-sync.
+    pub repl_child_pid: AtomicI32,
+    /// Active full-sync job. `Some` from the fork until the reaper has
+    /// finished shipping the RDB and catch-up bytes to every waiter; then
+    /// reset to `None`.
+    pub repl_bgsave_job: Mutex<Option<ReplBgsaveJob>>,
 }
 
 impl ReplicationState {
@@ -284,6 +315,8 @@ impl ReplicationState {
             replicas: Mutex::new(HashMap::new()),
             replica_of: Mutex::new(None),
             repl_state: AtomicU8::new(repl_state_code::MASTER),
+            repl_child_pid: AtomicI32::new(0),
+            repl_bgsave_job: Mutex::new(None),
         }
     }
 
@@ -425,6 +458,96 @@ impl ReplicationState {
             Err(p) => {
                 p.into_inner().remove(&client_id);
             }
+        }
+    }
+
+    /// PID of the in-flight BGSAVE-for-replication child, or 0 when no such
+    /// child is running.
+    pub fn repl_child_pid(&self) -> i32 {
+        self.repl_child_pid.load(Ordering::SeqCst)
+    }
+
+    /// Record the PID of the newly-forked BGSAVE-for-replication child.
+    pub fn set_repl_child_pid(&self, pid: i32) {
+        self.repl_child_pid.store(pid, Ordering::SeqCst);
+    }
+
+    /// Install a fresh `ReplBgsaveJob`. Called from `bgsave_for_replication`
+    /// once the fork has returned a child PID.
+    pub fn install_repl_bgsave_job(&self, job: ReplBgsaveJob) {
+        match self.repl_bgsave_job.lock() {
+            Ok(mut g) => *g = Some(job),
+            Err(p) => *p.into_inner() = Some(job),
+        }
+    }
+
+    /// Remove and return the current `ReplBgsaveJob`. Called by the reaper
+    /// after the child exits so the temp file path and waiting-replica list
+    /// can be consumed without holding the mutex through the I/O.
+    pub fn take_repl_bgsave_job(&self) -> Option<ReplBgsaveJob> {
+        match self.repl_bgsave_job.lock() {
+            Ok(mut g) => g.take(),
+            Err(p) => p.into_inner().take(),
+        }
+    }
+
+    /// Append `client_id` to the current job's waiting-replica list when a
+    /// fresh PSYNC arrives while a BGSAVE is already running. Returns `true`
+    /// if a job exists (so the caller can skip starting a new one); `false`
+    /// when no job is in flight.
+    pub fn enqueue_repl_waiter(&self, client_id: ClientId) -> bool {
+        let mut guard = match self.repl_bgsave_job.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        match guard.as_mut() {
+            Some(job) => {
+                job.waiting_replicas.push(client_id);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Snapshot of waiting-replica `client_id`s without taking the job.
+    /// Used by the reaper when it wants to walk the waiters and ship bytes
+    /// without removing the job mid-flight.
+    pub fn repl_bgsave_job_snapshot(&self) -> Option<(PathBuf, Vec<ClientId>, i64)> {
+        let guard = match self.repl_bgsave_job.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard
+            .as_ref()
+            .map(|j| (j.temp_path.clone(), j.waiting_replicas.clone(), j.snapshot_offset))
+    }
+
+    /// Send `bytes` through the outbound sender of the replica identified by
+    /// `client_id`, if it is still registered. Returns `true` on a successful
+    /// send (the send may still be queued in the writer thread but the channel
+    /// is alive). Returns `false` when the replica is gone or the channel is
+    /// closed.
+    pub fn send_to_replica(&self, client_id: ClientId, bytes: Vec<u8>) -> bool {
+        let guard = match self.replicas.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        match guard.get(&client_id) {
+            Some(r) => r.outbound_sender.send(bytes).is_ok(),
+            None => false,
+        }
+    }
+
+    /// Mark a replica's state, no-op when the entry is gone. Used by the
+    /// full-sync transfer path to step replicas through WaitingBgsave →
+    /// SendingRdb → Online.
+    pub fn set_replica_state(&self, client_id: ClientId, state: ReplicaState) {
+        let guard = match self.replicas.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if let Some(r) = guard.get(&client_id) {
+            r.set_state(state);
         }
     }
 }

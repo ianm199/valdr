@@ -271,6 +271,7 @@ fn deliver_to_waiter(db: &mut RedisDb, key: &RedisString, waiter: BlockedWaiter)
             dst_side,
         } => (*side, Some((dst_key.clone(), *dst_side))),
         BlockedAction::Stream { .. } => return,
+        BlockedAction::Wait { .. } => return,
     };
     if let Some((dst_key, _)) = &dst {
         if let Some(dst_obj) = db.lookup_key_read(dst_key) {
@@ -1155,6 +1156,7 @@ fn park_blocked_client(
             BlockedAction::Pop { .. } => ctx.reply_null_array(),
             BlockedAction::Move { .. } => ctx.reply_null_bulk(),
             BlockedAction::Stream { .. } => ctx.reply_null_bulk(),
+            BlockedAction::Wait { .. } => ctx.reply_integer(0),
         };
     }
     let registry = match ctx.pubsub.as_ref() {
@@ -1164,6 +1166,7 @@ fn park_blocked_client(
                 BlockedAction::Pop { .. } => ctx.reply_null_array(),
                 BlockedAction::Move { .. } => ctx.reply_null_bulk(),
                 BlockedAction::Stream { .. } => ctx.reply_null_bulk(),
+                BlockedAction::Wait { .. } => ctx.reply_integer(0),
             };
         }
     };
@@ -1181,6 +1184,7 @@ fn park_blocked_client(
                 BlockedAction::Pop { .. } => ctx.reply_null_array(),
                 BlockedAction::Move { .. } => ctx.reply_null_bulk(),
                 BlockedAction::Stream { .. } => ctx.reply_null_bulk(),
+                BlockedAction::Wait { .. } => ctx.reply_integer(0),
             };
         }
     };

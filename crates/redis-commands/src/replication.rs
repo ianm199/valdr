@@ -12,7 +12,11 @@
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use redis_core::blocked_keys::{
+    blocked_keys_index, deadline_from_timeout_secs, BlockedAction, BlockedWaiter,
+};
 use redis_core::client::ClientId;
 use redis_core::pubsub_registry::PubSubRegistry;
 use redis_core::replication::{
@@ -92,6 +96,254 @@ pub fn sync_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     handle_psync(ctx, b"?", -1)
 }
 
+/// `REPLCONF <subcommand> [args ...]`
+///
+/// Multipurpose command for replica metadata exchange. Subcommands:
+///   * `listening-port <N>` — replica's listener port; stored in `ReplicaConn`.
+///   * `ip-address <ip>`   — replica's public IP (stored as a future-use note).
+///   * `capa <flag> …`     — capability flags; bits ORed into `ReplicaConn.capa_flags`.
+///   * `ACK <offset>`      — replica reports its current stream offset; wakes any
+///                           WAIT clients that are now satisfied.
+///   * `GETACK *`          — primary asks replica for an ACK; answered with `+OK` on
+///                           the master side (the replica-side handler is Wave C).
+pub fn replconf_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
+    if ctx.arg_count() < 2 {
+        return Err(RedisError::wrong_number_of_args(b"replconf"));
+    }
+    let sub = ctx.arg_owned(1usize)?;
+    let sub_bytes = sub.as_bytes().to_ascii_lowercase();
+
+    match sub_bytes.as_slice() {
+        b"listening-port" => {
+            if ctx.arg_count() < 3 {
+                return Err(RedisError::wrong_number_of_args(b"replconf"));
+            }
+            let port_str = ctx.arg_owned(2usize)?;
+            let port = parse_port(port_str.as_bytes()).ok_or_else(|| {
+                RedisError::runtime(b"ERR invalid port number".to_vec())
+            })?;
+            let repl = global_replication_state();
+            let client_id = ctx.client_ref().id();
+            {
+                let guard = match repl.replicas.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                if let Some(conn) = guard.get(&client_id) {
+                    conn.listening_port.store(port, Ordering::Relaxed);
+                }
+            }
+            ctx.reply_simple_string(b"OK")
+        }
+        b"ip-address" => {
+            ctx.reply_simple_string(b"OK")
+        }
+        b"capa" => {
+            let repl = global_replication_state();
+            let client_id = ctx.client_ref().id();
+            let mut i = 2usize;
+            while i < ctx.arg_count() {
+                let flag_arg = ctx.arg_owned(i)?;
+                let bit = capa_flag_bit(flag_arg.as_bytes());
+                let guard = match repl.replicas.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                if let Some(conn) = guard.get(&client_id) {
+                    conn.capa_flags.fetch_or(bit, Ordering::Relaxed);
+                }
+                i += 1;
+            }
+            ctx.reply_simple_string(b"OK")
+        }
+        b"ack" => {
+            if ctx.arg_count() < 3 {
+                return Err(RedisError::wrong_number_of_args(b"replconf"));
+            }
+            let offset_str = ctx.arg_owned(2usize)?;
+            let offset = parse_i64(offset_str.as_bytes()).map_err(|_| {
+                RedisError::runtime(b"ERR value is not an integer or out of range".to_vec())
+            })?;
+            let client_id = ctx.client_ref().id();
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            let repl = global_replication_state();
+            {
+                let guard = match repl.replicas.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                if let Some(conn) = guard.get(&client_id) {
+                    conn.offset.store(offset, Ordering::Relaxed);
+                    conn.last_ack_time_ms.store(now_ms, Ordering::Relaxed);
+                }
+            }
+            maybe_wake_wait_clients();
+            Ok(())
+        }
+        b"getack" => {
+            ctx.reply_simple_string(b"OK")
+        }
+        _ => {
+            let mut msg = b"ERR Unknown REPLCONF subcommand: '".to_vec();
+            msg.extend_from_slice(sub.as_bytes());
+            msg.push(b'\'');
+            Err(RedisError::runtime(msg))
+        }
+    }
+}
+
+/// `WAIT numreplicas timeout`
+///
+/// Blocks until at least `numreplicas` replicas have acknowledged the current
+/// `master_repl_offset`, or until `timeout` ms elapses. Returns the count of
+/// replicas that acknowledged.
+///
+/// When `numreplicas` is 0 or when enough replicas are already caught up, the
+/// reply is sent immediately with no blocking.
+pub fn wait_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
+    if ctx.arg_count() != 3 {
+        return Err(RedisError::wrong_number_of_args(b"wait"));
+    }
+    let numreplicas_str = ctx.arg_owned(1usize)?;
+    let timeout_str = ctx.arg_owned(2usize)?;
+    let numreplicas = parse_i64(numreplicas_str.as_bytes())
+        .map_err(|_| RedisError::runtime(b"ERR value is not an integer or out of range".to_vec()))?
+        as usize;
+    let timeout_ms = parse_i64(timeout_str.as_bytes())
+        .map_err(|_| RedisError::runtime(b"ERR value is not an integer or out of range".to_vec()))?;
+
+    let repl = global_replication_state();
+    let target_offset = repl.master_offset();
+
+    let current_acked = count_acked_replicas(&repl, target_offset);
+
+    if numreplicas == 0 || current_acked >= numreplicas {
+        return ctx.reply_integer(current_acked as i64);
+    }
+
+    let registry = match ctx.pubsub.as_ref() {
+        Some(r) => r.clone(),
+        None => {
+            return ctx.reply_integer(current_acked as i64);
+        }
+    };
+    let sender = {
+        let guard = match registry.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard.sender_for(ctx.client_ref().id())
+    };
+    let sender = match sender {
+        Some(s) => s,
+        None => {
+            return ctx.reply_integer(current_acked as i64);
+        }
+    };
+
+    let timeout_secs = if timeout_ms <= 0 {
+        0.0
+    } else {
+        timeout_ms as f64 / 1000.0
+    };
+
+    let sentinel_key = redis_types::RedisString::from_bytes(b"__wait__");
+    let waiter = BlockedWaiter {
+        client_id: ctx.client_ref().id(),
+        sender,
+        keys: vec![sentinel_key.clone()],
+        action: BlockedAction::Wait {
+            target_offset,
+            numreplicas,
+        },
+        deadline_ms: deadline_from_timeout_secs(timeout_secs),
+    };
+    {
+        let mut idx = match blocked_keys_index().lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        idx.add(waiter);
+    }
+    ctx.client_mut().blocked_on_keys = true;
+    Ok(())
+}
+
+/// Return the count of replicas whose acknowledged offset is `>= target`.
+fn count_acked_replicas(repl: &ReplicationState, target: i64) -> usize {
+    let guard = match repl.replicas.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    guard
+        .values()
+        .filter(|r| r.offset.load(Ordering::Relaxed) >= target)
+        .count()
+}
+
+/// Walk all WAIT waiters and wake those whose required replica count is
+/// now satisfied. Called from the REPLCONF ACK handler after updating a
+/// replica's offset.
+fn maybe_wake_wait_clients() {
+    let repl = global_replication_state();
+    let acked_offsets: Vec<i64> = {
+        let guard = match repl.replicas.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard
+            .values()
+            .map(|r| r.offset.load(Ordering::Relaxed))
+            .collect()
+    };
+    let mut idx = match blocked_keys_index().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let satisfied = idx.take_satisfied_wait_waiters(|target| {
+        acked_offsets.iter().filter(|&&o| o >= target).count()
+    });
+    drop(idx);
+    for (waiter, count) in satisfied {
+        let reply = format!(":{}\r\n", count).into_bytes();
+        if waiter.sender.send(reply).is_err() {
+            eprintln!(
+                "redis-server: WAIT wake send failed for client {}",
+                waiter.client_id
+            );
+        }
+    }
+}
+
+/// Map a REPLCONF `capa` flag name to its bit position.
+///
+/// Known flags:
+///   * `eof`    — replica can receive the RDB blob without inline `$<len>` framing.
+///   * `psync2` — replica supports PSYNC2 (run-id propagation after partial resync).
+///
+/// Unknown flag names map to bit 31 as a catch-all so they are stored but do
+/// not collide with the defined bits.
+fn capa_flag_bit(name: &[u8]) -> u32 {
+    if name.eq_ignore_ascii_case(b"eof") {
+        1u32 << 0
+    } else if name.eq_ignore_ascii_case(b"psync2") {
+        1u32 << 1
+    } else {
+        1u32 << 31
+    }
+}
+
+/// Parse a decimal `i64` from an ASCII byte slice.
+fn parse_i64(bytes: &[u8]) -> Result<i64, ()> {
+    std::str::from_utf8(bytes)
+        .ok()
+        .and_then(|s| s.parse::<i64>().ok())
+        .ok_or(())
+}
+
 /// Shared body of `PSYNC` and `SYNC`. `provided_runid == b"?"` and
 /// `provided_offset == -1` is the canonical full-resync request.
 fn handle_psync(
@@ -131,15 +383,57 @@ fn handle_psync(
             sender,
         );
     }
-    eprintln!(
-        "redis-server: PSYNC client_id={} → FULLRESYNC at offset {} \
-         (TODO: full-sync RDB transfer arms in Wave B)",
-        client_id, snapshot_offset
-    );
     let line = fullresync_reply(our_runid, snapshot_offset);
     ctx.client_mut().reply_buf.extend_from_slice(&line);
     ctx.client_mut().is_replica = true;
+
+    arm_full_sync_bgsave(ctx, &repl, client_id, snapshot_offset);
     Ok(())
+}
+
+/// Either join an in-flight BGSAVE-for-replication job or kick off a new one
+/// so the freshly-attached replica eventually receives an RDB snapshot.
+///
+/// Behaviour:
+///   * If a BGSAVE-for-replication is already in progress, append the new
+///     replica's `client_id` to the same job's waiting list. Every replica
+///     that joins before the child exits receives the identical RDB snapshot
+///     and the same catch-up backlog window.
+///   * Otherwise call `bgsave_for_replication` to fork a fresh child.
+fn arm_full_sync_bgsave(
+    ctx: &mut CommandContext<'_>,
+    repl: &Arc<ReplicationState>,
+    client_id: ClientId,
+    snapshot_offset: i64,
+) {
+    if repl.enqueue_repl_waiter(client_id) {
+        eprintln!(
+            "redis-server: PSYNC client_id={} → FULLRESYNC at offset {} (joining in-flight BGSAVE)",
+            client_id, snapshot_offset
+        );
+        return;
+    }
+    match crate::persist::bgsave_for_replication(ctx, client_id) {
+        crate::persist::BgsaveForReplResult::Started => {
+            eprintln!(
+                "redis-server: PSYNC client_id={} → FULLRESYNC at offset {} (BGSAVE started)",
+                client_id, snapshot_offset
+            );
+        }
+        crate::persist::BgsaveForReplResult::Skipped => {
+            let _ = repl.enqueue_repl_waiter(client_id);
+            eprintln!(
+                "redis-server: PSYNC client_id={} → FULLRESYNC at offset {} (joined late)",
+                client_id, snapshot_offset
+            );
+        }
+        crate::persist::BgsaveForReplResult::Failed => {
+            eprintln!(
+                "redis-server: PSYNC client_id={} → FULLRESYNC at offset {} but BGSAVE fork failed",
+                client_id, snapshot_offset
+            );
+        }
+    }
 }
 
 /// True when the replica's requested offset lies inside the live backlog

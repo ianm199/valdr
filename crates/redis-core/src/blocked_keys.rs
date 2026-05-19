@@ -38,6 +38,8 @@ pub enum BlockedSide {
 /// replies with a bulk-string of the moved value (BLMOVE / BRPOPLPUSH shape).
 /// `Stream` parks the client until a new entry with id strictly greater than
 /// `id_after` arrives on the stream key (XREAD BLOCK shape).
+/// `Wait` parks the client until at least `numreplicas` replicas have
+/// acknowledged `target_offset` or the timeout fires.
 #[derive(Debug, Clone)]
 pub enum BlockedAction {
     Pop { side: BlockedSide },
@@ -47,6 +49,7 @@ pub enum BlockedAction {
         dst_side: BlockedSide,
     },
     Stream { id_after: StreamId },
+    Wait { target_offset: i64, numreplicas: usize },
 }
 
 impl BlockedAction {
@@ -56,11 +59,32 @@ impl BlockedAction {
     /// BLPOP / BRPOP / BLMPOP: null array (`*-1\r\n`).
     /// BLMOVE / BRPOPLPUSH: null bulk (`$-1\r\n`).
     /// XREAD BLOCK: null bulk (`$-1\r\n`) — matches real Redis behaviour.
+    /// WAIT timeout: integer reply of current acked-replica count (`:<n>\r\n`).
+    ///
+    /// The `acked_count` argument is only consulted for `Wait`; other variants
+    /// ignore it.
+    pub fn timeout_reply_bytes_with_count(&self, acked_count: usize) -> Vec<u8> {
+        match self {
+            BlockedAction::Pop { .. } => b"*-1\r\n".to_vec(),
+            BlockedAction::Move { .. } => b"$-1\r\n".to_vec(),
+            BlockedAction::Stream { .. } => b"$-1\r\n".to_vec(),
+            BlockedAction::Wait { .. } => {
+                format!(":{}\r\n", acked_count).into_bytes()
+            }
+        }
+    }
+
+    /// Return the RESP bytes to send when this waiter's deadline expires.
+    ///
+    /// Delegates to [`timeout_reply_bytes_with_count`] with zero for the
+    /// acked count. `Wait` waiters that call `take_expired` must use
+    /// [`timeout_reply_bytes_with_count`] directly to pass the live count.
     pub fn timeout_reply_bytes(&self) -> &'static [u8] {
         match self {
             BlockedAction::Pop { .. } => b"*-1\r\n",
             BlockedAction::Move { .. } => b"$-1\r\n",
             BlockedAction::Stream { .. } => b"$-1\r\n",
+            BlockedAction::Wait { .. } => b":0\r\n",
         }
     }
 }
@@ -191,6 +215,56 @@ impl BlockedKeysIndex {
     /// Whether the index is empty.
     pub fn is_empty(&self) -> bool {
         self.waiters.is_empty()
+    }
+
+    /// Drain all `Wait` waiters whose required replica count is now satisfied.
+    ///
+    /// `acked_count_for` is a closure that, given a `target_offset`, returns
+    /// the number of replicas whose acknowledged offset is `>= target_offset`.
+    /// Waiters where that count reaches `numreplicas` are removed from the
+    /// index and returned to the caller; the caller should send an integer
+    /// reply through each waiter's sender.
+    pub fn take_satisfied_wait_waiters(
+        &mut self,
+        acked_count_for: impl Fn(i64) -> usize,
+    ) -> Vec<(BlockedWaiter, usize)> {
+        let satisfied: Vec<(ClientId, usize)> = self
+            .waiters
+            .iter()
+            .filter_map(|(cid, w)| match &w.action {
+                BlockedAction::Wait { target_offset, numreplicas } => {
+                    let count = acked_count_for(*target_offset);
+                    if count >= *numreplicas {
+                        Some((*cid, count))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            })
+            .collect();
+        let mut out = Vec::with_capacity(satisfied.len());
+        for (cid, count) in satisfied {
+            if let Some(w) = self.remove_wait_client(cid) {
+                out.push((w, count));
+            }
+        }
+        out
+    }
+
+    /// Remove a `Wait` waiter by client id without consulting the keys index
+    /// (Wait waiters are not keyed — they park under a sentinel key).
+    fn remove_wait_client(&mut self, client_id: ClientId) -> Option<BlockedWaiter> {
+        let waiter = self.waiters.remove(&client_id)?;
+        for key in &waiter.keys {
+            if let Some(deque) = self.keys.get_mut(key) {
+                deque.retain(|cid| *cid != client_id);
+                if deque.is_empty() {
+                    self.keys.remove(key);
+                }
+            }
+        }
+        Some(waiter)
     }
 }
 
