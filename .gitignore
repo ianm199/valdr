@@ -16,3 +16,4 @@ harness/loop/
 *.actual.frames
 *.diff
 __pycache__/
+harness/bench/results/

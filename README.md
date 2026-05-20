@@ -102,6 +102,25 @@ The intended near-term target is: non-clustered, single-node Redis/Valkey
 workloads where the safety and auditability of a Rust implementation matter
 more than perfect coverage of every upstream extension.
 
+## Performance
+
+First-baseline numbers vs upstream Valkey on an Apple M3 Max (50 clients,
+pipeline 100, 64-byte payload):
+
+| Command | upstream Valkey | valkey-rs | ratio |
+|---|---:|---:|---:|
+| SET / GET / INCR (simple ops)  | ~2.5–3.5M req/s | ~190–225k req/s | ~6–9% |
+| LRANGE_100 (100-elem range)    | 111k req/s      | 106k req/s      | **95%** |
+| LRANGE_300 (300-elem range)    | 36.7k req/s     | 52.4k req/s     | **143%** ⚡ |
+
+Per-op latency p99 is mostly competitive (within 2× of upstream) even
+when throughput is not — the gap on simple ops is dominated by per-command
+mutex acquisition, which amortizes away on commands that do real work.
+**No perf tuning has been done yet.** See [`docs/BENCHMARKS.md`][bench]
+for full methodology, the complete table, and the optimization roadmap.
+
+[bench]: docs/BENCHMARKS.md
+
 ## Supported surface
 
 | Surface | Status |
