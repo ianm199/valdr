@@ -1,0 +1,12 @@
+services:
+  valkey-rs:
+    build: .
+    image: valkey-rs:local
+    ports:
+      - "6379:6379"
+    volumes:
+      - valkey-rs-data:/data
+    restart: unless-stopped
+
+volumes:
+  valkey-rs-data:

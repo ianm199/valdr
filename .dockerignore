@@ -1,0 +1,15 @@
+.git
+.github
+.claude
+.codex
+target
+reference
+data
+.venv
+__pycache__
+*.pyc
+*.rdb
+*.aof
+*.log
+tmp
+temp

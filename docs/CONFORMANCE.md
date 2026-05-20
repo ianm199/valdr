@@ -15,7 +15,7 @@ For each oracle, the numbers below are the **post-cleanup-wave-8** state
 | **Wire-diff smoke** (21 RESP corpus scripts vs upstream Valkey, byte-exact) | **21 / 21 PASS** ✅ |
 | **RDB bidirectional oracle** (we save → C loads; C saves → we load) | **378 / 378 PASS** ✅ |
 | **Upstream Valkey TCL suite** (~13 unit files surveyed) | **~98%** pass rate, see below |
-| **`unsafe` budget** | **2 documented blocks**, both wrapping `fork(2)` semantics |
+| **`unsafe` budget** | **5 documented blocks**, all wrapping `fork(2)` / `waitpid(2)` semantics |
 
 ## Wire-diff smoke
 
