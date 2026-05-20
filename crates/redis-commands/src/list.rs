@@ -349,6 +349,7 @@ fn deliver_to_waiter(db: &mut RedisDb, key: &RedisString, waiter: BlockedWaiter)
             crate::zset::deliver_zset_to_waiter(db, key, waiter);
         }
         BlockedAction::Stream { .. } => {}
+        BlockedAction::StreamGroup { .. } => {}
         BlockedAction::Wait { .. } => {}
     }
 }
@@ -1206,6 +1207,7 @@ fn park_blocked_client(
             BlockedAction::Move { .. } => ctx.reply_null_bulk(),
             BlockedAction::ZSetPop { .. } => ctx.reply_null_array(),
             BlockedAction::Stream { .. } => ctx.reply_null_bulk(),
+            BlockedAction::StreamGroup { .. } => ctx.reply_null_array(),
             BlockedAction::Wait { .. } => ctx.reply_integer(0),
         };
     }
@@ -1217,6 +1219,7 @@ fn park_blocked_client(
                 BlockedAction::Move { .. } => ctx.reply_null_bulk(),
                 BlockedAction::ZSetPop { .. } => ctx.reply_null_array(),
                 BlockedAction::Stream { .. } => ctx.reply_null_bulk(),
+                BlockedAction::StreamGroup { .. } => ctx.reply_null_array(),
                 BlockedAction::Wait { .. } => ctx.reply_integer(0),
             };
         }
@@ -1236,6 +1239,7 @@ fn park_blocked_client(
                 BlockedAction::Move { .. } => ctx.reply_null_bulk(),
                 BlockedAction::ZSetPop { .. } => ctx.reply_null_array(),
                 BlockedAction::Stream { .. } => ctx.reply_null_bulk(),
+                BlockedAction::StreamGroup { .. } => ctx.reply_null_array(),
                 BlockedAction::Wait { .. } => ctx.reply_integer(0),
             };
         }
@@ -1553,10 +1557,11 @@ pub fn wake_blocked_after_swapdb(db_id: u32, _unused: u32) {
         Ok(g) => g,
         Err(p) => p.into_inner(),
     };
-    for key in blocked_keys {
-        if db.find(&key).is_some() {
-            wake_blocked_for_key(&mut db, &key);
+    for key in &blocked_keys {
+        if db.find(key).is_some() {
+            wake_blocked_for_key(&mut db, key);
         }
+        crate::stream::wake_xreadgroup_after_rename(&mut db, key);
     }
 }
 

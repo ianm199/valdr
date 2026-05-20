@@ -43,6 +43,9 @@ pub enum BlockedSide {
 /// `count >= 1` (BZMPOP shape, pops up to `count` members).
 /// `Stream` parks the client until a new entry with id strictly greater than
 /// `id_after` arrives on the stream key (XREAD BLOCK shape).
+/// `StreamGroup` parks the client in an XREADGROUP BLOCK call on a specific
+/// consumer group. Woken when a new entry arrives (XADD), the key is deleted,
+/// or the group is destroyed.
 /// `Wait` parks the client until at least `numreplicas` replicas have
 /// acknowledged `target_offset` or the timeout fires.
 #[derive(Debug, Clone)]
@@ -55,6 +58,13 @@ pub enum BlockedAction {
     },
     ZSetPop { reverse: bool, count: u64 },
     Stream { id_after: StreamId },
+    StreamGroup {
+        id_after: StreamId,
+        group: RedisString,
+        consumer: RedisString,
+        count: Option<i64>,
+        noack: bool,
+    },
     Wait { target_offset: i64, numreplicas: usize },
 }
 
@@ -75,6 +85,7 @@ impl BlockedAction {
             BlockedAction::Move { .. } => b"$-1\r\n".to_vec(),
             BlockedAction::ZSetPop { .. } => b"*-1\r\n".to_vec(),
             BlockedAction::Stream { .. } => b"$-1\r\n".to_vec(),
+            BlockedAction::StreamGroup { .. } => b"*-1\r\n".to_vec(),
             BlockedAction::Wait { .. } => {
                 format!(":{}\r\n", acked_count).into_bytes()
             }
@@ -92,6 +103,7 @@ impl BlockedAction {
             BlockedAction::Move { .. } => b"$-1\r\n",
             BlockedAction::ZSetPop { .. } => b"*-1\r\n",
             BlockedAction::Stream { .. } => b"$-1\r\n",
+            BlockedAction::StreamGroup { .. } => b"*-1\r\n",
             BlockedAction::Wait { .. } => b":0\r\n",
         }
     }
@@ -206,6 +218,80 @@ impl BlockedKeysIndex {
                 if let Some(w) = self.remove_client(cid) {
                     out.push(w);
                 }
+            }
+        }
+        out
+    }
+
+    /// Drain all `StreamGroup` waiters for `key` whose `id_after` is strictly
+    /// less than `new_id`, remove them from the index, and return their records.
+    ///
+    /// Used by XADD to broadcast a new entry to all blocked XREADGROUP clients
+    /// whose consumer group cursor is behind the new entry.
+    pub fn take_stream_group_waiters_for(
+        &mut self,
+        key: &RedisString,
+        new_id: StreamId,
+    ) -> Vec<BlockedWaiter> {
+        let client_ids: Vec<ClientId> = match self.keys.get(key) {
+            None => return Vec::new(),
+            Some(deque) => deque.iter().copied().collect(),
+        };
+        let mut out = Vec::new();
+        for cid in client_ids {
+            let matches = match self.waiters.get(&cid) {
+                Some(w) => matches!(&w.action, BlockedAction::StreamGroup { id_after, .. } if *id_after < new_id),
+                None => false,
+            };
+            if matches {
+                if let Some(w) = self.remove_client(cid) {
+                    out.push(w);
+                }
+            }
+        }
+        out
+    }
+
+    /// Drain all `StreamGroup` waiters for `key` regardless of their cursor,
+    /// remove them from the index, and return their records.
+    ///
+    /// Used when the key is deleted, flushed, or the group is destroyed — any
+    /// of these events should unblock all XREADGROUP waiters on that key.
+    pub fn take_all_stream_group_waiters_for(&mut self, key: &RedisString) -> Vec<BlockedWaiter> {
+        let client_ids: Vec<ClientId> = match self.keys.get(key) {
+            None => return Vec::new(),
+            Some(deque) => deque.iter().copied().collect(),
+        };
+        let mut out = Vec::new();
+        for cid in client_ids {
+            let matches = match self.waiters.get(&cid) {
+                Some(w) => matches!(&w.action, BlockedAction::StreamGroup { .. }),
+                None => false,
+            };
+            if matches {
+                if let Some(w) = self.remove_client(cid) {
+                    out.push(w);
+                }
+            }
+        }
+        out
+    }
+
+    /// Drain every `StreamGroup` waiter across all keys and return them.
+    ///
+    /// Used by FLUSHDB/FLUSHALL where every blocked XREADGROUP client must be
+    /// woken with a NOGROUP error because all keys are gone.
+    pub fn take_all_stream_group_waiters(&mut self) -> Vec<BlockedWaiter> {
+        let cids: Vec<ClientId> = self
+            .waiters
+            .iter()
+            .filter(|(_, w)| matches!(&w.action, BlockedAction::StreamGroup { .. }))
+            .map(|(cid, _)| *cid)
+            .collect();
+        let mut out = Vec::with_capacity(cids.len());
+        for cid in cids {
+            if let Some(w) = self.remove_client(cid) {
+                out.push(w);
             }
         }
         out

@@ -177,6 +177,11 @@ fn read_bulk_length(buf: &[u8], pos: usize) -> Result<Option<(i64, usize)>, Redi
 /// text emitted when the digit field is invalid — this lets callers produce the
 /// exact Valkey wire text.
 ///
+/// When no `\r` is found and the remaining buffer exceeds `PROTO_INLINE_MAX_SIZE`
+/// the field is clearly malformed; returns `err_msg` immediately. This matches
+/// Valkey's `READ_FLAGS_ERROR_BIG_BULK_COUNT` / `READ_FLAGS_ERROR_BIG_MULTIBULK`
+/// size guards in `parseMultibulk`.
+///
 /// C: common `string2ll` + CRLF check pattern in `parseMultibulk`.
 fn read_resp_integer(
     buf: &[u8],
@@ -188,7 +193,12 @@ fn read_resp_integer(
     }
     let cr_offset = match buf[pos..].iter().position(|&b| b == b'\r') {
         Some(o) => o,
-        None => return Ok(None),
+        None => {
+            if buf.len() - pos > PROTO_INLINE_MAX_SIZE {
+                return Err(RedisError::runtime(err_msg));
+            }
+            return Ok(None);
+        }
     };
     let cr_idx = pos + cr_offset;
     if cr_idx + 1 >= buf.len() {
@@ -435,13 +445,16 @@ mod tests {
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        architect packet (Wave A — request-side RESP parser)
+//   source:        networking.c::processInlineBuffer + processMultibulkBuffer
+//                  sds.c::sdsnsplitargs_internal + sdsparsearg
 //   target_crate:  redis-protocol
 //   confidence:    high
-//   todos:         1
+//   todos:         0
 //   port_notes:    0
 //   unsafe_blocks: 0
 //   notes:         Mirrors processInlineBuffer + processMultibulkBuffer.
-//                  No quoted-string escape handling yet; proper sdssplitargs
-//                  port flagged as TODO(architect).
+//                  Full sdssplitargs port (double-quoted, single-quoted,
+//                  escape sequences, adjacent-quote concatenation). Error
+//                  messages match Valkey wire text byte-for-byte so the
+//                  upstream Tcl protocol test suite passes.
 // ──────────────────────────────────────────────────────────────────────────

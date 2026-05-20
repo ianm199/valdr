@@ -71,6 +71,78 @@ pub fn install_swapdb_wake_hook(f: Box<SwapDbWakeFn>) {
     let _ = SWAPDB_WAKE_HOOK.set(f);
 }
 
+type StreamKeyDeletedFn = dyn Fn(&RedisString) + Send + Sync;
+static STREAM_KEY_DELETED_HOOK: OnceLock<Box<StreamKeyDeletedFn>> = OnceLock::new();
+
+/// Install the hook called when a stream key is deleted (DEL / FLUSHDB-side).
+///
+/// The hook receives the key that was deleted and wakes any XREADGROUP BLOCK
+/// clients waiting on that key with a NOGROUP error. Installed once from
+/// `redis-commands`; subsequent calls are no-ops.
+pub fn install_stream_key_deleted_hook(f: Box<StreamKeyDeletedFn>) {
+    let _ = STREAM_KEY_DELETED_HOOK.set(f);
+}
+
+fn fire_stream_key_deleted_hook(key: &RedisString) {
+    if let Some(hook) = STREAM_KEY_DELETED_HOOK.get() {
+        hook(key);
+    }
+}
+
+type StreamDbFlushedFn = dyn Fn() + Send + Sync;
+static STREAM_DB_FLUSHED_HOOK: OnceLock<Box<StreamDbFlushedFn>> = OnceLock::new();
+
+/// Install the hook called when a database is flushed (FLUSHDB / FLUSHALL).
+///
+/// Wakes all XREADGROUP BLOCK clients with NOGROUP errors. Installed once
+/// from `redis-commands`; subsequent calls are no-ops.
+pub fn install_stream_db_flushed_hook(f: Box<StreamDbFlushedFn>) {
+    let _ = STREAM_DB_FLUSHED_HOOK.set(f);
+}
+
+fn fire_stream_db_flushed_hook() {
+    if let Some(hook) = STREAM_DB_FLUSHED_HOOK.get() {
+        hook();
+    }
+}
+
+type StreamRenameHookFn = dyn Fn(&RedisString, u32) + Send + Sync;
+static STREAM_RENAME_HOOK: OnceLock<Box<StreamRenameHookFn>> = OnceLock::new();
+
+/// Install the hook called after RENAME/RENAMENX completes.
+///
+/// The hook receives the destination key name and the database index. The
+/// `redis-commands` layer wakes any XREADGROUP BLOCK clients parked on that
+/// key: if the new value has the expected group, entries are delivered;
+/// otherwise NOGROUP is sent. Installed once from `redis-commands`; subsequent
+/// calls are no-ops.
+pub fn install_stream_rename_hook(f: Box<StreamRenameHookFn>) {
+    let _ = STREAM_RENAME_HOOK.set(f);
+}
+
+fn fire_stream_rename_hook(dst_key: &RedisString, db_id: u32) {
+    if let Some(hook) = STREAM_RENAME_HOOK.get() {
+        hook(dst_key, db_id);
+    }
+}
+
+type StreamKeyOverwrittenFn = dyn Fn(&RedisString) + Send + Sync;
+static STREAM_KEY_OVERWRITTEN_HOOK: OnceLock<Box<StreamKeyOverwrittenFn>> = OnceLock::new();
+
+/// Install the hook called when a stream key is overwritten with a non-stream
+/// value (e.g. SET mystream val). Wakes blocked XREADGROUP clients with
+/// WRONGTYPE error. Installed once from `redis-commands`; subsequent calls
+/// are no-ops.
+pub fn install_stream_key_overwritten_hook(f: Box<StreamKeyOverwrittenFn>) {
+    let _ = STREAM_KEY_OVERWRITTEN_HOOK.set(f);
+}
+
+fn fire_stream_key_overwritten_hook(key: &RedisString) {
+    if let Some(hook) = STREAM_KEY_OVERWRITTEN_HOOK.get() {
+        hook(key);
+    }
+}
+
 /// Carry-all for the components needed to fire keyspace notifications from
 /// code paths that do not have a `CommandContext` (lazy expiry, active expiry).
 ///
@@ -595,10 +667,14 @@ impl RedisDb {
         } else {
             EXPIRY_NONE
         };
+        let old_was_stream = self.dict.get(&key).is_some_and(|o| o.is_stream());
         value.expire = preserved_expire;
         self.dict.insert(key.clone(), value);
         if flags & SETKEY_NO_SIGNAL == 0 {
             self.signal_modified(&key);
+        }
+        if old_was_stream {
+            fire_stream_key_overwritten_hook(&key);
         }
     }
 
@@ -991,14 +1067,25 @@ pub fn flushdb_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     // TODO(port): parse ASYNC/SYNC flag from argv[1]
     // TODO(port): forceCommandPropagation(c, PROPAGATE_REPL|PROPAGATE_AOF)
     // TODO(port): server.dirty += emptyData(c->db->id, flags|EMPTYDB_NOFUNCTIONS, NULL)
+    fire_stream_db_flushed_hook();
     ctx.db_mut().clear();
     ctx.reply_simple_string(b"OK")
 }
 
 /// C: db.c:856 flushallCommand — FLUSHALL [ASYNC|SYNC]
+///
+/// Clears every logical database. The current client's DB is cleared via the
+/// already-held `ctx.db_mut()` reference; all other DBs are locked and cleared
+/// individually to avoid re-acquiring the mutex held by the accept loop.
 pub fn flushall_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
+    fire_stream_db_flushed_hook();
+    let current_db_id = ctx.client_ref().db_index;
+    ctx.db_mut().clear();
     let count = crate::databases::global_databases().count();
     for i in 0..count {
+        if i as u32 == current_db_id {
+            continue;
+        }
         let arc = crate::databases::global_databases().get(i as u32);
         let mut guard = match arc.lock() {
             Ok(g) => g,
@@ -1017,6 +1104,10 @@ fn del_generic_command(ctx: &mut CommandContext, lazy: bool) -> Result<(), Redis
     let mut num_deleted: i64 = 0;
     for j in 1..argc {
         let key = ctx.arg(j)?.clone();
+        let is_stream = ctx
+            .db_mut()
+            .lookup_key_read_with_flags(&key, LOOKUP_NOTOUCH)
+            .is_some_and(|o| o.is_stream());
         // TODO(port): expireIfNeeded(c->db, c->argv[j], NULL, 0) before delete
         let deleted = if lazy {
             ctx.db_mut().async_delete(&key)
@@ -1028,6 +1119,9 @@ fn del_generic_command(ctx: &mut CommandContext, lazy: bool) -> Result<(), Redis
             // TODO(port): signalModifiedKey(c, c->db, c->argv[j])
             // TODO(port): server.dirty++
             num_deleted += 1;
+            if is_stream {
+                fire_stream_key_deleted_hook(&key);
+            }
         }
     }
     ctx.reply_integer(num_deleted)
@@ -1279,6 +1373,7 @@ fn rename_generic_command(ctx: &mut CommandContext, nx: bool) -> Result<(), Redi
     ctx.notify_keyspace_event(NOTIFY_GENERIC, b"rename_to", &dst_key);
     // TODO(port): signalModifiedKey(c, c->db, c->argv[1]) and c->argv[2]
     // TODO(port): server.dirty++
+    fire_stream_rename_hook(&dst_key, ctx.db().id() as u32);
 
     if nx { ctx.reply_integer(1) } else { ctx.reply_simple_string(b"OK") }
 }
@@ -1293,23 +1388,35 @@ pub fn renamenx_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     rename_generic_command(ctx, true)
 }
 
-/// C: db.c:1538 moveGenericCommand — MOVE key db
+/// C: db.c:1538 moveGenericCommand — MOVE key db [REPLACE]
 ///
-/// Phase-B multi-DB simplification: only DB 0 has real storage. Moving to
-/// the same db as the current selection (db == current_db_id) is an error.
-/// Moving to a different db (0..15) when source is db 0 and destination is
-/// nonzero acts as a delete because the destination db is always empty and
-/// unobservable. Moving to db 0 from db 0 is the same-db error.
-///
-/// TODO(architect): real multi-DB storage in Phase 4.
+/// Atomically moves `key` from the client's current database to `target_db`.
+/// With `REPLACE`, an existing key in the destination is overwritten.
+/// Returns 1 on success, 0 when the key does not exist in the source or
+/// already exists in the destination (and REPLACE was not supplied).
 pub fn move_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
-    if ctx.arg_count() != 3 {
+    let argc = ctx.arg_count();
+    if argc < 3 {
         return Err(RedisError::wrong_number_of_args(b"move"));
     }
     let key = ctx.arg(1)?.clone();
     let db_arg = ctx.arg(2)?.clone();
     let target_db = parse_i64_from_bytes(db_arg.as_bytes())
         .ok_or_else(|| RedisError::runtime(b"ERR value is not an integer or out of range"))?;
+
+    let replace = if argc == 4 {
+        let opt = ctx.arg(3)?.clone();
+        if eq_ignore_ascii_case(opt.as_bytes(), b"REPLACE") {
+            true
+        } else {
+            return Err(RedisError::runtime(b"ERR syntax error"));
+        }
+    } else if argc > 4 {
+        return Err(RedisError::runtime(b"ERR syntax error"));
+    } else {
+        false
+    };
+
     if !(0..=15).contains(&target_db) {
         return Err(RedisError::runtime(b"ERR invalid DB index"));
     }
@@ -1317,9 +1424,23 @@ pub fn move_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     if target_db == current_db_id {
         return Err(RedisError::runtime(b"ERR source and destination objects are the same"));
     }
-    if ctx.db_mut().lookup_key_write(&key).is_none() {
+    let src_obj = match ctx.db_mut().lookup_key_read_with_flags(&key, LOOKUP_NOTOUCH) {
+        None => return ctx.reply_integer(0),
+        Some(obj) => obj.clone(),
+    };
+    let dest_arc = crate::databases::global_databases().get(target_db as u32);
+    let mut dest_guard = match dest_arc.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    if dest_guard.exists_raw(&key) && !replace {
         return ctx.reply_integer(0);
     }
+    let expire = ctx.db().get_expire(&key);
+    let mut new_obj = src_obj;
+    new_obj.expire = expire;
+    dest_guard.insert(key.clone(), new_obj);
+    drop(dest_guard);
     ctx.db_mut().sync_delete(&key);
     ctx.notify_keyspace_event(NOTIFY_GENERIC, b"move_from", &key);
     ctx.notify_keyspace_event(NOTIFY_GENERIC, b"move_to", &key);
@@ -1328,19 +1449,17 @@ pub fn move_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 
 /// C: db.c:1611 copyCommand — COPY source destination [DB n] [REPLACE]
 ///
-/// Phase-A semantics: a single logical DB is supported. The optional `DB n`
-/// modifier is parsed and validated (must equal the current db id) but the
-/// destination always lands in the active keyspace. The optional `REPLACE`
-/// modifier overrides the "destination must not exist" check. Source TTL is
-/// preserved on the duplicated value. Returns `:1` on success, `:0` if the
-/// destination already exists and `REPLACE` was not supplied.
+/// Copies `source` to `destination`. When `DB n` is supplied and `n` differs
+/// from the client's current database, the destination key lands in that
+/// logical database. The `REPLACE` flag allows overwriting an existing
+/// destination key. Returns `:1` on success, `:0` otherwise.
 pub fn copy_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let argc = ctx.arg_count();
     let src_key = ctx.arg(1)?.clone();
     let dst_key = ctx.arg(2)?.clone();
 
     let mut replace = false;
-    let mut target_db: Option<i64> = None;
+    let mut explicit_target_db: Option<i64> = None;
     let mut j: usize = 3;
     while j < argc {
         let opt = ctx.arg(j)?.clone();
@@ -1355,7 +1474,10 @@ pub fn copy_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
             let val_bytes = ctx.arg(j + 1)?.clone();
             let parsed = parse_i64_from_bytes(val_bytes.as_bytes())
                 .ok_or_else(|| RedisError::runtime(b"ERR value is not an integer or out of range"))?;
-            target_db = Some(parsed);
+            if !(0..=15).contains(&parsed) {
+                return Err(RedisError::runtime(b"ERR DB index is out of range"));
+            }
+            explicit_target_db = Some(parsed);
             j += 2;
         } else {
             return Err(RedisError::runtime(b"ERR syntax error"));
@@ -1363,16 +1485,9 @@ pub fn copy_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     }
 
     let current_db_id = ctx.db().id() as i64;
-    if let Some(target) = target_db {
-        if !(0..=15).contains(&target) {
-            return Err(RedisError::runtime(b"ERR DB index is out of range"));
-        }
-        if target != current_db_id {
-            return ctx.reply_integer(0);
-        }
-    }
+    let resolved_target_db = explicit_target_db.unwrap_or(current_db_id);
 
-    if src_key == dst_key {
+    if src_key == dst_key && resolved_target_db == current_db_id {
         return ctx.reply_integer(0);
     }
 
@@ -1380,17 +1495,30 @@ pub fn copy_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         None => return ctx.reply_integer(0),
         Some(obj) => obj.clone(),
     };
-
-    if ctx.db_mut().exists_raw(&dst_key) && !replace {
-        return ctx.reply_integer(0);
-    }
-
     let expire = ctx.db().get_expire(&src_key);
     let mut new_obj = src_clone;
     new_obj.expire = expire;
-    ctx.db_mut().insert(dst_key.clone(), new_obj);
-    ctx.notify_keyspace_event(NOTIFY_GENERIC, b"copy_to", &dst_key);
 
+    if resolved_target_db == current_db_id {
+        if ctx.db_mut().exists_raw(&dst_key) && !replace {
+            return ctx.reply_integer(0);
+        }
+        ctx.db_mut().insert(dst_key.clone(), new_obj);
+        ctx.notify_keyspace_event(NOTIFY_GENERIC, b"copy_to", &dst_key);
+        return ctx.reply_integer(1);
+    }
+
+    let dest_arc = crate::databases::global_databases().get(resolved_target_db as u32);
+    let mut dest_guard = match dest_arc.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    if dest_guard.exists_raw(&dst_key) && !replace {
+        return ctx.reply_integer(0);
+    }
+    dest_guard.insert(dst_key.clone(), new_obj);
+    drop(dest_guard);
+    ctx.notify_keyspace_event(NOTIFY_GENERIC, b"copy_to", &dst_key);
     ctx.reply_integer(1)
 }
 
@@ -1431,6 +1559,14 @@ fn eq_ignore_ascii_case(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// C: db.c:1861 swapdbCommand — SWAPDB index index
+///
+/// Atomically swaps the contents of two logical databases. When the client's
+/// current database is one of the two being swapped, the swap uses the already-
+/// held `ctx.db_mut()` lock plus a second lock on the other DB to avoid
+/// deadlock against the accept loop's lock ordering. When neither swapped DB
+/// is the current client DB both locks are acquired fresh in ascending index
+/// order (matching `GlobalDatabases::swap`). After the swap, blocked clients
+/// waiting on keys in either DB are woken.
 pub fn swapdb_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     if ctx.arg_count() != 3 {
         return Err(RedisError::wrong_number_of_args(b"swapdb"));
@@ -1439,37 +1575,64 @@ pub fn swapdb_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let id2_arg = ctx.arg(2)?.clone();
     let db_count = crate::databases::global_databases().count() as i64;
     let id1 = parse_i64_from_bytes(id1_arg.as_bytes())
-        .ok_or_else(|| RedisError::runtime(b"ERR value is not an integer or out of range"))?;
+        .ok_or_else(|| RedisError::runtime(b"ERR invalid first DB index"))?;
     let id2 = parse_i64_from_bytes(id2_arg.as_bytes())
-        .ok_or_else(|| RedisError::runtime(b"ERR value is not an integer or out of range"))?;
-    if id1 < 0 || id1 >= db_count || id2 < 0 || id2 >= db_count {
-        return Err(RedisError::runtime(b"ERR invalid DB index"));
+        .ok_or_else(|| RedisError::runtime(b"ERR invalid second DB index"))?;
+    if id1 < 0 || id1 >= db_count {
+        return Err(RedisError::runtime(b"ERR invalid first DB index"));
+    }
+    if id2 < 0 || id2 >= db_count {
+        return Err(RedisError::runtime(b"ERR invalid second DB index"));
     }
     let current_db_id = ctx.client_ref().db_index;
     let id1u = id1 as u32;
     let id2u = id2 as u32;
-    let other_db_id = if current_db_id == id1u { id2u } else { id1u };
-    {
+
+    if id1u == id2u {
+        return ctx.reply_simple_string(b"OK");
+    }
+
+    if current_db_id == id1u || current_db_id == id2u {
+        let other_db_id = if current_db_id == id1u { id2u } else { id1u };
         let other_arc = crate::databases::global_databases().get(other_db_id);
         let mut other_guard = match other_arc.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
         ctx.db_mut().swap_contents_with(&mut other_guard);
-    }
-    let blocked_keys: Vec<RedisString> = {
-        let idx = match crate::blocked_keys::blocked_keys_index().lock() {
+        drop(other_guard);
+        let blocked_keys: Vec<RedisString> = {
+            let idx = match crate::blocked_keys::blocked_keys_index().lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            idx.all_blocked_keys()
+        };
+        for key in &blocked_keys {
+            if ctx.db().find(key).is_some() {
+                ctx.client_mut().pending_wakes.push(key.clone());
+            }
+        }
+        wake_blocked_in_other_db(other_db_id);
+    } else {
+        let (lo, hi) = if id1u < id2u { (id1u, id2u) } else { (id2u, id1u) };
+        let lo_arc = crate::databases::global_databases().get(lo);
+        let hi_arc = crate::databases::global_databases().get(hi);
+        let mut lo_guard = match lo_arc.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
-        idx.all_blocked_keys()
-    };
-    for key in &blocked_keys {
-        if ctx.db().find(key).is_some() {
-            ctx.client_mut().pending_wakes.push(key.clone());
-        }
+        let mut hi_guard = match hi_arc.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        lo_guard.swap_contents_with(&mut hi_guard);
+        drop(hi_guard);
+        drop(lo_guard);
+        wake_blocked_in_other_db(id1u);
+        wake_blocked_in_other_db(id2u);
     }
-    wake_blocked_in_other_db(other_db_id);
+
     ctx.reply_simple_string(b"OK")
 }
 

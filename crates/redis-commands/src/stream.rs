@@ -49,14 +49,14 @@ enum BoundSide {
 
 /// A range-bound parsed from XRANGE/XREVRANGE.
 ///
-/// `Inclusive`/`Exclusive` capture the `(` prefix used by streams to
-/// request exclusive bounds. `Min`/`Max` are the `-` / `+` sentinels.
+/// `Inclusive` covers both direct inclusive IDs and exclusive IDs that have
+/// been resolved to their adjacent neighbour (so `(3-0` becomes `Inclusive(3-1)`).
+/// `Min`/`Max` are the `-` / `+` sentinels.
 #[derive(Debug, Clone, Copy)]
 enum Bound {
     Min,
     Max,
     Inclusive(StreamId),
-    Exclusive(StreamId),
 }
 
 fn parse_range_bound(arg: &[u8], side: BoundSide) -> Result<Bound, RedisError> {
@@ -71,19 +71,64 @@ fn parse_range_bound(arg: &[u8], side: BoundSide) -> Result<Bound, RedisError> {
     } else {
         (false, arg)
     };
+    if exclusive && (body == b"-" || body == b"+") {
+        return Err(invalid_stream_id_err());
+    }
     let default_seq = match side {
         BoundSide::Start => 0,
         BoundSide::End => u64::MAX,
     };
     let id = parse_stream_id(body, default_seq).map_err(|_| invalid_stream_id_err())?;
     if exclusive {
-        Ok(Bound::Exclusive(id))
+        match side {
+            BoundSide::Start => match id.checked_succ() {
+                Some(next) => Ok(Bound::Inclusive(next)),
+                None => Err(RedisError::runtime(b"ERR invalid start ID for the interval")),
+            },
+            BoundSide::End => match id.checked_pred() {
+                Some(prev) => Ok(Bound::Inclusive(prev)),
+                None => Err(RedisError::runtime(b"ERR invalid end ID for the interval")),
+            },
+        }
     } else {
         Ok(Bound::Inclusive(id))
     }
 }
 
-/// Parse an explicit id given to XADD/XDEL/XREAD (no `-` / `+` / `(`
+/// Result of parsing an XADD id argument, which may carry a literal seq or
+/// request auto-generation via the `<ms>-*` form.
+#[derive(Debug, Clone, Copy)]
+enum XaddIdSpec {
+    /// Fully-explicit `<ms>-<seq>` or bare `<ms>` (seq defaults to 0).
+    Explicit(StreamId),
+    /// `<ms>-*` — ms is given; seq is auto-generated relative to `last_id`.
+    Partial { ms: u64 },
+}
+
+/// Parse an XADD id argument: `*`, `<ms>`, `<ms>-<seq>`, or `<ms>-*`.
+///
+/// Returns `None` when the argument is the bare `*` auto-generate sentinel.
+fn parse_xadd_id_spec(arg: &[u8]) -> Result<Option<XaddIdSpec>, RedisError> {
+    if arg == b"*" {
+        return Ok(None);
+    }
+    let s = core::str::from_utf8(arg).map_err(|_| invalid_stream_id_err())?;
+    if let Some(dash) = s.find('-') {
+        let ms_part = &s[..dash];
+        let seq_part = &s[dash + 1..];
+        let ms = ms_part.parse::<u64>().map_err(|_| invalid_stream_id_err())?;
+        if seq_part == "*" {
+            return Ok(Some(XaddIdSpec::Partial { ms }));
+        }
+        let seq = seq_part.parse::<u64>().map_err(|_| invalid_stream_id_err())?;
+        Ok(Some(XaddIdSpec::Explicit(StreamId { ms, seq })))
+    } else {
+        let ms = s.parse::<u64>().map_err(|_| invalid_stream_id_err())?;
+        Ok(Some(XaddIdSpec::Explicit(StreamId { ms, seq: 0 })))
+    }
+}
+
+/// Parse an explicit id given to XDEL/XREAD (no `-` / `+` / `(`
 /// prefixes; seq defaults to 0 when absent).
 fn parse_explicit_id(arg: &[u8]) -> Result<StreamId, RedisError> {
     parse_stream_id(arg, 0).map_err(|_| invalid_stream_id_err())
@@ -115,13 +160,11 @@ fn resolve_range(
         Bound::Min => 0,
         Bound::Max => return None,
         Bound::Inclusive(id) => stream.lower_bound(&id),
-        Bound::Exclusive(id) => stream.upper_bound(&id),
     };
     let end_idx = match end {
         Bound::Min => return None,
         Bound::Max => entries.len(),
         Bound::Inclusive(id) => stream.upper_bound(&id),
-        Bound::Exclusive(id) => stream.lower_bound(&id),
     };
     if start_idx >= end_idx {
         return None;
@@ -356,21 +399,47 @@ pub fn xadd_command(ctx: &mut CommandContext) -> RedisResult<()> {
         };
 
         let id_bytes = id_arg.as_bytes();
-        let new_id = if id_bytes == b"*" {
-            auto_next_id(stream.last_id)
-        } else {
-            parse_explicit_id(id_bytes)?
+        let spec = parse_xadd_id_spec(id_bytes)?;
+        let new_id = match spec {
+            None => {
+                let next = auto_next_id(stream.last_id);
+                if next <= stream.last_id {
+                    return Err(RedisError::runtime(
+                        b"ERR The stream has exhausted the last possible ID, unable to add more items",
+                    ));
+                }
+                next
+            }
+            Some(XaddIdSpec::Partial { ms }) => {
+                if ms > stream.last_id.ms {
+                    StreamId { ms, seq: 0 }
+                } else if ms == stream.last_id.ms {
+                    match stream.last_id.seq.checked_add(1) {
+                        Some(next_seq) => StreamId { ms, seq: next_seq },
+                        None => return Err(RedisError::runtime(
+                            b"ERR The ID specified in XADD is equal or smaller than the target stream top item",
+                        )),
+                    }
+                } else {
+                    return Err(RedisError::runtime(
+                        b"ERR The ID specified in XADD is equal or smaller than the target stream top item",
+                    ));
+                }
+            }
+            Some(XaddIdSpec::Explicit(id)) => {
+                if id == StreamId::ZERO {
+                    return Err(RedisError::runtime(
+                        b"ERR The ID specified in XADD must be greater than 0-0",
+                    ));
+                }
+                if id <= stream.last_id && !(stream.entries_added == 0 && id == StreamId::ZERO && stream.last_id == StreamId::ZERO) {
+                    return Err(RedisError::runtime(
+                        b"ERR The ID specified in XADD is equal or smaller than the target stream top item",
+                    ));
+                }
+                id
+            }
         };
-        if id_bytes != b"*" && new_id <= stream.last_id && !(stream.entries_added == 0 && new_id == StreamId::ZERO && stream.last_id == StreamId::ZERO) {
-            return Err(RedisError::runtime(
-                b"ERR The ID specified in XADD is equal or smaller than the target stream top item",
-            ));
-        }
-        if id_bytes != b"*" && new_id == StreamId::ZERO {
-            return Err(RedisError::runtime(
-                b"ERR The ID specified in XADD must be greater than 0-0",
-            ));
-        }
         stream.append(StreamEntry { id: new_id, fields });
         apply_trim(stream, opts.trim);
         if let Some(obj) = obj_owned {
@@ -381,6 +450,7 @@ pub fn xadd_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
     let new_entry = StreamEntry { id: new_id, fields: fields_for_wake };
     wake_blocked_for_stream(ctx.db(), &key_for_wake, &new_entry);
+    wake_blocked_xreadgroup_for_key(ctx.db_mut(), &key_for_wake, &new_entry);
 
     ctx.notify_keyspace_event(NOTIFY_STREAM, b"xadd", &key_for_wake);
     ctx.reply_bulk_string(RedisString::from_vec(new_id.to_display_bytes()))
@@ -449,6 +519,277 @@ pub fn wake_blocked_for_stream(db: &RedisDb, key: &RedisString, new_entry: &Stre
     for waiter in waiters {
         let _ = waiter.sender.send(reply.clone());
     }
+}
+
+/// Encode a NOGROUP error reply as a RESP error frame.
+fn encode_nogroup_error(key: &[u8], group: &[u8]) -> Vec<u8> {
+    let mut msg: Vec<u8> = Vec::with_capacity(64 + key.len() + group.len());
+    msg.extend_from_slice(b"NOGROUP No such key '");
+    msg.extend_from_slice(key);
+    msg.extend_from_slice(b"' or consumer group '");
+    msg.extend_from_slice(group);
+    msg.extend_from_slice(b"' in XREADGROUP with GROUP option");
+    let mut buf: Vec<u8> = Vec::with_capacity(1 + msg.len() + 2);
+    buf.push(b'-');
+    buf.extend_from_slice(&msg);
+    buf.extend_from_slice(b"\r\n");
+    buf
+}
+
+/// Encode a WRONGTYPE error reply as a RESP error frame.
+fn encode_wrongtype_error() -> Vec<u8> {
+    b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n".to_vec()
+}
+
+/// Encode an XREADGROUP reply for one key carrying one newly-delivered entry.
+///
+/// Wire shape matches xreadgroup_command's normal output for a single entry:
+/// `*1 [key, *1 [*2 [id, *<2n> [f1,v1,...]]]]`
+fn encode_xreadgroup_single_entry(key: &RedisString, entry: &StreamEntry) -> Vec<u8> {
+    let id_bytes = entry.id.to_display_bytes();
+    let fields_count = entry.fields.len() * 2;
+    let mut buf = Vec::with_capacity(256);
+
+    let write_bulk = |buf: &mut Vec<u8>, bytes: &[u8]| {
+        buf.push(b'$');
+        buf.extend_from_slice(bytes.len().to_string().as_bytes());
+        buf.extend_from_slice(b"\r\n");
+        buf.extend_from_slice(bytes);
+        buf.extend_from_slice(b"\r\n");
+    };
+    let write_array = |buf: &mut Vec<u8>, n: usize| {
+        buf.push(b'*');
+        buf.extend_from_slice(n.to_string().as_bytes());
+        buf.extend_from_slice(b"\r\n");
+    };
+
+    write_array(&mut buf, 1);
+    write_array(&mut buf, 2);
+    write_bulk(&mut buf, key.as_bytes());
+    write_array(&mut buf, 1);
+    write_array(&mut buf, 2);
+    write_bulk(&mut buf, &id_bytes);
+    write_array(&mut buf, fields_count);
+    for (f, v) in &entry.fields {
+        write_bulk(&mut buf, f.as_bytes());
+        write_bulk(&mut buf, v.as_bytes());
+    }
+    buf
+}
+
+/// Wake all blocked XREADGROUP clients on `key` whose cursor is behind
+/// `new_entry.id` and whose consumer group still exists in the stream.
+///
+/// For each waiter:
+/// - If the key is gone or not a stream → send WRONGTYPE or NOGROUP error.
+/// - If the group is gone → send NOGROUP error.
+/// - Otherwise → deliver the entry through the XREADGROUP state machine
+///   (advance `last_delivered_id`, add PEL entry unless NOACK, send reply).
+pub fn wake_blocked_xreadgroup_for_key(db: &mut RedisDb, key: &RedisString, new_entry: &StreamEntry) {
+    let waiters = {
+        let mut idx = match blocked_keys_index().lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        idx.take_stream_group_waiters_for(key, new_entry.id)
+    };
+    if waiters.is_empty() {
+        return;
+    }
+    for waiter in waiters {
+        let (group, consumer, noack) = match &waiter.action {
+            BlockedAction::StreamGroup { group, consumer, noack, .. } => {
+                (group.clone(), consumer.clone(), *noack)
+            }
+            _ => continue,
+        };
+        let reply = match as_stream_mut(db.lookup_key_write(key)) {
+            Err(_) => encode_wrongtype_error(),
+            Ok(None) => encode_nogroup_error(key.as_bytes(), group.as_bytes()),
+            Ok(Some(stream)) => {
+                if !stream.groups.contains_key(&group) {
+                    encode_nogroup_error(key.as_bytes(), group.as_bytes())
+                } else {
+                    let now = now_ms_clamped();
+                    let g = stream.groups.get_mut(&group).expect("group checked above");
+                    touch_or_create_consumer(g, &consumer, now);
+                    if let Some(c) = g.consumers.get_mut(&consumer) {
+                        c.active_time_ms = now;
+                    }
+                    g.last_delivered_id = new_entry.id;
+                    g.entries_read = g.entries_read.saturating_add(1);
+                    if !noack {
+                        pel_add(
+                            g,
+                            &consumer,
+                            PelEntry {
+                                entry_id: new_entry.id,
+                                delivery_time_ms: now,
+                                delivery_count: 1,
+                            },
+                        );
+                    }
+                    encode_xreadgroup_single_entry(key, new_entry)
+                }
+            }
+        };
+        let _ = waiter.sender.send(reply);
+    }
+}
+
+/// Wake all blocked XREADGROUP clients on `key` with a NOGROUP error.
+///
+/// Used when the key is deleted (DEL, FLUSHDB) or the group is destroyed
+/// (XGROUP DESTROY), so every parked XREADGROUP client on that key receives
+/// the appropriate error response.
+pub fn wake_xreadgroup_with_nogroup(key: &RedisString) {
+    let waiters = {
+        let mut idx = match blocked_keys_index().lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        idx.take_all_stream_group_waiters_for(key)
+    };
+    for waiter in waiters {
+        let group = match &waiter.action {
+            BlockedAction::StreamGroup { group, .. } => group.clone(),
+            _ => continue,
+        };
+        let reply = encode_nogroup_error(key.as_bytes(), group.as_bytes());
+        let _ = waiter.sender.send(reply);
+    }
+}
+
+/// Wake all blocked XREADGROUP clients across all keys with NOGROUP errors.
+///
+/// Used by FLUSHDB / FLUSHALL where every stream key (and therefore every
+/// consumer group) is gone at once.
+pub fn wake_all_xreadgroup_with_nogroup() {
+    let waiters = {
+        let mut idx = match blocked_keys_index().lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        idx.take_all_stream_group_waiters()
+    };
+    for waiter in waiters {
+        let group = match &waiter.action {
+            BlockedAction::StreamGroup { group, .. } => group.clone(),
+            _ => continue,
+        };
+        let key = waiter.keys.first().cloned().unwrap_or_default();
+        let reply = encode_nogroup_error(key.as_bytes(), group.as_bytes());
+        let _ = waiter.sender.send(reply);
+    }
+}
+
+/// Wake blocked XREADGROUP clients on `dst_key` after RENAME moved a new
+/// stream into `dst_key`. Attempts to deliver new entries to each waiter.
+///
+/// If `dst_key` now holds a stream with the consumer group, entries after
+/// the waiter's cursor are delivered. Otherwise NOGROUP is sent.
+pub fn wake_xreadgroup_after_rename(db: &mut RedisDb, dst_key: &RedisString) {
+    let waiters = {
+        let mut idx = match blocked_keys_index().lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        idx.take_all_stream_group_waiters_for(dst_key)
+    };
+    for waiter in waiters {
+        let (group, consumer, id_after, count, noack) = match &waiter.action {
+            BlockedAction::StreamGroup { group, consumer, id_after, count, noack } => {
+                (group.clone(), consumer.clone(), *id_after, *count, *noack)
+            }
+            _ => continue,
+        };
+        let reply = match as_stream_mut(db.lookup_key_write(dst_key)) {
+            Err(_) => encode_wrongtype_error(),
+            Ok(None) => encode_nogroup_error(dst_key.as_bytes(), group.as_bytes()),
+            Ok(Some(stream)) => {
+                if !stream.groups.contains_key(&group) {
+                    encode_nogroup_error(dst_key.as_bytes(), group.as_bytes())
+                } else {
+                    let now = now_ms_clamped();
+                    let after = stream
+                        .groups
+                        .get(&group)
+                        .map(|g| g.last_delivered_id)
+                        .unwrap_or(id_after);
+                    let cursor = after.max(id_after);
+                    let start_idx = stream.upper_bound(&cursor);
+                    let slice_len = stream.entries.len() - start_idx;
+                    let max = match count {
+                        None => slice_len,
+                        Some(n) => (n as usize).min(slice_len),
+                    };
+                    if max == 0 {
+                        encode_nogroup_error(dst_key.as_bytes(), group.as_bytes())
+                    } else {
+                        let to_deliver: Vec<StreamEntry> =
+                            stream.entries[start_idx..start_idx + max].to_vec();
+                        let new_last = to_deliver.last().map(|e| e.id).expect("max > 0");
+                        let g = stream.groups.get_mut(&group).expect("group checked above");
+                        touch_or_create_consumer(g, &consumer, now);
+                        if let Some(c) = g.consumers.get_mut(&consumer) {
+                            c.active_time_ms = now;
+                        }
+                        g.last_delivered_id = new_last;
+                        g.entries_read = g.entries_read.saturating_add(max as u64);
+                        if !noack {
+                            for entry in &to_deliver {
+                                pel_add(
+                                    g,
+                                    &consumer,
+                                    PelEntry {
+                                        entry_id: entry.id,
+                                        delivery_time_ms: now,
+                                        delivery_count: 1,
+                                    },
+                                );
+                            }
+                        }
+                        encode_xreadgroup_multi_entries(dst_key, &to_deliver)
+                    }
+                }
+            }
+        };
+        let _ = waiter.sender.send(reply);
+    }
+}
+
+/// Encode an XREADGROUP reply for one key carrying multiple newly-delivered entries.
+fn encode_xreadgroup_multi_entries(key: &RedisString, entries: &[StreamEntry]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(512);
+
+    let write_bulk = |buf: &mut Vec<u8>, bytes: &[u8]| {
+        buf.push(b'$');
+        buf.extend_from_slice(bytes.len().to_string().as_bytes());
+        buf.extend_from_slice(b"\r\n");
+        buf.extend_from_slice(bytes);
+        buf.extend_from_slice(b"\r\n");
+    };
+    let write_array = |buf: &mut Vec<u8>, n: usize| {
+        buf.push(b'*');
+        buf.extend_from_slice(n.to_string().as_bytes());
+        buf.extend_from_slice(b"\r\n");
+    };
+
+    write_array(&mut buf, 1);
+    write_array(&mut buf, 2);
+    write_bulk(&mut buf, key.as_bytes());
+    write_array(&mut buf, entries.len());
+    for entry in entries {
+        let id_bytes = entry.id.to_display_bytes();
+        write_array(&mut buf, 2);
+        write_bulk(&mut buf, &id_bytes);
+        write_array(&mut buf, entry.fields.len() * 2);
+        for (f, v) in &entry.fields {
+            write_bulk(&mut buf, f.as_bytes());
+            write_bulk(&mut buf, v.as_bytes());
+        }
+    }
+    buf
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -652,6 +993,9 @@ pub fn xtrim_command(ctx: &mut CommandContext) -> RedisResult<()> {
 enum ReadStartId {
     /// `$` — only entries strictly after the current `last_id`.
     Now,
+    /// `+` — return the last entry in the stream (resolved to `last_id - 1`
+    /// so the XREAD "strictly greater than" logic includes the last entry).
+    LastEntry,
     /// Explicit id; XREAD returns entries with id strictly greater than this.
     After(StreamId),
 }
@@ -773,6 +1117,8 @@ pub fn xread_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let raw = ctx.arg(streams_start + n_keys + k)?.as_bytes();
         let id = if raw == b"$" {
             ReadStartId::Now
+        } else if raw == b"+" {
+            ReadStartId::LastEntry
         } else {
             ReadStartId::After(parse_explicit_id(raw)?)
         };
@@ -786,6 +1132,16 @@ pub fn xread_command(ctx: &mut CommandContext) -> RedisResult<()> {
             Some(stream) => {
                 let after = match start_id {
                     ReadStartId::Now => stream.last_id,
+                    ReadStartId::LastEntry => {
+                        if stream.entries.is_empty() {
+                            stream.last_id
+                        } else {
+                            match stream.last_id.checked_pred() {
+                                Some(pred) => pred,
+                                None => StreamId::ZERO,
+                            }
+                        }
+                    }
                     ReadStartId::After(id) => *id,
                 };
                 let start_idx = stream.upper_bound(&after);
@@ -821,6 +1177,12 @@ pub fn xread_command(ctx: &mut CommandContext) -> RedisResult<()> {
             .zip(ids.iter())
             .map(|(key, start_id)| match start_id {
                 ReadStartId::After(id) => *id,
+                ReadStartId::LastEntry => match as_stream_ref(ctx.db().lookup_key_read(key)) {
+                    Ok(Some(stream)) if !stream.entries.is_empty() => {
+                        stream.last_id.checked_pred().unwrap_or(StreamId::ZERO)
+                    }
+                    _ => StreamId::ZERO,
+                },
                 ReadStartId::Now => match as_stream_ref(ctx.db().lookup_key_read(key)) {
                     Ok(Some(stream)) => stream.last_id,
                     _ => StreamId::ZERO,
@@ -1116,14 +1478,16 @@ fn parse_entries_read_suffix(
     if start + 1 >= argc {
         return Err(RedisError::syntax(b"syntax error"));
     }
-    let n = parse_strict_i64(ctx.arg(start + 1)?.as_bytes())?;
-    if n < 0 {
-        return Err(RedisError::syntax(b"ENTRIESREAD must be a non-negative integer"));
+    let n = parse_strict_i64(ctx.arg(start + 1)?.as_bytes())
+        .map_err(|_| RedisError::runtime(b"ERR value for ENTRIESREAD must be positive or -1"))?;
+    if n < -1 {
+        return Err(RedisError::runtime(b"ERR value for ENTRIESREAD must be positive or -1"));
     }
     if start + 2 != argc {
         return Err(RedisError::syntax(b"syntax error"));
     }
-    Ok((true, n as u64))
+    let read_val = if n == -1 { 0u64 } else { n as u64 };
+    Ok((true, read_val))
 }
 
 fn xgroup_create(ctx: &mut CommandContext) -> RedisResult<()> {
@@ -1208,6 +1572,9 @@ fn xgroup_destroy(ctx: &mut CommandContext) -> RedisResult<()> {
         None => return ctx.reply_integer(0),
     };
     let removed = stream.groups.remove(&group_name).is_some();
+    if removed {
+        wake_xreadgroup_with_nogroup(&key);
+    }
     ctx.reply_integer(if removed { 1 } else { 0 })
 }
 
@@ -1286,7 +1653,7 @@ pub fn xreadgroup_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let mut i = 4usize;
     let mut count: Option<i64> = None;
     let mut noack = false;
-    let mut _block_ms: Option<i64> = None;
+    let mut block_ms: Option<i64> = None;
     let mut streams_idx: Option<usize> = None;
     while i < argc {
         let arg = ctx.arg(i)?.as_bytes();
@@ -1310,7 +1677,7 @@ pub fn xreadgroup_command(ctx: &mut CommandContext) -> RedisResult<()> {
             if ms < 0 {
                 return Err(RedisError::runtime(b"ERR timeout is negative"));
             }
-            _block_ms = Some(ms);
+            block_ms = Some(ms);
             i += 2;
             continue;
         }
@@ -1478,9 +1845,90 @@ pub fn xreadgroup_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
     let non_empty: Vec<&(RedisString, Vec<(StreamEntry, bool)>)> =
         results.iter().filter(|(_, v)| !v.is_empty()).collect();
+
+    let all_new = ids.iter().all(|id| matches!(id, GroupReadStartId::New));
+
     if non_empty.is_empty() {
-        return ctx.reply_null_array();
+        if let Some(ms) = block_ms {
+            if all_new && !ctx.client_ref().flag_deny_blocking() {
+                if let Some(registry) = ctx.pubsub.as_ref() {
+                    let sender = {
+                        let guard = match registry.lock() {
+                            Ok(g) => g,
+                            Err(p) => p.into_inner(),
+                        };
+                        guard.sender_for(ctx.client_ref().id)
+                    };
+                    if let Some(sender) = sender {
+                        let deadline_ms = if ms == 0 {
+                            i64::MAX
+                        } else {
+                            current_time_ms().saturating_add(ms)
+                        };
+                        let mut idx = match blocked_keys_index().lock() {
+                            Ok(g) => g,
+                            Err(p) => p.into_inner(),
+                        };
+                        for (key, start_id) in keys.iter().zip(ids.iter()) {
+                            let id_after = match start_id {
+                                GroupReadStartId::New => {
+                                    match as_stream_ref(ctx.db().lookup_key_read(key)) {
+                                        Ok(Some(s)) => s.last_id,
+                                        _ => StreamId::ZERO,
+                                    }
+                                }
+                                GroupReadStartId::From(id) => *id,
+                            };
+                            let waiter = BlockedWaiter {
+                                client_id: ctx.client_ref().id,
+                                sender: sender.clone(),
+                                keys: vec![key.clone()],
+                                action: BlockedAction::StreamGroup {
+                                    id_after,
+                                    group: group_name.clone(),
+                                    consumer: consumer_name.clone(),
+                                    count,
+                                    noack,
+                                },
+                                deadline_ms,
+                                resp_proto: ctx.client_ref().resp_proto,
+                            };
+                            idx.add(waiter);
+                        }
+                        ctx.client_mut().blocked_on_keys = true;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        if all_new {
+            return ctx.reply_null_array();
+        }
     }
+
+    if non_empty.is_empty() {
+        ctx.reply_array_header(results.len())?;
+        for (key, entries) in &results {
+            ctx.reply_array_header(2usize)?;
+            ctx.reply_bulk_string(key.clone())?;
+            ctx.reply_array_header(entries.len())?;
+            for (entry, present) in entries.iter() {
+                ctx.reply_array_header(2usize)?;
+                ctx.reply_bulk_string(RedisString::from_vec(entry.id.to_display_bytes()))?;
+                if *present {
+                    ctx.reply_array_header(entry.fields.len() * 2)?;
+                    for (f, v) in &entry.fields {
+                        ctx.reply_bulk_string(f.clone())?;
+                        ctx.reply_bulk_string(v.clone())?;
+                    }
+                } else {
+                    ctx.reply_null_array()?;
+                }
+            }
+        }
+        return Ok(());
+    }
+
     ctx.reply_array_header(non_empty.len())?;
     for (key, entries) in &non_empty {
         ctx.reply_array_header(2usize)?;
@@ -1617,19 +2065,11 @@ pub fn xpending_command(ctx: &mut CommandContext) -> RedisResult<()> {
         Bound::Min => StreamId::ZERO,
         Bound::Max => StreamId::MAX,
         Bound::Inclusive(id) => id,
-        Bound::Exclusive(id) => match id.checked_succ() {
-            Some(next) => next,
-            None => StreamId::MAX,
-        },
     };
     let end_id = match end {
         Bound::Min => StreamId::ZERO,
         Bound::Max => StreamId::MAX,
         Bound::Inclusive(id) => id,
-        Bound::Exclusive(id) => match id.checked_pred() {
-            Some(prev) => prev,
-            None => StreamId::ZERO,
-        },
     };
 
     let mut matched: Vec<(StreamId, RedisString, i64, u64)> = Vec::new();
@@ -2177,4 +2617,52 @@ fn xinfo_consumers(ctx: &mut CommandContext) -> RedisResult<()> {
         ctx.reply_integer(inactive)?;
     }
     Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Startup hook wiring
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Install all stream-related hooks into `redis-core`'s hook slots.
+///
+/// Must be called once at server startup, before any connections are accepted.
+/// Subsequent calls are no-ops (each underlying `OnceLock` only accepts the
+/// first value).
+pub fn install_stream_hooks() {
+    redis_core::db::install_stream_key_deleted_hook(Box::new(|key| {
+        wake_xreadgroup_with_nogroup(key);
+    }));
+    redis_core::db::install_stream_db_flushed_hook(Box::new(|| {
+        wake_all_xreadgroup_with_nogroup();
+    }));
+    redis_core::db::install_stream_rename_hook(Box::new(|dst_key, db_id| {
+        let db_arc = {
+            let idx = match redis_core::blocked_keys::blocked_keys_index().lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            if !idx.has_waiters_for(dst_key) {
+                return;
+            }
+            redis_core::databases::global_databases().get(db_id)
+        };
+        let mut guard = match db_arc.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        wake_xreadgroup_after_rename(&mut guard, dst_key);
+    }));
+    redis_core::db::install_stream_key_overwritten_hook(Box::new(|key| {
+        let waiters = {
+            let mut idx = match redis_core::blocked_keys::blocked_keys_index().lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            idx.take_all_stream_group_waiters_for(key)
+        };
+        let reply = encode_wrongtype_error();
+        for waiter in waiters {
+            let _ = waiter.sender.send(reply.clone());
+        }
+    }));
 }

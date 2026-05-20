@@ -368,6 +368,7 @@ fn main() {
     redis_core::db::install_swapdb_wake_hook(Box::new(|other_db_id| {
         redis_commands::wake_blocked_after_swapdb(other_db_id, other_db_id);
     }));
+    redis_commands::stream::install_stream_hooks();
     spawn_blocked_timeout_thread(Arc::clone(&shutdown));
     let active_expire_cfg = Arc::clone(active_expire_config());
     let metrics_arc = Arc::clone(server_metrics());

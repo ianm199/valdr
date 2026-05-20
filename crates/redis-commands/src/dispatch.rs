@@ -455,6 +455,7 @@ pub static HANDLERS: &[DispatchEntry] = &[
     DispatchEntry { name: b"KEYS", handler: redis_core::db::keys_command },
     DispatchEntry { name: b"COPY", handler: redis_core::db::copy_command },
     DispatchEntry { name: b"MOVE", handler: redis_core::db::move_command },
+    DispatchEntry { name: b"SWAPDB", handler: redis_core::db::swapdb_command },
     // ── STRING (Round 1, agent E1) ─────────────────────────────────────────
     DispatchEntry { name: b"APPEND", handler: crate::string::append_command },
     DispatchEntry { name: b"STRLEN", handler: crate::string::strlen_command },
