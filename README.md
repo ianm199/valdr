@@ -1,54 +1,86 @@
 # valkey-rs
 
-> A Valkey-compatible cache/store, reimplemented in **safe Rust** — drop-in for
-> non-clustered single-node deployments, ~98% of the upstream Valkey TCL test
-> suite passing.
+`valkey-rs` is a Valkey-compatible cache/store written in Rust. The goal
+is simple: full upstream-test-suite compatibility, shipped as a memory-safe
+single-node deployment.
 
-`valkey-rs` speaks the RESP2 and RESP3 wire protocols byte-for-byte against
-existing Redis/Valkey clients. Your unmodified `redis-py`, `ioredis`,
-`go-redis`, `jedis`, `redis-rs`, or any other RESP client will connect, run
-the standard command set, and observe the same replies they'd see from
-upstream Valkey 7.2.4.
+| | upstream Valkey | valkey-rs |
+|---|---|---|
+| TCL tests on surveyed unit files | 896 / 896 | **877 / 896 (97.9%)** |
+| RESP wire-diff oracle (byte-exact) | n/a — reference | **21 / 21** |
+| RDB bidirectional oracle | n/a — reference | **378 / 378** |
+| Source size | ~187,000 lines of C | **~80,000 lines of Rust** |
+| `unsafe` blocks | n/a | **5** (all `fork(2)`/`waitpid(2)`) |
+| License | BSD-3-Clause | BSD-3-Clause |
+
+`valkey-rs` is not a drop-in upstream-Valkey replacement *yet* — clustering
+and a handful of Valkey 9.0 extensions are deliberately unimplemented (see
+[Compatibility](#compatibility) and [`docs/CONFORMANCE.md`](docs/CONFORMANCE.md)).
+For non-clustered single-node deployments, unmodified `redis-py`,
+`ioredis`, `go-redis`, `jedis`, and `redis-rs` clients connect and behave
+the same as they would against Valkey 7.2.4.
 
 [![License: BSD-3](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)](LICENSE)
 [![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#status)
-[![Unsafe: documented](https://img.shields.io/badge/unsafe-2_blocks_documented-green.svg)](#safety)
-[![TCL: ~98%](https://img.shields.io/badge/upstream%20TCL-~98%25-brightgreen.svg)](docs/CONFORMANCE.md)
+[![TCL: 877/896](https://img.shields.io/badge/upstream%20TCL-877%2F896-brightgreen.svg)](docs/CONFORMANCE.md)
+
+[Get started](#get-started) • [Conformance](docs/CONFORMANCE.md) • [GitHub](https://github.com/ianm199/valkey-rs)
+
+## Highlights
+
+- **From-scratch port.** No bindings, no shim, no C dependency. ~80,000
+  lines of Rust against ~187,000 lines of upstream Valkey C.
+- **Wire-compatible.** RESP2 and RESP3 verified byte-for-byte against
+  upstream Valkey on every commit.
+- **All major data types.** Strings, lists, hashes, sets, sorted sets,
+  streams (incl. consumer groups + blocking variants), HyperLogLog,
+  bitmap, geo. Plus pub/sub, transactions, scripting (Lua 5.1), ACL,
+  replication (PSYNC + WAIT), persistence (RDB v11 + AOF), TLS, multi-DB.
+- **Tested against the upstream's own tests.** The same TCL test
+  infrastructure Valkey uses internally, pointed at our binary. 877
+  passing of 896 tests across the 13 surveyed unit files.
+- **5 `unsafe` blocks total** in the entire codebase, all wrapping POSIX
+  `fork(2)` / `waitpid(2)` in the background-save path. Every block
+  carries a `// SAFETY:` invariant. A pre-commit hook fails any change
+  that exceeds the per-crate budget.
 
 ## Status
 
-**Alpha.** Suitable for non-production workloads, evaluation, and
-single-node Valkey replacement in development environments. Not yet
-benchmarked or run under sustained production load.
+**Alpha.** Functional, verified against three independent oracles on
+every commit, but not yet performance-benchmarked or run under sustained
+production load. Use for development, evaluation, and CI-style workloads.
 
-What works today:
+## Compatibility
 
-- **All major data types** — strings, lists, hashes, sets, sorted sets,
-  streams (incl. consumer groups), HyperLogLog, bitmap, geo
-- **Persistence** — RDB v11 (bidirectional with upstream), AOF write +
-  replay
-- **Replication** — primary/replica state machine with PSYNC, full-sync
-  RDB transfer, REPLCONF/WAIT, READONLY enforcement
-- **Eviction** — all 8 maxmemory policies (noeviction / allkeys-lru /
-  allkeys-lfu / allkeys-random / volatile-lru / volatile-lfu /
-  volatile-random / volatile-ttl)
-- **Scripting** — EVAL / EVALSHA via embedded Lua 5.1
-- **Multi-user ACL** — SHA-256 password hashing, command categories
-- **Transactions** — MULTI / EXEC / DISCARD / WATCH
-- **Pub/sub** — channel + pattern subscribers
-- **Blocking ops** — BLPOP / BRPOP / BLMOVE / BLMPOP / BZPOPMIN / BZPOPMAX /
-  BZMPOP / XREAD BLOCK
-- **Multi-DB** — `SELECT 0..15`, MOVE, COPY DB, SWAPDB, INFO keyspace
-- **TLS** — rustls
-- **Native module commands** — RedisJSON-style `JSON.*` (17 commands,
-  JSONPath subset) and RedisBloom-style `BF.*` (7 commands)
+| Surface | Status |
+|---|---|
+| RESP2 / RESP3 wire protocol | ✅ full (one minor HELLO edge missing) |
+| Strings | ✅ |
+| Lists (incl. BLPOP / BLMPOP / BLMOVE) | ✅ |
+| Hashes | ✅ — HGETDEL family deferred (Valkey 9.0) |
+| Sets | ✅ |
+| Sorted sets (incl. BZPOPMIN / BZMPOP) | ✅ |
+| Streams (incl. consumer groups + XREADGROUP BLOCK) | ✅ |
+| HyperLogLog • Bitmap • Geo | ✅ |
+| Pub/sub (channels • patterns • sharded) | ✅ |
+| Transactions (MULTI / EXEC / WATCH) | ✅ |
+| Scripting (EVAL / EVALSHA via Lua 5.1) | ✅ |
+| ACL (multi-user, SHA-256 hashes) | ✅ |
+| Persistence (RDB v11 bidirectional + AOF) | ✅ |
+| Replication (PSYNC + WAIT) | ✅ |
+| Eviction (8 maxmemory policies) | ✅ |
+| TLS (rustls) | ✅ |
+| Multi-DB (`SELECT 0..15`, MOVE / COPY / SWAPDB) | ✅ |
+| Native RedisJSON-compat (`JSON.*`, 17 cmds) | ✅ |
+| Native RedisBloom-compat (`BF.*`, 7 cmds) | ✅ |
+| Clustering | ❌ single-node only (deliberate) |
+| Loadable C-ABI modules | ❌ — native impls only |
+| Valkey 9.0 extensions (LCS, SET IFEQ, …) | ❌ — roadmap |
 
-See [`docs/CONFORMANCE.md`](docs/CONFORMANCE.md) for the detailed
-capability matrix and known gaps.
+Per-unit-file TCL pass tally + full command coverage in
+[`docs/CONFORMANCE.md`](docs/CONFORMANCE.md).
 
-## Quick start
-
-### From source
+## Get started
 
 ```bash
 git clone https://github.com/ianm199/valkey-rs
@@ -57,25 +89,7 @@ cargo build --release
 ./target/release/redis-server --port 6379 --bind 127.0.0.1
 ```
 
-### Running the test suite (optional)
-
-The wire-diff and TCL oracles need a built copy of upstream Valkey for
-comparison. A helper script clones the pinned commit and builds it:
-
-```bash
-bash scripts/setup-reference.sh           # one-time, ~1 min
-bash harness/oracle/smoke.sh --skip-build # 21/21 PASS
-```
-
-In a separate terminal, point any RESP2/RESP3 client at it:
-
-```bash
-redis-cli -p 6379 PING                          # PONG
-redis-cli -p 6379 SET hello world               # OK
-redis-cli -p 6379 GET hello                     # "world"
-```
-
-### With your existing client library
+Point any unmodified RESP client at port 6379:
 
 ```python
 # Python (redis-py)
@@ -86,142 +100,104 @@ print(r.get('hello'))
 ```
 
 ```javascript
-// Node.js (ioredis)
+// Node (ioredis)
 const Redis = require('ioredis');
-const r = new Redis(6379, '127.0.0.1');
+const r = new Redis(6379);
 await r.set('hello', 'world');
 console.log(await r.get('hello'));
 ```
 
-## Why
+### Running the tests
 
-Most "Redis-in-Rust" projects are clients. This is a complete
-server-side reimplementation:
+The wire-diff and TCL oracles need a built copy of upstream Valkey for
+comparison. A helper script clones the pinned commit and builds it:
 
-- **Memory safety.** Zero `unsafe` outside two documented blocks (fork
-  + waitpid in the persistence path). The entire RESP protocol, every
-  command handler, every data structure, the replication state machine
-  — all in safe Rust. See [Safety](#safety).
-- **BSD-3-Clause licensing.** Tracks upstream Valkey's licensing (not
-  Redis 8+ AGPL/SSPL/RSAL) so the port can be freely redistributed.
-- **Single-node simplicity.** No cluster, no sharding. Drop it in
-  where you'd put a single-node Valkey today.
-- **Compatibility-first.** Behavior is validated against upstream's
-  own test suite, not a hand-rolled compat checklist.
+```bash
+bash scripts/setup-reference.sh             # one-time, ~1 min
+bash harness/oracle/smoke.sh --skip-build   # 21/21 wire-diff PASS
+```
 
-## Conformance
+For the upstream TCL suite against your `valkey-rs` build:
 
-This port is verified against **three independent oracles** at every
-commit:
-
-1. **Wire-diff oracle** — 21 hand-curated RESP corpus scripts compared
-   byte-for-byte against real Valkey. 21/21 PASS.
-2. **RDB bidirectional oracle** — saves a corpus with us, loads with
-   upstream; saves with upstream, loads with us. 378/378 PASS.
-3. **Upstream Valkey TCL test suite** — the same test infrastructure
-   Valkey uses internally, pointed at our binary. ~98% pass rate on
-   the surveyed unit files. See [CONFORMANCE.md](docs/CONFORMANCE.md)
-   for the per-file breakdown.
-
-## How this was built
-
-The translation work was done by an AI-driven porting harness that
-combines bounded subagent roles (translator / compiler-fixer / test-fixer
-/ verifier), pre-computed analyses (type vocabulary, macro mappings,
-header dependency graph), enforcement hooks (unsafe budget, forbidden
-patterns, vocabulary registry), and a three-oracle verification stack.
-The harness is a sibling project at [`../port-harness/`](../port-harness)
-and is intended to be the durable artifact — `valkey-rs` is one of two
-proofs (alongside `lua-rs-port`) that the methodology works on
-non-trivial real-world C codebases.
-
-The port spans **109 atomic commits** on the main branch, each one
-representing a single agent invocation with the same hooks gating
-every change.
+```bash
+bash harness/oracle/setup_tcl_runner.sh --skip-build
+cd reference/valkey
+VALKEY_BIN_DIR=$(pwd)/../../target/debug \
+  tclsh tests/test_helper.tcl --single unit/type/zset \
+  --clients 1 --skip-leaks --tags "-needs:repl -needs:debug" \
+  --durable --quiet
+```
 
 ## Safety
-
-`unsafe` accounting (`harness/unsafe-budgets.toml`):
 
 | Crate | `unsafe` blocks | Reason |
 |---|---|---|
 | `redis-types` | 0 | |
 | `redis-protocol` | 0 | |
-| `redis-core` | 0 | |
-| `redis-commands` | 1 | `libc::fork` + `_exit` in `persist.rs::bgsave_fork` |
-| `redis-server` | 1 | `libc::waitpid` in `main.rs` BGSAVE reaper |
 | `redis-ds` | 0 | |
+| `redis-core` | 0 | |
+| `redis-commands` | 3 | `libc::fork` + `_exit` for BGSAVE / BGREWRITEAOF / replication full-sync |
+| `redis-server` | 2 | `libc::waitpid` for BGSAVE + AOF-rewrite child reapers |
 
-Every `unsafe` block has a `// SAFETY:` comment documenting the
-invariant. Both are wrapping POSIX `fork(2)` semantics that have no
-safe equivalent in `std`.
+Every block carries a documented `// SAFETY:` invariant. A pre-commit
+hook (`harness/unsafe-budget.sh`) fails any change exceeding the per-
+crate ceiling.
 
-The chassis enforces the budget with a `Stop`-event hook
-(`harness/unsafe-budget.sh`) that fails the commit if any crate exceeds
-its declared ceiling.
-
-## Architecture overview
+## Architecture
 
 ```
 crates/
 ├── redis-types/          ByteString, RespValue, RedisError — no I/O
 ├── redis-protocol/       RESP2 + RESP3 frame parser + serializer
 ├── redis-ds/             ListPack, IntSet, SkipList — bulk-data structures
-├── redis-core/           RedisServer, Client, RedisDb, RedisObject, GC, eviction,
-│                         replication, ACL, BlockedKeysIndex, GlobalDatabases
-├── redis-commands/       all command handlers, AOF writer, RDB save/load,
+├── redis-core/           RedisServer, Client, RedisDb, RedisObject, GC,
+│                         eviction, replication, ACL, BlockedKeysIndex,
+│                         GlobalDatabases
+├── redis-commands/       command handlers, AOF writer, RDB save/load,
 │                         BGSAVE fork wrapper, EVAL/Lua bridge
 └── redis-server/         the binary — accept loop, TLS, command dispatch
 ```
 
-## Project layout
+## How this was built
 
-```
-valkey-rs/
-├── README.md             this file
-├── docs/
-│   ├── CONFORMANCE.md    capability matrix, TCL pass rates, gaps
-│   ├── DOCKER.md         containerization (planned)
-│   ├── ADR_001_LUA_RUNTIME.md
-│   └── ...
-├── crates/               see Architecture above
-├── reference/valkey/     pinned upstream source (BSD-3) for oracle
-├── harness/
-│   ├── oracle/           wire-diff, rdb-diff, TCL runner setup
-│   ├── corpus/           21 wire-diff scripts (smoke) + edge-case regression
-│   ├── rdb-corpus/       7 RDB serialization scripts (bidirectional)
-│   └── unsafe-budgets.toml
-└── PORTING.md            agent-facing translation rules (the "playbook")
-```
+The translation was done by an AI-driven porting harness — bounded
+subagent roles (translator / compiler-fixer / test-fixer / verifier),
+per-commit hooks enforcing safety budgets and forbidden patterns, and
+three independent oracles gating every change. The harness lives in a
+sibling project at [`../port-harness/`](../port-harness) and is intended
+to be the durable artifact; `valkey-rs` is one of two proofs (alongside
+[`lua-rs-port`](../lua-rs-port), a port of PUC-Rio Lua 5.4 to safe Rust)
+that the methodology works on non-trivial real-world C codebases.
 
-## Roadmap to 1.0
+The port currently spans **111 atomic commits** on main, each one a
+single agent invocation under the same hook gating.
 
-To reach **100% non-clustered drop-in**:
+## Roadmap
+
+To reach **full upstream-test-suite parity**:
 
 - HGETDEL / HEXPIRE family (Valkey 9.0 hash extensions)
-- LCS command (longest-common-subsequence)
+- LCS (longest-common-subsequence)
 - SET … IFEQ conditional (Valkey 9.0)
-- HELLO with no protover (Valkey 9.0 negotiation)
-- `unit/type/stream-cgroups` remaining XREADGROUP edge cases (~28 tests)
-- Performance benchmarking + tuning under sustained load
-- Per-DB BlockedKeysIndex (currently one BLPOP-watcher key namespace
-  across DBs — rare bug, deferred)
-- CI workflow
+- HELLO availability-zone / no-protover variants
+- `unit/type/stream-cgroups` remaining XREADGROUP edge cases
+- Per-DB BlockedKeysIndex (currently keyed by `RedisString` only)
+- Performance benchmarking and tuning under sustained load
 
-Beyond 1.0:
+Beyond parity:
 
-- Cluster mode (deliberate gap today; not on the alpha roadmap)
-- Loadable C-ABI modules (we provide native equivalents for RedisJSON +
+- Cluster mode (not on the alpha roadmap)
+- Loadable C-ABI modules (we provide native impls of RedisJSON +
   RedisBloom only)
 
 ## License
 
-BSD-3-Clause, matching upstream Valkey. See [LICENSE](LICENSE).
+[BSD-3-Clause](LICENSE), matching upstream Valkey.
 
 ## Acknowledgments
 
 - The [Valkey project](https://github.com/valkey-io/valkey) for the
-  reference implementation and the TCL test suite that makes this
-  port verifiable.
+  reference implementation and the TCL test suite that makes this port
+  verifiable.
 - [Redis Ltd.](https://redis.com) for the original Redis project, on
   whose source Valkey is based (BSD-3 era through Redis 7.2.4).
