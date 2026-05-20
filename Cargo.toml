@@ -12,7 +12,7 @@ members = [
 [workspace.package]
 edition = "2021"
 license = "BSD-3-Clause"
-repository = "https://github.com/valkey-io/valkey"
+repository = "https://github.com/ianm199/valkey-rs"
 
 [workspace.dependencies]
 redis-types = { path = "crates/redis-types" }

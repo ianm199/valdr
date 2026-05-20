@@ -1,13 +1,16 @@
 target/
 **/*.rs.bk
-Cargo.lock
 
 reference/valkey/
 
 .DS_Store
 
+dump.rdb
+appendonly.aof.*
+
 harness/oracle/results/
 harness/oracle/test-results.json
+harness/oracle/wire-diff.tsv
 harness/loop/
 *.actual.bytes
 *.actual.frames
