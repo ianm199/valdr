@@ -19,6 +19,8 @@ Useful tags:
 - `main` — latest image from the default branch.
 - `sha-<git-sha>` — immutable image for a specific commit.
 
+Published images target `linux/amd64` and `linux/arm64`.
+
 If the package is not visible yet, make the GHCR package public from the
 repository package settings after the first workflow publish.
 
