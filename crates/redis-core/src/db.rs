@@ -1443,7 +1443,7 @@ pub fn move_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     drop(dest_guard);
     ctx.db_mut().sync_delete(&key);
     ctx.notify_keyspace_event(NOTIFY_GENERIC, b"move_from", &key);
-    ctx.notify_keyspace_event(NOTIFY_GENERIC, b"move_to", &key);
+    notify_keyspace_event_global(NOTIFY_GENERIC, b"move_to", &key, target_db as u32);
     ctx.reply_integer(1)
 }
 
@@ -1518,7 +1518,7 @@ pub fn copy_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     }
     dest_guard.insert(dst_key.clone(), new_obj);
     drop(dest_guard);
-    ctx.notify_keyspace_event(NOTIFY_GENERIC, b"copy_to", &dst_key);
+    notify_keyspace_event_global(NOTIFY_GENERIC, b"copy_to", &dst_key, resolved_target_db as u32);
     ctx.reply_integer(1)
 }
 
@@ -1578,11 +1578,8 @@ pub fn swapdb_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         .ok_or_else(|| RedisError::runtime(b"ERR invalid first DB index"))?;
     let id2 = parse_i64_from_bytes(id2_arg.as_bytes())
         .ok_or_else(|| RedisError::runtime(b"ERR invalid second DB index"))?;
-    if id1 < 0 || id1 >= db_count {
-        return Err(RedisError::runtime(b"ERR invalid first DB index"));
-    }
-    if id2 < 0 || id2 >= db_count {
-        return Err(RedisError::runtime(b"ERR invalid second DB index"));
+    if id1 < 0 || id1 >= db_count || id2 < 0 || id2 >= db_count {
+        return Err(RedisError::runtime(b"ERR DB index is out of range"));
     }
     let current_db_id = ctx.client_ref().db_index;
     let id1u = id1 as u32;

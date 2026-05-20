@@ -260,12 +260,26 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
     if want(b"keyspace") {
         let _ = writeln!(buf, "# Keyspace\r");
-        if dbsize > 0 {
-            let _ = writeln!(
-                buf,
-                "db0:keys={},expires={},avg_ttl=0\r",
-                dbsize, expires_count
-            );
+        let current_db_id = ctx.client_ref().db_index;
+        let dbs = redis_core::databases::global_databases();
+        for i in 0..dbs.count() as u32 {
+            let (keys, expires) = if i == current_db_id {
+                (dbsize, expires_count)
+            } else {
+                let arc = dbs.get(i);
+                let guard = match arc.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                (guard.size(), guard.expires_count())
+            };
+            if keys > 0 {
+                let _ = writeln!(
+                    buf,
+                    "db{}:keys={},expires={},avg_ttl=0\r",
+                    i, keys, expires
+                );
+            }
         }
         let _ = writeln!(buf, "\r");
     }
