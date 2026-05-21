@@ -28,6 +28,32 @@ That runner executes smaller named profiles with different pipeline depths and
 emits a typed JSON result on stdout plus a TSV under
 `harness/bench/results/<UTC>-<commit>-profile-matrix.tsv`.
 
+For hotspot work, use the larger profiled runner:
+
+```bash
+./harness/bench/profile-hotspots.py --suite big
+```
+
+That runner benchmarks upstream and valkey-rs on longer simple-command
+workloads, and samples the Rust server with `/usr/bin/sample` while the hot
+section is running. It writes:
+
+- `harness/bench/results/<UTC>-<commit>-hotspots.tsv`
+- `harness/bench/results/<UTC>-<commit>-hotspots.json`
+- `harness/bench/results/<UTC>-<commit>-<workload>.sample.txt`
+
+The sampler is wall-clock stack sampling, not a pure CPU profiler. Treat
+wait/sleep/socket categories as scheduling and I/O evidence. For a GUI-grade
+CPU trace on macOS, attach Instruments/xctrace Time Profiler to the same Rust
+server PID while the workload runs. For better symbols in either tool, rebuild
+with optimized debuginfo:
+
+```bash
+CARGO_PROFILE_RELEASE_DEBUG=true \
+RUSTFLAGS="-C force-frame-pointers=yes" \
+  cargo build --release -p redis-server
+```
+
 The script writes a TSV to `harness/bench/results/<UTC>-<commit>.tsv`
 recording the request count, client count, pipeline depth, payload size,
 hardware fingerprint (CPU + OS + arch), and the commit hash so results
@@ -242,6 +268,12 @@ bash harness/bench/run.sh --requests 100000 --pipeline 1 --tests set,get
 
 # Profile matrix: pipeline 1 vs 16 vs 100, plus range-heavy workload
 bash harness/bench/run-profile-matrix.sh
+
+# Larger profiles plus sampled Rust server stacks
+./harness/bench/profile-hotspots.py --suite big
+
+# Faster hotspot smoke while developing the runner
+./harness/bench/profile-hotspots.py --suite smoke --workloads get --sample-seconds 2
 
 # Custom workload
 bash harness/bench/run.sh --requests 500000 --clients 100 --pipeline 50 \
