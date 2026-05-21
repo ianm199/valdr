@@ -20,11 +20,12 @@ The no-regret optimizations already landed:
   slowlog, AOF, or replication need them;
 - skip standalone write-propagation work when AOF is off, no replicas are
   connected, and no replication backlog is active;
-- fold handler and metadata lookup into one runtime dispatch table.
+- fold handler and metadata lookup into one runtime dispatch table;
+- bucket runtime dispatch lookup by the command's first ASCII byte.
 
-Those moved deep-pipeline GET from roughly 221k req/s to roughly 2.13M req/s,
+Those moved deep-pipeline GET from roughly 221k req/s to roughly 2.17M req/s,
 and moved deep-pipeline SET from roughly 190k req/s in the alpha baseline to
-roughly 1.64M req/s.
+roughly 1.67M req/s.
 That is a real improvement, and it also exposes the remaining architecture
 gap: valkey-rs still has blocking per-client threads sharing
 `Arc<Mutex<RedisDb>>`, while upstream Valkey drains many sockets and executes

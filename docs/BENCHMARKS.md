@@ -94,30 +94,31 @@ like upstream Valkey." The profile matrix runs the same binary at pipeline 1,
 16, and 100.
 
 **Hardware:** Apple M3 Max, macOS Darwin 24.3.0 (arm64)
-**valkey-rs revision:** `b21a533`, after the TCP-loop, dispatch hot-path, and
-standalone write-propagation optimizations described below
+**valkey-rs revision:** `0004595`, after the TCP-loop, dispatch hot-path,
+standalone write-propagation, and bucketed command-dispatch optimizations
+described below
 
 | Profile | Command | upstream Valkey (req/s) | valkey-rs (req/s) | ratio | upstream p99 (ms) | valkey-rs p99 (ms) |
 |---|---|---:|---:|---:|---:|---:|
-| core-p1 | PING_MBULK | 188,679 | 147,493 | 0.78× | 0.671 | 0.311 |
-| core-p1 | SET | 200,803 | 156,250 | 0.78× | 0.383 | 0.391 |
-| core-p1 | GET | 201,613 | 156,250 | 0.77× | 0.343 | 0.239 |
-| core-p1 | INCR | 204,082 | 153,374 | 0.75× | 0.367 | 0.247 |
-| core-p16 | PING_MBULK | 2,816,901 | 1,724,138 | 0.61× | 0.359 | 1.647 |
-| core-p16 | SET | 1,724,138 | 1,117,318 | 0.65× | 0.527 | 2.111 |
-| core-p16 | GET | 2,127,660 | 1,315,790 | 0.62× | 0.455 | 2.895 |
-| core-p16 | INCR | 2,325,581 | 1,176,471 | 0.51× | 0.447 | 2.079 |
-| core-p100 | PING_MBULK | 5,128,205 | 2,777,778 | 0.54× | 1.095 | 4.015 |
-| core-p100 | SET | 2,469,136 | 1,639,344 | 0.66× | 2.239 | 3.135 |
-| core-p100 | GET | 3,278,689 | 2,127,660 | 0.65× | 1.759 | 3.263 |
-| core-p100 | INCR | 3,448,276 | 1,754,386 | 0.51× | 1.623 | 2.959 |
-| range-heavy-p16 | LRANGE_100 | 177,936 | 190,114 | **1.07×** | 5.311 | 8.383 |
-| range-heavy-p16 | LRANGE_300 | 41,051 | 63,211 | **1.54×** | 13.119 | 23.935 |
+| core-p1 | PING_MBULK | 190,114 | 144,509 | 0.76× | 0.719 | 0.839 |
+| core-p1 | SET | 210,970 | 138,122 | 0.65× | 0.303 | 0.255 |
+| core-p1 | GET | 180,505 | 141,243 | 0.78× | 0.399 | 0.255 |
+| core-p1 | INCR | 196,850 | 151,515 | 0.77× | 0.375 | 0.255 |
+| core-p16 | PING_MBULK | 2,298,851 | 1,600,000 | 0.70× | 0.631 | 2.351 |
+| core-p16 | SET | 1,709,402 | 1,282,051 | 0.75× | 0.535 | 2.175 |
+| core-p16 | GET | 2,083,333 | 1,342,282 | 0.64× | 0.543 | 2.799 |
+| core-p16 | INCR | 2,222,222 | 1,234,568 | 0.56× | 0.439 | 2.447 |
+| core-p100 | PING_MBULK | 5,128,205 | 3,448,276 | 0.67× | 1.095 | 5.631 |
+| core-p100 | SET | 2,469,136 | 1,666,667 | 0.68× | 2.223 | 3.087 |
+| core-p100 | GET | 3,333,334 | 2,173,913 | 0.65× | 1.727 | 2.415 |
+| core-p100 | INCR | 3,278,689 | 1,869,159 | 0.57× | 1.719 | 2.735 |
+| range-heavy-p16 | LRANGE_100 | 185,874 | 185,529 | 1.00× | 4.991 | 8.959 |
+| range-heavy-p16 | LRANGE_300 | 41,701 | 66,094 | **1.58×** | 12.607 | 14.015 |
 
 The profile-matrix summary from this run:
 
 ```text
-median 0.66x, min 0.51x, max 1.54x; GET p1 0.77x; GET p100 0.65x
+median 0.68x, min 0.56x, max 1.58x; GET p1 0.78x; GET p100 0.65x
 ```
 
 The read I would trust: this is not primarily "Rust data structures cannot do
@@ -166,7 +167,9 @@ encoding when the server is a standalone primary with no active backlog, no
 replicas, and no replication BGSAVE job, matching upstream's "do not propagate
 when there is nowhere to propagate" shape. The same patch also folds handler
 and metadata lookup into one runtime dispatch table, removing the second
-per-command binary search.
+per-command binary search. The next packet, `0004595`, keeps the runtime
+dispatch table but buckets it by the command's first ASCII byte, so each
+lookup searches only the relevant sub-slice instead of the full command list.
 
 ### Harness-driven optimization log
 
@@ -185,10 +188,11 @@ same profile matrix and kept the table current after each pass.
 | 5 | Architecture-first hot path packet: batch client-info snapshots, reuse argv storage, `Instant` timing, batch DB0 lock | median 0.33x, min 0.18x, max 1.62x | 956,938 req/s (0.28x) | 909,091 req/s (0.18x) | 66,490 req/s (1.62x) |
 | 6 | Dispatch metadata cache + lazy argv snapshot for slowlog/AOF/replication | median 0.63x, min 0.39x, max 1.68x | 2,061,856 req/s (0.63x) | 2,702,703 req/s (0.53x) | 64,935 req/s (1.68x) |
 | 7 | Standalone no-replica propagation skip + unified runtime dispatch table | median 0.66x, min 0.51x, max 1.54x | 2,127,660 req/s (0.65x) | 2,777,778 req/s (0.54x) | 63,211 req/s (1.54x) |
+| 8 | First-byte bucketed runtime dispatch lookup | median 0.68x, min 0.56x, max 1.58x | 2,173,913 req/s (0.65x) | 3,448,276 req/s (0.67x) | 66,094 req/s (1.58x) |
 
 The individual runs are noisy, especially on loopback with short benchmark
 windows, so the useful read is the trend: deep-pipeline GET moved from about
-221k req/s to about 2.13M req/s. The exact LRANGE number bounces because it is
+221k req/s to about 2.17M req/s. The exact LRANGE number bounces because it is
 already doing enough response work that the TCP-loop patches are not the main
 determinant.
 
@@ -274,8 +278,8 @@ Roadmap to closer-to-parity throughput, in rough effort order:
    runtime owner/event loop so clients and DB state are not coordinated through
    one `Arc<Mutex<RedisDb>>` per DB. This is the real #5, and it needs its own
    packet graph.
-2. **Hasher/allocation pass on command execution** — after `b21a533`, handler
-   metadata lookup and idle replication propagation are no longer the obvious
+2. **Hasher/allocation pass on command execution** — after `0004595`, idle
+   replication propagation and command-table lookup are no longer the obvious
    low-hanging fruit. The next small packet should use sampled stacks to reduce
    allocator churn and default-hasher work without bypassing the normal command
    path.
