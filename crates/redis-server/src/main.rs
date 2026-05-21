@@ -969,11 +969,9 @@ fn run_client_loop(
                 }
             }
 
-            if !flush_reply(client, outbound) {
-                disconnect = true;
-                break;
-            }
-
+            // Batch all replies produced by commands already present in this
+            // read. Flushing per command destroys pipelined throughput by
+            // turning one client read into many writer-thread sends.
             if client.should_close {
                 disconnect = true;
                 break;

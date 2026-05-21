@@ -67,37 +67,61 @@ like upstream Valkey." The profile matrix runs the same binary at pipeline 1,
 16, and 100.
 
 **Hardware:** Apple M3 Max, macOS Darwin 24.3.0 (arm64)
-**valkey-rs commit:** `47915ba`
+**valkey-rs revision:** profile-matrix runner at `a5401a1`, plus the first reply-batching optimization described below
 
 | Profile | Command | upstream Valkey (req/s) | valkey-rs (req/s) | ratio | upstream p99 (ms) | valkey-rs p99 (ms) |
 |---|---|---:|---:|---:|---:|---:|
-| core-p1 | PING_MBULK | 146,628 | 132,275 | **0.90×** | 1.047 | 0.359 |
-| core-p1 | SET | 173,010 | 136,986 | **0.79×** | 0.383 | 0.351 |
-| core-p1 | GET | 161,290 | 141,243 | **0.88×** | 0.367 | 0.319 |
-| core-p1 | INCR | 168,919 | 136,240 | **0.81×** | 0.375 | 0.343 |
-| core-p16 | PING_MBULK | 2,380,953 | 254,453 | 0.11× | 0.551 | 2.895 |
-| core-p16 | SET | 1,503,759 | 184,672 | 0.12× | 0.719 | 1.903 |
-| core-p16 | GET | 2,105,263 | 209,424 | 0.10× | 0.543 | 3.055 |
-| core-p16 | INCR | 2,247,191 | 191,388 | 0.09× | 0.431 | 1.807 |
-| core-p100 | PING_MBULK | 5,128,205 | 250,941 | 0.05× | 1.183 | 12.223 |
-| core-p100 | SET | 2,531,646 | 187,970 | 0.07× | 2.239 | 1.743 |
-| core-p100 | GET | 3,333,334 | 220,994 | 0.07× | 1.759 | 10.879 |
-| core-p100 | INCR | 3,389,831 | 195,312 | 0.06× | 1.679 | 1.863 |
-| range-heavy-p16 | LRANGE_100 | 165,837 | 92,851 | 0.56× | 5.663 | 13.759 |
-| range-heavy-p16 | LRANGE_300 | 38,640 | 42,553 | **1.10×** | 13.439 | 47.871 |
+| core-p1 | PING_MBULK | 173,611 | 124,688 | 0.72× | 0.687 | 0.791 |
+| core-p1 | SET | 193,050 | 128,205 | 0.66× | 0.375 | 0.463 |
+| core-p1 | GET | 193,050 | 127,877 | 0.66× | 0.367 | 0.439 |
+| core-p1 | INCR | 171,821 | 126,263 | 0.73× | 0.351 | 0.423 |
+| core-p16 | PING_MBULK | 2,352,941 | 314,465 | 0.13× | 0.487 | 7.679 |
+| core-p16 | SET | 1,739,130 | 237,812 | 0.14× | 0.623 | 7.359 |
+| core-p16 | GET | 2,197,802 | 300,300 | 0.14× | 0.567 | 6.399 |
+| core-p16 | INCR | 1,869,159 | 232,019 | 0.12× | 0.599 | 7.935 |
+| core-p100 | PING_MBULK | 5,405,406 | 454,545 | 0.08× | 1.095 | 31.999 |
+| core-p100 | SET | 2,500,000 | 255,102 | 0.10× | 2.207 | 28.799 |
+| core-p100 | GET | 3,389,831 | 406,504 | 0.12× | 1.775 | 59.135 |
+| core-p100 | INCR | 3,389,831 | 271,003 | 0.08× | 1.767 | 26.879 |
+| range-heavy-p16 | LRANGE_100 | 176,367 | 120,482 | 0.68× | 5.023 | 25.727 |
+| range-heavy-p16 | LRANGE_300 | 38,521 | 49,975 | **1.30×** | 13.631 | 84.479 |
 
 The profile-matrix summary from this run:
 
 ```text
-median 0.11x, min 0.05x, max 1.10x; GET p1 0.88x; GET p100 0.07x
+median 0.14x, min 0.08x, max 1.30x; GET p1 0.66x; GET p100 0.12x
 ```
 
 The read I would trust: this is not primarily "Rust data structures cannot do
-GET." At pipeline 1, GET is close to upstream. The cliff appears when upstream
-Valkey can amortize event-loop work across large batches and valkey-rs stays
-near a ~200k req/s ceiling on simple commands. That points at connection
-serving, request draining, response flushing, and shared-state locking before it
+GET." The cliff appears when upstream Valkey can amortize event-loop work across
+large batches and valkey-rs hits the connection-serving path hard. That points
+at request draining, response flushing, and shared-state locking before it
 points at the command implementation itself.
+
+### Harness-driven optimization: batched reply flushing
+
+The profile matrix turned the vague "simple commands are slow" complaint into a
+specific subsystem hypothesis: the plain TCP loop was flushing through the
+writer-thread channel after every parsed command. Under a pipeline of 100 GETs,
+that meant one socket read could become 100 `mpsc::Sender<Vec<u8>>` sends and
+100 small `write_all` calls.
+
+The first harness-driven patch changed the plain TCP read loop to parse all
+complete commands currently in `query_buf`, append all their replies to
+`client.reply_buf`, and flush once after the batch.
+
+| Workload | Before | After | Change |
+|---|---:|---:|---:|
+| `core-p16/GET` Rust throughput | 209,424 req/s | 300,300 req/s | +43% |
+| `core-p100/PING_MBULK` Rust throughput | 250,941 req/s | 454,545 req/s | +81% |
+| `core-p100/GET` Rust throughput | 220,994 req/s | 406,504 req/s | +84% |
+| `core-p100/SET` Rust throughput | 187,970 req/s | 255,102 req/s | +36% |
+| `range-heavy-p16/LRANGE_300` Rust throughput | 42,553 req/s | 49,975 req/s | +18% |
+
+This is a good example of the harness shape we want for nginx: benchmark rows
+should identify the subsystem boundary. The correct packet was not "make Redis
+faster"; it was "reduce per-command reply flush overhead in the pipelined TCP
+path."
 
 ## Reading this honestly
 
