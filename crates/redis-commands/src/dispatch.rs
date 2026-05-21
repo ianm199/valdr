@@ -54,8 +54,13 @@ struct RuntimeDispatchEntry {
     metadata: CommandMetadata,
 }
 
+struct RuntimeDispatchIndex {
+    rows: Vec<RuntimeDispatchEntry>,
+    buckets: [(usize, usize); 256],
+}
+
 static COMMAND_METADATA_TABLE: OnceLock<Vec<(&'static [u8], CommandMetadata)>> = OnceLock::new();
-static RUNTIME_DISPATCH_TABLE: OnceLock<Vec<RuntimeDispatchEntry>> = OnceLock::new();
+static RUNTIME_DISPATCH_INDEX: OnceLock<RuntimeDispatchIndex> = OnceLock::new();
 
 /// Look up the handler for `name` (case-insensitive ASCII).
 ///
@@ -65,15 +70,23 @@ pub fn lookup_command(name: &[u8]) -> Option<&'static DispatchEntry> {
 }
 
 fn lookup_runtime_command(name: &[u8]) -> Option<&'static RuntimeDispatchEntry> {
-    let table = runtime_dispatch_table();
+    let first = *name.first()?;
+    let index = runtime_dispatch_index();
+    let (start, end) = index.buckets[ascii_lower(first) as usize];
+    let table = &index.rows[start..end];
     table
         .binary_search_by(|row| ascii_casecmp(row.entry.name, name))
-        .map(|idx| &table[idx])
+        .map(|idx| &index.rows[start + idx])
         .ok()
 }
 
+#[cfg(test)]
 fn runtime_dispatch_table() -> &'static [RuntimeDispatchEntry] {
-    RUNTIME_DISPATCH_TABLE.get_or_init(|| {
+    &runtime_dispatch_index().rows
+}
+
+fn runtime_dispatch_index() -> &'static RuntimeDispatchIndex {
+    RUNTIME_DISPATCH_INDEX.get_or_init(|| {
         let mut rows: Vec<RuntimeDispatchEntry> = HANDLERS
             .iter()
             .map(|entry| RuntimeDispatchEntry {
@@ -82,7 +95,19 @@ fn runtime_dispatch_table() -> &'static [RuntimeDispatchEntry] {
             })
             .collect();
         rows.sort_by(|left, right| ascii_casecmp(left.entry.name, right.entry.name));
-        rows
+        let mut buckets = [(0usize, 0usize); 256];
+        let mut cursor = 0usize;
+        while cursor < rows.len() {
+            let bucket = ascii_lower(rows[cursor].entry.name[0]) as usize;
+            let start = cursor;
+            while cursor < rows.len()
+                && ascii_lower(rows[cursor].entry.name[0]) as usize == bucket
+            {
+                cursor += 1;
+            }
+            buckets[bucket] = (start, cursor);
+        }
+        RuntimeDispatchIndex { rows, buckets }
     })
 }
 
