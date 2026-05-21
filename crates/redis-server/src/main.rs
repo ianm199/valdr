@@ -20,9 +20,9 @@ use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rustls::StreamOwned;
 
@@ -41,7 +41,7 @@ use redis_core::metrics::server_metrics;
 use redis_core::pubsub_registry::PubSubRegistry;
 use redis_core::{Client, Connection};
 use redis_protocol::frame::{encode_resp2, RespFrame};
-use redis_protocol::parse_inline_or_multibulk;
+use redis_protocol::parse_inline_or_multibulk_into;
 use redis_types::{RedisError, RedisString};
 
 const DEFAULT_PORT: u16 = 6379;
@@ -951,15 +951,48 @@ fn run_client_loop(
 
         let mut disconnect = false;
         let mut consumed_total = 0usize;
+        let mut saw_command = false;
+        let mut last_cmd_name: Vec<u8> = Vec::new();
+        let mut batch_db0_guard = if client.db_index == 0 {
+            Some(lock_redis_db(&db))
+        } else {
+            None
+        };
         loop {
-            let parsed = parse_inline_or_multibulk(&client.query_buf[consumed_total..]);
+            let parsed = parse_inline_or_multibulk_into(
+                &client.query_buf[consumed_total..],
+                &mut client.argv,
+            );
             match parsed {
-                Ok(Some((argv, consumed))) => {
+                Ok(Some(consumed)) => {
                     consumed_total += consumed;
-                    if argv.is_empty() {
+                    if client.argv.is_empty() {
                         continue;
                     }
-                    process_command(client, argv, &db, &registry, &server);
+                    saw_command = true;
+                    last_cmd_name.clear();
+                    if let Some(cmd) = client.arg(0) {
+                        last_cmd_name.extend_from_slice(cmd.as_bytes());
+                    }
+                    if is_client_info_observer(&last_cmd_name) {
+                        update_client_info_snapshot(client, &last_cmd_name);
+                    }
+                    if client.db_index == 0 {
+                        if batch_db0_guard.is_none() {
+                            batch_db0_guard = Some(lock_redis_db(&db));
+                        }
+                        let db_guard = batch_db0_guard.as_mut().expect("db0 guard installed");
+                        process_current_command_with_db(client, db_guard, &registry, &server);
+                    } else {
+                        batch_db0_guard = None;
+                        process_current_command(client, &registry, &server);
+                    }
+                    if client.db_index != 0 {
+                        batch_db0_guard = None;
+                    }
+                    if client.blocked_on_keys {
+                        batch_db0_guard = None;
+                    }
                 }
                 Ok(None) => break,
                 Err(err) => {
@@ -981,6 +1014,11 @@ fn run_client_loop(
 
         if consumed_total > 0 {
             client.query_buf.drain(..consumed_total);
+        }
+        drop(batch_db0_guard);
+
+        if saw_command {
+            update_client_info_snapshot(client, &last_cmd_name);
         }
 
         if disconnect {
@@ -1055,15 +1093,34 @@ fn run_client_loop_tls(
         client.query_buf.extend_from_slice(&read_buf[..n]);
 
         let mut disconnect = false;
+        let mut consumed_total = 0usize;
+        let mut saw_command = false;
+        let mut last_cmd_name: Vec<u8> = Vec::new();
         loop {
-            let parsed = parse_inline_or_multibulk(&client.query_buf);
+            let parsed = parse_inline_or_multibulk_into(
+                &client.query_buf[consumed_total..],
+                &mut client.argv,
+            );
             match parsed {
-                Ok(Some((argv, consumed))) => {
-                    client.query_buf.drain(..consumed);
-                    if argv.is_empty() {
+                Ok(Some(consumed)) => {
+                    consumed_total += consumed;
+                    if client.argv.is_empty() {
                         continue;
                     }
-                    process_command(client, argv, &db, &registry, &server);
+                    saw_command = true;
+                    last_cmd_name.clear();
+                    if let Some(cmd) = client.arg(0) {
+                        last_cmd_name.extend_from_slice(cmd.as_bytes());
+                    }
+                    if is_client_info_observer(&last_cmd_name) {
+                        update_client_info_snapshot(client, &last_cmd_name);
+                    }
+                    if client.db_index == 0 {
+                        let mut db_guard = lock_redis_db(&db);
+                        process_current_command_with_db(client, &mut db_guard, &registry, &server);
+                    } else {
+                        process_current_command(client, &registry, &server);
+                    }
                 }
                 Ok(None) => break,
                 Err(err) => {
@@ -1116,6 +1173,13 @@ fn run_client_loop_tls(
             }
         }
 
+        if consumed_total > 0 {
+            client.query_buf.drain(..consumed_total);
+        }
+        if saw_command {
+            update_client_info_snapshot(client, &last_cmd_name);
+        }
+
         if disconnect || client.should_close {
             break;
         }
@@ -1133,70 +1197,81 @@ fn run_client_loop_tls(
     server_metrics().on_disconnect();
 }
 
-/// Install `argv` as the current command and route through the dispatcher.
+/// Route the current `client.argv` through the dispatcher, locking the selected
+/// database for this command.
+fn process_current_command(
+    client: &mut Client,
+    registry: &Arc<Mutex<PubSubRegistry>>,
+    server: &Arc<redis_core::RedisServer>,
+) {
+    let selected_db = global_databases().get(client.db_index);
+    let mut guard = lock_redis_db(&selected_db);
+    process_current_command_with_db(client, &mut guard, registry, server);
+}
+
+/// Route the current `client.argv` through the dispatcher using an already-held
+/// database lock.
 ///
 /// If the previous command parked the client on the global blocked-keys
 /// index, the wake/timeout reply has already gone out via the writer thread
 /// before this fresh read returned bytes — clear the residual flag and any
 /// surviving registry entry before dispatching the new command.
-fn process_command(
+fn process_current_command_with_db(
     client: &mut Client,
-    argv: Vec<RedisString>,
-    _db: &Arc<Mutex<RedisDb>>,
+    db: &mut RedisDb,
     registry: &Arc<Mutex<PubSubRegistry>>,
     server: &Arc<redis_core::RedisServer>,
 ) {
     client.clear_blocked_on_keys();
-    client.set_args(argv);
-
-    let cmd_name = client
-        .arg(0)
-        .and_then(|a| core::str::from_utf8(a.as_bytes()).ok())
-        .unwrap_or("");
-    if let Ok(mut guard) = client_info_registry().lock() {
-        guard.set_cmd(client.id, &cmd_name);
-        guard.set_db(client.id, client.db_index);
-    }
 
     let metrics = server_metrics();
     metrics.total_commands_processed.fetch_add(1, Ordering::Relaxed);
-    let t0 = SystemTime::now();
+    let t0 = Instant::now();
     let result = {
-        let selected_db = global_databases().get(client.db_index);
-        let mut guard = match selected_db.lock() {
-            Ok(g) => g,
-            Err(poison) => poison.into_inner(),
-        };
         let mut ctx = CommandContext::with_server(
             client,
-            &mut guard,
+            db,
             Arc::clone(server),
             Arc::clone(registry),
         );
         let r = dispatch(&mut ctx);
         let deferred: Vec<RedisString> = std::mem::take(&mut ctx.client_mut().pending_wakes);
         for key in &deferred {
-            redis_commands::list::wake_blocked_for_key(&mut guard, key);
+            redis_commands::list::wake_blocked_for_key(db, key);
         }
         r
     };
-    let elapsed_us = t0
-        .elapsed()
-        .map(|d| d.as_micros() as u64)
-        .unwrap_or(0);
+    let elapsed_us = t0.elapsed().as_micros() as u64;
     metrics
         .active_time_main_thread_us
         .fetch_add(elapsed_us, Ordering::Relaxed);
-    if client.blocked_on_keys {
-        if let Ok(mut guard) = client_info_registry().lock() {
-            guard.set_blocked(client.id, true);
-        }
-    }
     if let Err(err) = result {
         let payload = err.to_resp_payload();
         encode_resp2(&RespFrame::Error(payload), &mut client.reply_buf);
     }
     client.reset_args();
+}
+
+fn lock_redis_db(db: &Arc<Mutex<RedisDb>>) -> MutexGuard<'_, RedisDb> {
+    match db.lock() {
+        Ok(g) => g,
+        Err(poison) => poison.into_inner(),
+    }
+}
+
+fn update_client_info_snapshot(client: &Client, last_cmd_name: &[u8]) {
+    if let Ok(mut guard) = client_info_registry().lock() {
+        guard.update_snapshot(
+            client.id,
+            last_cmd_name,
+            client.db_index,
+            client.blocked_on_keys,
+        );
+    }
+}
+
+fn is_client_info_observer(cmd: &[u8]) -> bool {
+    cmd.eq_ignore_ascii_case(b"CLIENT")
 }
 
 /// Drain `client.reply_buf` through the outbound sender. Returns `false` if

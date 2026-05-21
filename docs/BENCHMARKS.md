@@ -71,25 +71,25 @@ like upstream Valkey." The profile matrix runs the same binary at pipeline 1,
 
 | Profile | Command | upstream Valkey (req/s) | valkey-rs (req/s) | ratio | upstream p99 (ms) | valkey-rs p99 (ms) |
 |---|---|---:|---:|---:|---:|---:|
-| core-p1 | PING_MBULK | 158,228 | 138,889 | 0.88× | 0.687 | 1.063 |
-| core-p1 | SET | 200,000 | 141,643 | 0.71× | 0.343 | 0.279 |
-| core-p1 | GET | 196,078 | 140,845 | 0.72× | 0.359 | 0.583 |
-| core-p1 | INCR | 206,612 | 135,501 | 0.66× | 0.319 | 0.359 |
-| core-p16 | PING_MBULK | 2,352,941 | 371,747 | 0.16× | 0.479 | 5.855 |
-| core-p16 | SET | 1,680,672 | 253,165 | 0.15× | 0.615 | 6.943 |
-| core-p16 | GET | 2,105,263 | 350,262 | 0.17× | 0.543 | 5.951 |
-| core-p16 | INCR | 2,173,913 | 249,376 | 0.11× | 0.527 | 6.943 |
-| core-p100 | PING_MBULK | 5,000,000 | 447,427 | 0.09× | 1.207 | 39.935 |
-| core-p100 | SET | 2,439,024 | 286,532 | 0.12× | 2.271 | 27.391 |
-| core-p100 | GET | 3,278,689 | 498,753 | 0.15× | 1.759 | 38.143 |
-| core-p100 | INCR | 3,278,689 | 273,598 | 0.08× | 1.727 | 34.559 |
-| range-heavy-p16 | LRANGE_100 | 176,367 | 107,759 | 0.61× | 5.439 | 33.535 |
-| range-heavy-p16 | LRANGE_300 | 38,715 | 47,984 | **1.24×** | 13.567 | 101.887 |
+| core-p1 | PING_MBULK | 182,482 | 139,276 | 0.76× | 0.623 | 0.959 |
+| core-p1 | SET | 163,399 | 138,889 | 0.85× | 0.375 | 0.295 |
+| core-p1 | GET | 196,850 | 137,741 | 0.70× | 0.335 | 0.391 |
+| core-p1 | INCR | 178,571 | 133,689 | 0.75× | 0.343 | 0.711 |
+| core-p16 | PING_MBULK | 2,739,727 | 657,895 | 0.24× | 0.471 | 4.191 |
+| core-p16 | SET | 1,724,138 | 522,194 | 0.30× | 0.519 | 1.591 |
+| core-p16 | GET | 2,150,538 | 787,402 | 0.37× | 0.455 | 7.903 |
+| core-p16 | INCR | 2,222,222 | 519,481 | 0.23× | 0.431 | 1.583 |
+| core-p100 | PING_MBULK | 5,128,205 | 909,091 | 0.18× | 1.183 | 5.823 |
+| core-p100 | SET | 2,500,000 | 740,741 | 0.30× | 2.239 | 6.847 |
+| core-p100 | GET | 3,389,831 | 956,938 | 0.28× | 1.759 | 5.343 |
+| core-p100 | INCR | 3,389,831 | 746,269 | 0.22× | 1.631 | 6.815 |
+| range-heavy-p16 | LRANGE_100 | 164,744 | 162,075 | 0.98× | 5.855 | 9.791 |
+| range-heavy-p16 | LRANGE_300 | 40,951 | 66,490 | **1.62×** | 13.055 | 12.159 |
 
 The profile-matrix summary from this run:
 
 ```text
-median 0.17x, min 0.08x, max 1.24x; GET p1 0.72x; GET p100 0.15x
+median 0.33x, min 0.18x, max 1.62x; GET p1 0.70x; GET p100 0.28x
 ```
 
 The read I would trust: this is not primarily "Rust data structures cannot do
@@ -112,10 +112,11 @@ same profile matrix and kept the table current after each pass.
 | 2 | Drain query buffer once per read batch | median 0.14x, min 0.07x, max 1.26x | 446,429 req/s (0.14x) | 497,512 req/s (0.09x) | 48,309 req/s (1.26x) |
 | 3 | Direct-write ordinary plain-TCP replies | median 0.15x, min 0.07x, max 1.37x | 454,545 req/s (0.14x) | 420,168 req/s (0.08x) | 52,411 req/s (1.37x) |
 | 4 | Avoid duplicate command-name lowercase | median 0.17x, min 0.08x, max 1.24x | 498,753 req/s (0.15x) | 447,427 req/s (0.09x) | 47,984 req/s (1.24x) |
+| 5 | Architecture-first hot path packet: batch client-info snapshots, reuse argv storage, `Instant` timing, batch DB0 lock | median 0.33x, min 0.18x, max 1.62x | 956,938 req/s (0.28x) | 909,091 req/s (0.18x) | 66,490 req/s (1.62x) |
 
 The individual runs are noisy, especially on loopback with short benchmark
 windows, so the useful read is the trend: deep-pipeline GET moved from about
-221k req/s to about 499k req/s. The exact LRANGE number bounces because it is
+221k req/s to about 957k req/s. The exact LRANGE number bounces because it is
 already doing enough response work that the TCP-loop patches are not the main
 determinant.
 
@@ -123,11 +124,32 @@ This is a good example of the harness shape we want for nginx: benchmark rows
 should identify the subsystem boundary. The correct packet was not "make Redis
 faster"; it was "reduce per-command overhead in the pipelined TCP path."
 
+### Architecture-first read
+
+Iteration 5 deliberately bundled the first four no/low-regret hot-path fixes
+before considering a larger runtime rewrite:
+
+- `CLIENT LIST` metadata moved from per-command global-lock updates to one
+  read-batch snapshot update.
+- The live server parser gained `parse_inline_or_multibulk_into`, so the
+  connection reuses `client.argv` storage instead of allocating a fresh argv
+  vector for every pipelined command.
+- The command active-time metric uses monotonic `Instant` timing instead of
+  `SystemTime` on the dispatch path.
+- The plain TCP loop holds the DB0 lock across a read batch, dropping it when
+  the client changes DB or blocks.
+
+These changes transfer cleanly into any future runtime model. They also clarify
+what remains: even after cutting obvious per-command costs, upstream Valkey's
+event-loop batching still wins the tiny-command/deep-pipeline case. That is the
+evidence we would want before considering the larger event-loop or shard-owned
+DB architecture.
+
 ## Reading this honestly
 
-**Where we're slow (most simple commands, ~5-10% of upstream throughput):**
+**Where we're still slow (most simple commands, ~18-37% of upstream throughput under pipeline):**
 The profile matrix refines the diagnosis. The deep-pipeline gap is real, but
-pipeline-1 simple ops are roughly 0.66-0.88x upstream. That makes "per-command mutex
+pipeline-1 simple ops are roughly 0.70-0.85x upstream. That makes "per-command mutex
 acquisition" a likely contributor, not the whole explanation. The larger issue
 is that upstream Valkey's single event loop drains and writes pipelined command
 batches extremely efficiently, while valkey-rs still uses a blocking

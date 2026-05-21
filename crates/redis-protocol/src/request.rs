@@ -53,6 +53,31 @@ pub fn parse_inline_or_multibulk(
     }
 }
 
+/// Parse one complete RESP2 request from `buf`, reusing `out` as argv storage.
+///
+/// This is the hot-path variant used by the live server. It preserves the
+/// public [`parse_inline_or_multibulk`] contract but avoids allocating a fresh
+/// argv vector for every pipelined command. Argument byte strings are still
+/// owned `RedisString`s; moving those to borrowed slices is a larger command
+/// API change.
+pub fn parse_inline_or_multibulk_into(
+    buf: &[u8],
+    out: &mut Vec<RedisString>,
+) -> Result<Option<usize>, RedisError> {
+    out.clear();
+    let parsed = if buf.is_empty() {
+        Ok(None)
+    } else if buf[0] == b'*' {
+        parse_multibulk_into(buf, out)
+    } else {
+        parse_inline_into(buf, out)
+    };
+    if matches!(parsed, Ok(None) | Err(_)) {
+        out.clear();
+    }
+    parsed
+}
+
 /// Parse a multibulk request: `*N\r\n$L\r\n<bytes>\r\n…`.
 ///
 /// C: `networking.c::processMultibulkBuffer`.
@@ -118,6 +143,72 @@ fn parse_multibulk(buf: &[u8]) -> Result<Option<(Vec<RedisString>, usize)>, Redi
     Ok(Some((argv, pos)))
 }
 
+/// Same parser as [`parse_multibulk`], but pushes args into caller-owned argv
+/// storage.
+fn parse_multibulk_into(
+    buf: &[u8],
+    out: &mut Vec<RedisString>,
+) -> Result<Option<usize>, RedisError> {
+    let mut pos: usize = 1;
+
+    let (argc, after_argc) = match read_multibulk_count(buf, pos)? {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+    pos = after_argc;
+
+    if argc <= 0 {
+        return Ok(Some(pos));
+    }
+    if argc > PROTO_REQ_MULTIBULK_MAX_LEN {
+        return Err(RedisError::runtime(b"Protocol error: invalid multibulk length"));
+    }
+
+    out.reserve(argc as usize);
+    for _ in 0..argc {
+        if pos >= buf.len() {
+            return Ok(None);
+        }
+        if buf[pos] != b'$' {
+            let got = buf[pos];
+            let msg = format!("Protocol error: expected '$', got '{}'", got as char);
+            return Err(RedisError::runtime(msg));
+        }
+        pos += 1;
+
+        let (bulklen, after_len) = match read_bulk_length(buf, pos)? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        pos = after_len;
+
+        if bulklen < 0 || bulklen > PROTO_MAX_BULK_LEN {
+            return Err(RedisError::runtime(b"Protocol error: invalid bulk length"));
+        }
+        let bulklen = bulklen as usize;
+
+        let payload_end = pos
+            .checked_add(bulklen)
+            .ok_or_else(|| RedisError::runtime(b"Protocol error: bulk length overflow"))?;
+        let frame_end = payload_end
+            .checked_add(2)
+            .ok_or_else(|| RedisError::runtime(b"Protocol error: bulk length overflow"))?;
+        if frame_end > buf.len() {
+            return Ok(None);
+        }
+        if &buf[payload_end..frame_end] != b"\r\n" {
+            return Err(RedisError::runtime(
+                b"Protocol error: invalid CRLF in request",
+            ));
+        }
+
+        out.push(RedisString::from_bytes(&buf[pos..payload_end]));
+        pos = frame_end;
+    }
+
+    Ok(Some(pos))
+}
+
 /// Parse an inline command: whitespace-separated tokens ending in `\r\n` or `\n`.
 ///
 /// C: `networking.c::processInlineBuffer`.
@@ -143,6 +234,18 @@ fn parse_inline(buf: &[u8]) -> Result<Option<(Vec<RedisString>, usize)>, RedisEr
 
     let argv = split_inline_tokens(line)?;
     Ok(Some((argv, newline + 1)))
+}
+
+fn parse_inline_into(
+    buf: &[u8],
+    out: &mut Vec<RedisString>,
+) -> Result<Option<usize>, RedisError> {
+    let (argv, consumed) = match parse_inline(buf)? {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+    out.extend(argv);
+    Ok(Some(consumed))
 }
 
 /// Read a multibulk array count (`*N`) terminated by `\r\n` starting at `pos`.
@@ -416,6 +519,22 @@ mod tests {
         assert_eq!(argv[0].as_bytes(), b"SET");
         assert_eq!(argv[1].as_bytes(), b"foo");
         assert_eq!(argv[2].as_bytes(), b"bar");
+    }
+
+    #[test]
+    fn multibulk_into_reuses_argv_storage() {
+        let buf = b"*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n";
+        let mut argv = Vec::with_capacity(8);
+        argv.push(RedisString::from_bytes(b"stale"));
+        let cap = argv.capacity();
+
+        let n = parse_inline_or_multibulk_into(buf, &mut argv).unwrap().unwrap();
+
+        assert_eq!(n, buf.len());
+        assert!(argv.capacity() >= cap);
+        assert_eq!(argv.len(), 2);
+        assert_eq!(argv[0].as_bytes(), b"GET");
+        assert_eq!(argv[1].as_bytes(), b"key");
     }
 
     #[test]

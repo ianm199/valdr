@@ -1,8 +1,9 @@
 //! Global per-client metadata snapshot for cross-thread `CLIENT LIST` queries.
 //!
-//! Each connection thread registers itself on accept and updates its entry on
-//! every command dispatch. The `CLIENT LIST` handler on any thread can read a
-//! consistent snapshot of all live connections without holding the db lock.
+//! Each connection thread registers itself on accept and periodically updates
+//! its entry after processing a read batch. The `CLIENT LIST` handler on any
+//! thread can read a consistent snapshot of all live connections without
+//! holding the db lock.
 //!
 //! Layout:
 //!   * `ClientSnapshot` — immutable view of one client's current state.
@@ -49,11 +50,20 @@ impl ClientInfoRegistry {
         });
     }
 
-    /// Update the current command name for `id`.
-    pub fn set_cmd(&mut self, id: ClientId, cmd: &str) {
+    /// Update the externally visible command/db/blocking snapshot for `id`.
+    ///
+    /// This is intentionally batch-oriented rather than called for every
+    /// command in a pipeline. `CLIENT LIST` observes the last command completed
+    /// by the connection, which is the useful stable state for diagnostics and
+    /// avoids pushing a global mutex into every GET/SET hot path.
+    pub fn update_snapshot(&mut self, id: ClientId, cmd: &[u8], db_index: u32, blocked: bool) {
         if let Some(e) = self.entries.get_mut(&id) {
-            e.cmd = cmd.to_ascii_lowercase();
-            e.blocked = false;
+            e.cmd = cmd
+                .iter()
+                .map(|b| b.to_ascii_lowercase() as char)
+                .collect();
+            e.db_index = db_index;
+            e.blocked = blocked;
         }
     }
 
