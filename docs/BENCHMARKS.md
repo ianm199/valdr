@@ -126,6 +126,41 @@ large batches and valkey-rs hits the connection-serving path hard. That points
 at request draining, response flushing, and shared-state locking before it
 points at the command implementation itself.
 
+### Profiled hotspot run
+
+The first larger profiled run used commit `2709d1e`, 50 clients, pipeline 100,
+64-byte payloads, and `/usr/bin/sample` attached to the Rust server during each
+hot workload.
+
+| Workload | Requests | upstream Valkey (req/s) | valkey-rs (req/s) | ratio | upstream p99 (ms) | valkey-rs p99 (ms) |
+|---|---:|---:|---:|---:|---:|---:|
+| GET | 20,000,000 | 3,658,314 | 2,122,917 | 0.58x | 1.663 | 5.407 |
+| SET | 10,000,000 | 2,355,158 | 943,663 | 0.40x | 2.303 | 6.367 |
+| INCR | 10,000,000 | 3,178,640 | 1,047,559 | 0.33x | 1.751 | 5.855 |
+| PING_MBULK | 20,000,000 | 5,018,821 | 2,212,879 | 0.44x | 1.183 | 5.247 |
+
+The stack samples are wall-clock samples, so the top rows include blocked
+threads. That is still useful here because the blocked time is exactly the
+architecture question. Across GET/SET/INCR/PING, the dominant non-idle leaf is
+`__psynch_mutexwait`, followed by socket receive/write. The hottest Rust frames
+were:
+
+| Workload | Top Rust frames from sampled stacks |
+|---|---|
+| GET | `redis_commands::dispatch::dispatch_command_name`, `redis_protocol::request::parse_inline_or_multibulk_into`, `redis_protocol::request::read_resp_integer`, allocator frames |
+| SET | `redis_core::replication::ReplicationState::append_to_backlog`, `redis_commands::dispatch::dispatch_command_name`, hasher/format/allocator frames |
+| INCR | `redis_commands::dispatch::dispatch_command_name`, hasher frames, `redis_core::replication::ReplicationState::append_to_backlog`, format/allocator frames |
+| PING_MBULK | `redis_commands::dispatch::dispatch_command_name`, `redis_protocol::request::parse_inline_or_multibulk_into`, memcpy/allocator frames |
+
+The practical read: the profiler agrees with the architecture-stage conclusion.
+The biggest remaining gap is shared-state waiting under high fan-in. The best
+small/medium packet candidate is narrower than the full runtime rewrite:
+investigate write-command propagation overhead when AOF is off and no replicas
+are connected, because SET/INCR both show replication backlog work in the hot
+sample. The harness gate for that packet should be strict: oracle smoke, RDB/AOF
+tests if touched, replication tests if backlog semantics change, and this same
+profiled hotspot runner.
+
 ### Harness-driven optimization log
 
 The profile matrix turned the vague "simple commands are slow" complaint into a
