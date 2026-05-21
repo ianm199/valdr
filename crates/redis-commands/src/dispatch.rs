@@ -49,15 +49,41 @@ struct CommandMetadata {
     acl_categories: u64,
 }
 
+struct RuntimeDispatchEntry {
+    entry: &'static DispatchEntry,
+    metadata: CommandMetadata,
+}
+
 static COMMAND_METADATA_TABLE: OnceLock<Vec<(&'static [u8], CommandMetadata)>> = OnceLock::new();
+static RUNTIME_DISPATCH_TABLE: OnceLock<Vec<RuntimeDispatchEntry>> = OnceLock::new();
 
 /// Look up the handler for `name` (case-insensitive ASCII).
 ///
 /// Returns `Some(entry)` if a handler is registered, `None` otherwise.
 pub fn lookup_command(name: &[u8]) -> Option<&'static DispatchEntry> {
-    HANDLERS
-        .iter()
-        .find(|entry| ascii_eq_ignore_case(entry.name, name))
+    lookup_runtime_command(name).map(|row| row.entry)
+}
+
+fn lookup_runtime_command(name: &[u8]) -> Option<&'static RuntimeDispatchEntry> {
+    let table = runtime_dispatch_table();
+    table
+        .binary_search_by(|row| ascii_casecmp(row.entry.name, name))
+        .map(|idx| &table[idx])
+        .ok()
+}
+
+fn runtime_dispatch_table() -> &'static [RuntimeDispatchEntry] {
+    RUNTIME_DISPATCH_TABLE.get_or_init(|| {
+        let mut rows: Vec<RuntimeDispatchEntry> = HANDLERS
+            .iter()
+            .map(|entry| RuntimeDispatchEntry {
+                entry,
+                metadata: command_metadata(entry.name),
+            })
+            .collect();
+        rows.sort_by(|left, right| ascii_casecmp(left.entry.name, right.entry.name));
+        rows
+    })
 }
 
 /// Dispatch one command using `ctx.client.argv[0]` as the command name.
@@ -100,11 +126,12 @@ pub fn dispatch(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 /// argv without re-entering the queue logic. Times the handler execution and
 /// records an entry in the global slowlog when the duration meets the threshold.
 pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> RedisResult<()> {
-    let entry = match lookup_command(name) {
+    let runtime_entry = match lookup_runtime_command(name) {
         Some(e) => e,
         None => return Err(unknown_command_error(name)),
     };
-    let metadata = command_metadata(name);
+    let entry = runtime_entry.entry;
+    let metadata = runtime_entry.metadata;
 
     if !metadata.no_auth {
         if let Some(noauth_reply) = enforce_acl_gate(ctx, name, metadata.acl_categories) {
@@ -138,10 +165,19 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
     } else {
         None
     };
-    let should_propagate = result.is_ok() && metadata.write && !ctx.client_ref().is_replica;
+    let replication = if result.is_ok() && metadata.write && !ctx.client_ref().is_replica {
+        let repl = redis_core::replication::global_replication_state();
+        if repl.should_propagate_writes() {
+            Some(repl)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     let mut argv_snapshot: Option<Vec<RedisString>> = None;
-    if should_record_slowlog || aof.is_some() || should_propagate {
+    if should_record_slowlog || aof.is_some() || replication.is_some() {
         argv_snapshot = Some(snapshot_argv(ctx));
     }
 
@@ -163,9 +199,9 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
             }
         }
     }
-    if should_propagate {
+    if let Some(repl) = replication {
         if let Some(argv) = argv_snapshot.as_ref() {
-            propagate_write_to_replicas(argv);
+            propagate_write_to_replicas(&repl, argv);
         }
     }
 
@@ -399,8 +435,10 @@ fn enforce_maxmemory_gate(ctx: &mut CommandContext<'_>, is_denyoom_command: bool
 /// executed by a non-replica client. Failures to deliver to a specific
 /// replica are logged and skipped; they are non-fatal because the replica
 /// can re-sync via PSYNC.
-fn propagate_write_to_replicas(argv: &[RedisString]) {
-    let repl = redis_core::replication::global_replication_state();
+fn propagate_write_to_replicas(
+    repl: &redis_core::replication::ReplicationState,
+    argv: &[RedisString],
+) {
     let argv_bytes = crate::aof::encode_resp_command(argv);
     repl.append_to_backlog(&argv_bytes);
     let guard = match repl.replicas.lock() {
@@ -776,6 +814,19 @@ mod tests {
     #[test]
     fn unknown_command_is_none() {
         assert!(lookup_command(b"NOTACOMMAND").is_none());
+    }
+
+    #[test]
+    fn runtime_dispatch_table_is_sorted_for_binary_search() {
+        let table = runtime_dispatch_table();
+        for pair in table.windows(2) {
+            assert!(
+                ascii_casecmp(pair[0].entry.name, pair[1].entry.name) == Ordering::Less,
+                "{} should sort before {} with no duplicate handler names",
+                std::str::from_utf8(pair[0].entry.name).unwrap_or("<bytes>"),
+                std::str::from_utf8(pair[1].entry.name).unwrap_or("<bytes>")
+            );
+        }
     }
 
     #[test]

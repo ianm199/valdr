@@ -349,6 +349,39 @@ impl ReplicationState {
         new_offset
     }
 
+    /// True when a successful write command needs replication-stream work.
+    ///
+    /// Upstream Valkey does not format and feed the replication stream when it
+    /// is a standalone primary with AOF off, no backlog, and no connected
+    /// replicas. The Rust port always has a `ReplBacklog` value allocated for
+    /// simpler ownership, so "backlog exists" maps to "history is active".
+    pub fn should_propagate_writes(&self) -> bool {
+        if self.repl_state.load(Ordering::Relaxed) != repl_state_code::MASTER {
+            return false;
+        }
+
+        let has_replicas = match self.replicas.lock() {
+            Ok(g) => !g.is_empty(),
+            Err(p) => !p.into_inner().is_empty(),
+        };
+        if has_replicas {
+            return true;
+        }
+
+        let backlog_active = match self.backlog.lock() {
+            Ok(g) => g.histlen > 0,
+            Err(p) => p.into_inner().histlen > 0,
+        };
+        if backlog_active {
+            return true;
+        }
+
+        match self.repl_bgsave_job.lock() {
+            Ok(g) => g.is_some(),
+            Err(p) => p.into_inner().is_some(),
+        }
+    }
+
     /// Snapshot `(min_offset, master_offset, backlog_histlen, backlog_size)`
     /// in one lock acquisition. Used by `INFO replication` so the four values
     /// are consistent with each other.
@@ -696,6 +729,19 @@ mod tests {
         let new_off = st.append_to_backlog(b"abc");
         assert_eq!(new_off, 3);
         assert_eq!(st.master_offset(), 3);
+    }
+
+    #[test]
+    fn standalone_primary_does_not_need_replication_propagation() {
+        let st = ReplicationState::new(generate_runid(), 1024);
+        assert!(!st.should_propagate_writes());
+
+        st.append_to_backlog(b"active");
+        assert!(st.should_propagate_writes());
+
+        st.repl_state
+            .store(repl_state_code::REPLICA_ONLINE, Ordering::Relaxed);
+        assert!(!st.should_propagate_writes());
     }
 
     #[test]
