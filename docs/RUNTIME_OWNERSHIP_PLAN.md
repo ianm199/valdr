@@ -199,29 +199,143 @@ Cons:
 Recommendation: reject for public numbers. A private scratch experiment is fine,
 but it should not land as the default benchmark path.
 
-## Proposed Harness Packet For A Real Rewrite
+## How To Reopen This With The Harness
 
-If we choose to spend on #5 later, create a packet family rather than one giant
-agent task:
+If we choose to spend on #5 later, reopen it as an architect-led packet family,
+not as one broad "make Redis faster" prompt.
 
-```json
-{"id":"runtime-owner-0-design","role":"architect","selector":"manual"}
-{"id":"runtime-owner-1-client-table","role":"translator","selector":"manual"}
-{"id":"runtime-owner-2-nonblocking-poller","role":"translator","selector":"manual"}
-{"id":"runtime-owner-3-command-context","role":"translator","selector":"manual"}
-{"id":"runtime-owner-4-background-events","role":"translator","selector":"manual"}
-{"id":"runtime-owner-5-pubsub-blocking-replication","role":"translator","selector":"manual"}
-{"id":"runtime-owner-6-bench-and-soak","role":"runner","selector":"nightly"}
+### 1. Add architecture-stage artifacts
+
+Create these files first:
+
+```text
+harness/architecture/decisions/runtime-ownership.md
+harness/architecture/lifecycle-map.toml
+harness/architecture/object-vocabulary.tsv
 ```
 
-Required gates:
+Minimum `runtime-ownership.md` contents:
 
-- existing smoke oracle: `21 / 21`;
-- RDB bidirectional oracle: no regressions;
-- official TCL surveyed files: no regressions;
-- profile matrix: update the benchmark table every iteration;
-- one 30-minute soak before claiming production performance;
-- no command-specific benchmark bypasses.
+```text
+Decision:
+- Normal command execution is owned by RuntimeOwner.
+- RuntimeOwner owns ClientTable, RedisDb list, PubSubRegistry,
+  BlockedKeysIndex, timers, slowlog, and ordinary reply flushing.
+- Background helpers send RuntimeEvent messages into RuntimeOwner.
+
+Non-goals:
+- No benchmark-only GET/SET/PING/INCR bypass.
+- No sharded command execution in this milestone.
+- TLS may stay on the old path until runtime-owner-5 unless explicitly moved.
+
+Gates:
+- smoke oracle 21/21
+- RDB bidirectional oracle unchanged
+- official surveyed TCL files unchanged
+- profile matrix updated after every packet
+```
+
+Minimum object vocabulary:
+
+```tsv
+name	kind	owner	notes
+RuntimeOwner	struct	crates/redis-server/src/runtime.rs	Owns normal command execution.
+ClientTable	struct	crates/redis-server/src/runtime.rs	Owns live client slots and socket state.
+RuntimeEvent	enum	crates/redis-server/src/runtime.rs	Background-to-owner event channel.
+CommandContext	struct	crates/redis-core/src/command_context.rs	Will point at owner/client id, not raw shared lock.
+RedisDb	struct	crates/redis-core/src/db.rs	Moves from Arc<Mutex<_>> hot path to owner-held state.
+```
+
+### 2. Add explicit packet rows
+
+The packet graph should be materialized in `harness/work-packets.jsonl`.
+Sketch:
+
+```json
+{"schema_version":1,"id":"runtime-owner-0-design","phase":6,"role":"architect","selector":"manual","targets":["harness/architecture/decisions/runtime-ownership.md","harness/work-packets.jsonl","harness/runners.toml"],"capabilities":["runtime-owner"],"resources":["runtime-architecture"],"exclusive":true,"cost_hint":"medium"}
+{"schema_version":1,"id":"runtime-owner-1-client-table","phase":6,"role":"translator","selector":"manual","depends_on":["runtime-owner-0-design"],"targets":["crates/redis-server/src/runtime.rs","crates/redis-server/src/main.rs"],"capabilities":["runtime-owner"],"resources":["runtime-owner"],"cost_hint":"large"}
+{"schema_version":1,"id":"runtime-owner-2-nonblocking-poller","phase":6,"role":"translator","selector":"manual","depends_on":["runtime-owner-1-client-table"],"targets":["crates/redis-server/src/runtime.rs","crates/redis-server/Cargo.toml","Cargo.lock"],"capabilities":["runtime-owner"],"resources":["runtime-owner","dependency-policy"],"cost_hint":"large"}
+{"schema_version":1,"id":"runtime-owner-3-command-context","phase":6,"role":"translator","selector":"manual","depends_on":["runtime-owner-2-nonblocking-poller"],"targets":["crates/redis-core/src/command_context.rs","crates/redis-commands/src/dispatch.rs","crates/redis-server/src/runtime.rs"],"capabilities":["runtime-owner"],"resources":["command-context","runtime-owner"],"cost_hint":"large"}
+{"schema_version":1,"id":"runtime-owner-4-background-events","phase":6,"role":"translator","selector":"manual","depends_on":["runtime-owner-3-command-context"],"targets":["crates/redis-server/src/runtime.rs","crates/redis-core/src/expire.rs","crates/redis-core/src/blocked_keys.rs","crates/redis-commands/src/replica_dialer.rs"],"capabilities":["runtime-owner"],"resources":["runtime-owner","background-events"],"cost_hint":"large"}
+{"schema_version":1,"id":"runtime-owner-5-pubsub-blocking-replication","phase":6,"role":"translator","selector":"manual","depends_on":["runtime-owner-4-background-events"],"targets":["crates/redis-server/src/runtime.rs","crates/redis-commands/src/pubsub.rs","crates/redis-commands/src/list.rs","crates/redis-core/src/replication.rs"],"capabilities":["runtime-owner"],"resources":["runtime-owner","pubsub","blocking","replication"],"cost_hint":"large"}
+{"schema_version":1,"id":"runtime-owner-6-bench-and-soak","phase":6,"role":"runner","selector":"nightly","depends_on":["runtime-owner-5-pubsub-blocking-replication"],"runner":"profile-matrix-and-soak","capabilities":["runtime-owner"],"cost_hint":"small"}
+```
+
+The scheduler should treat these as mostly serial because they all lock the
+same `runtime-owner` resource. Parallelism can still happen around runners,
+docs, or independent command metadata cleanup.
+
+### 3. Add runner gates
+
+Add or extend `harness/runners.toml` with:
+
+```toml
+[[runner]]
+id = "runtime-owner-smoke"
+kind = "ExternalSuite"
+surface = "correctness"
+method = "wire-oracle"
+command = ["bash", "harness/oracle/smoke.sh", "--skip-build"]
+
+[[runner]]
+id = "runtime-owner-profile-matrix"
+kind = "ExternalSuite"
+surface = "performance"
+method = "bench-load"
+command = ["bash", "harness/bench/run-profile-matrix.sh"]
+
+[[runner]]
+id = "runtime-owner-soak-30m"
+kind = "ExternalSuite"
+surface = "robustness"
+method = "soak"
+command = ["bash", "harness/bench/run-soak.sh", "--duration", "1800"]
+```
+
+If `run-soak.sh` does not exist yet, create that as its own runner packet
+before claiming production performance.
+
+### 4. Packet acceptance criteria
+
+Every implementation packet must pass:
+
+- `cargo test -p redis-core -p redis-protocol -p redis-server`;
+- `bash harness/oracle/smoke.sh --skip-build`;
+- no RDB bidirectional oracle regression if persistence code is touched;
+- no command-specific benchmark bypass;
+- no public benchmark table update unless the normal product path produced
+  the number.
+
+The performance runner should append a profile-matrix evidence blob after each
+packet. The docs table should be updated only after the correctness gates pass.
+
+### 5. Human decisions before dispatch
+
+The first architect packet should force these decisions into
+`runtime-ownership.md`:
+
+1. Poller dependency: use `mio`, raw platform polling, or another runtime?
+2. TLS migration: move TLS into the owner loop now, or keep the old TLS path
+   temporarily and mark it as a separate non-optimized path?
+3. Background events: use a single `RuntimeEvent` channel, per-subsystem
+   channels, or direct timer integration?
+4. Sharding: explicitly out of scope for this milestone?
+5. Public claim: are performance numbers alpha telemetry or a speed-parity
+   claim?
+
+Do not dispatch translators until these are answered.
+
+### 6. Stop conditions
+
+Abort or quarantine the chain if any of these happen:
+
+- a packet special-cases benchmark commands outside normal dispatch;
+- smoke oracle regresses and cannot be restored in the same packet;
+- the implementation introduces a second live DB model without a migration
+  plan;
+- pub/sub, blocking wakeups, or replication become "temporarily disabled" in
+  the default product path;
+- benchmark rows improve but conformance evidence is missing.
 
 The packet should not be "make Redis faster." It should be "move command
 execution ownership to one runtime owner while preserving the command surface."
