@@ -17,6 +17,16 @@ bash harness/bench/run.sh
 # default: -n 1_000_000 -c 50 -P 100 -d 64 -t <standard suite>
 ```
 
+There is also a profile-matrix runner:
+
+```bash
+bash harness/bench/run-profile-matrix.sh
+```
+
+That runner executes smaller named profiles with different pipeline depths and
+emits a typed JSON result on stdout plus a TSV under
+`harness/bench/results/<UTC>-<commit>-profile-matrix.tsv`.
+
 The script writes a TSV to `harness/bench/results/<UTC>-<commit>.tsv`
 recording the request count, client count, pipeline depth, payload size,
 hardware fingerprint (CPU + OS + arch), and the commit hash so results
@@ -48,15 +58,56 @@ pipeline depth 100, 64-byte payload
 | LRANGE_100              | 111,669   | 105,988 | **0.95×** | 27.39 | 28.74 |
 | LRANGE_300              | 36,677    | 52,383  | **1.43×** ⚡ | 69.06 | 189.57 |
 
+## Profile matrix (2026-05-21)
+
+The original headline run used a deep pipeline (`-P 100`) for every simple
+command. That is useful, but it hides the distinction between "this command is
+intrinsically slow" and "this architecture does not drain pipelined requests
+like upstream Valkey." The profile matrix runs the same binary at pipeline 1,
+16, and 100.
+
+**Hardware:** Apple M3 Max, macOS Darwin 24.3.0 (arm64)
+**valkey-rs commit:** `47915ba`
+
+| Profile | Command | upstream Valkey (req/s) | valkey-rs (req/s) | ratio | upstream p99 (ms) | valkey-rs p99 (ms) |
+|---|---|---:|---:|---:|---:|---:|
+| core-p1 | PING_MBULK | 146,628 | 132,275 | **0.90×** | 1.047 | 0.359 |
+| core-p1 | SET | 173,010 | 136,986 | **0.79×** | 0.383 | 0.351 |
+| core-p1 | GET | 161,290 | 141,243 | **0.88×** | 0.367 | 0.319 |
+| core-p1 | INCR | 168,919 | 136,240 | **0.81×** | 0.375 | 0.343 |
+| core-p16 | PING_MBULK | 2,380,953 | 254,453 | 0.11× | 0.551 | 2.895 |
+| core-p16 | SET | 1,503,759 | 184,672 | 0.12× | 0.719 | 1.903 |
+| core-p16 | GET | 2,105,263 | 209,424 | 0.10× | 0.543 | 3.055 |
+| core-p16 | INCR | 2,247,191 | 191,388 | 0.09× | 0.431 | 1.807 |
+| core-p100 | PING_MBULK | 5,128,205 | 250,941 | 0.05× | 1.183 | 12.223 |
+| core-p100 | SET | 2,531,646 | 187,970 | 0.07× | 2.239 | 1.743 |
+| core-p100 | GET | 3,333,334 | 220,994 | 0.07× | 1.759 | 10.879 |
+| core-p100 | INCR | 3,389,831 | 195,312 | 0.06× | 1.679 | 1.863 |
+| range-heavy-p16 | LRANGE_100 | 165,837 | 92,851 | 0.56× | 5.663 | 13.759 |
+| range-heavy-p16 | LRANGE_300 | 38,640 | 42,553 | **1.10×** | 13.439 | 47.871 |
+
+The profile-matrix summary from this run:
+
+```text
+median 0.11x, min 0.05x, max 1.10x; GET p1 0.88x; GET p100 0.07x
+```
+
+The read I would trust: this is not primarily "Rust data structures cannot do
+GET." At pipeline 1, GET is close to upstream. The cliff appears when upstream
+Valkey can amortize event-loop work across large batches and valkey-rs stays
+near a ~200k req/s ceiling on simple commands. That points at connection
+serving, request draining, response flushing, and shared-state locking before it
+points at the command implementation itself.
+
 ## Reading this honestly
 
 **Where we're slow (most simple commands, ~5-10% of upstream throughput):**
-Per-command mutex lock acquisition dominates. Real Valkey is a
-single-threaded event loop with no locks; we hold an `Arc<Mutex<RedisDb>>`
-per request. On tight pipelined workloads where each operation is
-~nanoseconds of work, the mutex acquire/release dwarfs the actual data
-work. This is a known cost of safe-Rust shared-state design and is the
-biggest perf target on the roadmap.
+The profile matrix refines the diagnosis. The deep-pipeline gap is real, but
+pipeline-1 simple ops are 0.79-0.90x upstream. That makes "per-command mutex
+acquisition" a likely contributor, not the whole explanation. The larger issue
+is that upstream Valkey's single event loop drains and writes pipelined command
+batches extremely efficiently, while valkey-rs still uses a blocking
+thread-per-connection shape with shared global state.
 
 **Where we're competitive (LRANGE_100, ~95% of upstream):**
 Once each operation does meaningful work (return 100 elements, ~6.4 KB
@@ -110,6 +161,9 @@ bash harness/bench/run.sh --requests 50000 --pipeline 16
 # Single command, no pipelining (latency-focused)
 bash harness/bench/run.sh --requests 100000 --pipeline 1 --tests set,get
 
+# Profile matrix: pipeline 1 vs 16 vs 100, plus range-heavy workload
+bash harness/bench/run-profile-matrix.sh
+
 # Custom workload
 bash harness/bench/run.sh --requests 500000 --clients 100 --pipeline 50 \
     --tests "set,get,zadd,zrange,xadd,xread"
@@ -132,7 +186,8 @@ maintainer can diff runs across hardware or commits.
   p99/max but not p999 or p9999. For latency-sensitive workloads, a
   proper HDR histogram with `memtier_benchmark` is the next tool.
 - **Multi-client mixed workloads.** Reads + writes + range scans
-  concurrently — closer to a real app. `memtier_benchmark` again.
+  concurrently against the same server process — closer to a real app.
+  `memtier_benchmark` again.
 - **TLS overhead.** All numbers here are plain TCP.
 - **Persistence on the hot path.** AOF write costs aren't measured;
   bench runs use `--rdb-disabled --appendonly no` for both sides.

@@ -116,6 +116,18 @@ pipeline 100, 64-byte payload):
 Per-op latency p99 is mostly competitive (within 2× of upstream) even
 when throughput is not — the gap on simple ops is dominated by per-command
 mutex acquisition, which amortizes away on commands that do real work.
+
+A newer profile-matrix benchmark makes the architecture cliff clearer:
+unpipelined simple commands are much closer to upstream, but deep pipelining
+falls back to roughly the original headline gap.
+
+| Profile | Command | upstream Valkey | valkey-rs | ratio |
+|---|---|---:|---:|---:|
+| 50 clients, pipeline 1 | GET | 161k req/s | 141k req/s | **0.88×** |
+| 50 clients, pipeline 16 | GET | 2.11M req/s | 209k req/s | 0.10× |
+| 50 clients, pipeline 100 | GET | 3.33M req/s | 221k req/s | 0.07× |
+| 50 clients, pipeline 16 | LRANGE_300 | 38.6k req/s | 42.6k req/s | **1.10×** |
+
 **No perf tuning has been done yet.** See [`docs/BENCHMARKS.md`][bench]
 for full methodology, the complete table, and the optimization roadmap.
 
