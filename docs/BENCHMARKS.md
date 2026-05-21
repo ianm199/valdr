@@ -1,8 +1,9 @@
 # Benchmarks
 
-First measurement against upstream Valkey. **No performance tuning has
-been done yet** — these are baseline numbers from the same alpha binary
-that the conformance tests run against.
+This document keeps both the first alpha baseline and the harness-driven
+performance iterations against upstream Valkey. The important read is the
+trajectory: the same profile matrix is rerun after each focused packet so
+performance work stays tied to a reproducible objective.
 
 ## Methodology
 
@@ -67,29 +68,30 @@ like upstream Valkey." The profile matrix runs the same binary at pipeline 1,
 16, and 100.
 
 **Hardware:** Apple M3 Max, macOS Darwin 24.3.0 (arm64)
-**valkey-rs revision:** profile-matrix runner at `a5401a1`, plus the TCP-loop optimizations described below
+**valkey-rs revision:** `e8d347e`, after the TCP-loop and dispatch hot-path
+optimizations described below
 
 | Profile | Command | upstream Valkey (req/s) | valkey-rs (req/s) | ratio | upstream p99 (ms) | valkey-rs p99 (ms) |
 |---|---|---:|---:|---:|---:|---:|
-| core-p1 | PING_MBULK | 182,482 | 139,276 | 0.76× | 0.623 | 0.959 |
-| core-p1 | SET | 163,399 | 138,889 | 0.85× | 0.375 | 0.295 |
-| core-p1 | GET | 196,850 | 137,741 | 0.70× | 0.335 | 0.391 |
-| core-p1 | INCR | 178,571 | 133,689 | 0.75× | 0.343 | 0.711 |
-| core-p16 | PING_MBULK | 2,739,727 | 657,895 | 0.24× | 0.471 | 4.191 |
-| core-p16 | SET | 1,724,138 | 522,194 | 0.30× | 0.519 | 1.591 |
-| core-p16 | GET | 2,150,538 | 787,402 | 0.37× | 0.455 | 7.903 |
-| core-p16 | INCR | 2,222,222 | 519,481 | 0.23× | 0.431 | 1.583 |
-| core-p100 | PING_MBULK | 5,128,205 | 909,091 | 0.18× | 1.183 | 5.823 |
-| core-p100 | SET | 2,500,000 | 740,741 | 0.30× | 2.239 | 6.847 |
-| core-p100 | GET | 3,389,831 | 956,938 | 0.28× | 1.759 | 5.343 |
-| core-p100 | INCR | 3,389,831 | 746,269 | 0.22× | 1.631 | 6.815 |
-| range-heavy-p16 | LRANGE_100 | 164,744 | 162,075 | 0.98× | 5.855 | 9.791 |
-| range-heavy-p16 | LRANGE_300 | 40,951 | 66,490 | **1.62×** | 13.055 | 12.159 |
+| core-p1 | PING_MBULK | 163,934 | 139,276 | 0.85× | 0.599 | 0.247 |
+| core-p1 | SET | 170,068 | 138,122 | 0.81× | 0.399 | 0.319 |
+| core-p1 | GET | 187,970 | 137,741 | 0.73× | 0.335 | 0.279 |
+| core-p1 | INCR | 159,744 | 133,333 | 0.83× | 0.375 | 0.287 |
+| core-p16 | PING_MBULK | 2,352,941 | 1,785,714 | 0.76× | 0.503 | 1.279 |
+| core-p16 | SET | 1,680,672 | 816,326 | 0.49× | 0.655 | 5.823 |
+| core-p16 | GET | 2,083,333 | 1,298,701 | 0.62× | 0.583 | 3.007 |
+| core-p16 | INCR | 2,150,538 | 892,857 | 0.42× | 0.551 | 3.391 |
+| core-p100 | PING_MBULK | 5,128,205 | 2,702,703 | 0.53× | 1.127 | 7.231 |
+| core-p100 | SET | 2,500,000 | 1,075,269 | 0.43× | 2.271 | 5.055 |
+| core-p100 | GET | 3,278,689 | 2,061,856 | 0.63× | 1.807 | 2.591 |
+| core-p100 | INCR | 3,225,806 | 1,257,862 | 0.39× | 1.943 | 5.439 |
+| range-heavy-p16 | LRANGE_100 | 152,207 | 181,159 | **1.19×** | 6.495 | 10.111 |
+| range-heavy-p16 | LRANGE_300 | 38,551 | 64,935 | **1.68×** | 13.503 | 22.783 |
 
 The profile-matrix summary from this run:
 
 ```text
-median 0.33x, min 0.18x, max 1.62x; GET p1 0.70x; GET p100 0.28x
+median 0.63x, min 0.39x, max 1.68x; GET p1 0.73x; GET p100 0.63x
 ```
 
 The read I would trust: this is not primarily "Rust data structures cannot do
@@ -113,10 +115,11 @@ same profile matrix and kept the table current after each pass.
 | 3 | Direct-write ordinary plain-TCP replies | median 0.15x, min 0.07x, max 1.37x | 454,545 req/s (0.14x) | 420,168 req/s (0.08x) | 52,411 req/s (1.37x) |
 | 4 | Avoid duplicate command-name lowercase | median 0.17x, min 0.08x, max 1.24x | 498,753 req/s (0.15x) | 447,427 req/s (0.09x) | 47,984 req/s (1.24x) |
 | 5 | Architecture-first hot path packet: batch client-info snapshots, reuse argv storage, `Instant` timing, batch DB0 lock | median 0.33x, min 0.18x, max 1.62x | 956,938 req/s (0.28x) | 909,091 req/s (0.18x) | 66,490 req/s (1.62x) |
+| 6 | Dispatch metadata cache + lazy argv snapshot for slowlog/AOF/replication | median 0.63x, min 0.39x, max 1.68x | 2,061,856 req/s (0.63x) | 2,702,703 req/s (0.53x) | 64,935 req/s (1.68x) |
 
 The individual runs are noisy, especially on loopback with short benchmark
 windows, so the useful read is the trend: deep-pipeline GET moved from about
-221k req/s to about 957k req/s. The exact LRANGE number bounces because it is
+221k req/s to about 2.06M req/s. The exact LRANGE number bounces because it is
 already doing enough response work that the TCP-loop patches are not the main
 determinant.
 
@@ -168,13 +171,15 @@ a runtime-owner packet family, not another micro-optimization.
 
 ## Reading this honestly
 
-**Where we're still slow (most simple commands, ~18-37% of upstream throughput under pipeline):**
+**Where we're still slower (simple commands, ~39-76% of upstream throughput under pipeline):**
 The profile matrix refines the diagnosis. The deep-pipeline gap is real, but
-pipeline-1 simple ops are roughly 0.70-0.85x upstream. That makes "per-command mutex
-acquisition" a likely contributor, not the whole explanation. The larger issue
-is that upstream Valkey's single event loop drains and writes pipelined command
-batches extremely efficiently, while valkey-rs still uses a blocking
-thread-per-connection shape with shared global state.
+pipeline-1 simple ops are roughly 0.73-0.85x upstream and deep-pipeline GET is
+now about 0.63x. That makes "per-command Rust overhead" much less convincing
+as the primary explanation than it was at baseline. The remaining gap is
+mostly write-command bookkeeping, tail latency under contention, and the fact
+that upstream Valkey's single event loop still drains and writes pipelined
+command batches more predictably than valkey-rs's blocking thread-per-connection
+shape with shared global state.
 
 **Where we're competitive (LRANGE_100, ~95% of upstream):**
 Once each operation does meaningful work (return 100 elements, ~6.4 KB
@@ -200,10 +205,11 @@ Roadmap to closer-to-parity throughput, in rough effort order:
    runtime owner/event loop so clients and DB state are not coordinated through
    one `Arc<Mutex<RedisDb>>` per DB. This is the real #5, and it needs its own
    packet graph.
-2. **Command metadata cleanup** — avoid repeated generated-command scans in
-   dispatch and make read/write/denyoom/noauth flags available from the
-   dispatch entry. This transfers into any runtime model.
-3. **Profile-guided optimization** — flamegraphs on the GET hot path,
+2. **Handler lookup and write-propagation fast paths** — command metadata is
+   now cached, but handler lookup still linearly scans `HANDLERS`, and write
+   commands still pay AOF/replication-path checks. These are smaller than the
+   runtime rewrite and should be gated by the same oracle + profile matrix.
+3. **Profile-guided optimization** — flamegraphs on the GET/SET/INCR hot path,
    evaluate `jemalloc`/`mimalloc`, and keep updating the profile matrix after
    each patch.
 4. **Connection scalability** — after runtime ownership is chosen, evaluate

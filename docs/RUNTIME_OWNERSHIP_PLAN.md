@@ -9,15 +9,17 @@ local hot-path patches and change who owns sockets, clients, and databases.
 
 Do not implement the runtime-ownership rewrite as a same-day Redis patch.
 
-The first four no-regret optimizations already landed:
+The no-regret optimizations already landed:
 
 - batch replies per socket read;
 - drain the query buffer once per read batch;
 - direct-write ordinary request/reply traffic;
 - batch client-info snapshots, reuse argv storage, use monotonic timing, and
-  hold the DB0 lock across safe read batches.
+  hold the DB0 lock across safe read batches;
+- cache generated command metadata in dispatch and avoid argv snapshots unless
+  slowlog, AOF, or replication need them.
 
-Those moved deep-pipeline GET from roughly 221k req/s to roughly 957k req/s.
+Those moved deep-pipeline GET from roughly 221k req/s to roughly 2.06M req/s.
 That is a real improvement, and it also exposes the remaining architecture
 gap: valkey-rs still has blocking per-client threads sharing
 `Arc<Mutex<RedisDb>>`, while upstream Valkey drains many sockets and executes
