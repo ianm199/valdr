@@ -118,19 +118,21 @@ when throughput is not — the gap on simple ops is dominated by per-command
 mutex acquisition, which amortizes away on commands that do real work.
 
 A newer profile-matrix benchmark makes the architecture cliff clearer and gives
-the harness a performance objective it can optimize. The first optimization it
-drove was batching plain-TCP replies for all commands parsed from a socket read,
-instead of flushing through the writer thread after every command.
+the harness a performance objective it can optimize. The first tuning passes
+focused on the plain-TCP loop: batch replies for all commands parsed from a
+socket read, drain the query buffer once per read batch, direct-write ordinary
+request/reply traffic, and avoid duplicate command-name lowercasing.
 
 | Profile | Command | upstream Valkey | valkey-rs | ratio |
 |---|---|---:|---:|---:|
-| 50 clients, pipeline 1 | GET | 193k req/s | 128k req/s | 0.66× |
-| 50 clients, pipeline 16 | GET | 2.20M req/s | 300k req/s | 0.14× |
-| 50 clients, pipeline 100 | GET | 3.39M req/s | 407k req/s | 0.12× |
-| 50 clients, pipeline 16 | LRANGE_300 | 38.5k req/s | 50.0k req/s | **1.30×** |
+| 50 clients, pipeline 1 | GET | 196k req/s | 141k req/s | 0.72× |
+| 50 clients, pipeline 16 | GET | 2.11M req/s | 350k req/s | 0.17× |
+| 50 clients, pipeline 100 | GET | 3.28M req/s | 499k req/s | 0.15× |
+| 50 clients, pipeline 16 | LRANGE_300 | 38.7k req/s | 48.0k req/s | **1.24×** |
 
-**No perf tuning has been done yet.** See [`docs/BENCHMARKS.md`][bench]
-for full methodology, the complete table, and the optimization roadmap.
+The optimization log moved deep-pipeline GET from about 221k req/s to about
+499k req/s. See [`docs/BENCHMARKS.md`][bench] for full methodology, each
+iteration's table, and the optimization roadmap.
 
 [bench]: docs/BENCHMARKS.md
 

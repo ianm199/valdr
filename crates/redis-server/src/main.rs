@@ -950,11 +950,12 @@ fn run_client_loop(
         client.query_buf.extend_from_slice(&read_buf[..n]);
 
         let mut disconnect = false;
+        let mut consumed_total = 0usize;
         loop {
-            let parsed = parse_inline_or_multibulk(&client.query_buf);
+            let parsed = parse_inline_or_multibulk(&client.query_buf[consumed_total..]);
             match parsed {
                 Ok(Some((argv, consumed))) => {
-                    client.query_buf.drain(..consumed);
+                    consumed_total += consumed;
                     if argv.is_empty() {
                         continue;
                     }
@@ -963,26 +964,30 @@ fn run_client_loop(
                 Ok(None) => break,
                 Err(err) => {
                     queue_error_reply(client, &err);
-                    let _ = flush_reply(client, outbound);
+                    let _ = flush_reply_fast(client, outbound);
                     disconnect = true;
                     break;
                 }
             }
 
             // Batch all replies produced by commands already present in this
-            // read. Flushing per command destroys pipelined throughput by
-            // turning one client read into many writer-thread sends.
+            // read. Draining query_buf per command also destroys pipelined
+            // throughput by repeatedly memmoving the unread tail.
             if client.should_close {
                 disconnect = true;
                 break;
             }
         }
 
+        if consumed_total > 0 {
+            client.query_buf.drain(..consumed_total);
+        }
+
         if disconnect {
             break;
         }
 
-        if !flush_reply(client, outbound) {
+        if !flush_reply_fast(client, outbound) {
             break;
         }
 
@@ -1146,12 +1151,8 @@ fn process_command(
 
     let cmd_name = client
         .arg(0)
-        .map(|a| {
-            core::str::from_utf8(a.as_bytes())
-                .unwrap_or("")
-                .to_ascii_lowercase()
-        })
-        .unwrap_or_default();
+        .and_then(|a| core::str::from_utf8(a.as_bytes()).ok())
+        .unwrap_or("");
     if let Ok(mut guard) = client_info_registry().lock() {
         guard.set_cmd(client.id, &cmd_name);
         guard.set_db(client.id, client.db_index);
@@ -1206,6 +1207,26 @@ fn flush_reply(client: &mut Client, outbound: &Sender<Vec<u8>>) -> bool {
     }
     let bytes = std::mem::take(&mut client.reply_buf);
     outbound.send(bytes).is_ok()
+}
+
+/// Fast path for ordinary plain-TCP request/reply traffic.
+///
+/// Pub/sub, blocked clients, and replicas still need the writer-thread channel
+/// because other connection threads can deliver bytes to them. Normal clients
+/// have no foreign writers, so their own replies can be written directly and
+/// avoid one mpsc send plus one context switch per read batch.
+fn flush_reply_fast(client: &mut Client, outbound: &Sender<Vec<u8>>) -> bool {
+    if client.reply_buf.is_empty() {
+        return true;
+    }
+    if client.in_pubsub_mode() || client.blocked_on_keys || client.is_replica {
+        return flush_reply(client, outbound);
+    }
+    let bytes = std::mem::take(&mut client.reply_buf);
+    match client.conn.as_mut() {
+        Some(conn) => conn.write_all(&bytes).is_ok(),
+        None => false,
+    }
 }
 
 /// Determine the initial authenticated username for a newly accepted connection.

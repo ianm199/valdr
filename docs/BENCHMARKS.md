@@ -67,29 +67,29 @@ like upstream Valkey." The profile matrix runs the same binary at pipeline 1,
 16, and 100.
 
 **Hardware:** Apple M3 Max, macOS Darwin 24.3.0 (arm64)
-**valkey-rs revision:** profile-matrix runner at `a5401a1`, plus the first reply-batching optimization described below
+**valkey-rs revision:** profile-matrix runner at `a5401a1`, plus the TCP-loop optimizations described below
 
 | Profile | Command | upstream Valkey (req/s) | valkey-rs (req/s) | ratio | upstream p99 (ms) | valkey-rs p99 (ms) |
 |---|---|---:|---:|---:|---:|---:|
-| core-p1 | PING_MBULK | 173,611 | 124,688 | 0.72× | 0.687 | 0.791 |
-| core-p1 | SET | 193,050 | 128,205 | 0.66× | 0.375 | 0.463 |
-| core-p1 | GET | 193,050 | 127,877 | 0.66× | 0.367 | 0.439 |
-| core-p1 | INCR | 171,821 | 126,263 | 0.73× | 0.351 | 0.423 |
-| core-p16 | PING_MBULK | 2,352,941 | 314,465 | 0.13× | 0.487 | 7.679 |
-| core-p16 | SET | 1,739,130 | 237,812 | 0.14× | 0.623 | 7.359 |
-| core-p16 | GET | 2,197,802 | 300,300 | 0.14× | 0.567 | 6.399 |
-| core-p16 | INCR | 1,869,159 | 232,019 | 0.12× | 0.599 | 7.935 |
-| core-p100 | PING_MBULK | 5,405,406 | 454,545 | 0.08× | 1.095 | 31.999 |
-| core-p100 | SET | 2,500,000 | 255,102 | 0.10× | 2.207 | 28.799 |
-| core-p100 | GET | 3,389,831 | 406,504 | 0.12× | 1.775 | 59.135 |
-| core-p100 | INCR | 3,389,831 | 271,003 | 0.08× | 1.767 | 26.879 |
-| range-heavy-p16 | LRANGE_100 | 176,367 | 120,482 | 0.68× | 5.023 | 25.727 |
-| range-heavy-p16 | LRANGE_300 | 38,521 | 49,975 | **1.30×** | 13.631 | 84.479 |
+| core-p1 | PING_MBULK | 158,228 | 138,889 | 0.88× | 0.687 | 1.063 |
+| core-p1 | SET | 200,000 | 141,643 | 0.71× | 0.343 | 0.279 |
+| core-p1 | GET | 196,078 | 140,845 | 0.72× | 0.359 | 0.583 |
+| core-p1 | INCR | 206,612 | 135,501 | 0.66× | 0.319 | 0.359 |
+| core-p16 | PING_MBULK | 2,352,941 | 371,747 | 0.16× | 0.479 | 5.855 |
+| core-p16 | SET | 1,680,672 | 253,165 | 0.15× | 0.615 | 6.943 |
+| core-p16 | GET | 2,105,263 | 350,262 | 0.17× | 0.543 | 5.951 |
+| core-p16 | INCR | 2,173,913 | 249,376 | 0.11× | 0.527 | 6.943 |
+| core-p100 | PING_MBULK | 5,000,000 | 447,427 | 0.09× | 1.207 | 39.935 |
+| core-p100 | SET | 2,439,024 | 286,532 | 0.12× | 2.271 | 27.391 |
+| core-p100 | GET | 3,278,689 | 498,753 | 0.15× | 1.759 | 38.143 |
+| core-p100 | INCR | 3,278,689 | 273,598 | 0.08× | 1.727 | 34.559 |
+| range-heavy-p16 | LRANGE_100 | 176,367 | 107,759 | 0.61× | 5.439 | 33.535 |
+| range-heavy-p16 | LRANGE_300 | 38,715 | 47,984 | **1.24×** | 13.567 | 101.887 |
 
 The profile-matrix summary from this run:
 
 ```text
-median 0.14x, min 0.08x, max 1.30x; GET p1 0.66x; GET p100 0.12x
+median 0.17x, min 0.08x, max 1.24x; GET p1 0.72x; GET p100 0.15x
 ```
 
 The read I would trust: this is not primarily "Rust data structures cannot do
@@ -98,36 +98,36 @@ large batches and valkey-rs hits the connection-serving path hard. That points
 at request draining, response flushing, and shared-state locking before it
 points at the command implementation itself.
 
-### Harness-driven optimization: batched reply flushing
+### Harness-driven optimization log
 
 The profile matrix turned the vague "simple commands are slow" complaint into a
-specific subsystem hypothesis: the plain TCP loop was flushing through the
-writer-thread channel after every parsed command. Under a pipeline of 100 GETs,
-that meant one socket read could become 100 `mpsc::Sender<Vec<u8>>` sends and
-100 small `write_all` calls.
+specific subsystem hypothesis: the plain TCP loop was paying too much
+per-command overhead under deep pipelines. We then ran small patches through the
+same profile matrix and kept the table current after each pass.
 
-The first harness-driven patch changed the plain TCP read loop to parse all
-complete commands currently in `query_buf`, append all their replies to
-`client.reply_buf`, and flush once after the batch.
+| Iteration | Patch | Summary | `core-p100/GET` | `core-p100/PING` | `range-heavy-p16/LRANGE_300` |
+|---|---|---|---:|---:|---:|
+| 0 | Baseline profile matrix | median 0.11x, min 0.05x, max 1.10x | 220,994 req/s (0.07x) | 250,941 req/s (0.05x) | 42,553 req/s (1.10x) |
+| 1 | Batch replies once per socket read | median 0.14x, min 0.08x, max 1.30x | 406,504 req/s (0.12x) | 454,545 req/s (0.08x) | 49,975 req/s (1.30x) |
+| 2 | Drain query buffer once per read batch | median 0.14x, min 0.07x, max 1.26x | 446,429 req/s (0.14x) | 497,512 req/s (0.09x) | 48,309 req/s (1.26x) |
+| 3 | Direct-write ordinary plain-TCP replies | median 0.15x, min 0.07x, max 1.37x | 454,545 req/s (0.14x) | 420,168 req/s (0.08x) | 52,411 req/s (1.37x) |
+| 4 | Avoid duplicate command-name lowercase | median 0.17x, min 0.08x, max 1.24x | 498,753 req/s (0.15x) | 447,427 req/s (0.09x) | 47,984 req/s (1.24x) |
 
-| Workload | Before | After | Change |
-|---|---:|---:|---:|
-| `core-p16/GET` Rust throughput | 209,424 req/s | 300,300 req/s | +43% |
-| `core-p100/PING_MBULK` Rust throughput | 250,941 req/s | 454,545 req/s | +81% |
-| `core-p100/GET` Rust throughput | 220,994 req/s | 406,504 req/s | +84% |
-| `core-p100/SET` Rust throughput | 187,970 req/s | 255,102 req/s | +36% |
-| `range-heavy-p16/LRANGE_300` Rust throughput | 42,553 req/s | 49,975 req/s | +18% |
+The individual runs are noisy, especially on loopback with short benchmark
+windows, so the useful read is the trend: deep-pipeline GET moved from about
+221k req/s to about 499k req/s. The exact LRANGE number bounces because it is
+already doing enough response work that the TCP-loop patches are not the main
+determinant.
 
 This is a good example of the harness shape we want for nginx: benchmark rows
 should identify the subsystem boundary. The correct packet was not "make Redis
-faster"; it was "reduce per-command reply flush overhead in the pipelined TCP
-path."
+faster"; it was "reduce per-command overhead in the pipelined TCP path."
 
 ## Reading this honestly
 
 **Where we're slow (most simple commands, ~5-10% of upstream throughput):**
 The profile matrix refines the diagnosis. The deep-pipeline gap is real, but
-pipeline-1 simple ops are 0.79-0.90x upstream. That makes "per-command mutex
+pipeline-1 simple ops are roughly 0.66-0.88x upstream. That makes "per-command mutex
 acquisition" a likely contributor, not the whole explanation. The larger issue
 is that upstream Valkey's single event loop drains and writes pipelined command
 batches extremely efficiently, while valkey-rs still uses a blocking
