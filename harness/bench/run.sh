@@ -53,7 +53,9 @@ done
 
 [[ -x "$VALKEY_BIN" ]]   || { echo "ERROR: missing $VALKEY_BIN. Run scripts/setup-reference.sh first." >&2; exit 1; }
 [[ -x "$VALKEY_BENCH" ]] || { echo "ERROR: missing $VALKEY_BENCH. Run scripts/setup-reference.sh first." >&2; exit 1; }
-[[ -x "$RUST_BIN" ]]     || { echo "ERROR: missing $RUST_BIN. Run 'cargo build --release' first." >&2; exit 1; }
+if [[ "${VALKEY_BENCH_SKIP_BUILD:-0}" != "1" || ! -x "$RUST_BIN" ]]; then
+    cargo build --release -p redis-server >/dev/null
+fi
 
 # ── result file ──────────────────────────────────────────────────────────
 

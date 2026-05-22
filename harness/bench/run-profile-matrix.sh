@@ -12,7 +12,9 @@ if [[ ! -x "$VALKEY_BIN" || ! -x "$VALKEY_BENCH" ]]; then
     bash scripts/setup-reference.sh >/dev/null
 fi
 
-if [[ ! -x "$RUST_BIN" ]]; then
+if [[ "${VALKEY_BENCH_SKIP_BUILD:-0}" != "1" ]]; then
+    cargo build --release -p redis-server >/dev/null
+elif [[ ! -x "$RUST_BIN" ]]; then
     cargo build --release -p redis-server >/dev/null
 fi
 

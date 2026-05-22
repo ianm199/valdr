@@ -103,7 +103,7 @@ def hardware_fingerprint() -> dict[str, str]:
 def require_binaries() -> None:
     if not VALKEY_BIN.exists() or not VALKEY_BENCH.exists():
         subprocess.run(["bash", "scripts/setup-reference.sh"], cwd=ROOT, check=True)
-    if not RUST_BIN.exists():
+    if os.environ.get("VALKEY_BENCH_SKIP_BUILD") != "1" or not RUST_BIN.exists():
         subprocess.run(["cargo", "build", "--release", "-p", "redis-server"], cwd=ROOT, check=True)
     missing = [path for path in [VALKEY_BIN, VALKEY_BENCH, RUST_BIN] if not os.access(path, os.X_OK)]
     if missing:

@@ -79,142 +79,166 @@
       "role": "perf-fixer",
       "summary": "gates_passed",
       "ts": "2026-05-22T14:41:32.977606Z"
+    },
+    {
+      "commit": "1dd6563",
+      "commit_subject": "architect: queue runtime owner hotpath wave",
+      "packet": "runtime-owner-10-hotpath-timing-gate",
+      "role": "perf-fixer",
+      "summary": "gates_passed",
+      "ts": "2026-05-22T16:28:20.958733Z"
+    },
+    {
+      "commit": "cb6c82a",
+      "commit_subject": "runner: complete runtime-owner-10-post-timing-calltree",
+      "packet": "runtime-owner-11-reply-buffer-hotpath",
+      "role": "perf-fixer",
+      "summary": "gates_passed",
+      "ts": "2026-05-22T16:46:47.556623Z"
+    },
+    {
+      "commit": "25a02a1",
+      "commit_subject": "runner: complete runtime-owner-11-post-reply-calltree",
+      "packet": "runtime-owner-12-watch-dirty-fastpath",
+      "role": "perf-fixer",
+      "summary": "gates_passed",
+      "ts": "2026-05-22T17:04:15.030871Z"
     }
   ],
-  "generated_at": "2026-05-22T15:24:30+00:00",
+  "generated_at": "2026-05-22T17:27:43+00:00",
   "latest": {
     "calltree": {
       "artifacts": [
         {
           "kind": "summary-tsv",
-          "path": "harness/bench/results/20260522T144738Z-d3b7602-calltree.tsv",
-          "url": "../../bench/results/20260522T144738Z-d3b7602-calltree.tsv"
+          "path": "harness/bench/results/20260522T170812Z-2813e87-calltree.tsv",
+          "url": "../../bench/results/20260522T170812Z-2813e87-calltree.tsv"
         },
         {
           "kind": "runner-result-json",
-          "path": "harness/bench/results/20260522T144738Z-d3b7602-calltree.json",
-          "url": "../../bench/results/20260522T144738Z-d3b7602-calltree.json"
+          "path": "harness/bench/results/20260522T170812Z-2813e87-calltree.json",
+          "url": "../../bench/results/20260522T170812Z-2813e87-calltree.json"
         },
         {
           "kind": "raw-sample-calltree",
-          "path": "harness/bench/profiles/20260522T144738Z-d3b7602-calltree/get-p100/get-p100.sample.txt",
-          "url": "../../bench/profiles/20260522T144738Z-d3b7602-calltree/get-p100/get-p100.sample.txt",
+          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/get-p100/get-p100.sample.txt",
+          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/get-p100/get-p100.sample.txt",
           "workload": "get-p100"
         },
         {
           "kind": "profiler-log",
-          "path": "harness/bench/profiles/20260522T144738Z-d3b7602-calltree/get-p100/get-p100.sample.stderr.log",
-          "url": "../../bench/profiles/20260522T144738Z-d3b7602-calltree/get-p100/get-p100.sample.stderr.log",
+          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/get-p100/get-p100.sample.stderr.log",
+          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/get-p100/get-p100.sample.stderr.log",
           "workload": "get-p100"
         },
         {
           "kind": "raw-sample-calltree",
-          "path": "harness/bench/profiles/20260522T144738Z-d3b7602-calltree/set-p100/set-p100.sample.txt",
-          "url": "../../bench/profiles/20260522T144738Z-d3b7602-calltree/set-p100/set-p100.sample.txt",
+          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/set-p100/set-p100.sample.txt",
+          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/set-p100/set-p100.sample.txt",
           "workload": "set-p100"
         },
         {
           "kind": "profiler-log",
-          "path": "harness/bench/profiles/20260522T144738Z-d3b7602-calltree/set-p100/set-p100.sample.stderr.log",
-          "url": "../../bench/profiles/20260522T144738Z-d3b7602-calltree/set-p100/set-p100.sample.stderr.log",
+          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/set-p100/set-p100.sample.stderr.log",
+          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/set-p100/set-p100.sample.stderr.log",
           "workload": "set-p100"
         },
         {
           "kind": "raw-sample-calltree",
-          "path": "harness/bench/profiles/20260522T144738Z-d3b7602-calltree/incr-p100/incr-p100.sample.txt",
-          "url": "../../bench/profiles/20260522T144738Z-d3b7602-calltree/incr-p100/incr-p100.sample.txt",
+          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/incr-p100/incr-p100.sample.txt",
+          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/incr-p100/incr-p100.sample.txt",
           "workload": "incr-p100"
         },
         {
           "kind": "profiler-log",
-          "path": "harness/bench/profiles/20260522T144738Z-d3b7602-calltree/incr-p100/incr-p100.sample.stderr.log",
-          "url": "../../bench/profiles/20260522T144738Z-d3b7602-calltree/incr-p100/incr-p100.sample.stderr.log",
+          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/incr-p100/incr-p100.sample.stderr.log",
+          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/incr-p100/incr-p100.sample.stderr.log",
           "workload": "incr-p100"
         },
         {
           "kind": "raw-sample-calltree",
-          "path": "harness/bench/profiles/20260522T144738Z-d3b7602-calltree/ping-p100/ping-p100.sample.txt",
-          "url": "../../bench/profiles/20260522T144738Z-d3b7602-calltree/ping-p100/ping-p100.sample.txt",
+          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/ping-p100/ping-p100.sample.txt",
+          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/ping-p100/ping-p100.sample.txt",
           "workload": "ping-p100"
         },
         {
           "kind": "profiler-log",
-          "path": "harness/bench/profiles/20260522T144738Z-d3b7602-calltree/ping-p100/ping-p100.sample.stderr.log",
-          "url": "../../bench/profiles/20260522T144738Z-d3b7602-calltree/ping-p100/ping-p100.sample.stderr.log",
+          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/ping-p100/ping-p100.sample.stderr.log",
+          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/ping-p100/ping-p100.sample.stderr.log",
           "workload": "ping-p100"
         },
         {
           "kind": "server-log",
-          "path": "harness/bench/profiles/20260522T144738Z-d3b7602-calltree/get-p100/rust-57304.server.log",
-          "url": "../../bench/profiles/20260522T144738Z-d3b7602-calltree/get-p100/rust-57304.server.log"
+          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/get-p100/rust-51821.server.log",
+          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/get-p100/rust-51821.server.log"
         },
         {
           "kind": "server-log",
-          "path": "harness/bench/profiles/20260522T144738Z-d3b7602-calltree/incr-p100/rust-57563.server.log",
-          "url": "../../bench/profiles/20260522T144738Z-d3b7602-calltree/incr-p100/rust-57563.server.log"
+          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/incr-p100/rust-52062.server.log",
+          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/incr-p100/rust-52062.server.log"
         },
         {
           "kind": "server-log",
-          "path": "harness/bench/profiles/20260522T144738Z-d3b7602-calltree/ping-p100/rust-57689.server.log",
-          "url": "../../bench/profiles/20260522T144738Z-d3b7602-calltree/ping-p100/rust-57689.server.log"
+          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/ping-p100/rust-52184.server.log",
+          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/ping-p100/rust-52184.server.log"
         },
         {
           "kind": "server-log",
-          "path": "harness/bench/profiles/20260522T144738Z-d3b7602-calltree/reference-57249.server.log",
-          "url": "../../bench/profiles/20260522T144738Z-d3b7602-calltree/reference-57249.server.log"
+          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/reference-51761.server.log",
+          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/reference-51761.server.log"
         },
         {
           "kind": "server-log",
-          "path": "harness/bench/profiles/20260522T144738Z-d3b7602-calltree/reference-57364.server.log",
-          "url": "../../bench/profiles/20260522T144738Z-d3b7602-calltree/reference-57364.server.log"
+          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/reference-51878.server.log",
+          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/reference-51878.server.log"
         },
         {
           "kind": "server-log",
-          "path": "harness/bench/profiles/20260522T144738Z-d3b7602-calltree/reference-57507.server.log",
-          "url": "../../bench/profiles/20260522T144738Z-d3b7602-calltree/reference-57507.server.log"
+          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/reference-52007.server.log",
+          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/reference-52007.server.log"
         },
         {
           "kind": "server-log",
-          "path": "harness/bench/profiles/20260522T144738Z-d3b7602-calltree/reference-57634.server.log",
-          "url": "../../bench/profiles/20260522T144738Z-d3b7602-calltree/reference-57634.server.log"
+          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/reference-52116.server.log",
+          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/reference-52116.server.log"
         },
         {
           "kind": "server-log",
-          "path": "harness/bench/profiles/20260522T144738Z-d3b7602-calltree/set-p100/rust-57434.server.log",
-          "url": "../../bench/profiles/20260522T144738Z-d3b7602-calltree/set-p100/rust-57434.server.log"
+          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/set-p100/rust-51943.server.log",
+          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/set-p100/rust-51943.server.log"
         }
       ],
-      "commit": "d3b7602",
-      "commit_subject": "runner: complete runtime-owner-8-post-poller-hotspots",
-      "commit_url": "https://github.com/ianm199/valkey-rs/commit/d3b7602",
-      "evidence": "harness/evidence/runs/20260522T144733Z-d3b7602-runner-runtime-owner-8-post-poller-calltree.json",
-      "evidence_url": "../../evidence/runs/20260522T144733Z-d3b7602-runner-runtime-owner-8-post-poller-calltree.json",
+      "commit": "2813e87",
+      "commit_subject": "runner: complete runtime-owner-12-post-watch-profile-matrix",
+      "commit_url": "https://github.com/ianm199/valkey-rs/commit/2813e87",
+      "evidence": "harness/evidence/runs/20260522T170812Z-2813e87-runner-runtime-owner-12-post-watch-calltree.json",
+      "evidence_url": "../../evidence/runs/20260522T170812Z-2813e87-runner-runtime-owner-12-post-watch-calltree.json",
       "get_p1": null,
-      "get_p100": 0.809980865675625,
-      "incr_p100": 0.6235891654197433,
-      "max": 0.809980865675625,
-      "median": 0.7242053982026455,
-      "min": 0.6235891654197433,
+      "get_p100": 0.8130462440913714,
+      "incr_p100": 0.5836158200844632,
+      "max": 0.8130462440913714,
+      "median": 0.7111764448748289,
+      "min": 0.5836158200844632,
       "p99_ms": {
-        "get-p100": 1.807,
-        "incr-p100": 3.647,
-        "ping-p100": 1.695,
-        "set-p100": 3.295
+        "get-p100": 2.223,
+        "incr-p100": 3.087,
+        "ping-p100": 1.639,
+        "set-p100": 9.151
       },
-      "packet": "runtime-owner-8-post-poller-calltree",
-      "ping_p100": 0.7121738716483705,
+      "packet": "runtime-owner-12-post-watch-calltree",
+      "ping_p100": 0.7308162911414329,
       "ratios": {
-        "get-p100": 0.809980865675625,
-        "incr-p100": 0.6235891654197433,
-        "ping-p100": 0.7121738716483705,
-        "set-p100": 0.7362369247569205
+        "get-p100": 0.8130462440913714,
+        "incr-p100": 0.5836158200844632,
+        "ping-p100": 0.7308162911414329,
+        "set-p100": 0.6915365986082249
       },
       "runner": "bench-profile-calltree",
       "runner_kind": "calltree",
       "runner_label": "Calltree",
-      "set_p100": 0.7362369247569205,
-      "summary": "profile calltree: sample, median 0.74x, min 0.62x, max 0.81x; artifacts 16",
-      "ts": "2026-05-22T14:48:28.753333Z"
+      "set_p100": 0.6915365986082249,
+      "summary": "profile calltree: sample, median 0.73x, min 0.58x, max 0.81x; artifacts 16",
+      "ts": "2026-05-22T17:09:02.953431Z"
     },
     "hotspots": {
       "artifacts": [
@@ -262,66 +286,66 @@
     "profile-matrix": {
       "artifacts": [
         {
-          "path": "harness/bench/results/20260522T144552Z-aa09851-profile-matrix.tsv",
-          "url": "../../bench/results/20260522T144552Z-aa09851-profile-matrix.tsv"
+          "path": "harness/bench/results/20260522T170800Z-f8f5124-profile-matrix.tsv",
+          "url": "../../bench/results/20260522T170800Z-f8f5124-profile-matrix.tsv"
         }
       ],
-      "commit": "aa09851",
-      "commit_subject": "runner: complete runtime-owner-8-post-poller-oracle",
-      "commit_url": "https://github.com/ianm199/valkey-rs/commit/aa09851",
-      "evidence": "harness/evidence/runs/20260522T144541Z-aa09851-runner-runtime-owner-8-post-poller-profile-matrix.json",
-      "evidence_url": "../../evidence/runs/20260522T144541Z-aa09851-runner-runtime-owner-8-post-poller-profile-matrix.json",
-      "get_p1": 0.8770227440550187,
-      "get_p100": 0.7294117765588234,
-      "incr_p100": 0.6276596278191491,
-      "max": 1.490421497074331,
-      "median": 0.7548746939325917,
-      "min": 0.6000000558000035,
+      "commit": "f8f5124",
+      "commit_subject": "runner: complete runtime-owner-12-post-watch-oracle",
+      "commit_url": "https://github.com/ianm199/valkey-rs/commit/f8f5124",
+      "evidence": "harness/evidence/runs/20260522T170800Z-f8f5124-runner-runtime-owner-12-post-watch-profile-matrix.json",
+      "evidence_url": "../../evidence/runs/20260522T170800Z-f8f5124-runner-runtime-owner-12-post-watch-profile-matrix.json",
+      "get_p1": 0.997190956191015,
+      "get_p100": 0.7530864093981481,
+      "incr_p100": 0.6145833486364584,
+      "max": 1.3568906075363996,
+      "median": 0.784313752,
+      "min": 0.6145833486364584,
       "p99_ms": {
-        "core-p1/GET": 0.423,
-        "core-p1/INCR": 0.415,
-        "core-p1/PING_MBULK": 0.615,
-        "core-p1/SET": 0.431,
-        "core-p100/GET": 3.631,
+        "core-p1/GET": 0.415,
+        "core-p1/INCR": 0.503,
+        "core-p1/PING_MBULK": 0.407,
+        "core-p1/SET": 0.423,
+        "core-p100/GET": 2.255,
         "core-p100/INCR": 2.687,
-        "core-p100/PING_MBULK": 3.247,
-        "core-p100/SET": 2.799,
-        "core-p16/GET": 0.735,
-        "core-p16/INCR": 0.751,
-        "core-p16/PING_MBULK": 0.535,
-        "core-p16/SET": 0.775,
-        "range-heavy-p16/LPUSH (needed to benchmark LRANGE)": 1.015,
-        "range-heavy-p16/LRANGE_100 (first 100 elements)": 6.591,
-        "range-heavy-p16/LRANGE_300 (first 300 elements)": 17.791
+        "core-p100/PING_MBULK": 1.807,
+        "core-p100/SET": 2.863,
+        "core-p16/GET": 0.719,
+        "core-p16/INCR": 1.455,
+        "core-p16/PING_MBULK": 0.695,
+        "core-p16/SET": 0.783,
+        "range-heavy-p16/LPUSH (needed to benchmark LRANGE)": 2.047,
+        "range-heavy-p16/LRANGE_100 (first 100 elements)": 6.399,
+        "range-heavy-p16/LRANGE_300 (first 300 elements)": 18.175
       },
-      "packet": "runtime-owner-8-post-poller-profile-matrix",
-      "ping_p100": 0.7169811356603772,
+      "packet": "runtime-owner-12-post-watch-profile-matrix",
+      "ping_p100": 0.7962963022685189,
       "ratios": {
-        "core-p1/GET": 0.8770227440550187,
-        "core-p1/INCR": 1.490421497074331,
-        "core-p1/PING_MBULK": 0.8151261223142882,
-        "core-p1/SET": 0.7548746939325917,
-        "core-p100/GET": 0.7294117765588234,
-        "core-p100/INCR": 0.6276596278191491,
-        "core-p100/PING_MBULK": 0.7169811356603772,
-        "core-p100/SET": 0.8019802070420794,
-        "core-p16/GET": 0.6736111813687516,
-        "core-p16/INCR": 0.6000000558000035,
-        "core-p16/PING_MBULK": 0.7070707265151522,
-        "core-p16/SET": 0.7098765533611114,
-        "range-heavy-p16/LPUSH (needed to benchmark LRANGE)": 0.8750000297500011,
-        "range-heavy-p16/LRANGE_100 (first 100 elements)": 0.9150943451132079,
-        "range-heavy-p16/LRANGE_300 (first 300 elements)": 1.328657326852906
+        "core-p1/GET": 0.997190956191015,
+        "core-p1/INCR": 0.9162011143865921,
+        "core-p1/PING_MBULK": 1.0343838769896876,
+        "core-p1/SET": 0.9476584710038601,
+        "core-p100/GET": 0.7530864093981481,
+        "core-p100/INCR": 0.6145833486364584,
+        "core-p100/PING_MBULK": 0.7962963022685189,
+        "core-p100/SET": 0.784313752,
+        "core-p16/GET": 0.7449664648177858,
+        "core-p16/INCR": 0.7745665175190769,
+        "core-p16/PING_MBULK": 0.7457627174576271,
+        "core-p16/SET": 0.6781609758954024,
+        "range-heavy-p16/LPUSH (needed to benchmark LRANGE)": 0.6603773974528315,
+        "range-heavy-p16/LRANGE_100 (first 100 elements)": 1.0159744760472853,
+        "range-heavy-p16/LRANGE_300 (first 300 elements)": 1.3568906075363996
       },
       "runner": "bench-profile-matrix",
       "runner_kind": "profile-matrix",
       "runner_label": "Profile matrix",
-      "set_p100": 0.8019802070420794,
-      "summary": "profile matrix: median 0.75x, min 0.60x, max 1.49x; GET p1 0.88x; GET p100 0.73x",
-      "ts": "2026-05-22T14:46:03.118709Z"
+      "set_p100": 0.784313752,
+      "summary": "profile matrix: median 0.78x, min 0.61x, max 1.36x; GET p1 1.00x; GET p100 0.75x",
+      "ts": "2026-05-22T17:08:11.969615Z"
     }
   },
-  "point_count": 14,
+  "point_count": 20,
   "points": [
     {
       "artifacts": [
@@ -1170,10 +1194,592 @@
       "set_p100": 0.7362369247569205,
       "summary": "profile calltree: sample, median 0.74x, min 0.62x, max 0.81x; artifacts 16",
       "ts": "2026-05-22T14:48:28.753333Z"
+    },
+    {
+      "artifacts": [
+        {
+          "path": "harness/bench/results/20260522T163149Z-c63d3bd-profile-matrix.tsv",
+          "url": "../../bench/results/20260522T163149Z-c63d3bd-profile-matrix.tsv"
+        }
+      ],
+      "commit": "c63d3bd",
+      "commit_subject": "runner: complete runtime-owner-10-post-timing-oracle",
+      "commit_url": "https://github.com/ianm199/valkey-rs/commit/c63d3bd",
+      "evidence": "harness/evidence/runs/20260522T163148Z-c63d3bd-runner-runtime-owner-10-post-timing-profile-matrix.json",
+      "evidence_url": "../../evidence/runs/20260522T163148Z-c63d3bd-runner-runtime-owner-10-post-timing-profile-matrix.json",
+      "get_p1": 1.0517242187034495,
+      "get_p100": 0.731707238414638,
+      "incr_p100": 0.6210526603026316,
+      "max": 1.3801819490232607,
+      "median": 0.8235293809235302,
+      "min": 0.6210526603026316,
+      "p99_ms": {
+        "core-p1/GET": 0.423,
+        "core-p1/INCR": 0.431,
+        "core-p1/PING_MBULK": 0.727,
+        "core-p1/SET": 0.423,
+        "core-p100/GET": 2.271,
+        "core-p100/INCR": 2.591,
+        "core-p100/PING_MBULK": 1.991,
+        "core-p100/SET": 3.103,
+        "core-p16/GET": 0.735,
+        "core-p16/INCR": 0.767,
+        "core-p16/PING_MBULK": 0.583,
+        "core-p16/SET": 0.815,
+        "range-heavy-p16/LPUSH (needed to benchmark LRANGE)": 0.927,
+        "range-heavy-p16/LRANGE_100 (first 100 elements)": 5.631,
+        "range-heavy-p16/LRANGE_300 (first 300 elements)": 18.303
+      },
+      "packet": "runtime-owner-10-post-timing-profile-matrix",
+      "ping_p100": 0.6964285749107144,
+      "ratios": {
+        "core-p1/GET": 1.0517242187034495,
+        "core-p1/INCR": 0.9385474169564274,
+        "core-p1/PING_MBULK": 1.0080863293789815,
+        "core-p1/SET": 0.9688385331127479,
+        "core-p100/GET": 0.731707238414638,
+        "core-p100/INCR": 0.6210526603026316,
+        "core-p100/PING_MBULK": 0.6964285749107144,
+        "core-p100/SET": 0.7407407,
+        "core-p16/GET": 0.7549669115006618,
+        "core-p16/INCR": 0.8072290189072332,
+        "core-p16/PING_MBULK": 0.8235293809235302,
+        "core-p16/SET": 0.7696628619303413,
+        "range-heavy-p16/LPUSH (needed to benchmark LRANGE)": 0.8554218109542241,
+        "range-heavy-p16/LRANGE_100 (first 100 elements)": 1.0575295625,
+        "range-heavy-p16/LRANGE_300 (first 300 elements)": 1.3801819490232607
+      },
+      "runner": "bench-profile-matrix",
+      "runner_kind": "profile-matrix",
+      "runner_label": "Profile matrix",
+      "set_p100": 0.7407407,
+      "summary": "profile matrix: median 0.82x, min 0.62x, max 1.38x; GET p1 1.05x; GET p100 0.73x",
+      "ts": "2026-05-22T16:32:00.694895Z"
+    },
+    {
+      "artifacts": [
+        {
+          "kind": "summary-tsv",
+          "path": "harness/bench/results/20260522T163201Z-ac5a345-calltree.tsv",
+          "url": "../../bench/results/20260522T163201Z-ac5a345-calltree.tsv"
+        },
+        {
+          "kind": "runner-result-json",
+          "path": "harness/bench/results/20260522T163201Z-ac5a345-calltree.json",
+          "url": "../../bench/results/20260522T163201Z-ac5a345-calltree.json"
+        },
+        {
+          "kind": "raw-sample-calltree",
+          "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/get-p100/get-p100.sample.txt",
+          "url": "../../bench/profiles/20260522T163201Z-ac5a345-calltree/get-p100/get-p100.sample.txt",
+          "workload": "get-p100"
+        },
+        {
+          "kind": "profiler-log",
+          "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/get-p100/get-p100.sample.stderr.log",
+          "url": "../../bench/profiles/20260522T163201Z-ac5a345-calltree/get-p100/get-p100.sample.stderr.log",
+          "workload": "get-p100"
+        },
+        {
+          "kind": "raw-sample-calltree",
+          "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/set-p100/set-p100.sample.txt",
+          "url": "../../bench/profiles/20260522T163201Z-ac5a345-calltree/set-p100/set-p100.sample.txt",
+          "workload": "set-p100"
+        },
+        {
+          "kind": "profiler-log",
+          "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/set-p100/set-p100.sample.stderr.log",
+          "url": "../../bench/profiles/20260522T163201Z-ac5a345-calltree/set-p100/set-p100.sample.stderr.log",
+          "workload": "set-p100"
+        },
+        {
+          "kind": "raw-sample-calltree",
+          "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/incr-p100/incr-p100.sample.txt",
+          "url": "../../bench/profiles/20260522T163201Z-ac5a345-calltree/incr-p100/incr-p100.sample.txt",
+          "workload": "incr-p100"
+        },
+        {
+          "kind": "profiler-log",
+          "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/incr-p100/incr-p100.sample.stderr.log",
+          "url": "../../bench/profiles/20260522T163201Z-ac5a345-calltree/incr-p100/incr-p100.sample.stderr.log",
+          "workload": "incr-p100"
+        },
+        {
+          "kind": "raw-sample-calltree",
+          "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/ping-p100/ping-p100.sample.txt",
+          "url": "../../bench/profiles/20260522T163201Z-ac5a345-calltree/ping-p100/ping-p100.sample.txt",
+          "workload": "ping-p100"
+        },
+        {
+          "kind": "profiler-log",
+          "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/ping-p100/ping-p100.sample.stderr.log",
+          "url": "../../bench/profiles/20260522T163201Z-ac5a345-calltree/ping-p100/ping-p100.sample.stderr.log",
+          "workload": "ping-p100"
+        },
+        {
+          "kind": "server-log",
+          "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/get-p100/rust-53186.server.log",
+          "url": "../../bench/profiles/20260522T163201Z-ac5a345-calltree/get-p100/rust-53186.server.log"
+        },
+        {
+          "kind": "server-log",
+          "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/incr-p100/rust-53407.server.log",
+          "url": "../../bench/profiles/20260522T163201Z-ac5a345-calltree/incr-p100/rust-53407.server.log"
+        },
+        {
+          "kind": "server-log",
+          "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/ping-p100/rust-53532.server.log",
+          "url": "../../bench/profiles/20260522T163201Z-ac5a345-calltree/ping-p100/rust-53532.server.log"
+        },
+        {
+          "kind": "server-log",
+          "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/reference-53132.server.log",
+          "url": "../../bench/profiles/20260522T163201Z-ac5a345-calltree/reference-53132.server.log"
+        },
+        {
+          "kind": "server-log",
+          "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/reference-53242.server.log",
+          "url": "../../bench/profiles/20260522T163201Z-ac5a345-calltree/reference-53242.server.log"
+        },
+        {
+          "kind": "server-log",
+          "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/reference-53352.server.log",
+          "url": "../../bench/profiles/20260522T163201Z-ac5a345-calltree/reference-53352.server.log"
+        },
+        {
+          "kind": "server-log",
+          "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/reference-53478.server.log",
+          "url": "../../bench/profiles/20260522T163201Z-ac5a345-calltree/reference-53478.server.log"
+        },
+        {
+          "kind": "server-log",
+          "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/set-p100/rust-53296.server.log",
+          "url": "../../bench/profiles/20260522T163201Z-ac5a345-calltree/set-p100/rust-53296.server.log"
+        }
+      ],
+      "commit": "ac5a345",
+      "commit_subject": "runner: complete runtime-owner-10-post-timing-profile-matrix",
+      "commit_url": "https://github.com/ianm199/valkey-rs/commit/ac5a345",
+      "evidence": "harness/evidence/runs/20260522T163200Z-ac5a345-runner-runtime-owner-10-post-timing-calltree.json",
+      "evidence_url": "../../evidence/runs/20260522T163200Z-ac5a345-runner-runtime-owner-10-post-timing-calltree.json",
+      "get_p1": null,
+      "get_p100": 0.7971705598830074,
+      "incr_p100": 0.5609888267978396,
+      "max": 0.7971705598830074,
+      "median": 0.7142457793584263,
+      "min": 0.5609888267978396,
+      "p99_ms": {
+        "get-p100": 1.967,
+        "incr-p100": 8.031,
+        "ping-p100": 1.719,
+        "set-p100": 3.471
+      },
+      "packet": "runtime-owner-10-post-timing-calltree",
+      "ping_p100": 0.7161300873547966,
+      "ratios": {
+        "get-p100": 0.7971705598830074,
+        "incr-p100": 0.5609888267978396,
+        "ping-p100": 0.7161300873547966,
+        "set-p100": 0.7123614713620561
+      },
+      "runner": "bench-profile-calltree",
+      "runner_kind": "calltree",
+      "runner_label": "Calltree",
+      "set_p100": 0.7123614713620561,
+      "summary": "profile calltree: sample, median 0.72x, min 0.56x, max 0.80x; artifacts 16",
+      "ts": "2026-05-22T16:32:51.450091Z"
+    },
+    {
+      "artifacts": [
+        {
+          "path": "harness/bench/results/20260522T165017Z-a9ec71e-profile-matrix.tsv",
+          "url": "../../bench/results/20260522T165017Z-a9ec71e-profile-matrix.tsv"
+        }
+      ],
+      "commit": "a9ec71e",
+      "commit_subject": "runner: complete runtime-owner-11-post-reply-oracle",
+      "commit_url": "https://github.com/ianm199/valkey-rs/commit/a9ec71e",
+      "evidence": "harness/evidence/runs/20260522T165017Z-a9ec71e-runner-runtime-owner-11-post-reply-profile-matrix.json",
+      "evidence_url": "../../evidence/runs/20260522T165017Z-a9ec71e-runner-runtime-owner-11-post-reply-profile-matrix.json",
+      "get_p1": 1.1984126034984162,
+      "get_p100": 0.7468354243670886,
+      "incr_p100": 0.6344085640860214,
+      "max": 1.4248951967956212,
+      "median": 0.7821782315099014,
+      "min": 0.6344085640860214,
+      "p99_ms": {
+        "core-p1/GET": 0.399,
+        "core-p1/INCR": 0.415,
+        "core-p1/PING_MBULK": 0.399,
+        "core-p1/SET": 0.423,
+        "core-p100/GET": 2.319,
+        "core-p100/INCR": 2.735,
+        "core-p100/PING_MBULK": 1.447,
+        "core-p100/SET": 2.927,
+        "core-p16/GET": 0.679,
+        "core-p16/INCR": 0.735,
+        "core-p16/PING_MBULK": 0.575,
+        "core-p16/SET": 0.759,
+        "range-heavy-p16/LPUSH (needed to benchmark LRANGE)": 1.287,
+        "range-heavy-p16/LRANGE_100 (first 100 elements)": 6.527,
+        "range-heavy-p16/LRANGE_300 (first 300 elements)": 17.663
+      },
+      "packet": "runtime-owner-11-post-reply-profile-matrix",
+      "ping_p100": 0.7599999848000003,
+      "ratios": {
+        "core-p1/GET": 1.1984126034984162,
+        "core-p1/INCR": 1.057432432220946,
+        "core-p1/PING_MBULK": 1.0648463297037543,
+        "core-p1/SET": 0.9766081113497133,
+        "core-p100/GET": 0.7468354243670886,
+        "core-p100/INCR": 0.6344085640860214,
+        "core-p100/PING_MBULK": 0.7599999848000003,
+        "core-p100/SET": 0.7821782315099014,
+        "core-p16/GET": 0.7071428401714284,
+        "core-p16/INCR": 0.730769197884616,
+        "core-p16/PING_MBULK": 0.7750000871875055,
+        "core-p16/SET": 0.7300613668131903,
+        "range-heavy-p16/LPUSH (needed to benchmark LRANGE)": 0.8148148089481481,
+        "range-heavy-p16/LRANGE_100 (first 100 elements)": 0.9405144501728294,
+        "range-heavy-p16/LRANGE_300 (first 300 elements)": 1.4248951967956212
+      },
+      "runner": "bench-profile-matrix",
+      "runner_kind": "profile-matrix",
+      "runner_label": "Profile matrix",
+      "set_p100": 0.7821782315099014,
+      "summary": "profile matrix: median 0.78x, min 0.63x, max 1.42x; GET p1 1.20x; GET p100 0.75x",
+      "ts": "2026-05-22T16:50:28.158284Z"
+    },
+    {
+      "artifacts": [
+        {
+          "kind": "summary-tsv",
+          "path": "harness/bench/results/20260522T165028Z-328d0ee-calltree.tsv",
+          "url": "../../bench/results/20260522T165028Z-328d0ee-calltree.tsv"
+        },
+        {
+          "kind": "runner-result-json",
+          "path": "harness/bench/results/20260522T165028Z-328d0ee-calltree.json",
+          "url": "../../bench/results/20260522T165028Z-328d0ee-calltree.json"
+        },
+        {
+          "kind": "raw-sample-calltree",
+          "path": "harness/bench/profiles/20260522T165028Z-328d0ee-calltree/get-p100/get-p100.sample.txt",
+          "url": "../../bench/profiles/20260522T165028Z-328d0ee-calltree/get-p100/get-p100.sample.txt",
+          "workload": "get-p100"
+        },
+        {
+          "kind": "profiler-log",
+          "path": "harness/bench/profiles/20260522T165028Z-328d0ee-calltree/get-p100/get-p100.sample.stderr.log",
+          "url": "../../bench/profiles/20260522T165028Z-328d0ee-calltree/get-p100/get-p100.sample.stderr.log",
+          "workload": "get-p100"
+        },
+        {
+          "kind": "raw-sample-calltree",
+          "path": "harness/bench/profiles/20260522T165028Z-328d0ee-calltree/set-p100/set-p100.sample.txt",
+          "url": "../../bench/profiles/20260522T165028Z-328d0ee-calltree/set-p100/set-p100.sample.txt",
+          "workload": "set-p100"
+        },
+        {
+          "kind": "profiler-log",
+          "path": "harness/bench/profiles/20260522T165028Z-328d0ee-calltree/set-p100/set-p100.sample.stderr.log",
+          "url": "../../bench/profiles/20260522T165028Z-328d0ee-calltree/set-p100/set-p100.sample.stderr.log",
+          "workload": "set-p100"
+        },
+        {
+          "kind": "raw-sample-calltree",
+          "path": "harness/bench/profiles/20260522T165028Z-328d0ee-calltree/incr-p100/incr-p100.sample.txt",
+          "url": "../../bench/profiles/20260522T165028Z-328d0ee-calltree/incr-p100/incr-p100.sample.txt",
+          "workload": "incr-p100"
+        },
+        {
+          "kind": "profiler-log",
+          "path": "harness/bench/profiles/20260522T165028Z-328d0ee-calltree/incr-p100/incr-p100.sample.stderr.log",
+          "url": "../../bench/profiles/20260522T165028Z-328d0ee-calltree/incr-p100/incr-p100.sample.stderr.log",
+          "workload": "incr-p100"
+        },
+        {
+          "kind": "raw-sample-calltree",
+          "path": "harness/bench/profiles/20260522T165028Z-328d0ee-calltree/ping-p100/ping-p100.sample.txt",
+          "url": "../../bench/profiles/20260522T165028Z-328d0ee-calltree/ping-p100/ping-p100.sample.txt",
+          "workload": "ping-p100"
+        },
+        {
+          "kind": "profiler-log",
+          "path": "harness/bench/profiles/20260522T165028Z-328d0ee-calltree/ping-p100/ping-p100.sample.stderr.log",
+          "url": "../../bench/profiles/20260522T165028Z-328d0ee-calltree/ping-p100/ping-p100.sample.stderr.log",
+          "workload": "ping-p100"
+        },
+        {
+          "kind": "server-log",
+          "path": "harness/bench/profiles/20260522T165028Z-328d0ee-calltree/get-p100/rust-62166.server.log",
+          "url": "../../bench/profiles/20260522T165028Z-328d0ee-calltree/get-p100/rust-62166.server.log"
+        },
+        {
+          "kind": "server-log",
+          "path": "harness/bench/profiles/20260522T165028Z-328d0ee-calltree/incr-p100/rust-62389.server.log",
+          "url": "../../bench/profiles/20260522T165028Z-328d0ee-calltree/incr-p100/rust-62389.server.log"
+        },
+        {
+          "kind": "server-log",
+          "path": "harness/bench/profiles/20260522T165028Z-328d0ee-calltree/ping-p100/rust-62501.server.log",
+          "url": "../../bench/profiles/20260522T165028Z-328d0ee-calltree/ping-p100/rust-62501.server.log"
+        },
+        {
+          "kind": "server-log",
+          "path": "harness/bench/profiles/20260522T165028Z-328d0ee-calltree/reference-62107.server.log",
+          "url": "../../bench/profiles/20260522T165028Z-328d0ee-calltree/reference-62107.server.log"
+        },
+        {
+          "kind": "server-log",
+          "path": "harness/bench/profiles/20260522T165028Z-328d0ee-calltree/reference-62221.server.log",
+          "url": "../../bench/profiles/20260522T165028Z-328d0ee-calltree/reference-62221.server.log"
+        },
+        {
+          "kind": "server-log",
+          "path": "harness/bench/profiles/20260522T165028Z-328d0ee-calltree/reference-62335.server.log",
+          "url": "../../bench/profiles/20260522T165028Z-328d0ee-calltree/reference-62335.server.log"
+        },
+        {
+          "kind": "server-log",
+          "path": "harness/bench/profiles/20260522T165028Z-328d0ee-calltree/reference-62446.server.log",
+          "url": "../../bench/profiles/20260522T165028Z-328d0ee-calltree/reference-62446.server.log"
+        },
+        {
+          "kind": "server-log",
+          "path": "harness/bench/profiles/20260522T165028Z-328d0ee-calltree/set-p100/rust-62278.server.log",
+          "url": "../../bench/profiles/20260522T165028Z-328d0ee-calltree/set-p100/rust-62278.server.log"
+        }
+      ],
+      "commit": "328d0ee",
+      "commit_subject": "runner: complete runtime-owner-11-post-reply-profile-matrix",
+      "commit_url": "https://github.com/ianm199/valkey-rs/commit/328d0ee",
+      "evidence": "harness/evidence/runs/20260522T165028Z-328d0ee-runner-runtime-owner-11-post-reply-calltree.json",
+      "evidence_url": "../../evidence/runs/20260522T165028Z-328d0ee-runner-runtime-owner-11-post-reply-calltree.json",
+      "get_p1": null,
+      "get_p100": 0.802799148052082,
+      "incr_p100": 0.595507831928443,
+      "max": 0.802799148052082,
+      "median": 0.7251015746662406,
+      "min": 0.595507831928443,
+      "p99_ms": {
+        "get-p100": 3.263,
+        "incr-p100": 3.023,
+        "ping-p100": 1.831,
+        "set-p100": 3.199
+      },
+      "packet": "runtime-owner-11-post-reply-calltree",
+      "ping_p100": 0.7057467304805428,
+      "ratios": {
+        "get-p100": 0.802799148052082,
+        "incr-p100": 0.595507831928443,
+        "ping-p100": 0.7057467304805428,
+        "set-p100": 0.7444564188519383
+      },
+      "runner": "bench-profile-calltree",
+      "runner_kind": "calltree",
+      "runner_label": "Calltree",
+      "set_p100": 0.7444564188519383,
+      "summary": "profile calltree: sample, median 0.74x, min 0.60x, max 0.80x; artifacts 16",
+      "ts": "2026-05-22T16:51:18.393948Z"
+    },
+    {
+      "artifacts": [
+        {
+          "path": "harness/bench/results/20260522T170800Z-f8f5124-profile-matrix.tsv",
+          "url": "../../bench/results/20260522T170800Z-f8f5124-profile-matrix.tsv"
+        }
+      ],
+      "commit": "f8f5124",
+      "commit_subject": "runner: complete runtime-owner-12-post-watch-oracle",
+      "commit_url": "https://github.com/ianm199/valkey-rs/commit/f8f5124",
+      "evidence": "harness/evidence/runs/20260522T170800Z-f8f5124-runner-runtime-owner-12-post-watch-profile-matrix.json",
+      "evidence_url": "../../evidence/runs/20260522T170800Z-f8f5124-runner-runtime-owner-12-post-watch-profile-matrix.json",
+      "get_p1": 0.997190956191015,
+      "get_p100": 0.7530864093981481,
+      "incr_p100": 0.6145833486364584,
+      "max": 1.3568906075363996,
+      "median": 0.784313752,
+      "min": 0.6145833486364584,
+      "p99_ms": {
+        "core-p1/GET": 0.415,
+        "core-p1/INCR": 0.503,
+        "core-p1/PING_MBULK": 0.407,
+        "core-p1/SET": 0.423,
+        "core-p100/GET": 2.255,
+        "core-p100/INCR": 2.687,
+        "core-p100/PING_MBULK": 1.807,
+        "core-p100/SET": 2.863,
+        "core-p16/GET": 0.719,
+        "core-p16/INCR": 1.455,
+        "core-p16/PING_MBULK": 0.695,
+        "core-p16/SET": 0.783,
+        "range-heavy-p16/LPUSH (needed to benchmark LRANGE)": 2.047,
+        "range-heavy-p16/LRANGE_100 (first 100 elements)": 6.399,
+        "range-heavy-p16/LRANGE_300 (first 300 elements)": 18.175
+      },
+      "packet": "runtime-owner-12-post-watch-profile-matrix",
+      "ping_p100": 0.7962963022685189,
+      "ratios": {
+        "core-p1/GET": 0.997190956191015,
+        "core-p1/INCR": 0.9162011143865921,
+        "core-p1/PING_MBULK": 1.0343838769896876,
+        "core-p1/SET": 0.9476584710038601,
+        "core-p100/GET": 0.7530864093981481,
+        "core-p100/INCR": 0.6145833486364584,
+        "core-p100/PING_MBULK": 0.7962963022685189,
+        "core-p100/SET": 0.784313752,
+        "core-p16/GET": 0.7449664648177858,
+        "core-p16/INCR": 0.7745665175190769,
+        "core-p16/PING_MBULK": 0.7457627174576271,
+        "core-p16/SET": 0.6781609758954024,
+        "range-heavy-p16/LPUSH (needed to benchmark LRANGE)": 0.6603773974528315,
+        "range-heavy-p16/LRANGE_100 (first 100 elements)": 1.0159744760472853,
+        "range-heavy-p16/LRANGE_300 (first 300 elements)": 1.3568906075363996
+      },
+      "runner": "bench-profile-matrix",
+      "runner_kind": "profile-matrix",
+      "runner_label": "Profile matrix",
+      "set_p100": 0.784313752,
+      "summary": "profile matrix: median 0.78x, min 0.61x, max 1.36x; GET p1 1.00x; GET p100 0.75x",
+      "ts": "2026-05-22T17:08:11.969615Z"
+    },
+    {
+      "artifacts": [
+        {
+          "kind": "summary-tsv",
+          "path": "harness/bench/results/20260522T170812Z-2813e87-calltree.tsv",
+          "url": "../../bench/results/20260522T170812Z-2813e87-calltree.tsv"
+        },
+        {
+          "kind": "runner-result-json",
+          "path": "harness/bench/results/20260522T170812Z-2813e87-calltree.json",
+          "url": "../../bench/results/20260522T170812Z-2813e87-calltree.json"
+        },
+        {
+          "kind": "raw-sample-calltree",
+          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/get-p100/get-p100.sample.txt",
+          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/get-p100/get-p100.sample.txt",
+          "workload": "get-p100"
+        },
+        {
+          "kind": "profiler-log",
+          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/get-p100/get-p100.sample.stderr.log",
+          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/get-p100/get-p100.sample.stderr.log",
+          "workload": "get-p100"
+        },
+        {
+          "kind": "raw-sample-calltree",
+          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/set-p100/set-p100.sample.txt",
+          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/set-p100/set-p100.sample.txt",
+          "workload": "set-p100"
+        },
+        {
+          "kind": "profiler-log",
+          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/set-p100/set-p100.sample.stderr.log",
+          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/set-p100/set-p100.sample.stderr.log",
+          "workload": "set-p100"
+        },
+        {
+          "kind": "raw-sample-calltree",
+          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/incr-p100/incr-p100.sample.txt",
+          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/incr-p100/incr-p100.sample.txt",
+          "workload": "incr-p100"
+        },
+        {
+          "kind": "profiler-log",
+          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/incr-p100/incr-p100.sample.stderr.log",
+          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/incr-p100/incr-p100.sample.stderr.log",
+          "workload": "incr-p100"
+        },
+        {
+          "kind": "raw-sample-calltree",
+          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/ping-p100/ping-p100.sample.txt",
+          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/ping-p100/ping-p100.sample.txt",
+          "workload": "ping-p100"
+        },
+        {
+          "kind": "profiler-log",
+          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/ping-p100/ping-p100.sample.stderr.log",
+          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/ping-p100/ping-p100.sample.stderr.log",
+          "workload": "ping-p100"
+        },
+        {
+          "kind": "server-log",
+          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/get-p100/rust-51821.server.log",
+          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/get-p100/rust-51821.server.log"
+        },
+        {
+          "kind": "server-log",
+          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/incr-p100/rust-52062.server.log",
+          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/incr-p100/rust-52062.server.log"
+        },
+        {
+          "kind": "server-log",
+          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/ping-p100/rust-52184.server.log",
+          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/ping-p100/rust-52184.server.log"
+        },
+        {
+          "kind": "server-log",
+          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/reference-51761.server.log",
+          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/reference-51761.server.log"
+        },
+        {
+          "kind": "server-log",
+          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/reference-51878.server.log",
+          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/reference-51878.server.log"
+        },
+        {
+          "kind": "server-log",
+          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/reference-52007.server.log",
+          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/reference-52007.server.log"
+        },
+        {
+          "kind": "server-log",
+          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/reference-52116.server.log",
+          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/reference-52116.server.log"
+        },
+        {
+          "kind": "server-log",
+          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/set-p100/rust-51943.server.log",
+          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/set-p100/rust-51943.server.log"
+        }
+      ],
+      "commit": "2813e87",
+      "commit_subject": "runner: complete runtime-owner-12-post-watch-profile-matrix",
+      "commit_url": "https://github.com/ianm199/valkey-rs/commit/2813e87",
+      "evidence": "harness/evidence/runs/20260522T170812Z-2813e87-runner-runtime-owner-12-post-watch-calltree.json",
+      "evidence_url": "../../evidence/runs/20260522T170812Z-2813e87-runner-runtime-owner-12-post-watch-calltree.json",
+      "get_p1": null,
+      "get_p100": 0.8130462440913714,
+      "incr_p100": 0.5836158200844632,
+      "max": 0.8130462440913714,
+      "median": 0.7111764448748289,
+      "min": 0.5836158200844632,
+      "p99_ms": {
+        "get-p100": 2.223,
+        "incr-p100": 3.087,
+        "ping-p100": 1.639,
+        "set-p100": 9.151
+      },
+      "packet": "runtime-owner-12-post-watch-calltree",
+      "ping_p100": 0.7308162911414329,
+      "ratios": {
+        "get-p100": 0.8130462440913714,
+        "incr-p100": 0.5836158200844632,
+        "ping-p100": 0.7308162911414329,
+        "set-p100": 0.6915365986082249
+      },
+      "runner": "bench-profile-calltree",
+      "runner_kind": "calltree",
+      "runner_label": "Calltree",
+      "set_p100": 0.6915365986082249,
+      "summary": "profile calltree: sample, median 0.73x, min 0.58x, max 0.81x; artifacts 16",
+      "ts": "2026-05-22T17:09:02.953431Z"
     }
   ],
   "project": "valkey-rs",
-  "raw_point_count": 39,
+  "raw_point_count": 47,
   "raw_points": [
     {
       "clients": 10,
@@ -3061,6 +3667,374 @@
       "source_url": "../../bench/results/20260522T144738Z-d3b7602-calltree.tsv",
       "summary": "Raw calltree median 0.72x min 0.62x max 0.81x",
       "ts": "2026-05-22T14:47:38Z"
+    },
+    {
+      "clients": 50,
+      "commit": "c63d3bd",
+      "commit_subject": "runner: complete runtime-owner-10-post-timing-oracle",
+      "commit_url": "https://github.com/ianm199/valkey-rs/commit/c63d3bd",
+      "get_p1": 1.051724,
+      "get_p100": 0.731707,
+      "incr_p100": 0.621053,
+      "max": 1.380182,
+      "median": 0.823529,
+      "min": 0.621053,
+      "p99_ms": {
+        "core-p1/GET": 0.423,
+        "core-p1/INCR": 0.431,
+        "core-p1/PING_MBULK": 0.727,
+        "core-p1/SET": 0.423,
+        "core-p100/GET": 2.271,
+        "core-p100/INCR": 2.591,
+        "core-p100/PING_MBULK": 1.991,
+        "core-p100/SET": 3.103,
+        "core-p16/GET": 0.735,
+        "core-p16/INCR": 0.767,
+        "core-p16/PING_MBULK": 0.583,
+        "core-p16/SET": 0.815,
+        "range-heavy-p16/LPUSH (needed to benchmark LRANGE)": 0.927,
+        "range-heavy-p16/LRANGE_100 (first 100 elements)": 5.631,
+        "range-heavy-p16/LRANGE_300 (first 300 elements)": 18.303
+      },
+      "payload": 64,
+      "ping_p100": 0.696429,
+      "pipeline": 1,
+      "ratios": {
+        "core-p1/GET": 1.051724,
+        "core-p1/INCR": 0.938547,
+        "core-p1/PING_MBULK": 1.008086,
+        "core-p1/SET": 0.968839,
+        "core-p100/GET": 0.731707,
+        "core-p100/INCR": 0.621053,
+        "core-p100/PING_MBULK": 0.696429,
+        "core-p100/SET": 0.740741,
+        "core-p16/GET": 0.754967,
+        "core-p16/INCR": 0.807229,
+        "core-p16/PING_MBULK": 0.823529,
+        "core-p16/SET": 0.769663,
+        "range-heavy-p16/LPUSH (needed to benchmark LRANGE)": 0.855422,
+        "range-heavy-p16/LRANGE_100 (first 100 elements)": 1.05753,
+        "range-heavy-p16/LRANGE_300 (first 300 elements)": 1.380182
+      },
+      "requests": 50000,
+      "runner_kind": "raw-profile-matrix",
+      "runner_label": "Raw profile matrix",
+      "set_p100": 0.740741,
+      "source": "harness/bench/results/20260522T163149Z-c63d3bd-profile-matrix.tsv",
+      "source_url": "../../bench/results/20260522T163149Z-c63d3bd-profile-matrix.tsv",
+      "summary": "Raw profile matrix median 0.82x min 0.62x max 1.38x",
+      "ts": "2026-05-22T16:31:49Z"
+    },
+    {
+      "clients": 50,
+      "commit": "ac5a345",
+      "commit_subject": "runner: complete runtime-owner-10-post-timing-profile-matrix",
+      "commit_url": "https://github.com/ianm199/valkey-rs/commit/ac5a345",
+      "get_p1": null,
+      "get_p100": 0.797171,
+      "incr_p100": 0.560989,
+      "max": 0.797171,
+      "median": 0.7142455000000001,
+      "min": 0.560989,
+      "p99_ms": {
+        "get-p100": 1.967,
+        "incr-p100": 8.031,
+        "ping-p100": 1.719,
+        "set-p100": 3.471
+      },
+      "payload": 64,
+      "ping_p100": 0.71613,
+      "pipeline": 100,
+      "ratios": {
+        "get-p100": 0.797171,
+        "incr-p100": 0.560989,
+        "ping-p100": 0.71613,
+        "set-p100": 0.712361
+      },
+      "requests": 20000000,
+      "runner_kind": "raw-calltree",
+      "runner_label": "Raw calltree",
+      "set_p100": 0.712361,
+      "source": "harness/bench/results/20260522T163201Z-ac5a345-calltree.tsv",
+      "source_url": "../../bench/results/20260522T163201Z-ac5a345-calltree.tsv",
+      "summary": "Raw calltree median 0.71x min 0.56x max 0.80x",
+      "ts": "2026-05-22T16:32:01Z"
+    },
+    {
+      "clients": 50,
+      "commit": "a9ec71e",
+      "commit_subject": "runner: complete runtime-owner-11-post-reply-oracle",
+      "commit_url": "https://github.com/ianm199/valkey-rs/commit/a9ec71e",
+      "get_p1": 1.198413,
+      "get_p100": 0.746835,
+      "incr_p100": 0.634409,
+      "max": 1.424895,
+      "median": 0.782178,
+      "min": 0.634409,
+      "p99_ms": {
+        "core-p1/GET": 0.399,
+        "core-p1/INCR": 0.415,
+        "core-p1/PING_MBULK": 0.399,
+        "core-p1/SET": 0.423,
+        "core-p100/GET": 2.319,
+        "core-p100/INCR": 2.735,
+        "core-p100/PING_MBULK": 1.447,
+        "core-p100/SET": 2.927,
+        "core-p16/GET": 0.679,
+        "core-p16/INCR": 0.735,
+        "core-p16/PING_MBULK": 0.575,
+        "core-p16/SET": 0.759,
+        "range-heavy-p16/LPUSH (needed to benchmark LRANGE)": 1.287,
+        "range-heavy-p16/LRANGE_100 (first 100 elements)": 6.527,
+        "range-heavy-p16/LRANGE_300 (first 300 elements)": 17.663
+      },
+      "payload": 64,
+      "ping_p100": 0.76,
+      "pipeline": 1,
+      "ratios": {
+        "core-p1/GET": 1.198413,
+        "core-p1/INCR": 1.057432,
+        "core-p1/PING_MBULK": 1.064846,
+        "core-p1/SET": 0.976608,
+        "core-p100/GET": 0.746835,
+        "core-p100/INCR": 0.634409,
+        "core-p100/PING_MBULK": 0.76,
+        "core-p100/SET": 0.782178,
+        "core-p16/GET": 0.707143,
+        "core-p16/INCR": 0.730769,
+        "core-p16/PING_MBULK": 0.775,
+        "core-p16/SET": 0.730061,
+        "range-heavy-p16/LPUSH (needed to benchmark LRANGE)": 0.814815,
+        "range-heavy-p16/LRANGE_100 (first 100 elements)": 0.940514,
+        "range-heavy-p16/LRANGE_300 (first 300 elements)": 1.424895
+      },
+      "requests": 50000,
+      "runner_kind": "raw-profile-matrix",
+      "runner_label": "Raw profile matrix",
+      "set_p100": 0.782178,
+      "source": "harness/bench/results/20260522T165017Z-a9ec71e-profile-matrix.tsv",
+      "source_url": "../../bench/results/20260522T165017Z-a9ec71e-profile-matrix.tsv",
+      "summary": "Raw profile matrix median 0.78x min 0.63x max 1.42x",
+      "ts": "2026-05-22T16:50:17Z"
+    },
+    {
+      "clients": 50,
+      "commit": "328d0ee",
+      "commit_subject": "runner: complete runtime-owner-11-post-reply-profile-matrix",
+      "commit_url": "https://github.com/ianm199/valkey-rs/commit/328d0ee",
+      "get_p1": null,
+      "get_p100": 0.802799,
+      "incr_p100": 0.595508,
+      "max": 0.802799,
+      "median": 0.7251015000000001,
+      "min": 0.595508,
+      "p99_ms": {
+        "get-p100": 3.263,
+        "incr-p100": 3.023,
+        "ping-p100": 1.831,
+        "set-p100": 3.199
+      },
+      "payload": 64,
+      "ping_p100": 0.705747,
+      "pipeline": 100,
+      "ratios": {
+        "get-p100": 0.802799,
+        "incr-p100": 0.595508,
+        "ping-p100": 0.705747,
+        "set-p100": 0.744456
+      },
+      "requests": 20000000,
+      "runner_kind": "raw-calltree",
+      "runner_label": "Raw calltree",
+      "set_p100": 0.744456,
+      "source": "harness/bench/results/20260522T165028Z-328d0ee-calltree.tsv",
+      "source_url": "../../bench/results/20260522T165028Z-328d0ee-calltree.tsv",
+      "summary": "Raw calltree median 0.73x min 0.60x max 0.80x",
+      "ts": "2026-05-22T16:50:28Z"
+    },
+    {
+      "clients": 50,
+      "commit": "f8f5124",
+      "commit_subject": "runner: complete runtime-owner-12-post-watch-oracle",
+      "commit_url": "https://github.com/ianm199/valkey-rs/commit/f8f5124",
+      "get_p1": 0.997191,
+      "get_p100": 0.753086,
+      "incr_p100": 0.614583,
+      "max": 1.356891,
+      "median": 0.784314,
+      "min": 0.614583,
+      "p99_ms": {
+        "core-p1/GET": 0.415,
+        "core-p1/INCR": 0.503,
+        "core-p1/PING_MBULK": 0.407,
+        "core-p1/SET": 0.423,
+        "core-p100/GET": 2.255,
+        "core-p100/INCR": 2.687,
+        "core-p100/PING_MBULK": 1.807,
+        "core-p100/SET": 2.863,
+        "core-p16/GET": 0.719,
+        "core-p16/INCR": 1.455,
+        "core-p16/PING_MBULK": 0.695,
+        "core-p16/SET": 0.783,
+        "range-heavy-p16/LPUSH (needed to benchmark LRANGE)": 2.047,
+        "range-heavy-p16/LRANGE_100 (first 100 elements)": 6.399,
+        "range-heavy-p16/LRANGE_300 (first 300 elements)": 18.175
+      },
+      "payload": 64,
+      "ping_p100": 0.796296,
+      "pipeline": 1,
+      "ratios": {
+        "core-p1/GET": 0.997191,
+        "core-p1/INCR": 0.916201,
+        "core-p1/PING_MBULK": 1.034384,
+        "core-p1/SET": 0.947658,
+        "core-p100/GET": 0.753086,
+        "core-p100/INCR": 0.614583,
+        "core-p100/PING_MBULK": 0.796296,
+        "core-p100/SET": 0.784314,
+        "core-p16/GET": 0.744966,
+        "core-p16/INCR": 0.774567,
+        "core-p16/PING_MBULK": 0.745763,
+        "core-p16/SET": 0.678161,
+        "range-heavy-p16/LPUSH (needed to benchmark LRANGE)": 0.660377,
+        "range-heavy-p16/LRANGE_100 (first 100 elements)": 1.015974,
+        "range-heavy-p16/LRANGE_300 (first 300 elements)": 1.356891
+      },
+      "requests": 50000,
+      "runner_kind": "raw-profile-matrix",
+      "runner_label": "Raw profile matrix",
+      "set_p100": 0.784314,
+      "source": "harness/bench/results/20260522T170800Z-f8f5124-profile-matrix.tsv",
+      "source_url": "../../bench/results/20260522T170800Z-f8f5124-profile-matrix.tsv",
+      "summary": "Raw profile matrix median 0.78x min 0.61x max 1.36x",
+      "ts": "2026-05-22T17:08:00Z"
+    },
+    {
+      "clients": 50,
+      "commit": "2813e87",
+      "commit_subject": "runner: complete runtime-owner-12-post-watch-profile-matrix",
+      "commit_url": "https://github.com/ianm199/valkey-rs/commit/2813e87",
+      "get_p1": null,
+      "get_p100": 0.813046,
+      "incr_p100": 0.583616,
+      "max": 0.813046,
+      "median": 0.7111765,
+      "min": 0.583616,
+      "p99_ms": {
+        "get-p100": 2.223,
+        "incr-p100": 3.087,
+        "ping-p100": 1.639,
+        "set-p100": 9.151
+      },
+      "payload": 64,
+      "ping_p100": 0.730816,
+      "pipeline": 100,
+      "ratios": {
+        "get-p100": 0.813046,
+        "incr-p100": 0.583616,
+        "ping-p100": 0.730816,
+        "set-p100": 0.691537
+      },
+      "requests": 20000000,
+      "runner_kind": "raw-calltree",
+      "runner_label": "Raw calltree",
+      "set_p100": 0.691537,
+      "source": "harness/bench/results/20260522T170812Z-2813e87-calltree.tsv",
+      "source_url": "../../bench/results/20260522T170812Z-2813e87-calltree.tsv",
+      "summary": "Raw calltree median 0.71x min 0.58x max 0.81x",
+      "ts": "2026-05-22T17:08:12Z"
+    },
+    {
+      "clients": 50,
+      "commit": "752d649",
+      "commit_subject": "runner: complete runtime-owner-12-regression-incr-p100",
+      "commit_url": "https://github.com/ianm199/valkey-rs/commit/752d649",
+      "get_p1": 1.016529,
+      "get_p100": 0.772152,
+      "incr_p100": 0.57,
+      "max": 1.351364,
+      "median": 0.78,
+      "min": 0.57,
+      "p99_ms": {
+        "core-p1/GET": 0.663,
+        "core-p1/INCR": 0.471,
+        "core-p1/PING_MBULK": 6.047,
+        "core-p1/SET": 0.559,
+        "core-p100/GET": 2.175,
+        "core-p100/INCR": 2.767,
+        "core-p100/PING_MBULK": 1.503,
+        "core-p100/SET": 2.687,
+        "core-p16/GET": 0.711,
+        "core-p16/INCR": 0.799,
+        "core-p16/PING_MBULK": 0.679,
+        "core-p16/SET": 0.775,
+        "range-heavy-p16/LPUSH (needed to benchmark LRANGE)": 1.071,
+        "range-heavy-p16/LRANGE_100 (first 100 elements)": 6.879,
+        "range-heavy-p16/LRANGE_300 (first 300 elements)": 20.735
+      },
+      "payload": 64,
+      "ping_p100": 0.78,
+      "pipeline": 1,
+      "ratios": {
+        "core-p1/GET": 1.016529,
+        "core-p1/INCR": 1.058011,
+        "core-p1/PING_MBULK": 0.683636,
+        "core-p1/SET": 0.994398,
+        "core-p100/GET": 0.772152,
+        "core-p100/INCR": 0.57,
+        "core-p100/PING_MBULK": 0.78,
+        "core-p100/SET": 0.872341,
+        "core-p16/GET": 0.736842,
+        "core-p16/INCR": 0.639053,
+        "core-p16/PING_MBULK": 0.762295,
+        "core-p16/SET": 0.751445,
+        "range-heavy-p16/LPUSH (needed to benchmark LRANGE)": 0.804598,
+        "range-heavy-p16/LRANGE_100 (first 100 elements)": 0.898119,
+        "range-heavy-p16/LRANGE_300 (first 300 elements)": 1.351364
+      },
+      "requests": 50000,
+      "runner_kind": "raw-profile-matrix",
+      "runner_label": "Raw profile matrix",
+      "set_p100": 0.872341,
+      "source": "harness/bench/results/20260522T172533Z-752d649-profile-matrix.tsv",
+      "source_url": "../../bench/results/20260522T172533Z-752d649-profile-matrix.tsv",
+      "summary": "Raw profile matrix median 0.78x min 0.57x max 1.35x",
+      "ts": "2026-05-22T17:25:33Z"
+    },
+    {
+      "clients": 50,
+      "commit": "752d649",
+      "commit_subject": "runner: complete runtime-owner-12-regression-incr-p100",
+      "commit_url": "https://github.com/ianm199/valkey-rs/commit/752d649",
+      "get_p1": null,
+      "get_p100": 0.840902,
+      "incr_p100": 0.545236,
+      "max": 0.840902,
+      "median": 0.7671935000000001,
+      "min": 0.545236,
+      "p99_ms": {
+        "get-p100": 1.999,
+        "incr-p100": 3.487,
+        "ping-p100": 1.663,
+        "set-p100": 3.839
+      },
+      "payload": 64,
+      "ping_p100": 0.755298,
+      "pipeline": 100,
+      "ratios": {
+        "get-p100": 0.840902,
+        "incr-p100": 0.545236,
+        "ping-p100": 0.755298,
+        "set-p100": 0.779089
+      },
+      "requests": 20000000,
+      "runner_kind": "raw-calltree",
+      "runner_label": "Raw calltree",
+      "set_p100": 0.779089,
+      "source": "harness/bench/results/20260522T172634Z-752d649-calltree.tsv",
+      "source_url": "../../bench/results/20260522T172634Z-752d649-calltree.tsv",
+      "summary": "Raw calltree median 0.77x min 0.55x max 0.84x",
+      "ts": "2026-05-22T17:26:34Z"
     }
   ],
   "raw_series": {
@@ -3094,6 +4068,46 @@
         "summary": "Raw calltree median 0.72x min 0.62x max 0.81x",
         "ts": "2026-05-22T14:47:38Z",
         "value": 0.7242055000000001
+      },
+      {
+        "commit": "ac5a345",
+        "commit_url": "https://github.com/ianm199/valkey-rs/commit/ac5a345",
+        "evidence_url": "../../bench/results/20260522T163201Z-ac5a345-calltree.tsv",
+        "idx": 40,
+        "packet": "harness/bench/results/20260522T163201Z-ac5a345-calltree.tsv",
+        "summary": "Raw calltree median 0.71x min 0.56x max 0.80x",
+        "ts": "2026-05-22T16:32:01Z",
+        "value": 0.7142455000000001
+      },
+      {
+        "commit": "328d0ee",
+        "commit_url": "https://github.com/ianm199/valkey-rs/commit/328d0ee",
+        "evidence_url": "../../bench/results/20260522T165028Z-328d0ee-calltree.tsv",
+        "idx": 42,
+        "packet": "harness/bench/results/20260522T165028Z-328d0ee-calltree.tsv",
+        "summary": "Raw calltree median 0.73x min 0.60x max 0.80x",
+        "ts": "2026-05-22T16:50:28Z",
+        "value": 0.7251015000000001
+      },
+      {
+        "commit": "2813e87",
+        "commit_url": "https://github.com/ianm199/valkey-rs/commit/2813e87",
+        "evidence_url": "../../bench/results/20260522T170812Z-2813e87-calltree.tsv",
+        "idx": 44,
+        "packet": "harness/bench/results/20260522T170812Z-2813e87-calltree.tsv",
+        "summary": "Raw calltree median 0.71x min 0.58x max 0.81x",
+        "ts": "2026-05-22T17:08:12Z",
+        "value": 0.7111765
+      },
+      {
+        "commit": "752d649",
+        "commit_url": "https://github.com/ianm199/valkey-rs/commit/752d649",
+        "evidence_url": "../../bench/results/20260522T172634Z-752d649-calltree.tsv",
+        "idx": 46,
+        "packet": "harness/bench/results/20260522T172634Z-752d649-calltree.tsv",
+        "summary": "Raw calltree median 0.77x min 0.55x max 0.84x",
+        "ts": "2026-05-22T17:26:34Z",
+        "value": 0.7671935000000001
       }
     ],
     "raw_hotspots_median": [
@@ -3460,6 +4474,46 @@
         "summary": "Raw profile matrix median 0.75x min 0.60x max 1.49x",
         "ts": "2026-05-22T14:45:52Z",
         "value": 0.754875
+      },
+      {
+        "commit": "c63d3bd",
+        "commit_url": "https://github.com/ianm199/valkey-rs/commit/c63d3bd",
+        "evidence_url": "../../bench/results/20260522T163149Z-c63d3bd-profile-matrix.tsv",
+        "idx": 39,
+        "packet": "harness/bench/results/20260522T163149Z-c63d3bd-profile-matrix.tsv",
+        "summary": "Raw profile matrix median 0.82x min 0.62x max 1.38x",
+        "ts": "2026-05-22T16:31:49Z",
+        "value": 0.823529
+      },
+      {
+        "commit": "a9ec71e",
+        "commit_url": "https://github.com/ianm199/valkey-rs/commit/a9ec71e",
+        "evidence_url": "../../bench/results/20260522T165017Z-a9ec71e-profile-matrix.tsv",
+        "idx": 41,
+        "packet": "harness/bench/results/20260522T165017Z-a9ec71e-profile-matrix.tsv",
+        "summary": "Raw profile matrix median 0.78x min 0.63x max 1.42x",
+        "ts": "2026-05-22T16:50:17Z",
+        "value": 0.782178
+      },
+      {
+        "commit": "f8f5124",
+        "commit_url": "https://github.com/ianm199/valkey-rs/commit/f8f5124",
+        "evidence_url": "../../bench/results/20260522T170800Z-f8f5124-profile-matrix.tsv",
+        "idx": 43,
+        "packet": "harness/bench/results/20260522T170800Z-f8f5124-profile-matrix.tsv",
+        "summary": "Raw profile matrix median 0.78x min 0.61x max 1.36x",
+        "ts": "2026-05-22T17:08:00Z",
+        "value": 0.784314
+      },
+      {
+        "commit": "752d649",
+        "commit_url": "https://github.com/ianm199/valkey-rs/commit/752d649",
+        "evidence_url": "../../bench/results/20260522T172533Z-752d649-profile-matrix.tsv",
+        "idx": 45,
+        "packet": "harness/bench/results/20260522T172533Z-752d649-profile-matrix.tsv",
+        "summary": "Raw profile matrix median 0.78x min 0.57x max 1.35x",
+        "ts": "2026-05-22T17:25:33Z",
+        "value": 0.78
       }
     ]
   },
@@ -3514,6 +4568,36 @@
         "summary": "profile calltree: sample, median 0.74x, min 0.62x, max 0.81x; artifacts 16",
         "ts": "2026-05-22T14:48:28.753333Z",
         "value": 0.809980865675625
+      },
+      {
+        "commit": "ac5a345",
+        "commit_url": "https://github.com/ianm199/valkey-rs/commit/ac5a345",
+        "evidence_url": "../../evidence/runs/20260522T163200Z-ac5a345-runner-runtime-owner-10-post-timing-calltree.json",
+        "idx": 15,
+        "packet": "runtime-owner-10-post-timing-calltree",
+        "summary": "profile calltree: sample, median 0.72x, min 0.56x, max 0.80x; artifacts 16",
+        "ts": "2026-05-22T16:32:51.450091Z",
+        "value": 0.7971705598830074
+      },
+      {
+        "commit": "328d0ee",
+        "commit_url": "https://github.com/ianm199/valkey-rs/commit/328d0ee",
+        "evidence_url": "../../evidence/runs/20260522T165028Z-328d0ee-runner-runtime-owner-11-post-reply-calltree.json",
+        "idx": 17,
+        "packet": "runtime-owner-11-post-reply-calltree",
+        "summary": "profile calltree: sample, median 0.74x, min 0.60x, max 0.80x; artifacts 16",
+        "ts": "2026-05-22T16:51:18.393948Z",
+        "value": 0.802799148052082
+      },
+      {
+        "commit": "2813e87",
+        "commit_url": "https://github.com/ianm199/valkey-rs/commit/2813e87",
+        "evidence_url": "../../evidence/runs/20260522T170812Z-2813e87-runner-runtime-owner-12-post-watch-calltree.json",
+        "idx": 19,
+        "packet": "runtime-owner-12-post-watch-calltree",
+        "summary": "profile calltree: sample, median 0.73x, min 0.58x, max 0.81x; artifacts 16",
+        "ts": "2026-05-22T17:09:02.953431Z",
+        "value": 0.8130462440913714
       }
     ],
     "calltree_median": [
@@ -3536,6 +4620,36 @@
         "summary": "profile calltree: sample, median 0.74x, min 0.62x, max 0.81x; artifacts 16",
         "ts": "2026-05-22T14:48:28.753333Z",
         "value": 0.7242053982026455
+      },
+      {
+        "commit": "ac5a345",
+        "commit_url": "https://github.com/ianm199/valkey-rs/commit/ac5a345",
+        "evidence_url": "../../evidence/runs/20260522T163200Z-ac5a345-runner-runtime-owner-10-post-timing-calltree.json",
+        "idx": 15,
+        "packet": "runtime-owner-10-post-timing-calltree",
+        "summary": "profile calltree: sample, median 0.72x, min 0.56x, max 0.80x; artifacts 16",
+        "ts": "2026-05-22T16:32:51.450091Z",
+        "value": 0.7142457793584263
+      },
+      {
+        "commit": "328d0ee",
+        "commit_url": "https://github.com/ianm199/valkey-rs/commit/328d0ee",
+        "evidence_url": "../../evidence/runs/20260522T165028Z-328d0ee-runner-runtime-owner-11-post-reply-calltree.json",
+        "idx": 17,
+        "packet": "runtime-owner-11-post-reply-calltree",
+        "summary": "profile calltree: sample, median 0.74x, min 0.60x, max 0.80x; artifacts 16",
+        "ts": "2026-05-22T16:51:18.393948Z",
+        "value": 0.7251015746662406
+      },
+      {
+        "commit": "2813e87",
+        "commit_url": "https://github.com/ianm199/valkey-rs/commit/2813e87",
+        "evidence_url": "../../evidence/runs/20260522T170812Z-2813e87-runner-runtime-owner-12-post-watch-calltree.json",
+        "idx": 19,
+        "packet": "runtime-owner-12-post-watch-calltree",
+        "summary": "profile calltree: sample, median 0.73x, min 0.58x, max 0.81x; artifacts 16",
+        "ts": "2026-05-22T17:09:02.953431Z",
+        "value": 0.7111764448748289
       }
     ],
     "hotspots_get_p100": [
@@ -3722,6 +4836,36 @@
         "summary": "profile matrix: median 0.75x, min 0.60x, max 1.49x; GET p1 0.88x; GET p100 0.73x",
         "ts": "2026-05-22T14:46:03.118709Z",
         "value": 0.8770227440550187
+      },
+      {
+        "commit": "c63d3bd",
+        "commit_url": "https://github.com/ianm199/valkey-rs/commit/c63d3bd",
+        "evidence_url": "../../evidence/runs/20260522T163148Z-c63d3bd-runner-runtime-owner-10-post-timing-profile-matrix.json",
+        "idx": 14,
+        "packet": "runtime-owner-10-post-timing-profile-matrix",
+        "summary": "profile matrix: median 0.82x, min 0.62x, max 1.38x; GET p1 1.05x; GET p100 0.73x",
+        "ts": "2026-05-22T16:32:00.694895Z",
+        "value": 1.0517242187034495
+      },
+      {
+        "commit": "a9ec71e",
+        "commit_url": "https://github.com/ianm199/valkey-rs/commit/a9ec71e",
+        "evidence_url": "../../evidence/runs/20260522T165017Z-a9ec71e-runner-runtime-owner-11-post-reply-profile-matrix.json",
+        "idx": 16,
+        "packet": "runtime-owner-11-post-reply-profile-matrix",
+        "summary": "profile matrix: median 0.78x, min 0.63x, max 1.42x; GET p1 1.20x; GET p100 0.75x",
+        "ts": "2026-05-22T16:50:28.158284Z",
+        "value": 1.1984126034984162
+      },
+      {
+        "commit": "f8f5124",
+        "commit_url": "https://github.com/ianm199/valkey-rs/commit/f8f5124",
+        "evidence_url": "../../evidence/runs/20260522T170800Z-f8f5124-runner-runtime-owner-12-post-watch-profile-matrix.json",
+        "idx": 18,
+        "packet": "runtime-owner-12-post-watch-profile-matrix",
+        "summary": "profile matrix: median 0.78x, min 0.61x, max 1.36x; GET p1 1.00x; GET p100 0.75x",
+        "ts": "2026-05-22T17:08:11.969615Z",
+        "value": 0.997190956191015
       }
     ],
     "matrix_get_p100": [
@@ -3784,6 +4928,36 @@
         "summary": "profile matrix: median 0.75x, min 0.60x, max 1.49x; GET p1 0.88x; GET p100 0.73x",
         "ts": "2026-05-22T14:46:03.118709Z",
         "value": 0.7294117765588234
+      },
+      {
+        "commit": "c63d3bd",
+        "commit_url": "https://github.com/ianm199/valkey-rs/commit/c63d3bd",
+        "evidence_url": "../../evidence/runs/20260522T163148Z-c63d3bd-runner-runtime-owner-10-post-timing-profile-matrix.json",
+        "idx": 14,
+        "packet": "runtime-owner-10-post-timing-profile-matrix",
+        "summary": "profile matrix: median 0.82x, min 0.62x, max 1.38x; GET p1 1.05x; GET p100 0.73x",
+        "ts": "2026-05-22T16:32:00.694895Z",
+        "value": 0.731707238414638
+      },
+      {
+        "commit": "a9ec71e",
+        "commit_url": "https://github.com/ianm199/valkey-rs/commit/a9ec71e",
+        "evidence_url": "../../evidence/runs/20260522T165017Z-a9ec71e-runner-runtime-owner-11-post-reply-profile-matrix.json",
+        "idx": 16,
+        "packet": "runtime-owner-11-post-reply-profile-matrix",
+        "summary": "profile matrix: median 0.78x, min 0.63x, max 1.42x; GET p1 1.20x; GET p100 0.75x",
+        "ts": "2026-05-22T16:50:28.158284Z",
+        "value": 0.7468354243670886
+      },
+      {
+        "commit": "f8f5124",
+        "commit_url": "https://github.com/ianm199/valkey-rs/commit/f8f5124",
+        "evidence_url": "../../evidence/runs/20260522T170800Z-f8f5124-runner-runtime-owner-12-post-watch-profile-matrix.json",
+        "idx": 18,
+        "packet": "runtime-owner-12-post-watch-profile-matrix",
+        "summary": "profile matrix: median 0.78x, min 0.61x, max 1.36x; GET p1 1.00x; GET p100 0.75x",
+        "ts": "2026-05-22T17:08:11.969615Z",
+        "value": 0.7530864093981481
       }
     ],
     "matrix_median": [
@@ -3846,6 +5020,36 @@
         "summary": "profile matrix: median 0.75x, min 0.60x, max 1.49x; GET p1 0.88x; GET p100 0.73x",
         "ts": "2026-05-22T14:46:03.118709Z",
         "value": 0.7548746939325917
+      },
+      {
+        "commit": "c63d3bd",
+        "commit_url": "https://github.com/ianm199/valkey-rs/commit/c63d3bd",
+        "evidence_url": "../../evidence/runs/20260522T163148Z-c63d3bd-runner-runtime-owner-10-post-timing-profile-matrix.json",
+        "idx": 14,
+        "packet": "runtime-owner-10-post-timing-profile-matrix",
+        "summary": "profile matrix: median 0.82x, min 0.62x, max 1.38x; GET p1 1.05x; GET p100 0.73x",
+        "ts": "2026-05-22T16:32:00.694895Z",
+        "value": 0.8235293809235302
+      },
+      {
+        "commit": "a9ec71e",
+        "commit_url": "https://github.com/ianm199/valkey-rs/commit/a9ec71e",
+        "evidence_url": "../../evidence/runs/20260522T165017Z-a9ec71e-runner-runtime-owner-11-post-reply-profile-matrix.json",
+        "idx": 16,
+        "packet": "runtime-owner-11-post-reply-profile-matrix",
+        "summary": "profile matrix: median 0.78x, min 0.63x, max 1.42x; GET p1 1.20x; GET p100 0.75x",
+        "ts": "2026-05-22T16:50:28.158284Z",
+        "value": 0.7821782315099014
+      },
+      {
+        "commit": "f8f5124",
+        "commit_url": "https://github.com/ianm199/valkey-rs/commit/f8f5124",
+        "evidence_url": "../../evidence/runs/20260522T170800Z-f8f5124-runner-runtime-owner-12-post-watch-profile-matrix.json",
+        "idx": 18,
+        "packet": "runtime-owner-12-post-watch-profile-matrix",
+        "summary": "profile matrix: median 0.78x, min 0.61x, max 1.36x; GET p1 1.00x; GET p100 0.75x",
+        "ts": "2026-05-22T17:08:11.969615Z",
+        "value": 0.784313752
       }
     ]
   },
@@ -3901,11 +5105,11 @@
     }
   ],
   "signature": {
-    "latest_point": "harness/evidence/runs/20260522T144733Z-d3b7602-runner-runtime-owner-8-post-poller-calltree.json",
-    "latest_raw": "harness/bench/results/20260522T144738Z-d3b7602-calltree.tsv",
-    "ledger_mtime_ns": 1779462886694539979,
-    "point_count": 14,
-    "raw_point_count": 39,
-    "results_mtime_ns": 1779461308744302191
+    "latest_point": "harness/evidence/runs/20260522T170812Z-2813e87-runner-runtime-owner-12-post-watch-calltree.json",
+    "latest_raw": "harness/bench/results/20260522T172634Z-752d649-calltree.tsv",
+    "ledger_mtime_ns": 1779469744554664064,
+    "point_count": 20,
+    "raw_point_count": 47,
+    "results_mtime_ns": 1779470845333437774
   }
 }
