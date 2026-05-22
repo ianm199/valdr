@@ -22,6 +22,27 @@ pub type ClientId = u64;
 pub type CommandFn =
     fn(&mut crate::command_context::CommandContext) -> Result<(), redis_types::RedisError>;
 
+fn append_decimal_u64(buf: &mut Vec<u8>, mut n: u64) {
+    let mut tmp = [0u8; 20];
+    let mut i = tmp.len();
+    loop {
+        i -= 1;
+        tmp[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    buf.extend_from_slice(&tmp[i..]);
+}
+
+fn append_decimal_i64(buf: &mut Vec<u8>, n: i64) {
+    if n < 0 {
+        buf.push(b'-');
+    }
+    append_decimal_u64(buf, n.unsigned_abs());
+}
+
 /// A single command queued inside a MULTI block.
 ///
 /// PORT NOTE: migrated from `redis-commands::multi` per the architect TODO in
@@ -345,16 +366,16 @@ impl Client {
     }
 
     fn append_len_header_usize(&mut self, prefix: u8, len: usize) {
-        use std::io::Write;
+        self.reply_buf.reserve(1 + 20 + 2);
         self.reply_buf.push(prefix);
-        let _ = write!(self.reply_buf, "{}", len);
+        append_decimal_u64(&mut self.reply_buf, len as u64);
         self.reply_buf.extend_from_slice(b"\r\n");
     }
 
     fn append_len_header_i64(&mut self, prefix: u8, len: i64) {
-        use std::io::Write;
+        self.reply_buf.reserve(1 + 20 + 2);
         self.reply_buf.push(prefix);
-        let _ = write!(self.reply_buf, "{}", len);
+        append_decimal_i64(&mut self.reply_buf, len);
         self.reply_buf.extend_from_slice(b"\r\n");
     }
 
@@ -645,6 +666,19 @@ mod tests {
         c.write_map_header(2);
         c.write_set_header(3);
         assert_eq!(c.drain_reply(), b"_\r\n_\r\n>1\r\n%2\r\n~3\r\n");
+    }
+
+    #[test]
+    fn direct_resp_integer_formatting_handles_edges() {
+        let mut c = Client::new(1);
+        c.write_integer(0);
+        c.write_integer(-1);
+        c.write_integer(i64::MIN);
+        c.write_bulk(&[0; 10]);
+        assert_eq!(
+            c.drain_reply(),
+            b":0\r\n:-1\r\n:-9223372036854775808\r\n$10\r\n\0\0\0\0\0\0\0\0\0\0\r\n"
+        );
     }
 
     #[test]
