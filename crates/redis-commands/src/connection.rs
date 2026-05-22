@@ -986,7 +986,7 @@ pub fn hello_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 ///
 /// Pilot subset:
 ///   * `CLIENT ID` — integer reply of the client's connection id.
-///   * `CLIENT GETNAME` — bulk reply of the stored name (empty bulk when unset).
+///   * `CLIENT GETNAME` — bulk reply of the stored name (nil bulk when unset).
 ///   * `CLIENT SETNAME name` — store the name; replies `+OK\r\n`.
 ///   * `CLIENT NO-EVICT ON|OFF` — no-op, replies `+OK\r\n`.
 ///   * `CLIENT NO-TOUCH ON|OFF` — no-op, replies `+OK\r\n`.
@@ -1008,11 +1008,11 @@ pub fn client_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         if ctx.arg_count() != 2 {
             return Err(RedisError::wrong_number_of_args(b"client|getname"));
         }
-        let payload = match &ctx.client_ref().name {
-            Some(n) => n.clone(),
-            None => RedisString::new(),
+        let name = ctx.client_ref().name.clone();
+        return match name {
+            Some(n) => ctx.reply_bulk_string(n),
+            None => ctx.reply_null_bulk(),
         };
-        return ctx.reply_bulk_string(payload);
     }
     if ascii_eq_ignore_case(sub_bytes, b"SETNAME") {
         if ctx.arg_count() != 3 {
@@ -1833,6 +1833,41 @@ mod tests {
             }
             _ => panic!("expected WrongNumberOfArgs"),
         }
+    }
+
+    #[test]
+    fn client_getname_returns_null_bulk_after_reset() {
+        let mut c = Client::new(1);
+
+        c.set_args(vec![
+            RedisString::from_bytes(b"CLIENT"),
+            RedisString::from_bytes(b"SETNAME"),
+            RedisString::from_bytes(b"canary"),
+        ]);
+        let mut ctx = CommandContext::new(&mut c);
+        client_command(&mut ctx).unwrap();
+        assert_eq!(c.drain_reply(), b"+OK\r\n");
+
+        c.set_args(vec![
+            RedisString::from_bytes(b"CLIENT"),
+            RedisString::from_bytes(b"GETNAME"),
+        ]);
+        let mut ctx = CommandContext::new(&mut c);
+        client_command(&mut ctx).unwrap();
+        assert_eq!(c.drain_reply(), b"$6\r\ncanary\r\n");
+
+        c.set_args(vec![RedisString::from_bytes(b"RESET")]);
+        let mut ctx = CommandContext::new(&mut c);
+        reset_command(&mut ctx).unwrap();
+        assert_eq!(c.drain_reply(), b"+RESET\r\n");
+
+        c.set_args(vec![
+            RedisString::from_bytes(b"CLIENT"),
+            RedisString::from_bytes(b"GETNAME"),
+        ]);
+        let mut ctx = CommandContext::new(&mut c);
+        client_command(&mut ctx).unwrap();
+        assert_eq!(c.drain_reply(), b"$-1\r\n");
     }
 }
 

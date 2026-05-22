@@ -6,3 +6,6 @@
 {"ts": "2026-05-21T21:23:53", "suite": "wire-diff", "pass": 0, "fail": 0, "other": 0, "total": 0, "tsv_mtime": "2026-05-21T21:23:53"}
 {"ts": "2026-05-21T21:23:58", "suite": "wire-diff", "pass": 21, "fail": 1, "other": 0, "total": 22, "tsv_mtime": "2026-05-21T21:23:57"}
 {"ts": "2026-05-21T23:16:20", "suite": "wire-diff", "pass": 22, "fail": 0, "other": 0, "total": 22, "tsv_mtime": "2026-05-21T22:53:18"}
+{"ts": "2026-05-21T23:21:49", "suite": "wire-diff", "pass": 6, "fail": 0, "other": 0, "total": 6, "tsv_mtime": "2026-05-21T23:21:46"}
+{"ts": "2026-05-21T23:22:14", "suite": "wire-diff", "pass": 8, "fail": 0, "other": 0, "total": 8, "tsv_mtime": "2026-05-21T23:22:06"}
+{"ts": "2026-05-21T23:24:36", "suite": "wire-diff", "pass": 10, "fail": 0, "other": 0, "total": 10, "tsv_mtime": "2026-05-21T23:24:36"}
