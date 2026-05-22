@@ -1,0 +1,596 @@
+Analysis of sampling redis-server (pid 86886) every 1 millisecond
+Process:         redis-server [86886]
+Path:            /Users/USER/*/redis-server
+Load Address:    0x10271c000
+Identifier:      redis-server
+Version:         0
+Code Type:       ARM64
+Platform:        macOS
+Parent Process:  Python [85580]
+
+Date/Time:       2026-05-22 12:51:10.248 -0400
+Launch Time:     2026-05-22 12:51:10.164 -0400
+OS Version:      macOS 15.3.2 (24D81)
+Report Version:  7
+Analysis Tool:   /usr/bin/sample
+
+Physical footprint:         4209K
+Physical footprint (peak):  4209K
+Idle exit:                  untracked
+----
+
+Call graph:
+    6174 Thread_41629664   DispatchQueue_1: com.apple.main-thread  (serial)
+    + 6173 start  (in dyld) + 2840  [0x198648274]
+    + ! 6173 main  (in redis-server) + 52  [0x102729a0c]
+    + !   6173 std::rt::lang_start_internal::h0662b076b027b010  (in redis-server) + 952  [0x1029460dc]
+    + !     6173 std::rt::lang_start::_$u7b$$u7b$closure$u7d$$u7d$::hede2eabf17962aa4  (in redis-server) + 16  [0x10273bd30]
+    + !       6173 std::sys::backtrace::__rust_begin_short_backtrace::h3fb777770fd5d0a6  (in redis-server) + 12  [0x10273c224]
+    + !         6173 redis_server::main::h819ede4ff34e50ab  (in redis-server) + 10092  [0x102724720]
+    + !           3508 redis_server::runtime_owner::RuntimeOwner::run_plain_tcp::hdf68c9a7c7cc5dd7  (in redis-server) + 5764  [0x10272c20c]
+    + !           : 3071 redis_server::runtime_owner::RuntimeOwner::dispatch_slot_commands::h884c0622371c27aa  (in redis-server) + 524  [0x10272d5a8]
+    + !           : | 2285 redis_server::process_current_command_with_db::hfa2b8996f5fd6aaf  (in redis-server) + 140  [0x102721d2c]
+    + !           : | + 2182 redis_commands::dispatch::dispatch::h6470341fcc2210a6  (in redis-server) + 960  [0x1027b504c]
+    + !           : | + ! 398 redis_commands::dispatch::dispatch_command_name::h5d0125bdfdf9f92c  (in redis-server) + 2808  [0x1027b4020]
+    + !           : | + ! : 382 std::sys::pal::unix::time::Timespec::now::he31dd4de508f2879  (in redis-server) + 24  [0x102949c40]
+    + !           : | + ! : | 358 clock_gettime  (in libsystem_c.dylib) + 72  [0x19886a758]
+    + !           : | + ! : | + 313 clock_gettime_nsec_np  (in libsystem_c.dylib) + 404  [0x19885d060]
+    + !           : | + ! : | + ! 303 mach_absolute_time  (in libsystem_kernel.dylib) + 108,112,...  [0x1989873e4,0x1989873e8,...]
+    + !           : | + ! : | + ! 10 DYLD-STUB$$mach_absolute_time  (in libsystem_c.dylib) + 8,0  [0x1988d5a28,0x1988d5a20]
+    + !           : | + ! : | + 33 clock_gettime_nsec_np  (in libsystem_c.dylib) + 280,12,...  [0x19885cfe4,0x19885ced8,...]
+    + !           : | + ! : | + 6 clock_gettime_nsec_np  (in libsystem_c.dylib) + 240  [0x19885cfbc]
+    + !           : | + ! : | + ! 5 mach_timebase_info  (in libsystem_kernel.dylib) + 28  [0x1989872c4]
+    + !           : | + ! : | + ! 1 DYLD-STUB$$mach_timebase_info  (in libsystem_c.dylib) + 8  [0x1988d5aa8]
+    + !           : | + ! : | + 6 mach_timebase_info  (in libsystem_kernel.dylib) + 80  [0x1989872f8]
+    + !           : | + ! : | 13 clock_gettime  (in libsystem_c.dylib) + 52,12,...  [0x19886a744,0x19886a71c,...]
+    + !           : | + ! : | 10 DYLD-STUB$$clock_gettime  (in redis-server) + 4  [0x10298e8ac]
+    + !           : | + ! : | 1 clock_gettime_nsec_np  (in libsystem_c.dylib) + 428  [0x19885d078]
+    + !           : | + ! : 15 std::sys::pal::unix::time::Timespec::now::he31dd4de508f2879  (in redis-server) + 8,96,...  [0x102949c30,0x102949c88,...]
+    + !           : | + ! : 1 std::time::Instant::now::hb0d9f8e385d8cf6f  (in redis-server) + 0  [0x10294be30]
+    + !           : | + ! 342 redis_commands::dispatch::dispatch_command_name::h5d0125bdfdf9f92c  (in redis-server) + 2864  [0x1027b4058]
+    + !           : | + ! : 334 std::time::Instant::elapsed::hd8a84ef162118389  (in redis-server) + 28  [0x10294be54]
+    + !           : | + ! : | 331 std::sys::pal::unix::time::Timespec::now::he31dd4de508f2879  (in redis-server) + 24  [0x102949c40]
+    + !           : | + ! : | + 310 clock_gettime  (in libsystem_c.dylib) + 72  [0x19886a758]
+    + !           : | + ! : | + ! 255 clock_gettime_nsec_np  (in libsystem_c.dylib) + 404  [0x19885d060]
+    + !           : | + ! : | + ! : 252 mach_absolute_time  (in libsystem_kernel.dylib) + 108,112,...  [0x1989873e4,0x1989873e8,...]
+    + !           : | + ! : | + ! : 3 DYLD-STUB$$mach_absolute_time  (in libsystem_c.dylib) + 8  [0x1988d5a28]
+    + !           : | + ! : | + ! 38 clock_gettime_nsec_np  (in libsystem_c.dylib) + 12,252,...  [0x19885ced8,0x19885cfc8,...]
+    + !           : | + ! : | + ! 15 clock_gettime_nsec_np  (in libsystem_c.dylib) + 240  [0x19885cfbc]
+    + !           : | + ! : | + ! : 11 mach_timebase_info  (in libsystem_kernel.dylib) + 28,0  [0x1989872c4,0x1989872a8]
+    + !           : | + ! : | + ! : 4 DYLD-STUB$$mach_timebase_info  (in libsystem_c.dylib) + 8  [0x1988d5aa8]
+    + !           : | + ! : | + ! 2 mach_timebase_info  (in libsystem_kernel.dylib) + 80  [0x1989872f8]
+    + !           : | + ! : | + 15 clock_gettime  (in libsystem_c.dylib) + 52,104,...  [0x19886a744,0x19886a778,...]
+    + !           : | + ! : | + 6 DYLD-STUB$$clock_gettime  (in redis-server) + 4  [0x10298e8ac]
+    + !           : | + ! : | 3 std::sys::pal::unix::time::Timespec::now::he31dd4de508f2879  (in redis-server) + 104,0  [0x102949c90,0x102949c28]
+    + !           : | + ! : 5 std::time::Instant::elapsed::hd8a84ef162118389  (in redis-server) + 68  [0x10294be7c]
+    + !           : | + ! : | 5 std::sys::pal::unix::time::Timespec::sub_timespec::h145478bb7a0a2665  (in redis-server) + 4,132,...  [0x102949b50,0x102949bd0,...]
+    + !           : | + ! : 3 std::time::Instant::elapsed::hd8a84ef162118389  (in redis-server) + 8  [0x10294be40]
+    + !           : | + ! 262 redis_commands::dispatch::dispatch_command_name::h5d0125bdfdf9f92c  (in redis-server) + 64  [0x1027b3568]
+    + !           : | + ! : 262 redis_commands::dispatch::lookup_runtime_command::h7bbb4ffaf68fd422  (in redis-server) + 404,356,...  [0x1027b4c44,0x1027b4c14,...]
+    + !           : | + ! 262 redis_commands::dispatch::dispatch_command_name::h5d0125bdfdf9f92c  (in redis-server) + 2832  [0x1027b4038]
+    + !           : | + ! : 113 redis_core::command_context::CommandContext::reply_simple_string::h7bcf50b09c7f167a  (in redis-server) + 120  [0x10285ab40]
+    + !           : | + ! : | 79 redis_protocol::frame::encode_resp2::heb4486698584782c  (in redis-server) + 2992  [0x1028a7adc]
+    + !           : | + ! : | + 74 alloc::raw_vec::RawVecInner$LT$A$GT$::reserve::do_reserve_and_handle::ha590242bae04c6fc  (in redis-server) + 88  [0x102987470]
+    + !           : | + ! : | + ! 73 alloc::raw_vec::RawVecInner$LT$A$GT$::finish_grow::h705c5b18af41a14e  (in redis-server) + 108  [0x1029873c0]
+    + !           : | + ! : | + ! : 61 _realloc  (in libsystem_malloc.dylib) + 468  [0x19880047c]
+    + !           : | + ! : | + ! : | 57 _malloc_zone_realloc  (in libsystem_malloc.dylib) + 144  [0x1987ffc60]
+    + !           : | + ! : | + ! : | + 9 nanov2_realloc  (in libsystem_malloc.dylib) + 360  [0x1987d3e38]
+    + !           : | + ! : | + ! : | + ! 7 _nanov2_free  (in libsystem_malloc.dylib) + 316,16,...  [0x1987f4010,0x1987f3ee4,...]
+    + !           : | + ! : | + ! : | + ! 2 _nanov2_free  (in libsystem_malloc.dylib) + 520  [0x1987f40dc]
+    + !           : | + ! : | + ! : | + !   1 DYLD-STUB$$_platform_bzero  (in libsystem_malloc.dylib) + 8  [0x198807528]
+    + !           : | + ! : | + ! : | + !   1 _platform_memset  (in libsystem_platform.dylib) + 208  [0x1989fe810]
+    + !           : | + ! : | + ! : | + 6 nanov2_realloc  (in libsystem_malloc.dylib) + 56  [0x1987d3d08]
+    + !           : | + ! : | + ! : | + ! 6 nanov2_pointer_size  (in libsystem_malloc.dylib) + 12,0,...  [0x1987d16a0,0x1987d1694,...]
+    + !           : | + ! : | + ! : | + 6 nanov2_realloc  (in libsystem_malloc.dylib) + 92  [0x1987d3d2c]
+    + !           : | + ! : | + ! : | + ! 6 szone_malloc_should_clear  (in libsystem_malloc.dylib) + 88  [0x1987d1a80]
+    + !           : | + ! : | + ! : | + !   4 tiny_malloc_should_clear  (in libsystem_malloc.dylib) + 288  [0x1987d2d40]
+    + !           : | + ! : | + ! : | + !   : 1 _tiny_check_and_zero_inline_meta_from_freelist  (in libsystem_malloc.dylib) + 200  [0x1988061d0]
+    + !           : | + ! : | + ! : | + !   : 1 tiny_malloc_from_free_list  (in libsystem_malloc.dylib) + 1356  [0x1987d3944]
+    + !           : | + ! : | + ! : | + !   : | 1 _tiny_check_and_zero_inline_meta_from_freelist  (in libsystem_malloc.dylib) + 80  [0x198806158]
+    + !           : | + ! : | + ! : | + !   : 1 tiny_malloc_from_free_list  (in libsystem_malloc.dylib) + 1404  [0x1987d3974]
+    + !           : | + ! : | + ! : | + !   : | 1 tiny_free_list_add_ptr  (in libsystem_malloc.dylib) + 28  [0x1987d6138]
+    + !           : | + ! : | + ! : | + !   : 1 tiny_malloc_from_free_list  (in libsystem_malloc.dylib) + 992  [0x1987d37d8]
+    + !           : | + ! : | + ! : | + !   1 tiny_malloc_should_clear  (in libsystem_malloc.dylib) + 52  [0x1987d2c54]
+    + !           : | + ! : | + ! : | + !   : 1 rack_get_thread_index  (in libsystem_malloc.dylib) + 64  [0x1987eb058]
+    + !           : | + ! : | + ! : | + !   1 tiny_malloc_should_clear  (in libsystem_malloc.dylib) + 308  [0x1987d2d54]
+    + !           : | + ! : | + ! : | + 6 nanov2_realloc  (in libsystem_malloc.dylib) + 344  [0x1987d3e28]
+    + !           : | + ! : | + ! : | + ! 6 _platform_memmove  (in libsystem_platform.dylib) + 0,24,...  [0x1989fea10,0x1989fea28,...]
+    + !           : | + ! : | + ! : | + 6 nanov2_realloc  (in libsystem_malloc.dylib) + 40,72,...  [0x1987d3cf8,0x1987d3d18,...]
+    + !           : | + ! : | + ! : | + 6 szone_realloc  (in libsystem_malloc.dylib) + 928  [0x1987d4eb4]
+    + !           : | + ! : | + ! : | + ! 5 szone_malloc_should_clear  (in libsystem_malloc.dylib) + 124  [0x1987d1aa4]
+    + !           : | + ! : | + ! : | + ! : 3 small_malloc_should_clear  (in libsystem_malloc.dylib) + 196  [0x1987d1c74]
+    + !           : | + ! : | + ! : | + ! : | 2 small_malloc_from_free_list  (in libsystem_malloc.dylib) + 560  [0x1987d257c]
+    + !           : | + ! : | + ! : | + ! : | + 2 small_free_list_add_ptr  (in libsystem_malloc.dylib) + 72,156  [0x1987d65bc,0x1987d6610]
+    + !           : | + ! : | + ! : | + ! : | 1 small_malloc_from_free_list  (in libsystem_malloc.dylib) + 416  [0x1987d24ec]
+    + !           : | + ! : | + ! : | + ! : 2 small_malloc_should_clear  (in libsystem_malloc.dylib) + 0,180  [0x1987d1bb0,0x1987d1c64]
+    + !           : | + ! : | + ! : | + ! 1 szone_malloc_should_clear  (in libsystem_malloc.dylib) + 284  [0x1987d1b44]
+    + !           : | + ! : | + ! : | + 5 szone_realloc  (in libsystem_malloc.dylib) + 1016  [0x1987d4f0c]
+    + !           : | + ! : | + ! : | + ! 2 free_tiny  (in libsystem_malloc.dylib) + 496  [0x1987d5748]
+    + !           : | + ! : | + ! : | + ! : 2 tiny_free_no_lock  (in libsystem_malloc.dylib) + 636  [0x1987d5b48]
+    + !           : | + ! : | + ! : | + ! :   2 tiny_free_list_add_ptr  (in libsystem_malloc.dylib) + 576  [0x1987d635c]
+    + !           : | + ! : | + ! : | + ! 1 _szone_free  (in libsystem_malloc.dylib) + 32  [0x1987e7974]
+    + !           : | + ! : | + ! : | + ! 1 free_tiny  (in libsystem_malloc.dylib) + 136  [0x1987d55e0]
+    + !           : | + ! : | + ! : | + ! : 1 _platform_memset  (in libsystem_platform.dylib) + 140  [0x1989fe7cc]
+    + !           : | + ! : | + ! : | + ! 1 free_tiny  (in libsystem_malloc.dylib) + 508  [0x1987d5754]
+    + !           : | + ! : | + ! : | + 3 default_zone_realloc  (in libsystem_malloc.dylib) + 4  [0x1987d3cb0]
+    + !           : | + ! : | + ! : | + 3 nanov2_realloc  (in libsystem_malloc.dylib) + 316  [0x1987d3e0c]
+    + !           : | + ! : | + ! : | + ! 3 nanov2_malloc  (in libsystem_malloc.dylib) + 200,0  [0x1987d0c4c,0x1987d0b84]
+    + !           : | + ! : | + ! : | + 3 szone_realloc  (in libsystem_malloc.dylib) + 1000  [0x1987d4efc]
+    + !           : | + ! : | + ! : | + ! 3 _platform_memmove  (in libsystem_platform.dylib) + 180,12  [0x1989feac4,0x1989fea1c]
+    + !           : | + ! : | + ! : | + 2 szone_realloc  (in libsystem_malloc.dylib) + 72  [0x1987d4b5c]
+    + !           : | + ! : | + ! : | + ! 2 szone_size  (in libsystem_malloc.dylib) + 68  [0x1987d3eac]
+    + !           : | + ! : | + ! : | + !   2 tiny_size  (in libsystem_malloc.dylib) + 112,164  [0x1987d3f98,0x1987d3fcc]
+    + !           : | + ! : | + ! : | + 1 _nanov2_free  (in libsystem_malloc.dylib) + 844  [0x1987f4220]
+    + !           : | + ! : | + ! : | + 1 _szone_free  (in libsystem_malloc.dylib) + 688  [0x1987e7c04]
+    + !           : | + ! : | + ! : | 3 nanov2_realloc  (in libsystem_malloc.dylib) + 176,188,...  [0x1987d3d80,0x1987d3d8c,...]
+    + !           : | + ! : | + ! : | 1 _malloc_zone_realloc  (in libsystem_malloc.dylib) + 180  [0x1987ffc84]
+    + !           : | + ! : | + ! : 6 _realloc  (in libsystem_malloc.dylib) + 260  [0x1988003ac]
+    + !           : | + ! : | + ! : | 6 nanov2_size  (in libsystem_malloc.dylib) + 40,152,...  [0x1987d154c,0x1987d15bc,...]
+    + !           : | + ! : | + ! : 3 _realloc  (in libsystem_malloc.dylib) + 24,68,...  [0x1988002c0,0x1988002ec,...]
+    + !           : | + ! : | + ! : 1 _RNvCshXwFllX56pT_7___rustc13___rdl_realloc  (in redis-server) + 8  [0x10293d70c]
+    + !           : | + ! : | + ! : 1 _malloc_zone_realloc  (in libsystem_malloc.dylib) + 208  [0x1987ffca0]
+    + !           : | + ! : | + ! : 1 realloc  (in libsystem_malloc.dylib) + 0  [0x1987d27e0]
+    + !           : | + ! : | + ! 1 alloc::raw_vec::RawVecInner$LT$A$GT$::finish_grow::h705c5b18af41a14e  (in redis-server) + 36  [0x102987378]
+    + !           : | + ! : | + 5 alloc::raw_vec::RawVecInner$LT$A$GT$::reserve::do_reserve_and_handle::ha590242bae04c6fc  (in redis-server) + 8,88,...  [0x102987420,0x102987470,...]
+    + !           : | + ! : | 14 redis_protocol::frame::encode_resp2::heb4486698584782c  (in redis-server) + 1096  [0x1028a7374]
+    + !           : | + ! : | + 10 _platform_memmove  (in libsystem_platform.dylib) + 448,452,...  [0x1989febd0,0x1989febd4,...]
+    + !           : | + ! : | + 4 DYLD-STUB$$memcpy  (in redis-server) + 0,4  [0x10298eba8,0x10298ebac]
+    + !           : | + ! : | 14 redis_protocol::frame::encode_resp2::heb4486698584782c  (in redis-server) + 52,64,...  [0x1028a6f60,0x1028a6f6c,...]
+    + !           : | + ! : | 4 redis_protocol::frame::encode_for_proto::h6b5f413c4cb15c02  (in redis-server) + 0  [0x1028a8a58]
+    + !           : | + ! : | 2 redis_protocol::frame::encode_resp2::heb4486698584782c  (in redis-server) + 1040  [0x1028a733c]
+    + !           : | + ! : |   2 alloc::raw_vec::RawVec$LT$T$C$A$GT$::grow_one::h77ffb620020ff73c  (in redis-server) + 52  [0x10298e0f0]
+    + !           : | + ! : |     1 alloc::raw_vec::RawVecInner$LT$A$GT$::finish_grow::hb6fd2d02dd1b2f62  (in redis-server) + 88  [0x10298e174]
+    + !           : | + ! : |     ! 1 _RNvCshXwFllX56pT_7___rustc11___rdl_alloc  (in redis-server) + 0  [0x10293d694]
+    + !           : | + ! : |     1 alloc::raw_vec::RawVecInner$LT$A$GT$::finish_grow::hb6fd2d02dd1b2f62  (in redis-server) + 36  [0x10298e140]
+    + !           : | + ! : 95 redis_core::command_context::CommandContext::reply_simple_string::h7bcf50b09c7f167a  (in redis-server) + 128  [0x10285ab48]
+    + !           : | + ! : | 62 _nanov2_free  (in libsystem_malloc.dylib) + 572,692,...  [0x1987f4110,0x1987f4188,...]
+    + !           : | + ! : | 17 _free  (in libsystem_malloc.dylib) + 20,36,...  [0x198800238,0x198800248,...]
+    + !           : | + ! : | 10 core::ptr::drop_in_place$LT$redis_protocol..frame..RespFrame$GT$::hb1e2f2d656cfb340  (in redis-server) + 24,52,...  [0x10285feec,0x10285ff08,...]
+    + !           : | + ! : | 3 DYLD-STUB$$free  (in redis-server) + 4,0  [0x10298ea2c,0x10298ea28]
+    + !           : | + ! : | 1 _RNvCshXwFllX56pT_7___rustc14___rust_dealloc  (in redis-server) + 0  [0x10273d818]
+    + !           : | + ! : | 1 free  (in libsystem_malloc.dylib) + 0  [0x1987d1520]
+    + !           : | + ! : | 1 nanov2_try_free_default  (in libsystem_malloc.dylib) + 0  [0x1987f4228]
+    + !           : | + ! : 28 redis_core::command_context::CommandContext::reply_simple_string::h7bcf50b09c7f167a  (in redis-server) + 60  [0x10285ab04]
+    + !           : | + ! : | 19 nanov2_malloc_type  (in libsystem_malloc.dylib) + 0,472,...  [0x1987f3c90,0x1987f3e68,...]
+    + !           : | + ! : | 4 _malloc_zone_malloc  (in libsystem_malloc.dylib) + 36,32,...  [0x1987ff650,0x1987ff64c,...]
+    + !           : | + ! : | 3 _RNvCshXwFllX56pT_7___rustc11___rdl_alloc  (in redis-server) + 20  [0x10293d6a8]
+    + !           : | + ! : | 2 DYLD-STUB$$malloc  (in redis-server) + 0  [0x10298eb84]
+    + !           : | + ! : 8 redis_core::command_context::CommandContext::reply_simple_string::h7bcf50b09c7f167a  (in redis-server) + 92  [0x10285ab24]
+    + !           : | + ! : | 8 _platform_memmove  (in libsystem_platform.dylib) + 444,448,...  [0x1989febcc,0x1989febd0,...]
+    + !           : | + ! : 5 _nanov2_free  (in libsystem_malloc.dylib) + 844  [0x1987f4220]
+    + !           : | + ! : 5 redis_core::command_context::CommandContext::reply_simple_string::h7bcf50b09c7f167a  (in redis-server) + 32,16  [0x10285aae8,0x10285aad8]
+    + !           : | + ! : 3 redis_commands::connection::ping_command::h22c6ea08a766e9a7  (in redis-server) + 24  [0x1027fc79c]
+    + !           : | + ! : 3 redis_protocol::frame::encode_resp2::heb4486698584782c  (in redis-server) + 2100,2104,...  [0x1028a7760,0x1028a7764,...]
+    + !           : | + ! : 2 core::ptr::drop_in_place$LT$redis_protocol..frame..RespFrame$GT$::hb1e2f2d656cfb340  (in redis-server) + 404  [0x102860068]
+    + !           : | + ! 149 redis_commands::dispatch::dispatch_command_name::h5d0125bdfdf9f92c  (in redis-server) + 516,692,...  [0x1027b372c,0x1027b37dc,...]
+    + !           : | + ! 107 redis_commands::dispatch::dispatch_command_name::h5d0125bdfdf9f92c  (in redis-server) + 116  [0x1027b359c]
+    + !           : | + ! : 49 nanov2_malloc_type  (in libsystem_malloc.dylib) + 56,124,...  [0x1987f3cc8,0x1987f3d0c,...]
+    + !           : | + ! : 41 _malloc_zone_malloc  (in libsystem_malloc.dylib) + 12,68,...  [0x1987ff638,0x1987ff670,...]
+    + !           : | + ! : 9 _RNvCshXwFllX56pT_7___rustc11___rdl_alloc  (in redis-server) + 0,12  [0x10293d694,0x10293d6a0]
+    + !           : | + ! : 7 DYLD-STUB$$malloc  (in redis-server) + 4  [0x10298eb88]
+    + !           : | + ! : 1 malloc  (in libsystem_malloc.dylib) + 8  [0x1987d0b4c]
+    + !           : | + ! 101 redis_commands::dispatch::dispatch_command_name::h5d0125bdfdf9f92c  (in redis-server) + 1780  [0x1027b3c1c]
+    + !           : | + ! : 67 _nanov2_free  (in libsystem_malloc.dylib) + 252,692,...  [0x1987f3fd0,0x1987f4188,...]
+    + !           : | + ! : 19 _free  (in libsystem_malloc.dylib) + 80,20,...  [0x198800274,0x198800238,...]
+    + !           : | + ! : 15 DYLD-STUB$$free  (in redis-server) + 4  [0x10298ea2c]
+    + !           : | + ! 99 redis_commands::dispatch::dispatch_command_name::h5d0125bdfdf9f92c  (in redis-server) + 596  [0x1027b377c]
+    + !           : | + ! : 55 core::hash::BuildHasher::hash_one::h23ba648a26201d13  (in redis-server) + 168,56,...  [0x10280ac78,0x10280ac08,...]
+    + !           : | + ! : 29 core::hash::BuildHasher::hash_one::h23ba648a26201d13  (in redis-server) + 92  [0x10280ac2c]
+    + !           : | + ! : | 29 _$LT$std..hash..random..DefaultHasher$u20$as$u20$core..hash..Hasher$GT$::write::h1d555c3dc08887a8  (in redis-server) + 452,12,...  [0x10280b460,0x10280b2a8,...]
+    + !           : | + ! : 15 core::hash::BuildHasher::hash_one::h23ba648a26201d13  (in redis-server) + 108  [0x10280ac3c]
+    + !           : | + ! :   15 _$LT$std..hash..random..DefaultHasher$u20$as$u20$core..hash..Hasher$GT$::write::h1d555c3dc08887a8  (in redis-server) + 68,12,...  [0x10280b2e0,0x10280b2a8,...]
+    + !           : | + ! 97 redis_commands::dispatch::dispatch_command_name::h5d0125bdfdf9f92c  (in redis-server) + 468  [0x1027b36fc]
+    + !           : | + ! : 56 nanov2_malloc_type  (in libsystem_malloc.dylib) + 292,492,...  [0x1987f3db4,0x1987f3e7c,...]
+    + !           : | + ! : 31 _malloc_zone_malloc  (in libsystem_malloc.dylib) + 12,52,...  [0x1987ff638,0x1987ff660,...]
+    + !           : | + ! : 9 _RNvCshXwFllX56pT_7___rustc11___rdl_alloc  (in redis-server) + 0,12  [0x10293d694,0x10293d6a0]
+    + !           : | + ! : 1 DYLD-STUB$$malloc  (in redis-server) + 4  [0x10298eb88]
+    + !           : | + ! 91 redis_commands::dispatch::dispatch_command_name::h5d0125bdfdf9f92c  (in redis-server) + 1796  [0x1027b3c2c]
+    + !           : | + ! : 52 _nanov2_free  (in libsystem_malloc.dylib) + 572,692,...  [0x1987f4110,0x1987f4188,...]
+    + !           : | + ! : 28 _free  (in libsystem_malloc.dylib) + 100,0,...  [0x198800288,0x198800224,...]
+    + !           : | + ! : 11 DYLD-STUB$$free  (in redis-server) + 4,0  [0x10298ea2c,0x10298ea28]
+    + !           : | + ! 65 redis_commands::dispatch::dispatch_command_name::h5d0125bdfdf9f92c  (in redis-server) + 500  [0x1027b371c]
+    + !           : | + ! : 56 _platform_memmove  (in libsystem_platform.dylib) + 452,12,...  [0x1989febd4,0x1989fea1c,...]
+    + !           : | + ! : 9 DYLD-STUB$$memcpy  (in redis-server) + 4  [0x10298ebac]
+    + !           : | + ! 35 redis_commands::dispatch::dispatch_command_name::h5d0125bdfdf9f92c  (in redis-server) + 544  [0x1027b3748]
+    + !           : | + ! : 29 std::sys::pal::unix::sync::mutex::Mutex::lock::h965e2ed233aabc24  (in redis-server) + 12  [0x102949b38]
+    + !           : | + ! : | 24 pthread_mutex_lock  (in libsystem_pthread.dylib) + 112,32,...  [0x1989c2944,0x1989c28f4,...]
+    + !           : | + ! : | 5 DYLD-STUB$$pthread_mutex_lock  (in redis-server) + 4  [0x10298ed20]
+    + !           : | + ! : 6 std::sys::pal::unix::sync::mutex::Mutex::lock::h965e2ed233aabc24  (in redis-server) + 0,16  [0x102949b2c,0x102949b3c]
+    + !           : | + ! 31 redis_commands::dispatch::dispatch_command_name::h5d0125bdfdf9f92c  (in redis-server) + 708  [0x1027b37ec]
+    + !           : | + ! : 30 _platform_memcmp  (in libsystem_platform.dylib) + 260,272,...  [0x1989fc6b4,0x1989fc6c0,...]
+    + !           : | + ! : 1 DYLD-STUB$$memcmp  (in redis-server) + 4  [0x10298eba0]
+    + !           : | + ! 31 redis_commands::dispatch::dispatch_command_name::h5d0125bdfdf9f92c  (in redis-server) + 1724  [0x1027b3be4]
+    + !           : | + ! : 28 pthread_mutex_unlock  (in libsystem_pthread.dylib) + 104,12,...  [0x1989c2e80,0x1989c2e24,...]
+    + !           : | + ! : 3 DYLD-STUB$$pthread_mutex_unlock  (in redis-server) + 4  [0x10298ed38]
+    + !           : | + ! 21 redis_commands::dispatch::dispatch_command_name::h5d0125bdfdf9f92c  (in redis-server) + 1344  [0x1027b3a68]
+    + !           : | + ! : 21 redis_core::acl::AclUser::can_execute_command::h3578f624b2babfad  (in redis-server) + 32,24  [0x10285e254,0x10285e24c]
+    + !           : | + ! 16 redis_commands::dispatch::dispatch_command_name::h5d0125bdfdf9f92c  (in redis-server) + 524  [0x1027b3734]
+    + !           : | + ! : 16 redis_core::acl::global_acl_state::hbacd1b7912c84d73  (in redis-server) + 40,20,...  [0x10285cf60,0x10285cf4c,...]
+    + !           : | + ! 15 core::hash::BuildHasher::hash_one::h23ba648a26201d13  (in redis-server) + 296  [0x10280acf8]
+    + !           : | + ! 12 redis_commands::dispatch::dispatch_command_name::h5d0125bdfdf9f92c  (in redis-server) + 1816  [0x1027b3c40]
+    + !           : | + ! : 12 redis_core::replication::global_replication_state::h060536c75bdaaf27  (in redis-server) + 20,40,...  [0x10286bb60,0x10286bb74,...]
+    + !           : | + ! 10 redis_commands::dispatch::lookup_runtime_command::h7bbb4ffaf68fd422  (in redis-server) + 232  [0x1027b4b98]
+    + !           : | + ! 9 redis_commands::dispatch::dispatch_command_name::h5d0125bdfdf9f92c  (in redis-server) + 104  [0x1027b3590]
+    + !           : | + ! : 9 _RNvCshXwFllX56pT_7___rustc35___rust_no_alloc_shim_is_unstable_v2  (in redis-server) + 0  [0x10273d82c]
+    + !           : | + ! 8 redis_core::command_context::CommandContext::reply_simple_string::h7bcf50b09c7f167a  (in redis-server) + 148  [0x10285ab5c]
+    + !           : | + ! 7 _nanov2_free  (in libsystem_malloc.dylib) + 844  [0x1987f4220]
+    + !           : | + ! 5 redis_commands::dispatch::dispatch_command_name::h5d0125bdfdf9f92c  (in redis-server) + 2624  [0x1027b3f68]
+    + !           : | + ! : 5 redis_core::live_config::LiveConfig::maxmemory::h3ccfc5f14c70dcaa  (in redis-server) + 0  [0x102869d28]
+    + !           : | + ! 5 redis_core::acl::AclUser::can_execute_command::h3578f624b2babfad  (in redis-server) + 732,736  [0x10285e510,0x10285e514]
+    + !           : | + ! 2 redis_commands::dispatch::dispatch_command_name::h5d0125bdfdf9f92c  (in redis-server) + 2800  [0x1027b4018]
+    + !           : | + ! : 2 redis_core::live_config::LiveConfig::slowlog_timing_gate::h1c19eb1cdfd0825c  (in redis-server) + 0  [0x1028699d8]
+    + !           : | + ! 1 redis_commands::connection::ping_command::h22c6ea08a766e9a7  (in redis-server) + 128  [0x1027fc804]
+    + !           : | + ! 1 redis_commands::dispatch::dispatch_command_name::h5d0125bdfdf9f92c  (in redis-server) + 452  [0x1027b36ec]
+    + !           : | + !   1 _RNvCshXwFllX56pT_7___rustc35___rust_no_alloc_shim_is_unstable_v2  (in redis-server) + 0  [0x10273d82c]
+    + !           : | + 37 redis_commands::dispatch::dispatch::h6470341fcc2210a6  (in redis-server) + 168  [0x1027b4d34]
+    + !           : | + ! 22 nanov2_malloc_type  (in libsystem_malloc.dylib) + 124,292,...  [0x1987f3d0c,0x1987f3db4,...]
+    + !           : | + ! 10 _malloc_zone_malloc  (in libsystem_malloc.dylib) + 36,84  [0x1987ff650,0x1987ff680]
+    + !           : | + ! 5 DYLD-STUB$$malloc  (in redis-server) + 0  [0x10298eb84]
+    + !           : | + 21 _nanov2_free  (in libsystem_malloc.dylib) + 692,572,...  [0x1987f4188,0x1987f4110,...]
+    + !           : | + 20 redis_commands::dispatch::dispatch::h6470341fcc2210a6  (in redis-server) + 976,940,...  [0x1027b505c,0x1027b5038,...]
+    + !           : | + 12 _free  (in libsystem_malloc.dylib) + 60  [0x198800260]
+    + !           : | + 11 redis_commands::dispatch::dispatch::h6470341fcc2210a6  (in redis-server) + 188  [0x1027b4d48]
+    + !           : | + ! 11 _platform_memmove  (in libsystem_platform.dylib) + 452,436,...  [0x1989febd4,0x1989febc4,...]
+    + !           : | + 1 free  (in libsystem_malloc.dylib) + 0  [0x1987d1520]
+    + !           : | + 1 redis_commands::dispatch::dispatch::h6470341fcc2210a6  (in redis-server) + 152  [0x1027b4d24]
+    + !           : | +   1 _RNvCshXwFllX56pT_7___rustc35___rust_no_alloc_shim_is_unstable_v2  (in redis-server) + 0  [0x10273d82c]
+    + !           : | 421 redis_server::process_current_command_with_db::hfa2b8996f5fd6aaf  (in redis-server) + 368  [0x102721e10]
+    + !           : | + 399 std::time::Instant::elapsed::hd8a84ef162118389  (in redis-server) + 28  [0x10294be54]
+    + !           : | + ! 395 std::sys::pal::unix::time::Timespec::now::he31dd4de508f2879  (in redis-server) + 24  [0x102949c40]
+    + !           : | + ! : 372 clock_gettime  (in libsystem_c.dylib) + 72  [0x19886a758]
+    + !           : | + ! : | 360 clock_gettime_nsec_np  (in libsystem_c.dylib) + 404  [0x19885d060]
+    + !           : | + ! : | + 360 mach_absolute_time  (in libsystem_kernel.dylib) + 108,112,...  [0x1989873e4,0x1989873e8,...]
+    + !           : | + ! : | 7 clock_gettime_nsec_np  (in libsystem_c.dylib) + 228,0,...  [0x19885cfb0,0x19885cecc,...]
+    + !           : | + ! : | 5 clock_gettime_nsec_np  (in libsystem_c.dylib) + 240  [0x19885cfbc]
+    + !           : | + ! : |   3 mach_timebase_info  (in libsystem_kernel.dylib) + 76,28  [0x1989872f4,0x1989872c4]
+    + !           : | + ! : |   2 DYLD-STUB$$mach_timebase_info  (in libsystem_c.dylib) + 8  [0x1988d5aa8]
+    + !           : | + ! : 23 clock_gettime  (in libsystem_c.dylib) + 104,12,...  [0x19886a778,0x19886a71c,...]
+    + !           : | + ! 4 std::sys::pal::unix::time::Timespec::now::he31dd4de508f2879  (in redis-server) + 104  [0x102949c90]
+    + !           : | + 15 std::time::Instant::elapsed::hd8a84ef162118389  (in redis-server) + 68  [0x10294be7c]
+    + !           : | + ! 15 std::sys::pal::unix::time::Timespec::sub_timespec::h145478bb7a0a2665  (in redis-server) + 132,4,...  [0x102949bd0,0x102949b50,...]
+    + !           : | + 7 std::time::Instant::elapsed::hd8a84ef162118389  (in redis-server) + 4,28  [0x10294be3c,0x10294be54]
+    + !           : | 258 redis_server::process_current_command_with_db::hfa2b8996f5fd6aaf  (in redis-server) + 80  [0x102721cf0]
+    + !           : | + 243 std::sys::pal::unix::time::Timespec::now::he31dd4de508f2879  (in redis-server) + 24  [0x102949c40]
+    + !           : | + ! 215 clock_gettime  (in libsystem_c.dylib) + 72  [0x19886a758]
+    + !           : | + ! : 178 clock_gettime_nsec_np  (in libsystem_c.dylib) + 404  [0x19885d060]
+    + !           : | + ! : | 174 mach_absolute_time  (in libsystem_kernel.dylib) + 108,112,...  [0x1989873e4,0x1989873e8,...]
+    + !           : | + ! : | 4 DYLD-STUB$$mach_absolute_time  (in libsystem_c.dylib) + 8  [0x1988d5a28]
+    + !           : | + ! : 19 clock_gettime_nsec_np  (in libsystem_c.dylib) + 252,12,...  [0x19885cfc8,0x19885ced8,...]
+    + !           : | + ! : 11 clock_gettime_nsec_np  (in libsystem_c.dylib) + 240  [0x19885cfbc]
+    + !           : | + ! : | 6 DYLD-STUB$$mach_timebase_info  (in libsystem_c.dylib) + 8  [0x1988d5aa8]
+    + !           : | + ! : | 5 mach_timebase_info  (in libsystem_kernel.dylib) + 28  [0x1989872c4]
+    + !           : | + ! : 7 mach_timebase_info  (in libsystem_kernel.dylib) + 80  [0x1989872f8]
+    + !           : | + ! 19 clock_gettime  (in libsystem_c.dylib) + 12,52,...  [0x19886a71c,0x19886a744,...]
+    + !           : | + ! 9 DYLD-STUB$$clock_gettime  (in redis-server) + 4  [0x10298e8ac]
+    + !           : | + 13 std::sys::pal::unix::time::Timespec::now::he31dd4de508f2879  (in redis-server) + 104,0  [0x102949c90,0x102949c28]
+    + !           : | + 2 std::time::Instant::now::hb0d9f8e385d8cf6f  (in redis-server) + 0  [0x10294be30]
+    + !           : | 45 redis_server::process_current_command_with_db::hfa2b8996f5fd6aaf  (in redis-server) + 560  [0x102721ed0]
+    + !           : | + 36 redis_core::client::Client::reset_args::h3d58d6b708581fd4  (in redis-server) + 64  [0x10286bc8c]
+    + !           : | + ! 22 _nanov2_free  (in libsystem_malloc.dylib) + 4,536,...  [0x1987f3ed8,0x1987f40ec,...]
+    + !           : | + ! 7 DYLD-STUB$$free  (in redis-server) + 4  [0x10298ea2c]
+    + !           : | + ! 7 _free  (in libsystem_malloc.dylib) + 48  [0x198800254]
+    + !           : | + 9 redis_core::client::Client::reset_args::h3d58d6b708581fd4  (in redis-server) + 68,12  [0x10286bc90,0x10286bc58]
+    + !           : | 24 redis_server::process_current_command_with_db::hfa2b8996f5fd6aaf  (in redis-server) + 152,100,...  [0x102721d38,0x102721d04,...]
+    + !           : | 14 redis_server::process_current_command_with_db::hfa2b8996f5fd6aaf  (in redis-server) + 56  [0x102721cd8]
+    + !           : | + 14 redis_core::metrics::server_metrics::h1ceabaf502ed6d06  (in redis-server) + 12,16  [0x102858be8,0x102858bec]
+    + !           : | 12 redis_server::process_current_command_with_db::hfa2b8996f5fd6aaf  (in redis-server) + 52  [0x102721cd4]
+    + !           : | + 12 redis_core::client::Client::clear_blocked_on_keys::h861b9fcc835b4e09  (in redis-server) + 24,16  [0x10286c078,0x10286c070]
+    + !           : | 7 redis_core::client::Client::clear_blocked_on_keys::h861b9fcc835b4e09  (in redis-server) + 408  [0x10286c1f8]
+    + !           : | 5 redis_server::process_current_command_with_db::hfa2b8996f5fd6aaf  (in redis-server) + 356  [0x102721e04]
+    + !           : |   5 core::ptr::drop_in_place$LT$redis_core..command_context..CommandContext$GT$::h66ef9bd2c7a6e029  (in redis-server) + 96,128  [0x102728170,0x102728190]
+    + !           : 332 redis_server::runtime_owner::RuntimeOwner::dispatch_slot_commands::h884c0622371c27aa  (in redis-server) + 280  [0x10272d4b4]
+    + !           : | 165 redis_protocol::request::parse_inline_or_multibulk_into::ha726da75abf42626  (in redis-server) + 720  [0x1028aa3c4]
+    + !           : | + 104 _platform_memmove  (in libsystem_platform.dylib) + 444,436,...  [0x1989febcc,0x1989febc4,...]
+    + !           : | + 61 DYLD-STUB$$memcpy  (in redis-server) + 4  [0x10298ebac]
+    + !           : | 99 redis_protocol::request::parse_inline_or_multibulk_into::ha726da75abf42626  (in redis-server) + 688  [0x1028aa3a4]
+    + !           : | + 85 nanov2_malloc_type  (in libsystem_malloc.dylib) + 272,512,...  [0x1987f3da0,0x1987f3e90,...]
+    + !           : | + 14 _malloc_zone_malloc  (in libsystem_malloc.dylib) + 80,0,...  [0x1987ff67c,0x1987ff62c,...]
+    + !           : | 45 redis_protocol::request::parse_inline_or_multibulk_into::ha726da75abf42626  (in redis-server) + 692,520,...  [0x1028aa3a8,0x1028aa2fc,...]
+    + !           : | 11 redis_protocol::request::parse_inline_or_multibulk_into::ha726da75abf42626  (in redis-server) + 156  [0x1028aa190]
+    + !           : | + 11 redis_protocol::request::read_resp_integer::he43a507cc4251946  (in redis-server) + 448,212,...  [0x1028a9c00,0x1028a9b14,...]
+    + !           : | 10 redis_protocol::request::parse_inline_or_multibulk_into::ha726da75abf42626  (in redis-server) + 584  [0x1028aa33c]
+    + !           : | + 10 redis_protocol::request::read_resp_integer::he43a507cc4251946  (in redis-server) + 28,172,...  [0x1028a9a5c,0x1028a9aec,...]
+    + !           : | 1 redis_protocol::request::parse_inline_or_multibulk_into::ha726da75abf42626  (in redis-server) + 676  [0x1028aa398]
+    + !           : | + 1 _RNvCshXwFllX56pT_7___rustc35___rust_no_alloc_shim_is_unstable_v2  (in redis-server) + 0  [0x10273d82c]
+    + !           : | 1 redis_protocol::request::read_resp_integer::he43a507cc4251946  (in redis-server) + 216  [0x1028a9b18]
+    + !           : 39 redis_server::runtime_owner::RuntimeOwner::dispatch_slot_commands::h884c0622371c27aa  (in redis-server) + 344  [0x10272d4f4]
+    + !           : | 27 _$LT$alloc..vec..Vec$LT$T$C$A$GT$$u20$as$u20$alloc..vec..spec_extend..SpecExtend$LT$$RF$T$C$core..slice..iter..Iter$LT$T$GT$$GT$$GT$::spec_extend::h2bb4d75e8e67c073  (in redis-server) + 60  [0x102735aa4]
+    + !           : | + 22 _platform_memmove  (in libsystem_platform.dylib) + 12,436,...  [0x1989fea1c,0x1989febc4,...]
+    + !           : | + 5 DYLD-STUB$$memcpy  (in redis-server) + 4  [0x10298ebac]
+    + !           : | 11 _$LT$alloc..vec..Vec$LT$T$C$A$GT$$u20$as$u20$alloc..vec..spec_extend..SpecExtend$LT$$RF$T$C$core..slice..iter..Iter$LT$T$GT$$GT$$GT$::spec_extend::h2bb4d75e8e67c073  (in redis-server) + 28,24,...  [0x102735a84,0x102735a80,...]
+    + !           : | 1 _$LT$alloc..vec..Vec$LT$T$C$A$GT$$u20$as$u20$alloc..vec..spec_extend..SpecExtend$LT$$RF$T$C$core..slice..iter..Iter$LT$T$GT$$GT$$GT$::spec_extend::h2bb4d75e8e67c073  (in redis-server) + 112  [0x102735ad8]
+    + !           : |   1 alloc::raw_vec::RawVecInner$LT$A$GT$::reserve::do_reserve_and_handle::h27c7c4423ebd12af  (in redis-server) + 108  [0x10297c248]
+    + !           : |     1 alloc::raw_vec::RawVecInner$LT$A$GT$::finish_grow::h0aa235bb0230b55f  (in redis-server) + 136  [0x10297c1a0]
+    + !           : |       1 nanov2_malloc_type  (in libsystem_malloc.dylib) + 236  [0x1987f3d7c]
+    + !           : 29 redis_server::runtime_owner::RuntimeOwner::dispatch_slot_commands::h884c0622371c27aa  (in redis-server) + 292,360,...  [0x10272d4c0,0x10272d504,...]
+    + !           : 11 redis_protocol::request::parse_inline_or_multibulk_into::ha726da75abf42626  (in redis-server) + 928,916,...  [0x1028aa494,0x1028aa488,...]
+    + !           : 9 redis_server::runtime_owner::RuntimeOwner::dispatch_slot_commands::h884c0622371c27aa  (in redis-server) + 1144  [0x10272d814]
+    + !           : | 9 redis_server::update_client_info_snapshot::h96fd3caa2f91a219  (in redis-server) + 120  [0x102721c04]
+    + !           : |   4 redis_core::client_info::ClientInfoRegistry::update_snapshot::hb8111b970deca6b4  (in redis-server) + 248  [0x10287df78]
+    + !           : |   + 3 _$LT$alloc..string..String$u20$as$u20$core..iter..traits..collect..FromIterator$LT$char$GT$$GT$::from_iter::h0e48d0f987348e2a  (in redis-server) + 124  [0x10288f4c0]
+    + !           : |   + ! 2 alloc::raw_vec::RawVecInner$LT$A$GT$::reserve::do_reserve_and_handle::hf6fc1dc08ca9967f  (in redis-server) + 8  [0x1029859ec]
+    + !           : |   + ! 1 alloc::raw_vec::RawVecInner$LT$A$GT$::reserve::do_reserve_and_handle::hf6fc1dc08ca9967f  (in redis-server) + 108  [0x102985a50]
+    + !           : |   + !   1 alloc::raw_vec::RawVecInner$LT$A$GT$::finish_grow::ha9709e8bc77daecb  (in redis-server) + 0  [0x102985920]
+    + !           : |   + 1 _$LT$alloc..string..String$u20$as$u20$core..iter..traits..collect..FromIterator$LT$char$GT$$GT$::from_iter::h0e48d0f987348e2a  (in redis-server) + 0  [0x10288f444]
+    + !           : |   3 redis_core::client_info::ClientInfoRegistry::update_snapshot::hb8111b970deca6b4  (in redis-server) + 272  [0x10287df90]
+    + !           : |   + 3 _nanov2_free  (in libsystem_malloc.dylib) + 252,572  [0x1987f3fd0,0x1987f4110]
+    + !           : |   1 _$LT$alloc..string..String$u20$as$u20$core..iter..traits..collect..FromIterator$LT$char$GT$$GT$::from_iter::h0e48d0f987348e2a  (in redis-server) + 92  [0x10288f4a0]
+    + !           : |   1 redis_core::client_info::ClientInfoRegistry::update_snapshot::hb8111b970deca6b4  (in redis-server) + 72  [0x10287dec8]
+    + !           : |     1 core::hash::BuildHasher::hash_one::h4ebaa039ff700632  (in redis-server) + 64  [0x10285a284]
+    + !           : 6 redis_server::runtime_owner::RuntimeOwner::dispatch_slot_commands::h884c0622371c27aa  (in redis-server) + 1128  [0x10272d804]
+    + !           : | 6 redis_server::runtime_owner::ClientSlot::queue_write_owned::h30b5e31039680eec  (in redis-server) + 176  [0x10272ab20]
+    + !           : |   2 _szone_free  (in libsystem_malloc.dylib) + 148,300  [0x1987e79e8,0x1987e7a80]
+    + !           : |   2 free_small  (in libsystem_malloc.dylib) + 848  [0x1987d46f4]
+    + !           : |   + 2 small_free_list_add_ptr  (in libsystem_malloc.dylib) + 176,356  [0x1987d6624,0x1987d66d8]
+    + !           : |   1 _nanov2_free  (in libsystem_malloc.dylib) + 384  [0x1987f4054]
+    + !           : |   1 free_small  (in libsystem_malloc.dylib) + 580  [0x1987d45e8]
+    + !           : |     1 small_free_list_remove_ptr_no_clear  (in libsystem_malloc.dylib) + 152  [0x1987d6ccc]
+    + !           : 5 redis_server::runtime_owner::RuntimeOwner::dispatch_slot_commands::h884c0622371c27aa  (in redis-server) + 360  [0x10272d504]
+    + !           : | 5 redis_server::is_client_info_observer::hccc5fb6ea03a7afa  (in redis-server) + 192,0  [0x102721400,0x102721340]
+    + !           : 4 _$LT$alloc..vec..Vec$LT$T$C$A$GT$$u20$as$u20$alloc..vec..spec_extend..SpecExtend$LT$$RF$T$C$core..slice..iter..Iter$LT$T$GT$$GT$$GT$::spec_extend::h2bb4d75e8e67c073  (in redis-server) + 76  [0x102735ab4]
+    + !           : 2 redis_server::runtime_owner::RuntimeOwner::dispatch_slot_commands::h884c0622371c27aa  (in redis-server) + 208  [0x10272d46c]
+    + !           :   2 redis_server::lock_redis_db::h48a2a925511b9ee2  (in redis-server) + 28  [0x10271fc2c]
+    + !           :     1 std::sys::pal::unix::sync::mutex::Mutex::lock::h965e2ed233aabc24  (in redis-server) + 12  [0x102949b38]
+    + !           :     + 1 pthread_mutex_lock  (in libsystem_pthread.dylib) + 60  [0x1989c2910]
+    + !           :     1 std::sys::pal::unix::sync::mutex::Mutex::lock::h965e2ed233aabc24  (in redis-server) + 16  [0x102949b3c]
+    + !           1880 redis_server::runtime_owner::RuntimeOwner::run_plain_tcp::hdf68c9a7c7cc5dd7  (in redis-server) + 1988  [0x10272b34c]
+    + !           : 1880 mio::poll::Poll::poll::hfef474e240302943  (in redis-server) + 116  [0x10273dea0]
+    + !           :   1880 kevent  (in libsystem_kernel.dylib) + 8  [0x19898d01c]
+    + !           337 redis_server::runtime_owner::RuntimeOwner::run_plain_tcp::hdf68c9a7c7cc5dd7  (in redis-server) + 5480  [0x10272c0f0]
+    + !           : 336 _$LT$mio..net..tcp..stream..TcpStream$u20$as$u20$std..io..Read$GT$::read::h07db8b46c376f25a  (in redis-server) + 24  [0x10273db38]
+    + !           : | 335 _$LT$$RF$std..net..tcp..TcpStream$u20$as$u20$std..io..Read$GT$::read::h35273f0ee9d32582  (in redis-server) + 24  [0x1029612a8]
+    + !           : | + 332 __recvfrom  (in libsystem_kernel.dylib) + 8  [0x19898b478]
+    + !           : | + 1 __recvfrom  (in libsystem_kernel.dylib) + 28  [0x19898b48c]
+    + !           : | + ! 1 cerror  (in libsystem_kernel.dylib) + 52  [0x1989887bc]
+    + !           : | + !   1 cerror_nocancel  (in libsystem_kernel.dylib) + 12  [0x1989878d8]
+    + !           : | + 1 cerror  (in libsystem_kernel.dylib) + 64  [0x1989887c8]
+    + !           : | + 1 recv  (in libsystem_c.dylib) + 0  [0x19886e088]
+    + !           : | 1 _$LT$$RF$std..net..tcp..TcpStream$u20$as$u20$std..io..Read$GT$::read::h35273f0ee9d32582  (in redis-server) + 8  [0x102961298]
+    + !           : 1 _$LT$mio..net..tcp..stream..TcpStream$u20$as$u20$std..io..Read$GT$::read::h07db8b46c376f25a  (in redis-server) + 24  [0x10273db38]
+    + !           277 redis_server::runtime_owner::RuntimeOwner::run_plain_tcp::hdf68c9a7c7cc5dd7  (in redis-server) + 6380  [0x10272c474]
+    + !           : 277 _$LT$mio..net..tcp..stream..TcpStream$u20$as$u20$std..io..Write$GT$::write::hba292c7f53f69aa6  (in redis-server) + 24  [0x10273db5c]
+    + !           :   276 _$LT$$RF$std..net..tcp..TcpStream$u20$as$u20$std..io..Write$GT$::write::h77e8146043bd9f14  (in redis-server) + 28  [0x102961344]
+    + !           :   | 274 __sendto  (in libsystem_kernel.dylib) + 8  [0x19898b44c]
+    + !           :   | 1 DYLD-STUB$$__sendto  (in libsystem_c.dylib) + 8  [0x1988d5328]
+    + !           :   | 1 DYLD-STUB$$send  (in redis-server) + 0  [0x10298edf4]
+    + !           :   1 _$LT$$RF$std..net..tcp..TcpStream$u20$as$u20$std..io..Write$GT$::write::h77e8146043bd9f14  (in redis-server) + 28  [0x102961344]
+    + !           81 redis_server::runtime_owner::RuntimeOwner::run_plain_tcp::hdf68c9a7c7cc5dd7  (in redis-server) + 5788  [0x10272c224]
+    + !           : 79 redis_server::runtime_owner::RuntimeOwner::ensure_writable_interest::h34be3e2df004e768  (in redis-server) + 108  [0x10272da94]
+    + !           : | 78 mio::poll::Registry::reregister::h55b301228c2c805c  (in redis-server) + 200  [0x10273b928]
+    + !           : | + 78 mio::sys::unix::selector::Selector::reregister::h672166c99ca1a188  (in redis-server) + 112  [0x10273d8a0]
+    + !           : | +   78 kevent  (in libsystem_kernel.dylib) + 8  [0x19898d01c]
+    + !           : | 1 mio::poll::Registry::reregister::h55b301228c2c805c  (in redis-server) + 0  [0x10273b860]
+    + !           : 2 redis_server::runtime_owner::RuntimeOwner::ensure_writable_interest::h34be3e2df004e768  (in redis-server) + 76,108  [0x10272da74,0x10272da94]
+    + !           64 redis_server::runtime_owner::RuntimeOwner::run_plain_tcp::hdf68c9a7c7cc5dd7  (in redis-server) + 6728  [0x10272c5d0]
+    + !           : 64 mio::poll::Registry::reregister::h55b301228c2c805c  (in redis-server) + 200  [0x10273b928]
+    + !           :   63 mio::sys::unix::selector::Selector::reregister::h672166c99ca1a188  (in redis-server) + 112  [0x10273d8a0]
+    + !           :   | 63 kevent  (in libsystem_kernel.dylib) + 8  [0x19898d01c]
+    + !           :   1 mio::sys::unix::selector::Selector::reregister::h672166c99ca1a188  (in redis-server) + 76  [0x10273d87c]
+    + !           12 redis_server::runtime_owner::RuntimeOwner::run_plain_tcp::hdf68c9a7c7cc5dd7  (in redis-server) + 6892,2164,...  [0x10272c674,0x10272b3fc,...]
+    + !           7 redis_server::runtime_owner::RuntimeOwner::run_plain_tcp::hdf68c9a7c7cc5dd7  (in redis-server) + 2088  [0x10272b3b0]
+    + !           : 7 _platform_memset  (in libsystem_platform.dylib) + 140  [0x1989fe7cc]
+    + !           3 redis_server::runtime_owner::RuntimeOwner::run_plain_tcp::hdf68c9a7c7cc5dd7  (in redis-server) + 5640  [0x10272c190]
+    + !           : 3 _platform_memmove  (in libsystem_platform.dylib) + 0,136  [0x1989fea10,0x1989fea98]
+    + !           2 redis_server::runtime_owner::RuntimeOwner::run_plain_tcp::hdf68c9a7c7cc5dd7  (in redis-server) + 6992  [0x10272c6d8]
+    + !           : 2 std::sync::mpmc::list::Channel$LT$T$GT$::try_recv::ha5f52d584f56377c  (in redis-server) + 452,500  [0x102735370,0x1027353a0]
+    + !           1 redis_server::runtime_owner::RuntimeOwner::run_plain_tcp::hdf68c9a7c7cc5dd7  (in redis-server) + 5496  [0x10272c100]
+    + !           : 1 std::io::error::Error::kind::h7bbe8df59c586c2b  (in redis-server) + 132  [0x10272df70]
+    + !           1 redis_server::runtime_owner::RuntimeOwner::run_plain_tcp::hdf68c9a7c7cc5dd7  (in redis-server) + 7644  [0x10272c964]
+    + !             1 redis_server::runtime_owner::cleanup_slot::h8711d3476d4cfad8  (in redis-server) + 368  [0x10272ddac]
+    + !               1 core::ptr::drop_in_place$LT$redis_server..runtime_owner..ClientSlot$GT$::h77998a960b5ede29  (in redis-server) + 24  [0x10272ee68]
+    + !                 1 core::ptr::drop_in_place$LT$redis_core..client..Client$GT$::h46c5c3a3a2930817  (in redis-server) + 296  [0x10272e808]
+    + !                   1 close  (in libsystem_kernel.dylib) + 8  [0x198987aa4]
+    + 1 ???  (in <unknown binary>)  [0x16d6dc4d0]
+    +   1 redis_server::runtime_owner::ClientSlot::queue_write_owned::h30b5e31039680eec  (in redis-server) + 176  [0x10272ab20]
+    +     1 free_small  (in libsystem_malloc.dylib) + 28  [0x1987d43c0]
+    6174 Thread_41629665: blocked-timeout
+    + 6174 thread_start  (in libsystem_pthread.dylib) + 8  [0x1989c30fc]
+    +   6174 _pthread_start  (in libsystem_pthread.dylib) + 136  [0x1989c82e4]
+    +     6174 std::sys::thread::unix::Thread::new::thread_start::hd42ed9e591878587  (in redis-server) + 408  [0x10294a3a0]
+    +       6174 core::ops::function::FnOnce::call_once$u7b$$u7b$vtable.shim$u7d$$u7d$::h8e7716941da1a8aa  (in redis-server) + 84  [0x1027317a8]
+    +         6172 std::sys::backtrace::__rust_begin_short_backtrace::he9a1300a62218a6c  (in redis-server) + 160  [0x10273c310]
+    +         ! 6172 std::thread::functions::sleep::h0eab1a8b5b3e9444  (in redis-server) + 64  [0x10294c824]
+    +         !   5839 nanosleep  (in libsystem_c.dylib) + 220  [0x1988696f0]
+    +         !   : 5838 __semwait_signal  (in libsystem_kernel.dylib) + 8  [0x19898a4e8]
+    +         !   : 1 __semwait_signal  (in libsystem_kernel.dylib) + 28  [0x19898a4fc]
+    +         !   :   1 cerror  (in libsystem_kernel.dylib) + 44  [0x1989887b4]
+    +         !   :     1 _pthread_exit_if_canceled  (in libsystem_pthread.dylib) + 0  [0x1989c1e70]
+    +         !   333 nanosleep  (in libsystem_c.dylib) + 116  [0x198869688]
+    +         !     333 clock_get_time  (in libsystem_kernel.dylib) + 116  [0x19898c660]
+    +         !       333 mach_msg2_internal  (in libsystem_kernel.dylib) + 80  [0x198999604]
+    +         !         333 mach_msg2_trap  (in libsystem_kernel.dylib) + 8  [0x198986f54]
+    +         1 std::sys::backtrace::__rust_begin_short_backtrace::he9a1300a62218a6c  (in redis-server) + 164  [0x10273c314]
+    +         ! 1 redis_core::blocked_keys::blocked_keys_index::h4853cafcf351dc1b  (in redis-server) + 0  [0x1028547dc]
+    +         1 std::sys::backtrace::__rust_begin_short_backtrace::he9a1300a62218a6c  (in redis-server) + 212  [0x10273c344]
+    +           1 redis_core::blocked_keys::current_time_ms::h388e8682e9fbbf8c  (in redis-server) + 16  [0x102852a30]
+    +             1 std::sys::pal::unix::time::Timespec::now::he31dd4de508f2879  (in redis-server) + 24  [0x102949c40]
+    +               1 clock_gettime  (in libsystem_c.dylib) + 132  [0x19886a794]
+    6174 Thread_41629666: active-expire
+    + 6174 thread_start  (in libsystem_pthread.dylib) + 8  [0x1989c30fc]
+    +   6174 _pthread_start  (in libsystem_pthread.dylib) + 136  [0x1989c82e4]
+    +     6174 std::sys::thread::unix::Thread::new::thread_start::hd42ed9e591878587  (in redis-server) + 408  [0x10294a3a0]
+    +       6174 core::ops::function::FnOnce::call_once$u7b$$u7b$vtable.shim$u7d$$u7d$::hac91e8cbdbce18b3  (in redis-server) + 100  [0x10289886c]
+    +         6159 std::sys::backtrace::__rust_begin_short_backtrace::h804a9853d642901a  (in redis-server) + 148  [0x102895dac]
+    +         ! 6159 std::thread::functions::sleep::h0eab1a8b5b3e9444  (in redis-server) + 64  [0x10294c824]
+    +         !   6157 nanosleep  (in libsystem_c.dylib) + 220  [0x1988696f0]
+    +         !   : 6157 __semwait_signal  (in libsystem_kernel.dylib) + 8  [0x19898a4e8]
+    +         !   2 nanosleep  (in libsystem_c.dylib) + 116  [0x198869688]
+    +         !     2 clock_get_time  (in libsystem_kernel.dylib) + 116  [0x19898c660]
+    +         !       2 mach_msg2_internal  (in libsystem_kernel.dylib) + 80  [0x198999604]
+    +         !         2 mach_msg2_trap  (in libsystem_kernel.dylib) + 8  [0x198986f54]
+    +         13 std::sys::backtrace::__rust_begin_short_backtrace::h804a9853d642901a  (in redis-server) + 340  [0x102895e6c]
+    +         ! 13 std::sys::pal::unix::sync::mutex::Mutex::lock::h965e2ed233aabc24  (in redis-server) + 12  [0x102949b38]
+    +         !   11 _pthread_mutex_firstfit_lock_slow  (in libsystem_pthread.dylib) + 220  [0x1989c2dbc]
+    +         !   : 11 _pthread_mutex_firstfit_lock_wait  (in libsystem_pthread.dylib) + 84  [0x1989c53f8]
+    +         !   :   11 __psynch_mutexwait  (in libsystem_kernel.dylib) + 8  [0x198989bbc]
+    +         !   1 _pthread_mutex_firstfit_lock_slow  (in libsystem_pthread.dylib) + 0  [0x1989c2ce0]
+    +         !   1 pthread_mutex_lock  (in libsystem_pthread.dylib) + 140  [0x1989c2960]
+    +         1 std::sys::backtrace::__rust_begin_short_backtrace::h804a9853d642901a  (in redis-server) + 164  [0x102895dbc]
+    +         ! 1 std::sys::pal::unix::time::Timespec::now::he31dd4de508f2879  (in redis-server) + 24  [0x102949c40]
+    +         !   1 clock_gettime  (in libsystem_c.dylib) + 0  [0x19886a710]
+    +         1 std::sys::backtrace::__rust_begin_short_backtrace::h804a9853d642901a  (in redis-server) + 308  [0x102895e4c]
+    6174 Thread_41629667: lru-clock
+    + 6174 thread_start  (in libsystem_pthread.dylib) + 8  [0x1989c30fc]
+    +   6174 _pthread_start  (in libsystem_pthread.dylib) + 136  [0x1989c82e4]
+    +     6174 std::sys::thread::unix::Thread::new::thread_start::hd42ed9e591878587  (in redis-server) + 408  [0x10294a3a0]
+    +       6174 core::ops::function::FnOnce::call_once$u7b$$u7b$vtable.shim$u7d$$u7d$::hd349f046b04b1f31  (in redis-server) + 88  [0x102898ae8]
+    +         6174 std::sys::backtrace::__rust_begin_short_backtrace::h449644890c0a407e  (in redis-server) + 40  [0x102895cdc]
+    +           6174 std::thread::functions::sleep::h0eab1a8b5b3e9444  (in redis-server) + 64  [0x10294c824]
+    +             6173 nanosleep  (in libsystem_c.dylib) + 220  [0x1988696f0]
+    +             ! 6173 __semwait_signal  (in libsystem_kernel.dylib) + 8  [0x19898a4e8]
+    +             1 DYLD-STUB$$nanosleep  (in redis-server) + 0  [0x10298ec20]
+    6174 Thread_41629668: bgsave-reaper
+    + 6174 thread_start  (in libsystem_pthread.dylib) + 8  [0x1989c30fc]
+    +   6174 _pthread_start  (in libsystem_pthread.dylib) + 136  [0x1989c82e4]
+    +     6174 std::sys::thread::unix::Thread::new::thread_start::hd42ed9e591878587  (in redis-server) + 408  [0x10294a3a0]
+    +       6174 core::ops::function::FnOnce::call_once$u7b$$u7b$vtable.shim$u7d$$u7d$::h20c53c18a582ba29  (in redis-server) + 88  [0x102731644]
+    +         6174 std::sys::backtrace::__rust_begin_short_backtrace::h0caafada0be84517  (in redis-server) + 136  [0x10273bdc4]
+    +           6174 std::thread::functions::sleep::h0eab1a8b5b3e9444  (in redis-server) + 64  [0x10294c824]
+    +             5789 nanosleep  (in libsystem_c.dylib) + 220  [0x1988696f0]
+    +             ! 5789 __semwait_signal  (in libsystem_kernel.dylib) + 8  [0x19898a4e8]
+    +             385 nanosleep  (in libsystem_c.dylib) + 116  [0x198869688]
+    +               385 clock_get_time  (in libsystem_kernel.dylib) + 116  [0x19898c660]
+    +                 385 mach_msg2_internal  (in libsystem_kernel.dylib) + 80  [0x198999604]
+    +                   385 mach_msg2_trap  (in libsystem_kernel.dylib) + 8  [0x198986f54]
+    6174 Thread_41629669: repl-bgsave-reaper
+      6174 thread_start  (in libsystem_pthread.dylib) + 8  [0x1989c30fc]
+        6174 _pthread_start  (in libsystem_pthread.dylib) + 136  [0x1989c82e4]
+          6174 std::sys::thread::unix::Thread::new::thread_start::hd42ed9e591878587  (in redis-server) + 408  [0x10294a3a0]
+            6174 core::ops::function::FnOnce::call_once$u7b$$u7b$vtable.shim$u7d$$u7d$::hbecbe0fb045f5488  (in redis-server) + 48  [0x1027318fc]
+              6173 std::sys::backtrace::__rust_begin_short_backtrace::h10d5294d40fc4ede  (in redis-server) + 80  [0x10273bf50]
+              ! 6173 std::thread::functions::sleep::h0eab1a8b5b3e9444  (in redis-server) + 64  [0x10294c824]
+              !   6169 nanosleep  (in libsystem_c.dylib) + 220  [0x1988696f0]
+              !   : 6169 __semwait_signal  (in libsystem_kernel.dylib) + 8  [0x19898a4e8]
+              !   4 nanosleep  (in libsystem_c.dylib) + 116  [0x198869688]
+              !     4 clock_get_time  (in libsystem_kernel.dylib) + 116  [0x19898c660]
+              !       4 mach_msg2_internal  (in libsystem_kernel.dylib) + 80  [0x198999604]
+              !         4 mach_msg2_trap  (in libsystem_kernel.dylib) + 8  [0x198986f54]
+              1 std::sys::backtrace::__rust_begin_short_backtrace::h10d5294d40fc4ede  (in redis-server) + 96  [0x10273bf60]
+                1 redis_core::replication::ReplicationState::repl_child_pid::hbbfa29acd0dafb09  (in redis-server) + 0  [0x10286a968]
+
+Total number in stack (recursive counted multiple, when >=5):
+        11       _nanov2_free  (in libsystem_malloc.dylib) + 0  [0x1987f3ed4]
+        9       _platform_memmove  (in libsystem_platform.dylib) + 0  [0x1989fea10]
+        7       mach_timebase_info  (in libsystem_kernel.dylib) + 0  [0x1989872a8]
+        6       clock_gettime  (in libsystem_c.dylib) + 0  [0x19886a710]
+        6       nanov2_malloc_type  (in libsystem_malloc.dylib) + 0  [0x1987f3c90]
+        6       std::sys::pal::unix::time::Timespec::now::he31dd4de508f2879  (in redis-server) + 24  [0x102949c40]
+        5       __semwait_signal  (in libsystem_kernel.dylib) + 0  [0x19898a4e0]
+        5       _free  (in libsystem_malloc.dylib) + 0  [0x198800224]
+        5       _malloc_zone_malloc  (in libsystem_malloc.dylib) + 0  [0x1987ff62c]
+        5       _pthread_start  (in libsystem_pthread.dylib) + 136  [0x1989c82e4]
+        5       clock_gettime_nsec_np  (in libsystem_c.dylib) + 0  [0x19885cecc]
+        5       nanosleep  (in libsystem_c.dylib) + 220  [0x1988696f0]
+        5       std::sys::thread::unix::Thread::new::thread_start::hd42ed9e591878587  (in redis-server) + 408  [0x10294a3a0]
+        5       std::thread::functions::sleep::h0eab1a8b5b3e9444  (in redis-server) + 64  [0x10294c824]
+        5       thread_start  (in libsystem_pthread.dylib) + 8  [0x1989c30fc]
+
+Sort by top of stack, same collapsed (when >= 5):
+        __semwait_signal  (in libsystem_kernel.dylib)        30126
+        kevent  (in libsystem_kernel.dylib)        2021
+        mach_absolute_time  (in libsystem_kernel.dylib)        1089
+        mach_msg2_trap  (in libsystem_kernel.dylib)        724
+        __recvfrom  (in libsystem_kernel.dylib)        332
+        __sendto  (in libsystem_kernel.dylib)        274
+        redis_commands::dispatch::lookup_runtime_command::h7bbb4ffaf68fd422  (in redis-server)        272
+        _nanov2_free  (in libsystem_malloc.dylib)        248
+        nanov2_malloc_type  (in libsystem_malloc.dylib)        232
+        _platform_memmove  (in libsystem_platform.dylib)        223
+        redis_commands::dispatch::dispatch_command_name::h5d0125bdfdf9f92c  (in redis-server)        149
+        _malloc_zone_malloc  (in libsystem_malloc.dylib)        100
+        clock_gettime_nsec_np  (in libsystem_c.dylib)        98
+        _free  (in libsystem_malloc.dylib)        83
+        DYLD-STUB$$memcpy  (in redis-server)        79
+        clock_gettime  (in libsystem_c.dylib)        72
+        core::hash::BuildHasher::hash_one::h23ba648a26201d13  (in redis-server)        70
+        redis_protocol::request::parse_inline_or_multibulk_into::ha726da75abf42626  (in redis-server)        56
+        _$LT$std..hash..random..DefaultHasher$u20$as$u20$core..hash..Hasher$GT$::write::h1d555c3dc08887a8  (in redis-server)        44
+        mach_timebase_info  (in libsystem_kernel.dylib)        39
+        DYLD-STUB$$free  (in redis-server)        36
+        std::sys::pal::unix::time::Timespec::now::he31dd4de508f2879  (in redis-server)        35
+        _platform_memcmp  (in libsystem_platform.dylib)        30
+        redis_server::runtime_owner::RuntimeOwner::dispatch_slot_commands::h884c0622371c27aa  (in redis-server)        29
+        pthread_mutex_unlock  (in libsystem_pthread.dylib)        28
+        pthread_mutex_lock  (in libsystem_pthread.dylib)        26
+        redis_core::acl::AclUser::can_execute_command::h3578f624b2babfad  (in redis-server)        26
+        DYLD-STUB$$clock_gettime  (in redis-server)        25
+        redis_server::process_current_command_with_db::hfa2b8996f5fd6aaf  (in redis-server)        24
+        _RNvCshXwFllX56pT_7___rustc11___rdl_alloc  (in redis-server)        22
+        redis_protocol::request::read_resp_integer::he43a507cc4251946  (in redis-server)        22
+        redis_commands::dispatch::dispatch::h6470341fcc2210a6  (in redis-server)        20
+        std::sys::pal::unix::time::Timespec::sub_timespec::h145478bb7a0a2665  (in redis-server)        20
+        redis_core::client::Client::clear_blocked_on_keys::h861b9fcc835b4e09  (in redis-server)        19
+        DYLD-STUB$$mach_absolute_time  (in libsystem_c.dylib)        17
+        redis_protocol::frame::encode_resp2::heb4486698584782c  (in redis-server)        17
+        redis_core::acl::global_acl_state::hbacd1b7912c84d73  (in redis-server)        16
+        DYLD-STUB$$malloc  (in redis-server)        15
+        _$LT$alloc..vec..Vec$LT$T$C$A$GT$$u20$as$u20$alloc..vec..spec_extend..SpecExtend$LT$$RF$T$C$core..slice..iter..Iter$LT$T$GT$$GT$$GT$::spec_extend::h2bb4d75e8e67c073  (in redis-server)        15
+        redis_core::metrics::server_metrics::h1ceabaf502ed6d06  (in redis-server)        14
+        DYLD-STUB$$mach_timebase_info  (in libsystem_c.dylib)        13
+        redis_core::command_context::CommandContext::reply_simple_string::h7bcf50b09c7f167a  (in redis-server)        13
+        _RNvCshXwFllX56pT_7___rustc35___rust_no_alloc_shim_is_unstable_v2  (in redis-server)        12
+        core::ptr::drop_in_place$LT$redis_protocol..frame..RespFrame$GT$::hb1e2f2d656cfb340  (in redis-server)        12
+        redis_core::replication::global_replication_state::h060536c75bdaaf27  (in redis-server)        12
+        redis_server::runtime_owner::RuntimeOwner::run_plain_tcp::hdf68c9a7c7cc5dd7  (in redis-server)        12
+        __psynch_mutexwait  (in libsystem_kernel.dylib)        11
+        std::time::Instant::elapsed::hd8a84ef162118389  (in redis-server)        10
+        _platform_memset  (in libsystem_platform.dylib)        9
+        nanov2_realloc  (in libsystem_malloc.dylib)        9
+        redis_core::client::Client::reset_args::h3d58d6b708581fd4  (in redis-server)        9
+        std::sys::pal::unix::sync::mutex::Mutex::lock::h965e2ed233aabc24  (in redis-server)        7
+        nanov2_pointer_size  (in libsystem_malloc.dylib)        6
+        nanov2_size  (in libsystem_malloc.dylib)        6
+        DYLD-STUB$$pthread_mutex_lock  (in redis-server)        5
+        alloc::raw_vec::RawVecInner$LT$A$GT$::reserve::do_reserve_and_handle::ha590242bae04c6fc  (in redis-server)        5
+        core::ptr::drop_in_place$LT$redis_core..command_context..CommandContext$GT$::h66ef9bd2c7a6e029  (in redis-server)        5
+        redis_core::live_config::LiveConfig::maxmemory::h3ccfc5f14c70dcaa  (in redis-server)        5
+        redis_server::is_client_info_observer::hccc5fb6ea03a7afa  (in redis-server)        5
+
+Binary Images:
+       0x10271c000 -        0x102a77a0b +redis-server (0) <E0DCD97B-9525-3B5B-B43E-26FB92E094F0> /Users/*/redis-server
+       0x1985f0000 -        0x198641ca3  libobjc.A.dylib (928.3) <B2882096-462B-3878-BE2A-410F7B1A27FD> /usr/lib/libobjc.A.dylib
+       0x198642000 -        0x1986c3f3f  dyld (1.0.0 - 1245.1) <398A133C-9BCB-317F-A064-A40D3CEA3C0F> /usr/lib/dyld
+       0x1986c4000 -        0x1986c7ff8  libsystem_blocks.dylib (95) <A33D811C-BD2D-3833-9C38-9BF3960A1F8C> /usr/lib/system/libsystem_blocks.dylib
+       0x1986c8000 -        0x198712fff  libxpc.dylib (2866.81.1) <564B7785-E7C4-3231-8BF1-3FBB266B6599> /usr/lib/system/libxpc.dylib
+       0x198713000 -        0x19872efff  libsystem_trace.dylib (1612.80.7) <7F5EC174-AB45-37E7-B783-83A04B6154A1> /usr/lib/system/libsystem_trace.dylib
+       0x19872f000 -        0x1987cefdf  libcorecrypto.dylib (1736.80.2) <8A08F4FE-C92E-35AA-BBB8-45A9D7A00AAD> /usr/lib/system/libcorecrypto.dylib
+       0x1987cf000 -        0x198810fff  libsystem_malloc.dylib (657.80.3) <1480B446-99F7-3757-9D4E-5BA3014A2726> /usr/lib/system/libsystem_malloc.dylib
+       0x198811000 -        0x198857fff  libdispatch.dylib (1504.60.7) <5576E4FD-AAD2-3608-8C8F-4EEC421236F9> /usr/lib/system/libdispatch.dylib
+       0x198858000 -        0x19885affb  libsystem_featureflags.dylib (94) <64FD190D-C0D7-3B9A-837B-E63EA386BE14> /usr/lib/system/libsystem_featureflags.dylib
+       0x19885b000 -        0x1988dcffb  libsystem_c.dylib (1669.60.4) <92699527-645F-3D8D-AED8-1CFB0C034E15> /usr/lib/system/libsystem_c.dylib
+       0x1988dd000 -        0x19896affb  libc++.1.dylib (1800.105) <BBAB286C-2E51-3D64-9AE3-A4102935FE32> /usr/lib/libc++.1.dylib
+       0x19896b000 -        0x198985fff  libc++abi.dylib (1800.105) <E7DBA219-4E97-307D-8E80-E0D97BE8517B> /usr/lib/libc++abi.dylib
+       0x198986000 -        0x1989c0ff7  libsystem_kernel.dylib (11215.81.4) <EEE9D0D3-DFFC-37CB-9CED-B27CD0286D8C> /usr/lib/system/libsystem_kernel.dylib
+       0x1989c1000 -        0x1989cdfff  libsystem_pthread.dylib (535) <642FAF7A-874E-37E6-8ABA-2B0CC09A3025> /usr/lib/system/libsystem_pthread.dylib
+       0x1989ce000 -        0x1989faffb  libdyld.dylib (1245.1) <C0C53058-94D2-3D9E-9E92-56BA8B43C327> /usr/lib/system/libdyld.dylib
+       0x1989fb000 -        0x198a02feb  libsystem_platform.dylib (340.60.2) <984D08B8-F85C-36F5-9E17-5BFF7FC779A3> /usr/lib/system/libsystem_platform.dylib
+       0x198a03000 -        0x198a32ffb  libsystem_info.dylib (592) <8C7C4902-FEC1-3776-87FF-2373BA19B1CE> /usr/lib/system/libsystem_info.dylib
+       0x19c119000 -        0x19c123ff7  libsystem_darwin.dylib (1669.60.4) <F23DCA7C-AF18-3BB9-9D2F-FFBC4645DDC1> /usr/lib/system/libsystem_darwin.dylib
+       0x19c57c000 -        0x19c58efff  libsystem_notify.dylib (327.60.1) <A3EE7CB1-6FCC-37AB-A8BC-256B9642B47D> /usr/lib/system/libsystem_notify.dylib
+       0x19e52a000 -        0x19e544ff7  libsystem_networkextension.dylib (2063.80.10) <CD0C82E0-9B1B-3CAA-8CA7-466D1C439C3B> /usr/lib/system/libsystem_networkextension.dylib
+       0x19e5c0000 -        0x19e5d8ffb  libsystem_asl.dylib (402) <26693E85-AFDC-38E2-B939-D6EC865FA506> /usr/lib/system/libsystem_asl.dylib
+       0x1a00c9000 -        0x1a00d1fff  libsystem_symptoms.dylib (2001.80.5) <695D143C-5D59-37B0-8784-4AE727AFEEF5> /usr/lib/system/libsystem_symptoms.dylib
+       0x1a3826000 -        0x1a3854ff7  libsystem_containermanager.dylib (689) <A72C2FD5-969A-342F-B8A4-4216D7C7957E> /usr/lib/system/libsystem_containermanager.dylib
+       0x1a4a63000 -        0x1a4a67fff  libsystem_configuration.dylib (1351.80.2) <C218F939-9E60-37A3-B2EC-93837054946D> /usr/lib/system/libsystem_configuration.dylib
+       0x1a4a68000 -        0x1a4a6efff  libsystem_sandbox.dylib (2401.81.2) <BF38E17B-6A57-3EE2-A805-8E9B35542182> /usr/lib/system/libsystem_sandbox.dylib
+       0x1a5980000 -        0x1a5982ffb  libquarantine.dylib (181.80.2) <90D46A44-087C-3900-8509-EA90C6CFAD58> /usr/lib/system/libquarantine.dylib
+       0x1a608f000 -        0x1a6095ffb  libsystem_coreservices.dylib (171.1) <579E4601-365D-346F-9CD9-37851FB2874C> /usr/lib/system/libsystem_coreservices.dylib
+       0x1a64fc000 -        0x1a6539fff  libsystem_m.dylib (3289) <1B9E3C19-420A-38C5-96CE-6C2CE6EB56BA> /usr/lib/system/libsystem_m.dylib
+       0x1a653a000 -        0x1a653afff  libcharset.1.dylib (109) <0F68DB90-93D6-388A-9702-0AD069319AF6> /usr/lib/libcharset.1.dylib
+       0x1a653b000 -        0x1a653eff7  libmacho.dylib (1022.1) <9E0F73E3-1865-3F72-9ED1-465C68D23BA6> /usr/lib/system/libmacho.dylib
+       0x1a655c000 -        0x1a6569fff  libcommonCrypto.dylib (600033.60.1) <1C8E15A6-869F-3AAD-AAE8-5825C7C4F902> /usr/lib/system/libcommonCrypto.dylib
+       0x1a656a000 -        0x1a6575fff  libunwind.dylib (1800.85) <BEFBB85F-B46E-3C52-9A92-2F8EE957E3D9> /usr/lib/system/libunwind.dylib
+       0x1a6576000 -        0x1a657dfff  liboah.dylib (342) <D8407F3E-5522-3C66-8A60-C29567136FD5> /usr/lib/liboah.dylib
+       0x1a657e000 -        0x1a6588ff7  libcopyfile.dylib (213.40.2) <0D18978A-4446-31EE-8228-25FABB44DB94> /usr/lib/system/libcopyfile.dylib
+       0x1a6589000 -        0x1a658cfff  libcompiler_rt.dylib (103.3) <F22CE10B-B1DF-3A58-9B8B-7F0ED73962DF> /usr/lib/system/libcompiler_rt.dylib
+       0x1a658d000 -        0x1a6591ffb  libsystem_collections.dylib (1669.60.4) <74DC56B7-7BE5-3392-835A-7C6863986FF2> /usr/lib/system/libsystem_collections.dylib
+       0x1a6592000 -        0x1a6595ffb  libsystem_secinit.dylib (153.60.1) <9BFA7CCC-E31E-3D39-832D-CA425269A795> /usr/lib/system/libsystem_secinit.dylib
+       0x1a6596000 -        0x1a6598fff  libremovefile.dylib (75.80.1) <D242539B-BA45-363C-8B08-83FBCE4EC1C2> /usr/lib/system/libremovefile.dylib
+       0x1a6599000 -        0x1a6599fff  libkeymgr.dylib (31) <95E4D67C-51BF-36C9-99B5-35F5E2D6E2CA> /usr/lib/system/libkeymgr.dylib
+       0x1a659a000 -        0x1a65a2fff  libsystem_dnssd.dylib (2559.80.8) <35DE5A07-AF58-33F0-A950-1F7CCAE85F3E> /usr/lib/system/libsystem_dnssd.dylib
+       0x1a65a3000 -        0x1a65a8ffb  libcache.dylib (95) <46788F12-8B07-3253-BF23-C49BC753A327> /usr/lib/system/libcache.dylib
+       0x1a65a9000 -        0x1a65aaffb  libSystem.B.dylib (1351) <E7A14776-89AB-310A-9FCF-F47CAE8043B6> /usr/lib/libSystem.B.dylib
+       0x1a65e5000 -        0x1a65ecffb  libiconv.2.dylib (109) <5CF5071E-B8E9-3CE3-9AFC-FA99DA46DF13> /usr/lib/libiconv.2.dylib
+       0x2795a2000 -        0x2795a5fff  libsystem_darwindirectory.dylib (122) <E3036CCB-95CF-3BD6-AA4F-58543B923EA5> /usr/lib/system/libsystem_darwindirectory.dylib
+       0x2795a6000 -        0x2795acfff  libsystem_eligibility.dylib (160.60.1) <4C8AC363-F171-3A08-85F8-7542B9C79A87> /usr/lib/system/libsystem_eligibility.dylib
+       0x2795ad000 -        0x2795b2fff  libsystem_sanitizers.dylib (17.1) <F0A7379E-6861-3B3F-BB56-1B08B1BEE98A> /usr/lib/system/libsystem_sanitizers.dylib
