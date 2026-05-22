@@ -1,9 +1,9 @@
 schema_version = 1
 
 [project]
-name = "valkey-rs-runtime-owner-run"
-target = "faithful runtime-owner planning + std plain-TCP owner-loop experiment"
-description = "This run is complete when baseline conformance/performance evidence has been recorded, runtime-owner canaries pass, the inert scaffold lands, the overnight owner-loop architecture pass lands, the std nonblocking plain-TCP owner loop is attempted, and post-owner-loop oracle/benchmark evidence exists."
+name = "valkey-rs-runtime-owner-poller-run"
+target = "faithful runtime-owner poller experiment after std plain-TCP owner-loop"
+description = "This run is complete when the current runtime-owner baseline is reproven, call-tree profiling support exists, the architect approves or blocks the poller step, the mio plain-TCP readiness poller is attempted, and post-poller oracle/benchmark/profile/regression evidence exists."
 non_goals = [
   "Sharding",
   "Benchmark-only command fast paths",
@@ -11,7 +11,9 @@ non_goals = [
   "Moving the live DB list fully into RuntimeOwner during the std overnight packet; runtime-owner-4 uses existing global_databases handles as transitional storage",
   "Dropping ACL, MULTI/EXEC, scripting, expiration, pub/sub, blocking, AOF, RDB, or replication semantics for speed",
   "TLS owner-loop migration (locked out-of-scope this milestone by harness/architecture/decisions/runtime-ownership.md; gated on TODO(human) tls_migration_sequencing)",
-  "Adding a poller workspace dependency (mio/polling/tokio/raw-libc) during the overnight owner-loop experiment; docs/RUNTIME_OWNER_OVERNIGHT_ARCHITECTURE.md chooses std nonblocking first and defers mio to a follow-up",
+  "Adding raw epoll/kqueue/libc readiness code or raising unsafe budgets for a poller; the next run may add mio only after runtime-owner-7-poller-architecture approves the bounded packet",
+  "Moving TLS into the poller owner loop during this milestone",
+  "Moving the live DB list fully into RuntimeOwner during this milestone",
   "Any public speed-parity claim sourced from a non-default experimental mode; numbers from this run are alpha telemetry only",
   "Authoring a runtime-owner-soak runner before harness/bench/run-soak.sh and the human-decided workload/threshold exist",
 ]
@@ -22,9 +24,9 @@ binding_architecture_artifacts = [
 ]
 decision_evidence_root = "harness/evidence/runs/20260522T010206Z-15060d7-runner-runtime-owner-baseline-hotspots.json"
 latest_runtime_owner_evidence = [
-  "harness/evidence/runs/20260522T041306Z-2e2ae35-runner-runtime-owner-post-scaffold-oracle.json",
-  "harness/evidence/runs/20260522T041648Z-1a4086e-runner-runtime-owner-post-scaffold-profile-matrix.json",
-  "harness/evidence/runs/20260522T041658Z-ab1d468-runner-runtime-owner-post-scaffold-hotspots.json",
+  "harness/evidence/runs/20260522T045343Z-803918c-runner-runtime-owner-5-post-polish-oracle.json",
+  "harness/evidence/runs/20260522T045345Z-803918c-runner-runtime-owner-5-post-polish-profile-matrix.json",
+  "harness/evidence/runs/20260522T045355Z-803918c-runner-runtime-owner-5-post-polish-hotspots.json",
 ]
 
 [[criterion]]
@@ -34,75 +36,103 @@ required = false
 command = ["cargo", "check", "--workspace"]
 
 [[criterion]]
-id = "runtime-owner-seed-packets"
+id = "runtime-owner-poller-packets"
 kind = "packets_completed"
 required = true
 packets = [
-  "runtime-owner-baseline-oracle",
-  "runtime-owner-baseline-profile-matrix",
-  "runtime-owner-baseline-hotspots",
-  "runtime-owner-0-faithful-map",
-  "runtime-owner-1-canary-corpus",
-  "runtime-owner-1b-client-reset-getname",
-  "runtime-owner-1c-nested-multi-dirty-exec",
-  "runtime-owner-1d-exec-selected-db-routing",
-  "runtime-owner-post-canary-oracle",
-  "runtime-owner-2-scaffold-types",
-  "runtime-owner-post-scaffold-oracle",
-  "runtime-owner-post-scaffold-profile-matrix",
-  "runtime-owner-post-scaffold-hotspots",
-  "runtime-owner-3-overnight-architecture",
-  "runtime-owner-4-std-nonblocking-owner-loop",
-  "runtime-owner-4-post-owner-loop-oracle",
-  "runtime-owner-4-post-owner-loop-profile-matrix",
-  "runtime-owner-4-post-owner-loop-hotspots",
-  "runtime-owner-5-owner-loop-polish",
-  "runtime-owner-5-post-polish-oracle",
-  "runtime-owner-5-post-polish-profile-matrix",
-  "runtime-owner-5-post-polish-hotspots",
+  "runtime-owner-6-current-oracle",
+  "runtime-owner-6-current-profile-matrix",
+  "runtime-owner-6-current-hotspots",
+  "runtime-owner-6-profile-artifact-runner",
+  "runtime-owner-6-current-calltree",
+  "runtime-owner-7-poller-architecture",
+  "runtime-owner-8-mio-poller-owner-loop",
+  "runtime-owner-8-post-poller-oracle",
+  "runtime-owner-8-post-poller-profile-matrix",
+  "runtime-owner-8-post-poller-hotspots",
+  "runtime-owner-8-post-poller-calltree",
+  "runtime-owner-8-regression-ping-p100",
+  "runtime-owner-8-regression-get-p100",
+  "runtime-owner-8-regression-set-p100",
+  "runtime-owner-8-regression-incr-p100",
 ]
 
 [[criterion]]
-id = "latest-wire-smoke"
+id = "poller-current-wire-smoke"
 kind = "runner_latest_pass"
 required = true
-packet = "runtime-owner-post-scaffold-oracle"
+packet = "runtime-owner-6-current-oracle"
 runner = "wire-smoke"
 
 [[criterion]]
-id = "latest-profile-matrix"
+id = "poller-current-profile-matrix"
 kind = "runner_latest_pass"
 required = true
-packet = "runtime-owner-post-scaffold-profile-matrix"
+packet = "runtime-owner-6-current-profile-matrix"
 runner = "bench-profile-matrix"
 
 [[criterion]]
-id = "latest-profile-hotspots"
+id = "poller-current-profile-hotspots"
 kind = "runner_latest_pass"
 required = true
-packet = "runtime-owner-post-scaffold-hotspots"
+packet = "runtime-owner-6-current-hotspots"
 runner = "bench-profile-hotspots"
 
 [[criterion]]
-id = "final-owner-loop-wire-smoke"
+id = "poller-final-wire-smoke"
 kind = "runner_latest_pass"
 required = true
-packet = "runtime-owner-5-post-polish-oracle"
+packet = "runtime-owner-8-post-poller-oracle"
 runner = "wire-smoke"
 
 [[criterion]]
-id = "final-owner-loop-profile-matrix"
+id = "poller-final-profile-matrix"
 kind = "runner_latest_pass"
 required = true
-packet = "runtime-owner-5-post-polish-profile-matrix"
+packet = "runtime-owner-8-post-poller-profile-matrix"
 runner = "bench-profile-matrix"
 
 [[criterion]]
-id = "final-owner-loop-hotspots"
+id = "poller-final-hotspots"
 kind = "runner_latest_pass"
 required = true
-packet = "runtime-owner-5-post-polish-hotspots"
+packet = "runtime-owner-8-post-poller-hotspots"
 runner = "bench-profile-hotspots"
+
+[[criterion]]
+id = "poller-final-calltree"
+kind = "runner_latest_pass"
+required = true
+packet = "runtime-owner-8-post-poller-calltree"
+runner = "bench-profile-calltree"
+
+[[criterion]]
+id = "poller-regression-ping-p100"
+kind = "runner_latest_pass"
+required = true
+packet = "runtime-owner-8-regression-ping-p100"
+runner = "regress-core-p100-ping"
+
+[[criterion]]
+id = "poller-regression-get-p100"
+kind = "runner_latest_pass"
+required = true
+packet = "runtime-owner-8-regression-get-p100"
+runner = "regress-core-p100-get"
+
+[[criterion]]
+id = "poller-regression-set-p100"
+kind = "runner_latest_pass"
+required = true
+packet = "runtime-owner-8-regression-set-p100"
+runner = "regress-core-p100-set"
+
+[[criterion]]
+id = "poller-regression-incr-p100"
+kind = "runner_latest_pass"
+required = true
+packet = "runtime-owner-8-regression-incr-p100"
+runner = "regress-core-p100-incr"
 
 [[criterion]]
 id = "no-ready-auto-packets"

@@ -9,6 +9,8 @@ metric = "wire_smoke_pass"
 target = "rust-vs-reference"
 command = ["bash", "harness/oracle/smoke.sh", "--skip-build"]
 timeout_s = 900
+resources = ["oracle-results", "cargo-target"]
+claim_level = "internal-regression-gate"
 capabilities = [
   "wire-compatibility",
   "runtime-owner-canaries",
@@ -23,6 +25,8 @@ method = "bench-load"
 workload = "profile-matrix"
 command = ["bash", "harness/bench/run-profile-matrix.sh"]
 timeout_s = 1800
+resources = ["benchmark-host", "bench-results", "port:6379", "port:16379"]
+claim_level = "telemetry"
 capabilities = ["performance-profile-matrix", "faithful-runtime-ownership"]
 
 [[runner]]
@@ -33,6 +37,8 @@ method = "bench-load"
 workload = "profile-hotspots-smoke"
 command = ["python3", "harness/bench/profile-hotspots.py", "--suite", "smoke", "--sample-seconds", "4"]
 timeout_s = 1800
+resources = ["benchmark-host", "bench-results", "profiler", "port:6379", "port:16379"]
+claim_level = "telemetry"
 capabilities = ["performance-profile-matrix", "faithful-runtime-ownership"]
 
 [[runner]]
@@ -43,7 +49,69 @@ method = "bench-load"
 workload = "profile-hotspots-big"
 command = ["python3", "harness/bench/profile-hotspots.py", "--suite", "big", "--sample-seconds", "8"]
 timeout_s = 3600
+resources = ["benchmark-host", "bench-results", "profiler", "port:6379", "port:16379"]
+claim_level = "telemetry"
 capabilities = ["performance-profile-matrix", "faithful-runtime-ownership"]
+
+[[runner]]
+id = "regress-core-p100-ping"
+kind = "performance_regression"
+surface = "performance"
+method = "bench-load"
+metric = "throughput_ratio"
+target = "rust-vs-reference"
+workload = "core-p100/PING_MBULK"
+max_regression_pct = 12.0
+min_points = 2
+resources = ["bench-results"]
+claim_level = "internal-regression-gate"
+
+[[runner]]
+id = "regress-core-p100-get"
+kind = "performance_regression"
+surface = "performance"
+method = "bench-load"
+metric = "throughput_ratio"
+target = "rust-vs-reference"
+workload = "core-p100/GET"
+max_regression_pct = 12.0
+min_points = 2
+resources = ["bench-results"]
+claim_level = "internal-regression-gate"
+
+[[runner]]
+id = "regress-core-p100-set"
+kind = "performance_regression"
+surface = "performance"
+method = "bench-load"
+metric = "throughput_ratio"
+target = "rust-vs-reference"
+workload = "core-p100/SET"
+max_regression_pct = 12.0
+min_points = 2
+resources = ["bench-results"]
+claim_level = "internal-regression-gate"
+
+[[runner]]
+id = "regress-core-p100-incr"
+kind = "performance_regression"
+surface = "performance"
+method = "bench-load"
+metric = "throughput_ratio"
+target = "rust-vs-reference"
+workload = "core-p100/INCR"
+max_regression_pct = 12.0
+min_points = 2
+resources = ["bench-results"]
+claim_level = "internal-regression-gate"
+
+[[planned_runner]]
+id = "bench-profile-calltree"
+status = "queued-as-packet"
+packet = "runtime-owner-6-profile-artifact-runner"
+script_required = "harness/bench/profile-calltree.py"
+rationale = "The next performance run needs raw call-tree/flamegraph-style artifacts, not only throughput summaries and top sampled frames. The queued packet should add a json_command runner that emits RunnerResult JSON and attaches raw profiler artifacts."
+expected_capabilities = ["performance-profile-matrix", "faithful-runtime-ownership"]
 
 [[planned_runner]]
 id = "runtime-owner-soak"

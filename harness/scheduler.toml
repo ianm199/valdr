@@ -15,4 +15,5 @@ exclusive_roles = ["architect"]
 architect = 1
 translator = 1
 runner = 2
+perf-fixer = 1
 test-fixer = 1
