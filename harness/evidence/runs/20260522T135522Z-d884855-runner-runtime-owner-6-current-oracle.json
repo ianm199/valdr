@@ -1,0 +1,90 @@
+{
+  "captured_ts": "2026-05-22T13:55:24.729258Z",
+  "harness_context": {
+    "claim_level": "internal-regression-gate",
+    "commit": "d884855",
+    "git_dirty": true,
+    "git_status_short": [
+      " M harness/evidence/ledger.jsonl"
+    ],
+    "resources": [
+      "cargo-target",
+      "oracle-results"
+    ],
+    "run_id": "loop-6e4dc35668d06051",
+    "target_commit": "d884855efab4d37515bbb1566d8eda184646855c",
+    "tree_hash": "623affef6edc7c5b898f0d1a7b09eb88fcf72bff549aa06bf065cd1b61b04a07"
+  },
+  "kind": "runner_result",
+  "packet": "runtime-owner-6-current-oracle",
+  "result": {
+    "artifacts": [],
+    "claim_level": "internal-regression-gate",
+    "evidence": {
+      "command": [
+        "bash",
+        "harness/oracle/smoke.sh",
+        "--skip-build"
+      ],
+      "cwd": ".",
+      "harness_context": {
+        "claim_level": "internal-regression-gate",
+        "commit": "d884855",
+        "git_dirty": true,
+        "git_status_short": [
+          " M harness/evidence/ledger.jsonl"
+        ],
+        "resources": [
+          "cargo-target",
+          "oracle-results"
+        ],
+        "run_id": "loop-6e4dc35668d06051",
+        "target_commit": "d884855efab4d37515bbb1566d8eda184646855c",
+        "tree_hash": "623affef6edc7c5b898f0d1a7b09eb88fcf72bff549aa06bf065cd1b61b04a07"
+      },
+      "kind": "external_suite",
+      "resources": [
+        "oracle-results",
+        "cargo-target"
+      ],
+      "returncode": 0,
+      "stderr": "",
+      "stdout": "==> --skip-build: skipping cargo build\n==> starting C Valkey on port 16379 \u2026\n==> C Valkey ready\n==> starting Rust redis-server on port 16390 \u2026\n==> Rust server ready\n\n\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\n  Smoke corpus \u2014 wire-diff per script\n\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\n  01-ping                 PASS  (3 commands)\n  02-echo                 PASS  (3 commands)\n  03-set-get              PASS  (5 commands)\n  04-del-exists           PASS  (7 commands)\n  05-incr                 PASS  (6 commands)\n  06-string-ext           PASS  (16 commands)\n  07-keyops               PASS  (26 commands)\n  08-server               PASS  (6 commands)\n  08b-list                PASS  (50 commands)\n  09-hash                 PASS  (28 commands)\n  10-set                  PASS  (36 commands)\n  11-zset                 PASS  (43 commands)\n  12-ttl                  PASS  (32 commands)\n  13-scan-zset-extras     PASS  (71 commands)\n  14-pubsub               PASS  (7 commands)\n  15-tx                   PASS  (22 commands)\n  16-bitmap               PASS  (36 commands)\n  17-streams              PASS  (29 commands)\n  18-hll                  PASS  (23 commands)\n  19-geo                  PASS  (37 commands)\n  20-edge-cases           PASS  (52 commands)\n  21-runtime-owner-canaries  PASS  (131 commands)\n\n\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\n  Scripts: 22 pass  0 fail  0 skip\n\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\n",
+      "timed_out": false,
+      "timeout_s": 900
+    },
+    "measurements": [
+      {
+        "capability": "wire-compatibility",
+        "denominator": 1,
+        "metric": "wire_smoke_pass",
+        "name": "wire-smoke",
+        "numerator": 1,
+        "target": "rust-vs-reference"
+      },
+      {
+        "capability": "runtime-owner-canaries",
+        "denominator": 1,
+        "metric": "wire_smoke_pass",
+        "name": "wire-smoke",
+        "numerator": 1,
+        "target": "rust-vs-reference"
+      },
+      {
+        "capability": "runtime-owner-scaffold",
+        "denominator": 1,
+        "metric": "wire_smoke_pass",
+        "name": "wire-smoke",
+        "numerator": 1,
+        "target": "rust-vs-reference"
+      }
+    ],
+    "method": "oracle-diff",
+    "runner_id": "wire-smoke",
+    "schema_version": 1,
+    "status": "pass",
+    "summary": "wire-smoke: exit 0",
+    "surface": "correctness"
+  },
+  "role": "runner"
+}
