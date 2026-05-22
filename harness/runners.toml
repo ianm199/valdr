@@ -54,6 +54,18 @@ claim_level = "telemetry"
 capabilities = ["performance-profile-matrix", "faithful-runtime-ownership"]
 
 [[runner]]
+id = "bench-profile-calltree"
+kind = "json_command"
+surface = "performance"
+method = "bench-load-profile-artifact"
+workload = "profile-calltree"
+command = ["python3", "harness/bench/profile-calltree.py", "--suite", "big", "--profile-seconds", "8"]
+timeout_s = 3600
+resources = ["benchmark-host", "bench-results", "profiler", "port:6379", "port:16379"]
+claim_level = "telemetry"
+capabilities = ["performance-profile-matrix", "faithful-runtime-ownership"]
+
+[[runner]]
 id = "regress-core-p100-ping"
 kind = "performance_regression"
 surface = "performance"
@@ -104,14 +116,6 @@ max_regression_pct = 12.0
 min_points = 2
 resources = ["bench-results"]
 claim_level = "internal-regression-gate"
-
-[[planned_runner]]
-id = "bench-profile-calltree"
-status = "queued-as-packet"
-packet = "runtime-owner-6-profile-artifact-runner"
-script_required = "harness/bench/profile-calltree.py"
-rationale = "The next performance run needs raw call-tree/flamegraph-style artifacts, not only throughput summaries and top sampled frames. The queued packet should add a json_command runner that emits RunnerResult JSON and attaches raw profiler artifacts."
-expected_capabilities = ["performance-profile-matrix", "faithful-runtime-ownership"]
 
 [[planned_runner]]
 id = "runtime-owner-soak"

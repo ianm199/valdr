@@ -1,6 +1,7 @@
 # Runtime Owner Next Push
 
-Status: queued packet plan, not yet executed.
+Status: profile artifact runner added; next packet is
+`runtime-owner-6-current-calltree`.
 
 This document scopes the next large harness run after the std nonblocking
 `RuntimeOwner` loop. The previous run proved the big architecture move was
@@ -80,10 +81,14 @@ The new queue begins after `runtime-owner-5-post-polish-hotspots`.
    - Long p100 sampled profile at current HEAD.
 
 4. `runtime-owner-6-profile-artifact-runner`
-   - Add a runner that preserves call-tree/flamegraph-style artifacts.
-   - On macOS it may use `/usr/bin/sample`.
-   - On Linux it may use `perf` / `cargo flamegraph` if available.
-   - The runner must emit typed `RunnerResult` JSON and attach raw artifacts.
+   - Done in `harness/bench/profile-calltree.py`.
+   - Runner id: `bench-profile-calltree`.
+   - Emits typed `RunnerResult` JSON, a TSV summary, and raw profiler
+     artifacts under `harness/bench/profiles/<UTC>-<commit>-calltree/`.
+   - Uses `/usr/bin/sample` on macOS, or `perf` / `cargo flamegraph` on Linux
+     when available.
+   - Profiles attach to the Rust server PID only; the benchmark commands and
+     server flags stay in the normal harness envelope.
 
 5. `runtime-owner-6-current-calltree`
    - Run the new artifact profiler before implementation.
@@ -138,6 +143,13 @@ python3 ../port-harness/loop/run-loop.py \
 The next selected packet should be `runtime-owner-6-current-oracle`. If the
 first selected packet is anything else, stop and inspect `harness/work-packets.jsonl`
 plus `harness/evidence/ledger.jsonl` before dispatching.
+
+After `runtime-owner-6-profile-artifact-runner`, the next selected packet should
+be `runtime-owner-6-current-calltree`. The direct runner command is:
+
+```bash
+python3 harness/bench/profile-calltree.py --suite big --profile-seconds 8
+```
 
 ## Success criteria
 

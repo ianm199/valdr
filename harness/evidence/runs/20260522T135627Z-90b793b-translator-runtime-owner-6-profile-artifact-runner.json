@@ -1,0 +1,53 @@
+{
+  "captured_ts": "2026-05-22T14:06:18.758072Z",
+  "gate_results": {
+    "cargo_check_none": {
+      "detail": "no crate target declared",
+      "ok": true
+    },
+    "cargo_check_workspace": {
+      "detail": "cargo check --workspace: clean",
+      "ok": true
+    },
+    "cargo_test_none_profile-calltree": {
+      "detail": "no module target declared",
+      "ok": true
+    },
+    "no_out_of_scope_changes": {
+      "detail": "no changed files outside packet targets",
+      "ok": true
+    },
+    "oracle_reference_only": {
+      "detail": "no harness/oracle/run-smoke.sh present",
+      "ok": true
+    },
+    "target_files_modified": {
+      "detail": "all 3 target file(s) modified after dispatch",
+      "ok": true
+    },
+    "trailer_present": {
+      "detail": "all touched Rust targets carry PORT STATUS trailers",
+      "ok": true
+    }
+  },
+  "harness_context": {
+    "commit": "90b793b",
+    "git_dirty": true,
+    "git_status_short": [
+      " M docs/RUNTIME_OWNER_NEXT_PUSH.md",
+      " M harness/evidence/ledger.jsonl",
+      " M harness/runners.toml",
+      "?? harness/bench/profile-calltree.py"
+    ],
+    "run_id": "loop-6e4dc35668d06051",
+    "target_commit": "90b793bc05994ff7763b5c8a678d49b1978b82ab",
+    "tree_hash": "222f7c3adc24d255f68629f7416b907d7f0fe529199aeaab37799a1ac3c5839e"
+  },
+  "kind": "agent_transcript",
+  "packet": "runtime-owner-6-profile-artifact-runner",
+  "prompt_hash": "70d8f2334154df61",
+  "role": "translator",
+  "transcript_bytes": 608550,
+  "transcript_preview": "'\\nprint('runners.toml ok')\\nPY\\\"\",\"aggregated_output\":\"\",\"exit_code\":null,\"status\":\"in_progress\"}}\n{\"type\":\"item.completed\",\"item\":{\"id\":\"item_68\",\"type\":\"command_execution\",\"command\":\"/bin/zsh -lc \\\"python3 - <<'PY'\\nimport tomllib\\nwith open('harness/runners.toml','rb') as f:\\n    data = tomllib.load(f)\\nids = [r['id'] for r in data.get('runner', [])]\\nplanned = [r['id'] for r in data.get('planned_runner', [])]\\nassert ids.count('bench-profile-calltree') == 1, ids\\nassert 'bench-profile-calltree' not in planned, planned\\nrunner = next(r for r in data['runner'] if r['id'] == 'bench-profile-calltree')\\nassert runner['kind'] == 'json_command'\\nassert runner['command'][1] == 'harness/bench/profile-calltree.py'\\nprint('runners.toml ok')\\nPY\\\"\",\"aggregated_output\":\"runners.toml ok\\n\",\"exit_code\":0,\"status\":\"completed\"}}\n{\"type\":\"item.started\",\"item\":{\"id\":\"item_69\",\"type\":\"command_execution\",\"command\":\"/bin/zsh -lc 'python3 -m py_compile harness/bench/profile-calltree.py'\",\"aggregated_output\":\"\",\"exit_code\":null,\"status\":\"in_progress\"}}\n{\"type\":\"item.completed\",\"item\":{\"id\":\"item_69\",\"type\":\"command_execution\",\"command\":\"/bin/zsh -lc 'python3 -m py_compile harness/bench/profile-calltree.py'\",\"aggregated_output\":\"\",\"exit_code\":0,\"status\":\"completed\"}}\n{\"type\":\"item.started\",\"item\":{\"id\":\"item_70\",\"type\":\"command_execution\",\"command\":\"/bin/zsh -lc 'git diff --check -- harness/bench/profile-calltree.py harness/runners.toml docs/RUNTIME_OWNER_NEXT_PUSH.md'\",\"aggregated_output\":\"\",\"exit_code\":null,\"status\":\"in_progress\"}}\n{\"type\":\"item.completed\",\"item\":{\"id\":\"item_70\",\"type\":\"command_execution\",\"command\":\"/bin/zsh -lc 'git diff --check -- harness/bench/profile-calltree.py harness/runners.toml docs/RUNTIME_OWNER_NEXT_PUSH.md'\",\"aggregated_output\":\"\",\"exit_code\":0,\"status\":\"completed\"}}\n{\"type\":\"item.started\",\"item\":{\"id\":\"item_71\",\"type\":\"command_execution\",\"command\":\"/bin/zsh -lc 'git status --short --untracked-files=all'\",\"aggregated_output\":\"\",\"exit_code\":null,\"status\":\"in_progress\"}}\n{\"type\":\"item.completed\",\"item\":{\"id\":\"item_71\",\"type\":\"command_execution\",\"command\":\"/bin/zsh -lc 'git status --short --untracked-files=all'\",\"aggregated_output\":\" M docs/RUNTIME_OWNER_NEXT_PUSH.md\\n M harness/evidence/ledger.jsonl\\n M harness/runners.toml\\n?? harness/bench/profile-calltree.py\\n\",\"exit_code\":0,\"status\":\"completed\"}}\n{\"type\":\"item.started\",\"item\":{\"id\":\"item_72\",\"type\":\"command_execution\",\"command\":\"/bin/zsh -lc 'git diff --stat -- harness/bench/profile-calltree.py harness/runners.toml docs/RUNTIME_OWNER_NEXT_PUSH.md'\",\"aggregated_output\":\"\",\"exit_code\":null,\"status\":\"in_progress\"}}\n{\"type\":\"item.started\",\"item\":{\"id\":\"item_73\",\"type\":\"command_execution\",\"command\":\"/bin/zsh -lc 'git diff -- harness/runners.toml docs/RUNTIME_OWNER_NEXT_PUSH.md'\",\"aggregated_output\":\"\",\"exit_code\":null,\"status\":\"in_progress\"}}\n{\"type\":\"item.completed\",\"item\":{\"id\":\"item_72\",\"type\":\"command_execution\",\"command\":\"/bin/zsh -lc 'git diff --stat -- harness/bench/profile-calltree.py harness/runners.toml docs/RUNTIME_OWNER_NEXT_PUSH.md'\",\"aggregated_output\":\" docs/RUNTIME_OWNER_NEXT_PUSH.md | 22 +++++++++++++++++-----\\n harness/runners.toml            | 20 ++++++++++++--------\\n 2 files changed, 29 insertions(+), 13 deletions(-)\\n\",\"exit_code\":0,\"status\":\"completed\"}}\n{\"type\":\"item.completed\",\"item\":{\"id\":\"item_73\",\"type\":\"command_execution\",\"command\":\"/bin/zsh -lc 'git diff -- harness/runners.toml docs/RUNTIME_OWNER_NEXT_PUSH.md'\",\"aggregated_output\":\"diff --git a/docs/RUNTIME_OWNER_NEXT_PUSH.md b/docs/RUNTIME_OWNER_NEXT_PUSH.md\\nindex 3490980..9834318 100644\\n--- a/docs/RUNTIME_OWNER_NEXT_PUSH.md\\n+++ b/docs/RUNTIME_OWNER_NEXT_PUSH.md\\n@@ -1,6 +1,7 @@\\n # Runtime Owner Next Push\\n \\n-Status: queued packet plan, not yet executed.\\n+Status: profile artifact runner added; next packet is\\n+`runtime-owner-6-current-calltree`.\\n \\n This document scopes the next large harness run after the std nonblocking\\n `RuntimeOwner` loop. The previous run proved the big architecture move was\\n@@ -80,10 +81,14 @@ The new queue begins after `runtime-owner-5-post-polish-hotspots`.\\n    - Long p100 sampled profile at current HEAD.\\n \\n 4. `runtime-owner-6-profile-artifact-runner`\\n-   - Add a runner that preserves call-tree/flamegraph-style artifacts.\\n-   - On macOS it may use `/usr/bin/sample`.\\n-   - On Linux it may use `perf` / `cargo flamegraph` if available.\\n-   - The runner must emit typed `RunnerResult` JSON and attach raw artifacts.\\n+   - Done in `harness/bench/profile-calltree.py`.\\n+   - Runner id: `bench-profile-calltree`.\\n+   - Emits typed `RunnerResult` JSON, a TSV summary, and raw profiler\\n+     artifacts under `harness/bench/profiles/<UTC>-<commit>-calltree/`.\\n+   - Uses `/usr/bin/sample` on macOS, or `perf` / `cargo flamegraph` on Linux\\n+     when available.\\n+   - Profiles attach to the Rust server PID only; the benchmark commands and\\n+     server flags stay in the normal harness envelope.\\n \\n 5. `runtime-owner-6-current-calltree`\\n    - Run the new artifact profiler before implementation.\\n@@ -139,6 +144,13 @@ The next selected packet should be `runtime-owner-6-current-oracle`. If the\\n first selected packet is anything else, stop and inspect `harness/work-packets.jsonl`\\n plus `harness/evidence/ledger.jsonl` before dispatching.\\n \\n+After `runtime-owner-6-profile-artifact-runner`, the next selected packet should\\n+be `runtime-owner-6-current-calltree`. The direct runner command is:\\n+\\n+```bash\\n+python3 harness/bench/profile-calltree.py --suite big --profile-seconds 8\\n+```\\n+\\n ## Success criteria\\n \\n Minimum useful success:\\ndiff --git a/harness/runners.toml b/harness/runners.toml\\nindex 96b6820..d349a10 100644\\n--- a/harness/runners.toml\\n+++ b/harness/runners.toml\\n@@ -53,6 +53,18 @@ resources = [\\\"benchmark-host\\\", \\\"bench-results\\\", \\\"profiler\\\", \\\"port:6379\\\", \\\"port:1\\n claim_level = \\\"telemetry\\\"\\n capabilities = [\\\"performance-profile-matrix\\\", \\\"faithful-runtime-ownership\\\"]\\n \\n+[[runner]]\\n+id = \\\"bench-profile-calltree\\\"\\n+kind = \\\"json_command\\\"\\n+surface = \\\"performance\\\"\\n+method = \\\"bench-load-profile-artifact\\\"\\n+workload = \\\"profile-calltree\\\"\\n+command = [\\\"python3\\\", \\\"harness/bench/profile-calltree.py\\\", \\\"--suite\\\", \\\"big\\\", \\\"--profile-seconds\\\", \\\"8\\\"]\\n+timeout_s = 3600\\n+resources = [\\\"benchmark-host\\\", \\\"bench-results\\\", \\\"profiler\\\", \\\"port:6379\\\", \\\"port:16379\\\"]\\n+claim_level = \\\"telemetry\\\"\\n+capabilities = [\\\"performance-profile-matrix\\\", \\\"faithful-runtime-ownership\\\"]\\n+\\n [[runner]]\\n id = \\\"regress-core-p100-ping\\\"\\n kind = \\\"performance_regression\\\"\\n@@ -105,14 +117,6 @@ min_points = 2\\n resources = [\\\"bench-results\\\"]\\n claim_level = \\\"internal-regression-gate\\\"\\n \\n-[[planned_runner]]\\n-id = \\\"bench-profile-calltree\\\"\\n-status = \\\"queued-as-packet\\\"\\n-packet = \\\"runtime-owner-6-profile-artifact-runner\\\"\\n-script_required = \\\"harness/bench/profile-calltree.py\\\"\\n-rationale = \\\"The next performance run needs raw call-tree/flamegraph-style artifacts, not only throughput summaries and top sampled frames. The queued packet should add a json_command runner that emits RunnerResult JSON and attaches raw profiler artifacts.\\\"\\n-expected_capabilities = [\\\"performance-profile-matrix\\\", \\\"faithful-runtime-ownership\\\"]\\n-\\n [[planned_runner]]\\n id = \\\"runtime-owner-soak\\\"\\n status = \\\"blocked-on-human\\\"\\n\",\"exit_code\":0,\"status\":\"completed\"}}\n{\"type\":\"item.started\",\"item\":{\"id\":\"item_74\",\"type\":\"command_execution\",\"command\":\"/bin/zsh -lc 'git ls-files --stage harness/bench/profile-calltree.py && ls -l harness/bench/profile-calltree.py'\",\"aggregated_output\":\"\",\"exit_code\":null,\"status\":\"in_progress\"}}\n{\"type\":\"item.completed\",\"item\":{\"id\":\"item_74\",\"type\":\"command_execution\",\"command\":\"/bin/zsh -lc 'git ls-files --stage harness/bench/profile-calltree.py && ls -l harness/bench/profile-calltree.py'\",\"aggregated_output\":\"-rwxr-xr-x@ 1 ianmclaughlin  staff  31262 May 22 10:04 harness/bench/profile-calltree.py\\n\",\"exit_code\":0,\"status\":\"completed\"}}\n",
+  "transcript_src": "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/loop/state/transcripts/20260522T135627Z-codex-translator-runtime-owner-6-profile-artifact-runner.jsonl"
+}
