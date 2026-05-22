@@ -46,21 +46,21 @@ KIND_LABEL = {
 SERIES_DEFS = [
     {
         "id": "matrix_median",
-        "label": "Matrix median",
+        "label": "Curated matrix median",
         "runner_kind": "profile-matrix",
         "field": "median",
         "color": "#2f6fed",
     },
     {
         "id": "hotspots_median",
-        "label": "Hotspots median",
+        "label": "Curated hotspots median",
         "runner_kind": "hotspots",
         "field": "median",
         "color": "#c16a1a",
     },
     {
         "id": "calltree_median",
-        "label": "Calltree median",
+        "label": "Curated calltree median",
         "runner_kind": "calltree",
         "field": "median",
         "color": "#0f8f68",
@@ -105,7 +105,7 @@ RAW_SERIES_DEFS = [
     },
     {
         "id": "raw_matrix_median",
-        "label": "Raw matrix median",
+        "label": "Raw matrix median (all TSVs)",
         "runner_kind": "raw-profile-matrix",
         "field": "median",
         "color": "#2f6fed",
@@ -598,6 +598,20 @@ def render_html(history: dict[str, Any]) -> str:
             """
         )
     if raw_points:
+        first_matrix = next(
+            (point for point in raw_points if point["runner_kind"] == "raw-profile-matrix"),
+            None,
+        )
+        if first_matrix:
+            latest_cards.append(
+                f"""
+                <article class="metric-card">
+                  <div class="eyebrow">First matrix TSV</div>
+                  <div class="metric">{first_matrix['median']:.2f}x</div>
+                  <div class="subtle">{html.escape(first_matrix['commit'])} · {html.escape(first_matrix['source'])}</div>
+                </article>
+                """
+            )
         worst_raw = min(raw_points, key=lambda point: point["median"])
         latest_raw = raw_points[-1]
         latest_cards.append(
@@ -637,7 +651,7 @@ def render_html(history: dict[str, Any]) -> str:
     p {{ margin: 0; color: var(--muted); line-height: 1.5; }}
     a {{ color: var(--accent); text-decoration: none; }}
     a:hover {{ text-decoration: underline; }}
-    .grid {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }}
+    .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }}
     .metric-card, .panel {{ background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }}
     .metric-card {{ padding: 16px; }}
     .eyebrow {{ color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }}
@@ -681,9 +695,16 @@ def render_html(history: dict[str, Any]) -> str:
   </section>
 
   <section class="panel">
-    <h2>Median Throughput Ratio</h2>
-    <p class="note">1.00x means valkey-rs matches upstream Valkey for the same workload and hardware. Higher is better.</p>
-    <div class="chart-wrap"><svg id="median-chart" role="img" aria-label="Median throughput ratio over time"></svg></div>
+    <h2>Granular Raw TSV History</h2>
+    <p class="note warn-note">This view includes early one-off TSVs and intermediate profiling runs from <code>harness/bench/results/</code>. It is telemetry, not a controlled release claim, and it is the right place to see the original ~0.05x to ~0.10x baseline.</p>
+    <div class="chart-wrap"><svg id="raw-chart" role="img" aria-label="Raw benchmark TSV throughput ratio over time"></svg></div>
+    <div class="legend" id="raw-legend"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Curated Packet Evidence</h2>
+    <p class="note">These points come from packet-completion evidence blobs, so this series starts later than the raw TSV history. 1.00x means valkey-rs matches upstream Valkey for the same workload and hardware.</p>
+    <div class="chart-wrap"><svg id="median-chart" role="img" aria-label="Curated median throughput ratio over time"></svg></div>
     <div class="legend" id="median-legend"></div>
   </section>
 
@@ -692,13 +713,6 @@ def render_html(history: dict[str, Any]) -> str:
     <p>Tracks the GET-specific rows that kept showing up in our architecture discussions.</p>
     <div class="chart-wrap"><svg id="get-chart" role="img" aria-label="GET throughput ratio over time"></svg></div>
     <div class="legend" id="get-legend"></div>
-  </section>
-
-  <section class="panel">
-    <h2>Granular Raw TSV History</h2>
-    <p class="note warn-note">This view includes early one-off TSVs and intermediate profiling runs from <code>harness/bench/results/</code>. It is telemetry, not a controlled release claim, and it is the right place to see the original ~0.05x to ~0.10x baseline.</p>
-    <div class="chart-wrap"><svg id="raw-chart" role="img" aria-label="Raw benchmark TSV throughput ratio over time"></svg></div>
-    <div class="legend" id="raw-legend"></div>
   </section>
 
   <section class="panel">
