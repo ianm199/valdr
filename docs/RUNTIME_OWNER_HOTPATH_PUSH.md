@@ -101,6 +101,15 @@ cost is a measurable fraction of the remaining gap. Upstream also times command
 execution, so the correct fix is not "turn off slowlog." The packet should
 reduce avoidable overhead while preserving command duration semantics.
 
+Implementation note (`runtime-owner-10-hotpath-timing-gate`):
+`LiveConfig` now maintains a cached slowlog timing gate derived from
+`slowlog-log-slower-than` and `slowlog-max-len`. Dispatch still routes every
+command through the normal handler path and still records measured slowlog
+entries when the gate is active and the command exceeds the live threshold, but
+it skips the slowlog duration timer when the current config cannot record an
+entry. AOF and replication argv snapshots continue to use the same post-handler
+write-command path.
+
 Allowed ideas:
 
 - cache the slowlog/config predicate in a cheap form;

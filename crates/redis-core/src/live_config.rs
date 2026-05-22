@@ -20,7 +20,9 @@
 //! ride on.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU16, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{
+    AtomicBool, AtomicI64, AtomicU16, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering,
+};
 use std::sync::Mutex;
 
 use redis_types::RedisString;
@@ -106,6 +108,9 @@ pub struct LiveConfig {
     pub notify_keyspace_events_flags: AtomicU32,
     pub slowlog_threshold_micros: AtomicI64,
     pub slowlog_max_len: AtomicUsize,
+    /// Cached threshold used by command dispatch to decide whether it needs a
+    /// slowlog duration timer. `-1` means slowlog cannot currently record.
+    slowlog_timing_threshold_micros: AtomicI64,
     pub active_expire_effort: AtomicU8,
     pub hz: AtomicU32,
     pub hash_max_listpack_entries: AtomicUsize,
@@ -174,6 +179,32 @@ pub const DEFAULT_SLOWLOG_THRESHOLD_MICROS: i64 = 10_000;
 /// Default slowlog ring-buffer capacity.
 pub const DEFAULT_SLOWLOG_MAX_LEN: usize = 128;
 
+/// Slowlog timing decision snapshot for one command dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlowlogTimingGate {
+    threshold_micros: i64,
+}
+
+impl SlowlogTimingGate {
+    pub const fn new(threshold_micros: i64) -> Self {
+        Self { threshold_micros }
+    }
+
+    /// Whether dispatch must capture a command duration for slowlog.
+    pub const fn should_time(self) -> bool {
+        self.threshold_micros >= 0
+    }
+
+    /// Whether a measured command duration should be recorded.
+    pub const fn should_record(self, elapsed_micros: u64) -> bool {
+        self.threshold_micros >= 0 && elapsed_micros >= self.threshold_micros as u64
+    }
+
+    pub const fn threshold_micros(self) -> i64 {
+        self.threshold_micros
+    }
+}
+
 /// Default value of `server.hz` (events per second).
 pub const DEFAULT_HZ: u32 = 10;
 
@@ -229,6 +260,7 @@ impl Default for LiveConfig {
             notify_keyspace_events_flags: AtomicU32::new(0),
             slowlog_threshold_micros: AtomicI64::new(DEFAULT_SLOWLOG_THRESHOLD_MICROS),
             slowlog_max_len: AtomicUsize::new(DEFAULT_SLOWLOG_MAX_LEN),
+            slowlog_timing_threshold_micros: AtomicI64::new(DEFAULT_SLOWLOG_THRESHOLD_MICROS),
             active_expire_effort: AtomicU8::new(DEFAULT_ACTIVE_EXPIRE_EFFORT),
             hz: AtomicU32::new(DEFAULT_HZ),
             hash_max_listpack_entries: AtomicUsize::new(DEFAULT_HASH_MAX_LISTPACK_ENTRIES),
@@ -330,6 +362,7 @@ impl LiveConfig {
     pub fn set_slowlog_threshold_micros(&self, micros: i64) {
         self.slowlog_threshold_micros
             .store(micros, Ordering::Relaxed);
+        self.refresh_slowlog_timing_gate();
     }
 
     pub fn slowlog_max_len(&self) -> usize {
@@ -338,6 +371,23 @@ impl LiveConfig {
 
     pub fn set_slowlog_max_len(&self, max_len: usize) {
         self.slowlog_max_len.store(max_len, Ordering::Relaxed);
+        self.refresh_slowlog_timing_gate();
+    }
+
+    pub fn slowlog_timing_gate(&self) -> SlowlogTimingGate {
+        SlowlogTimingGate::new(self.slowlog_timing_threshold_micros.load(Ordering::Relaxed))
+    }
+
+    fn refresh_slowlog_timing_gate(&self) {
+        let threshold = self.slowlog_threshold_micros.load(Ordering::Relaxed);
+        let max_len = self.slowlog_max_len.load(Ordering::Relaxed);
+        let timing_threshold = if threshold >= 0 && max_len > 0 {
+            threshold
+        } else {
+            -1
+        };
+        self.slowlog_timing_threshold_micros
+            .store(timing_threshold, Ordering::Relaxed);
     }
 
     pub fn active_expire_effort(&self) -> u8 {
@@ -711,4 +761,38 @@ mod tests {
         cfg.set_requirepass(Some(RedisString::new()));
         assert!(cfg.requirepass().is_none());
     }
+
+    #[test]
+    fn slowlog_timing_gate_tracks_threshold_and_capacity() {
+        let cfg = LiveConfig::new();
+        assert_eq!(
+            cfg.slowlog_timing_gate().threshold_micros(),
+            DEFAULT_SLOWLOG_THRESHOLD_MICROS
+        );
+        assert!(cfg.slowlog_timing_gate().should_time());
+        assert!(!cfg.slowlog_timing_gate().should_record(1));
+
+        cfg.set_slowlog_max_len(0);
+        assert!(!cfg.slowlog_timing_gate().should_time());
+
+        cfg.set_slowlog_max_len(64);
+        cfg.set_slowlog_threshold_micros(-1);
+        assert!(!cfg.slowlog_timing_gate().should_time());
+
+        cfg.set_slowlog_threshold_micros(0);
+        assert!(cfg.slowlog_timing_gate().should_time());
+        assert!(cfg.slowlog_timing_gate().should_record(0));
+    }
 }
+
+// ──────────────────────────────────────────────────────────────────────────
+// PORT STATUS
+//   source:        runtime config spine (CONFIG SET live-state support)
+//   target_crate:  redis-core
+//   confidence:    high
+//   todos:         0
+//   port_notes:    0
+//   unsafe_blocks: 0
+//   notes:         LiveConfig atomics and snapshots for command/background
+//                  runtime config reads.
+// ──────────────────────────────────────────────────────────────────────────

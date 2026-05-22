@@ -151,8 +151,9 @@ pub fn dispatch(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 /// Dispatch using an externally-supplied command name.
 ///
 /// Skips the MULTI-queueing pre-check. Used by `EXEC` to drain each queued
-/// argv without re-entering the queue logic. Times the handler execution and
-/// records an entry in the global slowlog when the duration meets the threshold.
+/// argv without re-entering the queue logic. Times the handler execution when
+/// the live slowlog gate can consume a duration, and records an entry when the
+/// measured duration meets the threshold.
 pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> RedisResult<()> {
     let runtime_entry = match lookup_runtime_command(name) {
         Some(e) => e,
@@ -178,14 +179,16 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
         return Ok(());
     }
 
-    let start = Instant::now();
+    let initial_slowlog_gate = ctx.live_config().slowlog_timing_gate();
+    let start = initial_slowlog_gate.should_time().then(Instant::now);
     let result = (entry.handler)(ctx);
-    let elapsed_micros = start.elapsed().as_micros() as u64;
-
-    let should_record_slowlog = {
-        let cfg = ctx.live_config();
-        let threshold = cfg.slowlog_threshold_micros();
-        threshold >= 0 && cfg.slowlog_max_len() > 0 && elapsed_micros >= threshold as u64
+    let elapsed_micros = start.map(|start| start.elapsed().as_micros() as u64);
+    let should_record_slowlog = match elapsed_micros {
+        Some(elapsed_micros) => ctx
+            .live_config()
+            .slowlog_timing_gate()
+            .should_record(elapsed_micros),
+        None => false,
     };
 
     let aof = if result.is_ok() && metadata.write {
@@ -210,7 +213,7 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
     }
 
     if should_record_slowlog {
-        if let Some(argv) = argv_snapshot.as_ref() {
+        if let (Some(argv), Some(elapsed_micros)) = (argv_snapshot.as_ref(), elapsed_micros) {
             crate::slowlog_cmd::record_slowlog_entry(
                 argv,
                 elapsed_micros,
