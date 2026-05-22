@@ -19,6 +19,7 @@ import statistics
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import lru_cache
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from typing import Any
@@ -139,6 +140,8 @@ class Point:
     ts: str
     commit: str
     commit_subject: str
+    run_commit: str
+    run_commit_subject: str
     packet: str
     runner: str
     runner_kind: str
@@ -156,6 +159,11 @@ class Point:
             "commit": self.commit,
             "commit_subject": self.commit_subject,
             "commit_url": REMOTE_COMMIT_PREFIX + self.commit if self.commit else "",
+            "run_commit": self.run_commit,
+            "run_commit_subject": self.run_commit_subject,
+            "run_commit_url": (
+                REMOTE_COMMIT_PREFIX + self.run_commit if self.run_commit else ""
+            ),
             "packet": self.packet,
             "runner": self.runner,
             "runner_kind": self.runner_kind,
@@ -311,7 +319,8 @@ def raw_point_from_tsv(path: Path) -> dict[str, Any] | None:
 
     values = list(ratios.values())
     rel = str(path.relative_to(ROOT))
-    commit = metadata.get("commit", "")
+    run_commit = metadata.get("commit", "")
+    commit = benchmark_code_commit(run_commit)
     measured_at = compact_ts(metadata.get("timestamp_utc", ""))
     commit_ts = commit_timestamp(commit)
     shape = infer_raw_shape(clean_rows, metadata)
@@ -322,6 +331,9 @@ def raw_point_from_tsv(path: Path) -> dict[str, Any] | None:
         "commit": commit,
         "commit_subject": commit_subject(commit),
         "commit_url": REMOTE_COMMIT_PREFIX + commit if commit else "",
+        "run_commit": run_commit,
+        "run_commit_subject": commit_subject(run_commit),
+        "run_commit_url": REMOTE_COMMIT_PREFIX + run_commit if run_commit else "",
         "runner_kind": kind,
         "runner_label": RAW_KIND_LABEL[kind],
         "summary": (
@@ -381,6 +393,21 @@ def commit_subject(commit: str) -> str:
         return ""
 
 
+@lru_cache(maxsize=None)
+def short_commit(commit: str) -> str:
+    if not commit:
+        return ""
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short=7", commit],
+            cwd=ROOT,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except subprocess.SubprocessError:
+        return commit[:7]
+
+
 def commit_timestamp(commit: str) -> str:
     if not commit:
         return ""
@@ -393,6 +420,53 @@ def commit_timestamp(commit: str) -> str:
         ).strip()
     except subprocess.SubprocessError:
         return ""
+
+
+@lru_cache(maxsize=None)
+def changed_paths(commit: str) -> tuple[str, ...]:
+    if not commit:
+        return ()
+    try:
+        out = subprocess.check_output(
+            ["git", "diff-tree", "--root", "--no-commit-id", "--name-only", "-r", commit],
+            cwd=ROOT,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except subprocess.SubprocessError:
+        return ()
+    return tuple(line.strip() for line in out.splitlines() if line.strip())
+
+
+def is_code_path(path: str) -> bool:
+    return (
+        path.startswith("crates/")
+        or path.startswith("src/")
+        or path.startswith("benches/")
+        or path.startswith("tests/")
+        or path in {"Cargo.toml", "Cargo.lock"}
+    )
+
+
+@lru_cache(maxsize=None)
+def benchmark_code_commit(commit: str) -> str:
+    """Map a runner/harness measurement commit back to the code it measured."""
+    if not commit:
+        return ""
+    try:
+        revs = subprocess.check_output(
+            ["git", "rev-list", "--first-parent", "--max-count=80", commit],
+            cwd=ROOT,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).splitlines()
+    except subprocess.SubprocessError:
+        return short_commit(commit)
+
+    for rev in revs:
+        if any(is_code_path(path) for path in changed_paths(rev)):
+            return short_commit(rev)
+    return short_commit(commit)
 
 
 def ratio_from_summary(summary: str, name: str) -> float | None:
@@ -492,11 +566,14 @@ def point_from_completion(row: dict[str, Any]) -> Point | None:
     if not ratios:
         return None
 
-    commit = str(row.get("commit") or result.get("evidence", {}).get("commit") or "")
+    run_commit = str(row.get("commit") or result.get("evidence", {}).get("commit") or "")
+    commit = benchmark_code_commit(run_commit)
     return Point(
-        ts=str(row.get("ts") or ""),
+        ts=commit_timestamp(commit) or str(row.get("ts") or ""),
         commit=commit,
         commit_subject=commit_subject(commit),
+        run_commit=run_commit,
+        run_commit_subject=commit_subject(run_commit),
         packet=str(row.get("packet") or ""),
         runner=str(runner),
         runner_kind=RUNNER_KIND[str(runner)],
@@ -578,7 +655,15 @@ def collect_raw_points() -> list[dict[str, Any]]:
         point = raw_point_from_tsv(path)
         if point is not None:
             points.append(point)
-    return sorted(points, key=lambda item: item["ts"])
+    return sorted(
+        points,
+        key=lambda item: (
+            item["ts"],
+            item.get("runner_kind") or "",
+            item.get("measured_at") or "",
+            item.get("source") or "",
+        ),
+    )
 
 
 def build_series(
@@ -587,25 +672,35 @@ def build_series(
 ) -> dict[str, list[dict[str, Any]]]:
     series: dict[str, list[dict[str, Any]]] = {}
     for spec in series_defs:
-        rows = []
+        rows_by_commit: dict[str, dict[str, Any]] = {}
         for idx, point in enumerate(points):
             if point["runner_kind"] != spec["runner_kind"]:
                 continue
             value = point.get(spec["field"])
             if value is None:
                 continue
-            rows.append(
-                {
-                    "idx": idx,
-                    "ts": point["ts"],
-                    "value": value,
-                    "commit": point["commit"],
-                    "packet": point.get("packet") or point.get("source") or "",
-                    "summary": point["summary"],
-                    "evidence_url": point.get("evidence_url") or point.get("source_url") or "",
-                    "commit_url": point["commit_url"],
-                }
-            )
+            row = {
+                "idx": idx,
+                "ts": point["ts"],
+                "measured_at": point.get("measured_at") or "",
+                "value": value,
+                "commit": point["commit"],
+                "commit_subject": point.get("commit_subject") or "",
+                "run_commit": point.get("run_commit") or "",
+                "run_commit_subject": point.get("run_commit_subject") or "",
+                "run_commit_url": point.get("run_commit_url") or "",
+                "packet": point.get("packet") or point.get("source") or "",
+                "summary": point["summary"],
+                "evidence_url": point.get("evidence_url") or point.get("source_url") or "",
+                "commit_url": point["commit_url"],
+            }
+            existing = rows_by_commit.get(point["commit"])
+            if existing is None or (row["measured_at"], idx) > (
+                existing.get("measured_at") or "",
+                existing["idx"],
+            ):
+                rows_by_commit[point["commit"]] = row
+        rows = sorted(rows_by_commit.values(), key=lambda row: (row["ts"], row["commit"]))
         series[spec["id"]] = rows
     return series
 
@@ -846,12 +941,22 @@ function longTime(ts) {{
   return d.toLocaleString();
 }}
 
+function runCommitNote(point) {{
+  if (!point.run_commit || point.run_commit === point.commit) return "";
+  const url = point.run_commit_url || `${{REMOTE_COMMIT_PREFIX}}${{point.run_commit}}`;
+  return `<div class="subtle">measured at <a href="${{url}}"><code>${{point.run_commit}}</code></a></div>`;
+}}
+
 function tooltipHtml(spec, point) {{
   const summary = point.summary ? `<div class="muted">${{point.summary}}</div>` : "";
   const target = point.packet || point.source || "";
+  const runCommit = point.run_commit && point.run_commit !== point.commit
+    ? `<div><span class="muted">runner commit</span> ${{point.run_commit}}</div>`
+    : "";
   return `
     <strong>${{spec.label}} · ${{fmtRatio(point.value)}}</strong>
-    <div><span class="muted">commit</span> ${{point.commit || ""}}</div>
+    <div><span class="muted">code commit</span> ${{point.commit || ""}}</div>
+    ${{runCommit}}
     <div><span class="muted">time</span> ${{longTime(point.ts)}}</div>
     <div><span class="muted">item</span> ${{target}}</div>
     ${{summary}}
@@ -887,7 +992,15 @@ function drawChart(svgId, legendId, seriesIds, seriesData = HISTORY.series, seri
 
   const all = seriesIds.flatMap(id => (seriesData[id] || []).map(p => ({{...p, seriesId: id}})));
   if (!all.length) return;
-  const timestamps = [...new Set(pointSource.map(p => p.ts))];
+  const sortedSource = [...pointSource, ...all].sort((a, b) => new Date(a.ts) - new Date(b.ts));
+  const tickPoints = [];
+  const seenTs = new Set();
+  for (const point of sortedSource) {{
+    if (!point.ts || seenTs.has(point.ts)) continue;
+    seenTs.add(point.ts);
+    tickPoints.push(point);
+  }}
+  const timestamps = tickPoints.map(p => p.ts);
   const xByTs = new Map(timestamps.map((ts, idx) => [ts, idx]));
   const maxIndex = Math.max(1, timestamps.length - 1);
   const values = all.map(p => p.value);
@@ -895,7 +1008,7 @@ function drawChart(svgId, legendId, seriesIds, seriesData = HISTORY.series, seri
   const yMin = 0;
   const chartW = width - margin.left - margin.right;
   const chartH = height - margin.top - margin.bottom;
-  const x = ts => margin.left + (xByTs.get(ts) || 0) / maxIndex * chartW;
+  const x = ts => margin.left + (xByTs.get(ts) ?? 0) / maxIndex * chartW;
   const y = value => margin.top + (yMax - value) / (yMax - yMin) * chartH;
 
   for (let tick = 0; tick <= yMax + 0.0001; tick += 0.25) {{
@@ -925,8 +1038,8 @@ function drawChart(svgId, legendId, seriesIds, seriesData = HISTORY.series, seri
   xAxis.setAttribute("class", "axis");
   svg.appendChild(xAxis);
 
-  pointSource.forEach((point, idx) => {{
-    if (idx % Math.ceil(pointSource.length / 8) !== 0 && idx !== pointSource.length - 1) return;
+  tickPoints.forEach((point, idx) => {{
+    if (idx % Math.ceil(tickPoints.length / 8) !== 0 && idx !== tickPoints.length - 1) return;
     const tx = x(point.ts);
     const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
     text.setAttribute("x", tx);
@@ -987,7 +1100,7 @@ function renderTables() {{
     tr.innerHTML = `
       <td>${{shortTime(point.ts)}}</td>
       <td>${{point.runner_label}}</td>
-      <td><a href="${{point.commit_url}}"><code>${{point.commit}}</code></a><div class="subtle">${{point.commit_subject || ""}}</div></td>
+      <td><a href="${{point.commit_url}}"><code>${{point.commit}}</code></a><div class="subtle">${{point.commit_subject || ""}}</div>${{runCommitNote(point)}}</td>
       <td><code>${{point.packet}}</code></td>
       <td>${{fmtRatio(point.median)}}</td>
       <td>${{fmtRatio(point.get_p100)}}</td>
@@ -1024,7 +1137,7 @@ function renderTables() {{
     tr.innerHTML = `
       <td>${{shortTime(point.ts)}}</td>
       <td>${{point.runner_label}}</td>
-      <td><a href="${{point.commit_url}}"><code>${{point.commit}}</code></a><div class="subtle">${{point.commit_subject || ""}}</div></td>
+      <td><a href="${{point.commit_url}}"><code>${{point.commit}}</code></a><div class="subtle">${{point.commit_subject || ""}}</div>${{runCommitNote(point)}}</td>
       <td>${{shape}}</td>
       <td>${{fmtRatio(point.median)}}</td>
       <td>${{fmtRatio(point.min)}}</td>
