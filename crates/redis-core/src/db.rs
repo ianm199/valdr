@@ -765,11 +765,30 @@ impl RedisDb {
         } else {
             EXPIRY_NONE
         };
-        let old_was_stream = self.dict.get(&key).is_some_and(|o| o.is_stream());
         value.expire = preserved_expire;
+        self.set_key_prepared(key, value, flags);
+    }
 
+    /// High-level setter when the caller already observed the previous
+    /// expiry during its command-specific lookup.
+    pub fn set_key_with_known_expire(
+        &mut self,
+        key: RedisString,
+        mut value: RedisObject,
+        expire: i64,
+        flags: u32,
+    ) {
+        value.expire = expire;
+        self.set_key_prepared(key, value, flags);
+    }
+
+    fn set_key_prepared(&mut self, key: RedisString, value: RedisObject, flags: u32) {
+        let may_have_blocked_stream_waiters =
+            STREAM_KEY_OVERWRITTEN_HOOK.get().is_some() && crate::blocked_keys::blocked_keys_any();
+        let old_was_stream =
+            may_have_blocked_stream_waiters && self.dict.get(&key).is_some_and(|o| o.is_stream());
         let needs_watch_signal = flags & SETKEY_NO_SIGNAL == 0 && watched_keys_any();
-        let needs_stream_hook = old_was_stream && STREAM_KEY_OVERWRITTEN_HOOK.get().is_some();
+        let needs_stream_hook = old_was_stream;
         if needs_watch_signal || needs_stream_hook {
             let hook_key = key.clone();
             self.dict.insert(key, value);

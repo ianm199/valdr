@@ -15,6 +15,7 @@
 //! the timer thread drains expired entries via [`take_expired`].
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -23,6 +24,12 @@ use redis_ds::stream::StreamId;
 use redis_types::RedisString;
 
 use crate::client::ClientId;
+
+static BLOCKED_KEYS_WAITERS: AtomicUsize = AtomicUsize::new(0);
+
+pub fn blocked_keys_any() -> bool {
+    BLOCKED_KEYS_WAITERS.load(Ordering::Acquire) != 0
+}
 
 /// Which end of the list to pop on wake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,10 +145,14 @@ impl BlockedKeysIndex {
     /// ensure a client never re-blocks while already parked).
     pub fn add(&mut self, waiter: BlockedWaiter) {
         let cid = waiter.client_id;
+        let already_registered = self.waiters.contains_key(&cid);
         for key in &waiter.keys {
             self.keys.entry(key.clone()).or_default().push_back(cid);
         }
         self.waiters.insert(cid, waiter);
+        if !already_registered {
+            BLOCKED_KEYS_WAITERS.fetch_add(1, Ordering::AcqRel);
+        }
     }
 
     /// Pop the FIFO-front waiter for `key` and return its full record.
@@ -165,6 +176,10 @@ impl BlockedKeysIndex {
     /// Remove `client_id` from every key queue and return its waiter record.
     pub fn remove_client(&mut self, client_id: ClientId) -> Option<BlockedWaiter> {
         let waiter = self.waiters.remove(&client_id)?;
+        let _ =
+            BLOCKED_KEYS_WAITERS.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                Some(current.saturating_sub(1))
+            });
         for key in &waiter.keys {
             if let Some(deque) = self.keys.get_mut(key) {
                 deque.retain(|cid| *cid != client_id);

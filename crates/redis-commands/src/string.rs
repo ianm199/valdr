@@ -1064,13 +1064,17 @@ fn parse_strict_i64(bytes: &[u8]) -> Option<i64> {
 /// existing value is not a parseable integer, when the key is the wrong
 /// type, or when the arithmetic would overflow `i64`.
 fn incr_decr_apply(ctx: &mut CommandContext, key: RedisString, delta: i64) -> Result<(), RedisError> {
+    let mut current_expire = redis_core::object::EXPIRY_NONE;
     let current: i64 = match ctx.db_mut().lookup_key_write(&key) {
         None => 0,
         Some(obj) => match &obj.kind {
-            ObjectKind::String(_) => match obj.get_long_long() {
-                Ok(n) => n,
-                Err(_) => return Err(RedisError::not_integer()),
-            },
+            ObjectKind::String(_) => {
+                current_expire = obj.expire;
+                match obj.get_long_long() {
+                    Ok(n) => n,
+                    Err(_) => return Err(RedisError::not_integer()),
+                }
+            }
             _ => return Err(RedisError::wrong_type()),
         },
     };
@@ -1083,7 +1087,8 @@ fn incr_decr_apply(ctx: &mut CommandContext, key: RedisString, delta: i64) -> Re
         }
     };
     let stored = RedisObject::new_int_string(next);
-    ctx.db_mut().set_key(key, stored, SETKEY_KEEPTTL);
+    ctx.db_mut()
+        .set_key_with_known_expire(key, stored, current_expire, SETKEY_KEEPTTL);
     ctx.reply_integer(next)
 }
 
