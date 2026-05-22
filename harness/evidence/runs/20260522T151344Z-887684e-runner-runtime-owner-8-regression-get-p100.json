@@ -1,0 +1,130 @@
+{
+  "captured_ts": "2026-05-22T15:13:44.660748Z",
+  "harness_context": {
+    "claim_level": "internal-regression-gate",
+    "commit": "887684e",
+    "git_dirty": true,
+    "git_status_short": [
+      " M harness/evidence/ledger.jsonl"
+    ],
+    "resources": [
+      "bench-results"
+    ],
+    "run_id": "loop-6e4dc35668d06051",
+    "target_commit": "887684ecca5e0c76073a6f7715529adc6f8f8370",
+    "tree_hash": "964ce1bf508e699f9a3063ba7dc1b864284c809b88d5b9f3a600a6445cc98150"
+  },
+  "kind": "runner_result",
+  "packet": "runtime-owner-8-regression-get-p100",
+  "result": {
+    "artifacts": [],
+    "claim_level": "internal-regression-gate",
+    "evidence": {
+      "baseline": {
+        "row": {
+          "claim_level": "telemetry",
+          "commit": "5f159bc",
+          "evidence": "harness/evidence/runs/20260522T135524Z-5f159bc-runner-runtime-owner-6-current-profile-matrix.json",
+          "git_dirty": true,
+          "kind": "bench",
+          "metric": "throughput_ratio",
+          "packet": "runtime-owner-6-current-profile-matrix",
+          "resources": [
+            "bench-results",
+            "benchmark-host",
+            "port:16379",
+            "port:6379"
+          ],
+          "role": "runner",
+          "run_id": "loop-6e4dc35668d06051",
+          "runner": "bench-profile-matrix",
+          "schema_version": 1,
+          "target": "rust-vs-reference",
+          "target_commit": "5f159bcfb55fdbb2b77f52a5fd504489124d4f23",
+          "tree_hash": "bb9095c7bb2ef17edd62db8143c5c710e37cccf7ff33dbd9965697d6656de657",
+          "ts": "2026-05-22T13:55:37.017131Z",
+          "unit": "ratio",
+          "value": 0.7763158069407895,
+          "workload": "core-p100/GET"
+        },
+        "ts": "2026-05-22T13:55:37.017131Z",
+        "value": 0.7763158069407895
+      },
+      "current": {
+        "row": {
+          "claim_level": "telemetry",
+          "commit": "aa09851",
+          "evidence": "harness/evidence/runs/20260522T144541Z-aa09851-runner-runtime-owner-8-post-poller-profile-matrix.json",
+          "git_dirty": true,
+          "kind": "bench",
+          "metric": "throughput_ratio",
+          "packet": "runtime-owner-8-post-poller-profile-matrix",
+          "resources": [
+            "bench-results",
+            "benchmark-host",
+            "port:16379",
+            "port:6379"
+          ],
+          "role": "runner",
+          "run_id": "loop-6e4dc35668d06051",
+          "runner": "bench-profile-matrix",
+          "schema_version": 1,
+          "target": "rust-vs-reference",
+          "target_commit": "aa098516985fa00677dd32810d0a249b66981021",
+          "tree_hash": "bd59522d38c7988f15dcbebed065edf146fede4c305c6b3f5b7fa71b305d30a6",
+          "ts": "2026-05-22T14:46:03.118709Z",
+          "unit": "ratio",
+          "value": 0.7294117765588234,
+          "workload": "core-p100/GET"
+        },
+        "ts": "2026-05-22T14:46:03.118709Z",
+        "value": 0.7294117765588234
+      },
+      "filters": {
+        "target": "rust-vs-reference",
+        "workload": "core-p100/GET"
+      },
+      "harness_context": {
+        "claim_level": "internal-regression-gate",
+        "commit": "887684e",
+        "git_dirty": true,
+        "git_status_short": [
+          " M harness/evidence/ledger.jsonl"
+        ],
+        "resources": [
+          "bench-results"
+        ],
+        "run_id": "loop-6e4dc35668d06051",
+        "target_commit": "887684ecca5e0c76073a6f7715529adc6f8f8370",
+        "tree_hash": "964ce1bf508e699f9a3063ba7dc1b864284c809b88d5b9f3a600a6445cc98150"
+      },
+      "higher_is_better": true,
+      "kind": "performance_regression",
+      "limit": 0.6831579101078947,
+      "max_regression_pct": 12.0,
+      "metric": "throughput_ratio",
+      "resources": [
+        "bench-results"
+      ]
+    },
+    "measurements": [
+      {
+        "denominator": 1,
+        "metric": "performance_regression_pass",
+        "name": "regress-core-p100-get",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "unit": "current/baseline",
+        "value": 0.9395812503589231,
+        "workload": "core-p100/GET"
+      }
+    ],
+    "method": "bench-load",
+    "runner_id": "regress-core-p100-get",
+    "schema_version": 1,
+    "status": "pass",
+    "summary": "regress-core-p100-get: current 0.729412 vs baseline 0.776316 (0.940x, threshold 12.00%, higher-is-better)",
+    "surface": "performance"
+  },
+  "role": "runner"
+}
