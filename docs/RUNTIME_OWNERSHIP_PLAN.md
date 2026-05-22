@@ -1,5 +1,43 @@
 # Runtime Ownership Plan
 
+Status: refined by `runtime-owner-0-faithful-map` on 2026-05-21 after the
+baseline oracle (`81fd4ff`), profile-matrix (`6da1962`), and hotspot
+(`15060d7`) runs. The binding decisions live in
+`harness/architecture/decisions/runtime-ownership.md` and
+`harness/architecture/lifecycle-map.toml`; this doc is the prose explanation
+behind them.
+
+## Refinement 2026-05-21
+
+The hotspot run finally tells us where the wall is. On smoke-suite p100 GET,
+`__psynch_mutexwait` accounted for 22,512 samples vs 118 samples for all
+Rust user code combined; INCR was 18,728 vs 227. Lookup, parsing, allocator,
+and dispatch-table cost are no longer measurable next to the DB mutex. The
+production direction is the faithful event-loop owner (option A below). The
+following section-5 questions are now answered for the unattended run; the
+rest are explicit `TODO(human)` and block the real owner-loop migration:
+
+- sharding: out of scope for this milestone
+- public claim: alpha telemetry, not speed parity
+- background events channel: single ordered `RuntimeEvent` enum into the owner
+- TLS migration sequencing: out of scope for this milestone
+- inert scaffold rule: no new dep, no product-path change, no concrete poller
+- poller dependency: **TODO(human)** — `mio` recommended, not yet approved
+- I/O thread parity: **TODO(human)** — default recommendation is "later packet"
+- soak runner: **TODO(human)** — `harness/bench/run-soak.sh` does not exist yet
+
+The subsystem ownership boundary (accept, socket-read, parse, dispatch, db,
+socket-write, cron, active-expire, pub/sub, blocked, AOF, replication, RDB,
+TLS) is enumerated with upstream Valkey C references in
+`harness/architecture/lifecycle-map.toml [[subsystem]]` and in the decision
+doc's "Subsystem Ownership Boundary" table. Translator packets must work to
+those tables; widening the boundary requires re-entering the architect
+packet.
+
+The original architecture write-up below is preserved for context.
+
+---
+
 Status: architecture decision after the first Redis performance loop, 2026-05-21.
 
 This doc captures the "option 5" performance question: whether to move beyond

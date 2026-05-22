@@ -1,7 +1,20 @@
 name	kind	owner	notes
 RuntimeOwner	struct	crates/redis-server/src/runtime_owner.rs	Planned owner of normal command execution; not default until oracle evidence says so.
-ClientSlot	struct	crates/redis-server/src/runtime_owner.rs	Planned owner-loop representation of one connected client.
-RuntimeEvent	enum	crates/redis-server/src/runtime_owner.rs	Planned event channel from background systems into the owner loop.
+ClientSlot	struct	crates/redis-server/src/runtime_owner.rs	Planned owner-loop representation of one connected client; owns query_buf, parsed argv staging, and a reply ClientWriteBuffer.
+ClientWriteBuffer	struct	crates/redis-server/src/runtime_owner.rs	Planned per-slot outbound buffer drained by RuntimeOwner::flush_pending_writes; replaces direct Client::reply_buf flush.
+RuntimeEvent	enum	crates/redis-server/src/runtime_owner.rs	Single ordered event channel from background subsystems into the owner. Variants enumerated below.
 RuntimeOwnerConfig	struct	crates/redis-server/src/runtime_owner.rs	Typed knobs for owner-loop experiments; must not alter default behavior silently.
-CommandContext	struct	crates/redis-core/src/command_context.rs	Existing command API; migration target must preserve normal dispatch semantics.
-RedisDb	struct	crates/redis-core/src/db.rs	Existing DB state; owner-loop migration should move ownership, not duplicate live DB models.
+OwnerCommandResult	enum	crates/redis-server/src/runtime_owner.rs	Outcome of a single dispatched command inside the owner: Replied, Blocked, Closed, PendingMore. Replaces ad-hoc bool returns.
+PollDriverHandle	struct	crates/redis-server/src/runtime_owner.rs	Abstract poller handle inside the scaffold. Concrete poller crate is TODO(human) and not picked in the scaffold packet.
+CommandContext	struct	crates/redis-core/src/command_context.rs	Existing command API; migration target must preserve normal dispatch semantics. Will eventually carry slot_id + &mut RuntimeOwner instead of &mut Client + &mut RedisDb.
+RedisDb	struct	crates/redis-core/src/db.rs	Existing DB state; owner-loop migration moves ownership from Arc<Mutex<_>> in databases.rs to Vec<RedisDb> owned by RuntimeOwner. No duplicate live DB models.
+
+# RuntimeEvent variants (informational; not separate types). The single-channel
+# decision is locked in harness/architecture/decisions/runtime-ownership.md.
+#   RuntimeEvent::Publish { channel, payload }
+#   RuntimeEvent::WakeBlocked { slot_id, reason }
+#   RuntimeEvent::Expire { db_index, key }
+#   RuntimeEvent::ReplicaAck { offset }
+#   RuntimeEvent::AofFlushRequested
+#   RuntimeEvent::BackgroundChildDone { kind, status }
+#   RuntimeEvent::ShutdownRequested

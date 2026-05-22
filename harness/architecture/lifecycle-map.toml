@@ -1,7 +1,7 @@
 schema_version = 1
 
 [runtime.current]
-summary = "Blocking thread per client; each command borrows &mut Client and &mut RedisDb through CommandContext."
+summary = "Blocking thread per client; each command borrows &mut Client and &mut RedisDb through CommandContext. Every dispatch acquires Arc<Mutex<RedisDb>>; hotspot evidence shows __psynch_mutexwait dominates non-idle CPU."
 hot_path = [
   "TcpListener::incoming",
   "thread::spawn(handle_connection)",
@@ -11,13 +11,19 @@ hot_path = [
   "client.reply_buf flush",
 ]
 compatibility_status = "shipping alpha path"
+evidence = "harness/evidence/runs/20260522T010206Z-15060d7-runner-runtime-owner-baseline-hotspots.json"
+lock_wait_samples_get_p100 = 22512
+lock_wait_samples_incr_p100 = 18728
+rust_user_samples_get_p100 = 118
+rust_user_samples_incr_p100 = 227
 
 [runtime.target]
-summary = "Faithful Valkey-like runtime owner; one owner loop coordinates client sockets, DB state, timers, ordinary replies, and background events."
+summary = "Faithful Valkey-like runtime owner; one owner loop coordinates client sockets, the selected-DB list, timers, ordinary replies, AOF/replication propagation order, and background events."
 non_goals = [
   "sharding",
   "benchmark-only command bypass",
-  "dropping unsupported subsystems for speed",
+  "dropping ACL/MULTI/EXEC/scripting/expiration/pub-sub/blocking/AOF/RDB/replication for speed",
+  "public speed-parity claim from a private experimental mode",
 ]
 must_preserve = [
   "RESP wire compatibility",
@@ -31,9 +37,124 @@ must_preserve = [
   "RDB save/load compatibility",
 ]
 
+[runtime.decisions]
+background_event_channel = "single-enum"
+sharding = "out-of-scope"
+public_claim = "alpha-telemetry"
+inert_scaffold_rule = "no-product-path-change"
+tls_migration = "out-of-scope-this-milestone"
+
+[runtime.open_questions]
+poller_dependency = "TODO(human) — mio | polling | tokio | raw libc; pending"
+tls_migration_sequencing = "TODO(human) — never | follow-up | pre-default; pending"
+io_threads_parity = "TODO(human) — skip | follow-up | match-upstream; pending"
+soak_runner = "TODO(human) — harness/bench/run-soak.sh does not exist yet"
+
+[[subsystem]]
+id = "accept"
+upstream_reference = "reference/valkey/src/ae.c:411 aeProcessEvents; networking.c acceptCommonHandler"
+current_owner = "crates/redis-server/src/main.rs (TcpListener::incoming + thread::spawn)"
+target_owner = "RuntimeOwner::accept_step"
+order = 1
+
+[[subsystem]]
+id = "socket-read"
+upstream_reference = "reference/valkey/src/networking.c:4284 readQueryFromClient"
+current_owner = "crates/redis-server/src/main.rs per-client thread blocking read"
+target_owner = "RuntimeOwner::poll_readable -> ClientSlot::ingest"
+order = 2
+
+[[subsystem]]
+id = "resp-parse"
+upstream_reference = "reference/valkey/src/networking.c:4146 processInputBuffer"
+current_owner = "crates/redis-protocol/src/request.rs (pure)"
+target_owner = "unchanged (pure parser, called by owner)"
+order = 3
+
+[[subsystem]]
+id = "command-dispatch"
+upstream_reference = "reference/valkey/src/server.c:4303 processCommand"
+current_owner = "crates/redis-commands/src/dispatch.rs against CommandContext { &mut Client, &mut RedisDb, .. }"
+target_owner = "RuntimeOwner::dispatch(slot_id, parsed) with &mut RuntimeOwner"
+order = 4
+
+[[subsystem]]
+id = "db-storage"
+upstream_reference = "reference/valkey/src/db.c selectDb / dictFind"
+current_owner = "crates/redis-core/src/databases.rs Arc<Mutex<RedisDb>>"
+target_owner = "Vec<RedisDb> owned by RuntimeOwner"
+order = 5
+removes_hotspot = "__psynch_mutexwait"
+
+[[subsystem]]
+id = "socket-write"
+upstream_reference = "reference/valkey/src/networking.c:3059 writeToClient; :3271 handleClientsWithPendingWrites"
+current_owner = "Client::reply_buf direct flush per thread"
+target_owner = "RuntimeOwner::flush_pending_writes (beforeSleep step)"
+order = 6
+
+[[subsystem]]
+id = "server-cron"
+upstream_reference = "reference/valkey/src/server.c serverCron"
+current_owner = "background threads acquiring DB locks"
+target_owner = "RuntimeOwner::cron_step"
+order = 7
+
+[[subsystem]]
+id = "active-expire"
+upstream_reference = "reference/valkey/src/expire.c activeExpireCycle"
+current_owner = "background thread acquiring DB lock"
+target_owner = "RuntimeOwner::active_expire_step"
+order = 8
+
+[[subsystem]]
+id = "pubsub"
+upstream_reference = "reference/valkey/src/pubsub.c pubsubPublishMessage"
+current_owner = "crates/redis-core/src/pubsub_registry.rs (global behind locks)"
+target_owner = "RuntimeEvent::Publish { channel, payload } routed to owner"
+order = 9
+
+[[subsystem]]
+id = "blocked-clients"
+upstream_reference = "reference/valkey/src/blocked.c blockedBeforeSleep / unblockClient"
+current_owner = "crates/redis-core/src/blocked_keys.rs global index + writer thread"
+target_owner = "RuntimeEvent::WakeBlocked { slot_id, reason } routed to owner"
+order = 10
+
+[[subsystem]]
+id = "aof"
+upstream_reference = "reference/valkey/src/aof.c flushAppendOnlyFile (called from beforeSleep)"
+current_owner = "background thread, lock-protected"
+target_owner = "RuntimeOwner::flush_aof_step after dispatch batch"
+order = 11
+ordering = "after dispatch, before reply flush when appendfsync=always"
+
+[[subsystem]]
+id = "replication"
+upstream_reference = "reference/valkey/src/replication.c replicationFeedReplicas"
+current_owner = "crates/redis-commands replica_dialer invoked under DB lock"
+target_owner = "RuntimeOwner::propagate_step (ordered post-dispatch)"
+order = 12
+ordering = "must preserve upstream propagation order"
+
+[[subsystem]]
+id = "rdb"
+upstream_reference = "reference/valkey/src/rdb.c rdbSaveBackground"
+current_owner = "background helper + DB lock during fork prep"
+target_owner = "unchanged storage path; owner gates entry/exit"
+order = 13
+
+[[subsystem]]
+id = "tls"
+upstream_reference = "reference/valkey/src/connection.c connTypeProcessPendingData"
+current_owner = "per-thread TLS path"
+target_owner = "UNCHANGED in this milestone; gated on TODO(human) tls_migration_sequencing"
+order = 14
+in_milestone = false
+
 [[transition]]
 id = "map"
-status = "planned"
+status = "in-progress"
 packet = "runtime-owner-0-faithful-map"
 description = "Map current ownership and refine packet graph without implementation."
 
@@ -51,5 +172,5 @@ description = "Add inert RuntimeOwner vocabulary without switching the product p
 
 [[transition]]
 id = "owner-loop"
-status = "manual-after-human-review"
-description = "Real nonblocking owner loop; not in the default unattended run."
+status = "blocked-on-human"
+description = "Real nonblocking owner loop; gated on TODO(human) decisions in harness/architecture/decisions/runtime-ownership.md (poller, TLS, I/O threads, soak)."
