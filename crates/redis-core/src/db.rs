@@ -767,12 +767,20 @@ impl RedisDb {
         };
         let old_was_stream = self.dict.get(&key).is_some_and(|o| o.is_stream());
         value.expire = preserved_expire;
-        self.dict.insert(key.clone(), value);
-        if flags & SETKEY_NO_SIGNAL == 0 {
-            self.signal_modified(&key);
-        }
-        if old_was_stream {
-            fire_stream_key_overwritten_hook(&key);
+
+        let needs_watch_signal = flags & SETKEY_NO_SIGNAL == 0 && watched_keys_any();
+        let needs_stream_hook = old_was_stream && STREAM_KEY_OVERWRITTEN_HOOK.get().is_some();
+        if needs_watch_signal || needs_stream_hook {
+            let hook_key = key.clone();
+            self.dict.insert(key, value);
+            if needs_watch_signal {
+                watched_keys_touch(self.id, &hook_key);
+            }
+            if needs_stream_hook {
+                fire_stream_key_overwritten_hook(&hook_key);
+            }
+        } else {
+            self.dict.insert(key, value);
         }
     }
 

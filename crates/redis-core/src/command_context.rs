@@ -826,6 +826,14 @@ impl<'a> CommandContext<'a> {
         }
     }
 
+    /// Fast preflight for command hot paths that otherwise have to keep an
+    /// owned key alive only to call `notify_keyspace_event`, which is usually
+    /// disabled by config.
+    pub fn keyspace_notifications_enabled(&self, event_type: i32) -> bool {
+        let flags = self.live_config().notify_keyspace_events_flags() as i32;
+        flags & event_type != 0 && self.pubsub.is_some()
+    }
+
     /// Empty-array reply (RESP `*0\r\n`).
     pub fn reply_empty_array(&mut self) -> RedisResult<()> {
         self.reply_array_header_i64(0)

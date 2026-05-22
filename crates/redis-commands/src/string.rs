@@ -389,18 +389,29 @@ pub fn set_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         0
     };
     let obj = RedisObject::new_string_try_encoded(value.as_bytes());
-    ctx.db_mut().set_key(key.clone(), obj, setkey_flags);
-    ctx.notify_keyspace_event(NOTIFY_STRING, b"set", &key);
-
-    if let Some(abs_ms) = expire_at_ms {
-        let now_ms: i64 = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
-        if abs_ms <= now_ms {
-            ctx.db_mut().sync_delete(&key);
-        } else {
-            ctx.db_mut().set_expire(&key, abs_ms);
+    let notify = ctx.keyspace_notifications_enabled(NOTIFY_STRING);
+    match expire_at_ms {
+        Some(abs_ms) => {
+            ctx.db_mut().set_key(key.clone(), obj, setkey_flags);
+            if notify {
+                ctx.notify_keyspace_event(NOTIFY_STRING, b"set", &key);
+            }
+            let now_ms: i64 = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            if abs_ms <= now_ms {
+                ctx.db_mut().sync_delete(&key);
+            } else {
+                ctx.db_mut().set_expire(&key, abs_ms);
+            }
+        }
+        None if notify => {
+            ctx.db_mut().set_key(key.clone(), obj, setkey_flags);
+            ctx.notify_keyspace_event(NOTIFY_STRING, b"set", &key);
+        }
+        None => {
+            ctx.db_mut().set_key(key, obj, setkey_flags);
         }
     }
 
@@ -444,8 +455,12 @@ pub fn setnx_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         return ctx.reply_integer(0);
     }
     let obj = RedisObject::new_string_try_encoded(value.as_bytes());
-    ctx.db_mut().set_key(key.clone(), obj, 0);
-    ctx.notify_keyspace_event(NOTIFY_STRING, b"set", &key);
+    if ctx.keyspace_notifications_enabled(NOTIFY_STRING) {
+        ctx.db_mut().set_key(key.clone(), obj, 0);
+        ctx.notify_keyspace_event(NOTIFY_STRING, b"set", &key);
+    } else {
+        ctx.db_mut().set_key(key, obj, 0);
+    }
     ctx.reply_integer(1)
 }
 
@@ -1080,8 +1095,12 @@ pub fn incr_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         return Err(RedisError::wrong_number_of_args(b"incr"));
     }
     let key = ctx.arg_owned(1usize)?;
-    incr_decr_apply(ctx, key.clone(), 1)?;
-    ctx.notify_keyspace_event(NOTIFY_STRING, b"incrby", &key);
+    if ctx.keyspace_notifications_enabled(NOTIFY_STRING) {
+        incr_decr_apply(ctx, key.clone(), 1)?;
+        ctx.notify_keyspace_event(NOTIFY_STRING, b"incrby", &key);
+    } else {
+        incr_decr_apply(ctx, key, 1)?;
+    }
     Ok(())
 }
 
@@ -1093,8 +1112,12 @@ pub fn decr_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         return Err(RedisError::wrong_number_of_args(b"decr"));
     }
     let key = ctx.arg_owned(1usize)?;
-    incr_decr_apply(ctx, key.clone(), -1)?;
-    ctx.notify_keyspace_event(NOTIFY_STRING, b"decrby", &key);
+    if ctx.keyspace_notifications_enabled(NOTIFY_STRING) {
+        incr_decr_apply(ctx, key.clone(), -1)?;
+        ctx.notify_keyspace_event(NOTIFY_STRING, b"decrby", &key);
+    } else {
+        incr_decr_apply(ctx, key, -1)?;
+    }
     Ok(())
 }
 
@@ -1108,8 +1131,12 @@ pub fn incrby_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let key = ctx.arg_owned(1usize)?;
     let delta_raw = ctx.arg_owned(2usize)?;
     let delta = parse_strict_i64(delta_raw.as_bytes()).ok_or_else(RedisError::not_integer)?;
-    incr_decr_apply(ctx, key.clone(), delta)?;
-    ctx.notify_keyspace_event(NOTIFY_STRING, b"incrby", &key);
+    if ctx.keyspace_notifications_enabled(NOTIFY_STRING) {
+        incr_decr_apply(ctx, key.clone(), delta)?;
+        ctx.notify_keyspace_event(NOTIFY_STRING, b"incrby", &key);
+    } else {
+        incr_decr_apply(ctx, key, delta)?;
+    }
     Ok(())
 }
 
@@ -1131,8 +1158,12 @@ pub fn decrby_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
             ))
         }
     };
-    incr_decr_apply(ctx, key.clone(), negated)?;
-    ctx.notify_keyspace_event(NOTIFY_STRING, b"decrby", &key);
+    if ctx.keyspace_notifications_enabled(NOTIFY_STRING) {
+        incr_decr_apply(ctx, key.clone(), negated)?;
+        ctx.notify_keyspace_event(NOTIFY_STRING, b"decrby", &key);
+    } else {
+        incr_decr_apply(ctx, key, negated)?;
+    }
     Ok(())
 }
 
