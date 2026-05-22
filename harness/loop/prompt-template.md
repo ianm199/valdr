@@ -34,6 +34,7 @@ Packet: **`{{PACKET_ID}}`**
 - Do not silently grow public claims. New capabilities require typed evidence.
 - Do not invent duplicate canonical types or APIs. Use the vocabulary files; escalate cross-cutting questions with `TODO(architect):`.
 - Keep changes scoped to the packet target files. If the packet needs another file, make the smallest typed-artifact edit that explains why.
+- Do not run workspace-wide `cargo fmt`. Use `cargo fmt --check` or format only the packet target files; broad formatting churn is a failed packet.
 - Prefer faithful semantics over local speed. Performance work must keep conformance gates green.
 - No new `unsafe` unless the packet explicitly grants it and updates the unsafe budget with a narrow rationale.
 - Rust files you materially edit must retain or add a `PORT STATUS` trailer compatible with the trailer hook.
