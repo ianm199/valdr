@@ -1,9 +1,9 @@
 schema_version = 1
 
 [project]
-name = "valkey-rs-runtime-owner-poller-run"
-target = "faithful runtime-owner poller experiment after std plain-TCP owner-loop"
-description = "This run is complete when the current runtime-owner baseline is reproven, call-tree profiling support exists, the architect approves or blocks the poller step, the mio plain-TCP readiness poller is attempted, and post-poller oracle/benchmark/profile/regression evidence exists."
+name = "valkey-rs-runtime-owner-hotpath-run"
+target = "faithful runtime-owner small hot-path wave after the mio plain-TCP poller"
+description = "This run is complete when the completed poller evidence remains green, the three post-poller hot-path packets land, and each packet is followed by wire-smoke plus benchmark/profile evidence. The owner-owned DB migration remains a manual follow-up."
 non_goals = [
   "Sharding",
   "Benchmark-only command fast paths",
@@ -16,6 +16,9 @@ non_goals = [
   "Moving the live DB list fully into RuntimeOwner during this milestone",
   "Any public speed-parity claim sourced from a non-default experimental mode; numbers from this run are alpha telemetry only",
   "Authoring a runtime-owner-soak runner before harness/bench/run-soak.sh and the human-decided workload/threshold exist",
+  "Linux-specific optimizations in this wave: no io_uring, raw epoll, Linux perf gate, or Linux-only benchmark requirement",
+  "Owner-owned live Vec<RedisDb> migration during runtime-owner-10 through runtime-owner-12",
+  "Disabling slowlog, RESP3, WATCH/MULTI/EXEC, AOF, replication, ACL, maxmemory, pub/sub, blocking, expiration, scripting, or RDB semantics for speed",
 ]
 binding_architecture_artifacts = [
   "harness/architecture/decisions/runtime-ownership.md",
@@ -25,10 +28,10 @@ binding_architecture_artifacts = [
 decision_evidence_root = "harness/evidence/runs/20260522T010206Z-15060d7-runner-runtime-owner-baseline-hotspots.json"
 poller_decision_evidence_root = "harness/evidence/runs/20260522T140909Z-0022bc7-runner-runtime-owner-6-current-calltree.json"
 latest_runtime_owner_evidence = [
-  "harness/evidence/runs/20260522T135522Z-d884855-runner-runtime-owner-6-current-oracle.json",
-  "harness/evidence/runs/20260522T135524Z-5f159bc-runner-runtime-owner-6-current-profile-matrix.json",
-  "harness/evidence/runs/20260522T135537Z-1edcb59-runner-runtime-owner-6-current-hotspots.json",
-  "harness/evidence/runs/20260522T140909Z-0022bc7-runner-runtime-owner-6-current-calltree.json",
+  "harness/evidence/runs/20260522T144154Z-6f99e53-runner-runtime-owner-8-post-poller-oracle.json",
+  "harness/evidence/runs/20260522T144541Z-aa09851-runner-runtime-owner-8-post-poller-profile-matrix.json",
+  "harness/evidence/runs/20260522T144623Z-651c67e-runner-runtime-owner-8-post-poller-hotspots.json",
+  "harness/evidence/runs/20260522T144733Z-d3b7602-runner-runtime-owner-8-post-poller-calltree.json",
 ]
 
 [[criterion]]
@@ -141,6 +144,120 @@ id = "poller-regression-incr-p100"
 kind = "runner_latest_pass"
 required = true
 packet = "runtime-owner-8-regression-incr-p100"
+runner = "regress-core-p100-incr"
+
+[[criterion]]
+id = "runtime-owner-hotpath-packets"
+kind = "packets_completed"
+required = true
+packets = [
+  "runtime-owner-10-hotpath-timing-gate",
+  "runtime-owner-10-post-timing-oracle",
+  "runtime-owner-10-post-timing-profile-matrix",
+  "runtime-owner-10-post-timing-calltree",
+  "runtime-owner-11-reply-buffer-hotpath",
+  "runtime-owner-11-post-reply-oracle",
+  "runtime-owner-11-post-reply-profile-matrix",
+  "runtime-owner-11-post-reply-calltree",
+  "runtime-owner-12-watch-dirty-fastpath",
+  "runtime-owner-12-post-watch-oracle",
+  "runtime-owner-12-post-watch-profile-matrix",
+  "runtime-owner-12-post-watch-calltree",
+  "runtime-owner-12-regression-ping-p100",
+  "runtime-owner-12-regression-get-p100",
+  "runtime-owner-12-regression-set-p100",
+  "runtime-owner-12-regression-incr-p100",
+]
+
+[[criterion]]
+id = "hotpath-timing-wire-smoke"
+kind = "runner_latest_pass"
+required = true
+packet = "runtime-owner-10-post-timing-oracle"
+runner = "wire-smoke"
+
+[[criterion]]
+id = "hotpath-timing-profile-matrix"
+kind = "runner_latest_pass"
+required = true
+packet = "runtime-owner-10-post-timing-profile-matrix"
+runner = "bench-profile-matrix"
+
+[[criterion]]
+id = "hotpath-timing-calltree"
+kind = "runner_latest_pass"
+required = true
+packet = "runtime-owner-10-post-timing-calltree"
+runner = "bench-profile-calltree"
+
+[[criterion]]
+id = "hotpath-reply-wire-smoke"
+kind = "runner_latest_pass"
+required = true
+packet = "runtime-owner-11-post-reply-oracle"
+runner = "wire-smoke"
+
+[[criterion]]
+id = "hotpath-reply-profile-matrix"
+kind = "runner_latest_pass"
+required = true
+packet = "runtime-owner-11-post-reply-profile-matrix"
+runner = "bench-profile-matrix"
+
+[[criterion]]
+id = "hotpath-reply-calltree"
+kind = "runner_latest_pass"
+required = true
+packet = "runtime-owner-11-post-reply-calltree"
+runner = "bench-profile-calltree"
+
+[[criterion]]
+id = "hotpath-watch-wire-smoke"
+kind = "runner_latest_pass"
+required = true
+packet = "runtime-owner-12-post-watch-oracle"
+runner = "wire-smoke"
+
+[[criterion]]
+id = "hotpath-watch-profile-matrix"
+kind = "runner_latest_pass"
+required = true
+packet = "runtime-owner-12-post-watch-profile-matrix"
+runner = "bench-profile-matrix"
+
+[[criterion]]
+id = "hotpath-watch-calltree"
+kind = "runner_latest_pass"
+required = true
+packet = "runtime-owner-12-post-watch-calltree"
+runner = "bench-profile-calltree"
+
+[[criterion]]
+id = "hotpath-regression-ping-p100"
+kind = "runner_latest_pass"
+required = true
+packet = "runtime-owner-12-regression-ping-p100"
+runner = "regress-core-p100-ping"
+
+[[criterion]]
+id = "hotpath-regression-get-p100"
+kind = "runner_latest_pass"
+required = true
+packet = "runtime-owner-12-regression-get-p100"
+runner = "regress-core-p100-get"
+
+[[criterion]]
+id = "hotpath-regression-set-p100"
+kind = "runner_latest_pass"
+required = true
+packet = "runtime-owner-12-regression-set-p100"
+runner = "regress-core-p100-set"
+
+[[criterion]]
+id = "hotpath-regression-incr-p100"
+kind = "runner_latest_pass"
+required = true
+packet = "runtime-owner-12-regression-incr-p100"
 runner = "regress-core-p100-incr"
 
 [[criterion]]

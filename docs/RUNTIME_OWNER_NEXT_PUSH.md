@@ -1,7 +1,10 @@
 # Runtime Owner Next Push
 
-Status: `runtime-owner-8-mio-poller-owner-loop` implementation landed; the
-post-poller oracle and benchmark runners remain the evidence gate.
+Status: `runtime-owner-8-mio-poller-owner-loop` implementation landed and its
+post-poller oracle, profile, call-tree, and p100 regression gates passed. The
+next auto wave is the smaller macOS hot-path packet family in
+`docs/RUNTIME_OWNER_HOTPATH_PUSH.md`; the owner-owned DB migration remains a
+manual architecture packet.
 
 This document scopes the next large harness run after the std nonblocking
 `RuntimeOwner` loop. The previous run proved the big architecture move was
@@ -126,7 +129,7 @@ Implementation update:
   AOF, RDB, or replication for speed.
 - No public benchmark claim. The next run remains alpha telemetry.
 
-## Queued packet family
+## Queued packet family already completed
 
 The new queue begins after `runtime-owner-5-post-polish-hotspots`.
 
@@ -173,6 +176,32 @@ The new queue begins after `runtime-owner-5-post-polish-hotspots`.
    - Manual follow-up only.
    - This is the real high-risk migration; do not auto-dispatch it until the
      poller evidence is reviewed.
+
+## Next queued packet family
+
+The next auto selector wave is intentionally smaller than owner-owned DB. It is
+documented in `docs/RUNTIME_OWNER_HOTPATH_PUSH.md` and targets three measured
+post-poller costs:
+
+1. `runtime-owner-10-hotpath-timing-gate`
+   - reduce avoidable command timing / slowlog predicate overhead without
+     disabling slowlog or command duration semantics;
+   - gate with wire-smoke, profile matrix, and calltree.
+
+2. `runtime-owner-11-reply-buffer-hotpath`
+   - add direct RESP2 reply-buffer helpers for common legacy replies while
+     preserving generic RESP3 frame handling;
+   - gate with wire-smoke, profile matrix, and calltree.
+
+3. `runtime-owner-12-watch-dirty-fastpath`
+   - skip global WATCH dirty-key lock/allocation work when no clients are
+     watching keys, while preserving WATCH/MULTI/EXEC invalidation;
+   - gate with wire-smoke, profile matrix, calltree, and final p100 regression
+     comparators.
+
+This wave explicitly ignores Linux-only optimizations. No io_uring, epoll,
+Linux perf dependency, sharding, command-specific benchmark bypass, or
+owner-owned live DB migration is in scope.
 
 ## Kickoff command
 

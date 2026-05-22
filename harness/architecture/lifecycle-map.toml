@@ -45,7 +45,7 @@ inert_scaffold_rule = "no-product-path-change"
 tls_migration = "out-of-scope-this-milestone"
 
 [runtime.open_questions]
-poller_dependency = "overnight experiment: std nonblocking linear scan first; mio remains recommended production follow-up"
+poller_dependency = "resolved for runtime-owner-8: mio plain-TCP readiness poller landed and post-poller gates passed"
 tls_migration_sequencing = "TODO(human) — never | follow-up | pre-default; pending"
 io_threads_parity = "TODO(human) — skip | follow-up | match-upstream; pending"
 soak_runner = "TODO(human) — harness/bench/run-soak.sh does not exist yet"
@@ -187,9 +187,21 @@ packet = "runtime-owner-4-std-nonblocking-owner-loop"
 description = "Plain-TCP owner-loop experiment using std nonblocking sockets, existing dispatch, and existing global DB handles. Long-term poller, TLS migration, I/O threads, and soak gates remain TODO(human)."
 
 [[transition]]
+id = "mio-poller"
+status = "completed"
+packet = "runtime-owner-8-mio-poller-owner-loop"
+description = "Default plain-TCP RuntimeOwner path now uses mio readiness. Post-poller oracle, profile matrix, hotspot, calltree, and p100 regression gates passed."
+
+[[transition]]
+id = "post-poller-hotpath"
+status = "queued"
+packet = "runtime-owner-10-hotpath-timing-gate"
+description = "Small macOS/current-runner hot-path wave before owner-owned DB: command timing/slowlog gate, direct RESP reply-buffer helpers, and WATCH dirty-key no-watch fast path."
+
+[[transition]]
 id = "production-owner-loop"
 status = "blocked-on-human"
-description = "Full production event-loop migration with owned DB list and a real readiness backend; gated on TODO(human) decisions in harness/architecture/decisions/runtime-ownership.md (poller, TLS, I/O threads, soak)."
+description = "Full production event-loop migration with owned DB list; gated on the manual owner-owned DB architecture packet plus TODO(human) decisions for TLS, I/O threads, and soak."
 
 [invariants]
 runner_capability_alignment = "harness/runners.toml wire-smoke runner must declare wire-compatibility, runtime-owner-canaries, and runtime-owner-scaffold so post-canary-oracle and post-scaffold-oracle packets can produce capability evidence."
@@ -200,3 +212,5 @@ overnight_std_owner_first = "docs/RUNTIME_OWNER_OVERNIGHT_ARCHITECTURE.md allows
 std_owner_loop_no_second_db = "runtime-owner-4 uses existing global_databases Arc<Mutex<RedisDb>> handles as transitional storage; it must not create a divergent live Vec<RedisDb> while TLS/background helpers still use global_databases."
 plain_tcp_foreign_payloads_enter_owner = "Pub/sub, blocked wakeups, replication/WAIT payloads, and other foreign bytes for owner-loop plain-TCP clients enter through per-slot mpsc receivers drained by RuntimeOwner; foreign threads do not write owner-loop sockets directly."
 no_soak_runner_before_script = "harness/runners.toml [[runner]] entries for runtime-owner-soak require harness/bench/run-soak.sh to exist; planned_runner row is the only acceptable placeholder until then."
+post_poller_hotpath_no_linux = "runtime-owner-10 through runtime-owner-12 use macOS/current benchmark and sample runners only; no Linux-specific io_uring/epoll/perf dependency is approved in this wave."
+post_poller_hotpath_preserve_semantics = "The small hot-path wave may reduce timing, reply-encoding, and WATCH bookkeeping overhead, but must not disable slowlog, RESP3, WATCH/MULTI/EXEC, AOF, replication, ACL, maxmemory, pub/sub, blocking, expiration, scripting, or RDB semantics."

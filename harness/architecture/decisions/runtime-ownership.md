@@ -229,6 +229,43 @@ Decision:
 9. **Compatibility gate.** `runtime-owner-8-post-poller-oracle` must pass
    before any post-poller benchmark evidence is trusted.
 
+## Post-Poller Hotpath Wave (locked 2026-05-22)
+
+`runtime-owner-8` completed cleanly enough to make the next performance wall
+local and measurable rather than structural. The owner-owned DB migration is
+still the larger manual architecture decision, but it is not the first next
+step. The current macOS call-tree artifacts show three smaller faithful-port
+cost centers that can be tested directly with the existing harness runners:
+
+1. **Command timing / slowlog predicate overhead.** `dispatch_command_name()`
+   currently pays `Instant::now()` plus `elapsed()` on every command before
+   deciding whether slowlog should record anything. Upstream Valkey also times
+   command execution in `server.c::call()`, so this packet may reduce avoidable
+   work but may not disable timing semantics, slowlog, latency stats, AOF, or
+   replication.
+2. **RESP reply buffer encoding.** `CommandContext` common reply helpers build
+   `RespFrame` / `RedisString` values and enter the generic encoder even for
+   simple RESP2 legacy replies. Upstream has direct reply helpers in
+   `networking.c` and attempts copy avoidance for bulk replies. This packet may
+   add direct client-buffer encoders for hot RESP2 shapes while preserving
+   generic RESP3 frames.
+3. **WATCH dirty-key fast path.** `RedisDb::signal_modified()` currently enters
+   the global watched-key mutex path and constructs a `RedisString` for every
+   write. Upstream `multi.c::touchWatchedKey()` returns immediately if the DB
+   has no watched keys. This packet may add an equivalent no-watch fast path,
+   but WATCH/MULTI/EXEC invalidation remains binding behavior.
+
+Binding constraints for this wave:
+
+- macOS/current-runner evidence only; no Linux-specific packet is approved here;
+- no command-specific benchmark bypass;
+- no owner-owned live `Vec<RedisDb>`;
+- no disabled ACL, maxmemory, readonly-replica, slowlog, transactions,
+  scripting, expiration, WATCH, AOF, replication, pub/sub, blocking, RDB, or
+  RESP3 semantics;
+- every implementation packet must be followed by wire-smoke and fresh
+  profile/call-tree evidence before the next packet is trusted.
+
 ## TODO(human): Long-Term Runtime Decisions
 
 These are remaining long-term choices, plus the now-resolved poller dependency
