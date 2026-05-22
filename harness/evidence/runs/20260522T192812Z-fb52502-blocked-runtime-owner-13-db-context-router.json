@@ -1,0 +1,106 @@
+{
+  "captured_ts": "2026-05-22T19:28:12.835491Z",
+  "harness_context": {
+    "commit": "fb52502",
+    "git_dirty": true,
+    "git_status_short": [
+      " M crates/redis-commands/src/connection.rs",
+      " M crates/redis-commands/src/multi.rs",
+      " M crates/redis-core/src/command_context.rs",
+      " M crates/redis-core/src/db.rs",
+      " M crates/redis-server/src/runtime_owner.rs",
+      " M docs/RUNTIME_OWNER_NEXT_PUSH.md",
+      " M harness/evidence/ledger.jsonl",
+      " M harness/history.jsonl",
+      "?? harness/evidence/runs/20260522T185427Z-fb52502-translator-runtime-owner-13-db-context-router.json",
+      "?? harness/evidence/runs/20260522T191237Z-fb52502-translator-runtime-owner-13-db-context-router.json"
+    ],
+    "run_id": "loop-33de34d1e5026ac8",
+    "target_commit": "fb525022e4c0b23581a21115e23df51e933f5a68",
+    "tree_hash": "c73a2741535a204ece9acba4e985cb0a8ce1d980ebec4ab502a5dbf856298a1c"
+  },
+  "kind": "packet_blocked",
+  "packet": "runtime-owner-13-db-context-router",
+  "reason_code": "repeated_packet_failure",
+  "role": "translator",
+  "schema_version": 1,
+  "state": {
+    "capabilities": [
+      "faithful-runtime-ownership",
+      "wire-compatibility"
+    ],
+    "commit": "fb52502",
+    "evidence_path": "harness/evidence/runs/20260522T191237Z-fb52502-translator-runtime-owner-13-db-context-router.json",
+    "git_dirty": true,
+    "git_status_short": [
+      " M crates/redis-commands/src/connection.rs",
+      " M crates/redis-core/src/command_context.rs",
+      " M crates/redis-core/src/db.rs",
+      " M crates/redis-server/src/runtime_owner.rs",
+      " M docs/RUNTIME_OWNER_NEXT_PUSH.md",
+      " M harness/evidence/ledger.jsonl",
+      "?? harness/evidence/runs/20260522T185427Z-fb52502-translator-runtime-owner-13-db-context-router.json"
+    ],
+    "mode": "translator",
+    "packet": {
+      "capabilities": [
+        "faithful-runtime-ownership",
+        "wire-compatibility"
+      ],
+      "claim_level": "telemetry",
+      "cost_hint": "large",
+      "depends_on": [
+        "runtime-owner-9-owner-owned-db-architecture",
+        "runtime-owner-12-post-watch-calltree",
+        "runtime-owner-12-regression-ping-p100",
+        "runtime-owner-12-regression-get-p100",
+        "runtime-owner-12-regression-set-p100",
+        "runtime-owner-12-regression-incr-p100"
+      ],
+      "id": "runtime-owner-13-db-context-router",
+      "note": "Add owner-compatible selected-DB and cross-DB routing APIs to CommandContext while keeping the current live storage model. Preserve redis_commands::dispatch as the only command path. Existing borrowed-DB constructors may remain for tests and legacy startup/TLS surfaces, but owner-loop dispatch should be able to pass a DB-list route keyed by Client::db_index. SELECT validation must use the configured DB count rather than a hard-coded local assumption where the context can provide it. Do not move the live DB list into RuntimeOwner yet and do not introduce a second live keyspace.",
+      "phase": 81,
+      "resources": [
+        "runtime-owner",
+        "db-ownership",
+        "command-context",
+        "transactions"
+      ],
+      "role": "translator",
+      "schema_version": 1,
+      "selector": "auto",
+      "source_ranges": [
+        "reference/valkey/src/server.c:4303-4672",
+        "reference/valkey/src/db.c:727-758",
+        "reference/valkey/src/db.c:1538-1884",
+        "reference/valkey/src/multi.c:453-525"
+      ],
+      "targets": [
+        "crates/redis-core/src/command_context.rs",
+        "crates/redis-core/src/db.rs",
+        "crates/redis-commands/src/connection.rs",
+        "crates/redis-commands/src/multi.rs",
+        "crates/redis-server/src/runtime_owner.rs",
+        "docs/RUNTIME_OWNER_NEXT_PUSH.md"
+      ]
+    },
+    "packet_id": "runtime-owner-13-db-context-router",
+    "prompt_hash": "05c28517dfecded2",
+    "role": "translator",
+    "run_id": "loop-33de34d1e5026ac8",
+    "runner_id": null,
+    "target_commit": "fb525022e4c0b23581a21115e23df51e933f5a68",
+    "targets": [
+      "crates/redis-core/src/command_context.rs",
+      "crates/redis-core/src/db.rs",
+      "crates/redis-commands/src/connection.rs",
+      "crates/redis-commands/src/multi.rs",
+      "crates/redis-server/src/runtime_owner.rs",
+      "docs/RUNTIME_OWNER_NEXT_PUSH.md"
+    ],
+    "tree_hash": "5620f3b43281e33ab7e0958fde0b74bc17d3c290743fe90b132b8814ebd142f2",
+    "ts": "2026-05-22T19:12:37.344415Z"
+  },
+  "summary": "same packet failed 2 consecutive time(s); loop stopped to avoid repeated unsafe churn",
+  "worker": "supervisor"
+}

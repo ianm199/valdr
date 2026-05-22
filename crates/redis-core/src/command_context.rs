@@ -7,9 +7,10 @@
 //! `RedisServer` reference comes via the orchestrator (Phase 3 architect
 //! packet adds it).
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::client::Client;
+use crate::databases::{global_databases, GlobalDatabases};
 use crate::db::RedisDb;
 use crate::live_config::LiveConfig;
 use crate::notify::{NOTIFY_KEYEVENT, NOTIFY_KEYSPACE};
@@ -26,11 +27,15 @@ use redis_types::{RedisError, RedisResult, RedisString};
 /// SET/GET state persists across commands and connections. Unit tests still
 /// want an isolated scratch db per context, so this enum supports both.
 ///
-/// Phase 3 will collapse this back to `&'a mut RedisServer` once the server
-/// reference threads through every dispatch site.
+/// Runtime-owner packets add the routed variant so command handlers can use a
+/// selected-DB/cross-DB boundary without naming the global database store.
 pub enum DbStorage<'a> {
     Owned(RedisDb),
     Borrowed(&'a mut RedisDb),
+    Routed {
+        selected: &'a mut RedisDb,
+        route: DbListRoute,
+    },
 }
 
 impl<'a> DbStorage<'a> {
@@ -38,6 +43,7 @@ impl<'a> DbStorage<'a> {
         match self {
             DbStorage::Owned(db) => db,
             DbStorage::Borrowed(db) => db,
+            DbStorage::Routed { selected, .. } => selected,
         }
     }
 
@@ -45,7 +51,42 @@ impl<'a> DbStorage<'a> {
         match self {
             DbStorage::Owned(db) => db,
             DbStorage::Borrowed(db) => db,
+            DbStorage::Routed { selected, .. } => selected,
         }
+    }
+
+    fn route(&self) -> Option<DbListRoute> {
+        match self {
+            DbStorage::Routed { route, .. } => Some(*route),
+            DbStorage::Owned(_) | DbStorage::Borrowed(_) => None,
+        }
+    }
+}
+
+/// Route to the current live DB list.
+///
+/// This is deliberately a route to the existing `global_databases()` storage,
+/// not a second keyspace. Later owner-owned DB packets can replace the route
+/// internals without changing command handlers that ask `CommandContext` for
+/// selected-DB or cross-DB access.
+#[derive(Clone, Copy)]
+pub struct DbListRoute {
+    dbs: &'static GlobalDatabases,
+}
+
+impl DbListRoute {
+    pub fn global() -> Self {
+        Self {
+            dbs: global_databases(),
+        }
+    }
+
+    pub fn count(self) -> usize {
+        self.dbs.count()
+    }
+
+    pub fn get(self, index: u32) -> Arc<Mutex<RedisDb>> {
+        self.dbs.get(index)
     }
 }
 
@@ -53,10 +94,10 @@ impl<'a> DbStorage<'a> {
 /// exposes argument access + reply-writer methods.
 ///
 /// PORT NOTE: `db` is held in a [`DbStorage`] enum. Production callers use
-/// [`CommandContext::with_db`] to share one `RedisDb` across commands; tests
-/// use [`CommandContext::new`] for an isolated owned scratch db. Phase 3 will
-/// replace this with `&'a mut RedisServer` (and `db()` will route through the
-/// server's db list keyed by `client.db_index`).
+/// [`CommandContext::with_server`] to share the selected live `RedisDb` plus a
+/// DB-list route; tests use [`CommandContext::new`] for an isolated owned
+/// scratch db. The owner-owned DB packet will replace the route internals with
+/// the owner-held DB list.
 pub struct CommandContext<'a> {
     pub client: &'a mut Client,
     db: DbStorage<'a>,
@@ -197,9 +238,29 @@ impl<'a> CommandContext<'a> {
         server: Arc<RedisServer>,
         pubsub: Arc<Mutex<PubSubRegistry>>,
     ) -> Self {
+        Self::with_server_and_db_route(client, db, DbListRoute::global(), server, pubsub)
+    }
+
+    /// Construct a fully-wired context with an explicit DB-list route.
+    ///
+    /// `db` is the already-selected database for this dispatch. `route` names
+    /// the full live DB list that cross-DB commands can consult without
+    /// reaching back to `global_databases()` directly. For this packet the
+    /// route points at the existing global handles; it does not move storage
+    /// ownership or create a second live keyspace.
+    pub fn with_server_and_db_route(
+        client: &'a mut Client,
+        db: &'a mut RedisDb,
+        route: DbListRoute,
+        server: Arc<RedisServer>,
+        pubsub: Arc<Mutex<PubSubRegistry>>,
+    ) -> Self {
         Self {
             client,
-            db: DbStorage::Borrowed(db),
+            db: DbStorage::Routed {
+                selected: db,
+                route,
+            },
             server,
             pubsub: Some(pubsub),
         }
@@ -396,6 +457,82 @@ impl<'a> CommandContext<'a> {
         self.db.as_mut()
     }
 
+    /// Number of logical databases visible to this command context.
+    ///
+    /// Production contexts carry a `DbListRoute` and report the configured
+    /// route length. Legacy test contexts fall back to the current global DB
+    /// count so SELECT validation keeps matching the product envelope until
+    /// tests opt into an explicit route.
+    pub fn database_count(&self) -> usize {
+        self.db
+            .route()
+            .map(DbListRoute::count)
+            .unwrap_or_else(|| global_databases().count())
+    }
+
+    /// Route to the logical DB list visible from this context.
+    ///
+    /// Production contexts receive an explicit route from the dispatch owner.
+    /// Legacy borrowed/owned contexts fall back to the current global route so
+    /// tests and the TLS startup path preserve today's storage model.
+    pub fn db_list_route(&self) -> DbListRoute {
+        self.db.route().unwrap_or_else(DbListRoute::global)
+    }
+
+    /// Validate a database index parsed from argv.
+    pub fn validate_db_index(&self, index: i64) -> RedisResult<u32> {
+        if index < 0 || index >= self.database_count() as i64 {
+            return Err(RedisError::runtime(b"ERR DB index is out of range"));
+        }
+        Ok(index as u32)
+    }
+
+    /// Currently selected database index as carried by the client.
+    pub fn selected_db_index(&self) -> u32 {
+        self.client.db_index
+    }
+
+    /// Return the selected DB id for the borrowed DB currently installed in
+    /// this context.
+    pub fn selected_db_id(&self) -> u32 {
+        self.db.as_ref().id
+    }
+
+    /// Return a handle to a non-selected DB from the live DB list.
+    ///
+    /// `Ok(None)` means the requested index is the currently borrowed DB and
+    /// callers should use `ctx.db()` / `ctx.db_mut()` instead. This avoids
+    /// taking the same `Arc<Mutex<RedisDb>>` twice on the transitional storage
+    /// model. Future owner-owned DB packets can keep this contract while
+    /// changing the route internals.
+    pub fn other_db_handle(&self, index: u32) -> RedisResult<Option<Arc<Mutex<RedisDb>>>> {
+        self.validate_db_index(index as i64)?;
+        if index == self.selected_db_id() {
+            return Ok(None);
+        }
+        Ok(Some(self.db_list_route().get(index)))
+    }
+
+    /// Run `f` with mutable access to a logical database selected by index.
+    ///
+    /// For the selected DB this reuses the already-borrowed `&mut RedisDb`.
+    /// For any other DB it locks the current DB-list route. This is the
+    /// transitional API that lets commands stop naming `global_databases()`
+    /// directly before the owner-owned DB flip.
+    pub fn with_db_index<R>(
+        &mut self,
+        index: u32,
+        f: impl FnOnce(&mut RedisDb) -> R,
+    ) -> RedisResult<R> {
+        self.validate_db_index(index as i64)?;
+        if index == self.selected_db_id() {
+            return Ok(f(self.db.as_mut()));
+        }
+        let handle = self.db_list_route().get(index);
+        let mut guard = lock_db_handle(&handle);
+        Ok(f(&mut guard))
+    }
+
     /// Mutable borrow of the underlying `Client`.
     pub fn client_mut(&mut self) -> &mut Client {
         self.client
@@ -558,6 +695,13 @@ fn publish_keyspace_message(
     }
 }
 
+fn lock_db_handle(db: &Arc<Mutex<RedisDb>>) -> MutexGuard<'_, RedisDb> {
+    match db.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    }
+}
+
 /// Encode a RESP2 `*3 message channel payload` array.
 pub fn encode_pubsub_message_resp2(channel: &RedisString, message: &RedisString) -> Vec<u8> {
     let mut buf = Vec::with_capacity(32 + channel.as_bytes().len() + message.as_bytes().len());
@@ -710,6 +854,27 @@ mod tests {
     }
 
     #[test]
+    fn routed_context_validates_against_db_list_count() {
+        let registry = Arc::new(Mutex::new(PubSubRegistry::new()));
+        let server = Arc::new(RedisServer::default());
+        let mut c = Client::new(1);
+        c.set_args(vec![RedisString::from_bytes(b"SELECT")]);
+        let mut db = RedisDb::new(0);
+        let ctx = CommandContext::with_server(
+            &mut c,
+            &mut db,
+            Arc::clone(&server),
+            Arc::clone(&registry),
+        );
+
+        assert_eq!(ctx.database_count(), global_databases().count());
+        assert!(ctx.validate_db_index(0).is_ok());
+        assert!(ctx
+            .validate_db_index(global_databases().count() as i64)
+            .is_err());
+    }
+
+    #[test]
     fn notify_keyspace_event_publishes_to_both_channel_families() {
         use crate::notify::{NOTIFY_KEYEVENT, NOTIFY_KEYSPACE, NOTIFY_STRING};
         use std::sync::mpsc;
@@ -795,8 +960,8 @@ mod tests {
 //   source:        architect packet (PORTING.md §2 #5 + §4.5 reply mapping)
 //   target_crate:  redis-core
 //   confidence:    high
-//   todos:         1
+//   todos:         2
 //   port_notes:    1
 //   unsafe_blocks: 0
-//   notes:         Reply writer + arg access. RedisServer reference deferred to Phase 3.
+//   notes:         Reply writer, arg access, and transitional DB-list routing.
 // ──────────────────────────────────────────────────────────────────────────

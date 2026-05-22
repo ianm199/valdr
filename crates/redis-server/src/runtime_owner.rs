@@ -9,6 +9,10 @@
 //! existing `global_databases()` handles. RuntimeOwner owns plain-TCP sockets,
 //! client parser state, per-slot foreign payload receivers, and ordinary reply
 //! flushing, but it does not create a second live `Vec<RedisDb>`.
+//!
+//! `CommandContext::with_server` now attaches a DB-list route to the same
+//! global handles, so the owner loop has a selected-DB/cross-DB routing
+//! boundary without changing the live storage owner yet.
 
 use std::collections::{HashSet, VecDeque};
 use std::io::{self, Read, Write};
@@ -1301,9 +1305,10 @@ mod tests {
 //   target_crate:  redis-server
 //   confidence:    high
 //   todos:         0
-//   port_notes:    3
+//   port_notes:    0
 //   unsafe_blocks: 0
 //   notes:         Mio readiness plain-TCP owner loop with stable slot tokens.
-//                  No command fast path or owner-owned live DB migration is
+//                  CommandContext carries a route to the existing DB handles;
+//                  no command fast path or owner-owned live DB migration is
 //                  introduced.
 // --------------------------------------------------------------------------

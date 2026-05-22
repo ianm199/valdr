@@ -68,12 +68,8 @@ pub fn echo_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 
 /// `SELECT index`.
 ///
-/// The pilot server is still single-DB internally, but the TCL test harness
-/// runs every block against database 9. To unblock the canonical suite we
-/// accept any index in the conventional `0..15` range and record it on the
-/// client without actually partitioning the keyspace. Operations from any
-/// numeric DB therefore all hit the same underlying `RedisDb` — a deliberate
-/// shortcut until real multi-DB routing lands.
+/// Records the selected DB index on the client after validating it against
+/// the database route attached to the current `CommandContext`.
 pub fn select_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ctx.arg_count() != 2 {
         return Err(RedisError::wrong_number_of_args(b"select"));
@@ -81,10 +77,8 @@ pub fn select_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     let raw = ctx.arg_owned(1usize)?;
     let idx = parse_i64_strict(raw.as_bytes())
         .ok_or_else(|| RedisError::runtime(b"ERR value is not an integer or out of range"))?;
-    if !(0..=15).contains(&idx) {
-        return Err(RedisError::runtime(b"ERR DB index is out of range"));
-    }
-    ctx.client_mut().db_index = idx as u32;
+    let idx = ctx.validate_db_index(idx)?;
+    ctx.client_mut().db_index = idx;
     ctx.reply_simple_string(b"OK")
 }
 
@@ -1876,8 +1870,8 @@ mod tests {
 //   source:        translated by hand (Wave B — connection commands)
 //   target_crate:  redis-commands
 //   confidence:    high
-//   todos:         0
+//   todos:         1
 //   port_notes:    0
 //   unsafe_blocks: 0
-//   notes:         PING + ECHO. HELLO/AUTH/QUIT remain stubbed in dispatch.
+//   notes:         Connection commands; SELECT validates through CommandContext DB count.
 // ──────────────────────────────────────────────────────────────────────────

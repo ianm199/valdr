@@ -25,7 +25,6 @@
 
 use redis_core::client::Client;
 use redis_core::command_context::CommandContext;
-use redis_core::databases::global_databases;
 use redis_core::db::{
     watched_keys_index_add, watched_keys_index_remove_client, watched_keys_take_dirty,
 };
@@ -236,11 +235,15 @@ fn dispatch_queued_on_db(
     name: &[u8],
     selected_db: u32,
 ) -> RedisResult<()> {
-    if ctx.db().id as u32 == selected_db {
+    if ctx.selected_db_id() == selected_db {
         return dispatch_command_name(ctx, name);
     }
 
-    let db = global_databases().get(selected_db);
+    let route = ctx.db_list_route();
+    let db = match ctx.other_db_handle(selected_db)? {
+        Some(db) => db,
+        None => return dispatch_command_name(ctx, name),
+    };
     let mut guard = match db.lock() {
         Ok(g) => g,
         Err(p) => p.into_inner(),
@@ -248,8 +251,13 @@ fn dispatch_queued_on_db(
     let server = ctx.server_arc();
     match ctx.pubsub.as_ref().cloned() {
         Some(pubsub) => {
-            let mut selected_ctx =
-                CommandContext::with_server(ctx.client_mut(), &mut guard, server, pubsub);
+            let mut selected_ctx = CommandContext::with_server_and_db_route(
+                ctx.client_mut(),
+                &mut guard,
+                route,
+                server,
+                pubsub,
+            );
             dispatch_command_name(&mut selected_ctx, name)
         }
         None => {
@@ -260,13 +268,21 @@ fn dispatch_queued_on_db(
 }
 
 fn wake_blocked_for_db(ctx: &mut CommandContext, db_id: u32, key: &RedisString) {
-    if ctx.db().id as u32 == db_id {
+    if ctx.selected_db_id() == db_id {
         wake_blocked_for_key(ctx.db_mut(), key);
         wake_blocked_zset_for_key(ctx.db_mut(), key);
         return;
     }
 
-    let db = global_databases().get(db_id);
+    let db = match ctx.other_db_handle(db_id) {
+        Ok(Some(db)) => db,
+        Ok(None) => {
+            wake_blocked_for_key(ctx.db_mut(), key);
+            wake_blocked_zset_for_key(ctx.db_mut(), key);
+            return;
+        }
+        Err(_) => return,
+    };
     let mut guard = match db.lock() {
         Ok(g) => g,
         Err(p) => p.into_inner(),
@@ -399,5 +415,5 @@ mod tests {
 //                  watched-keys index in redis-core::db. CLIENT PAUSE during
 //                  EXEC, scripting (EVAL inside MULTI), and proper EXEC ACL
 //                  re-checks are deferred. Queued SELECT commands route later
-//                  EXEC commands through the selected logical DB.
+//                  EXEC commands through CommandContext's DB-list route.
 // ──────────────────────────────────────────────────────────────────────────

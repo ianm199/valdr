@@ -14,10 +14,10 @@
 //! PORT NOTE: C embeds the key inside the robj value (hasembkey). Rust uses only the
 //! HashMap key — the object does not carry a copy of its own key.
 //!
-//! PORT NOTE: `ctx.db()` / `ctx.db_mut()` are expected to be added to `CommandContext`
-//! in Phase 3 when `&mut RedisServer` is wired in. All commands that reach db state are
-//! annotated TODO(port) at those call sites; the name-resolution errors are expected
-//! Phase-A failures.
+//! PORT NOTE: `ctx.db()` / `ctx.db_mut()` now expose the selected DB, and
+//! `CommandContext` carries a DB-list route for staged cross-DB migration.
+//! Commands that still call `global_databases()` directly are transitional
+//! call sites for the runtime-owner-14 routing packet.
 //!
 //! PORT NOTE: C stringmatchlen (util.c) is replaced by the local `glob_match` helper,
 //! which handles `*` and `?` but not `[...]` character classes yet.
@@ -1163,14 +1163,17 @@ pub fn flushdb_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 /// individually to avoid re-acquiring the mutex held by the accept loop.
 pub fn flushall_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     fire_stream_db_flushed_hook();
-    let current_db_id = ctx.client_ref().db_index;
+    let current_db_id = ctx.selected_db_id();
     ctx.db_mut().clear();
-    let count = crate::databases::global_databases().count();
+    let count = ctx.database_count();
     for i in 0..count {
-        if i as u32 == current_db_id {
+        let db_id = i as u32;
+        if db_id == current_db_id {
             continue;
         }
-        let arc = crate::databases::global_databases().get(i as u32);
+        let Some(arc) = ctx.other_db_handle(db_id)? else {
+            continue;
+        };
         let mut guard = match arc.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
@@ -1244,10 +1247,8 @@ pub fn select_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let id_arg = ctx.arg(1)?.clone();
     let id = parse_i64_from_bytes(id_arg.as_bytes())
         .ok_or_else(|| RedisError::runtime(b"ERR value is not an integer or out of range"))?;
-    if id < 0 || id >= crate::databases::global_databases().count() as i64 {
-        return Err(RedisError::runtime(b"ERR DB index is out of range"));
-    }
-    ctx.client_mut().db_index = id as u32;
+    let id = ctx.validate_db_index(id)?;
+    ctx.client_mut().db_index = id;
     ctx.reply_simple_string(b"OK")
 }
 
@@ -1519,11 +1520,9 @@ pub fn move_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         false
     };
 
-    if !(0..=15).contains(&target_db) {
-        return Err(RedisError::runtime(b"ERR invalid DB index"));
-    }
+    let target_db = ctx.validate_db_index(target_db)?;
     let current_db_id = ctx.db().id() as i64;
-    if target_db == current_db_id {
+    if i64::from(target_db) == current_db_id {
         return Err(RedisError::runtime(
             b"ERR source and destination objects are the same",
         ));
@@ -1535,7 +1534,7 @@ pub fn move_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         None => return ctx.reply_integer(0),
         Some(obj) => obj.clone(),
     };
-    let dest_arc = crate::databases::global_databases().get(target_db as u32);
+    let dest_arc = crate::databases::global_databases().get(target_db);
     let mut dest_guard = match dest_arc.lock() {
         Ok(g) => g,
         Err(p) => p.into_inner(),
@@ -1550,7 +1549,7 @@ pub fn move_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     drop(dest_guard);
     ctx.db_mut().sync_delete(&key);
     ctx.notify_keyspace_event(NOTIFY_GENERIC, b"move_from", &key);
-    notify_keyspace_event_global(NOTIFY_GENERIC, b"move_to", &key, target_db as u32);
+    notify_keyspace_event_global(NOTIFY_GENERIC, b"move_to", &key, target_db);
     ctx.reply_integer(1)
 }
 
@@ -1582,10 +1581,7 @@ pub fn copy_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
             let parsed = parse_i64_from_bytes(val_bytes.as_bytes()).ok_or_else(|| {
                 RedisError::runtime(b"ERR value is not an integer or out of range")
             })?;
-            if !(0..=15).contains(&parsed) {
-                return Err(RedisError::runtime(b"ERR DB index is out of range"));
-            }
-            explicit_target_db = Some(parsed);
+            explicit_target_db = Some(i64::from(ctx.validate_db_index(parsed)?));
             j += 2;
         } else {
             return Err(RedisError::runtime(b"ERR syntax error"));
@@ -1695,7 +1691,7 @@ pub fn swapdb_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     }
     let id1_arg = ctx.arg(1)?.clone();
     let id2_arg = ctx.arg(2)?.clone();
-    let db_count = crate::databases::global_databases().count() as i64;
+    let db_count = ctx.database_count() as i64;
     let id1 = parse_i64_from_bytes(id1_arg.as_bytes())
         .ok_or_else(|| RedisError::runtime(b"ERR invalid first DB index"))?;
     let id2 = parse_i64_from_bytes(id2_arg.as_bytes())
@@ -2029,16 +2025,17 @@ mod tests {
 //   source:        src/db.c  (~2850 lines, ~80 functions)
 //   target_crate:  redis-core
 //   confidence:    high
-//   todos:         86
-//   port_notes:    3
+//   todos:         59
+//   port_notes:    6
 //   unsafe_blocks: 0
 //   notes:         Core lookup/add/delete/expiry/set_key/swap translated faithfully.
 //                  Commands stubbed with ctx.db_mut() calls (expected name-resolution
 //                  errors — Phase 3 wires CommandContext to RedisServer).
 //                  kvstore/cluster slots, lazy-free, SCAN cursor, multi-db
-//                  (SELECT/MOVE/COPY/SWAPDB), keyspace notifications, and
-//                  replication propagation all carry TODO(port) and are deferred
-//                  to Phase 3 (keyspace events, blocking) and Phase 4 (kvstore).
+//                  MOVE/COPY/SWAPDB, keyspace notifications, and replication
+//                  propagation all carry TODO(port) and are deferred to Phase 3
+//                  (keyspace events, blocking) and Phase 4 (kvstore). SELECT
+//                  and DB-index validation now read CommandContext DB routing.
 //                  Validator shows only expected E0432/E0282 name-resolution errors;
 //                  zero real syntax errors.
 // ──────────────────────────────────────────────────────────────────────────

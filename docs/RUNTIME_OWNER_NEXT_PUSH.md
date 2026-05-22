@@ -242,13 +242,22 @@ owner-owned live DB migration is in scope.
    - add owner-compatible selected-DB and cross-DB APIs to `CommandContext`;
    - preserve the current live storage model while preparing command handlers
      to stop calling `global_databases()` directly.
+   - implementation update: `CommandContext::with_server` now installs a
+     DB-list route to the existing global DB handles, exposes DB-count and
+     bounded cross-DB helpers, and SELECT / DB-index validation reads that
+     context route instead of hard-coded `0..15` assumptions.
+   - FLUSHALL, queued EXEC selected-DB dispatch, and deferred blocked-key
+     wakes now use the same context DB-list route instead of naming the global
+     DB list directly.
+   - not done in this packet: moving live DB storage into `RuntimeOwner`, or
+     replacing MOVE / COPY / SWAPDB direct cross-DB call sites. Those remain
+     scoped to `runtime-owner-14-cross-db-owner-routing`.
 
 2. `runtime-owner-13-post-db-context-oracle`
    - run full wire-smoke before touching cross-DB command behavior.
 
 3. `runtime-owner-14-cross-db-owner-routing`
-   - remove `global_databases()` from `MOVE`, `COPY`, `SWAPDB`, queued `EXEC`
-     selected-DB routing, and blocked wake paths;
+   - remove `global_databases()` from `MOVE`, `COPY`, and `SWAPDB`;
    - strengthen runtime-owner canaries for SELECT plus cross-DB WATCH and
      SWAPDB behavior.
 
