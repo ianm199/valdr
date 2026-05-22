@@ -44,6 +44,8 @@ use redis_protocol::frame::{encode_resp2, RespFrame};
 use redis_protocol::parse_inline_or_multibulk_into;
 use redis_types::{RedisError, RedisString};
 
+mod runtime_owner;
+
 const DEFAULT_PORT: u16 = 6379;
 const DEFAULT_BIND: &str = "127.0.0.1";
 
@@ -1341,4 +1343,5 @@ fn queue_error_reply(client: &mut Client, err: &RedisError) {
 //   notes:         Blocking thread-per-conn TCP server with a per-conn
 //                  writer thread driven by mpsc. Pub/sub registry is shared
 //                  via Arc<Mutex<>>. SIGINT handler is a no-op stub.
+//                  RuntimeOwner is declared as an inert scaffold only.
 // ──────────────────────────────────────────────────────────────────────────
