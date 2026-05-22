@@ -104,6 +104,37 @@ sampled `__psynch_mutexwait` is no longer the dominant remaining leaf, and the
 next packet should focus on owner-loop readiness/write batching, command
 lookup, parser/integer parsing, allocator traffic, and command hasher work.
 
+## Poller Architecture Update: runtime-owner-7
+
+The runtime-owner-6 evidence approves the next bounded step: replace the std
+nonblocking linear readiness scan with a `mio` readiness poller for plain TCP.
+
+Evidence used:
+
+- `runtime-owner-6-current-oracle` passed full wire-smoke, including the
+  runtime-owner canary corpus, at
+  `harness/evidence/runs/20260522T135522Z-d884855-runner-runtime-owner-6-current-oracle.json`.
+- `runtime-owner-6-current-profile-matrix` reported core-p100 GET 0.78x, SET
+  0.79x, INCR 0.63x, and PING 0.76x at
+  `harness/evidence/runs/20260522T135524Z-5f159bc-runner-runtime-owner-6-current-profile-matrix.json`.
+- `runtime-owner-6-current-hotspots` reported median 0.75x, min 0.59x, max
+  0.86x at
+  `harness/evidence/runs/20260522T135537Z-1edcb59-runner-runtime-owner-6-current-hotspots.json`.
+- `runtime-owner-6-current-calltree` reported median 0.74x, min 0.56x, max
+  0.84x and stored raw `sample` artifacts under
+  `harness/bench/profiles/20260522T140914Z-0022bc7-calltree/`.
+
+The call-tree artifacts show `RuntimeOwner::run_plain_tcp` still paying for
+repeated nonblocking `accept`, idle `yield_now`, socket read/write, parser,
+dispatch lookup, hashing, and allocation. This is enough evidence to answer
+the earlier poller dependency question for the next packet: use `mio`, preserve
+the synchronous owner-loop command model, and keep the product path faithful.
+
+This does not widen the milestone. TLS remains outside the owner loop; the live
+DB list remains behind `global_databases()`; sharding and I/O threads remain
+out of scope; background semantics stay live; no benchmark-only command path is
+allowed.
+
 ## Overnight Strategy
 
 Do the lowest-blast-radius owner-loop step first:

@@ -174,12 +174,67 @@ event-loop port. Its implementation contract is:
 The post-owner-loop oracle is the gate. Benchmark evidence after this packet is
 only meaningful if `runtime-owner-4-post-owner-loop-oracle` passes.
 
+## Mio Readiness Poller Step (locked 2026-05-22)
+
+`runtime-owner-7-poller-architecture` approves
+`runtime-owner-8-mio-poller-owner-loop` as the next automatic implementation
+packet.
+
+Evidence:
+
+- The current wire-smoke oracle passed at
+  `harness/evidence/runs/20260522T135522Z-d884855-runner-runtime-owner-6-current-oracle.json`,
+  including `21-runtime-owner-canaries`.
+- The current profile matrix at
+  `harness/evidence/runs/20260522T135524Z-5f159bc-runner-runtime-owner-6-current-profile-matrix.json`
+  shows the p1 path is no longer the main concern, while core-p100 remains
+  below parity: GET 0.78x, SET 0.79x, INCR 0.63x, PING 0.76x.
+- The current hotspot run at
+  `harness/evidence/runs/20260522T135537Z-1edcb59-runner-runtime-owner-6-current-hotspots.json`
+  reports median 0.75x, min 0.59x, max 0.86x.
+- The current call-tree run at
+  `harness/evidence/runs/20260522T140909Z-0022bc7-runner-runtime-owner-6-current-calltree.json`
+  reports median 0.74x, min 0.56x, max 0.84x and stores raw call-tree
+  artifacts under `harness/bench/profiles/20260522T140914Z-0022bc7-calltree/`.
+  Those artifacts show `RuntimeOwner::run_plain_tcp` spending visible samples
+  in repeated `accept`, `yield_now`, socket read/write, parser, dispatch
+  lookup, hashing, and allocation work.
+
+Decision:
+
+1. **Poller dependency for this packet: `mio`.** Add `mio` as a workspace
+   dependency with `os-poll` and `net` features. `tokio`, `polling`, and raw
+   `epoll`/`kqueue` remain unapproved for this milestone.
+2. **No unsafe budget increase.** The poller packet must use `mio`'s safe
+   readiness API. Raw platform poller code is out of scope.
+3. **Plain TCP only.** TLS stays on the existing thread-per-connection path.
+4. **Command path unchanged.** Every command still goes through
+   `parse_inline_or_multibulk_into`, `CommandContext::with_server`, and
+   `redis_commands::dispatch`.
+5. **Readiness model.** The owner loop registers the listener and each
+   plain-TCP slot with stable tokens. Listener readiness accepts until
+   `WouldBlock`; client readability drains socket reads; writability is
+   registered only while a slot has pending writes and removed when empty.
+6. **Dispatch continuation.** If a slot reaches the per-tick command cap while
+   complete commands remain buffered, the owner loop must reschedule that slot;
+   it must not wait for another socket readiness edge.
+7. **Foreign payloads.** Pub/sub, blocked wakeups, WAIT/replication replies,
+   and similar payloads still enter via the existing per-slot mpsc receivers.
+   The owner drains those receivers after poll returns and on a short bounded
+   timeout, queues bytes into the owner write buffer, and owns socket writes.
+   Foreign threads still may not write owner-loop sockets directly.
+8. **DB storage unchanged.** Continue using `global_databases()` handles as
+   transitional storage. An owner-owned live `Vec<RedisDb>` remains a later
+   architect packet.
+9. **Compatibility gate.** `runtime-owner-8-post-poller-oracle` must pass
+   before any post-poller benchmark evidence is trusted.
+
 ## TODO(human): Long-Term Runtime Decisions
 
-These are deliberately NOT decided by this architect packet. They are dependency
-or policy choices that require human review before the final production
-event-loop shape, but they do not block the std nonblocking plain-TCP
-experiment above.
+These are remaining long-term choices, plus the now-resolved poller dependency
+record for this milestone. Items still marked `TODO(human)` require human
+review before the final production event-loop shape, but they do not block the
+bounded plain-TCP `mio` poller packet above.
 
 ### Overnight owner-loop experiment decision, 2026-05-22
 
@@ -197,15 +252,12 @@ evidence step: prove or disprove that removing the thread-per-client/mutex
 runtime shape moves the current p100 benchmark wall while preserving
 wire-smoke.
 
-- **TODO(human): poller dependency.** Options:
-  (a) `mio` (cross-platform, std-shaped readiness API, mature),
-  (b) `polling` crate (smaller surface),
-  (c) `tokio` (forces async-everywhere; conflicts with `&mut RuntimeOwner` model),
-  (d) raw `epoll`/`kqueue` via `libc` (no new dep, more unsafe code).
-  Recommendation pending: `mio`. Adds one workspace dep, keeps the
-  `&mut RuntimeOwner` synchronous command model intact, mirrors what
-  upstream Valkey expresses with `ae_kqueue.c`/`ae_epoll.c`. Requires
-  architect approval to add to `crates/redis-server/Cargo.toml`.
+- **Resolved for runtime-owner-8: poller dependency.** `mio` is approved for
+  the bounded plain-TCP readiness packet because it keeps the synchronous
+  `&mut RuntimeOwner` command model intact and mirrors the readiness role that
+  upstream Valkey expresses through `ae_kqueue.c`/`ae_epoll.c`. `polling`,
+  `tokio`, and raw `epoll`/`kqueue` remain unapproved without a later
+  architect packet.
 - **TODO(human): TLS migration sequencing.** When does TLS join the owner
   loop? Options: (a) never in this port (keep dual path indefinitely),
   (b) one follow-up packet after the owner loop is default,
@@ -221,10 +273,11 @@ wire-smoke.
   exist. Before any public performance claim, an explicit `runtime-owner-soak`
   runner must land. Not in this unattended run.
 
-Until these are answered, the only runtime-owner implementation work beyond the
-std experiment is its bounded post-evidence polish packet. Adding a real poller
-dependency, moving TLS into the owner loop, adding I/O threads, or making a
-public performance claim still requires a follow-up architect decision.
+After runtime-owner-7, the only automatic runtime-owner implementation work
+beyond the std experiment and its polish packet is the bounded `mio` plain-TCP
+poller. Moving TLS into the owner loop, adding I/O threads, choosing a poller
+other than `mio`, adding raw poller unsafe code, or making a public performance
+claim still requires a follow-up architect decision.
 
 ## Required Gates (every implementation packet in this family)
 

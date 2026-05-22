@@ -1,7 +1,7 @@
 # Runtime Owner Next Push
 
-Status: profile artifact runner added; next packet is
-`runtime-owner-6-current-calltree`.
+Status: `runtime-owner-7-poller-architecture` approves the bounded
+`runtime-owner-8-mio-poller-owner-loop` packet.
 
 This document scopes the next large harness run after the std nonblocking
 `RuntimeOwner` loop. The previous run proved the big architecture move was
@@ -15,10 +15,26 @@ GET p100 0.76x
 hotspot median 0.78x, min 0.58x, max 0.84x
 ```
 
-The remaining gap is no longer the old DB-mutex wall. It is local runtime
-owner-loop work: readiness, writeback, parser/integer parsing, dispatch lookup,
-hashing/allocation, and socket I/O. The next run should use the new harness
-performance loop:
+The current runtime-owner-6 evidence keeps that diagnosis intact:
+
+```text
+runtime-owner-6-current-oracle: wire-smoke pass, including 21-runtime-owner-canaries
+runtime-owner-6-current-profile-matrix: core-p100 GET 0.78x, SET 0.79x, INCR 0.63x, PING 0.76x
+runtime-owner-6-current-hotspots: median 0.75x, min 0.59x, max 0.86x
+runtime-owner-6-current-calltree: median 0.74x, min 0.56x, max 0.84x
+```
+
+The call-tree artifacts at
+`harness/bench/profiles/20260522T140914Z-0022bc7-calltree/` show the std owner
+loop still spending measurable samples in repeated nonblocking `accept`,
+`yield_now`, socket read/write, parser, dispatch lookup, hashing, and allocation
+work. For example, `ping-p100` records `__accept` and `cthread_yield` under
+`RuntimeOwner::run_plain_tcp`, while `get-p100` and `incr-p100` show the
+expected command-path costs after the loop reaches dispatch. The remaining gap
+is no longer the old DB-mutex wall; it is local runtime owner-loop readiness and
+per-command work.
+
+The next run should use the harness performance loop:
 
 ```text
 oracle
@@ -39,23 +55,50 @@ oracle
 The next auto run should attempt a real readiness poller for the plain-TCP
 owner loop.
 
-Recommended direction:
+Approved direction:
 
-- add `mio` as a workspace dependency;
+- add `mio` as a workspace dependency with `os-poll` and `net` features;
 - keep the synchronous `&mut RuntimeOwner` command execution model;
 - keep `redis_commands::dispatch` as the only command path;
-- replace std nonblocking linear scanning with poll readiness;
+- replace std nonblocking linear accept/read/write scans with readiness events;
 - keep TLS on the existing per-connection path;
 - keep the transitional `global_databases()` DB model for this run.
 
 Why this first:
 
 - It is the smallest production-shaped step after the std owner loop.
-- It targets the remaining p100 shape without inventing a second DB model.
+- It targets the repeated accept/yield/readiness shape now visible in call-tree
+  evidence without inventing a second DB model.
 - It is much safer than moving the live DB list into `RuntimeOwner`.
 - If it fails to move numbers, the post-poller call-tree evidence should tell
   us whether the next wall is command execution, allocation/copying, or the
   transitional DB lock.
+
+## Runtime-Owner-8 Contract
+
+`runtime-owner-8-mio-poller-owner-loop` is approved with this contract:
+
+- Plain TCP only. TLS remains on the existing thread-per-connection path.
+- Use `mio::Poll`, `mio::Events`, and stable slot tokens for readiness. Do not
+  add `tokio`, `polling`, raw `epoll`/`kqueue`, or any unsafe poller surface.
+- The listener token accepts until `WouldBlock`; client readable tokens drain
+  socket reads; writable interest is enabled only while the slot write buffer
+  has pending bytes and disabled again when it is empty.
+- Slots that still have complete parsed commands after the per-tick command cap
+  must be rescheduled by the owner loop; they must not wait for another socket
+  readiness edge before dispatch continues.
+- Foreign pub/sub, blocked, WAIT, and replication payloads still enter through
+  per-slot mpsc receivers. The owner loop drains receivers after poll returns
+  and on a short bounded timeout, queues bytes into the slot write buffer, and
+  owns the socket write. Foreign threads must not write owner-loop sockets.
+- Preserve `redis_commands::dispatch` through `CommandContext::with_server`,
+  `parse_inline_or_multibulk_into`, selected DB state, `RESET`, `QUIT`,
+  maxclients, client-info registry updates, connected-client metrics, pub/sub
+  cleanup, replica cleanup, and blocked-key cleanup.
+- Keep the transitional `global_databases()` storage model. Do not create an
+  owner-owned live `Vec<RedisDb>` in this packet.
+- If `cargo check --workspace`, focused tests, or full wire-smoke cannot be
+  restored, stop with `TODO(architect)` instead of weakening compatibility.
 
 ## Explicit non-goals for the next run
 
@@ -100,7 +143,8 @@ The new queue begins after `runtime-owner-5-post-polish-hotspots`.
 
 7. `runtime-owner-8-mio-poller-owner-loop`
    - Bounded implementation packet.
-   - Adds the poller dependency and rewires only plain-TCP readiness/writeback.
+   - Adds the `mio` poller dependency and rewires only plain-TCP
+     readiness/writeback.
 
 8. Post-poller gates:
    - `runtime-owner-8-post-poller-oracle`
@@ -144,12 +188,10 @@ The next selected packet should be `runtime-owner-6-current-oracle`. If the
 first selected packet is anything else, stop and inspect `harness/work-packets.jsonl`
 plus `harness/evidence/ledger.jsonl` before dispatching.
 
-After `runtime-owner-6-profile-artifact-runner`, the next selected packet should
-be `runtime-owner-6-current-calltree`. The direct runner command is:
-
-```bash
-python3 harness/bench/profile-calltree.py --suite big --profile-seconds 8
-```
+After this architecture packet, the next selected packet should be
+`runtime-owner-8-mio-poller-owner-loop`. If the loop selects anything else,
+inspect `harness/work-packets.jsonl` and `harness/evidence/ledger.jsonl` before
+dispatching.
 
 ## Success criteria
 

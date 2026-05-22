@@ -1,0 +1,89 @@
+{
+  "captured_ts": "2026-05-22T14:20:20.698779Z",
+  "gate_results": {
+    "cargo_check_none": {
+      "detail": "no crate target declared",
+      "ok": true
+    },
+    "cargo_check_workspace": {
+      "detail": "cargo check --workspace: clean",
+      "ok": true
+    },
+    "cargo_test_none_RUNTIME_OWNER_NEXT_PUSH": {
+      "detail": "no module target declared",
+      "ok": true
+    },
+    "no_out_of_scope_changes": {
+      "detail": "architect may update declared architecture artifacts",
+      "ok": true
+    },
+    "oracle_reference_only": {
+      "detail": "no harness/oracle/run-smoke.sh present",
+      "ok": true
+    },
+    "target_files_modified": {
+      "detail": "architect touched 6/6 candidate target(s)",
+      "ok": true
+    },
+    "trailer_present": {
+      "detail": "all touched Rust targets carry PORT STATUS trailers",
+      "ok": true
+    }
+  },
+  "harness_context": {
+    "commit": "b6cefaa",
+    "git_dirty": true,
+    "git_status_short": [
+      " M docs/RUNTIME_OWNER_NEXT_PUSH.md",
+      " M docs/RUNTIME_OWNER_OVERNIGHT_ARCHITECTURE.md",
+      " M harness/architecture/decisions/runtime-ownership.md",
+      " M harness/completion.toml",
+      " M harness/evidence/ledger.jsonl",
+      " M harness/runners.toml",
+      " M harness/work-packets.jsonl"
+    ],
+    "run_id": "loop-6e4dc35668d06051",
+    "target_commit": "b6cefaa8e47c231f32e229fcc23febdfb115c3e2",
+    "tree_hash": "891eab6b81cc4aea72abdeb0488bcb7823af18dcb26c7182b3f1f5bc74993cce"
+  },
+  "kind": "agent_transcript",
+  "packet": "runtime-owner-7-poller-architecture",
+  "prompt_hash": "11f977f4828cfa36",
+  "role": "architect",
+  "runtime_metadata": {
+    "approval": "never",
+    "cmd": [
+      "codex",
+      "--ask-for-approval",
+      "never",
+      "exec",
+      "--cd",
+      "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port",
+      "--add-dir",
+      "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port",
+      "--sandbox",
+      "danger-full-access",
+      "--json",
+      "--output-last-message",
+      "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/loop/state/transcripts/20260522T141204Z-codex-architect-runtime-owner-7-poller-architecture.last.txt",
+      "-"
+    ],
+    "finished_at": "2026-05-22T14:20:10Z",
+    "last_message_path": "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/loop/state/transcripts/20260522T141204Z-codex-architect-runtime-owner-7-poller-architecture.last.txt",
+    "model": null,
+    "packet": "runtime-owner-7-poller-architecture",
+    "profile": null,
+    "project": "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port",
+    "prompt_source": "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/loop/state/next-prompt.md",
+    "return_code": 0,
+    "role": "architect",
+    "runtime": "codex",
+    "sandbox": "danger-full-access",
+    "started_at": "2026-05-22T14:12:04Z",
+    "stderr_tail": "2026-05-22T14:17:24.143855Z ERROR codex_core::tools::router: error=apply_patch verification failed: Failed to find expected lines in /Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/architecture/decisions/runtime-ownership.md:\nAdding a real poller\ndependency, moving TLS into the owner loop, adding I/O threads, or making a\npublic performance claim still requires a follow-up architect decision.\n",
+    "transcript_path": "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/loop/state/transcripts/20260522T141204Z-codex-architect-runtime-owner-7-poller-architecture.jsonl"
+  },
+  "transcript_bytes": 784674,
+  "transcript_preview": ".json`.\\n+- `runtime-owner-6-current-profile-matrix` reported core-p100 GET 0.78x, SET\\n+  0.79x, INCR 0.63x, and PING 0.76x at\\n+  `harness/evidence/runs/20260522T135524Z-5f159bc-runner-runtime-owner-6-current-profile-matrix.json`.\\n+- `runtime-owner-6-current-hotspots` reported median 0.75x, min 0.59x, max\\n+  0.86x at\\n+  `harness/evidence/runs/20260522T135537Z-1edcb59-runner-runtime-owner-6-current-hotspots.json`.\\n+- `runtime-owner-6-current-calltree` reported median 0.74x, min 0.56x, max\\n+  0.84x and stored raw `sample` artifacts under\\n+  `harness/bench/profiles/20260522T140914Z-0022bc7-calltree/`.\\n+\\n+The call-tree artifacts show `RuntimeOwner::run_plain_tcp` still paying for\\n+repeated nonblocking `accept`, idle `yield_now`, socket read/write, parser,\\n+dispatch lookup, hashing, and allocation. This is enough evidence to answer\\n+the earlier poller dependency question for the next packet: use `mio`, preserve\\n+the synchronous owner-loop command model, and keep the product path faithful.\\n+\\n+This does not widen the milestone. TLS remains outside the owner loop; the live\\n+DB list remains behind `global_databases()`; sharding and I/O threads remain\\n+out of scope; background semantics stay live; no benchmark-only command path is\\n+allowed.\\n+\\n ## Overnight Strategy\\n \\n Do the lowest-blast-radius owner-loop step first:\\ndiff --git a/harness/architecture/decisions/runtime-ownership.md b/harness/architecture/decisions/runtime-ownership.md\\nindex 81a2bd9..11f349c 100644\\n--- a/harness/architecture/decisions/runtime-ownership.md\\n+++ b/harness/architecture/decisions/runtime-ownership.md\\n@@ -174,12 +174,67 @@ event-loop port. Its implementation contract is:\\n The post-owner-loop oracle is the gate. Benchmark evidence after this packet is\\n only meaningful if `runtime-owner-4-post-owner-loop-oracle` passes.\\n \\n+## Mio Readiness Poller Step (locked 2026-05-22)\\n+\\n+`runtime-owner-7-poller-architecture` approves\\n+`runtime-owner-8-mio-poller-owner-loop` as the next automatic implementation\\n+packet.\\n+\\n+Evidence:\\n+\\n+- The current wire-smoke oracle passed at\\n+  `harness/evidence/runs/20260522T135522Z-d884855-runner-runtime-owner-6-current-oracle.json`,\\n+  including `21-runtime-owner-canaries`.\\n+- The current profile matrix at\\n+  `harness/evidence/runs/20260522T135524Z-5f159bc-runner-runtime-owner-6-current-profile-matrix.json`\\n+  shows the p1 path is no longer the main concern, while core-p100 remains\\n+  below parity: GET 0.78x, SET 0.79x, INCR 0.63x, PING 0.76x.\\n+- The current hotspot run at\\n+  `harness/evidence/runs/20260522T135537Z-1edcb59-runner-runtime-owner-6-current-hotspots.json`\\n+  reports median 0.75x, min 0.59x, max 0.86x.\\n+- The current call-tree run at\\n+  `harness/evidence/runs/20260522T140909Z-0022bc7-runner-runtime-owner-6-current-calltree.json`\\n+  reports median 0.74x, min 0.56x, max 0.84x and stores raw call-tree\\n+  artifacts under `harness/bench/profiles/20260522T140914Z-0022bc7-calltree/`.\\n+  Those artifacts show `RuntimeOwner::run_plain_tcp` spending visible samples\\n+  in repeated `accept`, `yield_now`, socket read/write, parser, dispatch\\n+  lookup, hashing, and allocation work.\\n+\\n+Decision:\\n+\\n+1. **Poller dependency for this packet: `mio`.** Add `mio` as a workspace\\n+   dependency with `os-poll` and `net` features. `tokio`, `polling`, and raw\\n+   `epoll`/`kqueue` remain unapproved for this milestone.\\n+2. **No unsafe budget increase.** The poller packet must use `mio`'s safe\\n+   readiness API. Raw platform poller code is out of scope.\\n+3. **Plain TCP only.** TLS stays on the existing thread-per-connection path.\\n+4. **Command path unchanged.** Every command still goes through\\n+   `parse_inline_or_multibulk_into`, `CommandContext::with_server`, and\\n+   `redis_commands::dispatch`.\\n+5. **Readiness model.** The owner loop registers the listener and each\\n+   plain-TCP slot with stable tokens. Listener readiness accepts until\\n+   `WouldBlock`; client readability drains socket reads; writability is\\n+   registered only while a slot has pending writes and removed when empty.\\n+6. **Dispatch continuation.** If a slot reaches the per-tick command cap while\\n+   complete commands remain buffered, the owner loop must reschedule that slot;\\n+   it must not wait for another socket readiness edge.\\n+7. **Foreign payloads.** Pub/sub, blocked wakeups, WAIT/replication replies,\\n+   and similar payloads still enter via the existing per-slot mpsc receivers.\\n+   The owner drains those receivers after poll returns and on a short bounded\\n+   timeout, queues bytes into the owner write buffer, and owns socket writes.\\n+   Foreign threads still may not write owner-loop sockets directly.\\n+8. **DB storage unchanged.** Continue using `global_databases()` handles as\\n+   transitional storage. An owner-owned live `Vec<RedisDb>` remains a later\\n+   architect packet.\\n+9. **Compatibility gate.** `runtime-owner-8-post-poller-oracle` must pass\\n+   before any post-poller benchmark evidence is trusted.\\n+\\n ## TODO(human): Long-Term Runtime Decisions\\n \\n-These are deliberately NOT decided by this architect packet. They are dependency\\n-or policy choices that require human review before the final production\\n-event-loop shape, but they do not block the std nonblocking plain-TCP\\n-experiment above.\\n+These are remaining long-term choices, plus the now-resolved poller dependency\\n+record for this milestone. Items still marked `TODO(human)` require human\\n+review before the final production event-loop shape, but they do not block the\\n+bounded plain-TCP `mio` poller packet above.\\n \\n ### Overnight owner-loop experiment decision, 2026-05-22\\n \\n@@ -197,15 +252,12 @@ evidence step: prove or disprove that removing the thread-per-client/mutex\\n runtime shape moves the current p100 benchmark wall while preserving\\n wire-smoke.\\n \\n-- **TODO(human): poller dependency.** Options:\\n-  (a) `mio` (cross-platform, std-shaped readiness API, mature),\\n-  (b) `polling` crate (smaller surface),\\n-  (c) `tokio` (forces async-everywhere; conflicts with `&mut RuntimeOwner` model),\\n-  (d) raw `epoll`/`kqueue` via `libc` (no new dep, more unsafe code).\\n-  Recommendation pending: `mio`. Adds one workspace dep, keeps the\\n-  `&mut RuntimeOwner` synchronous command model intact, mirrors what\\n-  upstream Valkey expresses with `ae_kqueue.c`/`ae_epoll.c`. Requires\\n-  architect approval to add to `crates/redis-server/Cargo.toml`.\\n+- **Resolved for runtime-owner-8: poller dependency.** `mio` is approved for\\n\",\"exit_code\":0,\"status\":\"completed\"}}\n{\"type\":\"item.completed\",\"item\":{\"id\":\"item_94\",\"type\":\"agent_message\",\"text\":\"ARCHITECT DECISIONS:\\n- Approve bounded `mio` poller: current wire-smoke is green and runtime-owner-6 call-tree evidence shows repeated `accept`/`yield` under `RuntimeOwner::run_plain_tcp`.\\n- Scope remains plain TCP only: no TLS migration, sharding, owner-owned DB list, unsafe poller code, or command fast paths.\\n- Post-poller evidence remains telemetry until wire-smoke passes.\\n\\nFILES UPDATED:\\n- `docs/RUNTIME_OWNER_NEXT_PUSH.md`: added current evidence and runtime-owner-8 contract.\\n- `docs/RUNTIME_OWNER_OVERNIGHT_ARCHITECTURE.md`: recorded poller architecture update.\\n- `harness/architecture/decisions/runtime-ownership.md`: locked `mio` decision and constraints.\\n- `harness/work-packets.jsonl`: tightened `runtime-owner-8-mio-poller-owner-loop`.\\n- `harness/completion.toml`: added calltree criterion and latest evidence roots.\\n- `harness/runners.toml`: added capabilities to p100 regression runners.\\n\\nPACKETS CREATED OR CHANGED:\\n- `runtime-owner-8-mio-poller-owner-loop`: perf-fixer; implement safe `mio` readiness for plain-TCP owner loop; depends on `runtime-owner-7-poller-architecture`.\\n\\nHUMAN QUESTIONS:\\n- none\\n\\nNEXT SAFE DISPATCH:\\n- `runtime-owner-8-mio-poller-owner-loop`\"}}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":4531546,\"cached_input_tokens\":4318848,\"output_tokens\":22372,\"reasoning_output_tokens\":7162}}\n",
+  "transcript_src": "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/loop/state/transcripts/20260522T141204Z-codex-architect-runtime-owner-7-poller-architecture.jsonl"
+}

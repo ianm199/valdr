@@ -11,7 +11,7 @@ non_goals = [
   "Moving the live DB list fully into RuntimeOwner during the std overnight packet; runtime-owner-4 uses existing global_databases handles as transitional storage",
   "Dropping ACL, MULTI/EXEC, scripting, expiration, pub/sub, blocking, AOF, RDB, or replication semantics for speed",
   "TLS owner-loop migration (locked out-of-scope this milestone by harness/architecture/decisions/runtime-ownership.md; gated on TODO(human) tls_migration_sequencing)",
-  "Adding raw epoll/kqueue/libc readiness code or raising unsafe budgets for a poller; the next run may add mio only after runtime-owner-7-poller-architecture approves the bounded packet",
+  "Adding raw epoll/kqueue/libc readiness code, choosing a poller other than mio, or raising unsafe budgets for a poller; runtime-owner-7 approves mio only for the bounded plain-TCP packet",
   "Moving TLS into the poller owner loop during this milestone",
   "Moving the live DB list fully into RuntimeOwner during this milestone",
   "Any public speed-parity claim sourced from a non-default experimental mode; numbers from this run are alpha telemetry only",
@@ -23,10 +23,12 @@ binding_architecture_artifacts = [
   "harness/architecture/object-vocabulary.tsv",
 ]
 decision_evidence_root = "harness/evidence/runs/20260522T010206Z-15060d7-runner-runtime-owner-baseline-hotspots.json"
+poller_decision_evidence_root = "harness/evidence/runs/20260522T140909Z-0022bc7-runner-runtime-owner-6-current-calltree.json"
 latest_runtime_owner_evidence = [
-  "harness/evidence/runs/20260522T045343Z-803918c-runner-runtime-owner-5-post-polish-oracle.json",
-  "harness/evidence/runs/20260522T045345Z-803918c-runner-runtime-owner-5-post-polish-profile-matrix.json",
-  "harness/evidence/runs/20260522T045355Z-803918c-runner-runtime-owner-5-post-polish-hotspots.json",
+  "harness/evidence/runs/20260522T135522Z-d884855-runner-runtime-owner-6-current-oracle.json",
+  "harness/evidence/runs/20260522T135524Z-5f159bc-runner-runtime-owner-6-current-profile-matrix.json",
+  "harness/evidence/runs/20260522T135537Z-1edcb59-runner-runtime-owner-6-current-hotspots.json",
+  "harness/evidence/runs/20260522T140909Z-0022bc7-runner-runtime-owner-6-current-calltree.json",
 ]
 
 [[criterion]]
@@ -77,6 +79,13 @@ kind = "runner_latest_pass"
 required = true
 packet = "runtime-owner-6-current-hotspots"
 runner = "bench-profile-hotspots"
+
+[[criterion]]
+id = "poller-current-calltree"
+kind = "runner_latest_pass"
+required = true
+packet = "runtime-owner-6-current-calltree"
+runner = "bench-profile-calltree"
 
 [[criterion]]
 id = "poller-final-wire-smoke"
