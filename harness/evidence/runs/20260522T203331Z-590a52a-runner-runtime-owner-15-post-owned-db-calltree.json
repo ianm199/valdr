@@ -1,0 +1,852 @@
+{
+  "captured_ts": "2026-05-22T20:34:21.936821Z",
+  "harness_context": {
+    "claim_level": "telemetry",
+    "commit": "590a52a",
+    "git_dirty": true,
+    "git_status_short": [
+      " M harness/evidence/ledger.jsonl"
+    ],
+    "resources": [
+      "bench-results",
+      "benchmark-host",
+      "port:16379",
+      "port:6379",
+      "profiler"
+    ],
+    "run_id": "loop-905ac0c59f52cdc4",
+    "target_commit": "590a52a501ece8e59c7fbff306c1157b297d4a89",
+    "tree_hash": "d1f805737dcac1852eb3b63a1e114c33eb667473c290e07468a6a9670a73c480"
+  },
+  "kind": "runner_result",
+  "packet": "runtime-owner-15-post-owned-db-calltree",
+  "result": {
+    "artifacts": [
+      {
+        "kind": "summary-tsv",
+        "path": "harness/bench/results/20260522T203331Z-590a52a-calltree.tsv"
+      },
+      {
+        "kind": "runner-result-json",
+        "path": "harness/bench/results/20260522T203331Z-590a52a-calltree.json"
+      },
+      {
+        "kind": "raw-sample-calltree",
+        "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/get-p100/get-p100.sample.txt",
+        "workload": "get-p100"
+      },
+      {
+        "kind": "profiler-log",
+        "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/get-p100/get-p100.sample.stderr.log",
+        "workload": "get-p100"
+      },
+      {
+        "kind": "raw-sample-calltree",
+        "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/set-p100/set-p100.sample.txt",
+        "workload": "set-p100"
+      },
+      {
+        "kind": "profiler-log",
+        "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/set-p100/set-p100.sample.stderr.log",
+        "workload": "set-p100"
+      },
+      {
+        "kind": "raw-sample-calltree",
+        "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/incr-p100/incr-p100.sample.txt",
+        "workload": "incr-p100"
+      },
+      {
+        "kind": "profiler-log",
+        "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/incr-p100/incr-p100.sample.stderr.log",
+        "workload": "incr-p100"
+      },
+      {
+        "kind": "raw-sample-calltree",
+        "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/ping-p100/ping-p100.sample.txt",
+        "workload": "ping-p100"
+      },
+      {
+        "kind": "profiler-log",
+        "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/ping-p100/ping-p100.sample.stderr.log",
+        "workload": "ping-p100"
+      },
+      {
+        "kind": "server-log",
+        "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/get-p100/rust-56431.server.log"
+      },
+      {
+        "kind": "server-log",
+        "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/incr-p100/rust-56763.server.log"
+      },
+      {
+        "kind": "server-log",
+        "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/ping-p100/rust-56948.server.log"
+      },
+      {
+        "kind": "server-log",
+        "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/reference-56349.server.log"
+      },
+      {
+        "kind": "server-log",
+        "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/reference-56526.server.log"
+      },
+      {
+        "kind": "server-log",
+        "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/reference-56690.server.log"
+      },
+      {
+        "kind": "server-log",
+        "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/reference-56876.server.log"
+      },
+      {
+        "kind": "server-log",
+        "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/set-p100/rust-56596.server.log"
+      }
+    ],
+    "claim_level": "telemetry",
+    "evidence": {
+      "commit": "590a52a",
+      "git_status_short": [
+        "M harness/evidence/ledger.jsonl"
+      ],
+      "hardware": {
+        "arch": "arm64",
+        "cpu": "Apple M3 Max",
+        "os": "Darwin 24.3.0"
+      },
+      "harness_context": {
+        "claim_level": "telemetry",
+        "commit": "590a52a",
+        "git_dirty": true,
+        "git_status_short": [
+          " M harness/evidence/ledger.jsonl"
+        ],
+        "resources": [
+          "bench-results",
+          "benchmark-host",
+          "port:16379",
+          "port:6379",
+          "profiler"
+        ],
+        "run_id": "loop-905ac0c59f52cdc4",
+        "target_commit": "590a52a501ece8e59c7fbff306c1157b297d4a89",
+        "tree_hash": "d1f805737dcac1852eb3b63a1e114c33eb667473c290e07468a6a9670a73c480"
+      },
+      "json_command": {
+        "command": [
+          "python3",
+          "harness/bench/profile-calltree.py",
+          "--suite",
+          "big",
+          "--profile-seconds",
+          "8"
+        ],
+        "cwd": ".",
+        "resources": [
+          "benchmark-host",
+          "bench-results",
+          "profiler",
+          "port:6379",
+          "port:16379"
+        ],
+        "stderr": "g.rs:226:5\n    |\n226 |     ctx: &mut CommandContext,\n    |     ^^^ help: if this is intentional, prefix it with an underscore: `_ctx`\n\nwarning: unused variable: `flags`\n   --> crates/redis-commands/src/string.rs:227:5\n    |\n227 |     flags: u32,\n    |     ^^^^^ help: if this is intentional, prefix it with an underscore: `_flags`\n\nwarning: unused variable: `key`\n   --> crates/redis-commands/src/string.rs:228:5\n    |\n228 |     key: &RedisString,\n    |     ^^^ help: if this is intentional, prefix it with an underscore: `_key`\n\nwarning: unused variable: `val`\n   --> crates/redis-commands/src/string.rs:229:5\n    |\n229 |     val: RedisString,\n    |     ^^^ help: if this is intentional, prefix it with an underscore: `_val`\n\nwarning: unused variable: `expire_val`\n   --> crates/redis-commands/src/string.rs:230:5\n    |\n230 |     expire_val: Option<&RedisString>,\n    |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_expire_val`\n\nwarning: unused variable: `unit`\n   --> crates/redis-commands/src/string.rs:231:5\n    |\n231 |     unit: Unit,\n    |     ^^^^ help: if this is intentional, prefix it with an underscore: `_unit`\n\nwarning: unused variable: `ok_reply`\n   --> crates/redis-commands/src/string.rs:232:5\n    |\n232 |     ok_reply: Option<&[u8]>,\n    |     ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_ok_reply`\n\nwarning: unused variable: `abort_reply`\n   --> crates/redis-commands/src/string.rs:233:5\n    |\n233 |     abort_reply: Option<&[u8]>,\n    |     ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_abort_reply`\n\nwarning: unused variable: `comparison`\n   --> crates/redis-commands/src/string.rs:234:5\n    |\n234 |     comparison: Option<&RedisString>,\n    |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_comparison`\n\nwarning: unused variable: `ctx`\n   --> crates/redis-commands/src/string.rs:242:25\n    |\n242 | fn mset_generic_command(ctx: &mut CommandContext, nx: bool) -> Result<(), RedisError> {\n    |                         ^^^ help: if this is intentional, prefix it with an underscore: `_ctx`\n\nwarning: unused variable: `nx`\n   --> crates/redis-commands/src/string.rs:242:51\n    |\n242 | fn mset_generic_command(ctx: &mut CommandContext, nx: bool) -> Result<(), RedisError> {\n    |                                                   ^^ help: if this is intentional, prefix it with an underscore: `_nx`\n\nwarning: unused variable: `ctx`\n   --> crates/redis-commands/src/string.rs:249:22\n    |\n249 | fn incr_decr_command(ctx: &mut CommandContext, incr: i64) -> Result<(), RedisError> {\n    |                      ^^^ help: if this is intentional, prefix it with an underscore: `_ctx`\n\nwarning: unused variable: `incr`\n   --> crates/redis-commands/src/string.rs:249:48\n    |\n249 | fn incr_decr_command(ctx: &mut CommandContext, incr: i64) -> Result<(), RedisError> {\n    |                                                ^^^^ help: if this is intentional, prefix it with an underscore: `_incr`\n\nwarning: unused variable: `ctx`\n   --> crates/redis-commands/src/string.rs:260:35\n    |\n260 | pub(crate) fn get_generic_command(ctx: &mut CommandContext) -> Result<(), RedisError> {\n    |                                   ^^^ help: if this is intentional, prefix it with an underscore: `_ctx`\n\nwarning: function `get_bloom_mut` is never used\n   --> crates/redis-commands/src/bloom.rs:114:4\n    |\n114 | fn get_bloom_mut<'a>(\n    |    ^^^^^^^^^^^^^\n    |\n    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default\n\nwarning: function `build_client_list_line` is never used\n    --> crates/redis-commands/src/connection.rs:1702:4\n     |\n1702 | fn build_client_list_line(ctx: &CommandContext<'_>) -> Vec<u8> {\n     |    ^^^^^^^^^^^^^^^^^^^^^^\n\nwarning: function `query_path` is never used\n   --> crates/redis-commands/src/json.rs:214:4\n    |\n214 | fn query_path<'a>(root: &'a Value, path: &str) -> Result<Vec<&'a Value>, RedisError> {\n    |    ^^^^^^^^^^\n\nwarning: function `require_hll_object` is never used\n   --> crates/redis-commands/src/hyperloglog.rs:960:4\n    |\n960 | fn require_hll_object(obj: &RedisObject) -> Result<&[u8], RedisError> {\n    |    ^^^^^^^^^^^^^^^^^^\n\nwarning: function `dialer_loop` is never used\n  --> crates/redis-commands/src/replica_dialer.rs:74:4\n   |\n74 | fn dialer_loop(\n   |    ^^^^^^^^^^^\n\nwarning: function `run_handshake` is never used\n   --> crates/redis-commands/src/replica_dialer.rs:163:4\n    |\n163 | fn run_handshake(stream: &TcpStream, repl: &ReplicationState, our_port: u16) -> io::Result<i64> {\n    |    ^^^^^^^^^^^^^\n\nwarning: function `parse_psync_reply` is never used\n   --> crates/redis-commands/src/replica_dialer.rs:219:4\n    |\n219 | fn parse_psync_reply(line: &[u8]) -> io::Result<i64> {\n    |    ^^^^^^^^^^^^^^^^^\n\nwarning: function `read_fullresync_rdb` is never used\n   --> crates/redis-commands/src/replica_dialer.rs:247:4\n    |\n247 | fn read_fullresync_rdb(stream: &TcpStream) -> io::Result<Vec<u8>> {\n    |    ^^^^^^^^^^^^^^^^^^^\n\nwarning: function `ingest_rdb` is never used\n   --> crates/redis-commands/src/replica_dialer.rs:269:4\n    |\n269 | fn ingest_rdb(rdb_bytes: &[u8], rdb_dir: &str, db: &Arc<Mutex<RedisDb>>) -> io::Result<()> {\n    |    ^^^^^^^^^^\n\nwarning: function `run_command_apply_loop` is never used\n   --> crates/redis-commands/src/replica_dialer.rs:297:4\n    |\n297 | fn run_command_apply_loop(\n    |    ^^^^^^^^^^^^^^^^^^^^^^\n\nwarning: function `is_getack` is never used\n   --> crates/redis-commands/src/replica_dialer.rs:346:4\n    |\n346 | fn is_getack(argv: &[RedisString]) -> bool {\n    |    ^^^^^^^^^\n\nwarning: function `apply_command_locally` is never used\n   --> crates/redis-commands/src/replica_dialer.rs:357:4\n    |\n357 | fn apply_command_locally(argv: &[RedisString], db: &Arc<Mutex<RedisDb>>, server: &Arc<RedisServer>) {\n    |    ^^^^^^^^^^^^^^^^^^^^^\n\nwarning: function `periodic_ack_loop` is never used\n   --> crates/redis-commands/src/replica_dialer.rs:401:4\n    |\n401 | fn periodic_ack_loop(mut stream: TcpStream, repl: Arc<ReplicationState>) {\n    |    ^^^^^^^^^^^^^^^^^\n\nwarning: function `build_replconf_ack` is never used\n   --> crates/redis-commands/src/replica_dialer.rs:421:4\n    |\n421 | fn build_replconf_ack(offset: i64) -> Vec<u8> {\n    |    ^^^^^^^^^^^^^^^^^^\n\nwarning: function `send_multibulk` is never used\n   --> crates/redis-commands/src/replica_dialer.rs:427:4\n    |\n427 | fn send_multibulk(stream: &TcpStream, parts: &[&[u8]]) -> io::Result<()> {\n    |    ^^^^^^^^^^^^^^\n\nwarning: function `build_multibulk` is never used\n   --> crates/redis-commands/src/replica_dialer.rs:433:4\n    |\n433 | fn build_multibulk(parts: &[&[u8]]) -> Vec<u8> {\n    |    ^^^^^^^^^^^^^^^\n\nwarning: function `read_line` is never used\n   --> crates/redis-commands/src/replica_dialer.rs:449:4\n    |\n449 | fn read_line(stream: &TcpStream) -> io::Result<Vec<u8>> {\n    |    ^^^^^^^^^\n\nwarning: function `read_exact_from_stream` is never used\n   --> crates/redis-commands/src/replica_dialer.rs:470:4\n    |\n470 | fn read_exact_from_stream(stream: &TcpStream, buf: &mut [u8]) -> io::Result<()> {\n    |    ^^^^^^^^^^^^^^^^^^^^^^\n\nwarning: function `lock_db` is never used\n   --> crates/redis-commands/src/replica_dialer.rs:482:4\n    |\n482 | fn lock_db(db: &Arc<Mutex<RedisDb>>) -> io::Result<std::sync::MutexGuard<'_, RedisDb>> {\n    |    ^^^^^^^\n\nwarning: function `stream_write` is never used\n   --> crates/redis-commands/src/replica_dialer.rs:486:4\n    |\n486 | fn stream_write(stream: &TcpStream, data: &[u8]) -> io::Result<()> {\n    |    ^^^^^^^^^^^^\n\nwarning: function `stream_read` is never used\n   --> crates/redis-commands/src/replica_dialer.rs:493:4\n    |\n493 | fn stream_read(stream: &TcpStream, buf: &mut [u8]) -> io::Result<usize> {\n    |    ^^^^^^^^^^^\n\nwarning: function `stream_read_exact` is never used\n   --> crates/redis-commands/src/replica_dialer.rs:500:4\n    |\n500 | fn stream_read_exact(stream: &TcpStream, buf: &mut [u8]) -> io::Result<()> {\n    |    ^^^^^^^^^^^^^^^^^\n\nwarning: function `stream_read_slice` is never used\n   --> crates/redis-commands/src/replica_dialer.rs:507:4\n    |\n507 | fn stream_read_slice(stream: &TcpStream, buf: &mut [u8]) -> io::Result<usize> {\n    |    ^^^^^^^^^^^^^^^^^\n\nwarning: function `check_string_length` is never used\n   --> crates/redis-commands/src/string.rs:120:4\n    |\n120 | fn check_string_length(\n    |    ^^^^^^^^^^^^^^^^^^^\n\nwarning: function `get_expire_milliseconds` is never used\n   --> crates/redis-commands/src/string.rs:132:4\n    |\n132 | fn get_expire_milliseconds(\n    |    ^^^^^^^^^^^^^^^^^^^^^^^\n\nwarning: function `parse_extended_command_args` is never used\n   --> crates/redis-commands/src/string.rs:147:4\n    |\n147 | fn parse_extended_command_args(\n    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\nwarning: function `parse_integer` is never used\n   --> crates/redis-commands/src/string.rs:163:4\n    |\n163 | fn parse_integer(s: &RedisString) -> Result<i64, RedisError> {\n    |    ^^^^^^^^^^^^^\n\nwarning: function `parse_integer_from_object` is never used\n   --> crates/redis-commands/src/string.rs:170:4\n    |\n170 | fn parse_integer_from_object(obj: &RedisObject) -> Result<i64, RedisError> {\n    |    ^^^^^^^^^^^^^^^^^^^^^^^^^\n\nwarning: function `parse_float_from_object` is never used\n   --> crates/redis-commands/src/string.rs:179:4\n    |\n179 | fn parse_float_from_object(obj: &RedisObject) -> Result<f64, RedisError> {\n    |    ^^^^^^^^^^^^^^^^^^^^^^^\n\nwarning: function `object_as_bytes` is never used\n   --> crates/redis-commands/src/string.rs:186:4\n    |\n186 | fn object_as_bytes(obj: &RedisObject) -> Option<&[u8]> {\n    |    ^^^^^^^^^^^^^^^\n\nwarning: function `string_object_len` is never used\n   --> crates/redis-commands/src/string.rs:193:4\n    |\n193 | fn string_object_len(obj: &RedisObject) -> usize {\n    |    ^^^^^^^^^^^^^^^^^\n\nwarning: function `long_long_to_bytes` is never used\n   --> crates/redis-commands/src/string.rs:200:4\n    |\n200 | fn long_long_to_bytes(n: i64) -> Vec<u8> {\n    |    ^^^^^^^^^^^^^^^^^^\n\nwarning: function `double_to_bytes` is never used\n   --> crates/redis-commands/src/string.rs:212:4\n    |\n212 | fn double_to_bytes(v: f64) -> Vec<u8> {\n    |    ^^^^^^^^^^^^^^^\n\nwarning: function `mset_generic_command` is never used\n   --> crates/redis-commands/src/string.rs:242:4\n    |\n242 | fn mset_generic_command(ctx: &mut CommandContext, nx: bool) -> Result<(), RedisError> {\n    |    ^^^^^^^^^^^^^^^^^^^^\n\nwarning: function `incr_decr_command` is never used\n   --> crates/redis-commands/src/string.rs:249:4\n    |\n249 | fn incr_decr_command(ctx: &mut CommandContext, incr: i64) -> Result<(), RedisError> {\n    |    ^^^^^^^^^^^^^^^^^\n\nwarning: function `get_generic_command` is never used\n   --> crates/redis-commands/src/string.rs:260:15\n    |\n260 | pub(crate) fn get_generic_command(ctx: &mut CommandContext) -> Result<(), RedisError> {\n    |               ^^^^^^^^^^^^^^^^^^^\n\nwarning: `redis-commands` (lib) generated 68 warnings (run `cargo fix --lib -p redis-commands` to apply 32 suggestions)\nwarning: function `serve` is never used\n   --> crates/redis-server/src/main.rs:663:4\n    |\n663 | fn serve(\n    |    ^^^^^\n    |\n    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default\n\nwarning: function `serve_tls` is never used\n   --> crates/redis-server/src/main.rs:735:4\n    |\n735 | fn serve_tls(\n    |    ^^^^^^^^^\n\nwarning: function `spawn_writer` is never used\n   --> crates/redis-server/src/main.rs:806:4\n    |\n806 | fn spawn_writer(mut writer: TcpStream, peer: String) -> Sender<Vec<u8>> {\n    |    ^^^^^^^^^^^^\n\nwarning: function `handle_connection` is never used\n   --> crates/redis-server/src/main.rs:826:4\n    |\n826 | fn handle_connection(\n    |    ^^^^^^^^^^^^^^^^^\n\nwarning: function `handle_connection_tls` is never used\n   --> crates/redis-server/src/main.rs:867:4\n    |\n867 | fn handle_connection_tls(\n    |    ^^^^^^^^^^^^^^^^^^^^^\n\nwarning: function `run_client_loop` is never used\n   --> crates/redis-server/src/main.rs:906:4\n    |\n906 | fn run_client_loop(\n    |    ^^^^^^^^^^^^^^^\n\nwarning: function `run_client_loop_tls` is never used\n    --> crates/redis-server/src/main.rs:1037:4\n     |\n1037 | fn run_client_loop_tls(\n     |    ^^^^^^^^^^^^^^^^^^^\n\nwarning: function `process_current_command` is never used\n    --> crates/redis-server/src/main.rs:1185:4\n     |\n1185 | fn process_current_command(\n     |    ^^^^^^^^^^^^^^^^^^^^^^^\n\nwarning: function `process_current_command_with_db` is never used\n    --> crates/redis-server/src/main.rs:1202:4\n     |\n1202 | fn process_current_command_with_db(\n     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\nwarning: function `lock_redis_db` is never used\n    --> crates/redis-server/src/main.rs:1279:4\n     |\n1279 | fn lock_redis_db(db: &Arc<Mutex<RedisDb>>) -> MutexGuard<'_, RedisDb> {\n     |    ^^^^^^^^^^^^^\n\nwarning: function `flush_reply` is never used\n    --> crates/redis-server/src/main.rs:1303:4\n     |\n1303 | fn flush_reply(client: &mut Client, outbound: &Sender<Vec<u8>>) -> bool {\n     |    ^^^^^^^^^^^\n\nwarning: function `flush_reply_fast` is never used\n    --> crates/redis-server/src/main.rs:1317:4\n     |\n1317 | fn flush_reply_fast(client: &mut Client, outbound: &Sender<Vec<u8>>) -> bool {\n     |    ^^^^^^^^^^^^^^^^\n\nwarning: associated items `new` and `as_u32` are never used\n  --> crates/redis-server/src/runtime_owner.rs:47:18\n   |\n46 | impl SlotId {\n   | ----------- associated items in this implementation\n47 |     pub const fn new(raw: u32) -> Self {\n   |                  ^^^\n...\n51 |     pub const fn as_u32(self) -> u32 {\n   |                  ^^^^^^\n\nwarning: methods `is_installed` and `epoch` are never used\n  --> crates/redis-server/src/runtime_owner.rs:90:18\n   |\n75 | impl PollDriverHandle {\n   | --------------------- methods in this implementation\n...\n90 |     pub const fn is_installed(self) -> bool {\n   |                  ^^^^^^^^^^^^\n...\n94 |     pub const fn epoch(self) -> u64 {\n   |                  ^^^^^\n\nwarning: methods `enabled`, `database_count`, `max_pending_events`, and `with_max_pending_events` are never used\n   --> crates/redis-server/src/runtime_owner.rs:119:18\n    |\n110 | impl RuntimeOwnerConfig {\n    | ----------------------- methods in this implementation\n...\n119 |     pub const fn enabled(self) -> bool {\n    |                  ^^^^^^^\n...\n123 |     pub const fn database_count(self) -> u32 {\n    |                  ^^^^^^^^^^^^^^\n...\n127 |     pub const fn max_pending_events(self) -> usize {\n    |                  ^^^^^^^^^^^^^^^^^^\n...\n141 |     pub const fn with_max_pending_events(mut self, max_pending_events: usize) -> Self {\n    |                  ^^^^^^^^^^^^^^^^^^^^^^^\n\nwarning: methods `append` and `take` are never used\n   --> crates/redis-server/src/runtime_owner.rs:168:12\n    |\n160 | impl ClientWriteBuffer {\n    | ---------------------- methods in this implementation\n...\n168 |     pub fn append(&mut self, bytes: &[u8]) {\n    |            ^^^^^^\n...\n197 |     pub fn take(&mut self) -> Vec<u8> {\n    |            ^^^^\n\nwarning: multiple associated items are never used\n   --> crates/redis-server/src/runtime_owner.rs:238:12\n    |\n237 | impl ClientSlot {\n    | --------------- associated items in this implementation\n238 |     pub fn new(id: SlotId, client: Client) -> Self {\n    |            ^^^\n...\n273 |     pub fn client(&self) -> &Client {\n    |            ^^^^^^\n...\n277 |     pub fn client_mut(&mut self) -> &mut Client {\n    |            ^^^^^^^^^^\n...\n285 |     pub fn query_buffer(&self) -> &[u8] {\n    |            ^^^^^^^^^^^^\n...\n289 |     pub fn clear_query_buffer(&mut self) {\n    |            ^^^^^^^^^^^^^^^^^^\n...\n293 |     pub fn stage_argv(&mut self, argv: Vec<RedisString>) {\n    |            ^^^^^^^^^^\n...\n297 |     pub fn argv(&self) -> &[RedisString] {\n    |            ^^^^\n...\n301 |     pub fn queue_write(&mut self, bytes: &[u8]) {\n    |            ^^^^^^^^^^^\n...\n309 |     pub fn pending_write_len(&self) -> usize {\n    |            ^^^^^^^^^^^^^^^^^\n...\n313 |     pub fn take_pending_write(&mut self) -> Vec<u8> {\n    |            ^^^^^^^^^^^^^^^^^^\n...\n325 |     pub fn is_closed(&self) -> bool {\n    |            ^^^^^^^^^\n...\n329 |     pub fn into_client(self) -> Client {\n    |            ^^^^^^^^^^^\n\nwarning: multiple variants are never constructed\n   --> crates/redis-server/src/runtime_owner.rs:337:5\n    |\n336 | pub enum RuntimeEvent {\n    |          ------------ variants in this enum\n337 |     Publish {\n    |     ^^^^^^^\n...\n341 |     WakeBlocked {\n    |     ^^^^^^^^^^^\n...\n345 |     Expire {\n    |     ^^^^^^\n...\n349 |     ReplicaAck {\n    |     ^^^^^^^^^^\n...\n352 |     AofFlushRequested,\n    |     ^^^^^^^^^^^^^^^^^\n353 |     BackgroundChildDone {\n    |     ^^^^^^^^^^^^^^^^^^^\n...\n357 |     ShutdownRequested,\n    |     ^^^^^^^^^^^^^^^^^\n    |\n    = note: `RuntimeEvent` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis\n\nwarning: enum `OwnerCommandResult` is never used\n   --> crates/redis-server/src/runtime_owner.rs:362:10\n    |\n362 | pub enum OwnerCommandResult {\n    |          ^^^^^^^^^^^^^^^^^^\n\nwarning: methods `slot_id` and `is_terminal` are never used\n   --> crates/redis-server/src/runtime_owner.rs:370:12\n    |\n369 | impl OwnerCommandResult {\n    | ----------------------- methods in this implementation\n370 |     pub fn slot_id(self) -> SlotId {\n    |            ^^^^^^^\n...\n379 |     pub fn is_terminal(self) -> bool {\n    |            ^^^^^^^^^^^\n\nwarning: fields `config` and `events` are never read\n   --> crates/redis-server/src/runtime_owner.rs:393:5\n    |\n392 | pub struct RuntimeOwner {\n    |            ------------ fields in this struct\n393 |     config: RuntimeOwnerConfig,\n    |     ^^^^^^\n...\n402 |     events: VecDeque<RuntimeEvent>,\n    |     ^^^^^^\n\nwarning: multiple associated items are never used\n   --> crates/redis-server/src/runtime_owner.rs:406:12\n    |\n405 | impl RuntimeOwner {\n    | ----------------- associated items in this implementation\n406 |     pub fn new(config: RuntimeOwnerConfig) -> Self {\n    |            ^^^\n...\n432 |     pub fn disabled() -> Self {\n    |            ^^^^^^^^\n...\n436 |     pub fn config(&self) -> RuntimeOwnerConfig {\n    |            ^^^^^^\n...\n440 |     pub fn poll_driver(&self) -> PollDriverHandle {\n    |            ^^^^^^^^^^^\n...\n444 |     pub fn database_count(&self) -> usize {\n    |            ^^^^^^^^^^^^^^\n...\n448 |     pub fn dbs(&self) -> &[RedisDb] {\n    |            ^^^\n...\n452 |     pub fn dbs_mut(&mut self) -> &mut [RedisDb] {\n    |            ^^^^^^^\n...\n456 |     pub fn active_slot_count(&self) -> usize {\n    |            ^^^^^^^^^^^^^^^^^\n...\n460 |     pub fn event_queue_len(&self) -> usize {\n    |            ^^^^^^^^^^^^^^^\n...\n464 |     pub fn is_event_queue_empty(&self) -> bool {\n    |            ^^^^^^^^^^^^^^^^^^^^\n...\n468 |     pub fn queue_event(&mut self, event: RuntimeEvent) -> Result<(), RuntimeEvent> {\n    |            ^^^^^^^^^^^\n...\n476 |     pub fn pop_event(&mut self) -> Option<RuntimeEvent> {\n    |            ^^^^^^^^^\n...\n480 |     pub fn insert_client(&mut self, client: Client) -> Option<SlotId> {\n    |            ^^^^^^^^^^^^^\n...\n715 |     pub fn slot(&self, slot_id: SlotId) -> Option<&ClientSlot> {\n    |            ^^^^\n...\n723 |     pub fn queue_write(&mut self, slot_id: SlotId, bytes: &[u8]) -> bool {\n    |            ^^^^^^^^^^^\n...\n732 |     pub fn take_pending_write(&mut self, slot_id: SlotId) -> Option<Vec<u8>> {\n    |            ^^^^^^^^^^^^^^^^^^\n\nwarning: function `create_databases` is never used\n    --> crates/redis-server/src/runtime_owner.rs:1152:4\n     |\n1152 | fn create_databases(count: u32) -> Vec<RedisDb> {\n     |    ^^^^^^^^^^^^^^^^\n\nwarning: `redis-server` (bin \"redis-server\") generated 23 warnings\n    Finished `release` profile [optimized] target(s) in 0.02s\n==> get-p100: reference\n==> get-p100: rust + sample\n==> set-p100: reference\n==> set-p100: rust + sample\n==> incr-p100: reference\n==> incr-p100: rust + sample\n==> ping-p100: reference\n==> ping-p100: rust + sample\n"
+      },
+      "method_detail": "bench-load-with-raw-calltree-profile-artifacts",
+      "method_note": "Profiles attach to the Rust server PID while valkey-benchmark drives the same loopback workload used for performance telemetry. The runner does not change server flags, command dispatch, persistence settings, or benchmark command selection outside its own artifact capture.",
+      "profile_root": "harness/bench/profiles/20260522T203331Z-590a52a-calltree",
+      "profiler": {
+        "name": "sample",
+        "note": "macOS wall-clock stack sampler attached to the Rust server PID",
+        "path": "/usr/bin/sample",
+        "version": ""
+      },
+      "rows": [
+        {
+          "clients": 50,
+          "command": "GET",
+          "payload": 64,
+          "pipeline": 100,
+          "profile": {
+            "artifacts": [
+              {
+                "kind": "raw-sample-calltree",
+                "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/get-p100/get-p100.sample.txt"
+              },
+              {
+                "kind": "profiler-log",
+                "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/get-p100/get-p100.sample.stderr.log"
+              }
+            ],
+            "available": true,
+            "command": [
+              "/usr/bin/sample",
+              "98074",
+              "8",
+              "1",
+              "-mayDie",
+              "-file",
+              "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/bench/profiles/20260522T203331Z-590a52a-calltree/get-p100/get-p100.sample.txt"
+            ],
+            "status": {
+              "returncode": 0,
+              "timed_out": false
+            },
+            "tool": "sample"
+          },
+          "profile_summary": {
+            "artifact_count": 2,
+            "available": true,
+            "bytes": 62772,
+            "sample_top_frames": [
+              {
+                "count": 26288,
+                "frame": "__semwait_signal  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 1667,
+                "frame": "kevent  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 1097,
+                "frame": "mach_absolute_time  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 787,
+                "frame": "mach_msg2_trap  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 415,
+                "frame": "__recvfrom  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 351,
+                "frame": "__sendto  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 347,
+                "frame": "redis_commands::dispatch::lookup_runtime_command::h7bbb4ffaf68fd422  (in redis-server)"
+              },
+              {
+                "count": 334,
+                "frame": "_nanov2_free  (in libsystem_malloc.dylib)"
+              },
+              {
+                "count": 262,
+                "frame": "redis_protocol::request::parse_inline_or_multibulk_into::ha726da75abf42626  (in redis-server)"
+              },
+              {
+                "count": 215,
+                "frame": "redis_protocol::request::read_resp_integer::he43a507cc4251946  (in redis-server)"
+              },
+              {
+                "count": 199,
+                "frame": "nanov2_malloc_type  (in libsystem_malloc.dylib)"
+              },
+              {
+                "count": 175,
+                "frame": "_platform_memmove  (in libsystem_platform.dylib)"
+              }
+            ],
+            "tool": "sample"
+          },
+          "ratio": 0.8493259628005553,
+          "reference": {
+            "avg_ms": 1.22,
+            "clients": 50,
+            "command": "GET",
+            "max_ms": 9.535,
+            "min_ms": 0.136,
+            "p50_ms": 1.167,
+            "p95_ms": 1.391,
+            "p99_ms": 3.247,
+            "payload": 64,
+            "pipeline": 100,
+            "requests": 20000000,
+            "rps": 3734827.25,
+            "target": "reference",
+            "workload": "get-p100"
+          },
+          "reference_p99_ms": 3.247,
+          "reference_rps": 3734827.25,
+          "requests": 20000000,
+          "rust": {
+            "avg_ms": 1.554,
+            "clients": 50,
+            "command": "GET",
+            "max_ms": 6.879,
+            "min_ms": 0.224,
+            "p50_ms": 1.535,
+            "p95_ms": 1.727,
+            "p99_ms": 2.047,
+            "payload": 64,
+            "pipeline": 100,
+            "requests": 20000000,
+            "rps": 3172085.75,
+            "target": "rust",
+            "workload": "get-p100"
+          },
+          "rust_p99_ms": 2.047,
+          "rust_rps": 3172085.75,
+          "workload": "get-p100"
+        },
+        {
+          "clients": 50,
+          "command": "SET",
+          "payload": 64,
+          "pipeline": 100,
+          "profile": {
+            "artifacts": [
+              {
+                "kind": "raw-sample-calltree",
+                "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/set-p100/set-p100.sample.txt"
+              },
+              {
+                "kind": "profiler-log",
+                "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/set-p100/set-p100.sample.stderr.log"
+              }
+            ],
+            "available": true,
+            "command": [
+              "/usr/bin/sample",
+              "98368",
+              "8",
+              "1",
+              "-mayDie",
+              "-file",
+              "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/bench/profiles/20260522T203331Z-590a52a-calltree/set-p100/set-p100.sample.txt"
+            ],
+            "status": {
+              "returncode": 0,
+              "timed_out": false
+            },
+            "tool": "sample"
+          },
+          "profile_summary": {
+            "artifact_count": 2,
+            "available": true,
+            "bytes": 84046,
+            "sample_top_frames": [
+              {
+                "count": 26307,
+                "frame": "__semwait_signal  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 2455,
+                "frame": "kevent  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 882,
+                "frame": "mach_msg2_trap  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 472,
+                "frame": "mach_absolute_time  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 402,
+                "frame": "_nanov2_free  (in libsystem_malloc.dylib)"
+              },
+              {
+                "count": 289,
+                "frame": "redis_commands::dispatch::lookup_runtime_command::h7bbb4ffaf68fd422  (in redis-server)"
+              },
+              {
+                "count": 258,
+                "frame": "__recvfrom  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 243,
+                "frame": "_$LT$std..hash..random..DefaultHasher$u20$as$u20$core..hash..Hasher$GT$::write::h1d555c3dc08887a8  (in redis-server)"
+              },
+              {
+                "count": 208,
+                "frame": "nanov2_malloc_type  (in libsystem_malloc.dylib)"
+              },
+              {
+                "count": 205,
+                "frame": "_free  (in libsystem_malloc.dylib)"
+              },
+              {
+                "count": 178,
+                "frame": "_platform_memmove  (in libsystem_platform.dylib)"
+              },
+              {
+                "count": 175,
+                "frame": "redis_protocol::request::read_resp_integer::he43a507cc4251946  (in redis-server)"
+              }
+            ],
+            "tool": "sample"
+          },
+          "ratio": 0.7977718618391255,
+          "reference": {
+            "avg_ms": 1.969,
+            "clients": 50,
+            "command": "SET",
+            "max_ms": 11.519,
+            "min_ms": 0.264,
+            "p50_ms": 1.951,
+            "p95_ms": 2.223,
+            "p99_ms": 2.415,
+            "payload": 64,
+            "pipeline": 100,
+            "requests": 10000000,
+            "rps": 2366864.0,
+            "target": "reference",
+            "workload": "set-p100"
+          },
+          "reference_p99_ms": 2.415,
+          "reference_rps": 2366864.0,
+          "requests": 10000000,
+          "rust": {
+            "avg_ms": 2.619,
+            "clients": 50,
+            "command": "SET",
+            "max_ms": 3.871,
+            "min_ms": 0.792,
+            "p50_ms": 2.623,
+            "p95_ms": 2.863,
+            "p99_ms": 3.023,
+            "payload": 64,
+            "pipeline": 100,
+            "requests": 10000000,
+            "rps": 1888217.5,
+            "target": "rust",
+            "workload": "set-p100"
+          },
+          "rust_p99_ms": 3.023,
+          "rust_rps": 1888217.5,
+          "workload": "set-p100"
+        },
+        {
+          "clients": 50,
+          "command": "INCR",
+          "payload": 64,
+          "pipeline": 100,
+          "profile": {
+            "artifacts": [
+              {
+                "kind": "raw-sample-calltree",
+                "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/incr-p100/incr-p100.sample.txt"
+              },
+              {
+                "kind": "profiler-log",
+                "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/incr-p100/incr-p100.sample.stderr.log"
+              }
+            ],
+            "available": true,
+            "command": [
+              "/usr/bin/sample",
+              "98768",
+              "8",
+              "1",
+              "-mayDie",
+              "-file",
+              "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/bench/profiles/20260522T203331Z-590a52a-calltree/incr-p100/incr-p100.sample.txt"
+            ],
+            "status": {
+              "returncode": 0,
+              "timed_out": false
+            },
+            "tool": "sample"
+          },
+          "profile_summary": {
+            "artifact_count": 2,
+            "available": true,
+            "bytes": 94288,
+            "sample_top_frames": [
+              {
+                "count": 26787,
+                "frame": "__semwait_signal  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 2850,
+                "frame": "kevent  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 444,
+                "frame": "mach_msg2_trap  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 440,
+                "frame": "mach_absolute_time  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 313,
+                "frame": "_nanov2_free  (in libsystem_malloc.dylib)"
+              },
+              {
+                "count": 259,
+                "frame": "_$LT$std..hash..random..DefaultHasher$u20$as$u20$core..hash..Hasher$GT$::write::h1d555c3dc08887a8  (in redis-server)"
+              },
+              {
+                "count": 222,
+                "frame": "__recvfrom  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 220,
+                "frame": "core::hash::BuildHasher::hash_one::h794138a86e00798c  (in redis-server)"
+              },
+              {
+                "count": 188,
+                "frame": "_platform_memmove  (in libsystem_platform.dylib)"
+              },
+              {
+                "count": 186,
+                "frame": "__sendto  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 140,
+                "frame": "redis_protocol::request::parse_inline_or_multibulk_into::ha726da75abf42626  (in redis-server)"
+              },
+              {
+                "count": 133,
+                "frame": "nanov2_malloc_type  (in libsystem_malloc.dylib)"
+              }
+            ],
+            "tool": "sample"
+          },
+          "ratio": 0.650206583240746,
+          "reference": {
+            "avg_ms": 1.448,
+            "clients": 50,
+            "command": "INCR",
+            "max_ms": 8.191,
+            "min_ms": 0.144,
+            "p50_ms": 1.431,
+            "p95_ms": 1.671,
+            "p99_ms": 2.207,
+            "payload": 64,
+            "pipeline": 100,
+            "requests": 10000000,
+            "rps": 3177629.5,
+            "target": "reference",
+            "workload": "incr-p100"
+          },
+          "reference_p99_ms": 2.207,
+          "reference_rps": 3177629.5,
+          "requests": 10000000,
+          "rust": {
+            "avg_ms": 2.393,
+            "clients": 50,
+            "command": "INCR",
+            "max_ms": 3.391,
+            "min_ms": 0.848,
+            "p50_ms": 2.399,
+            "p95_ms": 2.607,
+            "p99_ms": 2.687,
+            "payload": 64,
+            "pipeline": 100,
+            "requests": 10000000,
+            "rps": 2066115.62,
+            "target": "rust",
+            "workload": "incr-p100"
+          },
+          "rust_p99_ms": 2.687,
+          "rust_rps": 2066115.62,
+          "workload": "incr-p100"
+        },
+        {
+          "clients": 50,
+          "command": "PING_MBULK",
+          "payload": 64,
+          "pipeline": 100,
+          "profile": {
+            "artifacts": [
+              {
+                "kind": "raw-sample-calltree",
+                "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/ping-p100/ping-p100.sample.txt"
+              },
+              {
+                "kind": "profiler-log",
+                "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/ping-p100/ping-p100.sample.stderr.log"
+              }
+            ],
+            "available": true,
+            "command": [
+              "/usr/bin/sample",
+              "99038",
+              "8",
+              "1",
+              "-mayDie",
+              "-file",
+              "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/bench/profiles/20260522T203331Z-590a52a-calltree/ping-p100/ping-p100.sample.txt"
+            ],
+            "status": {
+              "returncode": 0,
+              "timed_out": false
+            },
+            "tool": "sample"
+          },
+          "profile_summary": {
+            "artifact_count": 2,
+            "available": true,
+            "bytes": 62830,
+            "sample_top_frames": [
+              {
+                "count": 24952,
+                "frame": "__semwait_signal  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 2174,
+                "frame": "kevent  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 1367,
+                "frame": "mach_msg2_trap  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 1305,
+                "frame": "mach_absolute_time  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 845,
+                "frame": "clock_get_time  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 376,
+                "frame": "__recvfrom  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 352,
+                "frame": "redis_commands::dispatch::lookup_runtime_command::h7bbb4ffaf68fd422  (in redis-server)"
+              },
+              {
+                "count": 318,
+                "frame": "__sendto  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 281,
+                "frame": "_platform_memmove  (in libsystem_platform.dylib)"
+              },
+              {
+                "count": 262,
+                "frame": "_nanov2_free  (in libsystem_malloc.dylib)"
+              },
+              {
+                "count": 179,
+                "frame": "nanov2_malloc_type  (in libsystem_malloc.dylib)"
+              },
+              {
+                "count": 173,
+                "frame": "redis_commands::dispatch::dispatch_command_name::h5d0125bdfdf9f92c  (in redis-server)"
+              }
+            ],
+            "tool": "sample"
+          },
+          "ratio": 0.7209668936743563,
+          "reference": {
+            "avg_ms": 0.897,
+            "clients": 50,
+            "command": "PING_MBULK",
+            "max_ms": 2.159,
+            "min_ms": 0.208,
+            "p50_ms": 0.887,
+            "p95_ms": 1.111,
+            "p99_ms": 1.207,
+            "payload": 64,
+            "pipeline": 100,
+            "requests": 20000000,
+            "rps": 4859086.5,
+            "target": "reference",
+            "workload": "ping-p100"
+          },
+          "reference_p99_ms": 1.207,
+          "reference_rps": 4859086.5,
+          "requests": 20000000,
+          "rust": {
+            "avg_ms": 1.402,
+            "clients": 50,
+            "command": "PING_MBULK",
+            "max_ms": 10.623,
+            "min_ms": 0.256,
+            "p50_ms": 1.375,
+            "p95_ms": 1.567,
+            "p99_ms": 1.983,
+            "payload": 64,
+            "pipeline": 100,
+            "requests": 20000000,
+            "rps": 3503240.5,
+            "target": "rust",
+            "workload": "ping-p100"
+          },
+          "rust_p99_ms": 1.983,
+          "rust_rps": 3503240.5,
+          "workload": "ping-p100"
+        }
+      ],
+      "suite": "big",
+      "tool_metadata": {
+        "cargo_flamegraph": {
+          "available": false,
+          "path": "/Users/ianmclaughlin/.cargo/bin/cargo",
+          "version": ""
+        },
+        "perf": {
+          "available": false,
+          "path": "",
+          "version": ""
+        },
+        "platform": "Darwin",
+        "sample": {
+          "available": true,
+          "path": "/usr/bin/sample"
+        }
+      },
+      "workloads": [
+        {
+          "clients": 50,
+          "command": "get",
+          "name": "get-p100",
+          "payload": 64,
+          "pipeline": 100,
+          "requests": 20000000
+        },
+        {
+          "clients": 50,
+          "command": "set",
+          "name": "set-p100",
+          "payload": 64,
+          "pipeline": 100,
+          "requests": 10000000
+        },
+        {
+          "clients": 50,
+          "command": "incr",
+          "name": "incr-p100",
+          "payload": 64,
+          "pipeline": 100,
+          "requests": 10000000
+        },
+        {
+          "clients": 50,
+          "command": "ping_mbulk",
+          "name": "ping-p100",
+          "payload": 64,
+          "pipeline": 100,
+          "requests": 20000000
+        }
+      ]
+    },
+    "measurements": [
+      {
+        "metric": "throughput_req_s",
+        "target": "reference",
+        "unit": "req/s",
+        "value": 3734827.25,
+        "workload": "get-p100"
+      },
+      {
+        "metric": "throughput_req_s",
+        "target": "rust",
+        "unit": "req/s",
+        "value": 3172085.75,
+        "workload": "get-p100"
+      },
+      {
+        "metric": "throughput_ratio",
+        "target": "rust-vs-reference",
+        "unit": "ratio",
+        "value": 0.8493259628005553,
+        "workload": "get-p100"
+      },
+      {
+        "metric": "profile_artifact_bytes",
+        "target": "rust",
+        "unit": "bytes",
+        "value": 62772,
+        "workload": "get-p100"
+      },
+      {
+        "metric": "throughput_req_s",
+        "target": "reference",
+        "unit": "req/s",
+        "value": 2366864.0,
+        "workload": "set-p100"
+      },
+      {
+        "metric": "throughput_req_s",
+        "target": "rust",
+        "unit": "req/s",
+        "value": 1888217.5,
+        "workload": "set-p100"
+      },
+      {
+        "metric": "throughput_ratio",
+        "target": "rust-vs-reference",
+        "unit": "ratio",
+        "value": 0.7977718618391255,
+        "workload": "set-p100"
+      },
+      {
+        "metric": "profile_artifact_bytes",
+        "target": "rust",
+        "unit": "bytes",
+        "value": 84046,
+        "workload": "set-p100"
+      },
+      {
+        "metric": "throughput_req_s",
+        "target": "reference",
+        "unit": "req/s",
+        "value": 3177629.5,
+        "workload": "incr-p100"
+      },
+      {
+        "metric": "throughput_req_s",
+        "target": "rust",
+        "unit": "req/s",
+        "value": 2066115.62,
+        "workload": "incr-p100"
+      },
+      {
+        "metric": "throughput_ratio",
+        "target": "rust-vs-reference",
+        "unit": "ratio",
+        "value": 0.650206583240746,
+        "workload": "incr-p100"
+      },
+      {
+        "metric": "profile_artifact_bytes",
+        "target": "rust",
+        "unit": "bytes",
+        "value": 94288,
+        "workload": "incr-p100"
+      },
+      {
+        "metric": "throughput_req_s",
+        "target": "reference",
+        "unit": "req/s",
+        "value": 4859086.5,
+        "workload": "ping-p100"
+      },
+      {
+        "metric": "throughput_req_s",
+        "target": "rust",
+        "unit": "req/s",
+        "value": 3503240.5,
+        "workload": "ping-p100"
+      },
+      {
+        "metric": "throughput_ratio",
+        "target": "rust-vs-reference",
+        "unit": "ratio",
+        "value": 0.7209668936743563,
+        "workload": "ping-p100"
+      },
+      {
+        "metric": "profile_artifact_bytes",
+        "target": "rust",
+        "unit": "bytes",
+        "value": 62830,
+        "workload": "ping-p100"
+      }
+    ],
+    "method": "bench-load",
+    "runner_id": "bench-profile-calltree",
+    "schema_version": 1,
+    "status": "pass",
+    "summary": "profile calltree: sample, median 0.80x, min 0.65x, max 0.85x; artifacts 16",
+    "surface": "performance"
+  },
+  "role": "runner"
+}
