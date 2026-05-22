@@ -274,6 +274,26 @@ Final post-polish completion evidence:
   `harness/bench/results/20260522T045355Z-803918c-hotspots.json`: long p100
   hotspot median 0.78x, min 0.58x, max 0.84x.
 
+Final post-polish profile matrix:
+
+| Profile | Command | upstream Valkey (req/s) | valkey-rs (req/s) | ratio | upstream p99 (ms) | valkey-rs p99 (ms) |
+|---|---|---:|---:|---:|---:|---:|
+| core-p1 | PING_MBULK | 186,567 | 213,675 | **1.15×** | 0.703 | 0.687 |
+| core-p1 | SET | 179,211 | 230,415 | **1.29×** | 0.415 | 0.263 |
+| core-p1 | GET | 207,469 | 224,215 | **1.08×** | 0.351 | 0.247 |
+| core-p1 | INCR | 141,643 | 230,415 | **1.63×** | 0.799 | 0.287 |
+| core-p16 | PING_MBULK | 2,985,074 | 2,173,913 | 0.73× | 0.455 | 0.551 |
+| core-p16 | SET | 1,801,802 | 1,438,849 | 0.80× | 0.623 | 0.847 |
+| core-p16 | GET | 2,298,851 | 1,680,672 | 0.73× | 0.431 | 0.695 |
+| core-p16 | INCR | 2,173,913 | 1,459,854 | 0.67× | 0.567 | 0.607 |
+| core-p100 | PING_MBULK | 5,405,406 | 3,921,569 | 0.73× | 1.023 | 1.959 |
+| core-p100 | SET | 2,531,646 | 2,000,000 | 0.79× | 2.159 | 2.655 |
+| core-p100 | GET | 3,389,830 | 2,564,103 | 0.76× | 1.751 | 3.567 |
+| core-p100 | INCR | 3,076,923 | 2,040,816 | 0.66× | 4.319 | 3.295 |
+| range-heavy-p16 | LPUSH | 1,666,667 | 1,449,275 | 0.87× | 0.639 | 0.863 |
+| range-heavy-p16 | LRANGE_100 | 186,567 | 140,845 | 0.75× | 5.151 | 6.463 |
+| range-heavy-p16 | LRANGE_300 | 39,793 | 46,447 | **1.17×** | 13.567 | 18.559 |
+
 The current hotspot read is different from the pre-owner baseline. DB mutex
 waiting is no longer the dominant sampled leaf. The remaining long-run p100
 gap shows up around the owner loop, dispatch lookup, RESP integer parsing,
