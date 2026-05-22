@@ -103,145 +103,177 @@
       "role": "perf-fixer",
       "summary": "gates_passed",
       "ts": "2026-05-22T17:04:15.030871Z"
+    },
+    {
+      "commit": "aa03ead",
+      "commit_subject": "bench: align performance charts by code commit",
+      "packet": "runtime-owner-9-owner-owned-db-architecture",
+      "role": "architect",
+      "summary": "gates_passed",
+      "ts": "2026-05-22T18:53:51.441056Z"
+    },
+    {
+      "commit": "fb52502",
+      "commit_subject": "architect: complete runtime-owner-9-owner-owned-db-architecture",
+      "packet": "runtime-owner-13-db-context-router",
+      "role": "translator",
+      "summary": "gates_passed",
+      "ts": "2026-05-22T19:29:11.655671Z"
+    },
+    {
+      "commit": "f77259d",
+      "commit_subject": "runner: complete runtime-owner-13-post-db-context-oracle",
+      "packet": "runtime-owner-14-cross-db-owner-routing",
+      "role": "translator",
+      "summary": "gates_passed",
+      "ts": "2026-05-22T19:53:12.998505Z"
+    },
+    {
+      "commit": "80747d8",
+      "commit_subject": "runner: complete runtime-owner-14-post-cross-db-oracle",
+      "packet": "runtime-owner-15-owner-owned-db-loop",
+      "role": "translator",
+      "summary": "gates_passed",
+      "ts": "2026-05-22T20:17:41Z"
     }
   ],
-  "generated_at": "2026-05-22T18:10:39+00:00",
+  "generated_at": "2026-05-22T20:44:34+00:00",
   "latest": {
     "calltree": {
       "artifacts": [
         {
           "kind": "summary-tsv",
-          "path": "harness/bench/results/20260522T170812Z-2813e87-calltree.tsv",
-          "url": "../../bench/results/20260522T170812Z-2813e87-calltree.tsv"
+          "path": "harness/bench/results/20260522T203331Z-590a52a-calltree.tsv",
+          "url": "../../bench/results/20260522T203331Z-590a52a-calltree.tsv"
         },
         {
           "kind": "runner-result-json",
-          "path": "harness/bench/results/20260522T170812Z-2813e87-calltree.json",
-          "url": "../../bench/results/20260522T170812Z-2813e87-calltree.json"
+          "path": "harness/bench/results/20260522T203331Z-590a52a-calltree.json",
+          "url": "../../bench/results/20260522T203331Z-590a52a-calltree.json"
         },
         {
           "kind": "raw-sample-calltree",
-          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/get-p100/get-p100.sample.txt",
-          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/get-p100/get-p100.sample.txt",
+          "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/get-p100/get-p100.sample.txt",
+          "url": "../../bench/profiles/20260522T203331Z-590a52a-calltree/get-p100/get-p100.sample.txt",
           "workload": "get-p100"
         },
         {
           "kind": "profiler-log",
-          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/get-p100/get-p100.sample.stderr.log",
-          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/get-p100/get-p100.sample.stderr.log",
+          "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/get-p100/get-p100.sample.stderr.log",
+          "url": "../../bench/profiles/20260522T203331Z-590a52a-calltree/get-p100/get-p100.sample.stderr.log",
           "workload": "get-p100"
         },
         {
           "kind": "raw-sample-calltree",
-          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/set-p100/set-p100.sample.txt",
-          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/set-p100/set-p100.sample.txt",
+          "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/set-p100/set-p100.sample.txt",
+          "url": "../../bench/profiles/20260522T203331Z-590a52a-calltree/set-p100/set-p100.sample.txt",
           "workload": "set-p100"
         },
         {
           "kind": "profiler-log",
-          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/set-p100/set-p100.sample.stderr.log",
-          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/set-p100/set-p100.sample.stderr.log",
+          "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/set-p100/set-p100.sample.stderr.log",
+          "url": "../../bench/profiles/20260522T203331Z-590a52a-calltree/set-p100/set-p100.sample.stderr.log",
           "workload": "set-p100"
         },
         {
           "kind": "raw-sample-calltree",
-          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/incr-p100/incr-p100.sample.txt",
-          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/incr-p100/incr-p100.sample.txt",
+          "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/incr-p100/incr-p100.sample.txt",
+          "url": "../../bench/profiles/20260522T203331Z-590a52a-calltree/incr-p100/incr-p100.sample.txt",
           "workload": "incr-p100"
         },
         {
           "kind": "profiler-log",
-          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/incr-p100/incr-p100.sample.stderr.log",
-          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/incr-p100/incr-p100.sample.stderr.log",
+          "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/incr-p100/incr-p100.sample.stderr.log",
+          "url": "../../bench/profiles/20260522T203331Z-590a52a-calltree/incr-p100/incr-p100.sample.stderr.log",
           "workload": "incr-p100"
         },
         {
           "kind": "raw-sample-calltree",
-          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/ping-p100/ping-p100.sample.txt",
-          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/ping-p100/ping-p100.sample.txt",
+          "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/ping-p100/ping-p100.sample.txt",
+          "url": "../../bench/profiles/20260522T203331Z-590a52a-calltree/ping-p100/ping-p100.sample.txt",
           "workload": "ping-p100"
         },
         {
           "kind": "profiler-log",
-          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/ping-p100/ping-p100.sample.stderr.log",
-          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/ping-p100/ping-p100.sample.stderr.log",
+          "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/ping-p100/ping-p100.sample.stderr.log",
+          "url": "../../bench/profiles/20260522T203331Z-590a52a-calltree/ping-p100/ping-p100.sample.stderr.log",
           "workload": "ping-p100"
         },
         {
           "kind": "server-log",
-          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/get-p100/rust-51821.server.log",
-          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/get-p100/rust-51821.server.log"
+          "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/get-p100/rust-56431.server.log",
+          "url": "../../bench/profiles/20260522T203331Z-590a52a-calltree/get-p100/rust-56431.server.log"
         },
         {
           "kind": "server-log",
-          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/incr-p100/rust-52062.server.log",
-          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/incr-p100/rust-52062.server.log"
+          "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/incr-p100/rust-56763.server.log",
+          "url": "../../bench/profiles/20260522T203331Z-590a52a-calltree/incr-p100/rust-56763.server.log"
         },
         {
           "kind": "server-log",
-          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/ping-p100/rust-52184.server.log",
-          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/ping-p100/rust-52184.server.log"
+          "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/ping-p100/rust-56948.server.log",
+          "url": "../../bench/profiles/20260522T203331Z-590a52a-calltree/ping-p100/rust-56948.server.log"
         },
         {
           "kind": "server-log",
-          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/reference-51761.server.log",
-          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/reference-51761.server.log"
+          "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/reference-56349.server.log",
+          "url": "../../bench/profiles/20260522T203331Z-590a52a-calltree/reference-56349.server.log"
         },
         {
           "kind": "server-log",
-          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/reference-51878.server.log",
-          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/reference-51878.server.log"
+          "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/reference-56526.server.log",
+          "url": "../../bench/profiles/20260522T203331Z-590a52a-calltree/reference-56526.server.log"
         },
         {
           "kind": "server-log",
-          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/reference-52007.server.log",
-          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/reference-52007.server.log"
+          "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/reference-56690.server.log",
+          "url": "../../bench/profiles/20260522T203331Z-590a52a-calltree/reference-56690.server.log"
         },
         {
           "kind": "server-log",
-          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/reference-52116.server.log",
-          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/reference-52116.server.log"
+          "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/reference-56876.server.log",
+          "url": "../../bench/profiles/20260522T203331Z-590a52a-calltree/reference-56876.server.log"
         },
         {
           "kind": "server-log",
-          "path": "harness/bench/profiles/20260522T170812Z-2813e87-calltree/set-p100/rust-51943.server.log",
-          "url": "../../bench/profiles/20260522T170812Z-2813e87-calltree/set-p100/rust-51943.server.log"
+          "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/set-p100/rust-56596.server.log",
+          "url": "../../bench/profiles/20260522T203331Z-590a52a-calltree/set-p100/rust-56596.server.log"
         }
       ],
-      "commit": "8857714",
-      "commit_subject": "perf-fixer: complete runtime-owner-12-watch-dirty-fastpath",
-      "commit_url": "https://github.com/ianm199/valkey-rs/commit/8857714",
-      "evidence": "harness/evidence/runs/20260522T170812Z-2813e87-runner-runtime-owner-12-post-watch-calltree.json",
-      "evidence_url": "../../evidence/runs/20260522T170812Z-2813e87-runner-runtime-owner-12-post-watch-calltree.json",
+      "commit": "93db315",
+      "commit_subject": "runtime-owner: move keyspace into owner loop",
+      "commit_url": "https://github.com/ianm199/valkey-rs/commit/93db315",
+      "evidence": "harness/evidence/runs/20260522T203331Z-590a52a-runner-runtime-owner-15-post-owned-db-calltree.json",
+      "evidence_url": "../../evidence/runs/20260522T203331Z-590a52a-runner-runtime-owner-15-post-owned-db-calltree.json",
       "get_p1": null,
-      "get_p100": 0.8130462440913714,
-      "incr_p100": 0.5836158200844632,
-      "max": 0.8130462440913714,
-      "median": 0.7111764448748289,
-      "min": 0.5836158200844632,
+      "get_p100": 0.8493259628005553,
+      "incr_p100": 0.650206583240746,
+      "max": 0.8493259628005553,
+      "median": 0.759369377756741,
+      "min": 0.650206583240746,
       "p99_ms": {
-        "get-p100": 2.223,
-        "incr-p100": 3.087,
-        "ping-p100": 1.639,
-        "set-p100": 9.151
+        "get-p100": 2.047,
+        "incr-p100": 2.687,
+        "ping-p100": 1.983,
+        "set-p100": 3.023
       },
-      "packet": "runtime-owner-12-post-watch-calltree",
-      "ping_p100": 0.7308162911414329,
+      "packet": "runtime-owner-15-post-owned-db-calltree",
+      "ping_p100": 0.7209668936743563,
       "ratios": {
-        "get-p100": 0.8130462440913714,
-        "incr-p100": 0.5836158200844632,
-        "ping-p100": 0.7308162911414329,
-        "set-p100": 0.6915365986082249
+        "get-p100": 0.8493259628005553,
+        "incr-p100": 0.650206583240746,
+        "ping-p100": 0.7209668936743563,
+        "set-p100": 0.7977718618391255
       },
-      "run_commit": "2813e87",
-      "run_commit_subject": "runner: complete runtime-owner-12-post-watch-profile-matrix",
-      "run_commit_url": "https://github.com/ianm199/valkey-rs/commit/2813e87",
+      "run_commit": "590a52a",
+      "run_commit_subject": "runner: complete runtime-owner-15-post-owned-db-profile-matrix",
+      "run_commit_url": "https://github.com/ianm199/valkey-rs/commit/590a52a",
       "runner": "bench-profile-calltree",
       "runner_kind": "calltree",
       "runner_label": "Calltree",
-      "set_p100": 0.6915365986082249,
-      "summary": "profile calltree: sample, median 0.73x, min 0.58x, max 0.81x; artifacts 16",
-      "ts": "2026-05-22T13:04:15-04:00"
+      "set_p100": 0.7977718618391255,
+      "summary": "profile calltree: sample, median 0.80x, min 0.65x, max 0.85x; artifacts 16",
+      "ts": "2026-05-22T16:32:33-04:00"
     },
     "hotspots": {
       "artifacts": [
@@ -292,69 +324,69 @@
     "profile-matrix": {
       "artifacts": [
         {
-          "path": "harness/bench/results/20260522T170800Z-f8f5124-profile-matrix.tsv",
-          "url": "../../bench/results/20260522T170800Z-f8f5124-profile-matrix.tsv"
+          "path": "harness/bench/results/20260522T203256Z-93db315-profile-matrix.tsv",
+          "url": "../../bench/results/20260522T203256Z-93db315-profile-matrix.tsv"
         }
       ],
-      "commit": "8857714",
-      "commit_subject": "perf-fixer: complete runtime-owner-12-watch-dirty-fastpath",
-      "commit_url": "https://github.com/ianm199/valkey-rs/commit/8857714",
-      "evidence": "harness/evidence/runs/20260522T170800Z-f8f5124-runner-runtime-owner-12-post-watch-profile-matrix.json",
-      "evidence_url": "../../evidence/runs/20260522T170800Z-f8f5124-runner-runtime-owner-12-post-watch-profile-matrix.json",
-      "get_p1": 0.997190956191015,
-      "get_p100": 0.7530864093981481,
-      "incr_p100": 0.6145833486364584,
-      "max": 1.3568906075363996,
-      "median": 0.784313752,
-      "min": 0.6145833486364584,
+      "commit": "93db315",
+      "commit_subject": "runtime-owner: move keyspace into owner loop",
+      "commit_url": "https://github.com/ianm199/valkey-rs/commit/93db315",
+      "evidence": "harness/evidence/runs/20260522T203250Z-93db315-runner-runtime-owner-15-post-owned-db-profile-matrix.json",
+      "evidence_url": "../../evidence/runs/20260522T203250Z-93db315-runner-runtime-owner-15-post-owned-db-profile-matrix.json",
+      "get_p1": 0.9527558414866157,
+      "get_p100": 0.7625000057187501,
+      "incr_p100": 0.6555555653888889,
+      "max": 1.3678859539813462,
+      "median": 0.7901235038814851,
+      "min": 0.6555555653888889,
       "p99_ms": {
-        "core-p1/GET": 0.415,
-        "core-p1/INCR": 0.503,
-        "core-p1/PING_MBULK": 0.407,
-        "core-p1/SET": 0.423,
+        "core-p1/GET": 1.031,
+        "core-p1/INCR": 0.415,
+        "core-p1/PING_MBULK": 0.871,
+        "core-p1/SET": 0.431,
         "core-p100/GET": 2.255,
-        "core-p100/INCR": 2.687,
-        "core-p100/PING_MBULK": 1.807,
-        "core-p100/SET": 2.863,
-        "core-p16/GET": 0.719,
-        "core-p16/INCR": 1.455,
-        "core-p16/PING_MBULK": 0.695,
-        "core-p16/SET": 0.783,
-        "range-heavy-p16/LPUSH (needed to benchmark LRANGE)": 2.047,
-        "range-heavy-p16/LRANGE_100 (first 100 elements)": 6.399,
-        "range-heavy-p16/LRANGE_300 (first 300 elements)": 18.175
+        "core-p100/INCR": 2.479,
+        "core-p100/PING_MBULK": 1.487,
+        "core-p100/SET": 2.623,
+        "core-p16/GET": 0.735,
+        "core-p16/INCR": 0.743,
+        "core-p16/PING_MBULK": 0.655,
+        "core-p16/SET": 0.839,
+        "range-heavy-p16/LPUSH (needed to benchmark LRANGE)": 1.151,
+        "range-heavy-p16/LRANGE_100 (first 100 elements)": 5.791,
+        "range-heavy-p16/LRANGE_300 (first 300 elements)": 18.047
       },
-      "packet": "runtime-owner-12-post-watch-profile-matrix",
-      "ping_p100": 0.7962963022685189,
+      "packet": "runtime-owner-15-post-owned-db-profile-matrix",
+      "ping_p100": 0.78431375,
       "ratios": {
-        "core-p1/GET": 0.997190956191015,
-        "core-p1/INCR": 0.9162011143865921,
-        "core-p1/PING_MBULK": 1.0343838769896876,
-        "core-p1/SET": 0.9476584710038601,
-        "core-p100/GET": 0.7530864093981481,
-        "core-p100/INCR": 0.6145833486364584,
-        "core-p100/PING_MBULK": 0.7962963022685189,
-        "core-p100/SET": 0.784313752,
-        "core-p16/GET": 0.7449664648177858,
-        "core-p16/INCR": 0.7745665175190769,
-        "core-p16/PING_MBULK": 0.7457627174576271,
-        "core-p16/SET": 0.6781609758954024,
-        "range-heavy-p16/LPUSH (needed to benchmark LRANGE)": 0.6603773974528315,
-        "range-heavy-p16/LRANGE_100 (first 100 elements)": 1.0159744760472853,
-        "range-heavy-p16/LRANGE_300 (first 300 elements)": 1.3568906075363996
+        "core-p1/GET": 0.9527558414866157,
+        "core-p1/INCR": 0.9630681860556821,
+        "core-p1/PING_MBULK": 1.0424403854355453,
+        "core-p1/SET": 0.9916898173340742,
+        "core-p100/GET": 0.7625000057187501,
+        "core-p100/INCR": 0.6555555653888889,
+        "core-p100/PING_MBULK": 0.78431375,
+        "core-p100/SET": 0.8526316343684223,
+        "core-p16/GET": 0.7548387147725806,
+        "core-p16/INCR": 0.6962024888291154,
+        "core-p16/PING_MBULK": 0.7583333532395828,
+        "core-p16/SET": 0.7901235038814851,
+        "range-heavy-p16/LPUSH (needed to benchmark LRANGE)": 0.7529412546258885,
+        "range-heavy-p16/LRANGE_100 (first 100 elements)": 0.8972268283197439,
+        "range-heavy-p16/LRANGE_300 (first 300 elements)": 1.3678859539813462
       },
-      "run_commit": "f8f5124",
-      "run_commit_subject": "runner: complete runtime-owner-12-post-watch-oracle",
-      "run_commit_url": "https://github.com/ianm199/valkey-rs/commit/f8f5124",
+      "run_commit": "93db315",
+      "run_commit_subject": "runtime-owner: move keyspace into owner loop",
+      "run_commit_url": "https://github.com/ianm199/valkey-rs/commit/93db315",
       "runner": "bench-profile-matrix",
       "runner_kind": "profile-matrix",
       "runner_label": "Profile matrix",
-      "set_p100": 0.784313752,
-      "summary": "profile matrix: median 0.78x, min 0.61x, max 1.36x; GET p1 1.00x; GET p100 0.75x",
-      "ts": "2026-05-22T13:04:15-04:00"
+      "set_p100": 0.8526316343684223,
+      "summary": "profile matrix: median 0.79x, min 0.66x, max 1.37x; GET p1 0.95x; GET p100 0.76x",
+      "ts": "2026-05-22T16:32:33-04:00"
     }
   },
-  "point_count": 20,
+  "point_count": 22,
   "points": [
     {
       "artifacts": [
@@ -1845,10 +1877,210 @@
       "set_p100": 0.6915365986082249,
       "summary": "profile calltree: sample, median 0.73x, min 0.58x, max 0.81x; artifacts 16",
       "ts": "2026-05-22T13:04:15-04:00"
+    },
+    {
+      "artifacts": [
+        {
+          "path": "harness/bench/results/20260522T203256Z-93db315-profile-matrix.tsv",
+          "url": "../../bench/results/20260522T203256Z-93db315-profile-matrix.tsv"
+        }
+      ],
+      "commit": "93db315",
+      "commit_subject": "runtime-owner: move keyspace into owner loop",
+      "commit_url": "https://github.com/ianm199/valkey-rs/commit/93db315",
+      "evidence": "harness/evidence/runs/20260522T203250Z-93db315-runner-runtime-owner-15-post-owned-db-profile-matrix.json",
+      "evidence_url": "../../evidence/runs/20260522T203250Z-93db315-runner-runtime-owner-15-post-owned-db-profile-matrix.json",
+      "get_p1": 0.9527558414866157,
+      "get_p100": 0.7625000057187501,
+      "incr_p100": 0.6555555653888889,
+      "max": 1.3678859539813462,
+      "median": 0.7901235038814851,
+      "min": 0.6555555653888889,
+      "p99_ms": {
+        "core-p1/GET": 1.031,
+        "core-p1/INCR": 0.415,
+        "core-p1/PING_MBULK": 0.871,
+        "core-p1/SET": 0.431,
+        "core-p100/GET": 2.255,
+        "core-p100/INCR": 2.479,
+        "core-p100/PING_MBULK": 1.487,
+        "core-p100/SET": 2.623,
+        "core-p16/GET": 0.735,
+        "core-p16/INCR": 0.743,
+        "core-p16/PING_MBULK": 0.655,
+        "core-p16/SET": 0.839,
+        "range-heavy-p16/LPUSH (needed to benchmark LRANGE)": 1.151,
+        "range-heavy-p16/LRANGE_100 (first 100 elements)": 5.791,
+        "range-heavy-p16/LRANGE_300 (first 300 elements)": 18.047
+      },
+      "packet": "runtime-owner-15-post-owned-db-profile-matrix",
+      "ping_p100": 0.78431375,
+      "ratios": {
+        "core-p1/GET": 0.9527558414866157,
+        "core-p1/INCR": 0.9630681860556821,
+        "core-p1/PING_MBULK": 1.0424403854355453,
+        "core-p1/SET": 0.9916898173340742,
+        "core-p100/GET": 0.7625000057187501,
+        "core-p100/INCR": 0.6555555653888889,
+        "core-p100/PING_MBULK": 0.78431375,
+        "core-p100/SET": 0.8526316343684223,
+        "core-p16/GET": 0.7548387147725806,
+        "core-p16/INCR": 0.6962024888291154,
+        "core-p16/PING_MBULK": 0.7583333532395828,
+        "core-p16/SET": 0.7901235038814851,
+        "range-heavy-p16/LPUSH (needed to benchmark LRANGE)": 0.7529412546258885,
+        "range-heavy-p16/LRANGE_100 (first 100 elements)": 0.8972268283197439,
+        "range-heavy-p16/LRANGE_300 (first 300 elements)": 1.3678859539813462
+      },
+      "run_commit": "93db315",
+      "run_commit_subject": "runtime-owner: move keyspace into owner loop",
+      "run_commit_url": "https://github.com/ianm199/valkey-rs/commit/93db315",
+      "runner": "bench-profile-matrix",
+      "runner_kind": "profile-matrix",
+      "runner_label": "Profile matrix",
+      "set_p100": 0.8526316343684223,
+      "summary": "profile matrix: median 0.79x, min 0.66x, max 1.37x; GET p1 0.95x; GET p100 0.76x",
+      "ts": "2026-05-22T16:32:33-04:00"
+    },
+    {
+      "artifacts": [
+        {
+          "kind": "summary-tsv",
+          "path": "harness/bench/results/20260522T203331Z-590a52a-calltree.tsv",
+          "url": "../../bench/results/20260522T203331Z-590a52a-calltree.tsv"
+        },
+        {
+          "kind": "runner-result-json",
+          "path": "harness/bench/results/20260522T203331Z-590a52a-calltree.json",
+          "url": "../../bench/results/20260522T203331Z-590a52a-calltree.json"
+        },
+        {
+          "kind": "raw-sample-calltree",
+          "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/get-p100/get-p100.sample.txt",
+          "url": "../../bench/profiles/20260522T203331Z-590a52a-calltree/get-p100/get-p100.sample.txt",
+          "workload": "get-p100"
+        },
+        {
+          "kind": "profiler-log",
+          "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/get-p100/get-p100.sample.stderr.log",
+          "url": "../../bench/profiles/20260522T203331Z-590a52a-calltree/get-p100/get-p100.sample.stderr.log",
+          "workload": "get-p100"
+        },
+        {
+          "kind": "raw-sample-calltree",
+          "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/set-p100/set-p100.sample.txt",
+          "url": "../../bench/profiles/20260522T203331Z-590a52a-calltree/set-p100/set-p100.sample.txt",
+          "workload": "set-p100"
+        },
+        {
+          "kind": "profiler-log",
+          "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/set-p100/set-p100.sample.stderr.log",
+          "url": "../../bench/profiles/20260522T203331Z-590a52a-calltree/set-p100/set-p100.sample.stderr.log",
+          "workload": "set-p100"
+        },
+        {
+          "kind": "raw-sample-calltree",
+          "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/incr-p100/incr-p100.sample.txt",
+          "url": "../../bench/profiles/20260522T203331Z-590a52a-calltree/incr-p100/incr-p100.sample.txt",
+          "workload": "incr-p100"
+        },
+        {
+          "kind": "profiler-log",
+          "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/incr-p100/incr-p100.sample.stderr.log",
+          "url": "../../bench/profiles/20260522T203331Z-590a52a-calltree/incr-p100/incr-p100.sample.stderr.log",
+          "workload": "incr-p100"
+        },
+        {
+          "kind": "raw-sample-calltree",
+          "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/ping-p100/ping-p100.sample.txt",
+          "url": "../../bench/profiles/20260522T203331Z-590a52a-calltree/ping-p100/ping-p100.sample.txt",
+          "workload": "ping-p100"
+        },
+        {
+          "kind": "profiler-log",
+          "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/ping-p100/ping-p100.sample.stderr.log",
+          "url": "../../bench/profiles/20260522T203331Z-590a52a-calltree/ping-p100/ping-p100.sample.stderr.log",
+          "workload": "ping-p100"
+        },
+        {
+          "kind": "server-log",
+          "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/get-p100/rust-56431.server.log",
+          "url": "../../bench/profiles/20260522T203331Z-590a52a-calltree/get-p100/rust-56431.server.log"
+        },
+        {
+          "kind": "server-log",
+          "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/incr-p100/rust-56763.server.log",
+          "url": "../../bench/profiles/20260522T203331Z-590a52a-calltree/incr-p100/rust-56763.server.log"
+        },
+        {
+          "kind": "server-log",
+          "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/ping-p100/rust-56948.server.log",
+          "url": "../../bench/profiles/20260522T203331Z-590a52a-calltree/ping-p100/rust-56948.server.log"
+        },
+        {
+          "kind": "server-log",
+          "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/reference-56349.server.log",
+          "url": "../../bench/profiles/20260522T203331Z-590a52a-calltree/reference-56349.server.log"
+        },
+        {
+          "kind": "server-log",
+          "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/reference-56526.server.log",
+          "url": "../../bench/profiles/20260522T203331Z-590a52a-calltree/reference-56526.server.log"
+        },
+        {
+          "kind": "server-log",
+          "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/reference-56690.server.log",
+          "url": "../../bench/profiles/20260522T203331Z-590a52a-calltree/reference-56690.server.log"
+        },
+        {
+          "kind": "server-log",
+          "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/reference-56876.server.log",
+          "url": "../../bench/profiles/20260522T203331Z-590a52a-calltree/reference-56876.server.log"
+        },
+        {
+          "kind": "server-log",
+          "path": "harness/bench/profiles/20260522T203331Z-590a52a-calltree/set-p100/rust-56596.server.log",
+          "url": "../../bench/profiles/20260522T203331Z-590a52a-calltree/set-p100/rust-56596.server.log"
+        }
+      ],
+      "commit": "93db315",
+      "commit_subject": "runtime-owner: move keyspace into owner loop",
+      "commit_url": "https://github.com/ianm199/valkey-rs/commit/93db315",
+      "evidence": "harness/evidence/runs/20260522T203331Z-590a52a-runner-runtime-owner-15-post-owned-db-calltree.json",
+      "evidence_url": "../../evidence/runs/20260522T203331Z-590a52a-runner-runtime-owner-15-post-owned-db-calltree.json",
+      "get_p1": null,
+      "get_p100": 0.8493259628005553,
+      "incr_p100": 0.650206583240746,
+      "max": 0.8493259628005553,
+      "median": 0.759369377756741,
+      "min": 0.650206583240746,
+      "p99_ms": {
+        "get-p100": 2.047,
+        "incr-p100": 2.687,
+        "ping-p100": 1.983,
+        "set-p100": 3.023
+      },
+      "packet": "runtime-owner-15-post-owned-db-calltree",
+      "ping_p100": 0.7209668936743563,
+      "ratios": {
+        "get-p100": 0.8493259628005553,
+        "incr-p100": 0.650206583240746,
+        "ping-p100": 0.7209668936743563,
+        "set-p100": 0.7977718618391255
+      },
+      "run_commit": "590a52a",
+      "run_commit_subject": "runner: complete runtime-owner-15-post-owned-db-profile-matrix",
+      "run_commit_url": "https://github.com/ianm199/valkey-rs/commit/590a52a",
+      "runner": "bench-profile-calltree",
+      "runner_kind": "calltree",
+      "runner_label": "Calltree",
+      "set_p100": 0.7977718618391255,
+      "summary": "profile calltree: sample, median 0.80x, min 0.65x, max 0.85x; artifacts 16",
+      "ts": "2026-05-22T16:32:33-04:00"
     }
   ],
   "project": "valkey-rs",
-  "raw_point_count": 63,
+  "raw_point_count": 66,
   "raw_points": [
     {
       "clients": 10,
@@ -5077,6 +5309,148 @@
       "source_url": "../../bench/results/20260522T174612Z-8857714-profile-matrix.tsv",
       "summary": "Raw profile matrix median 0.79x min 0.66x max 1.46x",
       "ts": "2026-05-22T13:04:15-04:00"
+    },
+    {
+      "clients": 50,
+      "commit": "93db315",
+      "commit_subject": "runtime-owner: move keyspace into owner loop",
+      "commit_ts": "2026-05-22T16:32:33-04:00",
+      "commit_url": "https://github.com/ianm199/valkey-rs/commit/93db315",
+      "get_p1": null,
+      "get_p100": 0.849326,
+      "incr_p100": 0.650207,
+      "max": 0.849326,
+      "measured_at": "2026-05-22T20:33:31Z",
+      "median": 0.7593695,
+      "min": 0.650207,
+      "p99_ms": {
+        "get-p100": 2.047,
+        "incr-p100": 2.687,
+        "ping-p100": 1.983,
+        "set-p100": 3.023
+      },
+      "payload": 64,
+      "ping_p100": 0.720967,
+      "pipeline": 100,
+      "ratios": {
+        "get-p100": 0.849326,
+        "incr-p100": 0.650207,
+        "ping-p100": 0.720967,
+        "set-p100": 0.797772
+      },
+      "requests": 20000000,
+      "run_commit": "590a52a",
+      "run_commit_subject": "runner: complete runtime-owner-15-post-owned-db-profile-matrix",
+      "run_commit_url": "https://github.com/ianm199/valkey-rs/commit/590a52a",
+      "runner_kind": "raw-calltree",
+      "runner_label": "Raw calltree",
+      "set_p100": 0.797772,
+      "source": "harness/bench/results/20260522T203331Z-590a52a-calltree.tsv",
+      "source_url": "../../bench/results/20260522T203331Z-590a52a-calltree.tsv",
+      "summary": "Raw calltree median 0.76x min 0.65x max 0.85x",
+      "ts": "2026-05-22T16:32:33-04:00"
+    },
+    {
+      "clients": 50,
+      "commit": "93db315",
+      "commit_subject": "runtime-owner: move keyspace into owner loop",
+      "commit_ts": "2026-05-22T16:32:33-04:00",
+      "commit_url": "https://github.com/ianm199/valkey-rs/commit/93db315",
+      "get_p1": null,
+      "get_p100": 0.804474,
+      "incr_p100": 0.593494,
+      "max": 0.804474,
+      "measured_at": "2026-05-22T20:43:02Z",
+      "median": 0.76521,
+      "min": 0.593494,
+      "p99_ms": {
+        "get-p100": 1.855,
+        "incr-p100": 7.487,
+        "ping-p100": 1.631,
+        "set-p100": 3.167
+      },
+      "payload": 64,
+      "ping_p100": 0.742558,
+      "pipeline": 100,
+      "ratios": {
+        "get-p100": 0.804474,
+        "incr-p100": 0.593494,
+        "ping-p100": 0.742558,
+        "set-p100": 0.787862
+      },
+      "requests": 20000000,
+      "run_commit": "ee3f087",
+      "run_commit_subject": "runner: complete runtime-owner-15-regression-incr-p100",
+      "run_commit_url": "https://github.com/ianm199/valkey-rs/commit/ee3f087",
+      "runner_kind": "raw-hotspots",
+      "runner_label": "Raw hotspots",
+      "set_p100": 0.787862,
+      "source": "harness/bench/results/20260522T204302Z-ee3f087-hotspots.tsv",
+      "source_url": "../../bench/results/20260522T204302Z-ee3f087-hotspots.tsv",
+      "summary": "Raw hotspots median 0.77x min 0.59x max 0.80x",
+      "ts": "2026-05-22T16:32:33-04:00"
+    },
+    {
+      "clients": 50,
+      "commit": "93db315",
+      "commit_subject": "runtime-owner: move keyspace into owner loop",
+      "commit_ts": "2026-05-22T16:32:33-04:00",
+      "commit_url": "https://github.com/ianm199/valkey-rs/commit/93db315",
+      "get_p1": 0.952756,
+      "get_p100": 0.7625,
+      "incr_p100": 0.655556,
+      "max": 1.367886,
+      "measured_at": "2026-05-22T20:32:56Z",
+      "median": 0.790124,
+      "min": 0.655556,
+      "p99_ms": {
+        "core-p1/GET": 1.031,
+        "core-p1/INCR": 0.415,
+        "core-p1/PING_MBULK": 0.871,
+        "core-p1/SET": 0.431,
+        "core-p100/GET": 2.255,
+        "core-p100/INCR": 2.479,
+        "core-p100/PING_MBULK": 1.487,
+        "core-p100/SET": 2.623,
+        "core-p16/GET": 0.735,
+        "core-p16/INCR": 0.743,
+        "core-p16/PING_MBULK": 0.655,
+        "core-p16/SET": 0.839,
+        "range-heavy-p16/LPUSH (needed to benchmark LRANGE)": 1.151,
+        "range-heavy-p16/LRANGE_100 (first 100 elements)": 5.791,
+        "range-heavy-p16/LRANGE_300 (first 300 elements)": 18.047
+      },
+      "payload": 64,
+      "ping_p100": 0.784314,
+      "pipeline": 1,
+      "ratios": {
+        "core-p1/GET": 0.952756,
+        "core-p1/INCR": 0.963068,
+        "core-p1/PING_MBULK": 1.04244,
+        "core-p1/SET": 0.99169,
+        "core-p100/GET": 0.7625,
+        "core-p100/INCR": 0.655556,
+        "core-p100/PING_MBULK": 0.784314,
+        "core-p100/SET": 0.852632,
+        "core-p16/GET": 0.754839,
+        "core-p16/INCR": 0.696202,
+        "core-p16/PING_MBULK": 0.758333,
+        "core-p16/SET": 0.790124,
+        "range-heavy-p16/LPUSH (needed to benchmark LRANGE)": 0.752941,
+        "range-heavy-p16/LRANGE_100 (first 100 elements)": 0.897227,
+        "range-heavy-p16/LRANGE_300 (first 300 elements)": 1.367886
+      },
+      "requests": 50000,
+      "run_commit": "93db315",
+      "run_commit_subject": "runtime-owner: move keyspace into owner loop",
+      "run_commit_url": "https://github.com/ianm199/valkey-rs/commit/93db315",
+      "runner_kind": "raw-profile-matrix",
+      "runner_label": "Raw profile matrix",
+      "set_p100": 0.852632,
+      "source": "harness/bench/results/20260522T203256Z-93db315-profile-matrix.tsv",
+      "source_url": "../../bench/results/20260522T203256Z-93db315-profile-matrix.tsv",
+      "summary": "Raw profile matrix median 0.79x min 0.66x max 1.37x",
+      "ts": "2026-05-22T16:32:33-04:00"
     }
   ],
   "raw_series": {
@@ -5155,6 +5529,21 @@
         "summary": "Raw calltree median 0.74x min 0.61x max 0.80x",
         "ts": "2026-05-22T13:04:15-04:00",
         "value": 0.7420115
+      },
+      {
+        "commit": "93db315",
+        "commit_subject": "runtime-owner: move keyspace into owner loop",
+        "commit_url": "https://github.com/ianm199/valkey-rs/commit/93db315",
+        "evidence_url": "../../bench/results/20260522T203331Z-590a52a-calltree.tsv",
+        "idx": 63,
+        "measured_at": "2026-05-22T20:33:31Z",
+        "packet": "harness/bench/results/20260522T203331Z-590a52a-calltree.tsv",
+        "run_commit": "590a52a",
+        "run_commit_subject": "runner: complete runtime-owner-15-post-owned-db-profile-matrix",
+        "run_commit_url": "https://github.com/ianm199/valkey-rs/commit/590a52a",
+        "summary": "Raw calltree median 0.76x min 0.65x max 0.85x",
+        "ts": "2026-05-22T16:32:33-04:00",
+        "value": 0.7593695
       }
     ],
     "raw_hotspots_median": [
@@ -5307,6 +5696,21 @@
         "summary": "Raw hotspots median 0.78x min 0.63x max 0.78x",
         "ts": "2026-05-22T13:04:15-04:00",
         "value": 0.778295
+      },
+      {
+        "commit": "93db315",
+        "commit_subject": "runtime-owner: move keyspace into owner loop",
+        "commit_url": "https://github.com/ianm199/valkey-rs/commit/93db315",
+        "evidence_url": "../../bench/results/20260522T204302Z-ee3f087-hotspots.tsv",
+        "idx": 64,
+        "measured_at": "2026-05-22T20:43:02Z",
+        "packet": "harness/bench/results/20260522T204302Z-ee3f087-hotspots.tsv",
+        "run_commit": "ee3f087",
+        "run_commit_subject": "runner: complete runtime-owner-15-regression-incr-p100",
+        "run_commit_url": "https://github.com/ianm199/valkey-rs/commit/ee3f087",
+        "summary": "Raw hotspots median 0.77x min 0.59x max 0.80x",
+        "ts": "2026-05-22T16:32:33-04:00",
+        "value": 0.76521
       }
     ],
     "raw_legacy_median": [
@@ -5536,6 +5940,21 @@
         "summary": "Raw profile matrix median 0.79x min 0.66x max 1.46x",
         "ts": "2026-05-22T13:04:15-04:00",
         "value": 0.785714
+      },
+      {
+        "commit": "93db315",
+        "commit_subject": "runtime-owner: move keyspace into owner loop",
+        "commit_url": "https://github.com/ianm199/valkey-rs/commit/93db315",
+        "evidence_url": "../../bench/results/20260522T203256Z-93db315-profile-matrix.tsv",
+        "idx": 65,
+        "measured_at": "2026-05-22T20:32:56Z",
+        "packet": "harness/bench/results/20260522T203256Z-93db315-profile-matrix.tsv",
+        "run_commit": "93db315",
+        "run_commit_subject": "runtime-owner: move keyspace into owner loop",
+        "run_commit_url": "https://github.com/ianm199/valkey-rs/commit/93db315",
+        "summary": "Raw profile matrix median 0.79x min 0.66x max 1.37x",
+        "ts": "2026-05-22T16:32:33-04:00",
+        "value": 0.790124
       }
     ]
   },
@@ -5645,6 +6064,21 @@
         "summary": "profile calltree: sample, median 0.73x, min 0.58x, max 0.81x; artifacts 16",
         "ts": "2026-05-22T13:04:15-04:00",
         "value": 0.8130462440913714
+      },
+      {
+        "commit": "93db315",
+        "commit_subject": "runtime-owner: move keyspace into owner loop",
+        "commit_url": "https://github.com/ianm199/valkey-rs/commit/93db315",
+        "evidence_url": "../../evidence/runs/20260522T203331Z-590a52a-runner-runtime-owner-15-post-owned-db-calltree.json",
+        "idx": 21,
+        "measured_at": "",
+        "packet": "runtime-owner-15-post-owned-db-calltree",
+        "run_commit": "590a52a",
+        "run_commit_subject": "runner: complete runtime-owner-15-post-owned-db-profile-matrix",
+        "run_commit_url": "https://github.com/ianm199/valkey-rs/commit/590a52a",
+        "summary": "profile calltree: sample, median 0.80x, min 0.65x, max 0.85x; artifacts 16",
+        "ts": "2026-05-22T16:32:33-04:00",
+        "value": 0.8493259628005553
       }
     ],
     "calltree_median": [
@@ -5722,6 +6156,21 @@
         "summary": "profile calltree: sample, median 0.73x, min 0.58x, max 0.81x; artifacts 16",
         "ts": "2026-05-22T13:04:15-04:00",
         "value": 0.7111764448748289
+      },
+      {
+        "commit": "93db315",
+        "commit_subject": "runtime-owner: move keyspace into owner loop",
+        "commit_url": "https://github.com/ianm199/valkey-rs/commit/93db315",
+        "evidence_url": "../../evidence/runs/20260522T203331Z-590a52a-runner-runtime-owner-15-post-owned-db-calltree.json",
+        "idx": 21,
+        "measured_at": "",
+        "packet": "runtime-owner-15-post-owned-db-calltree",
+        "run_commit": "590a52a",
+        "run_commit_subject": "runner: complete runtime-owner-15-post-owned-db-profile-matrix",
+        "run_commit_url": "https://github.com/ianm199/valkey-rs/commit/590a52a",
+        "summary": "profile calltree: sample, median 0.80x, min 0.65x, max 0.85x; artifacts 16",
+        "ts": "2026-05-22T16:32:33-04:00",
+        "value": 0.759369377756741
       }
     ],
     "hotspots_get_p100": [
@@ -5998,6 +6447,21 @@
         "summary": "profile matrix: median 0.78x, min 0.61x, max 1.36x; GET p1 1.00x; GET p100 0.75x",
         "ts": "2026-05-22T13:04:15-04:00",
         "value": 0.997190956191015
+      },
+      {
+        "commit": "93db315",
+        "commit_subject": "runtime-owner: move keyspace into owner loop",
+        "commit_url": "https://github.com/ianm199/valkey-rs/commit/93db315",
+        "evidence_url": "../../evidence/runs/20260522T203250Z-93db315-runner-runtime-owner-15-post-owned-db-profile-matrix.json",
+        "idx": 20,
+        "measured_at": "",
+        "packet": "runtime-owner-15-post-owned-db-profile-matrix",
+        "run_commit": "93db315",
+        "run_commit_subject": "runtime-owner: move keyspace into owner loop",
+        "run_commit_url": "https://github.com/ianm199/valkey-rs/commit/93db315",
+        "summary": "profile matrix: median 0.79x, min 0.66x, max 1.37x; GET p1 0.95x; GET p100 0.76x",
+        "ts": "2026-05-22T16:32:33-04:00",
+        "value": 0.9527558414866157
       }
     ],
     "matrix_get_p100": [
@@ -6120,6 +6584,21 @@
         "summary": "profile matrix: median 0.78x, min 0.61x, max 1.36x; GET p1 1.00x; GET p100 0.75x",
         "ts": "2026-05-22T13:04:15-04:00",
         "value": 0.7530864093981481
+      },
+      {
+        "commit": "93db315",
+        "commit_subject": "runtime-owner: move keyspace into owner loop",
+        "commit_url": "https://github.com/ianm199/valkey-rs/commit/93db315",
+        "evidence_url": "../../evidence/runs/20260522T203250Z-93db315-runner-runtime-owner-15-post-owned-db-profile-matrix.json",
+        "idx": 20,
+        "measured_at": "",
+        "packet": "runtime-owner-15-post-owned-db-profile-matrix",
+        "run_commit": "93db315",
+        "run_commit_subject": "runtime-owner: move keyspace into owner loop",
+        "run_commit_url": "https://github.com/ianm199/valkey-rs/commit/93db315",
+        "summary": "profile matrix: median 0.79x, min 0.66x, max 1.37x; GET p1 0.95x; GET p100 0.76x",
+        "ts": "2026-05-22T16:32:33-04:00",
+        "value": 0.7625000057187501
       }
     ],
     "matrix_median": [
@@ -6242,6 +6721,21 @@
         "summary": "profile matrix: median 0.78x, min 0.61x, max 1.36x; GET p1 1.00x; GET p100 0.75x",
         "ts": "2026-05-22T13:04:15-04:00",
         "value": 0.784313752
+      },
+      {
+        "commit": "93db315",
+        "commit_subject": "runtime-owner: move keyspace into owner loop",
+        "commit_url": "https://github.com/ianm199/valkey-rs/commit/93db315",
+        "evidence_url": "../../evidence/runs/20260522T203250Z-93db315-runner-runtime-owner-15-post-owned-db-profile-matrix.json",
+        "idx": 20,
+        "measured_at": "",
+        "packet": "runtime-owner-15-post-owned-db-profile-matrix",
+        "run_commit": "93db315",
+        "run_commit_subject": "runtime-owner: move keyspace into owner loop",
+        "run_commit_url": "https://github.com/ianm199/valkey-rs/commit/93db315",
+        "summary": "profile matrix: median 0.79x, min 0.66x, max 1.37x; GET p1 0.95x; GET p100 0.76x",
+        "ts": "2026-05-22T16:32:33-04:00",
+        "value": 0.7901235038814851
       }
     ]
   },
@@ -6297,11 +6791,11 @@
     }
   ],
   "signature": {
-    "latest_point": "harness/evidence/runs/20260522T170812Z-2813e87-runner-runtime-owner-12-post-watch-calltree.json",
-    "latest_raw": "harness/bench/results/20260522T174612Z-8857714-profile-matrix.tsv",
-    "ledger_mtime_ns": 1779469744554664064,
-    "point_count": 20,
-    "raw_point_count": 63,
-    "results_mtime_ns": 1779472906748616899
+    "latest_point": "harness/evidence/runs/20260522T203331Z-590a52a-runner-runtime-owner-15-post-owned-db-calltree.json",
+    "latest_raw": "harness/bench/results/20260522T203256Z-93db315-profile-matrix.tsv",
+    "ledger_mtime_ns": 1779482091424971097,
+    "point_count": 22,
+    "raw_point_count": 66,
+    "results_mtime_ns": 1779482632508176426
   }
 }
