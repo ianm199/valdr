@@ -18,8 +18,10 @@ python3 harness/bench/probe-hypotheses.py alloc-stacks \
   --requests 200000 \
   --commands get,set,incr,ping_mbulk
 
-# CPU-time trace for one workload. Opens in Instruments; the child process uses
-# a minimal environment so .trace metadata does not capture shell secrets.
+# CPU-time trace for one workload. This records with xctrace, exports the
+# Time Profiler table as XML, and aggregates top frames into JSON. The child
+# process uses a minimal environment so .trace metadata does not capture shell
+# secrets.
 python3 harness/bench/probe-hypotheses.py xctrace-time \
   --command get \
   --requests 1000000 \
@@ -35,8 +37,9 @@ How to read the current probes:
   amortizing the gap. Payload copy is probably not the first fix.
 - `malloc_history` mostly reports live/high-water allocations. Treat it as
   stack attribution, not as a precise per-command allocation counter.
-- `xctrace-time` is the highest-fidelity local CPU tool on macOS, but its raw
-  `.trace` bundle is a local artifact, not something to commit.
+- `xctrace-time` is the highest-fidelity local CPU tool on macOS. The JSON
+  includes a command-line `cli_profile` summary; the raw `.trace` bundle is a
+  local artifact, not something to commit.
 
 The benchmark runners rebuild `redis-server` by default. For historical data,
 use `backfill.py` instead of checking out commits in the main worktree.

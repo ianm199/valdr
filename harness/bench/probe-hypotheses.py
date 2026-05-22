@@ -29,6 +29,7 @@ import socket
 import subprocess
 import sys
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -656,6 +657,7 @@ def run_xctrace_time(args: argparse.Namespace) -> int:
     xctrace_proc: subprocess.Popen[str] | None = None
     trace_path = profile_root / f"{workload.name}.trace"
     xctrace_log = profile_root / "xctrace.log"
+    time_profile_xml = profile_root / "time-profile.xml"
     try:
         proc = start_server(Target.RUST, port, profile_root / "rust-server.log")
         with xctrace_log.open("w", encoding="utf-8") as log:
@@ -714,6 +716,8 @@ def run_xctrace_time(args: argparse.Namespace) -> int:
         except subprocess.TimeoutExpired:
             xctrace_proc.terminate()
             xctrace_proc.wait(timeout=5)
+        export_status = export_xctrace_time_profile(xctrace, trace_path, time_profile_xml)
+        cli_profile = parse_xctrace_time_profile(time_profile_xml)
         result = {
             "schema_version": 1,
             "probe_id": "xctrace-time",
@@ -725,13 +729,18 @@ def run_xctrace_time(args: argparse.Namespace) -> int:
             "artifacts": [
                 {"path": relative(trace_path), "kind": "xctrace-time-profiler-trace"},
                 {"path": relative(xctrace_log), "kind": "xctrace-log"},
+                {"path": relative(time_profile_xml), "kind": "xctrace-time-profile-xml"},
                 {"path": relative(json_path), "kind": "json-summary"},
             ],
             "xctrace_returncode": xctrace_proc.returncode,
+            "xctrace_export_status": export_status,
+            "cli_profile": cli_profile,
             "note": (
-                "Open the .trace in Instruments for CPU-time stack attribution. "
-                "The benchmark child is launched with a minimal environment so "
-                "the trace does not record operator shell secrets."
+                "This probe is fully command-line: it records a Time Profiler trace, "
+                "exports the time-profile table as XML, and aggregates top frames into "
+                "cli_profile. The raw .trace can still be opened in Instruments for "
+                "manual inspection. The benchmark child is launched with a minimal "
+                "environment so the trace does not record operator shell secrets."
             ),
         }
     finally:
@@ -740,6 +749,128 @@ def run_xctrace_time(args: argparse.Namespace) -> int:
     json_path.write_text(json.dumps(result, indent=2, sort_keys=True), encoding="utf-8")
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
+
+
+def export_xctrace_time_profile(xctrace: str, trace_path: Path, out_path: Path) -> dict[str, Any]:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    completed = subprocess.run(
+        [
+            xctrace,
+            "export",
+            "--input",
+            str(trace_path),
+            "--xpath",
+            '/trace-toc/run[@number="1"]/data/table[@schema="time-profile"]',
+            "--output",
+            str(out_path),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    return {
+        "returncode": completed.returncode,
+        "stdout_tail": completed.stdout[-1000:],
+        "stderr_tail": completed.stderr[-1000:],
+        "path": relative(out_path),
+    }
+
+
+def parse_xctrace_time_profile(path: Path) -> dict[str, Any]:
+    if not path.exists() or path.stat().st_size == 0:
+        return {"available": False, "reason": "time-profile XML missing"}
+
+    try:
+        root = ET.parse(path).getroot()
+    except ET.ParseError as exc:
+        return {"available": False, "reason": f"XML parse error: {exc}"}
+
+    frame_names: dict[str, str] = {}
+    weight_values: dict[str, int] = {}
+    backtrace_defs: dict[str, list[str]] = {}
+
+    for frame in root.iter("frame"):
+        frame_id = frame.attrib.get("id")
+        name = frame.attrib.get("name")
+        if frame_id and name:
+            frame_names[frame_id] = name
+
+    for weight in root.iter("weight"):
+        weight_id = weight.attrib.get("id")
+        if weight_id and weight.text:
+            try:
+                weight_values[weight_id] = int(weight.text)
+            except ValueError:
+                pass
+
+    def frame_name(frame: ET.Element) -> str:
+        if ref := frame.attrib.get("ref"):
+            return frame_names.get(ref, f"<frame ref={ref}>")
+        return frame.attrib.get("name") or "<unknown>"
+
+    for backtrace in root.iter("backtrace"):
+        backtrace_id = backtrace.attrib.get("id")
+        if not backtrace_id:
+            continue
+        frames = [frame_name(frame) for frame in backtrace.findall("frame")]
+        backtrace_defs[backtrace_id] = frames
+
+    leaf_weight: dict[str, int] = {}
+    inclusive_weight: dict[str, int] = {}
+    sample_count = 0
+    total_weight_ns = 0
+
+    for row in root.iter("row"):
+        weight_elem = row.find("weight")
+        backtrace_elem = row.find("backtrace")
+        if weight_elem is None or backtrace_elem is None:
+            continue
+
+        weight = 0
+        if ref := weight_elem.attrib.get("ref"):
+            weight = weight_values.get(ref, 0)
+        elif weight_elem.text:
+            try:
+                weight = int(weight_elem.text)
+            except ValueError:
+                weight = 0
+        if weight <= 0:
+            continue
+
+        if ref := backtrace_elem.attrib.get("ref"):
+            frames = backtrace_defs.get(ref, [])
+        else:
+            frames = [frame_name(frame) for frame in backtrace_elem.findall("frame")]
+        if not frames:
+            continue
+
+        sample_count += 1
+        total_weight_ns += weight
+        leaf_weight[frames[0]] = leaf_weight.get(frames[0], 0) + weight
+        for frame in frames:
+            inclusive_weight[frame] = inclusive_weight.get(frame, 0) + weight
+
+    def top_rows(rows: dict[str, int], limit: int = 25) -> list[dict[str, Any]]:
+        out = []
+        for frame, ns in sorted(rows.items(), key=lambda item: item[1], reverse=True)[:limit]:
+            out.append(
+                {
+                    "frame": frame,
+                    "weight_ms": ns / 1_000_000.0,
+                    "pct": (ns / total_weight_ns * 100.0) if total_weight_ns else 0.0,
+                }
+            )
+        return out
+
+    return {
+        "available": True,
+        "sample_count": sample_count,
+        "total_weight_ms": total_weight_ns / 1_000_000.0,
+        "top_self": top_rows(leaf_weight),
+        "top_inclusive": top_rows(inclusive_weight),
+        "note": "Weights are Time Profiler sample weights, not exact counters.",
+    }
 
 
 def main() -> int:
