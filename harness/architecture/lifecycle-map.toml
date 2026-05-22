@@ -174,3 +174,10 @@ description = "Add inert RuntimeOwner vocabulary without switching the product p
 id = "owner-loop"
 status = "blocked-on-human"
 description = "Real nonblocking owner loop; gated on TODO(human) decisions in harness/architecture/decisions/runtime-ownership.md (poller, TLS, I/O threads, soak)."
+
+[invariants]
+runner_capability_alignment = "harness/runners.toml wire-smoke runner must declare wire-compatibility, runtime-owner-canaries, and runtime-owner-scaffold so post-canary-oracle and post-scaffold-oracle packets can produce capability evidence."
+scaffold_vocabulary_single_source = "harness/architecture/object-vocabulary.tsv rows owned by crates/redis-server/src/runtime_owner.rs are the only authoritative scaffold type list. work-packets.jsonl runtime-owner-2-scaffold-types must not re-enumerate them."
+slot_id_is_newtype = "SlotId is a newtype around u32 in the scaffold; type confusion with db_index or replica_id is structurally prevented."
+no_poller_dep_before_human = "crates/redis-server/Cargo.toml must not gain mio/polling/tokio/raw-libc-epoll until TODO(human) poller_dependency in harness/architecture/decisions/runtime-ownership.md is answered."
+no_soak_runner_before_script = "harness/runners.toml [[runner]] entries for runtime-owner-soak require harness/bench/run-soak.sh to exist; planned_runner row is the only acceptable placeholder until then."

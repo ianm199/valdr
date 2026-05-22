@@ -9,7 +9,17 @@ non_goals = [
   "Benchmark-only command fast paths",
   "Making the runtime-owner scaffold the default server loop",
   "Dropping ACL, MULTI/EXEC, scripting, expiration, pub/sub, blocking, AOF, RDB, or replication semantics for speed",
+  "TLS owner-loop migration (locked out-of-scope this milestone by harness/architecture/decisions/runtime-ownership.md; gated on TODO(human) tls_migration_sequencing)",
+  "Adding a poller workspace dependency (mio/polling/tokio/raw-libc; locked as TODO(human) poller_dependency)",
+  "Any public speed-parity claim sourced from a non-default experimental mode; numbers from this run are alpha telemetry only",
+  "Authoring a runtime-owner-soak runner before harness/bench/run-soak.sh and the human-decided workload/threshold exist",
 ]
+binding_architecture_artifacts = [
+  "harness/architecture/decisions/runtime-ownership.md",
+  "harness/architecture/lifecycle-map.toml",
+  "harness/architecture/object-vocabulary.tsv",
+]
+decision_evidence_root = "harness/evidence/runs/20260522T010206Z-15060d7-runner-runtime-owner-baseline-hotspots.json"
 
 [[criterion]]
 id = "workspace-check"

@@ -36,6 +36,42 @@ packet.
 
 The original architecture write-up below is preserved for context.
 
+## Refinement 2026-05-22 (re-attempt)
+
+The first refinement landed the architect decisions but left two declared
+targets — `harness/runners.toml` and `harness/completion.toml` — out of sync
+with the locked decisions. This re-attempt closes that gap:
+
+- `harness/runners.toml` `wire-smoke` runner now declares
+  `runtime-owner-canaries` and `runtime-owner-scaffold` so the
+  `runtime-owner-post-canary-oracle` and `runtime-owner-post-scaffold-oracle`
+  packets actually produce capability evidence against the runner manifest.
+- `harness/runners.toml` adds a `[[planned_runner]]` row for
+  `runtime-owner-soak` that points back at the TODO(human) gate. Promoting
+  it to a real `[[runner]]` requires the missing script and human-chosen
+  scope.
+- `harness/completion.toml` `[project].non_goals` now mirrors the locked
+  TLS, poller-crate, public-claim, and soak-runner-authoring decisions.
+  `binding_architecture_artifacts` and `decision_evidence_root` give the
+  completion contract a structured pointer at the binding architect files
+  and the hotspot evidence that drove them.
+- `harness/architecture/object-vocabulary.tsv` adds `SlotId` as a newtype.
+  The previous map referenced it in the dispatch signature without
+  declaring it.
+- `harness/work-packets.jsonl` `runtime-owner-2-scaffold-types` note no
+  longer re-enumerates the allowed types; the object vocabulary is the
+  single source of truth. (Two-source-of-truth violation removed.)
+- `harness/architecture/lifecycle-map.toml` gains an `[invariants]` table
+  encoding the five cross-artifact rules so a future translator/runner/fixer
+  packet cannot quietly relax them.
+- `harness/architecture/decisions/runtime-ownership.md` gains a "Cross-Artifact
+  Synchronization (locked 2026-05-22)" section that records the same five
+  rules in prose, with a single-architect escalation requirement to change
+  them.
+
+These are consistency edits. They do not change the production direction,
+do not add or remove a packet, and do not relax any TODO(human) gate.
+
 ---
 
 Status: architecture decision after the first Redis performance loop, 2026-05-21.

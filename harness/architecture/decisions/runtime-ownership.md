@@ -177,3 +177,36 @@ Quarantine the chain if any of these happen:
 - benchmark rows improve but conformance evidence is missing
 - the scaffold packet changes the default product path before the canary
   oracle is green
+
+## Cross-Artifact Synchronization (locked 2026-05-22)
+
+These rules align the typed artifacts under this packet's authority. A future
+architect packet may relax them, but a translator/runner/fixer packet may not.
+
+1. **Runner capability manifest is the single source of truth for "what
+   evidence this runner produces."** `harness/runners.toml` wire-smoke runner
+   declares `wire-compatibility`, `runtime-owner-canaries`, and
+   `runtime-owner-scaffold`. Any packet using `wire-smoke` may only declare
+   capabilities that are a subset of that list.
+2. **Object vocabulary is the single source of truth for scaffold types.**
+   `harness/architecture/object-vocabulary.tsv` rows owned by
+   `crates/redis-server/src/runtime_owner.rs` define the entire allowed
+   surface of `runtime-owner-2-scaffold-types`. `work-packets.jsonl` does
+   not re-enumerate them. Adding a new scaffold type requires this architect
+   doc to be updated first.
+3. **`SlotId` is a newtype**, not a bare integer. The dispatch signature
+   `RuntimeOwner::dispatch(slot_id, parsed)` and the variants
+   `RuntimeEvent::WakeBlocked { slot_id, .. }` and
+   `OwnerCommandResult::Closed { slot_id }` all share that type; using `u32`
+   directly would let `db_index` or `replica_id` cross paths at the type
+   level.
+4. **Completion non-goals mirror the locked decisions.**
+   `harness/completion.toml` `[project].non_goals` includes TLS owner-loop
+   migration, adding a poller workspace dep, public speed-parity claim from
+   non-default mode, and authoring a soak runner before its script and human
+   thresholds exist. Removing any of these requires a follow-up architect
+   packet.
+5. **Planned, human-blocked runners do not become real runners by
+   accident.** `harness/runners.toml [[planned_runner]]` is a placeholder
+   shape. Promoting a row to `[[runner]]` requires the script to exist and
+   the matching TODO(human) item in this doc to be answered.

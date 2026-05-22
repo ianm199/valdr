@@ -6,6 +6,7 @@ RuntimeEvent	enum	crates/redis-server/src/runtime_owner.rs	Single ordered event 
 RuntimeOwnerConfig	struct	crates/redis-server/src/runtime_owner.rs	Typed knobs for owner-loop experiments; must not alter default behavior silently.
 OwnerCommandResult	enum	crates/redis-server/src/runtime_owner.rs	Outcome of a single dispatched command inside the owner: Replied, Blocked, Closed, PendingMore. Replaces ad-hoc bool returns.
 PollDriverHandle	struct	crates/redis-server/src/runtime_owner.rs	Abstract poller handle inside the scaffold. Concrete poller crate is TODO(human) and not picked in the scaffold packet.
+SlotId	newtype	crates/redis-server/src/runtime_owner.rs	Typed key into the owner's ClientSlot table. Must be a newtype around u32 (not a bare integer) so dispatch and RuntimeEvent variants cannot accidentally cross with db_index or replica_id. Referenced by the dispatch signature in harness/architecture/decisions/runtime-ownership.md.
 CommandContext	struct	crates/redis-core/src/command_context.rs	Existing command API; migration target must preserve normal dispatch semantics. Will eventually carry slot_id + &mut RuntimeOwner instead of &mut Client + &mut RedisDb.
 RedisDb	struct	crates/redis-core/src/db.rs	Existing DB state; owner-loop migration moves ownership from Arc<Mutex<_>> in databases.rs to Vec<RedisDb> owned by RuntimeOwner. No duplicate live DB models.
 

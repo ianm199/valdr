@@ -9,7 +9,11 @@ metric = "wire_smoke_pass"
 target = "rust-vs-reference"
 command = ["bash", "harness/oracle/smoke.sh", "--skip-build"]
 timeout_s = 900
-capabilities = ["wire-compatibility"]
+capabilities = [
+  "wire-compatibility",
+  "runtime-owner-canaries",
+  "runtime-owner-scaffold",
+]
 
 [[runner]]
 id = "bench-profile-matrix"
@@ -40,3 +44,11 @@ workload = "profile-hotspots-big"
 command = ["python3", "harness/bench/profile-hotspots.py", "--suite", "big", "--sample-seconds", "8"]
 timeout_s = 3600
 capabilities = ["performance-profile-matrix", "faithful-runtime-ownership"]
+
+[[planned_runner]]
+id = "runtime-owner-soak"
+status = "blocked-on-human"
+decision_doc = "harness/architecture/decisions/runtime-ownership.md"
+script_required = "harness/bench/run-soak.sh"
+rationale = "Locked as TODO(human) by runtime-owner-0-faithful-map: no public performance claim until a long-duration soak runner exists. Script does not exist yet; do not author runner entry until human picks scope (workloads, duration, allowed regression band)."
+expected_capabilities = ["performance-profile-matrix", "faithful-runtime-ownership"]
