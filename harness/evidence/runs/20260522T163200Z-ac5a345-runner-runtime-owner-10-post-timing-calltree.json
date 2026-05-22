@@ -1,0 +1,852 @@
+{
+  "captured_ts": "2026-05-22T16:32:51.449427Z",
+  "harness_context": {
+    "claim_level": "telemetry",
+    "commit": "ac5a345",
+    "git_dirty": true,
+    "git_status_short": [
+      " M harness/evidence/ledger.jsonl"
+    ],
+    "resources": [
+      "bench-results",
+      "benchmark-host",
+      "port:16379",
+      "port:6379",
+      "profiler"
+    ],
+    "run_id": "loop-967628385bd8f4c4",
+    "target_commit": "ac5a34560bc96f1ca88b3c3546dde10b2535d8a3",
+    "tree_hash": "9c624594940e6a4eea1fdcaf60c33ecadeaa92dd70ca7fb3a2225cb410b37136"
+  },
+  "kind": "runner_result",
+  "packet": "runtime-owner-10-post-timing-calltree",
+  "result": {
+    "artifacts": [
+      {
+        "kind": "summary-tsv",
+        "path": "harness/bench/results/20260522T163201Z-ac5a345-calltree.tsv"
+      },
+      {
+        "kind": "runner-result-json",
+        "path": "harness/bench/results/20260522T163201Z-ac5a345-calltree.json"
+      },
+      {
+        "kind": "raw-sample-calltree",
+        "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/get-p100/get-p100.sample.txt",
+        "workload": "get-p100"
+      },
+      {
+        "kind": "profiler-log",
+        "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/get-p100/get-p100.sample.stderr.log",
+        "workload": "get-p100"
+      },
+      {
+        "kind": "raw-sample-calltree",
+        "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/set-p100/set-p100.sample.txt",
+        "workload": "set-p100"
+      },
+      {
+        "kind": "profiler-log",
+        "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/set-p100/set-p100.sample.stderr.log",
+        "workload": "set-p100"
+      },
+      {
+        "kind": "raw-sample-calltree",
+        "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/incr-p100/incr-p100.sample.txt",
+        "workload": "incr-p100"
+      },
+      {
+        "kind": "profiler-log",
+        "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/incr-p100/incr-p100.sample.stderr.log",
+        "workload": "incr-p100"
+      },
+      {
+        "kind": "raw-sample-calltree",
+        "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/ping-p100/ping-p100.sample.txt",
+        "workload": "ping-p100"
+      },
+      {
+        "kind": "profiler-log",
+        "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/ping-p100/ping-p100.sample.stderr.log",
+        "workload": "ping-p100"
+      },
+      {
+        "kind": "server-log",
+        "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/get-p100/rust-53186.server.log"
+      },
+      {
+        "kind": "server-log",
+        "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/incr-p100/rust-53407.server.log"
+      },
+      {
+        "kind": "server-log",
+        "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/ping-p100/rust-53532.server.log"
+      },
+      {
+        "kind": "server-log",
+        "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/reference-53132.server.log"
+      },
+      {
+        "kind": "server-log",
+        "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/reference-53242.server.log"
+      },
+      {
+        "kind": "server-log",
+        "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/reference-53352.server.log"
+      },
+      {
+        "kind": "server-log",
+        "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/reference-53478.server.log"
+      },
+      {
+        "kind": "server-log",
+        "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/set-p100/rust-53296.server.log"
+      }
+    ],
+    "claim_level": "telemetry",
+    "evidence": {
+      "commit": "ac5a345",
+      "git_status_short": [
+        "M harness/evidence/ledger.jsonl"
+      ],
+      "hardware": {
+        "arch": "arm64",
+        "cpu": "Apple M3 Max",
+        "os": "Darwin 24.3.0"
+      },
+      "harness_context": {
+        "claim_level": "telemetry",
+        "commit": "ac5a345",
+        "git_dirty": true,
+        "git_status_short": [
+          " M harness/evidence/ledger.jsonl"
+        ],
+        "resources": [
+          "bench-results",
+          "benchmark-host",
+          "port:16379",
+          "port:6379",
+          "profiler"
+        ],
+        "run_id": "loop-967628385bd8f4c4",
+        "target_commit": "ac5a34560bc96f1ca88b3c3546dde10b2535d8a3",
+        "tree_hash": "9c624594940e6a4eea1fdcaf60c33ecadeaa92dd70ca7fb3a2225cb410b37136"
+      },
+      "json_command": {
+        "command": [
+          "python3",
+          "harness/bench/profile-calltree.py",
+          "--suite",
+          "big",
+          "--profile-seconds",
+          "8"
+        ],
+        "cwd": ".",
+        "resources": [
+          "benchmark-host",
+          "bench-results",
+          "profiler",
+          "port:6379",
+          "port:16379"
+        ],
+        "stderr": "==> get-p100: reference\n==> get-p100: rust + sample\n==> set-p100: reference\n==> set-p100: rust + sample\n==> incr-p100: reference\n==> incr-p100: rust + sample\n==> ping-p100: reference\n==> ping-p100: rust + sample\n"
+      },
+      "method_detail": "bench-load-with-raw-calltree-profile-artifacts",
+      "method_note": "Profiles attach to the Rust server PID while valkey-benchmark drives the same loopback workload used for performance telemetry. The runner does not change server flags, command dispatch, persistence settings, or benchmark command selection outside its own artifact capture.",
+      "profile_root": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree",
+      "profiler": {
+        "name": "sample",
+        "note": "macOS wall-clock stack sampler attached to the Rust server PID",
+        "path": "/usr/bin/sample",
+        "version": ""
+      },
+      "rows": [
+        {
+          "clients": 50,
+          "command": "GET",
+          "payload": 64,
+          "pipeline": 100,
+          "profile": {
+            "artifacts": [
+              {
+                "kind": "raw-sample-calltree",
+                "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/get-p100/get-p100.sample.txt"
+              },
+              {
+                "kind": "profiler-log",
+                "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/get-p100/get-p100.sample.stderr.log"
+              }
+            ],
+            "available": true,
+            "command": [
+              "/usr/bin/sample",
+              "49386",
+              "8",
+              "1",
+              "-mayDie",
+              "-file",
+              "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/bench/profiles/20260522T163201Z-ac5a345-calltree/get-p100/get-p100.sample.txt"
+            ],
+            "status": {
+              "returncode": 0,
+              "timed_out": false
+            },
+            "tool": "sample"
+          },
+          "profile_summary": {
+            "artifact_count": 2,
+            "available": true,
+            "bytes": 70250,
+            "sample_top_frames": [
+              {
+                "count": 32146,
+                "frame": "__semwait_signal  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 1511,
+                "frame": "kevent  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 1132,
+                "frame": "mach_absolute_time  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 1058,
+                "frame": "mach_msg2_trap  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 449,
+                "frame": "__recvfrom  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 444,
+                "frame": "nanosleep  (in libsystem_c.dylib)"
+              },
+              {
+                "count": 401,
+                "frame": "redis_commands::dispatch::lookup_runtime_command::h7bbb4ffaf68fd422  (in redis-server)"
+              },
+              {
+                "count": 315,
+                "frame": "__sendto  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 315,
+                "frame": "_nanov2_free  (in libsystem_malloc.dylib)"
+              },
+              {
+                "count": 295,
+                "frame": "redis_protocol::request::parse_inline_or_multibulk_into::ha726da75abf42626  (in redis-server)"
+              },
+              {
+                "count": 233,
+                "frame": "nanov2_malloc_type  (in libsystem_malloc.dylib)"
+              },
+              {
+                "count": 221,
+                "frame": "redis_protocol::request::read_resp_integer::he43a507cc4251946  (in redis-server)"
+              }
+            ],
+            "tool": "sample"
+          },
+          "ratio": 0.7971705598830074,
+          "reference": {
+            "avg_ms": 1.184,
+            "clients": 50,
+            "command": "GET",
+            "max_ms": 4.799,
+            "min_ms": 0.208,
+            "p50_ms": 1.175,
+            "p95_ms": 1.383,
+            "p99_ms": 1.527,
+            "payload": 64,
+            "pipeline": 100,
+            "requests": 20000000,
+            "rps": 3858024.75,
+            "target": "reference",
+            "workload": "get-p100"
+          },
+          "reference_p99_ms": 1.527,
+          "reference_rps": 3858024.75,
+          "requests": 20000000,
+          "rust": {
+            "avg_ms": 1.604,
+            "clients": 50,
+            "command": "GET",
+            "max_ms": 8.575,
+            "min_ms": 0.24,
+            "p50_ms": 1.591,
+            "p95_ms": 1.775,
+            "p99_ms": 1.967,
+            "payload": 64,
+            "pipeline": 100,
+            "requests": 20000000,
+            "rps": 3075503.75,
+            "target": "rust",
+            "workload": "get-p100"
+          },
+          "rust_p99_ms": 1.967,
+          "rust_rps": 3075503.75,
+          "workload": "get-p100"
+        },
+        {
+          "clients": 50,
+          "command": "SET",
+          "payload": 64,
+          "pipeline": 100,
+          "profile": {
+            "artifacts": [
+              {
+                "kind": "raw-sample-calltree",
+                "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/set-p100/set-p100.sample.txt"
+              },
+              {
+                "kind": "profiler-log",
+                "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/set-p100/set-p100.sample.stderr.log"
+              }
+            ],
+            "available": true,
+            "command": [
+              "/usr/bin/sample",
+              "49727",
+              "8",
+              "1",
+              "-mayDie",
+              "-file",
+              "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/bench/profiles/20260522T163201Z-ac5a345-calltree/set-p100/set-p100.sample.txt"
+            ],
+            "status": {
+              "returncode": 0,
+              "timed_out": false
+            },
+            "tool": "sample"
+          },
+          "profile_summary": {
+            "artifact_count": 2,
+            "available": true,
+            "bytes": 97339,
+            "sample_top_frames": [
+              {
+                "count": 33235,
+                "frame": "__semwait_signal  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 1958,
+                "frame": "kevent  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 523,
+                "frame": "mach_absolute_time  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 513,
+                "frame": "mach_msg2_trap  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 455,
+                "frame": "_nanov2_free  (in libsystem_malloc.dylib)"
+              },
+              {
+                "count": 313,
+                "frame": "redis_commands::dispatch::lookup_runtime_command::h7bbb4ffaf68fd422  (in redis-server)"
+              },
+              {
+                "count": 279,
+                "frame": "nanov2_malloc_type  (in libsystem_malloc.dylib)"
+              },
+              {
+                "count": 248,
+                "frame": "__recvfrom  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 231,
+                "frame": "__sendto  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 216,
+                "frame": "_$LT$std..hash..random..DefaultHasher$u20$as$u20$core..hash..Hasher$GT$::write::h1d555c3dc08887a8  (in redis-server)"
+              },
+              {
+                "count": 208,
+                "frame": "_platform_memmove  (in libsystem_platform.dylib)"
+              },
+              {
+                "count": 199,
+                "frame": "_free  (in libsystem_malloc.dylib)"
+              }
+            ],
+            "tool": "sample"
+          },
+          "ratio": 0.7123614713620561,
+          "reference": {
+            "avg_ms": 1.947,
+            "clients": 50,
+            "command": "SET",
+            "max_ms": 5.343,
+            "min_ms": 0.416,
+            "p50_ms": 1.943,
+            "p95_ms": 2.207,
+            "p99_ms": 2.303,
+            "payload": 64,
+            "pipeline": 100,
+            "requests": 10000000,
+            "rps": 2393489.75,
+            "target": "reference",
+            "workload": "set-p100"
+          },
+          "reference_p99_ms": 2.303,
+          "reference_rps": 2393489.75,
+          "requests": 10000000,
+          "rust": {
+            "avg_ms": 2.9,
+            "clients": 50,
+            "command": "SET",
+            "max_ms": 14.143,
+            "min_ms": 0.752,
+            "p50_ms": 2.895,
+            "p95_ms": 3.135,
+            "p99_ms": 3.471,
+            "payload": 64,
+            "pipeline": 100,
+            "requests": 10000000,
+            "rps": 1705029.88,
+            "target": "rust",
+            "workload": "set-p100"
+          },
+          "rust_p99_ms": 3.471,
+          "rust_rps": 1705029.88,
+          "workload": "set-p100"
+        },
+        {
+          "clients": 50,
+          "command": "INCR",
+          "payload": 64,
+          "pipeline": 100,
+          "profile": {
+            "artifacts": [
+              {
+                "kind": "raw-sample-calltree",
+                "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/incr-p100/incr-p100.sample.txt"
+              },
+              {
+                "kind": "profiler-log",
+                "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/incr-p100/incr-p100.sample.stderr.log"
+              }
+            ],
+            "available": true,
+            "command": [
+              "/usr/bin/sample",
+              "50056",
+              "8",
+              "1",
+              "-mayDie",
+              "-file",
+              "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/bench/profiles/20260522T163201Z-ac5a345-calltree/incr-p100/incr-p100.sample.txt"
+            ],
+            "status": {
+              "returncode": 0,
+              "timed_out": false
+            },
+            "tool": "sample"
+          },
+          "profile_summary": {
+            "artifact_count": 2,
+            "available": true,
+            "bytes": 98021,
+            "sample_top_frames": [
+              {
+                "count": 33056,
+                "frame": "__semwait_signal  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 2276,
+                "frame": "kevent  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 794,
+                "frame": "mach_msg2_trap  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 473,
+                "frame": "mach_absolute_time  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 361,
+                "frame": "_nanov2_free  (in libsystem_malloc.dylib)"
+              },
+              {
+                "count": 355,
+                "frame": "_$LT$std..hash..random..DefaultHasher$u20$as$u20$core..hash..Hasher$GT$::write::h1d555c3dc08887a8  (in redis-server)"
+              },
+              {
+                "count": 259,
+                "frame": "__recvfrom  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 247,
+                "frame": "_platform_memmove  (in libsystem_platform.dylib)"
+              },
+              {
+                "count": 237,
+                "frame": "core::hash::BuildHasher::hash_one::h794138a86e00798c  (in redis-server)"
+              },
+              {
+                "count": 226,
+                "frame": "__sendto  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 193,
+                "frame": "nanov2_malloc_type  (in libsystem_malloc.dylib)"
+              },
+              {
+                "count": 155,
+                "frame": "redis_commands::dispatch::lookup_runtime_command::h7bbb4ffaf68fd422  (in redis-server)"
+              }
+            ],
+            "tool": "sample"
+          },
+          "ratio": 0.5609888267978396,
+          "reference": {
+            "avg_ms": 1.435,
+            "clients": 50,
+            "command": "INCR",
+            "max_ms": 9.535,
+            "min_ms": 0.256,
+            "p50_ms": 1.423,
+            "p95_ms": 1.647,
+            "p99_ms": 1.735,
+            "payload": 64,
+            "pipeline": 100,
+            "requests": 10000000,
+            "rps": 3216468.25,
+            "target": "reference",
+            "workload": "incr-p100"
+          },
+          "reference_p99_ms": 1.735,
+          "reference_rps": 3216468.25,
+          "requests": 10000000,
+          "rust": {
+            "avg_ms": 2.732,
+            "clients": 50,
+            "command": "INCR",
+            "max_ms": 15.103,
+            "min_ms": 0.368,
+            "p50_ms": 2.623,
+            "p95_ms": 2.991,
+            "p99_ms": 8.031,
+            "payload": 64,
+            "pipeline": 100,
+            "requests": 10000000,
+            "rps": 1804402.75,
+            "target": "rust",
+            "workload": "incr-p100"
+          },
+          "rust_p99_ms": 8.031,
+          "rust_rps": 1804402.75,
+          "workload": "incr-p100"
+        },
+        {
+          "clients": 50,
+          "command": "PING_MBULK",
+          "payload": 64,
+          "pipeline": 100,
+          "profile": {
+            "artifacts": [
+              {
+                "kind": "raw-sample-calltree",
+                "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/ping-p100/ping-p100.sample.txt"
+              },
+              {
+                "kind": "profiler-log",
+                "path": "harness/bench/profiles/20260522T163201Z-ac5a345-calltree/ping-p100/ping-p100.sample.stderr.log"
+              }
+            ],
+            "available": true,
+            "command": [
+              "/usr/bin/sample",
+              "50506",
+              "8",
+              "1",
+              "-mayDie",
+              "-file",
+              "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/bench/profiles/20260522T163201Z-ac5a345-calltree/ping-p100/ping-p100.sample.txt"
+            ],
+            "status": {
+              "returncode": 0,
+              "timed_out": false
+            },
+            "tool": "sample"
+          },
+          "profile_summary": {
+            "artifact_count": 2,
+            "available": true,
+            "bytes": 66732,
+            "sample_top_frames": [
+              {
+                "count": 31875,
+                "frame": "__semwait_signal  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 2107,
+                "frame": "kevent  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 1814,
+                "frame": "mach_msg2_trap  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 1227,
+                "frame": "mach_absolute_time  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 414,
+                "frame": "__recvfrom  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 372,
+                "frame": "__sendto  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 307,
+                "frame": "redis_commands::dispatch::lookup_runtime_command::h7bbb4ffaf68fd422  (in redis-server)"
+              },
+              {
+                "count": 303,
+                "frame": "_nanov2_free  (in libsystem_malloc.dylib)"
+              },
+              {
+                "count": 261,
+                "frame": "mig_get_reply_port  (in libsystem_kernel.dylib)"
+              },
+              {
+                "count": 258,
+                "frame": "_platform_memmove  (in libsystem_platform.dylib)"
+              },
+              {
+                "count": 227,
+                "frame": "nanov2_malloc_type  (in libsystem_malloc.dylib)"
+              },
+              {
+                "count": 133,
+                "frame": "redis_commands::dispatch::dispatch_command_name::h5d0125bdfdf9f92c  (in redis-server)"
+              }
+            ],
+            "tool": "sample"
+          },
+          "ratio": 0.7161300873547966,
+          "reference": {
+            "avg_ms": 0.905,
+            "clients": 50,
+            "command": "PING_MBULK",
+            "max_ms": 12.543,
+            "min_ms": 0.12,
+            "p50_ms": 0.895,
+            "p95_ms": 1.127,
+            "p99_ms": 1.255,
+            "payload": 64,
+            "pipeline": 100,
+            "requests": 20000000,
+            "rps": 4807692.5,
+            "target": "reference",
+            "workload": "ping-p100"
+          },
+          "reference_p99_ms": 1.255,
+          "reference_rps": 4807692.5,
+          "requests": 20000000,
+          "rust": {
+            "avg_ms": 1.427,
+            "clients": 50,
+            "command": "PING_MBULK",
+            "max_ms": 8.767,
+            "min_ms": 0.296,
+            "p50_ms": 1.423,
+            "p95_ms": 1.591,
+            "p99_ms": 1.719,
+            "payload": 64,
+            "pipeline": 100,
+            "requests": 20000000,
+            "rps": 3442933.25,
+            "target": "rust",
+            "workload": "ping-p100"
+          },
+          "rust_p99_ms": 1.719,
+          "rust_rps": 3442933.25,
+          "workload": "ping-p100"
+        }
+      ],
+      "suite": "big",
+      "tool_metadata": {
+        "cargo_flamegraph": {
+          "available": false,
+          "path": "/Users/ianmclaughlin/.cargo/bin/cargo",
+          "version": ""
+        },
+        "perf": {
+          "available": false,
+          "path": "",
+          "version": ""
+        },
+        "platform": "Darwin",
+        "sample": {
+          "available": true,
+          "path": "/usr/bin/sample"
+        }
+      },
+      "workloads": [
+        {
+          "clients": 50,
+          "command": "get",
+          "name": "get-p100",
+          "payload": 64,
+          "pipeline": 100,
+          "requests": 20000000
+        },
+        {
+          "clients": 50,
+          "command": "set",
+          "name": "set-p100",
+          "payload": 64,
+          "pipeline": 100,
+          "requests": 10000000
+        },
+        {
+          "clients": 50,
+          "command": "incr",
+          "name": "incr-p100",
+          "payload": 64,
+          "pipeline": 100,
+          "requests": 10000000
+        },
+        {
+          "clients": 50,
+          "command": "ping_mbulk",
+          "name": "ping-p100",
+          "payload": 64,
+          "pipeline": 100,
+          "requests": 20000000
+        }
+      ]
+    },
+    "measurements": [
+      {
+        "metric": "throughput_req_s",
+        "target": "reference",
+        "unit": "req/s",
+        "value": 3858024.75,
+        "workload": "get-p100"
+      },
+      {
+        "metric": "throughput_req_s",
+        "target": "rust",
+        "unit": "req/s",
+        "value": 3075503.75,
+        "workload": "get-p100"
+      },
+      {
+        "metric": "throughput_ratio",
+        "target": "rust-vs-reference",
+        "unit": "ratio",
+        "value": 0.7971705598830074,
+        "workload": "get-p100"
+      },
+      {
+        "metric": "profile_artifact_bytes",
+        "target": "rust",
+        "unit": "bytes",
+        "value": 70250,
+        "workload": "get-p100"
+      },
+      {
+        "metric": "throughput_req_s",
+        "target": "reference",
+        "unit": "req/s",
+        "value": 2393489.75,
+        "workload": "set-p100"
+      },
+      {
+        "metric": "throughput_req_s",
+        "target": "rust",
+        "unit": "req/s",
+        "value": 1705029.88,
+        "workload": "set-p100"
+      },
+      {
+        "metric": "throughput_ratio",
+        "target": "rust-vs-reference",
+        "unit": "ratio",
+        "value": 0.7123614713620561,
+        "workload": "set-p100"
+      },
+      {
+        "metric": "profile_artifact_bytes",
+        "target": "rust",
+        "unit": "bytes",
+        "value": 97339,
+        "workload": "set-p100"
+      },
+      {
+        "metric": "throughput_req_s",
+        "target": "reference",
+        "unit": "req/s",
+        "value": 3216468.25,
+        "workload": "incr-p100"
+      },
+      {
+        "metric": "throughput_req_s",
+        "target": "rust",
+        "unit": "req/s",
+        "value": 1804402.75,
+        "workload": "incr-p100"
+      },
+      {
+        "metric": "throughput_ratio",
+        "target": "rust-vs-reference",
+        "unit": "ratio",
+        "value": 0.5609888267978396,
+        "workload": "incr-p100"
+      },
+      {
+        "metric": "profile_artifact_bytes",
+        "target": "rust",
+        "unit": "bytes",
+        "value": 98021,
+        "workload": "incr-p100"
+      },
+      {
+        "metric": "throughput_req_s",
+        "target": "reference",
+        "unit": "req/s",
+        "value": 4807692.5,
+        "workload": "ping-p100"
+      },
+      {
+        "metric": "throughput_req_s",
+        "target": "rust",
+        "unit": "req/s",
+        "value": 3442933.25,
+        "workload": "ping-p100"
+      },
+      {
+        "metric": "throughput_ratio",
+        "target": "rust-vs-reference",
+        "unit": "ratio",
+        "value": 0.7161300873547966,
+        "workload": "ping-p100"
+      },
+      {
+        "metric": "profile_artifact_bytes",
+        "target": "rust",
+        "unit": "bytes",
+        "value": 66732,
+        "workload": "ping-p100"
+      }
+    ],
+    "method": "bench-load",
+    "runner_id": "bench-profile-calltree",
+    "schema_version": 1,
+    "status": "pass",
+    "summary": "profile calltree: sample, median 0.72x, min 0.56x, max 0.80x; artifacts 16",
+    "surface": "performance"
+  },
+  "role": "runner"
+}

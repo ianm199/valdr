@@ -1,0 +1,5 @@
+redis-server: listening on 127.0.0.1:53407
+50056:M 1779467550 * PID: 50056
+50056:M 1779467550 * Server initialized
+50056:M 1779467550 * Ready to accept connections tcp
+redis-server: RuntimeOwner mio plain TCP loop enabled
