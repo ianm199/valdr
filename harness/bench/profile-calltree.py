@@ -739,7 +739,7 @@ def failure_result(summary: str, evidence: dict[str, Any]) -> dict[str, Any]:
         "runner_id": "bench-profile-calltree",
         "status": "fail",
         "surface": "performance",
-        "method": "bench-load-profile-artifact",
+        "method": "bench-load",
         "summary": summary,
         "measurements": [],
         "artifacts": [],
@@ -877,7 +877,7 @@ def main() -> int:
         "runner_id": "bench-profile-calltree",
         "status": "pass" if passed else "fail",
         "surface": "performance",
-        "method": "bench-load-profile-artifact",
+        "method": "bench-load",
         "summary": (
             f"profile calltree: {profiler.name}, median {median_ratio:.2f}x, "
             f"min {min(ratios):.2f}x, max {max(ratios):.2f}x; "
