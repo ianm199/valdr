@@ -12,6 +12,7 @@ extra_paths = [
   "harness/completion.toml",
   "harness/commit.toml",
   "harness/source.toml",
+  "harness/history.jsonl",
   "harness/architecture/",
   "docs/",
 ]
