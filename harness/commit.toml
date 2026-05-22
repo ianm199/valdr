@@ -1,0 +1,17 @@
+schema_version = 1
+
+[commit]
+mode = "packet_success"
+author = "ianm199 <ianm199@users.noreply.github.com>"
+require_no_unrelated_dirty = true
+include_dashboard = true
+extra_paths = [
+  "harness/envelope.toml",
+  "harness/runners.toml",
+  "harness/scheduler.toml",
+  "harness/completion.toml",
+  "harness/commit.toml",
+  "harness/source.toml",
+  "harness/architecture/",
+  "docs/",
+]

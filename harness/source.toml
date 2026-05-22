@@ -5,11 +5,13 @@
 # license compatibility with the Rust port.
 
 [source]
+name     = "valkey"
 repo     = "https://github.com/valkey-io/valkey"
 branch   = "unstable"
 commit   = "0321a69e62f5148096d03358e26a1b884af3b969"  # 2026-05-16
 license  = "BSD-3-Clause"
 local    = "reference/valkey"
+primary_file = "reference/valkey/src/server.c"
 
 [build.reference]
 command  = "make -j4 BUILD_TLS=no DISABLE_WERRORS=yes"

@@ -1,0 +1,55 @@
+schema_version = 1
+
+[runtime.current]
+summary = "Blocking thread per client; each command borrows &mut Client and &mut RedisDb through CommandContext."
+hot_path = [
+  "TcpListener::incoming",
+  "thread::spawn(handle_connection)",
+  "Client::query_buf parse loop",
+  "Arc<Mutex<RedisDb>> lock",
+  "redis_commands::dispatch",
+  "client.reply_buf flush",
+]
+compatibility_status = "shipping alpha path"
+
+[runtime.target]
+summary = "Faithful Valkey-like runtime owner; one owner loop coordinates client sockets, DB state, timers, ordinary replies, and background events."
+non_goals = [
+  "sharding",
+  "benchmark-only command bypass",
+  "dropping unsupported subsystems for speed",
+]
+must_preserve = [
+  "RESP wire compatibility",
+  "ACL/auth checks",
+  "MULTI/EXEC/WATCH ordering",
+  "Lua script command ordering",
+  "expiration semantics",
+  "pub/sub delivery",
+  "blocking wakeups",
+  "AOF/replication propagation order",
+  "RDB save/load compatibility",
+]
+
+[[transition]]
+id = "map"
+status = "planned"
+packet = "runtime-owner-0-faithful-map"
+description = "Map current ownership and refine packet graph without implementation."
+
+[[transition]]
+id = "canaries"
+status = "planned"
+packet = "runtime-owner-1-canary-corpus"
+description = "Add compatibility canaries before touching runtime ownership code."
+
+[[transition]]
+id = "scaffold"
+status = "planned"
+packet = "runtime-owner-2-scaffold-types"
+description = "Add inert RuntimeOwner vocabulary without switching the product path."
+
+[[transition]]
+id = "owner-loop"
+status = "manual-after-human-review"
+description = "Real nonblocking owner loop; not in the default unattended run."

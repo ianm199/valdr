@@ -1,0 +1,62 @@
+schema_version = 1
+
+[project]
+name = "valkey-rs-runtime-owner-run"
+target = "faithful runtime-owner planning + safe scaffold"
+description = "This run is complete when baseline conformance/performance evidence has been recorded, the faithful runtime-owner architecture map has landed, runtime-owner canaries pass, an inert RuntimeOwner scaffold lands without changing the default product path, and post-scaffold oracle/benchmark evidence exists."
+non_goals = [
+  "Sharding",
+  "Benchmark-only command fast paths",
+  "Making the runtime-owner scaffold the default server loop",
+  "Dropping ACL, MULTI/EXEC, scripting, expiration, pub/sub, blocking, AOF, RDB, or replication semantics for speed",
+]
+
+[[criterion]]
+id = "workspace-check"
+kind = "command_success"
+required = false
+command = ["cargo", "check", "--workspace"]
+
+[[criterion]]
+id = "runtime-owner-seed-packets"
+kind = "packets_completed"
+required = true
+packets = [
+  "runtime-owner-baseline-oracle",
+  "runtime-owner-baseline-profile-matrix",
+  "runtime-owner-baseline-hotspots",
+  "runtime-owner-0-faithful-map",
+  "runtime-owner-1-canary-corpus",
+  "runtime-owner-post-canary-oracle",
+  "runtime-owner-2-scaffold-types",
+  "runtime-owner-post-scaffold-oracle",
+  "runtime-owner-post-scaffold-profile-matrix",
+  "runtime-owner-post-scaffold-hotspots",
+]
+
+[[criterion]]
+id = "latest-wire-smoke"
+kind = "runner_latest_pass"
+required = true
+packet = "runtime-owner-post-scaffold-oracle"
+runner = "wire-smoke"
+
+[[criterion]]
+id = "latest-profile-matrix"
+kind = "runner_latest_pass"
+required = true
+packet = "runtime-owner-post-scaffold-profile-matrix"
+runner = "bench-profile-matrix"
+
+[[criterion]]
+id = "latest-profile-hotspots"
+kind = "runner_latest_pass"
+required = true
+packet = "runtime-owner-post-scaffold-hotspots"
+runner = "bench-profile-hotspots-big"
+
+[[criterion]]
+id = "no-ready-auto-packets"
+kind = "no_ready_packets"
+required = false
+selector = "auto"

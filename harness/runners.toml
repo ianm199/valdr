@@ -1,0 +1,42 @@
+schema_version = 1
+
+[[runner]]
+id = "wire-smoke"
+kind = "external_suite"
+surface = "correctness"
+method = "oracle-diff"
+metric = "wire_smoke_pass"
+target = "rust-vs-reference"
+command = ["bash", "harness/oracle/smoke.sh", "--skip-build"]
+timeout_s = 900
+capabilities = ["wire-compatibility"]
+
+[[runner]]
+id = "bench-profile-matrix"
+kind = "json_command"
+surface = "performance"
+method = "bench-load"
+workload = "profile-matrix"
+command = ["bash", "harness/bench/run-profile-matrix.sh"]
+timeout_s = 1800
+capabilities = ["performance-profile-matrix", "faithful-runtime-ownership"]
+
+[[runner]]
+id = "bench-profile-hotspots-smoke"
+kind = "json_command"
+surface = "performance"
+method = "bench-load"
+workload = "profile-hotspots-smoke"
+command = ["python3", "harness/bench/profile-hotspots.py", "--suite", "smoke", "--sample-seconds", "4"]
+timeout_s = 1800
+capabilities = ["performance-profile-matrix", "faithful-runtime-ownership"]
+
+[[runner]]
+id = "bench-profile-hotspots-big"
+kind = "json_command"
+surface = "performance"
+method = "bench-load"
+workload = "profile-hotspots-big"
+command = ["python3", "harness/bench/profile-hotspots.py", "--suite", "big", "--sample-seconds", "8"]
+timeout_s = 3600
+capabilities = ["performance-profile-matrix", "faithful-runtime-ownership"]

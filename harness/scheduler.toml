@@ -1,0 +1,18 @@
+schema_version = 1
+
+max_workers = 3
+max_agent_workers = 1
+max_runner_workers = 2
+max_merge_workers = 1
+claim_ttl_s = 10800
+worktree_root = ".harness/worktrees"
+merge_strategy = "serialized"
+
+conflict_scopes = ["file", "resource"]
+exclusive_roles = ["architect"]
+
+[role_limits]
+architect = 1
+translator = 1
+runner = 2
+test-fixer = 1

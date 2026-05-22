@@ -425,7 +425,7 @@ def main() -> int:
         "runner_id": "bench-profile-hotspots",
         "status": "pass",
         "surface": "performance",
-        "method": "bench-load-with-stack-sampling",
+        "method": "bench-load",
         "summary": (
             f"profile hotspots: median {sorted(ratios)[len(ratios)//2]:.2f}x, "
             f"min {min(ratios):.2f}x, max {max(ratios):.2f}x"
@@ -442,6 +442,7 @@ def main() -> int:
             "rows": result_rows,
             "samples": sample_summaries,
             "sampler": str(MACOS_SAMPLE) if MACOS_SAMPLE.exists() else "unavailable",
+            "method_detail": "bench-load-with-stack-sampling",
             "sampler_note": (
                 "/usr/bin/sample is wall-clock stack sampling. Treat wait/sleep/socket categories "
                 "as scheduler/IO evidence, not pure CPU time. Use xctrace Time Profiler for a "

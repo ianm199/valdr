@@ -1,0 +1,50 @@
+schema_version = 1
+target = "valkey-rs"
+upstream = "Valkey"
+upstream_commit = "0321a69e62f5148096d03358e26a1b884af3b969"
+rust_binary = "target/release/redis-server"
+
+[[capability]]
+id = "wire-compatibility"
+description = "RESP command/reply behavior matches pinned upstream Valkey on the surveyed wire-diff corpus"
+phase = 0
+owners = ["redis-server", "redis-protocol", "redis-core", "redis-commands"]
+fixtures = ["harness/oracle/corpus/*.txt"]
+benchmarks = []
+security_cases = []
+
+[[capability]]
+id = "performance-profile-matrix"
+description = "Performance is measured against upstream Valkey with the profile matrix runner, not asserted by hand-written claims"
+phase = 0
+owners = ["harness/bench/run-profile-matrix.sh", "harness/bench/profile-hotspots.py"]
+fixtures = []
+benchmarks = ["bench-profile-matrix", "bench-profile-hotspots"]
+security_cases = []
+
+[[capability]]
+id = "faithful-runtime-ownership"
+description = "Normal command execution moves toward a Valkey-like runtime owner while preserving drop-in command semantics"
+phase = 6
+owners = ["crates/redis-server/src/main.rs", "crates/redis-server/src/runtime_owner.rs", "crates/redis-core/src/command_context.rs"]
+fixtures = ["runtime-owner-canaries"]
+benchmarks = ["bench-profile-matrix", "bench-profile-hotspots"]
+security_cases = []
+
+[[capability]]
+id = "runtime-owner-canaries"
+description = "Compatibility canaries cover the semantics most likely to break under runtime ownership changes"
+phase = 6
+owners = ["harness/oracle/corpus/21-runtime-owner-canaries.txt"]
+fixtures = ["runtime-owner-canaries"]
+benchmarks = []
+security_cases = []
+
+[[capability]]
+id = "runtime-owner-scaffold"
+description = "Typed RuntimeOwner vocabulary exists without changing the default product path"
+phase = 6
+owners = ["crates/redis-server/src/runtime_owner.rs"]
+fixtures = ["runtime-owner-canaries"]
+benchmarks = []
+security_cases = []
