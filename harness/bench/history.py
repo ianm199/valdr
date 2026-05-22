@@ -1060,11 +1060,22 @@ def build(out_dir: Path, *, quiet: bool = False) -> None:
         print(f"points: {history['point_count']}")
 
 
+def needs_rebuild(out_dir: Path) -> bool:
+    index = out_dir / "index.html"
+    history_json = out_dir / "history.json"
+    if not index.exists() or not history_json.exists():
+        return True
+    existing = load_json(history_json) or {}
+    existing_signature = existing.get("signature")
+    current_signature = build_history().get("signature")
+    return existing_signature != current_signature
+
+
 def serve(out_dir: Path, port: int) -> None:
     class Handler(SimpleHTTPRequestHandler):
         def do_GET(self) -> None:
             route = self.path.split("?", 1)[0]
-            if route in {"/", "/index.html", "/history.json"}:
+            if route in {"/", "/index.html", "/history.json"} and needs_rebuild(out_dir):
                 try:
                     build(out_dir, quiet=True)
                 except Exception as err:  # noqa: BLE001 - keep serving old dashboard on rebuild failure.
@@ -1085,9 +1096,12 @@ def main() -> int:
     parser.add_argument("--serve", action="store_true")
     parser.add_argument("--port", type=int, default=8022)
     args = parser.parse_args()
-    build(args.out_dir)
     if args.serve:
+        if needs_rebuild(args.out_dir):
+            build(args.out_dir)
         serve(args.out_dir, args.port)
+    else:
+        build(args.out_dir)
     return 0
 
 
