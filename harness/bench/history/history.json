@@ -105,7 +105,7 @@
       "ts": "2026-05-22T17:04:15.030871Z"
     }
   ],
-  "generated_at": "2026-05-22T17:27:43+00:00",
+  "generated_at": "2026-05-22T17:47:46+00:00",
   "latest": {
     "calltree": {
       "artifacts": [
@@ -1779,17 +1779,19 @@
     }
   ],
   "project": "valkey-rs",
-  "raw_point_count": 47,
+  "raw_point_count": 52,
   "raw_points": [
     {
       "clients": 10,
       "commit": "a6ebea9",
       "commit_subject": "docs: move planning + triage docs to history/, delete broken pointer",
+      "commit_ts": "2026-05-20T11:23:51-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/a6ebea9",
       "get_p1": null,
       "get_p100": 0.12,
       "incr_p100": 0.1,
       "max": 0.16,
+      "measured_at": "2026-05-20T15:33:46Z",
       "median": 0.11499999999999999,
       "min": 0.1,
       "p99_ms": {
@@ -1814,17 +1816,19 @@
       "source": "harness/bench/results/20260520T153346Z-a6ebea9.tsv",
       "source_url": "../../bench/results/20260520T153346Z-a6ebea9.tsv",
       "summary": "Legacy benchmark median 0.11x min 0.10x max 0.16x",
-      "ts": "2026-05-20T15:33:46Z"
+      "ts": "2026-05-20T11:23:51-04:00"
     },
     {
       "clients": 50,
       "commit": "a6ebea9",
       "commit_subject": "docs: move planning + triage docs to history/, delete broken pointer",
+      "commit_ts": "2026-05-20T11:23:51-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/a6ebea9",
       "get_p1": null,
       "get_p100": 0.07,
       "incr_p100": 0.06,
       "max": 1.43,
+      "measured_at": "2026-05-20T15:34:24Z",
       "median": 0.07500000000000001,
       "min": 0.05,
       "p99_ms": {
@@ -1873,17 +1877,19 @@
       "source": "harness/bench/results/20260520T153424Z-a6ebea9.tsv",
       "source_url": "../../bench/results/20260520T153424Z-a6ebea9.tsv",
       "summary": "Legacy benchmark median 0.08x min 0.05x max 1.43x",
-      "ts": "2026-05-20T15:34:24Z"
+      "ts": "2026-05-20T11:23:51-04:00"
     },
     {
       "clients": 50,
       "commit": "47915ba",
       "commit_subject": "bench: add valkey-benchmark side-by-side script + BENCHMARKS.md baseline",
+      "commit_ts": "2026-05-20T11:36:43-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/47915ba",
       "get_p1": 0.575,
       "get_p100": 0.093023,
       "incr_p100": 0.056604,
       "max": 1.316589,
+      "measured_at": "2026-05-21T21:58:06Z",
       "median": 0.093023,
       "min": 0.056604,
       "p99_ms": {
@@ -1930,17 +1936,19 @@
       "source": "harness/bench/results/20260521T215806Z-47915ba-profile-matrix.tsv",
       "source_url": "../../bench/results/20260521T215806Z-47915ba-profile-matrix.tsv",
       "summary": "Raw profile matrix median 0.09x min 0.06x max 1.32x",
-      "ts": "2026-05-21T21:58:06Z"
+      "ts": "2026-05-20T11:36:43-04:00"
     },
     {
       "clients": 50,
       "commit": "47915ba",
       "commit_subject": "bench: add valkey-benchmark side-by-side script + BENCHMARKS.md baseline",
+      "commit_ts": "2026-05-20T11:36:43-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/47915ba",
       "get_p1": 0.875706,
       "get_p100": 0.066298,
       "incr_p100": 0.057617,
       "max": 1.101276,
+      "measured_at": "2026-05-21T21:58:25Z",
       "median": 0.10687,
       "min": 0.048934,
       "p99_ms": {
@@ -1987,17 +1995,19 @@
       "source": "harness/bench/results/20260521T215825Z-47915ba-profile-matrix.tsv",
       "source_url": "../../bench/results/20260521T215825Z-47915ba-profile-matrix.tsv",
       "summary": "Raw profile matrix median 0.11x min 0.05x max 1.10x",
-      "ts": "2026-05-21T21:58:25Z"
+      "ts": "2026-05-20T11:36:43-04:00"
     },
     {
       "clients": 50,
       "commit": "a5401a1",
       "commit_subject": "bench: add profile matrix benchmark",
+      "commit_ts": "2026-05-21T18:00:10-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/a5401a1",
       "get_p1": 0.662404,
       "get_p100": 0.119919,
       "incr_p100": 0.079946,
       "max": 1.297352,
+      "measured_at": "2026-05-21T22:24:58Z",
       "median": 0.136742,
       "min": 0.079946,
       "p99_ms": {
@@ -2044,17 +2054,19 @@
       "source": "harness/bench/results/20260521T222458Z-a5401a1-profile-matrix.tsv",
       "source_url": "../../bench/results/20260521T222458Z-a5401a1-profile-matrix.tsv",
       "summary": "Raw profile matrix median 0.14x min 0.08x max 1.30x",
-      "ts": "2026-05-21T22:24:58Z"
+      "ts": "2026-05-21T18:00:10-04:00"
     },
     {
       "clients": 50,
       "commit": "8af2ad2",
       "commit_subject": "perf: batch pipelined replies",
+      "commit_ts": "2026-05-21T18:27:16-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/8af2ad2",
       "get_p1": 0.809896,
       "get_p100": 0.136161,
       "incr_p100": 0.071338,
       "max": 1.255073,
+      "measured_at": "2026-05-21T22:35:25Z",
       "median": 0.139877,
       "min": 0.071338,
       "p99_ms": {
@@ -2101,17 +2113,19 @@
       "source": "harness/bench/results/20260521T223525Z-8af2ad2-profile-matrix.tsv",
       "source_url": "../../bench/results/20260521T223525Z-8af2ad2-profile-matrix.tsv",
       "summary": "Raw profile matrix median 0.14x min 0.07x max 1.26x",
-      "ts": "2026-05-21T22:35:25Z"
+      "ts": "2026-05-21T18:27:16-04:00"
     },
     {
       "clients": 50,
       "commit": "8af2ad2",
       "commit_subject": "perf: batch pipelined replies",
+      "commit_ts": "2026-05-21T18:27:16-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/8af2ad2",
       "get_p1": 0.765171,
       "get_p100": 0.138636,
       "incr_p100": 0.073511,
       "max": 1.366876,
+      "measured_at": "2026-05-21T22:36:36Z",
       "median": 0.153184,
       "min": 0.073511,
       "p99_ms": {
@@ -2158,17 +2172,19 @@
       "source": "harness/bench/results/20260521T223636Z-8af2ad2-profile-matrix.tsv",
       "source_url": "../../bench/results/20260521T223636Z-8af2ad2-profile-matrix.tsv",
       "summary": "Raw profile matrix median 0.15x min 0.07x max 1.37x",
-      "ts": "2026-05-21T22:36:36Z"
+      "ts": "2026-05-21T18:27:16-04:00"
     },
     {
       "clients": 50,
       "commit": "8af2ad2",
       "commit_subject": "perf: batch pipelined replies",
+      "commit_ts": "2026-05-21T18:27:16-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/8af2ad2",
       "get_p1": 0.71831,
       "get_p100": 0.15212,
       "incr_p100": 0.083447,
       "max": 1.239443,
+      "measured_at": "2026-05-21T22:39:14Z",
       "median": 0.166375,
       "min": 0.083447,
       "p99_ms": {
@@ -2215,17 +2231,19 @@
       "source": "harness/bench/results/20260521T223914Z-8af2ad2-profile-matrix.tsv",
       "source_url": "../../bench/results/20260521T223914Z-8af2ad2-profile-matrix.tsv",
       "summary": "Raw profile matrix median 0.17x min 0.08x max 1.24x",
-      "ts": "2026-05-21T22:39:14Z"
+      "ts": "2026-05-21T18:27:16-04:00"
     },
     {
       "clients": 50,
       "commit": "41d22d7",
       "commit_subject": "perf: reduce pipelined tcp overhead",
+      "commit_ts": "2026-05-21T18:41:50-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/41d22d7",
       "get_p1": 0.699725,
       "get_p100": 0.282297,
       "incr_p100": 0.220149,
       "max": 1.62367,
+      "measured_at": "2026-05-21T22:56:49Z",
       "median": 0.326733,
       "min": 0.177273,
       "p99_ms": {
@@ -2272,17 +2290,19 @@
       "source": "harness/bench/results/20260521T225649Z-41d22d7-profile-matrix.tsv",
       "source_url": "../../bench/results/20260521T225649Z-41d22d7-profile-matrix.tsv",
       "summary": "Raw profile matrix median 0.33x min 0.18x max 1.62x",
-      "ts": "2026-05-21T22:56:49Z"
+      "ts": "2026-05-21T18:41:50-04:00"
     },
     {
       "clients": 50,
       "commit": "f64f932",
       "commit_subject": "docs: detail runtime owner harness plan",
+      "commit_ts": "2026-05-21T19:15:04-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/f64f932",
       "get_p1": 0.900875,
       "get_p100": 0.625,
       "incr_p100": 0.349693,
       "max": 1.720026,
+      "measured_at": "2026-05-21T23:21:50Z",
       "median": 0.643312,
       "min": 0.349693,
       "p99_ms": {
@@ -2329,17 +2349,19 @@
       "source": "harness/bench/results/20260521T232150Z-f64f932-profile-matrix.tsv",
       "source_url": "../../bench/results/20260521T232150Z-f64f932-profile-matrix.tsv",
       "summary": "Raw profile matrix median 0.64x min 0.35x max 1.72x",
-      "ts": "2026-05-21T23:21:50Z"
+      "ts": "2026-05-21T19:15:04-04:00"
     },
     {
       "clients": 50,
       "commit": "e8d347e",
       "commit_subject": "perf: cache redis dispatch metadata",
+      "commit_ts": "2026-05-21T19:22:49-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/e8d347e",
       "get_p1": 0.732782,
       "get_p100": 0.628866,
       "incr_p100": 0.389937,
       "max": 1.684416,
+      "measured_at": "2026-05-21T23:22:53Z",
       "median": 0.628866,
       "min": 0.389937,
       "p99_ms": {
@@ -2386,17 +2408,19 @@
       "source": "harness/bench/results/20260521T232253Z-e8d347e-profile-matrix.tsv",
       "source_url": "../../bench/results/20260521T232253Z-e8d347e-profile-matrix.tsv",
       "summary": "Raw profile matrix median 0.63x min 0.39x max 1.68x",
-      "ts": "2026-05-21T23:22:53Z"
+      "ts": "2026-05-21T19:22:49-04:00"
     },
     {
       "clients": 50,
       "commit": "907ad5f",
       "commit_subject": "docs: update redis performance iteration",
+      "commit_ts": "2026-05-21T19:24:46-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/907ad5f",
       "get_p1": null,
       "get_p100": 0.524152,
       "incr_p100": null,
       "max": 0.524152,
+      "measured_at": "2026-05-21T23:31:42Z",
       "median": 0.524152,
       "min": 0.524152,
       "p99_ms": {
@@ -2415,17 +2439,19 @@
       "source": "harness/bench/results/20260521T233142Z-907ad5f-hotspots.tsv",
       "source_url": "../../bench/results/20260521T233142Z-907ad5f-hotspots.tsv",
       "summary": "Raw hotspots median 0.52x min 0.52x max 0.52x",
-      "ts": "2026-05-21T23:31:42Z"
+      "ts": "2026-05-21T19:24:46-04:00"
     },
     {
       "clients": 50,
       "commit": "2709d1e",
       "commit_subject": "bench: add profiled redis hotspot runner",
+      "commit_ts": "2026-05-21T19:32:29-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/2709d1e",
       "get_p1": null,
       "get_p100": 0.580299,
       "incr_p100": 0.329562,
       "max": 0.580299,
+      "measured_at": "2026-05-21T23:32:34Z",
       "median": 0.4207975,
       "min": 0.329562,
       "p99_ms": {
@@ -2450,17 +2476,19 @@
       "source": "harness/bench/results/20260521T233234Z-2709d1e-hotspots.tsv",
       "source_url": "../../bench/results/20260521T233234Z-2709d1e-hotspots.tsv",
       "summary": "Raw hotspots median 0.42x min 0.33x max 0.58x",
-      "ts": "2026-05-21T23:32:34Z"
+      "ts": "2026-05-21T19:32:29-04:00"
     },
     {
       "clients": 50,
       "commit": "fda6d1f",
       "commit_subject": "docs: record profiled redis hotspot run",
+      "commit_ts": "2026-05-21T19:34:23-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/fda6d1f",
       "get_p1": 0.784367,
       "get_p100": 0.9,
       "incr_p100": 0.61157,
       "max": 1.682881,
+      "measured_at": "2026-05-21T23:44:07Z",
       "median": 0.737705,
       "min": 0.443182,
       "p99_ms": {
@@ -2507,17 +2535,19 @@
       "source": "harness/bench/results/20260521T234407Z-fda6d1f-profile-matrix.tsv",
       "source_url": "../../bench/results/20260521T234407Z-fda6d1f-profile-matrix.tsv",
       "summary": "Raw profile matrix median 0.74x min 0.44x max 1.68x",
-      "ts": "2026-05-21T23:44:07Z"
+      "ts": "2026-05-21T19:34:23-04:00"
     },
     {
       "clients": 50,
       "commit": "fda6d1f",
       "commit_subject": "docs: record profiled redis hotspot run",
+      "commit_ts": "2026-05-21T19:34:23-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/fda6d1f",
       "get_p1": null,
       "get_p100": 0.568464,
       "incr_p100": 0.433471,
       "max": 0.568464,
+      "measured_at": "2026-05-21T23:44:45Z",
       "median": 0.5051265,
       "min": 0.433471,
       "p99_ms": {
@@ -2542,17 +2572,19 @@
       "source": "harness/bench/results/20260521T234445Z-fda6d1f-hotspots.tsv",
       "source_url": "../../bench/results/20260521T234445Z-fda6d1f-hotspots.tsv",
       "summary": "Raw hotspots median 0.51x min 0.43x max 0.57x",
-      "ts": "2026-05-21T23:44:45Z"
+      "ts": "2026-05-21T19:34:23-04:00"
     },
     {
       "clients": 50,
       "commit": "fda6d1f",
       "commit_subject": "docs: record profiled redis hotspot run",
+      "commit_ts": "2026-05-21T19:34:23-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/fda6d1f",
       "get_p1": 0.749288,
       "get_p100": 0.639175,
       "incr_p100": 0.521739,
       "max": 1.699546,
+      "measured_at": "2026-05-21T23:46:58Z",
       "median": 0.684211,
       "min": 0.521739,
       "p99_ms": {
@@ -2599,17 +2631,19 @@
       "source": "harness/bench/results/20260521T234658Z-fda6d1f-profile-matrix.tsv",
       "source_url": "../../bench/results/20260521T234658Z-fda6d1f-profile-matrix.tsv",
       "summary": "Raw profile matrix median 0.68x min 0.52x max 1.70x",
-      "ts": "2026-05-21T23:46:58Z"
+      "ts": "2026-05-21T19:34:23-04:00"
     },
     {
       "clients": 50,
       "commit": "b21a533",
       "commit_subject": "perf: trim redis dispatch replication hot path",
+      "commit_ts": "2026-05-21T19:47:22-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/b21a533",
       "get_p1": 0.775,
       "get_p100": 0.648936,
       "incr_p100": 0.508772,
       "max": 1.539823,
+      "measured_at": "2026-05-21T23:47:28Z",
       "median": 0.663934,
       "min": 0.505882,
       "p99_ms": {
@@ -2656,17 +2690,19 @@
       "source": "harness/bench/results/20260521T234728Z-b21a533-profile-matrix.tsv",
       "source_url": "../../bench/results/20260521T234728Z-b21a533-profile-matrix.tsv",
       "summary": "Raw profile matrix median 0.66x min 0.51x max 1.54x",
-      "ts": "2026-05-21T23:47:28Z"
+      "ts": "2026-05-21T19:47:22-04:00"
     },
     {
       "clients": 50,
       "commit": "a673212",
       "commit_subject": "docs: record redis perf packet results",
+      "commit_ts": "2026-05-21T19:49:53-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/a673212",
       "get_p1": null,
       "get_p100": 0.557614,
       "incr_p100": 0.454321,
       "max": 0.595059,
+      "measured_at": "2026-05-21T23:50:11Z",
       "median": 0.5059675,
       "min": 0.451077,
       "p99_ms": {
@@ -2691,17 +2727,19 @@
       "source": "harness/bench/results/20260521T235011Z-a673212-hotspots.tsv",
       "source_url": "../../bench/results/20260521T235011Z-a673212-hotspots.tsv",
       "summary": "Raw hotspots median 0.51x min 0.45x max 0.60x",
-      "ts": "2026-05-21T23:50:11Z"
+      "ts": "2026-05-21T19:49:53-04:00"
     },
     {
       "clients": 50,
       "commit": "a673212",
       "commit_subject": "docs: record redis perf packet results",
+      "commit_ts": "2026-05-21T19:49:53-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/a673212",
       "get_p1": 0.751572,
       "get_p100": 0.663043,
       "incr_p100": 0.556604,
       "max": 1.607791,
+      "measured_at": "2026-05-21T23:52:03Z",
       "median": 0.689076,
       "min": 0.550898,
       "p99_ms": {
@@ -2748,17 +2786,19 @@
       "source": "harness/bench/results/20260521T235203Z-a673212-profile-matrix.tsv",
       "source_url": "../../bench/results/20260521T235203Z-a673212-profile-matrix.tsv",
       "summary": "Raw profile matrix median 0.69x min 0.55x max 1.61x",
-      "ts": "2026-05-21T23:52:03Z"
+      "ts": "2026-05-21T19:49:53-04:00"
     },
     {
       "clients": 50,
       "commit": "0004595",
       "commit_subject": "perf: bucket redis command dispatch lookup",
+      "commit_ts": "2026-05-21T19:52:33-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/0004595",
       "get_p1": 0.782486,
       "get_p100": 0.652174,
       "incr_p100": 0.570093,
       "max": 1.58493,
+      "measured_at": "2026-05-21T23:52:46Z",
       "median": 0.675,
       "min": 0.555556,
       "p99_ms": {
@@ -2805,17 +2845,19 @@
       "source": "harness/bench/results/20260521T235246Z-0004595-profile-matrix.tsv",
       "source_url": "../../bench/results/20260521T235246Z-0004595-profile-matrix.tsv",
       "summary": "Raw profile matrix median 0.68x min 0.56x max 1.58x",
-      "ts": "2026-05-21T23:52:46Z"
+      "ts": "2026-05-21T19:52:33-04:00"
     },
     {
       "clients": 50,
       "commit": "6da1962",
       "commit_subject": "harness: allow runtime run history commits",
+      "commit_ts": "2026-05-21T21:01:43-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/6da1962",
       "get_p1": 0.833866,
       "get_p100": 0.619565,
       "incr_p100": 0.650485,
       "max": 1.61753,
+      "measured_at": "2026-05-22T01:01:56Z",
       "median": 0.690476,
       "min": 0.6,
       "p99_ms": {
@@ -2862,17 +2904,19 @@
       "source": "harness/bench/results/20260522T010156Z-6da1962-profile-matrix.tsv",
       "source_url": "../../bench/results/20260522T010156Z-6da1962-profile-matrix.tsv",
       "summary": "Raw profile matrix median 0.69x min 0.60x max 1.62x",
-      "ts": "2026-05-22T01:01:56Z"
+      "ts": "2026-05-21T21:01:43-04:00"
     },
     {
       "clients": 50,
       "commit": "15060d7",
       "commit_subject": "runner: complete runtime-owner-baseline-profile-matrix",
+      "commit_ts": "2026-05-21T21:02:06-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/15060d7",
       "get_p1": null,
       "get_p100": 0.562997,
       "incr_p100": 0.542088,
       "max": 0.627536,
+      "measured_at": "2026-05-22T01:02:06Z",
       "median": 0.562997,
       "min": 0.542088,
       "p99_ms": {
@@ -2895,17 +2939,19 @@
       "source": "harness/bench/results/20260522T010206Z-15060d7-hotspots.tsv",
       "source_url": "../../bench/results/20260522T010206Z-15060d7-hotspots.tsv",
       "summary": "Raw hotspots median 0.56x min 0.54x max 0.63x",
-      "ts": "2026-05-22T01:02:06Z"
+      "ts": "2026-05-21T21:02:06-04:00"
     },
     {
       "clients": 50,
       "commit": "1a4086e",
       "commit_subject": "runner: complete runtime-owner-post-scaffold-oracle",
+      "commit_ts": "2026-05-22T00:16:48-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/1a4086e",
       "get_p1": 0.67688,
       "get_p100": 0.641304,
       "incr_p100": 0.522936,
       "max": 1.671079,
+      "measured_at": "2026-05-22T04:16:48Z",
       "median": 0.682353,
       "min": 0.522936,
       "p99_ms": {
@@ -2952,17 +2998,19 @@
       "source": "harness/bench/results/20260522T041648Z-1a4086e-profile-matrix.tsv",
       "source_url": "../../bench/results/20260522T041648Z-1a4086e-profile-matrix.tsv",
       "summary": "Raw profile matrix median 0.68x min 0.52x max 1.67x",
-      "ts": "2026-05-22T04:16:48Z"
+      "ts": "2026-05-22T00:16:48-04:00"
     },
     {
       "clients": 50,
       "commit": "ab1d468",
       "commit_subject": "runner: complete runtime-owner-post-scaffold-profile-matrix",
+      "commit_ts": "2026-05-22T00:16:58-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/ab1d468",
       "get_p1": null,
       "get_p100": 0.556009,
       "incr_p100": 0.505332,
       "max": 0.595453,
+      "measured_at": "2026-05-22T04:16:58Z",
       "median": 0.5306705,
       "min": 0.48133,
       "p99_ms": {
@@ -2987,17 +3035,19 @@
       "source": "harness/bench/results/20260522T041658Z-ab1d468-hotspots.tsv",
       "source_url": "../../bench/results/20260522T041658Z-ab1d468-hotspots.tsv",
       "summary": "Raw hotspots median 0.53x min 0.48x max 0.60x",
-      "ts": "2026-05-22T04:16:58Z"
+      "ts": "2026-05-22T00:16:58-04:00"
     },
     {
       "clients": 50,
       "commit": "4595740",
       "commit_subject": "architect: complete runtime-owner-3-overnight-architecture",
+      "commit_ts": "2026-05-22T00:24:38-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/4595740",
       "get_p1": 0.153019,
       "get_p100": 0.406897,
       "incr_p100": 0.386667,
       "max": 1.068628,
+      "measured_at": "2026-05-22T04:36:02Z",
       "median": 0.278638,
       "min": 0.153019,
       "p99_ms": {
@@ -3044,17 +3094,19 @@
       "source": "harness/bench/results/20260522T043602Z-4595740-profile-matrix.tsv",
       "source_url": "../../bench/results/20260522T043602Z-4595740-profile-matrix.tsv",
       "summary": "Raw profile matrix median 0.28x min 0.15x max 1.07x",
-      "ts": "2026-05-22T04:36:02Z"
+      "ts": "2026-05-22T00:24:38-04:00"
     },
     {
       "clients": 50,
       "commit": "4595740",
       "commit_subject": "architect: complete runtime-owner-3-overnight-architecture",
+      "commit_ts": "2026-05-22T00:24:38-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/4595740",
       "get_p1": 1.413953,
       "get_p100": 0.659341,
       "incr_p100": 0.597938,
       "max": 1.413953,
+      "measured_at": "2026-05-22T04:37:45Z",
       "median": 0.76699,
       "min": 0.597938,
       "p99_ms": {
@@ -3101,17 +3153,78 @@
       "source": "harness/bench/results/20260522T043745Z-4595740-profile-matrix.tsv",
       "source_url": "../../bench/results/20260522T043745Z-4595740-profile-matrix.tsv",
       "summary": "Raw profile matrix median 0.77x min 0.60x max 1.41x",
-      "ts": "2026-05-22T04:37:45Z"
+      "ts": "2026-05-22T00:24:38-04:00"
+    },
+    {
+      "clients": 50,
+      "commit": "7c190b1",
+      "commit_subject": "perf-fixer: complete runtime-owner-4-std-nonblocking-owner-loop",
+      "commit_ts": "2026-05-22T00:39:42-04:00",
+      "commit_url": "https://github.com/ianm199/valkey-rs/commit/7c190b1",
+      "get_p1": 1.048781,
+      "get_p100": 0.645161,
+      "incr_p100": 0.59596,
+      "max": 1.137196,
+      "measured_at": "2026-05-22T17:44:40Z",
+      "median": 0.70566,
+      "min": 0.533333,
+      "p99_ms": {
+        "core-p1/GET": 0.351,
+        "core-p1/INCR": 0.367,
+        "core-p1/PING_MBULK": 0.607,
+        "core-p1/SET": 0.367,
+        "core-p100/GET": 2.623,
+        "core-p100/INCR": 3.039,
+        "core-p100/PING_MBULK": 4.863,
+        "core-p100/SET": 7.615,
+        "core-p16/GET": 0.983,
+        "core-p16/INCR": 0.791,
+        "core-p16/PING_MBULK": 0.559,
+        "core-p16/SET": 0.751,
+        "range-heavy-p16/LPUSH (needed to benchmark LRANGE)": 0.999,
+        "range-heavy-p16/LRANGE_100 (first 100 elements)": 7.327,
+        "range-heavy-p16/LRANGE_300 (first 300 elements)": 22.911
+      },
+      "payload": 64,
+      "ping_p100": 0.533333,
+      "pipeline": 1,
+      "ratios": {
+        "core-p1/GET": 1.048781,
+        "core-p1/INCR": 1.048443,
+        "core-p1/PING_MBULK": 0.942675,
+        "core-p1/SET": 1.03871,
+        "core-p100/GET": 0.645161,
+        "core-p100/INCR": 0.59596,
+        "core-p100/PING_MBULK": 0.533333,
+        "core-p100/SET": 0.681035,
+        "core-p16/GET": 0.635135,
+        "core-p16/INCR": 0.630137,
+        "core-p16/PING_MBULK": 0.685714,
+        "core-p16/SET": 0.781457,
+        "range-heavy-p16/LPUSH (needed to benchmark LRANGE)": 0.881579,
+        "range-heavy-p16/LRANGE_100 (first 100 elements)": 0.70566,
+        "range-heavy-p16/LRANGE_300 (first 300 elements)": 1.137196
+      },
+      "requests": 50000,
+      "runner_kind": "raw-profile-matrix",
+      "runner_label": "Raw profile matrix",
+      "set_p100": 0.681035,
+      "source": "harness/bench/results/20260522T174440Z-7c190b1-profile-matrix.tsv",
+      "source_url": "../../bench/results/20260522T174440Z-7c190b1-profile-matrix.tsv",
+      "summary": "Raw profile matrix median 0.71x min 0.53x max 1.14x",
+      "ts": "2026-05-22T00:39:42-04:00"
     },
     {
       "clients": 50,
       "commit": "8721cbf",
       "commit_subject": "runner: complete runtime-owner-4-post-owner-loop-oracle",
+      "commit_ts": "2026-05-22T00:39:44-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/8721cbf",
       "get_p1": 1.058366,
       "get_p100": 0.572816,
       "incr_p100": 0.57,
       "max": 1.260274,
+      "measured_at": "2026-05-22T04:39:44Z",
       "median": 0.792857,
       "min": 0.57,
       "p99_ms": {
@@ -3158,17 +3271,19 @@
       "source": "harness/bench/results/20260522T043944Z-8721cbf-profile-matrix.tsv",
       "source_url": "../../bench/results/20260522T043944Z-8721cbf-profile-matrix.tsv",
       "summary": "Raw profile matrix median 0.79x min 0.57x max 1.26x",
-      "ts": "2026-05-22T04:39:44Z"
+      "ts": "2026-05-22T00:39:44-04:00"
     },
     {
       "clients": 50,
       "commit": "393a5f9",
       "commit_subject": "runner: complete runtime-owner-4-post-owner-loop-profile-matrix",
+      "commit_ts": "2026-05-22T00:39:54-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/393a5f9",
       "get_p1": null,
       "get_p100": 0.772951,
       "incr_p100": 0.54155,
       "max": 0.772951,
+      "measured_at": "2026-05-22T04:39:55Z",
       "median": 0.720557,
       "min": 0.54155,
       "p99_ms": {
@@ -3193,17 +3308,19 @@
       "source": "harness/bench/results/20260522T043955Z-393a5f9-hotspots.tsv",
       "source_url": "../../bench/results/20260522T043955Z-393a5f9-hotspots.tsv",
       "summary": "Raw hotspots median 0.72x min 0.54x max 0.77x",
-      "ts": "2026-05-22T04:39:55Z"
+      "ts": "2026-05-22T00:39:54-04:00"
     },
     {
       "clients": 50,
       "commit": "803918c",
       "commit_subject": "runner: complete runtime-owner-4-post-owner-loop-hotspots",
+      "commit_ts": "2026-05-22T00:40:45-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/803918c",
       "get_p1": 1.100457,
       "get_p100": 0.722892,
       "incr_p100": 0.57,
       "max": 1.180555,
+      "measured_at": "2026-05-22T04:47:45Z",
       "median": 0.795918,
       "min": 0.57,
       "p99_ms": {
@@ -3250,17 +3367,19 @@
       "source": "harness/bench/results/20260522T044745Z-803918c-profile-matrix.tsv",
       "source_url": "../../bench/results/20260522T044745Z-803918c-profile-matrix.tsv",
       "summary": "Raw profile matrix median 0.80x min 0.57x max 1.18x",
-      "ts": "2026-05-22T04:47:45Z"
+      "ts": "2026-05-22T00:40:45-04:00"
     },
     {
       "clients": 50,
       "commit": "803918c",
       "commit_subject": "runner: complete runtime-owner-4-post-owner-loop-hotspots",
+      "commit_ts": "2026-05-22T00:40:45-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/803918c",
       "get_p1": null,
       "get_p100": 0.802763,
       "incr_p100": 0.605087,
       "max": 0.802763,
+      "measured_at": "2026-05-22T04:48:01Z",
       "median": 0.721051,
       "min": 0.605087,
       "p99_ms": {
@@ -3285,17 +3404,19 @@
       "source": "harness/bench/results/20260522T044801Z-803918c-hotspots.tsv",
       "source_url": "../../bench/results/20260522T044801Z-803918c-hotspots.tsv",
       "summary": "Raw hotspots median 0.72x min 0.61x max 0.80x",
-      "ts": "2026-05-22T04:48:01Z"
+      "ts": "2026-05-22T00:40:45-04:00"
     },
     {
       "clients": 50,
       "commit": "803918c",
       "commit_subject": "runner: complete runtime-owner-4-post-owner-loop-hotspots",
+      "commit_ts": "2026-05-22T00:40:45-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/803918c",
       "get_p1": 1.080717,
       "get_p100": 0.75641,
       "incr_p100": 0.663265,
       "max": 1.626728,
+      "measured_at": "2026-05-22T04:53:45Z",
       "median": 0.79,
       "min": 0.663265,
       "p99_ms": {
@@ -3342,17 +3463,19 @@
       "source": "harness/bench/results/20260522T045345Z-803918c-profile-matrix.tsv",
       "source_url": "../../bench/results/20260522T045345Z-803918c-profile-matrix.tsv",
       "summary": "Raw profile matrix median 0.79x min 0.66x max 1.63x",
-      "ts": "2026-05-22T04:53:45Z"
+      "ts": "2026-05-22T00:40:45-04:00"
     },
     {
       "clients": 50,
       "commit": "803918c",
       "commit_subject": "runner: complete runtime-owner-4-post-owner-loop-hotspots",
+      "commit_ts": "2026-05-22T00:40:45-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/803918c",
       "get_p1": null,
       "get_p100": 0.835678,
       "incr_p100": 0.575196,
       "max": 0.835678,
+      "measured_at": "2026-05-22T04:53:55Z",
       "median": 0.7383595000000001,
       "min": 0.575196,
       "p99_ms": {
@@ -3377,17 +3500,19 @@
       "source": "harness/bench/results/20260522T045355Z-803918c-hotspots.tsv",
       "source_url": "../../bench/results/20260522T045355Z-803918c-hotspots.tsv",
       "summary": "Raw hotspots median 0.74x min 0.58x max 0.84x",
-      "ts": "2026-05-22T04:53:55Z"
+      "ts": "2026-05-22T00:40:45-04:00"
     },
     {
       "clients": 50,
       "commit": "5f159bc",
       "commit_subject": "runner: complete runtime-owner-6-current-oracle",
+      "commit_ts": "2026-05-22T09:55:24-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/5f159bc",
       "get_p1": 1.142349,
       "get_p100": 0.776316,
       "incr_p100": 0.634409,
       "max": 1.142349,
+      "measured_at": "2026-05-22T13:55:25Z",
       "median": 0.846154,
       "min": 0.412903,
       "p99_ms": {
@@ -3434,17 +3559,19 @@
       "source": "harness/bench/results/20260522T135525Z-5f159bc-profile-matrix.tsv",
       "source_url": "../../bench/results/20260522T135525Z-5f159bc-profile-matrix.tsv",
       "summary": "Raw profile matrix median 0.85x min 0.41x max 1.14x",
-      "ts": "2026-05-22T13:55:25Z"
+      "ts": "2026-05-22T09:55:24-04:00"
     },
     {
       "clients": 50,
       "commit": "1edcb59",
       "commit_subject": "runner: complete runtime-owner-6-current-profile-matrix",
+      "commit_ts": "2026-05-22T09:55:37-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/1edcb59",
       "get_p1": null,
       "get_p100": 0.863768,
       "incr_p100": 0.587844,
       "max": 0.863768,
+      "measured_at": "2026-05-22T13:55:37Z",
       "median": 0.7319715,
       "min": 0.587844,
       "p99_ms": {
@@ -3469,17 +3596,19 @@
       "source": "harness/bench/results/20260522T135537Z-1edcb59-hotspots.tsv",
       "source_url": "../../bench/results/20260522T135537Z-1edcb59-hotspots.tsv",
       "summary": "Raw hotspots median 0.73x min 0.59x max 0.86x",
-      "ts": "2026-05-22T13:55:37Z"
+      "ts": "2026-05-22T09:55:37-04:00"
     },
     {
       "clients": 50,
       "commit": "70dcc11",
       "commit_subject": "translator: complete runtime-owner-6-profile-artifact-runner",
+      "commit_ts": "2026-05-22T10:06:18-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/70dcc11",
       "get_p1": null,
       "get_p100": 0.827553,
       "incr_p100": 0.556248,
       "max": 0.827553,
+      "measured_at": "2026-05-22T14:07:01Z",
       "median": 0.740085,
       "min": 0.556248,
       "p99_ms": {
@@ -3504,17 +3633,19 @@
       "source": "harness/bench/results/20260522T140701Z-70dcc11-calltree.tsv",
       "source_url": "../../bench/results/20260522T140701Z-70dcc11-calltree.tsv",
       "summary": "Raw calltree median 0.74x min 0.56x max 0.83x",
-      "ts": "2026-05-22T14:07:01Z"
+      "ts": "2026-05-22T10:06:18-04:00"
     },
     {
       "clients": 50,
       "commit": "0022bc7",
       "commit_subject": "harness: use typed method for calltree profiler",
+      "commit_ts": "2026-05-22T10:09:09-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/0022bc7",
       "get_p1": null,
       "get_p100": 0.836972,
       "incr_p100": 0.563262,
       "max": 0.836972,
+      "measured_at": "2026-05-22T14:09:14Z",
       "median": 0.7279865,
       "min": 0.563262,
       "p99_ms": {
@@ -3539,17 +3670,78 @@
       "source": "harness/bench/results/20260522T140914Z-0022bc7-calltree.tsv",
       "source_url": "../../bench/results/20260522T140914Z-0022bc7-calltree.tsv",
       "summary": "Raw calltree median 0.73x min 0.56x max 0.84x",
-      "ts": "2026-05-22T14:09:14Z"
+      "ts": "2026-05-22T10:09:09-04:00"
+    },
+    {
+      "clients": 50,
+      "commit": "6f99e53",
+      "commit_subject": "perf-fixer: complete runtime-owner-8-mio-poller-owner-loop",
+      "commit_ts": "2026-05-22T10:41:33-04:00",
+      "commit_url": "https://github.com/ianm199/valkey-rs/commit/6f99e53",
+      "get_p1": 1.132203,
+      "get_p100": 0.820513,
+      "incr_p100": 0.606383,
+      "max": 1.339041,
+      "measured_at": "2026-05-22T17:45:03Z",
+      "median": 0.820513,
+      "min": 0.606383,
+      "p99_ms": {
+        "core-p1/GET": 0.415,
+        "core-p1/INCR": 0.415,
+        "core-p1/PING_MBULK": 0.831,
+        "core-p1/SET": 0.415,
+        "core-p100/GET": 2.159,
+        "core-p100/INCR": 2.703,
+        "core-p100/PING_MBULK": 1.439,
+        "core-p100/SET": 2.831,
+        "core-p16/GET": 0.711,
+        "core-p16/INCR": 0.743,
+        "core-p16/PING_MBULK": 0.543,
+        "core-p16/SET": 0.807,
+        "range-heavy-p16/LPUSH (needed to benchmark LRANGE)": 1.159,
+        "range-heavy-p16/LRANGE_100 (first 100 elements)": 6.623,
+        "range-heavy-p16/LRANGE_300 (first 300 elements)": 19.711
+      },
+      "payload": 64,
+      "ping_p100": 0.764706,
+      "pipeline": 1,
+      "ratios": {
+        "core-p1/GET": 1.132203,
+        "core-p1/INCR": 1.27,
+        "core-p1/PING_MBULK": 1.041401,
+        "core-p1/SET": 1.143357,
+        "core-p100/GET": 0.820513,
+        "core-p100/INCR": 0.606383,
+        "core-p100/PING_MBULK": 0.764706,
+        "core-p100/SET": 0.80198,
+        "core-p16/GET": 0.736111,
+        "core-p16/INCR": 0.610063,
+        "core-p16/PING_MBULK": 0.92381,
+        "core-p16/SET": 0.674286,
+        "range-heavy-p16/LPUSH (needed to benchmark LRANGE)": 0.809524,
+        "range-heavy-p16/LRANGE_100 (first 100 elements)": 0.914596,
+        "range-heavy-p16/LRANGE_300 (first 300 elements)": 1.339041
+      },
+      "requests": 50000,
+      "runner_kind": "raw-profile-matrix",
+      "runner_label": "Raw profile matrix",
+      "set_p100": 0.80198,
+      "source": "harness/bench/results/20260522T174503Z-6f99e53-profile-matrix.tsv",
+      "source_url": "../../bench/results/20260522T174503Z-6f99e53-profile-matrix.tsv",
+      "summary": "Raw profile matrix median 0.82x min 0.61x max 1.34x",
+      "ts": "2026-05-22T10:41:33-04:00"
     },
     {
       "clients": 50,
       "commit": "aa09851",
       "commit_subject": "runner: complete runtime-owner-8-post-poller-oracle",
+      "commit_ts": "2026-05-22T10:45:32-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/aa09851",
       "get_p1": 0.877023,
       "get_p100": 0.729412,
       "incr_p100": 0.62766,
       "max": 1.490421,
+      "measured_at": "2026-05-22T14:45:52Z",
       "median": 0.754875,
       "min": 0.6,
       "p99_ms": {
@@ -3596,17 +3788,19 @@
       "source": "harness/bench/results/20260522T144552Z-aa09851-profile-matrix.tsv",
       "source_url": "../../bench/results/20260522T144552Z-aa09851-profile-matrix.tsv",
       "summary": "Raw profile matrix median 0.75x min 0.60x max 1.49x",
-      "ts": "2026-05-22T14:45:52Z"
+      "ts": "2026-05-22T10:45:32-04:00"
     },
     {
       "clients": 50,
       "commit": "651c67e",
       "commit_subject": "runner: complete runtime-owner-8-post-poller-profile-matrix",
+      "commit_ts": "2026-05-22T10:46:03-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/651c67e",
       "get_p1": null,
       "get_p100": 0.831641,
       "incr_p100": 0.595243,
       "max": 0.831641,
+      "measured_at": "2026-05-22T14:46:31Z",
       "median": 0.7158065,
       "min": 0.595243,
       "p99_ms": {
@@ -3631,17 +3825,19 @@
       "source": "harness/bench/results/20260522T144631Z-651c67e-hotspots.tsv",
       "source_url": "../../bench/results/20260522T144631Z-651c67e-hotspots.tsv",
       "summary": "Raw hotspots median 0.72x min 0.60x max 0.83x",
-      "ts": "2026-05-22T14:46:31Z"
+      "ts": "2026-05-22T10:46:03-04:00"
     },
     {
       "clients": 50,
       "commit": "d3b7602",
       "commit_subject": "runner: complete runtime-owner-8-post-poller-hotspots",
+      "commit_ts": "2026-05-22T10:47:21-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/d3b7602",
       "get_p1": null,
       "get_p100": 0.809981,
       "incr_p100": 0.623589,
       "max": 0.809981,
+      "measured_at": "2026-05-22T14:47:38Z",
       "median": 0.7242055000000001,
       "min": 0.623589,
       "p99_ms": {
@@ -3666,17 +3862,78 @@
       "source": "harness/bench/results/20260522T144738Z-d3b7602-calltree.tsv",
       "source_url": "../../bench/results/20260522T144738Z-d3b7602-calltree.tsv",
       "summary": "Raw calltree median 0.72x min 0.62x max 0.81x",
-      "ts": "2026-05-22T14:47:38Z"
+      "ts": "2026-05-22T10:47:21-04:00"
+    },
+    {
+      "clients": 50,
+      "commit": "9b82591",
+      "commit_subject": "perf-fixer: complete runtime-owner-10-hotpath-timing-gate",
+      "commit_ts": "2026-05-22T12:28:21-04:00",
+      "commit_url": "https://github.com/ianm199/valkey-rs/commit/9b82591",
+      "get_p1": 1.152416,
+      "get_p100": 0.797468,
+      "incr_p100": 0.606383,
+      "max": 1.403707,
+      "measured_at": "2026-05-22T17:45:26Z",
+      "median": 0.797468,
+      "min": 0.354286,
+      "p99_ms": {
+        "core-p1/GET": 0.415,
+        "core-p1/INCR": 0.423,
+        "core-p1/PING_MBULK": 0.911,
+        "core-p1/SET": 0.423,
+        "core-p100/GET": 2.271,
+        "core-p100/INCR": 2.575,
+        "core-p100/PING_MBULK": 1.479,
+        "core-p100/SET": 2.767,
+        "core-p16/GET": 0.703,
+        "core-p16/INCR": 0.743,
+        "core-p16/PING_MBULK": 0.551,
+        "core-p16/SET": 0.767,
+        "range-heavy-p16/LPUSH (needed to benchmark LRANGE)": 7.679,
+        "range-heavy-p16/LRANGE_100 (first 100 elements)": 12.159,
+        "range-heavy-p16/LRANGE_300 (first 300 elements)": 18.047
+      },
+      "payload": 64,
+      "ping_p100": 0.730769,
+      "pipeline": 1,
+      "ratios": {
+        "core-p1/GET": 1.152416,
+        "core-p1/INCR": 1.177936,
+        "core-p1/PING_MBULK": 1.003195,
+        "core-p1/SET": 0.952381,
+        "core-p100/GET": 0.797468,
+        "core-p100/INCR": 0.606383,
+        "core-p100/PING_MBULK": 0.730769,
+        "core-p100/SET": 0.823529,
+        "core-p16/GET": 0.664336,
+        "core-p16/INCR": 0.6125,
+        "core-p16/PING_MBULK": 0.867257,
+        "core-p16/SET": 0.77439,
+        "range-heavy-p16/LPUSH (needed to benchmark LRANGE)": 0.354286,
+        "range-heavy-p16/LRANGE_100 (first 100 elements)": 0.721374,
+        "range-heavy-p16/LRANGE_300 (first 300 elements)": 1.403707
+      },
+      "requests": 50000,
+      "runner_kind": "raw-profile-matrix",
+      "runner_label": "Raw profile matrix",
+      "set_p100": 0.823529,
+      "source": "harness/bench/results/20260522T174526Z-9b82591-profile-matrix.tsv",
+      "source_url": "../../bench/results/20260522T174526Z-9b82591-profile-matrix.tsv",
+      "summary": "Raw profile matrix median 0.80x min 0.35x max 1.40x",
+      "ts": "2026-05-22T12:28:21-04:00"
     },
     {
       "clients": 50,
       "commit": "c63d3bd",
       "commit_subject": "runner: complete runtime-owner-10-post-timing-oracle",
+      "commit_ts": "2026-05-22T12:31:48-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/c63d3bd",
       "get_p1": 1.051724,
       "get_p100": 0.731707,
       "incr_p100": 0.621053,
       "max": 1.380182,
+      "measured_at": "2026-05-22T16:31:49Z",
       "median": 0.823529,
       "min": 0.621053,
       "p99_ms": {
@@ -3723,17 +3980,19 @@
       "source": "harness/bench/results/20260522T163149Z-c63d3bd-profile-matrix.tsv",
       "source_url": "../../bench/results/20260522T163149Z-c63d3bd-profile-matrix.tsv",
       "summary": "Raw profile matrix median 0.82x min 0.62x max 1.38x",
-      "ts": "2026-05-22T16:31:49Z"
+      "ts": "2026-05-22T12:31:48-04:00"
     },
     {
       "clients": 50,
       "commit": "ac5a345",
       "commit_subject": "runner: complete runtime-owner-10-post-timing-profile-matrix",
+      "commit_ts": "2026-05-22T12:32:00-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/ac5a345",
       "get_p1": null,
       "get_p100": 0.797171,
       "incr_p100": 0.560989,
       "max": 0.797171,
+      "measured_at": "2026-05-22T16:32:01Z",
       "median": 0.7142455000000001,
       "min": 0.560989,
       "p99_ms": {
@@ -3758,17 +4017,78 @@
       "source": "harness/bench/results/20260522T163201Z-ac5a345-calltree.tsv",
       "source_url": "../../bench/results/20260522T163201Z-ac5a345-calltree.tsv",
       "summary": "Raw calltree median 0.71x min 0.56x max 0.80x",
-      "ts": "2026-05-22T16:32:01Z"
+      "ts": "2026-05-22T12:32:00-04:00"
+    },
+    {
+      "clients": 50,
+      "commit": "ea9b3a8",
+      "commit_subject": "perf-fixer: complete runtime-owner-11-reply-buffer-hotpath",
+      "commit_ts": "2026-05-22T12:46:47-04:00",
+      "commit_url": "https://github.com/ianm199/valkey-rs/commit/ea9b3a8",
+      "get_p1": 1.107639,
+      "get_p100": 0.728395,
+      "incr_p100": 0.641304,
+      "max": 1.451959,
+      "measured_at": "2026-05-22T17:45:49Z",
+      "median": 0.795918,
+      "min": 0.639752,
+      "p99_ms": {
+        "core-p1/GET": 0.407,
+        "core-p1/INCR": 0.431,
+        "core-p1/PING_MBULK": 0.895,
+        "core-p1/SET": 0.423,
+        "core-p100/GET": 2.687,
+        "core-p100/INCR": 2.559,
+        "core-p100/PING_MBULK": 1.479,
+        "core-p100/SET": 2.783,
+        "core-p16/GET": 0.711,
+        "core-p16/INCR": 0.751,
+        "core-p16/PING_MBULK": 0.551,
+        "core-p16/SET": 0.783,
+        "range-heavy-p16/LPUSH (needed to benchmark LRANGE)": 1.319,
+        "range-heavy-p16/LRANGE_100 (first 100 elements)": 6.879,
+        "range-heavy-p16/LRANGE_300 (first 300 elements)": 16.895
+      },
+      "payload": 64,
+      "ping_p100": 0.795918,
+      "pipeline": 1,
+      "ratios": {
+        "core-p1/GET": 1.107639,
+        "core-p1/INCR": 1.015432,
+        "core-p1/PING_MBULK": 1.035191,
+        "core-p1/SET": 0.940625,
+        "core-p100/GET": 0.728395,
+        "core-p100/INCR": 0.641304,
+        "core-p100/PING_MBULK": 0.795918,
+        "core-p100/SET": 0.8,
+        "core-p16/GET": 0.694445,
+        "core-p16/INCR": 0.639752,
+        "core-p16/PING_MBULK": 0.672566,
+        "core-p16/SET": 0.784431,
+        "range-heavy-p16/LPUSH (needed to benchmark LRANGE)": 0.764045,
+        "range-heavy-p16/LRANGE_100 (first 100 elements)": 1.031696,
+        "range-heavy-p16/LRANGE_300 (first 300 elements)": 1.451959
+      },
+      "requests": 50000,
+      "runner_kind": "raw-profile-matrix",
+      "runner_label": "Raw profile matrix",
+      "set_p100": 0.8,
+      "source": "harness/bench/results/20260522T174549Z-ea9b3a8-profile-matrix.tsv",
+      "source_url": "../../bench/results/20260522T174549Z-ea9b3a8-profile-matrix.tsv",
+      "summary": "Raw profile matrix median 0.80x min 0.64x max 1.45x",
+      "ts": "2026-05-22T12:46:47-04:00"
     },
     {
       "clients": 50,
       "commit": "a9ec71e",
       "commit_subject": "runner: complete runtime-owner-11-post-reply-oracle",
+      "commit_ts": "2026-05-22T12:50:17-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/a9ec71e",
       "get_p1": 1.198413,
       "get_p100": 0.746835,
       "incr_p100": 0.634409,
       "max": 1.424895,
+      "measured_at": "2026-05-22T16:50:17Z",
       "median": 0.782178,
       "min": 0.634409,
       "p99_ms": {
@@ -3815,17 +4135,19 @@
       "source": "harness/bench/results/20260522T165017Z-a9ec71e-profile-matrix.tsv",
       "source_url": "../../bench/results/20260522T165017Z-a9ec71e-profile-matrix.tsv",
       "summary": "Raw profile matrix median 0.78x min 0.63x max 1.42x",
-      "ts": "2026-05-22T16:50:17Z"
+      "ts": "2026-05-22T12:50:17-04:00"
     },
     {
       "clients": 50,
       "commit": "328d0ee",
       "commit_subject": "runner: complete runtime-owner-11-post-reply-profile-matrix",
+      "commit_ts": "2026-05-22T12:50:28-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/328d0ee",
       "get_p1": null,
       "get_p100": 0.802799,
       "incr_p100": 0.595508,
       "max": 0.802799,
+      "measured_at": "2026-05-22T16:50:28Z",
       "median": 0.7251015000000001,
       "min": 0.595508,
       "p99_ms": {
@@ -3850,17 +4172,78 @@
       "source": "harness/bench/results/20260522T165028Z-328d0ee-calltree.tsv",
       "source_url": "../../bench/results/20260522T165028Z-328d0ee-calltree.tsv",
       "summary": "Raw calltree median 0.73x min 0.60x max 0.80x",
-      "ts": "2026-05-22T16:50:28Z"
+      "ts": "2026-05-22T12:50:28-04:00"
+    },
+    {
+      "clients": 50,
+      "commit": "8857714",
+      "commit_subject": "perf-fixer: complete runtime-owner-12-watch-dirty-fastpath",
+      "commit_ts": "2026-05-22T13:04:15-04:00",
+      "commit_url": "https://github.com/ianm199/valkey-rs/commit/8857714",
+      "get_p1": 0.896936,
+      "get_p100": 0.75,
+      "incr_p100": 0.659091,
+      "max": 1.45899,
+      "measured_at": "2026-05-22T17:46:12Z",
+      "median": 0.785714,
+      "min": 0.659091,
+      "p99_ms": {
+        "core-p1/GET": 0.847,
+        "core-p1/INCR": 0.439,
+        "core-p1/PING_MBULK": 0.879,
+        "core-p1/SET": 0.423,
+        "core-p100/GET": 2.319,
+        "core-p100/INCR": 2.495,
+        "core-p100/PING_MBULK": 1.343,
+        "core-p100/SET": 2.735,
+        "core-p16/GET": 0.703,
+        "core-p16/INCR": 0.727,
+        "core-p16/PING_MBULK": 0.551,
+        "core-p16/SET": 0.751,
+        "range-heavy-p16/LPUSH (needed to benchmark LRANGE)": 1.175,
+        "range-heavy-p16/LRANGE_100 (first 100 elements)": 5.983,
+        "range-heavy-p16/LRANGE_300 (first 300 elements)": 16.511
+      },
+      "payload": 64,
+      "ping_p100": 0.78,
+      "pipeline": 1,
+      "ratios": {
+        "core-p1/GET": 0.896936,
+        "core-p1/INCR": 0.964072,
+        "core-p1/PING_MBULK": 1.098305,
+        "core-p1/SET": 0.966667,
+        "core-p100/GET": 0.75,
+        "core-p100/INCR": 0.659091,
+        "core-p100/PING_MBULK": 0.78,
+        "core-p100/SET": 0.84375,
+        "core-p16/GET": 0.682432,
+        "core-p16/INCR": 0.673203,
+        "core-p16/PING_MBULK": 0.752294,
+        "core-p16/SET": 0.778481,
+        "range-heavy-p16/LPUSH (needed to benchmark LRANGE)": 0.785714,
+        "range-heavy-p16/LRANGE_100 (first 100 elements)": 0.937807,
+        "range-heavy-p16/LRANGE_300 (first 300 elements)": 1.45899
+      },
+      "requests": 50000,
+      "runner_kind": "raw-profile-matrix",
+      "runner_label": "Raw profile matrix",
+      "set_p100": 0.84375,
+      "source": "harness/bench/results/20260522T174612Z-8857714-profile-matrix.tsv",
+      "source_url": "../../bench/results/20260522T174612Z-8857714-profile-matrix.tsv",
+      "summary": "Raw profile matrix median 0.79x min 0.66x max 1.46x",
+      "ts": "2026-05-22T13:04:15-04:00"
     },
     {
       "clients": 50,
       "commit": "f8f5124",
       "commit_subject": "runner: complete runtime-owner-12-post-watch-oracle",
+      "commit_ts": "2026-05-22T13:08:00-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/f8f5124",
       "get_p1": 0.997191,
       "get_p100": 0.753086,
       "incr_p100": 0.614583,
       "max": 1.356891,
+      "measured_at": "2026-05-22T17:08:00Z",
       "median": 0.784314,
       "min": 0.614583,
       "p99_ms": {
@@ -3907,17 +4290,19 @@
       "source": "harness/bench/results/20260522T170800Z-f8f5124-profile-matrix.tsv",
       "source_url": "../../bench/results/20260522T170800Z-f8f5124-profile-matrix.tsv",
       "summary": "Raw profile matrix median 0.78x min 0.61x max 1.36x",
-      "ts": "2026-05-22T17:08:00Z"
+      "ts": "2026-05-22T13:08:00-04:00"
     },
     {
       "clients": 50,
       "commit": "2813e87",
       "commit_subject": "runner: complete runtime-owner-12-post-watch-profile-matrix",
+      "commit_ts": "2026-05-22T13:08:12-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/2813e87",
       "get_p1": null,
       "get_p100": 0.813046,
       "incr_p100": 0.583616,
       "max": 0.813046,
+      "measured_at": "2026-05-22T17:08:12Z",
       "median": 0.7111765,
       "min": 0.583616,
       "p99_ms": {
@@ -3942,17 +4327,19 @@
       "source": "harness/bench/results/20260522T170812Z-2813e87-calltree.tsv",
       "source_url": "../../bench/results/20260522T170812Z-2813e87-calltree.tsv",
       "summary": "Raw calltree median 0.71x min 0.58x max 0.81x",
-      "ts": "2026-05-22T17:08:12Z"
+      "ts": "2026-05-22T13:08:12-04:00"
     },
     {
       "clients": 50,
       "commit": "752d649",
       "commit_subject": "runner: complete runtime-owner-12-regression-incr-p100",
+      "commit_ts": "2026-05-22T13:09:04-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/752d649",
       "get_p1": 1.016529,
       "get_p100": 0.772152,
       "incr_p100": 0.57,
       "max": 1.351364,
+      "measured_at": "2026-05-22T17:25:33Z",
       "median": 0.78,
       "min": 0.57,
       "p99_ms": {
@@ -3999,17 +4386,19 @@
       "source": "harness/bench/results/20260522T172533Z-752d649-profile-matrix.tsv",
       "source_url": "../../bench/results/20260522T172533Z-752d649-profile-matrix.tsv",
       "summary": "Raw profile matrix median 0.78x min 0.57x max 1.35x",
-      "ts": "2026-05-22T17:25:33Z"
+      "ts": "2026-05-22T13:09:04-04:00"
     },
     {
       "clients": 50,
       "commit": "752d649",
       "commit_subject": "runner: complete runtime-owner-12-regression-incr-p100",
+      "commit_ts": "2026-05-22T13:09:04-04:00",
       "commit_url": "https://github.com/ianm199/valkey-rs/commit/752d649",
       "get_p1": null,
       "get_p100": 0.840902,
       "incr_p100": 0.545236,
       "max": 0.840902,
+      "measured_at": "2026-05-22T17:26:34Z",
       "median": 0.7671935000000001,
       "min": 0.545236,
       "p99_ms": {
@@ -4034,7 +4423,7 @@
       "source": "harness/bench/results/20260522T172634Z-752d649-calltree.tsv",
       "source_url": "../../bench/results/20260522T172634Z-752d649-calltree.tsv",
       "summary": "Raw calltree median 0.77x min 0.55x max 0.84x",
-      "ts": "2026-05-22T17:26:34Z"
+      "ts": "2026-05-22T13:09:04-04:00"
     }
   ],
   "raw_series": {
@@ -4043,70 +4432,70 @@
         "commit": "70dcc11",
         "commit_url": "https://github.com/ianm199/valkey-rs/commit/70dcc11",
         "evidence_url": "../../bench/results/20260522T140701Z-70dcc11-calltree.tsv",
-        "idx": 34,
+        "idx": 35,
         "packet": "harness/bench/results/20260522T140701Z-70dcc11-calltree.tsv",
         "summary": "Raw calltree median 0.74x min 0.56x max 0.83x",
-        "ts": "2026-05-22T14:07:01Z",
+        "ts": "2026-05-22T10:06:18-04:00",
         "value": 0.740085
       },
       {
         "commit": "0022bc7",
         "commit_url": "https://github.com/ianm199/valkey-rs/commit/0022bc7",
         "evidence_url": "../../bench/results/20260522T140914Z-0022bc7-calltree.tsv",
-        "idx": 35,
+        "idx": 36,
         "packet": "harness/bench/results/20260522T140914Z-0022bc7-calltree.tsv",
         "summary": "Raw calltree median 0.73x min 0.56x max 0.84x",
-        "ts": "2026-05-22T14:09:14Z",
+        "ts": "2026-05-22T10:09:09-04:00",
         "value": 0.7279865
       },
       {
         "commit": "d3b7602",
         "commit_url": "https://github.com/ianm199/valkey-rs/commit/d3b7602",
         "evidence_url": "../../bench/results/20260522T144738Z-d3b7602-calltree.tsv",
-        "idx": 38,
+        "idx": 40,
         "packet": "harness/bench/results/20260522T144738Z-d3b7602-calltree.tsv",
         "summary": "Raw calltree median 0.72x min 0.62x max 0.81x",
-        "ts": "2026-05-22T14:47:38Z",
+        "ts": "2026-05-22T10:47:21-04:00",
         "value": 0.7242055000000001
       },
       {
         "commit": "ac5a345",
         "commit_url": "https://github.com/ianm199/valkey-rs/commit/ac5a345",
         "evidence_url": "../../bench/results/20260522T163201Z-ac5a345-calltree.tsv",
-        "idx": 40,
+        "idx": 43,
         "packet": "harness/bench/results/20260522T163201Z-ac5a345-calltree.tsv",
         "summary": "Raw calltree median 0.71x min 0.56x max 0.80x",
-        "ts": "2026-05-22T16:32:01Z",
+        "ts": "2026-05-22T12:32:00-04:00",
         "value": 0.7142455000000001
       },
       {
         "commit": "328d0ee",
         "commit_url": "https://github.com/ianm199/valkey-rs/commit/328d0ee",
         "evidence_url": "../../bench/results/20260522T165028Z-328d0ee-calltree.tsv",
-        "idx": 42,
+        "idx": 46,
         "packet": "harness/bench/results/20260522T165028Z-328d0ee-calltree.tsv",
         "summary": "Raw calltree median 0.73x min 0.60x max 0.80x",
-        "ts": "2026-05-22T16:50:28Z",
+        "ts": "2026-05-22T12:50:28-04:00",
         "value": 0.7251015000000001
       },
       {
         "commit": "2813e87",
         "commit_url": "https://github.com/ianm199/valkey-rs/commit/2813e87",
         "evidence_url": "../../bench/results/20260522T170812Z-2813e87-calltree.tsv",
-        "idx": 44,
+        "idx": 49,
         "packet": "harness/bench/results/20260522T170812Z-2813e87-calltree.tsv",
         "summary": "Raw calltree median 0.71x min 0.58x max 0.81x",
-        "ts": "2026-05-22T17:08:12Z",
+        "ts": "2026-05-22T13:08:12-04:00",
         "value": 0.7111765
       },
       {
         "commit": "752d649",
         "commit_url": "https://github.com/ianm199/valkey-rs/commit/752d649",
         "evidence_url": "../../bench/results/20260522T172634Z-752d649-calltree.tsv",
-        "idx": 46,
+        "idx": 51,
         "packet": "harness/bench/results/20260522T172634Z-752d649-calltree.tsv",
         "summary": "Raw calltree median 0.77x min 0.55x max 0.84x",
-        "ts": "2026-05-22T17:26:34Z",
+        "ts": "2026-05-22T13:09:04-04:00",
         "value": 0.7671935000000001
       }
     ],
@@ -4118,7 +4507,7 @@
         "idx": 11,
         "packet": "harness/bench/results/20260521T233142Z-907ad5f-hotspots.tsv",
         "summary": "Raw hotspots median 0.52x min 0.52x max 0.52x",
-        "ts": "2026-05-21T23:31:42Z",
+        "ts": "2026-05-21T19:24:46-04:00",
         "value": 0.524152
       },
       {
@@ -4128,7 +4517,7 @@
         "idx": 12,
         "packet": "harness/bench/results/20260521T233234Z-2709d1e-hotspots.tsv",
         "summary": "Raw hotspots median 0.42x min 0.33x max 0.58x",
-        "ts": "2026-05-21T23:32:34Z",
+        "ts": "2026-05-21T19:32:29-04:00",
         "value": 0.4207975
       },
       {
@@ -4138,7 +4527,7 @@
         "idx": 14,
         "packet": "harness/bench/results/20260521T234445Z-fda6d1f-hotspots.tsv",
         "summary": "Raw hotspots median 0.51x min 0.43x max 0.57x",
-        "ts": "2026-05-21T23:44:45Z",
+        "ts": "2026-05-21T19:34:23-04:00",
         "value": 0.5051265
       },
       {
@@ -4148,7 +4537,7 @@
         "idx": 17,
         "packet": "harness/bench/results/20260521T235011Z-a673212-hotspots.tsv",
         "summary": "Raw hotspots median 0.51x min 0.45x max 0.60x",
-        "ts": "2026-05-21T23:50:11Z",
+        "ts": "2026-05-21T19:49:53-04:00",
         "value": 0.5059675
       },
       {
@@ -4158,7 +4547,7 @@
         "idx": 21,
         "packet": "harness/bench/results/20260522T010206Z-15060d7-hotspots.tsv",
         "summary": "Raw hotspots median 0.56x min 0.54x max 0.63x",
-        "ts": "2026-05-22T01:02:06Z",
+        "ts": "2026-05-21T21:02:06-04:00",
         "value": 0.562997
       },
       {
@@ -4168,57 +4557,57 @@
         "idx": 23,
         "packet": "harness/bench/results/20260522T041658Z-ab1d468-hotspots.tsv",
         "summary": "Raw hotspots median 0.53x min 0.48x max 0.60x",
-        "ts": "2026-05-22T04:16:58Z",
+        "ts": "2026-05-22T00:16:58-04:00",
         "value": 0.5306705
       },
       {
         "commit": "393a5f9",
         "commit_url": "https://github.com/ianm199/valkey-rs/commit/393a5f9",
         "evidence_url": "../../bench/results/20260522T043955Z-393a5f9-hotspots.tsv",
-        "idx": 27,
+        "idx": 28,
         "packet": "harness/bench/results/20260522T043955Z-393a5f9-hotspots.tsv",
         "summary": "Raw hotspots median 0.72x min 0.54x max 0.77x",
-        "ts": "2026-05-22T04:39:55Z",
+        "ts": "2026-05-22T00:39:54-04:00",
         "value": 0.720557
       },
       {
         "commit": "803918c",
         "commit_url": "https://github.com/ianm199/valkey-rs/commit/803918c",
         "evidence_url": "../../bench/results/20260522T044801Z-803918c-hotspots.tsv",
-        "idx": 29,
+        "idx": 30,
         "packet": "harness/bench/results/20260522T044801Z-803918c-hotspots.tsv",
         "summary": "Raw hotspots median 0.72x min 0.61x max 0.80x",
-        "ts": "2026-05-22T04:48:01Z",
+        "ts": "2026-05-22T00:40:45-04:00",
         "value": 0.721051
       },
       {
         "commit": "803918c",
         "commit_url": "https://github.com/ianm199/valkey-rs/commit/803918c",
         "evidence_url": "../../bench/results/20260522T045355Z-803918c-hotspots.tsv",
-        "idx": 31,
+        "idx": 32,
         "packet": "harness/bench/results/20260522T045355Z-803918c-hotspots.tsv",
         "summary": "Raw hotspots median 0.74x min 0.58x max 0.84x",
-        "ts": "2026-05-22T04:53:55Z",
+        "ts": "2026-05-22T00:40:45-04:00",
         "value": 0.7383595000000001
       },
       {
         "commit": "1edcb59",
         "commit_url": "https://github.com/ianm199/valkey-rs/commit/1edcb59",
         "evidence_url": "../../bench/results/20260522T135537Z-1edcb59-hotspots.tsv",
-        "idx": 33,
+        "idx": 34,
         "packet": "harness/bench/results/20260522T135537Z-1edcb59-hotspots.tsv",
         "summary": "Raw hotspots median 0.73x min 0.59x max 0.86x",
-        "ts": "2026-05-22T13:55:37Z",
+        "ts": "2026-05-22T09:55:37-04:00",
         "value": 0.7319715
       },
       {
         "commit": "651c67e",
         "commit_url": "https://github.com/ianm199/valkey-rs/commit/651c67e",
         "evidence_url": "../../bench/results/20260522T144631Z-651c67e-hotspots.tsv",
-        "idx": 37,
+        "idx": 39,
         "packet": "harness/bench/results/20260522T144631Z-651c67e-hotspots.tsv",
         "summary": "Raw hotspots median 0.72x min 0.60x max 0.83x",
-        "ts": "2026-05-22T14:46:31Z",
+        "ts": "2026-05-22T10:46:03-04:00",
         "value": 0.7158065
       }
     ],
@@ -4230,7 +4619,7 @@
         "idx": 0,
         "packet": "harness/bench/results/20260520T153346Z-a6ebea9.tsv",
         "summary": "Legacy benchmark median 0.11x min 0.10x max 0.16x",
-        "ts": "2026-05-20T15:33:46Z",
+        "ts": "2026-05-20T11:23:51-04:00",
         "value": 0.11499999999999999
       },
       {
@@ -4240,7 +4629,7 @@
         "idx": 1,
         "packet": "harness/bench/results/20260520T153424Z-a6ebea9.tsv",
         "summary": "Legacy benchmark median 0.08x min 0.05x max 1.43x",
-        "ts": "2026-05-20T15:34:24Z",
+        "ts": "2026-05-20T11:23:51-04:00",
         "value": 0.07500000000000001
       }
     ],
@@ -4252,7 +4641,7 @@
         "idx": 2,
         "packet": "harness/bench/results/20260521T215806Z-47915ba-profile-matrix.tsv",
         "summary": "Raw profile matrix median 0.09x min 0.06x max 1.32x",
-        "ts": "2026-05-21T21:58:06Z",
+        "ts": "2026-05-20T11:36:43-04:00",
         "value": 0.093023
       },
       {
@@ -4262,7 +4651,7 @@
         "idx": 3,
         "packet": "harness/bench/results/20260521T215825Z-47915ba-profile-matrix.tsv",
         "summary": "Raw profile matrix median 0.11x min 0.05x max 1.10x",
-        "ts": "2026-05-21T21:58:25Z",
+        "ts": "2026-05-20T11:36:43-04:00",
         "value": 0.10687
       },
       {
@@ -4272,7 +4661,7 @@
         "idx": 4,
         "packet": "harness/bench/results/20260521T222458Z-a5401a1-profile-matrix.tsv",
         "summary": "Raw profile matrix median 0.14x min 0.08x max 1.30x",
-        "ts": "2026-05-21T22:24:58Z",
+        "ts": "2026-05-21T18:00:10-04:00",
         "value": 0.136742
       },
       {
@@ -4282,7 +4671,7 @@
         "idx": 5,
         "packet": "harness/bench/results/20260521T223525Z-8af2ad2-profile-matrix.tsv",
         "summary": "Raw profile matrix median 0.14x min 0.07x max 1.26x",
-        "ts": "2026-05-21T22:35:25Z",
+        "ts": "2026-05-21T18:27:16-04:00",
         "value": 0.139877
       },
       {
@@ -4292,7 +4681,7 @@
         "idx": 6,
         "packet": "harness/bench/results/20260521T223636Z-8af2ad2-profile-matrix.tsv",
         "summary": "Raw profile matrix median 0.15x min 0.07x max 1.37x",
-        "ts": "2026-05-21T22:36:36Z",
+        "ts": "2026-05-21T18:27:16-04:00",
         "value": 0.153184
       },
       {
@@ -4302,7 +4691,7 @@
         "idx": 7,
         "packet": "harness/bench/results/20260521T223914Z-8af2ad2-profile-matrix.tsv",
         "summary": "Raw profile matrix median 0.17x min 0.08x max 1.24x",
-        "ts": "2026-05-21T22:39:14Z",
+        "ts": "2026-05-21T18:27:16-04:00",
         "value": 0.166375
       },
       {
@@ -4312,7 +4701,7 @@
         "idx": 8,
         "packet": "harness/bench/results/20260521T225649Z-41d22d7-profile-matrix.tsv",
         "summary": "Raw profile matrix median 0.33x min 0.18x max 1.62x",
-        "ts": "2026-05-21T22:56:49Z",
+        "ts": "2026-05-21T18:41:50-04:00",
         "value": 0.326733
       },
       {
@@ -4322,7 +4711,7 @@
         "idx": 9,
         "packet": "harness/bench/results/20260521T232150Z-f64f932-profile-matrix.tsv",
         "summary": "Raw profile matrix median 0.64x min 0.35x max 1.72x",
-        "ts": "2026-05-21T23:21:50Z",
+        "ts": "2026-05-21T19:15:04-04:00",
         "value": 0.643312
       },
       {
@@ -4332,7 +4721,7 @@
         "idx": 10,
         "packet": "harness/bench/results/20260521T232253Z-e8d347e-profile-matrix.tsv",
         "summary": "Raw profile matrix median 0.63x min 0.39x max 1.68x",
-        "ts": "2026-05-21T23:22:53Z",
+        "ts": "2026-05-21T19:22:49-04:00",
         "value": 0.628866
       },
       {
@@ -4342,7 +4731,7 @@
         "idx": 13,
         "packet": "harness/bench/results/20260521T234407Z-fda6d1f-profile-matrix.tsv",
         "summary": "Raw profile matrix median 0.74x min 0.44x max 1.68x",
-        "ts": "2026-05-21T23:44:07Z",
+        "ts": "2026-05-21T19:34:23-04:00",
         "value": 0.737705
       },
       {
@@ -4352,7 +4741,7 @@
         "idx": 15,
         "packet": "harness/bench/results/20260521T234658Z-fda6d1f-profile-matrix.tsv",
         "summary": "Raw profile matrix median 0.68x min 0.52x max 1.70x",
-        "ts": "2026-05-21T23:46:58Z",
+        "ts": "2026-05-21T19:34:23-04:00",
         "value": 0.684211
       },
       {
@@ -4362,7 +4751,7 @@
         "idx": 16,
         "packet": "harness/bench/results/20260521T234728Z-b21a533-profile-matrix.tsv",
         "summary": "Raw profile matrix median 0.66x min 0.51x max 1.54x",
-        "ts": "2026-05-21T23:47:28Z",
+        "ts": "2026-05-21T19:47:22-04:00",
         "value": 0.663934
       },
       {
@@ -4372,7 +4761,7 @@
         "idx": 18,
         "packet": "harness/bench/results/20260521T235203Z-a673212-profile-matrix.tsv",
         "summary": "Raw profile matrix median 0.69x min 0.55x max 1.61x",
-        "ts": "2026-05-21T23:52:03Z",
+        "ts": "2026-05-21T19:49:53-04:00",
         "value": 0.689076
       },
       {
@@ -4382,7 +4771,7 @@
         "idx": 19,
         "packet": "harness/bench/results/20260521T235246Z-0004595-profile-matrix.tsv",
         "summary": "Raw profile matrix median 0.68x min 0.56x max 1.58x",
-        "ts": "2026-05-21T23:52:46Z",
+        "ts": "2026-05-21T19:52:33-04:00",
         "value": 0.675
       },
       {
@@ -4392,7 +4781,7 @@
         "idx": 20,
         "packet": "harness/bench/results/20260522T010156Z-6da1962-profile-matrix.tsv",
         "summary": "Raw profile matrix median 0.69x min 0.60x max 1.62x",
-        "ts": "2026-05-22T01:01:56Z",
+        "ts": "2026-05-21T21:01:43-04:00",
         "value": 0.690476
       },
       {
@@ -4402,7 +4791,7 @@
         "idx": 22,
         "packet": "harness/bench/results/20260522T041648Z-1a4086e-profile-matrix.tsv",
         "summary": "Raw profile matrix median 0.68x min 0.52x max 1.67x",
-        "ts": "2026-05-22T04:16:48Z",
+        "ts": "2026-05-22T00:16:48-04:00",
         "value": 0.682353
       },
       {
@@ -4412,7 +4801,7 @@
         "idx": 24,
         "packet": "harness/bench/results/20260522T043602Z-4595740-profile-matrix.tsv",
         "summary": "Raw profile matrix median 0.28x min 0.15x max 1.07x",
-        "ts": "2026-05-22T04:36:02Z",
+        "ts": "2026-05-22T00:24:38-04:00",
         "value": 0.278638
       },
       {
@@ -4422,97 +4811,147 @@
         "idx": 25,
         "packet": "harness/bench/results/20260522T043745Z-4595740-profile-matrix.tsv",
         "summary": "Raw profile matrix median 0.77x min 0.60x max 1.41x",
-        "ts": "2026-05-22T04:37:45Z",
+        "ts": "2026-05-22T00:24:38-04:00",
         "value": 0.76699
+      },
+      {
+        "commit": "7c190b1",
+        "commit_url": "https://github.com/ianm199/valkey-rs/commit/7c190b1",
+        "evidence_url": "../../bench/results/20260522T174440Z-7c190b1-profile-matrix.tsv",
+        "idx": 26,
+        "packet": "harness/bench/results/20260522T174440Z-7c190b1-profile-matrix.tsv",
+        "summary": "Raw profile matrix median 0.71x min 0.53x max 1.14x",
+        "ts": "2026-05-22T00:39:42-04:00",
+        "value": 0.70566
       },
       {
         "commit": "8721cbf",
         "commit_url": "https://github.com/ianm199/valkey-rs/commit/8721cbf",
         "evidence_url": "../../bench/results/20260522T043944Z-8721cbf-profile-matrix.tsv",
-        "idx": 26,
+        "idx": 27,
         "packet": "harness/bench/results/20260522T043944Z-8721cbf-profile-matrix.tsv",
         "summary": "Raw profile matrix median 0.79x min 0.57x max 1.26x",
-        "ts": "2026-05-22T04:39:44Z",
+        "ts": "2026-05-22T00:39:44-04:00",
         "value": 0.792857
       },
       {
         "commit": "803918c",
         "commit_url": "https://github.com/ianm199/valkey-rs/commit/803918c",
         "evidence_url": "../../bench/results/20260522T044745Z-803918c-profile-matrix.tsv",
-        "idx": 28,
+        "idx": 29,
         "packet": "harness/bench/results/20260522T044745Z-803918c-profile-matrix.tsv",
         "summary": "Raw profile matrix median 0.80x min 0.57x max 1.18x",
-        "ts": "2026-05-22T04:47:45Z",
+        "ts": "2026-05-22T00:40:45-04:00",
         "value": 0.795918
       },
       {
         "commit": "803918c",
         "commit_url": "https://github.com/ianm199/valkey-rs/commit/803918c",
         "evidence_url": "../../bench/results/20260522T045345Z-803918c-profile-matrix.tsv",
-        "idx": 30,
+        "idx": 31,
         "packet": "harness/bench/results/20260522T045345Z-803918c-profile-matrix.tsv",
         "summary": "Raw profile matrix median 0.79x min 0.66x max 1.63x",
-        "ts": "2026-05-22T04:53:45Z",
+        "ts": "2026-05-22T00:40:45-04:00",
         "value": 0.79
       },
       {
         "commit": "5f159bc",
         "commit_url": "https://github.com/ianm199/valkey-rs/commit/5f159bc",
         "evidence_url": "../../bench/results/20260522T135525Z-5f159bc-profile-matrix.tsv",
-        "idx": 32,
+        "idx": 33,
         "packet": "harness/bench/results/20260522T135525Z-5f159bc-profile-matrix.tsv",
         "summary": "Raw profile matrix median 0.85x min 0.41x max 1.14x",
-        "ts": "2026-05-22T13:55:25Z",
+        "ts": "2026-05-22T09:55:24-04:00",
         "value": 0.846154
+      },
+      {
+        "commit": "6f99e53",
+        "commit_url": "https://github.com/ianm199/valkey-rs/commit/6f99e53",
+        "evidence_url": "../../bench/results/20260522T174503Z-6f99e53-profile-matrix.tsv",
+        "idx": 37,
+        "packet": "harness/bench/results/20260522T174503Z-6f99e53-profile-matrix.tsv",
+        "summary": "Raw profile matrix median 0.82x min 0.61x max 1.34x",
+        "ts": "2026-05-22T10:41:33-04:00",
+        "value": 0.820513
       },
       {
         "commit": "aa09851",
         "commit_url": "https://github.com/ianm199/valkey-rs/commit/aa09851",
         "evidence_url": "../../bench/results/20260522T144552Z-aa09851-profile-matrix.tsv",
-        "idx": 36,
+        "idx": 38,
         "packet": "harness/bench/results/20260522T144552Z-aa09851-profile-matrix.tsv",
         "summary": "Raw profile matrix median 0.75x min 0.60x max 1.49x",
-        "ts": "2026-05-22T14:45:52Z",
+        "ts": "2026-05-22T10:45:32-04:00",
         "value": 0.754875
+      },
+      {
+        "commit": "9b82591",
+        "commit_url": "https://github.com/ianm199/valkey-rs/commit/9b82591",
+        "evidence_url": "../../bench/results/20260522T174526Z-9b82591-profile-matrix.tsv",
+        "idx": 41,
+        "packet": "harness/bench/results/20260522T174526Z-9b82591-profile-matrix.tsv",
+        "summary": "Raw profile matrix median 0.80x min 0.35x max 1.40x",
+        "ts": "2026-05-22T12:28:21-04:00",
+        "value": 0.797468
       },
       {
         "commit": "c63d3bd",
         "commit_url": "https://github.com/ianm199/valkey-rs/commit/c63d3bd",
         "evidence_url": "../../bench/results/20260522T163149Z-c63d3bd-profile-matrix.tsv",
-        "idx": 39,
+        "idx": 42,
         "packet": "harness/bench/results/20260522T163149Z-c63d3bd-profile-matrix.tsv",
         "summary": "Raw profile matrix median 0.82x min 0.62x max 1.38x",
-        "ts": "2026-05-22T16:31:49Z",
+        "ts": "2026-05-22T12:31:48-04:00",
         "value": 0.823529
+      },
+      {
+        "commit": "ea9b3a8",
+        "commit_url": "https://github.com/ianm199/valkey-rs/commit/ea9b3a8",
+        "evidence_url": "../../bench/results/20260522T174549Z-ea9b3a8-profile-matrix.tsv",
+        "idx": 44,
+        "packet": "harness/bench/results/20260522T174549Z-ea9b3a8-profile-matrix.tsv",
+        "summary": "Raw profile matrix median 0.80x min 0.64x max 1.45x",
+        "ts": "2026-05-22T12:46:47-04:00",
+        "value": 0.795918
       },
       {
         "commit": "a9ec71e",
         "commit_url": "https://github.com/ianm199/valkey-rs/commit/a9ec71e",
         "evidence_url": "../../bench/results/20260522T165017Z-a9ec71e-profile-matrix.tsv",
-        "idx": 41,
+        "idx": 45,
         "packet": "harness/bench/results/20260522T165017Z-a9ec71e-profile-matrix.tsv",
         "summary": "Raw profile matrix median 0.78x min 0.63x max 1.42x",
-        "ts": "2026-05-22T16:50:17Z",
+        "ts": "2026-05-22T12:50:17-04:00",
         "value": 0.782178
+      },
+      {
+        "commit": "8857714",
+        "commit_url": "https://github.com/ianm199/valkey-rs/commit/8857714",
+        "evidence_url": "../../bench/results/20260522T174612Z-8857714-profile-matrix.tsv",
+        "idx": 47,
+        "packet": "harness/bench/results/20260522T174612Z-8857714-profile-matrix.tsv",
+        "summary": "Raw profile matrix median 0.79x min 0.66x max 1.46x",
+        "ts": "2026-05-22T13:04:15-04:00",
+        "value": 0.785714
       },
       {
         "commit": "f8f5124",
         "commit_url": "https://github.com/ianm199/valkey-rs/commit/f8f5124",
         "evidence_url": "../../bench/results/20260522T170800Z-f8f5124-profile-matrix.tsv",
-        "idx": 43,
+        "idx": 48,
         "packet": "harness/bench/results/20260522T170800Z-f8f5124-profile-matrix.tsv",
         "summary": "Raw profile matrix median 0.78x min 0.61x max 1.36x",
-        "ts": "2026-05-22T17:08:00Z",
+        "ts": "2026-05-22T13:08:00-04:00",
         "value": 0.784314
       },
       {
         "commit": "752d649",
         "commit_url": "https://github.com/ianm199/valkey-rs/commit/752d649",
         "evidence_url": "../../bench/results/20260522T172533Z-752d649-profile-matrix.tsv",
-        "idx": 45,
+        "idx": 50,
         "packet": "harness/bench/results/20260522T172533Z-752d649-profile-matrix.tsv",
         "summary": "Raw profile matrix median 0.78x min 0.57x max 1.35x",
-        "ts": "2026-05-22T17:25:33Z",
+        "ts": "2026-05-22T13:09:04-04:00",
         "value": 0.78
       }
     ]
@@ -5109,7 +5548,7 @@
     "latest_raw": "harness/bench/results/20260522T172634Z-752d649-calltree.tsv",
     "ledger_mtime_ns": 1779469744554664064,
     "point_count": 20,
-    "raw_point_count": 47,
-    "results_mtime_ns": 1779470845333437774
+    "raw_point_count": 52,
+    "results_mtime_ns": 1779471983287973803
   }
 }

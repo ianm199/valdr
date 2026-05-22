@@ -312,9 +312,13 @@ def raw_point_from_tsv(path: Path) -> dict[str, Any] | None:
     values = list(ratios.values())
     rel = str(path.relative_to(ROOT))
     commit = metadata.get("commit", "")
+    measured_at = compact_ts(metadata.get("timestamp_utc", ""))
+    commit_ts = commit_timestamp(commit)
     shape = infer_raw_shape(clean_rows, metadata)
     return {
-        "ts": compact_ts(metadata.get("timestamp_utc", "")),
+        "ts": commit_ts or measured_at,
+        "measured_at": measured_at,
+        "commit_ts": commit_ts,
         "commit": commit,
         "commit_subject": commit_subject(commit),
         "commit_url": REMOTE_COMMIT_PREFIX + commit if commit else "",
@@ -369,6 +373,20 @@ def commit_subject(commit: str) -> str:
     try:
         return subprocess.check_output(
             ["git", "log", "-1", "--format=%s", commit],
+            cwd=ROOT,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except subprocess.SubprocessError:
+        return ""
+
+
+def commit_timestamp(commit: str) -> str:
+    if not commit:
+        return ""
+    try:
+        return subprocess.check_output(
+            ["git", "log", "-1", "--format=%cI", commit],
             cwd=ROOT,
             text=True,
             stderr=subprocess.DEVNULL,

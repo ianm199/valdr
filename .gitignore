@@ -17,3 +17,4 @@ harness/loop/
 *.diff
 __pycache__/
 harness/bench/results/
+harness/bench/profiles/
