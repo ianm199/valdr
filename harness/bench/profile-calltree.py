@@ -867,6 +867,13 @@ def main() -> int:
             artifact_with_workload = dict(artifact)
             artifact_with_workload["workload"] = row["workload"]
             profile_artifacts.append(artifact_with_workload)
+    for server_log in sorted(profile_root.glob("**/*.server.log")):
+        profile_artifacts.append(
+            {
+                "path": relative(server_log),
+                "kind": "server-log",
+            }
+        )
 
     passed = all(row["reference_rps"] > 0 and row["rust_rps"] > 0 for row in rows) and all(
         row["profile_summary"]["artifact_count"] > 0 for row in rows
