@@ -22,6 +22,29 @@ shows `__psynch_mutexwait` dominating GET and INCR at pipeline depth 100.
 That means the next serious performance move is ownership, not another local
 micro-optimization.
 
+Post-scaffold evidence keeps that conclusion intact:
+
+- `runtime-owner-post-scaffold-oracle` passed at
+  `harness/evidence/runs/20260522T041306Z-2e2ae35-runner-runtime-owner-post-scaffold-oracle.json`.
+- `runtime-owner-post-scaffold-profile-matrix` reported median 0.68x, GET p1
+  0.68x, and GET p100 0.64x at
+  `harness/evidence/runs/20260522T041648Z-1a4086e-runner-runtime-owner-post-scaffold-profile-matrix.json`.
+- `runtime-owner-post-scaffold-hotspots` reported median 0.56x, min 0.48x,
+  max 0.60x at
+  `harness/evidence/runs/20260522T041658Z-ab1d468-runner-runtime-owner-post-scaffold-hotspots.json`.
+
+The Rust surface still matches the architectural diagnosis:
+
+- `crates/redis-server/src/main.rs` accepts plain TCP with
+  `TcpListener::incoming`, spawns one client read/dispatch thread, and spawns a
+  writer thread for plain TCP.
+- `process_current_command_with_db` still constructs
+  `CommandContext::with_server` and calls `redis_commands::dispatch`.
+- DB state still enters dispatch through `Arc<Mutex<RedisDb>>` from
+  `global_databases()`.
+- `crates/redis-server/src/runtime_owner.rs` is an inert scaffold; it does not
+  yet own sockets, dispatch, or the live DB list.
+
 ## Overnight Strategy
 
 Do the lowest-blast-radius owner-loop step first:
@@ -67,8 +90,43 @@ encoding, or something else.
 - **I/O threads:** out of scope; owner loop first, I/O threads later if needed.
 - **Soak:** not a public claim gate tonight. Use profile matrix + hotspot
   evidence as alpha telemetry.
-- **Default product path:** if the owner loop lands, plain TCP may become the
-  default path only after `wire-smoke` is green.
+- **Default product path:** the implementation packet may replace the default
+  plain-TCP path, but benchmark numbers only count after post-owner-loop
+  `wire-smoke` is green.
+
+## Runtime-Owner-4 Contract
+
+`runtime-owner-4-std-nonblocking-owner-loop` is approved for dispatch with this
+bounded contract:
+
+- Plain TCP moves first; TLS remains on the existing thread-per-client path.
+- Use standard-library nonblocking `TcpListener`/`TcpStream` and a linear scan.
+  Do not add `mio`, `polling`, `tokio`, raw platform pollers, or unsafe poller
+  code.
+- Keep `redis_commands::dispatch` as the only command execution path.
+- Use `parse_inline_or_multibulk_into` for request parsing.
+- Keep the existing `global_databases()` `Arc<Mutex<RedisDb>>` handles as the
+  live DB source for this packet. The owner loop may hold the selected DB guard
+  across a bounded parse/dispatch batch, but must not create a second live
+  `Vec<RedisDb>` that diverges from TLS, active-expire, AOF replay,
+  replication, or RDB helpers.
+- Accepted plain-TCP sockets, `Client` values, query buffers, parsed argv
+  staging, and ordinary reply flushing are owned by owner-loop client slots.
+- Pub/sub, blocked wakeups, WAIT/replication replies, and other foreign bytes
+  for owner-loop clients enter through per-slot `mpsc::Sender<Vec<u8>>`
+  handles. The owner loop drains matching receivers and writes the socket; no
+  foreign thread writes an owner-loop plain-TCP socket directly.
+- Preserve `maxclients`, client-info registry updates, connected-client
+  metrics, `RESET`, `QUIT`, selected DB state, pub/sub cleanup, replica
+  cleanup, and blocked-key cleanup.
+- Each owner tick accepts until `WouldBlock`, drains foreign payload channels,
+  reads clients until `WouldBlock`, parses and dispatches completed commands,
+  flushes pending writes, cleans closed clients, and sleeps or yields briefly
+  if no progress occurred.
+
+This contract intentionally keeps the long-term `Vec<RedisDb>` owner model out
+of the first implementation packet. It removes the per-client command threads
+from the plain-TCP hot path without inventing a second database model.
 
 ## Required Order
 
@@ -88,13 +146,15 @@ encoding, or something else.
 - Keep `redis_commands::dispatch` as the command execution path.
 - Do not create a second semantic DB model. If the owner loop uses the existing
   global DB handle as an intermediate step, document that it is an ownership
-  transition and ensure no two command owners mutate it concurrently.
+  transition and ensure shared access remains serialized.
 - Do not disable pub/sub, blocking commands, replication, AOF, RDB, scripting,
   or ACL to improve numbers.
 - Use existing `Client`, `RedisDb`, `CommandContext`, `PubSubRegistry`, and
   reply-buffer primitives unless a packet explicitly updates the vocabulary.
 - Plain TCP and TLS may have different runtime implementations during this
   milestone, but their command behavior must remain byte-compatible.
+- The owner loop cannot count as a performance win until
+  `runtime-owner-4-post-owner-loop-oracle` passes.
 
 ## Stop Conditions
 

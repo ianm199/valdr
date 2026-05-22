@@ -2,12 +2,13 @@ schema_version = 1
 
 [project]
 name = "valkey-rs-runtime-owner-run"
-target = "faithful runtime-owner planning + safe scaffold"
+target = "faithful runtime-owner planning + std plain-TCP owner-loop experiment"
 description = "This run is complete when baseline conformance/performance evidence has been recorded, runtime-owner canaries pass, the inert scaffold lands, the overnight owner-loop architecture pass lands, the std nonblocking plain-TCP owner loop is attempted, and post-owner-loop oracle/benchmark evidence exists."
 non_goals = [
   "Sharding",
   "Benchmark-only command fast paths",
   "Making the runtime-owner scaffold the default server loop",
+  "Moving the live DB list fully into RuntimeOwner during the std overnight packet; runtime-owner-4 uses existing global_databases handles as transitional storage",
   "Dropping ACL, MULTI/EXEC, scripting, expiration, pub/sub, blocking, AOF, RDB, or replication semantics for speed",
   "TLS owner-loop migration (locked out-of-scope this milestone by harness/architecture/decisions/runtime-ownership.md; gated on TODO(human) tls_migration_sequencing)",
   "Adding a poller workspace dependency (mio/polling/tokio/raw-libc) during the overnight owner-loop experiment; docs/RUNTIME_OWNER_OVERNIGHT_ARCHITECTURE.md chooses std nonblocking first and defers mio to a follow-up",
@@ -20,6 +21,11 @@ binding_architecture_artifacts = [
   "harness/architecture/object-vocabulary.tsv",
 ]
 decision_evidence_root = "harness/evidence/runs/20260522T010206Z-15060d7-runner-runtime-owner-baseline-hotspots.json"
+latest_runtime_owner_evidence = [
+  "harness/evidence/runs/20260522T041306Z-2e2ae35-runner-runtime-owner-post-scaffold-oracle.json",
+  "harness/evidence/runs/20260522T041648Z-1a4086e-runner-runtime-owner-post-scaffold-profile-matrix.json",
+  "harness/evidence/runs/20260522T041658Z-ab1d468-runner-runtime-owner-post-scaffold-hotspots.json",
+]
 
 [[criterion]]
 id = "workspace-check"

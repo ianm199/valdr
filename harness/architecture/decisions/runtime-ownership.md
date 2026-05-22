@@ -23,13 +23,18 @@ The runtime owner will eventually own:
 - slowlog / latency / metrics increments on the hot path
 - ordered AOF and replication propagation after each dispatch batch
 
-The default product path does not migrate to the owner loop until:
+The full production owner loop with an owned DB list does not become the final
+runtime shape until:
 
 1. the wire-diff oracle stays green on the surveyed corpus;
 2. the runtime-owner canary corpus (`runtime-owner-1-canary-corpus`) is green;
 3. profile-matrix and hotspot evidence confirms the lock-wait shape collapsed;
 4. AOF, replication, RDB, scripting, blocking, and pub/sub behavior remains
    byte-compatible.
+
+The narrower `runtime-owner-4-std-nonblocking-owner-loop` experiment may replace
+the default plain-TCP path earlier, but only under the std experiment contract
+below and only as alpha telemetry until its post-owner-loop oracle passes.
 
 ## Evidence Backing The Decision
 
@@ -120,12 +125,61 @@ unattended run:
    architect packet exists. The scaffold may not assume TLS lives in the
    owner.
 
-## TODO(human): Decisions Blocking The Real Owner-Loop Migration
+## Std Nonblocking Owner-Loop Experiment (locked 2026-05-22)
+
+`runtime-owner-4-std-nonblocking-owner-loop` is safe to dispatch after
+`runtime-owner-3-overnight-architecture`. It is not blocked by the long-term
+poller dependency question because this experiment deliberately uses only
+standard-library nonblocking sockets and a linear scan over live plain-TCP
+clients.
+
+This packet is an ownership-transition experiment, not the final production
+event-loop port. Its implementation contract is:
+
+1. **Plain TCP only.** The normal TCP listener may move to a single owner loop.
+   TLS remains on the existing thread-per-client path and must keep using the
+   same command dispatch behavior.
+2. **No new readiness dependency.** Do not add `mio`, `polling`, `tokio`, raw
+   `epoll`/`kqueue`, or a new unsafe poller surface in this packet.
+3. **Existing dispatch path.** Every command still enters
+   `redis_commands::dispatch` through `CommandContext::with_server`. No
+   `PING`/`GET`/`SET`/`INCR` fast path is allowed.
+4. **Transitional DB model.** Use the existing `global_databases()`
+   `Arc<Mutex<RedisDb>>` handles as the live database source during this
+   packet. The owner loop is the sole plain-TCP command executor, so it may
+   hold the selected DB guard across a bounded parse/dispatch batch, but it
+   must not create a second live `Vec<RedisDb>` that diverges from TLS,
+   active-expire, AOF replay, replication, or RDB helpers. Moving the live DB
+   list fully into `RuntimeOwner` remains a later architect/translator packet.
+5. **Socket and client ownership.** Accepted plain-TCP `TcpStream`s,
+   `Client` state, query buffers, parsed argv staging, and ordinary reply
+   flushing are owned by `RuntimeOwner`/`ClientSlot`, not by per-client read or
+   writer threads.
+6. **Foreign payload delivery.** Pub/sub, blocked wakeups, WAIT/replication
+   replies, and other out-of-band payloads must enter the owner loop through a
+   per-slot `mpsc::Sender<Vec<u8>>` registered in the existing
+   `PubSubRegistry`/blocked-key machinery. The owner loop drains the matching
+   receivers and appends bytes to the slot write buffer; no foreign thread may
+   write a plain-TCP owner-loop socket directly.
+7. **Loop shape.** Each tick accepts until `WouldBlock`, drains foreign
+   payload channels, reads ready client sockets until `WouldBlock`, parses with
+   `parse_inline_or_multibulk_into`, dispatches completed commands, flushes
+   pending writes, and cleans up closed clients. If no progress was made, the
+   loop must sleep or yield briefly; a busy spin is not acceptable.
+8. **Lifecycle hooks stay live.** `maxclients`, client-info registry,
+   connected-client metrics, selected DB state, `RESET`, `QUIT`, pub/sub
+   cleanup, replica cleanup, and blocked-key cleanup must still run on the
+   owner-loop path.
+
+The post-owner-loop oracle is the gate. Benchmark evidence after this packet is
+only meaningful if `runtime-owner-4-post-owner-loop-oracle` passes.
+
+## TODO(human): Long-Term Runtime Decisions
 
 These are deliberately NOT decided by this architect packet. They are dependency
-or policy choices that require human review. The runtime-owner-3 (and later)
-implementation packets are blocked on them and must not be dispatched until each
-is answered in this section.
+or policy choices that require human review before the final production
+event-loop shape, but they do not block the std nonblocking plain-TCP
+experiment above.
 
 ### Overnight owner-loop experiment decision, 2026-05-22
 
@@ -167,9 +221,10 @@ wire-smoke.
   exist. Before any public performance claim, an explicit `runtime-owner-soak`
   runner must land. Not in this unattended run.
 
-Until these are answered, the only runtime-owner work the harness will
-dispatch is: this architect map (now), `runtime-owner-1-canary-corpus`,
-`runtime-owner-2-scaffold-types` (inert), and their oracle/bench post-runs.
+Until these are answered, the only runtime-owner implementation work beyond the
+std experiment is its bounded post-evidence polish packet. Adding a real poller
+dependency, moving TLS into the owner loop, adding I/O threads, or making a
+public performance claim still requires a follow-up architect decision.
 
 ## Required Gates (every implementation packet in this family)
 
@@ -226,3 +281,12 @@ architect packet may relax them, but a translator/runner/fixer packet may not.
    accident.** `harness/runners.toml [[planned_runner]]` is a placeholder
    shape. Promoting a row to `[[runner]]` requires the script to exist and
    the matching TODO(human) item in this doc to be answered.
+6. **The std owner-loop packet uses transitional DB storage.**
+   `runtime-owner-4-std-nonblocking-owner-loop` must use existing
+   `global_databases()` handles. A fully owner-owned `Vec<RedisDb>` is still
+   the target model, but creating it while TLS/background helpers still use
+   `global_databases()` would create two live keyspaces.
+7. **Foreign bytes for owner-loop sockets enter through the owner.**
+   Pub/sub, blocked wakeups, WAIT/replication replies, and similar payloads
+   use per-slot `mpsc` senders. The owner loop drains receivers and writes
+   plain-TCP sockets, preserving the socket ownership boundary.
