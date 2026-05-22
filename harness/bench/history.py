@@ -522,10 +522,23 @@ def build_history() -> dict[str, Any]:
         if row.get("kind") == "packet_completed"
         and row.get("role") in {"architect", "perf-fixer", "translator"}
     ]
+    latest_result_mtime = max(
+        (path.stat().st_mtime_ns for path in RESULTS_DIR.glob("*.tsv")),
+        default=0,
+    ) if RESULTS_DIR.exists() else 0
+    signature = {
+        "point_count": len(point_dicts),
+        "raw_point_count": len(raw_points),
+        "latest_point": point_dicts[-1]["evidence"] if point_dicts else "",
+        "latest_raw": raw_points[-1]["source"] if raw_points else "",
+        "ledger_mtime_ns": LEDGER.stat().st_mtime_ns if LEDGER.exists() else 0,
+        "results_mtime_ns": latest_result_mtime,
+    }
 
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "project": "valkey-rs",
+        "signature": signature,
         "point_count": len(point_dicts),
         "raw_point_count": len(raw_points),
         "series_defs": SERIES_DEFS,
@@ -673,6 +686,28 @@ def render_html(history: dict[str, Any]) -> str:
     code {{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }}
     .note {{ background: #eef4ff; border: 1px solid #cbdcff; color: #23314d; border-radius: 8px; padding: 12px 14px; }}
     .warn-note {{ background: #fff7eb; border-color: #f0c994; color: #3c2a12; }}
+    .tooltip {{
+      position: fixed;
+      z-index: 20;
+      max-width: 360px;
+      pointer-events: none;
+      background: rgba(24, 32, 47, .96);
+      color: #fff;
+      border-radius: 8px;
+      padding: 10px 12px;
+      box-shadow: 0 10px 24px rgba(20, 30, 45, .18);
+      font-size: 12px;
+      line-height: 1.35;
+      opacity: 0;
+      transform: translate(-50%, calc(-100% - 12px));
+      transition: opacity .08s ease-out;
+      overflow-wrap: anywhere;
+    }}
+    .tooltip strong {{ display: block; font-size: 13px; margin-bottom: 4px; }}
+    .tooltip .muted {{ color: #c9d3e4; }}
+    .tooltip.show {{ opacity: 1; }}
+    .point-hit {{ fill: transparent; cursor: crosshair; }}
+    .refresh-status {{ text-align: right; }}
     @media (max-width: 900px) {{
       main {{ padding: 18px; }}
       header {{ display: block; }}
@@ -687,7 +722,7 @@ def render_html(history: dict[str, Any]) -> str:
       <h1>valkey-rs Performance History</h1>
       <p>Commit-keyed benchmark trajectory generated from <code>harness/evidence/ledger.jsonl</code> and runner evidence blobs.</p>
     </div>
-    <p class="subtle">Generated {html.escape(history['generated_at'])}<br>{history['point_count']} curated points · {history['raw_point_count']} raw TSV points</p>
+    <p class="subtle refresh-status">Generated {html.escape(history['generated_at'])}<br>{history['point_count']} curated points · {history['raw_point_count']} raw TSV points<br><span id="refresh-status">Auto-refresh enabled</span></p>
   </header>
 
   <section class="grid">
@@ -769,11 +804,13 @@ def render_html(history: dict[str, Any]) -> str:
     </table>
   </section>
 </main>
+<div class="tooltip" id="chart-tooltip" role="tooltip"></div>
 
 <script>
 const HISTORY = {data};
 const SERIES = Object.fromEntries(HISTORY.series_defs.map(s => [s.id, s]));
 const RAW_SERIES = Object.fromEntries(HISTORY.raw_series_defs.map(s => [s.id, s]));
+const INITIAL_SIGNATURE = JSON.stringify(HISTORY.signature || {{}});
 
 function fmtRatio(value) {{
   return value == null ? "" : Number(value).toFixed(2) + "x";
@@ -783,6 +820,42 @@ function shortTime(ts) {{
   const d = new Date(ts);
   if (Number.isNaN(d.getTime())) return ts || "";
   return d.toLocaleTimeString([], {{hour: "2-digit", minute: "2-digit"}});
+}}
+
+function longTime(ts) {{
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return ts || "";
+  return d.toLocaleString();
+}}
+
+function tooltipHtml(spec, point) {{
+  const summary = point.summary ? `<div class="muted">${{point.summary}}</div>` : "";
+  const target = point.packet || point.source || "";
+  return `
+    <strong>${{spec.label}} · ${{fmtRatio(point.value)}}</strong>
+    <div><span class="muted">commit</span> ${{point.commit || ""}}</div>
+    <div><span class="muted">time</span> ${{longTime(point.ts)}}</div>
+    <div><span class="muted">item</span> ${{target}}</div>
+    ${{summary}}
+  `;
+}}
+
+function showTooltip(event, html) {{
+  const tip = document.getElementById("chart-tooltip");
+  tip.innerHTML = html;
+  tip.style.left = `${{event.clientX}}px`;
+  tip.style.top = `${{event.clientY}}px`;
+  tip.classList.add("show");
+}}
+
+function moveTooltip(event) {{
+  const tip = document.getElementById("chart-tooltip");
+  tip.style.left = `${{event.clientX}}px`;
+  tip.style.top = `${{event.clientY}}px`;
+}}
+
+function hideTooltip() {{
+  document.getElementById("chart-tooltip").classList.remove("show");
 }}
 
 function drawChart(svgId, legendId, seriesIds, seriesData = HISTORY.series, seriesDefs = SERIES, pointSource = HISTORY.points) {{
@@ -869,6 +942,16 @@ function drawChart(svgId, legendId, seriesIds, seriesData = HISTORY.series, seri
       title.textContent = `${{spec.label}}\\n${{p.commit}}\\n${{p.packet}}\\n${{fmtRatio(p.value)}}`;
       circle.appendChild(title);
       svg.appendChild(circle);
+
+      const hit = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+      hit.setAttribute("class", "point-hit");
+      hit.setAttribute("cx", x(p.ts));
+      hit.setAttribute("cy", y(p.value));
+      hit.setAttribute("r", 11);
+      hit.addEventListener("mouseenter", event => showTooltip(event, tooltipHtml(spec, p)));
+      hit.addEventListener("mousemove", moveTooltip);
+      hit.addEventListener("mouseleave", hideTooltip);
+      svg.appendChild(hit);
     }});
 
     const item = document.createElement("span");
@@ -940,13 +1023,31 @@ drawChart("median-chart", "median-legend", ["matrix_median", "hotspots_median", 
 drawChart("get-chart", "get-legend", ["matrix_get_p1", "matrix_get_p100", "hotspots_get_p100", "calltree_get_p100"]);
 drawChart("raw-chart", "raw-legend", ["raw_legacy_median", "raw_matrix_median", "raw_hotspots_median", "raw_calltree_median"], HISTORY.raw_series, RAW_SERIES, HISTORY.raw_points);
 renderTables();
+
+async function checkForRefresh() {{
+  const status = document.getElementById("refresh-status");
+  try {{
+    const response = await fetch(`history.json?check=${{Date.now()}}`, {{cache: "no-store"}});
+    const next = await response.json();
+    const nextSignature = JSON.stringify(next.signature || {{}});
+    if (nextSignature !== INITIAL_SIGNATURE) {{
+      status.textContent = "New data found; reloading...";
+      window.location.reload();
+      return;
+    }}
+    status.textContent = "Auto-refresh checked " + new Date().toLocaleTimeString();
+  }} catch (err) {{
+    status.textContent = "Auto-refresh check failed";
+  }}
+}}
+setInterval(checkForRefresh, 30000);
 </script>
 </body>
 </html>
 """
 
 
-def build(out_dir: Path) -> None:
+def build(out_dir: Path, *, quiet: bool = False) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     history = build_history()
     (out_dir / "history.json").write_text(
@@ -954,12 +1055,22 @@ def build(out_dir: Path) -> None:
         encoding="utf-8",
     )
     (out_dir / "index.html").write_text(render_html(history), encoding="utf-8")
-    print(f"wrote {out_dir / 'index.html'}")
-    print(f"points: {history['point_count']}")
+    if not quiet:
+        print(f"wrote {out_dir / 'index.html'}")
+        print(f"points: {history['point_count']}")
 
 
 def serve(out_dir: Path, port: int) -> None:
     class Handler(SimpleHTTPRequestHandler):
+        def do_GET(self) -> None:
+            route = self.path.split("?", 1)[0]
+            if route in {"/", "/index.html", "/history.json"}:
+                try:
+                    build(out_dir, quiet=True)
+                except Exception as err:  # noqa: BLE001 - keep serving old dashboard on rebuild failure.
+                    print(f"dashboard rebuild failed: {err}")
+            super().do_GET()
+
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, directory=str(out_dir), **kwargs)
 

@@ -81,7 +81,7 @@
       "ts": "2026-05-22T14:41:32.977606Z"
     }
   ],
-  "generated_at": "2026-05-22T15:08:08+00:00",
+  "generated_at": "2026-05-22T15:19:05+00:00",
   "latest": {
     "calltree": {
       "artifacts": [
@@ -3899,5 +3899,13 @@
       "label": "Calltree GET p100",
       "runner_kind": "calltree"
     }
-  ]
+  ],
+  "signature": {
+    "latest_point": "harness/evidence/runs/20260522T144733Z-d3b7602-runner-runtime-owner-8-post-poller-calltree.json",
+    "latest_raw": "harness/bench/results/20260522T144738Z-d3b7602-calltree.tsv",
+    "ledger_mtime_ns": 1779462886694539979,
+    "point_count": 14,
+    "raw_point_count": 39,
+    "results_mtime_ns": 1779461308744302191
+  }
 }
