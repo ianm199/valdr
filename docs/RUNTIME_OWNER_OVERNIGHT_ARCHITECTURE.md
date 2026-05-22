@@ -33,7 +33,8 @@ Post-scaffold evidence keeps that conclusion intact:
   max 0.60x at
   `harness/evidence/runs/20260522T041658Z-ab1d468-runner-runtime-owner-post-scaffold-hotspots.json`.
 
-The Rust surface still matches the architectural diagnosis:
+Before `runtime-owner-4-std-nonblocking-owner-loop`, the Rust surface still
+matched the architectural diagnosis:
 
 - `crates/redis-server/src/main.rs` accepts plain TCP with
   `TcpListener::incoming`, spawns one client read/dispatch thread, and spawns a
@@ -44,6 +45,27 @@ The Rust surface still matches the architectural diagnosis:
   `global_databases()`.
 - `crates/redis-server/src/runtime_owner.rs` is an inert scaffold; it does not
   yet own sockets, dispatch, or the live DB list.
+
+## Implementation Update: runtime-owner-4
+
+The implementation packet moves the default plain-TCP listener into
+`RuntimeOwner::run_plain_tcp`, a single std-library nonblocking owner loop with
+a linear scan over live slots. The loop accepts until `WouldBlock`, drains each
+slot's foreign-payload receiver, reads sockets until `WouldBlock`, parses with
+`parse_inline_or_multibulk_into`, dispatches through
+`CommandContext::with_server` and `redis_commands::dispatch`, flushes pending
+slot writes, and removes closed clients.
+
+The DB storage rule remains transitional: the owner loop uses
+`global_databases()` `Arc<Mutex<RedisDb>>` handles and may hold DB0's guard
+across a bounded per-slot dispatch batch. It does not create an owner-owned
+live `Vec<RedisDb>`, so TLS, active-expire, AOF replay, replication, RDB, and
+other helpers still observe the same keyspace.
+
+TLS remains on the existing thread-per-connection path. Foreign bytes for
+plain-TCP clients still enter through mpsc senders registered in
+`PubSubRegistry`; the owner loop drains the matching receivers and writes the
+socket itself.
 
 ## Overnight Strategy
 

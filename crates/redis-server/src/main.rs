@@ -1,16 +1,15 @@
 //! `redis-server` binary entry point — Wave A scaffolding.
 //!
-//! Minimal TCP accept loop: binds a port, spawns a thread per accepted
-//! connection, reads RESP requests, dispatches through `redis-commands`,
-//! and writes the reply back to the socket.
+//! Plain TCP binds a port and runs through the std nonblocking
+//! `RuntimeOwner` loop: one owner accepts sockets, parses RESP requests,
+//! dispatches through `redis-commands`, and flushes replies.
 //!
-//! Round 8a adds a per-connection writer thread (driven by an `mpsc::Sender`)
-//! so PUBLISH running on a foreign connection can deliver bytes to subscriber
-//! sockets without re-acquiring the subscriber's transport from a foreign
-//! thread.
+//! TLS remains on the earlier thread-per-connection path. Its outbound
+//! `mpsc::Sender` still lets PUBLISH and blocked wakeups deliver bytes without
+//! re-acquiring the subscriber's transport from a foreign thread.
 //!
 //! Out of scope for Wave A:
-//!   * Event-loop based I/O (no `mio` / `tokio`); blocking thread-per-conn.
+//!   * Real poller dependency (no `mio` / `tokio` yet; std nonblocking only).
 //!   * Multi-DB routing (every command sees DB 0).
 //!   * Replication, cluster, persistence, modules.
 
@@ -104,32 +103,44 @@ fn parse_args(argv: Vec<String>) -> Result<CliArgs, String> {
     while let Some(flag) = it.next() {
         match flag.as_str() {
             "--port" | "-p" => {
-                let v = it.next().ok_or_else(|| "--port requires a value".to_string())?;
+                let v = it
+                    .next()
+                    .ok_or_else(|| "--port requires a value".to_string())?;
                 out.port = v.parse().map_err(|_| format!("invalid port: {}", v))?;
             }
             "--bind" => {
-                let v = it.next().ok_or_else(|| "--bind requires a value".to_string())?;
+                let v = it
+                    .next()
+                    .ok_or_else(|| "--bind requires a value".to_string())?;
                 out.bind = v;
             }
             "--rdb-disabled" => {
                 out.rdb_disabled = true;
             }
             "--appendonly" => {
-                let v = it.next().ok_or_else(|| "--appendonly requires yes/no".to_string())?;
+                let v = it
+                    .next()
+                    .ok_or_else(|| "--appendonly requires yes/no".to_string())?;
                 out.appendonly = v == "yes";
             }
             "--appendfilename" => {
-                let v = it.next().ok_or_else(|| "--appendfilename requires a value".to_string())?;
+                let v = it
+                    .next()
+                    .ok_or_else(|| "--appendfilename requires a value".to_string())?;
                 out.appendfilename = v;
             }
             "--appendfsync" => {
-                let v = it.next().ok_or_else(|| "--appendfsync requires always/everysec/no".to_string())?;
+                let v = it
+                    .next()
+                    .ok_or_else(|| "--appendfsync requires always/everysec/no".to_string())?;
                 if let Some(p) = redis_commands::aof::parse_fsync_policy(v.as_bytes()) {
                     out.appendfsync = p;
                 }
             }
             "--help" | "-h" => {
-                println!("Usage: redis-server [<config-file>] [--port N] [--bind addr] [--rdb-disabled]");
+                println!(
+                    "Usage: redis-server [<config-file>] [--port N] [--bind addr] [--rdb-disabled]"
+                );
                 std::process::exit(0);
             }
             other => {
@@ -159,7 +170,9 @@ fn apply_config_file(args: &mut CliArgs, path: &Path) -> Result<(), String> {
         let value = parts.next().unwrap_or("").trim();
         match key {
             "port" => {
-                let v: u16 = value.parse().map_err(|_| format!("invalid port: {}", value))?;
+                let v: u16 = value
+                    .parse()
+                    .map_err(|_| format!("invalid port: {}", value))?;
                 args.port = v;
             }
             "bind" => {
@@ -269,8 +282,8 @@ fn main() {
     let shutdown = Arc::new(AtomicBool::new(false));
     install_shutdown_handler(Arc::clone(&shutdown));
 
-    if let Err(e) = listener.set_nonblocking(false) {
-        eprintln!("redis-server: set_nonblocking(false) failed: {}", e);
+    if let Err(e) = listener.set_nonblocking(true) {
+        eprintln!("redis-server: set_nonblocking(true) failed: {}", e);
     }
     eprintln!("redis-server: listening on {}", addr);
     emit_startup_log();
@@ -312,23 +325,27 @@ fn main() {
     );
 
     if !args.rdb_disabled {
-        let rdb_path = redis_core::rdb::rdb_path(
-            &live_config.rdb_dir(),
-            &live_config.rdb_filename(),
-        );
+        let rdb_path =
+            redis_core::rdb::rdb_path(&live_config.rdb_dir(), &live_config.rdb_filename());
         if rdb_path.exists() {
             match db_zero.lock() {
-                Ok(mut guard) => {
-                    match redis_core::rdb::load_into(&mut guard, &rdb_path) {
-                        Ok(msg) => eprintln!("redis-server: {}", msg),
-                        Err(e) => eprintln!("redis-server: RDB load failed ({}): {}", rdb_path.display(), e),
-                    }
-                }
+                Ok(mut guard) => match redis_core::rdb::load_into(&mut guard, &rdb_path) {
+                    Ok(msg) => eprintln!("redis-server: {}", msg),
+                    Err(e) => eprintln!(
+                        "redis-server: RDB load failed ({}): {}",
+                        rdb_path.display(),
+                        e
+                    ),
+                },
                 Err(p) => {
                     let mut guard = p.into_inner();
                     match redis_core::rdb::load_into(&mut guard, &rdb_path) {
                         Ok(msg) => eprintln!("redis-server: {}", msg),
-                        Err(e) => eprintln!("redis-server: RDB load failed ({}): {}", rdb_path.display(), e),
+                        Err(e) => eprintln!(
+                            "redis-server: RDB load failed ({}): {}",
+                            rdb_path.display(),
+                            e
+                        ),
                     }
                 }
             }
@@ -339,34 +356,41 @@ fn main() {
         let aof_path = std::path::Path::new(&args.dir).join(&args.appendfilename);
         if aof_path.exists() {
             match db_zero.lock() {
-                Ok(mut guard) => {
-                    match redis_commands::aof::replay_aof(&aof_path, &mut guard) {
-                        Ok(n) => eprintln!("redis-server: AOF replay: {} commands", n),
-                        Err(e) => eprintln!("redis-server: AOF replay failed ({}): {}", aof_path.display(), e),
-                    }
-                }
+                Ok(mut guard) => match redis_commands::aof::replay_aof(&aof_path, &mut guard) {
+                    Ok(n) => eprintln!("redis-server: AOF replay: {} commands", n),
+                    Err(e) => eprintln!(
+                        "redis-server: AOF replay failed ({}): {}",
+                        aof_path.display(),
+                        e
+                    ),
+                },
                 Err(p) => {
                     let mut guard = p.into_inner();
                     match redis_commands::aof::replay_aof(&aof_path, &mut guard) {
                         Ok(n) => eprintln!("redis-server: AOF replay: {} commands", n),
-                        Err(e) => eprintln!("redis-server: AOF replay failed ({}): {}", aof_path.display(), e),
+                        Err(e) => eprintln!(
+                            "redis-server: AOF replay failed ({}): {}",
+                            aof_path.display(),
+                            e
+                        ),
                     }
                 }
             }
         }
         match redis_commands::aof::AofWriter::open(&aof_path, args.appendfsync) {
             Ok(w) => redis_commands::aof::install_aof_writer(Arc::new(w)),
-            Err(e) => eprintln!("redis-server: failed to open AOF {}: {}", aof_path.display(), e),
+            Err(e) => eprintln!(
+                "redis-server: failed to open AOF {}: {}",
+                aof_path.display(),
+                e
+            ),
         }
         redis_commands::aof::spawn_fsync_thread();
     }
 
     let next_client_id = Arc::new(AtomicU64::new(1));
     let registry = Arc::new(Mutex::new(PubSubRegistry::new()));
-    redis_core::db::install_global_notify_handle(
-        Arc::clone(&registry),
-        Arc::clone(&live_config),
-    );
+    redis_core::db::install_global_notify_handle(Arc::clone(&registry), Arc::clone(&live_config));
     redis_core::db::install_swapdb_wake_hook(Box::new(|other_db_id| {
         redis_commands::wake_blocked_after_swapdb(other_db_id, other_db_id);
     }));
@@ -374,7 +398,11 @@ fn main() {
     spawn_blocked_timeout_thread(Arc::clone(&shutdown));
     let active_expire_cfg = Arc::clone(active_expire_config());
     let metrics_arc = Arc::clone(server_metrics());
-    let _ = spawn_active_expire_thread(global_databases().get(0), active_expire_cfg, Some(metrics_arc));
+    let _ = spawn_active_expire_thread(
+        global_databases().get(0),
+        active_expire_cfg,
+        Some(metrics_arc),
+    );
     let _ = spawn_lru_clock_thread();
     spawn_bgsave_reaper(Arc::clone(&server), Arc::clone(&live_config));
     spawn_repl_bgsave_reaper();
@@ -392,7 +420,9 @@ fn main() {
         let cert = match live_config_for_hook.tls_cert_file() {
             Some(p) => p,
             None => {
-                eprintln!("redis-server: CONFIG SET tls-port requires tls-cert-file to be set first");
+                eprintln!(
+                    "redis-server: CONFIG SET tls-port requires tls-cert-file to be set first"
+                );
                 live_config_for_hook.set_tls_port(0);
                 return;
             }
@@ -400,7 +430,9 @@ fn main() {
         let key = match live_config_for_hook.tls_key_file() {
             Some(p) => p,
             None => {
-                eprintln!("redis-server: CONFIG SET tls-port requires tls-key-file to be set first");
+                eprintln!(
+                    "redis-server: CONFIG SET tls-port requires tls-key-file to be set first"
+                );
                 live_config_for_hook.set_tls_port(0);
                 return;
             }
@@ -442,7 +474,14 @@ fn main() {
             });
     }));
 
-    serve(listener, shutdown, db_zero, next_client_id, registry, server, args.port);
+    runtime_owner::RuntimeOwner::run_plain_tcp(
+        listener,
+        shutdown,
+        next_client_id,
+        registry,
+        server,
+        args.port,
+    );
 }
 
 /// Reaper thread for BGSAVE child processes.
@@ -469,7 +508,8 @@ fn spawn_bgsave_reaper(
                 continue;
             }
             let mut status: libc::c_int = 0;
-            let ret = unsafe { libc::waitpid(child_pid as libc::pid_t, &mut status, libc::WNOHANG) };
+            let ret =
+                unsafe { libc::waitpid(child_pid as libc::pid_t, &mut status, libc::WNOHANG) };
             if ret == 0 {
                 continue;
             }
@@ -537,7 +577,8 @@ fn spawn_repl_bgsave_reaper() {
                 continue;
             }
             let mut status: libc::c_int = 0;
-            let ret = unsafe { libc::waitpid(child_pid as libc::pid_t, &mut status, libc::WNOHANG) };
+            let ret =
+                unsafe { libc::waitpid(child_pid as libc::pid_t, &mut status, libc::WNOHANG) };
             if ret == 0 {
                 continue;
             }
@@ -597,7 +638,10 @@ fn dispatch_full_sync_transfer() {
 
     let snapshot_offset = job.snapshot_offset;
     for client_id in &job.waiting_replicas {
-        repl.set_replica_state(*client_id, redis_core::replication::ReplicaState::SendingRdb);
+        repl.set_replica_state(
+            *client_id,
+            redis_core::replication::ReplicaState::SendingRdb,
+        );
         if !repl.send_to_replica(*client_id, header.clone()) {
             eprintln!(
                 "redis-server: full-sync RDB send failed for replica client_id={}",
@@ -737,12 +781,21 @@ fn serve(
                 let server_clone = Arc::clone(&server);
                 let id = next_client_id.fetch_add(1, Ordering::Relaxed);
                 metrics.on_connect();
-                metrics.total_connections_received.fetch_add(1, Ordering::Relaxed);
+                metrics
+                    .total_connections_received
+                    .fetch_add(1, Ordering::Relaxed);
                 let _ = thread::Builder::new()
                     .name(format!("client-{}", peer))
                     .spawn(move || {
                         handle_connection(
-                            stream, shutdown, db, id, peer, registry, server_clone, tcp_port,
+                            stream,
+                            shutdown,
+                            db,
+                            id,
+                            peer,
+                            registry,
+                            server_clone,
+                            tcp_port,
                         )
                     });
             }
@@ -791,15 +844,17 @@ fn serve_tls(
                     .peer_addr()
                     .map(|a| a.to_string())
                     .unwrap_or_else(|_| "<unknown>".to_string());
-                let tls_conn = match rustls::ServerConnection::new(
-                    Arc::clone(&tls_cfg.server_config),
-                ) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        eprintln!("redis-server: tls ServerConnection::new failed for {}: {}", peer, e);
-                        continue;
-                    }
-                };
+                let tls_conn =
+                    match rustls::ServerConnection::new(Arc::clone(&tls_cfg.server_config)) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            eprintln!(
+                                "redis-server: tls ServerConnection::new failed for {}: {}",
+                                peer, e
+                            );
+                            continue;
+                        }
+                    };
                 let tls_stream = Box::new(StreamOwned::new(tls_conn, stream));
                 let conn = Connection::Tls(tls_stream);
                 let shutdown2 = Arc::clone(&shutdown);
@@ -808,7 +863,9 @@ fn serve_tls(
                 let server2 = Arc::clone(&server);
                 let id = next_client_id.fetch_add(1, Ordering::Relaxed);
                 metrics.on_connect();
-                metrics.total_connections_received.fetch_add(1, Ordering::Relaxed);
+                metrics
+                    .total_connections_received
+                    .fetch_add(1, Ordering::Relaxed);
                 let _ = thread::Builder::new()
                     .name(format!("tls-client-{}", peer))
                     .spawn(move || {
@@ -828,10 +885,7 @@ fn serve_tls(
 /// Spawn a writer thread that drains an `mpsc::Receiver<Vec<u8>>` and writes
 /// each payload to the TCP stream. Returns the matching sender that the read
 /// loop and the pub/sub registry both hold.
-fn spawn_writer(
-    mut writer: TcpStream,
-    peer: String,
-) -> Sender<Vec<u8>> {
+fn spawn_writer(mut writer: TcpStream, peer: String) -> Sender<Vec<u8>> {
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
     let _ = thread::Builder::new()
         .name(format!("writer-{}", peer))
@@ -915,7 +969,16 @@ fn handle_connection_tls(
     client.addr = Some(peer_addr.clone());
     client.authenticated_user = determine_initial_user();
 
-    run_client_loop_tls(&mut client, tx, rx, peer_addr, shutdown, db, registry, server);
+    run_client_loop_tls(
+        &mut client,
+        tx,
+        rx,
+        peer_addr,
+        shutdown,
+        db,
+        registry,
+        server,
+    );
 }
 
 /// Shared read-dispatch-write loop for plain TCP connections.
@@ -1227,15 +1290,13 @@ fn process_current_command_with_db(
     client.clear_blocked_on_keys();
 
     let metrics = server_metrics();
-    metrics.total_commands_processed.fetch_add(1, Ordering::Relaxed);
+    metrics
+        .total_commands_processed
+        .fetch_add(1, Ordering::Relaxed);
     let t0 = Instant::now();
     let result = {
-        let mut ctx = CommandContext::with_server(
-            client,
-            db,
-            Arc::clone(server),
-            Arc::clone(registry),
-        );
+        let mut ctx =
+            CommandContext::with_server(client, db, Arc::clone(server), Arc::clone(registry));
         let r = dispatch(&mut ctx);
         let deferred: Vec<RedisString> = std::mem::take(&mut ctx.client_mut().pending_wakes);
         for key in &deferred {
@@ -1337,11 +1398,11 @@ fn queue_error_reply(client: &mut Client, err: &RedisError) {
 //   source:        architect packet (Wave A main + Round 8a pub/sub wiring)
 //   target_crate:  redis-server
 //   confidence:    high
-//   todos:         1
-//   port_notes:    0
+//   todos:         0
+//   port_notes:    1
 //   unsafe_blocks: 0
-//   notes:         Blocking thread-per-conn TCP server with a per-conn
-//                  writer thread driven by mpsc. Pub/sub registry is shared
-//                  via Arc<Mutex<>>. SIGINT handler is a no-op stub.
-//                  RuntimeOwner is declared as an inert scaffold only.
+//   notes:         Plain TCP now enters the std nonblocking RuntimeOwner loop.
+//                  TLS stays on the existing per-connection thread path with
+//                  mpsc foreign payload delivery. SIGINT handler is a no-op
+//                  stub.
 // ──────────────────────────────────────────────────────────────────────────

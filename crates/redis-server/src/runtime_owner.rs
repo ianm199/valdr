@@ -1,18 +1,35 @@
-//! Inert RuntimeOwner scaffold.
+//! RuntimeOwner std nonblocking plain-TCP experiment.
 //!
 //! This module names the owner-loop vocabulary from
-//! `harness/architecture/object-vocabulary.tsv` without wiring it into the
-//! default server path. The current product path still lives in `main.rs`:
-//! blocking accept, one thread per connection, `Arc<Mutex<RedisDb>>`, and
-//! normal `redis_commands::dispatch`.
+//! `harness/architecture/object-vocabulary.tsv` and implements the bounded
+//! std-only owner loop approved by
+//! `harness/architecture/decisions/runtime-ownership.md`.
+//!
+//! The transitional DB model is intentional: command dispatch still locks the
+//! existing `global_databases()` handles. RuntimeOwner owns plain-TCP sockets,
+//! client parser state, per-slot foreign payload receivers, and ordinary reply
+//! flushing, but it does not create a second live `Vec<RedisDb>`.
 
 use std::collections::VecDeque;
+use std::io::{self, Read, Write};
+use std::net::{Shutdown, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex};
+use std::thread;
 
-use redis_core::{Client, RedisDb};
+use redis_core::client_info::client_info_registry;
+use redis_core::databases::global_databases;
+use redis_core::metrics::server_metrics;
+use redis_core::pubsub_registry::PubSubRegistry;
+use redis_core::{Client, Connection};
+use redis_protocol::parse_inline_or_multibulk_into;
 use redis_types::RedisString;
 
 const DEFAULT_DATABASE_COUNT: u32 = 16;
 const DEFAULT_EVENT_CAPACITY: usize = 1024;
+const READ_BUFFER_SIZE: usize = 16 * 1024;
+const MAX_COMMANDS_PER_SLOT_TICK: usize = 128;
 
 /// Typed key into the future RuntimeOwner client-slot table.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -118,7 +135,7 @@ impl Default for RuntimeOwnerConfig {
     }
 }
 
-/// Per-slot outbound bytes drained by the future owner write step.
+/// Per-slot outbound bytes drained by the owner write step.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct ClientWriteBuffer {
     bytes: Vec<u8>,
@@ -148,16 +165,26 @@ impl ClientWriteBuffer {
     pub fn take(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.bytes)
     }
+
+    pub fn consume_front(&mut self, n: usize) {
+        let n = n.min(self.bytes.len());
+        if n == self.bytes.len() {
+            self.bytes.clear();
+        } else if n > 0 {
+            self.bytes.drain(..n);
+        }
+    }
 }
 
 /// Owner-loop representation of one connected client.
 pub struct ClientSlot {
     id: SlotId,
     client: Client,
-    query_buf: Vec<u8>,
-    argv: Vec<RedisString>,
+    stream: Option<TcpStream>,
+    foreign_rx: Option<Receiver<Vec<u8>>>,
     write_buffer: ClientWriteBuffer,
     closed: bool,
+    close_after_flush: bool,
 }
 
 impl ClientSlot {
@@ -165,10 +192,28 @@ impl ClientSlot {
         Self {
             id,
             client,
-            query_buf: Vec::new(),
-            argv: Vec::new(),
+            stream: None,
+            foreign_rx: None,
             write_buffer: ClientWriteBuffer::new(),
             closed: false,
+            close_after_flush: false,
+        }
+    }
+
+    fn with_stream(
+        id: SlotId,
+        client: Client,
+        stream: TcpStream,
+        foreign_rx: Receiver<Vec<u8>>,
+    ) -> Self {
+        Self {
+            id,
+            client,
+            stream: Some(stream),
+            foreign_rx: Some(foreign_rx),
+            write_buffer: ClientWriteBuffer::new(),
+            closed: false,
+            close_after_flush: false,
         }
     }
 
@@ -185,23 +230,23 @@ impl ClientSlot {
     }
 
     pub fn ingest(&mut self, bytes: &[u8]) {
-        self.query_buf.extend_from_slice(bytes);
+        self.client.query_buf.extend_from_slice(bytes);
     }
 
     pub fn query_buffer(&self) -> &[u8] {
-        &self.query_buf
+        &self.client.query_buf
     }
 
     pub fn clear_query_buffer(&mut self) {
-        self.query_buf.clear();
+        self.client.query_buf.clear();
     }
 
     pub fn stage_argv(&mut self, argv: Vec<RedisString>) {
-        self.argv = argv;
+        self.client.argv = argv;
     }
 
     pub fn argv(&self) -> &[RedisString] {
-        &self.argv
+        &self.client.argv
     }
 
     pub fn queue_write(&mut self, bytes: &[u8]) {
@@ -218,6 +263,10 @@ impl ClientSlot {
 
     pub fn mark_closed(&mut self) {
         self.closed = true;
+    }
+
+    fn mark_close_after_flush(&mut self) {
+        self.close_after_flush = true;
     }
 
     pub fn is_closed(&self) -> bool {
@@ -279,32 +328,28 @@ impl OwnerCommandResult {
     }
 }
 
-/// Planned owner of normal command execution.
+/// Owner of normal plain-TCP command execution for the std experiment.
 ///
-/// This scaffold is deliberately inert. It can be constructed and unit-tested,
-/// but `main.rs` does not send accepted sockets, parsed requests, or live
-/// database locks through it.
+/// This is still transitional: it owns accepted plain-TCP sockets and client
+/// slots, but dispatch reaches live keyspace state through `global_databases()`
+/// handles rather than an owner-held `Vec<RedisDb>`.
 pub struct RuntimeOwner {
     config: RuntimeOwnerConfig,
     poll_driver: PollDriverHandle,
     slots: Vec<Option<ClientSlot>>,
     free_slots: Vec<SlotId>,
-    databases: Vec<RedisDb>,
+    database_count: u32,
     events: VecDeque<RuntimeEvent>,
 }
 
 impl RuntimeOwner {
     pub fn new(config: RuntimeOwnerConfig) -> Self {
-        let mut databases = Vec::new();
-        for id in 0..config.database_count() {
-            databases.push(RedisDb::new(id));
-        }
         Self {
+            database_count: config.database_count(),
             config,
             poll_driver: PollDriverHandle::abstract_placeholder(),
             slots: Vec::new(),
             free_slots: Vec::new(),
-            databases,
             events: VecDeque::new(),
         }
     }
@@ -322,7 +367,7 @@ impl RuntimeOwner {
     }
 
     pub fn database_count(&self) -> usize {
-        self.databases.len()
+        self.database_count as usize
     }
 
     pub fn active_slot_count(&self) -> usize {
@@ -363,6 +408,148 @@ impl RuntimeOwner {
         Some(slot_id)
     }
 
+    fn insert_connected_client(
+        &mut self,
+        client: Client,
+        stream: TcpStream,
+        foreign_rx: Receiver<Vec<u8>>,
+    ) -> Option<SlotId> {
+        if let Some(slot_id) = self.free_slots.pop() {
+            let idx = slot_id.as_index();
+            if idx < self.slots.len() {
+                self.slots[idx] =
+                    Some(ClientSlot::with_stream(slot_id, client, stream, foreign_rx));
+                return Some(slot_id);
+            }
+        }
+
+        let slot_id = SlotId::from_index(self.slots.len())?;
+        self.slots.push(Some(ClientSlot::with_stream(
+            slot_id, client, stream, foreign_rx,
+        )));
+        Some(slot_id)
+    }
+
+    pub fn run_plain_tcp(
+        listener: TcpListener,
+        shutdown: Arc<AtomicBool>,
+        next_client_id: Arc<AtomicU64>,
+        registry: Arc<Mutex<PubSubRegistry>>,
+        server: Arc<redis_core::RedisServer>,
+        tcp_port: u16,
+    ) {
+        let _ = tcp_port;
+        if let Err(e) = listener.set_nonblocking(true) {
+            eprintln!("redis-server: set_nonblocking(true) failed: {}", e);
+        }
+
+        let config = RuntimeOwnerConfig::disabled()
+            .with_enabled(true)
+            .with_database_count(global_databases().count() as u32);
+        let mut owner = RuntimeOwner::new(config);
+        eprintln!("redis-server: RuntimeOwner plain TCP loop enabled");
+
+        while !shutdown.load(Ordering::SeqCst) {
+            let mut progressed = false;
+            progressed |= owner.accept_ready(&listener, &next_client_id, &registry);
+            progressed |= owner.drain_foreign_payloads();
+            progressed |= owner.read_ready_clients(&registry, &server);
+            progressed |= owner.flush_pending_writes();
+            progressed |= owner.cleanup_closed_clients(&registry);
+
+            if !progressed {
+                thread::yield_now();
+            }
+        }
+
+        owner.close_all_clients(&registry);
+    }
+
+    fn accept_ready(
+        &mut self,
+        listener: &TcpListener,
+        next_client_id: &Arc<AtomicU64>,
+        registry: &Arc<Mutex<PubSubRegistry>>,
+    ) -> bool {
+        let mut progressed = false;
+        loop {
+            match listener.accept() {
+                Ok((mut stream, peer_addr)) => {
+                    progressed = true;
+                    let metrics = server_metrics();
+                    let current = metrics.connected_clients.load(Ordering::Relaxed);
+                    let limit = redis_commands::connection::get_max_clients();
+                    if current >= limit {
+                        metrics.rejected_connections.fetch_add(1, Ordering::Relaxed);
+                        let _ = stream.write_all(b"-ERR max number of clients reached\r\n");
+                        drop(stream);
+                        continue;
+                    }
+
+                    if let Err(e) = stream.set_nodelay(true) {
+                        eprintln!("redis-server: set_nodelay failed: {}", e);
+                    }
+                    if let Err(e) = stream.set_nonblocking(true) {
+                        eprintln!("redis-server: client set_nonblocking(true) failed: {}", e);
+                        drop(stream);
+                        continue;
+                    }
+                    let conn_stream = match stream.try_clone() {
+                        Ok(s) => s,
+                        Err(e) => {
+                            eprintln!("redis-server: try_clone failed for {}: {}", peer_addr, e);
+                            drop(stream);
+                            continue;
+                        }
+                    };
+
+                    let id = next_client_id.fetch_add(1, Ordering::Relaxed);
+                    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+                    {
+                        let mut guard = match registry.lock() {
+                            Ok(g) => g,
+                            Err(p) => p.into_inner(),
+                        };
+                        guard.register_sender(id, tx);
+                        guard.set_resp_proto(id, 2);
+                    }
+
+                    let peer = peer_addr.to_string();
+                    if let Ok(mut guard) = client_info_registry().lock() {
+                        guard.register(id, peer.clone());
+                    }
+
+                    let mut client = Client::with_connection(Connection::Tcp(conn_stream));
+                    client.id = id;
+                    client.addr = Some(peer);
+                    client.authenticated_user = super::determine_initial_user();
+
+                    if self.insert_connected_client(client, stream, rx).is_some() {
+                        metrics.on_connect();
+                        metrics
+                            .total_connections_received
+                            .fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        if let Ok(mut guard) = registry.lock() {
+                            guard.drop_client(id);
+                        }
+                        if let Ok(mut guard) = client_info_registry().lock() {
+                            guard.deregister(id);
+                        }
+                        metrics.rejected_connections.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => {
+                    eprintln!("redis-server: accept failed: {}", e);
+                    break;
+                }
+            }
+        }
+        progressed
+    }
+
     pub fn remove_client(&mut self, slot_id: SlotId) -> Option<ClientSlot> {
         let slot = self.slots.get_mut(slot_id.as_index())?;
         let removed = slot.take();
@@ -392,6 +579,257 @@ impl RuntimeOwner {
     pub fn take_pending_write(&mut self, slot_id: SlotId) -> Option<Vec<u8>> {
         self.slot_mut(slot_id).map(ClientSlot::take_pending_write)
     }
+
+    fn drain_foreign_payloads(&mut self) -> bool {
+        let mut progressed = false;
+        for slot in self.slots.iter_mut().flatten() {
+            let mut payloads = Vec::new();
+            if let Some(rx) = slot.foreign_rx.as_mut() {
+                loop {
+                    match rx.try_recv() {
+                        Ok(payload) => payloads.push(payload),
+                        Err(mpsc::TryRecvError::Empty) | Err(mpsc::TryRecvError::Disconnected) => {
+                            break;
+                        }
+                    }
+                }
+            }
+            for payload in payloads {
+                slot.queue_write(&payload);
+                progressed = true;
+            }
+        }
+        progressed
+    }
+
+    fn read_ready_clients(
+        &mut self,
+        registry: &Arc<Mutex<PubSubRegistry>>,
+        server: &Arc<redis_core::RedisServer>,
+    ) -> bool {
+        let mut progressed = false;
+        let mut read_buf = [0u8; READ_BUFFER_SIZE];
+        for idx in 0..self.slots.len() {
+            progressed |= self.read_slot(idx, &mut read_buf);
+            progressed |= self.dispatch_slot_commands(idx, registry, server);
+        }
+        progressed
+    }
+
+    fn read_slot(&mut self, idx: usize, read_buf: &mut [u8; READ_BUFFER_SIZE]) -> bool {
+        let slot = match self.slots.get_mut(idx).and_then(Option::as_mut) {
+            Some(slot) => slot,
+            None => return false,
+        };
+        if slot.closed || slot.close_after_flush {
+            return false;
+        }
+
+        let mut progressed = false;
+        loop {
+            let n = {
+                let stream = match slot.stream.as_mut() {
+                    Some(stream) => stream,
+                    None => {
+                        slot.mark_closed();
+                        return progressed;
+                    }
+                };
+                match stream.read(read_buf) {
+                    Ok(0) => {
+                        slot.mark_closed();
+                        break;
+                    }
+                    Ok(n) => n,
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(_) => {
+                        slot.mark_closed();
+                        break;
+                    }
+                }
+            };
+            slot.ingest(&read_buf[..n]);
+            progressed = true;
+        }
+        progressed
+    }
+
+    fn dispatch_slot_commands(
+        &mut self,
+        idx: usize,
+        registry: &Arc<Mutex<PubSubRegistry>>,
+        server: &Arc<redis_core::RedisServer>,
+    ) -> bool {
+        let slot = match self.slots.get_mut(idx).and_then(Option::as_mut) {
+            Some(slot) => slot,
+            None => return false,
+        };
+        if slot.closed || slot.close_after_flush || slot.client.query_buf.is_empty() {
+            return false;
+        }
+
+        let db0 = global_databases().get(0);
+        let mut batch_db0_guard = if slot.client.db_index == 0 {
+            Some(super::lock_redis_db(&db0))
+        } else {
+            None
+        };
+        let mut consumed_total = 0usize;
+        let mut commands = 0usize;
+        let mut saw_command = false;
+        let mut last_cmd_name: Vec<u8> = Vec::new();
+
+        while commands < MAX_COMMANDS_PER_SLOT_TICK {
+            let parsed = parse_inline_or_multibulk_into(
+                &slot.client.query_buf[consumed_total..],
+                &mut slot.client.argv,
+            );
+            match parsed {
+                Ok(Some(consumed)) => {
+                    consumed_total += consumed;
+                    if slot.client.argv.is_empty() {
+                        continue;
+                    }
+                    commands += 1;
+                    saw_command = true;
+                    last_cmd_name.clear();
+                    if let Some(cmd) = slot.client.arg(0) {
+                        last_cmd_name.extend_from_slice(cmd.as_bytes());
+                    }
+                    if super::is_client_info_observer(&last_cmd_name) {
+                        super::update_client_info_snapshot(&slot.client, &last_cmd_name);
+                    }
+
+                    if slot.client.db_index == 0 {
+                        if batch_db0_guard.is_none() {
+                            batch_db0_guard = Some(super::lock_redis_db(&db0));
+                        }
+                        if let Some(db_guard) = batch_db0_guard.as_mut() {
+                            super::process_current_command_with_db(
+                                &mut slot.client,
+                                db_guard,
+                                registry,
+                                server,
+                            );
+                        }
+                    } else {
+                        batch_db0_guard = None;
+                        super::process_current_command(&mut slot.client, registry, server);
+                    }
+
+                    if slot.client.db_index != 0 || slot.client.blocked_on_keys {
+                        batch_db0_guard = None;
+                    }
+
+                    let reply = slot.client.drain_reply();
+                    if !reply.is_empty() {
+                        slot.queue_write(&reply);
+                    }
+                    if slot.client.should_close {
+                        slot.mark_close_after_flush();
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(err) => {
+                    super::queue_error_reply(&mut slot.client, &err);
+                    let reply = slot.client.drain_reply();
+                    if !reply.is_empty() {
+                        slot.queue_write(&reply);
+                    }
+                    slot.mark_close_after_flush();
+                    break;
+                }
+            }
+        }
+
+        if consumed_total > 0 {
+            slot.client.query_buf.drain(..consumed_total);
+        }
+        drop(batch_db0_guard);
+
+        if saw_command {
+            super::update_client_info_snapshot(&slot.client, &last_cmd_name);
+        }
+
+        saw_command || consumed_total > 0
+    }
+
+    fn flush_pending_writes(&mut self) -> bool {
+        let mut progressed = false;
+        for slot in self.slots.iter_mut().flatten() {
+            if slot.write_buffer.is_empty() {
+                continue;
+            }
+            let (stream, buffer) = match (slot.stream.as_mut(), &mut slot.write_buffer) {
+                (Some(stream), buffer) => (stream, buffer),
+                (None, _) => {
+                    slot.mark_closed();
+                    continue;
+                }
+            };
+            while !buffer.is_empty() {
+                match stream.write(buffer.as_bytes()) {
+                    Ok(0) => {
+                        slot.mark_closed();
+                        break;
+                    }
+                    Ok(n) => {
+                        buffer.consume_front(n);
+                        progressed = true;
+                    }
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(_) => {
+                        slot.mark_closed();
+                        break;
+                    }
+                }
+            }
+        }
+        progressed
+    }
+
+    fn cleanup_closed_clients(&mut self, registry: &Arc<Mutex<PubSubRegistry>>) -> bool {
+        let mut to_remove = Vec::new();
+        for slot in self.slots.iter().flatten() {
+            if slot.closed || (slot.close_after_flush && slot.write_buffer.is_empty()) {
+                to_remove.push(slot.id());
+            }
+        }
+
+        let progressed = !to_remove.is_empty();
+        for slot_id in to_remove {
+            if let Some(slot) = self.remove_client(slot_id) {
+                cleanup_slot(slot, registry);
+            }
+        }
+        progressed
+    }
+
+    fn close_all_clients(&mut self, registry: &Arc<Mutex<PubSubRegistry>>) {
+        let ids: Vec<SlotId> = self.slots.iter().flatten().map(ClientSlot::id).collect();
+        for slot_id in ids {
+            if let Some(slot) = self.remove_client(slot_id) {
+                cleanup_slot(slot, registry);
+            }
+        }
+    }
+}
+
+fn cleanup_slot(mut slot: ClientSlot, registry: &Arc<Mutex<PubSubRegistry>>) {
+    let id = slot.client.id;
+    let _ = redis_commands::pubsub::drop_client_from_registry(registry, id);
+    redis_core::replication::global_replication_state().remove_replica(id);
+    slot.client.clear_blocked_on_keys();
+    if let Ok(mut guard) = client_info_registry().lock() {
+        guard.deregister(id);
+    }
+    if let Some(stream) = slot.stream.take() {
+        let _ = stream.shutdown(Shutdown::Both);
+    }
+    server_metrics().on_disconnect();
 }
 
 #[cfg(test)]
@@ -522,9 +960,9 @@ mod tests {
 //   target_crate:  redis-server
 //   confidence:    high
 //   todos:         0
-//   port_notes:    2
+//   port_notes:    3
 //   unsafe_blocks: 0
-//   notes:         Inert scaffold only. PollDriverHandle is abstract; no
-//                  concrete poller dependency, default product-path wiring,
-//                  command fast path, or live DB migration is introduced here.
+//   notes:         Std nonblocking plain-TCP owner loop. PollDriverHandle is
+//                  still abstract; no concrete poller dependency, command
+//                  fast path, or owner-owned live DB migration is introduced.
 // --------------------------------------------------------------------------
