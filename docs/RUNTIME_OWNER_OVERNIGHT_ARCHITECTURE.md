@@ -33,6 +33,18 @@ Post-scaffold evidence keeps that conclusion intact:
   max 0.60x at
   `harness/evidence/runs/20260522T041658Z-ab1d468-runner-runtime-owner-post-scaffold-hotspots.json`.
 
+Post-owner evidence moved the diagnosis from architecture-scale mutex waiting
+to local owner-loop work:
+
+- `runtime-owner-4-post-owner-loop-oracle` passed at
+  `harness/evidence/runs/20260522T043942Z-7c190b1-runner-runtime-owner-4-post-owner-loop-oracle.json`.
+- `runtime-owner-5-owner-loop-polish` profile matrix reported median 0.80x,
+  min 0.57x, max 1.18x, GET p1 1.10x, and GET p100 0.72x at
+  `harness/bench/results/20260522T044745Z-803918c-profile-matrix.tsv`.
+- `runtime-owner-5-owner-loop-polish` hotspots reported median 0.74x,
+  min 0.61x, max 0.80x at
+  `harness/bench/results/20260522T044801Z-803918c-hotspots.json`.
+
 Before `runtime-owner-4-std-nonblocking-owner-loop`, the Rust surface still
 matched the architectural diagnosis:
 
@@ -66,6 +78,31 @@ TLS remains on the existing thread-per-connection path. Foreign bytes for
 plain-TCP clients still enter through mpsc senders registered in
 `PubSubRegistry`; the owner loop drains the matching receivers and writes the
 socket itself.
+
+## Implementation Update: runtime-owner-5
+
+The perf-polish packet keeps the same subsystem boundary as runtime-owner-4:
+plain-TCP owner-loop internals only. It does not change command execution,
+RESP wire parsing, ACL, transactions, scripting, expiration, pub/sub, blocking
+wakeups, AOF, replication, RDB, TLS, or the DB ownership model.
+
+The local change is reply staging:
+
+- `ClientWriteBuffer` now tracks a consumed offset, so partial socket writes do
+  not immediately `drain(..n)` and memmove the remaining reply bytes.
+- Foreign payload receivers queue owned `Vec<u8>` payloads into the slot write
+  buffer instead of collecting and copying them through borrowed slices.
+- The dispatch batch lets `client.reply_buf` accumulate across parsed commands
+  and transfers it to the slot write buffer once per batch, matching the
+  upstream `beforeSleep`/pending-write shape more closely.
+- Fully consumed query buffers clear directly; partial consumption keeps the
+  existing drain behavior.
+
+The post-polish matrix and hotspot runs are alpha telemetry, not a public
+performance guarantee. They do show the architectural packet did its job:
+sampled `__psynch_mutexwait` is no longer the dominant remaining leaf, and the
+next packet should focus on owner-loop readiness/write batching, command
+lookup, parser/integer parsing, allocator traffic, and command hasher work.
 
 ## Overnight Strategy
 

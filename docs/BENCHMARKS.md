@@ -189,6 +189,7 @@ same profile matrix and kept the table current after each pass.
 | 6 | Dispatch metadata cache + lazy argv snapshot for slowlog/AOF/replication | median 0.63x, min 0.39x, max 1.68x | 2,061,856 req/s (0.63x) | 2,702,703 req/s (0.53x) | 64,935 req/s (1.68x) |
 | 7 | Standalone no-replica propagation skip + unified runtime dispatch table | median 0.66x, min 0.51x, max 1.54x | 2,127,660 req/s (0.65x) | 2,777,778 req/s (0.54x) | 63,211 req/s (1.54x) |
 | 8 | First-byte bucketed runtime dispatch lookup | median 0.68x, min 0.56x, max 1.58x | 2,173,913 req/s (0.65x) | 3,448,276 req/s (0.67x) | 66,094 req/s (1.58x) |
+| 9 | Runtime-owner reply/write-buffer polish | median 0.80x, min 0.57x, max 1.18x | 2,409,639 req/s (0.72x) | 4,081,633 req/s (0.80x) | 43,346 req/s (1.11x) |
 
 The individual runs are noisy, especially on loopback with short benchmark
 windows, so the useful read is the trend: deep-pipeline GET moved from about
@@ -242,52 +243,67 @@ The production-shaped version is documented in
 version: if valkey-rs continues, the next real performance milestone should be
 a runtime-owner packet family, not another micro-optimization.
 
+### Runtime owner loop evidence (2026-05-22)
+
+The overnight runtime-owner packets moved default plain TCP onto the std
+nonblocking owner loop and then polished the owner-loop reply staging. The
+polish packet is deliberately narrow: it keeps `redis_commands::dispatch`,
+RESP parsing, DB access, pub/sub foreign payload delivery, and command
+semantics intact, while reducing reply-buffer movement inside
+`RuntimeOwner::run_plain_tcp`.
+
+Typed evidence for `runtime-owner-5-owner-loop-polish`:
+
+- `harness/bench/results/20260522T044745Z-803918c-profile-matrix.tsv`:
+  profile matrix median 0.80x, min 0.57x, max 1.18x; GET p1 1.10x and
+  GET p100 0.72x.
+- `harness/bench/results/20260522T044801Z-803918c-hotspots.tsv` and
+  `harness/bench/results/20260522T044801Z-803918c-hotspots.json`: long p100
+  hotspot median 0.74x, min 0.61x, max 0.80x.
+- `harness/evidence/runs/20260522T044045Z-803918c-perf-fixer-runtime-owner-5-owner-loop-polish.json`:
+  packet validation summary, including oracle smoke and focused Rust checks.
+
+The current hotspot read is different from the pre-owner baseline. DB mutex
+waiting is no longer the dominant sampled leaf. The remaining long-run p100
+gap shows up around the owner loop, dispatch lookup, RESP integer parsing,
+hashing for write commands, allocator/free/memmove, and socket read/write
+costs.
+
 ## Reading this honestly
 
-**Where we're still slower (simple commands, ~51-78% of upstream throughput under pipeline):**
-The profile matrix refines the diagnosis. The deep-pipeline gap is real, but
-pipeline-1 simple ops are roughly 0.75-0.78x upstream and deep-pipeline GET is
-now about 0.65x. That makes "per-command Rust overhead" much less convincing
-as the primary explanation than it was at baseline. The remaining gap is
-mostly write-command bookkeeping, tail latency under contention, and the fact
-that upstream Valkey's single event loop still drains and writes pipelined
-command batches more predictably than valkey-rs's blocking thread-per-connection
-shape with shared global state.
+**Where we're still slower (long p100 simple commands, ~61-80% of upstream in
+the latest hotspot run):**
+The profile matrix now has noisy pipeline-1 wins, but the long p100 run is the
+more useful read for the owner-loop path. GET reached 0.80x, SET 0.74x, PING
+0.70x, and INCR 0.61x. The remaining gap is local hot-path work, not the old
+thread-per-connection DB mutex wall.
 
-**Where we're competitive (LRANGE_100, ~95% of upstream):**
-Once each operation does meaningful work (return 100 elements, ~6.4 KB
-payload), the lock overhead amortizes and we're within noise of
-upstream. The Rust data structures themselves are not the bottleneck.
+**Where we're competitive or faster (larger replies):**
+The latest short matrix has LRANGE_100 at 0.77x and LRANGE_300 at 1.11x.
+Those numbers are noisier than the simple-command hotspot suite, but they keep
+the same broad shape: once each operation returns meaningful payload, command
+implementation and serialization costs matter more than tiny-command loop
+overhead.
 
-**Where we're faster (LRANGE_300, 1.4× upstream):**
-The larger the payload, the more our advantage. Reasons we suspect
-matter here: Rust's `Vec<u8>` push + I/O write path may be marginally
-better than upstream's reply buffer, and our RESP serializer is a tight
-write-only path with no string-conversion overhead. Worth profiling.
-
-**Per-op latency p99 is mostly competitive** even when throughput is
-not — most commands' p99 latency is within 2× of upstream. The GET p99
-of 18ms is an outlier we should investigate (probably a tail-latency
-event from GC pressure or a lock-contention spike).
+**Per-op latency p99 is still close enough to guide packet work** even when
+throughput lags. In the latest long p100 hotspot run, Rust p99 is about
+1.3-2.3x upstream across GET/SET/INCR/PING. GET and PING still show wider
+tails than upstream and should stay visible in future owner-loop evidence.
 
 ## What we'd improve
 
 Roadmap to closer-to-parity throughput, in rough effort order:
 
-1. **Runtime ownership rewrite** — move normal command execution to a
-   runtime owner/event loop so clients and DB state are not coordinated through
-   one `Arc<Mutex<RedisDb>>` per DB. This is the real #5, and it needs its own
-   packet graph.
-2. **Hasher/allocation pass on command execution** — after `0004595`, idle
-   replication propagation and command-table lookup are no longer the obvious
-   low-hanging fruit. The next small packet should use sampled stacks to reduce
-   allocator churn and default-hasher work without bypassing the normal command
-   path.
+1. **Readiness and write batching** — replace the std nonblocking linear scan
+   with a real readiness poller only after the owner-loop semantics stay green.
+2. **Hasher/allocation pass on command execution** — use the new sampled stacks
+   to reduce allocator churn, default-hasher work, and residual reply movement
+   without bypassing the normal command path.
 3. **Profile-guided optimization** — flamegraphs on the GET/SET/INCR hot path,
    evaluate `jemalloc`/`mimalloc`, and keep updating the profile matrix after
    each patch.
-4. **Connection scalability** — after runtime ownership is chosen, evaluate
-   `mio`, Tokio, or `io_uring` for socket readiness and write batching.
+4. **Connection scalability and TLS parity** — the runtime owner currently
+   covers plain TCP; TLS still uses the existing path.
 5. **Sharding** — only after the faithful single-owner semantics are stable.
    Sharding can help independent-key throughput, but Redis transactions,
    scripts, blocking commands, and replication ordering make it a product

@@ -139,39 +139,70 @@ impl Default for RuntimeOwnerConfig {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct ClientWriteBuffer {
     bytes: Vec<u8>,
+    consumed: usize,
 }
 
 impl ClientWriteBuffer {
     pub fn new() -> Self {
-        Self { bytes: Vec::new() }
+        Self {
+            bytes: Vec::new(),
+            consumed: 0,
+        }
     }
 
     pub fn append(&mut self, bytes: &[u8]) {
+        self.compact_if_empty();
         self.bytes.extend_from_slice(bytes);
     }
 
+    pub fn append_owned(&mut self, mut bytes: Vec<u8>) {
+        if bytes.is_empty() {
+            return;
+        }
+        self.compact_if_empty();
+        if self.bytes.is_empty() {
+            self.bytes = bytes;
+        } else {
+            self.bytes.append(&mut bytes);
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
+        self.consumed >= self.bytes.len()
     }
 
     pub fn len(&self) -> usize {
-        self.bytes.len()
+        self.bytes.len().saturating_sub(self.consumed)
     }
 
     pub fn as_bytes(&self) -> &[u8] {
-        &self.bytes
+        &self.bytes[self.consumed..]
     }
 
     pub fn take(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.bytes)
+        if self.consumed == 0 {
+            return std::mem::take(&mut self.bytes);
+        }
+        let pending = self.bytes.split_off(self.consumed);
+        self.bytes.clear();
+        self.consumed = 0;
+        pending
     }
 
     pub fn consume_front(&mut self, n: usize) {
-        let n = n.min(self.bytes.len());
-        if n == self.bytes.len() {
+        let n = n.min(self.len());
+        if n == self.len() {
             self.bytes.clear();
+            self.consumed = 0;
         } else if n > 0 {
-            self.bytes.drain(..n);
+            self.consumed += n;
+        }
+    }
+
+    fn compact_if_empty(&mut self) {
+        if self.consumed >= self.bytes.len() {
+            self.bytes.clear();
+            self.consumed = 0;
         }
     }
 }
@@ -251,6 +282,10 @@ impl ClientSlot {
 
     pub fn queue_write(&mut self, bytes: &[u8]) {
         self.write_buffer.append(bytes);
+    }
+
+    fn queue_write_owned(&mut self, bytes: Vec<u8>) {
+        self.write_buffer.append_owned(bytes);
     }
 
     pub fn pending_write_len(&self) -> usize {
@@ -583,20 +618,20 @@ impl RuntimeOwner {
     fn drain_foreign_payloads(&mut self) -> bool {
         let mut progressed = false;
         for slot in self.slots.iter_mut().flatten() {
-            let mut payloads = Vec::new();
-            if let Some(rx) = slot.foreign_rx.as_mut() {
-                loop {
-                    match rx.try_recv() {
-                        Ok(payload) => payloads.push(payload),
-                        Err(mpsc::TryRecvError::Empty) | Err(mpsc::TryRecvError::Disconnected) => {
-                            break;
-                        }
+            loop {
+                let recv_result = match slot.foreign_rx.as_mut() {
+                    Some(rx) => rx.try_recv(),
+                    None => break,
+                };
+                match recv_result {
+                    Ok(payload) => {
+                        slot.queue_write_owned(payload);
+                        progressed = true;
+                    }
+                    Err(mpsc::TryRecvError::Empty) | Err(mpsc::TryRecvError::Disconnected) => {
+                        break;
                     }
                 }
-            }
-            for payload in payloads {
-                slot.queue_write(&payload);
-                progressed = true;
             }
         }
         progressed
@@ -722,10 +757,6 @@ impl RuntimeOwner {
                         batch_db0_guard = None;
                     }
 
-                    let reply = slot.client.drain_reply();
-                    if !reply.is_empty() {
-                        slot.queue_write(&reply);
-                    }
                     if slot.client.should_close {
                         slot.mark_close_after_flush();
                         break;
@@ -734,10 +765,6 @@ impl RuntimeOwner {
                 Ok(None) => break,
                 Err(err) => {
                     super::queue_error_reply(&mut slot.client, &err);
-                    let reply = slot.client.drain_reply();
-                    if !reply.is_empty() {
-                        slot.queue_write(&reply);
-                    }
                     slot.mark_close_after_flush();
                     break;
                 }
@@ -745,9 +772,18 @@ impl RuntimeOwner {
         }
 
         if consumed_total > 0 {
-            slot.client.query_buf.drain(..consumed_total);
+            if consumed_total >= slot.client.query_buf.len() {
+                slot.client.query_buf.clear();
+            } else {
+                slot.client.query_buf.drain(..consumed_total);
+            }
         }
         drop(batch_db0_guard);
+
+        let reply = slot.client.drain_reply();
+        if !reply.is_empty() {
+            slot.queue_write_owned(reply);
+        }
 
         if saw_command {
             super::update_client_info_snapshot(&slot.client, &last_cmd_name);
@@ -854,6 +890,15 @@ mod tests {
         assert_eq!(buffer.len(), 5);
         assert_eq!(buffer.as_bytes(), b"+OK\r\n");
         assert_eq!(buffer.take(), b"+OK\r\n");
+        assert!(buffer.is_empty());
+
+        buffer.append_owned(b"abcdef".to_vec());
+        buffer.consume_front(2);
+        assert_eq!(buffer.len(), 4);
+        assert_eq!(buffer.as_bytes(), b"cdef");
+        buffer.append_owned(b"gh".to_vec());
+        assert_eq!(buffer.as_bytes(), b"cdefgh");
+        assert_eq!(buffer.take(), b"cdefgh");
         assert!(buffer.is_empty());
     }
 
