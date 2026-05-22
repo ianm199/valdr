@@ -12,10 +12,11 @@
 //! receives `+QUEUED\r\n`.
 //!
 //! Cross-connection WATCH invalidation goes through a process-wide index in
-//! `redis-core::db::watched_keys_index()`. Every mutation through
-//! `RedisDb::set_key` / `sync_delete` / `clear` marks watching clients as
-//! dirty there. `EXEC` consults the index at the top of its body, sees its
-//! own client id in the dirty set, and aborts with `*-1\r\n`.
+//! `redis-core::db::watched_keys_index()`. WATCH registrations are keyed by
+//! selected DB plus key bytes, and every mutation through `RedisDb::set_key` /
+//! `sync_delete` / `clear` marks matching clients as dirty there. `EXEC`
+//! consults the index at the top of its body, sees its own client id in the
+//! dirty set, and aborts with `*-1\r\n`.
 //!
 //! Architectural shortcut: the process-wide index lives behind a `OnceLock`
 //! because the current `RedisDb` does not own a reference back to
@@ -302,9 +303,10 @@ pub fn watch_command(ctx: &mut CommandContext) -> RedisResult<()> {
         return Err(RedisError::wrong_number_of_args(b"WATCH"));
     }
     let cid = ctx.client_ref().id();
+    let db_id = ctx.selected_db_id();
     for j in 1..argc {
         let key = ctx.arg_owned(j)?;
-        watched_keys_index_add(&key, cid);
+        watched_keys_index_add(db_id, &key, cid);
     }
     ctx.reply_simple_string(b"OK")
 }
@@ -398,7 +400,7 @@ mod tests {
         watch_command(&mut ctx).unwrap();
         unwatch_command(&mut ctx).unwrap();
 
-        watched_keys_touch(&key);
+        watched_keys_touch(0, &key);
         assert!(!watched_keys_take_dirty(ctx.client_ref().id()));
     }
 }
@@ -412,8 +414,9 @@ mod tests {
 //   port_notes:    1
 //   unsafe_blocks: 0
 //   notes:         Cross-conn WATCH dirty propagation runs through the global
-//                  watched-keys index in redis-core::db. CLIENT PAUSE during
-//                  EXEC, scripting (EVAL inside MULTI), and proper EXEC ACL
-//                  re-checks are deferred. Queued SELECT commands route later
-//                  EXEC commands through CommandContext's DB-list route.
+//                  watched-keys index in redis-core::db keyed by logical DB id.
+//                  CLIENT PAUSE during EXEC, scripting (EVAL inside MULTI), and
+//                  proper EXEC ACL re-checks are deferred. Queued SELECT
+//                  commands route later EXEC commands through CommandContext's
+//                  DB-list route.
 // ──────────────────────────────────────────────────────────────────────────

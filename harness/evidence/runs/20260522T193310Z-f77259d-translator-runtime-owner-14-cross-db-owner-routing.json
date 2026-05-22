@@ -1,0 +1,89 @@
+{
+  "captured_ts": "2026-05-22T19:53:12.997144Z",
+  "gate_results": {
+    "cargo_check_redis-core": {
+      "detail": "cargo check -p redis-core: clean",
+      "ok": true
+    },
+    "cargo_check_workspace": {
+      "detail": "cargo check --workspace: clean",
+      "ok": true
+    },
+    "cargo_test_redis-core_db": {
+      "detail": "test result: ok. 61 passed; 0 failed; 0 ignored; 0 measured; 72 filtered out; finished in 0.00s",
+      "ok": true
+    },
+    "no_out_of_scope_changes": {
+      "detail": "no changed files outside packet targets",
+      "ok": true
+    },
+    "oracle_reference_only": {
+      "detail": "no harness/oracle/run-smoke.sh present",
+      "ok": true
+    },
+    "target_files_modified": {
+      "detail": "translator touched 4/5 candidate target(s)",
+      "ok": true
+    },
+    "trailer_present": {
+      "detail": "all touched Rust targets carry PORT STATUS trailers",
+      "ok": true
+    }
+  },
+  "harness_context": {
+    "commit": "f77259d",
+    "git_dirty": true,
+    "git_status_short": [
+      " M crates/redis-commands/src/multi.rs",
+      " M crates/redis-core/src/db.rs",
+      " M docs/RUNTIME_OWNER_NEXT_PUSH.md",
+      " M harness/evidence/ledger.jsonl",
+      " M harness/history.jsonl",
+      " M harness/oracle/corpus/21-runtime-owner-canaries.txt",
+      "?? harness/evidence/runs/20260522T193310Z-f77259d-translator-runtime-owner-14-cross-db-owner-routing.json"
+    ],
+    "run_id": "loop-905ac0c59f52cdc4",
+    "target_commit": "f77259d7209c4113cdcaf880b7659046bb62d135",
+    "tree_hash": "f8945b6248d06353d75ea6791d2c4f97115f9dc49c266a5b456174cabd3f5b17"
+  },
+  "kind": "agent_transcript",
+  "packet": "runtime-owner-14-cross-db-owner-routing",
+  "prompt_hash": "ce699275f65506d5",
+  "role": "translator",
+  "runtime_metadata": {
+    "approval": "never",
+    "cmd": [
+      "codex",
+      "--ask-for-approval",
+      "never",
+      "exec",
+      "--cd",
+      "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port",
+      "--add-dir",
+      "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port",
+      "--sandbox",
+      "danger-full-access",
+      "--json",
+      "--output-last-message",
+      "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/loop/state/transcripts/20260522T193310Z-codex-translator-runtime-owner-14-cross-db-owner-routing.last.txt",
+      "-"
+    ],
+    "finished_at": "2026-05-22T19:53:12Z",
+    "last_message_path": "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/loop/state/transcripts/20260522T193310Z-codex-translator-runtime-owner-14-cross-db-owner-routing.last.txt",
+    "model": null,
+    "packet": "runtime-owner-14-cross-db-owner-routing",
+    "profile": null,
+    "project": "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port",
+    "prompt_source": "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/loop/state/next-prompt.md",
+    "return_code": 0,
+    "role": "translator",
+    "runtime": "codex",
+    "sandbox": "danger-full-access",
+    "started_at": "2026-05-22T19:33:10Z",
+    "stderr_tail": "j in 1..argc {\n        let key = ctx.arg(j)?.clone();\n        if ctx\n            .db_mut()\n            .lookup_key_read_with_flags(&key, LOOKUP_NONE)\n            .is_some()\n        {\n            count += 1;\n        }\n    }\n    ctx.reply_integer(count)\n}\n\n/// Wake any clients blocked on keys in `other_db_id` (the db not currently\n/// held by the command dispatch).\n///\n/// Delegates to the hook installed by `install_swapdb_wake_hook`. No-op when\n/// no hook is installed (unit tests).\nfn wake_blocked_in_other_db(other_db_id: u32) {\n    if let Some(hook) = SWAPDB_WAKE_HOOK.get() {\n        hook(other_db_id);\n    }\n}\n\n/// Case-insensitive ASCII equality for command option keywords.\nfn eq_ignore_ascii_case(a: &[u8], b: &[u8]) -> bool {\n    if a.len() != b.len() {\n        return false;\n    }\n    a.iter()\n        .zip(b.iter())\n        .all(|(x, y)| x.to_ascii_lowercase() == y.to_ascii_lowercase())\n}\n\n/// C: db.c:1861 swapdbCommand \u2014 SWAPDB index index\n///\n/// Atomically swaps the contents of two logical databases. When the client's\n/// current database is one of the two being swapped, the swap uses the already-\n/// held `ctx.db_mut()` lock plus a second lock on the other DB to avoid\n/// deadlock against the accept loop's lock ordering. When neither swapped DB\n/// is the current client DB both locks are acquired fresh in ascending index\n/// order (matching `GlobalDatabases::swap`). After the swap, blocked clients\n/// waiting on keys in either DB are woken.\npub fn swapdb_command(ctx: &mut CommandContext) -> Result<(), RedisError> {\n    if ctx.arg_count() != 3 {\n        return Err(RedisError::wrong_number_of_args(b\"swapdb\"));\n    }\n    let id1_arg = ctx.arg(1)?.clone();\n    let id2_arg = ctx.arg(2)?.clone();\n    let db_count = ctx.database_count() as i64;\n    let id1 = parse_i64_from_bytes(id1_arg.as_bytes())\n        .ok_or_else(|| RedisError::runtime(b\"ERR invalid first DB index\"))?;\n    let id2 = parse_i64_from_bytes(id2_arg.as_bytes())\n        .ok_or_else(|| RedisError::runtime(b\"ERR invalid second DB index\"))?;\n    if id1 < 0 || id1 >= db_count || id2 < 0 || id2 >= db_count {\n        return Err(RedisError::runtime(b\"ERR DB index is out of range\"));\n    }\n    let current_db_id = ctx.client_ref().db_index;\n    let id1u = id1 as u32;\n    let id2u = id2 as u32;\n\n    if id1u == id2u {\n        return ctx.reply_simple_string(b\"OK\");\n    }\n\n    if current_db_id == id1u || current_db_id == id2u {\n        let other_db_id = if current_db_id == id1u { id2u } else { id1u };\n        let other_arc = crate::databases::global_databases().get(other_db_id);\n        let mut other_guard = match other_arc.lock() {\n            Ok(g) => g,\n            Err(p) => p.into_inner(),\n        };\n        ctx.db_mut().swap_contents_with(&mut other_guard);\n        drop(other_guard);\n        let blocked_keys: Vec<RedisString> = {\n            let idx = match crate::blocked_keys::blocked_keys_index().lock() {\n                Ok(g) => g,\n                Err(p) => p.into_inner(),\n            };\n            idx.all_blocked_keys()\n        };\n        for key in &blocked_keys {\n            if ctx.db().find(key).is_some() {\n                ctx.client_mut().pending_wakes.push(key.clone());\n            }\n        }\n        wake_blocked_in_other_db(other_db_id);\n    } else {\n        let (lo, hi) = if id1u < id2u {\n            (id1u, id2u)\n        } else {\n            (id2u, id1u)\n        };\n        let lo_arc = crate::databases::global_databases().get(lo);\n        let hi_arc = crate::databases::global_databases().get(hi);\n        let mut lo_guard = match lo_arc.lock() {\n            Ok(g) => g,\n            Err(p) => p.into_inner(),\n        };\n        let mut hi_guard = match hi_arc.lock() {\n            Ok(g) => g,\n            Err(p) => p.into_inner(),\n        };\n        lo_guard.swap_contents_with(&mut hi_guard);\n        drop(hi_guard);\n        drop(lo_guard);\n        wake_blocked_in_other_db(id1u);\n        wake_blocked_in_other_db(id2u);\n    }\n\n    ctx.reply_simple_string(b\"OK\")\n}\n",
+    "transcript_path": "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/loop/state/transcripts/20260522T193310Z-codex-translator-runtime-owner-14-cross-db-owner-routing.jsonl"
+  },
+  "transcript_bytes": 2301164,
+  "transcript_preview": "4\\t            (id2u, id1u)\\n  1765\\t        };\\n  1766\\t        let Some(lo_arc) = ctx.other_db_handle(lo)? else {\\n  1767\\t            return ctx.reply_simple_string(b\\\"OK\\\");\\n  1768\\t        };\\n  1769\\t        let Some(hi_arc) = ctx.other_db_handle(hi)? else {\\n  1770\\t            return ctx.reply_simple_string(b\\\"OK\\\");\\n  1771\\t        };\\n  1772\\t        let mut lo_guard = match lo_arc.lock() {\\n  1773\\t            Ok(g) => g,\\n  1774\\t            Err(p) => p.into_inner(),\\n  1775\\t        };\\n  2015\\t        watched_keys_touch(0, &key);\\n  2016\\t        assert!(!watched_keys_take_dirty(cid));\\n  2017\\t    }\\n  2018\\t\\n  2019\\t    #[test]\\n  2020\\t    fn swap_contents_exchanges_keys() {\\n  2021\\t        let mut db1 = RedisDb::new(0);\\n  2022\\t        let mut db2 = RedisDb::new(1);\\n  2023\\t        db1.add(k(b\\\"x\\\"), make_str_obj(b\\\"from-db1\\\"));\\n  2024\\t        db2.add(k(b\\\"y\\\"), make_str_obj(b\\\"from-db2\\\"));\\n  2025\\t        db1.swap_contents_with(&mut db2);\\n  2026\\t        assert!(db1.exists_raw(&k(b\\\"y\\\")));\\n  2027\\t        assert!(!db1.exists_raw(&k(b\\\"x\\\")));\\n  2028\\t        assert!(db2.exists_raw(&k(b\\\"x\\\")));\\n  2029\\t        assert!(!db2.exists_raw(&k(b\\\"y\\\")));\\n  2030\\t    }\\n  2031\\t\\n  2032\\t    #[test]\\n  2033\\t    fn swap_contents_marks_watchers_on_logical_db() {\\n  2034\\t        let key = k(b\\\"swap-watch-key\\\");\\n  2035\\t        let cid = 9_101_003;\\n  2036\\t        watched_keys_index_remove_client(cid);\\n  2037\\t\\n  2038\\t        let mut db0 = RedisDb::new(0);\\n  2039\\t        let mut db1 = RedisDb::new(1);\\n  2040\\t        db0.add(key.clone(), make_str_obj(b\\\"from-db0\\\"));\\n  2041\\t        watched_keys_index_add(1, &key, cid);\\n  2042\\t\\n  2043\\t        db1.swap_contents_with(&mut db0);\\n  2044\\t\\n  2045\\t        assert!(watched_keys_take_dirty(cid));\\n  2046\\t        watched_keys_index_remove_client(cid);\\n  2047\\t    }\\n  2048\\t\\n  2049\\t    #[test]\\n  2050\\t    fn glob_match_basic() {\\n  2051\\t        assert!(glob_match(b\\\"*\\\", b\\\"anything\\\"));\\n  2052\\t        assert!(glob_match(b\\\"*\\\", b\\\"\\\"));\\n  2053\\t        assert!(glob_match(b\\\"foo*\\\", b\\\"foobar\\\"));\\n  2054\\t        assert!(!glob_match(b\\\"foo*\\\", b\\\"barfoo\\\"));\\n  2055\\t        assert!(glob_match(b\\\"f?o\\\", b\\\"foo\\\"));\\n\",\"exit_code\":0,\"status\":\"completed\"}}\n{\"type\":\"item.started\",\"item\":{\"id\":\"item_169\",\"type\":\"command_execution\",\"command\":\"/bin/zsh -lc \\\"nl -ba crates/redis-commands/src/multi.rs | sed -n '292,318p;404,418p'\\\"\",\"aggregated_output\":\"\",\"exit_code\":null,\"status\":\"in_progress\"}}\n{\"type\":\"item.completed\",\"item\":{\"id\":\"item_169\",\"type\":\"command_execution\",\"command\":\"/bin/zsh -lc \\\"nl -ba crates/redis-commands/src/multi.rs | sed -n '292,318p;404,418p'\\\"\",\"aggregated_output\":\"   292\\t    wake_blocked_zset_for_key(&mut guard, key);\\n   293\\t}\\n   294\\t\\n   295\\t/// `WATCH key [key \u2026]` \u2014 register CAS watchers on each key.\\n   296\\t///\\n   297\\t/// `CMD_NO_MULTI` causes dispatch to reject `WATCH` inside an open\\n   298\\t/// transaction with the standard \\\"Command 'watch' not allowed inside a\\n   299\\t/// transaction\\\" message before this handler runs.\\n   300\\tpub fn watch_command(ctx: &mut CommandContext) -> RedisResult<()> {\\n   301\\t    let argc = ctx.argc();\\n   302\\t    if argc < 2 {\\n   303\\t        return Err(RedisError::wrong_number_of_args(b\\\"WATCH\\\"));\\n   304\\t    }\\n   305\\t    let cid = ctx.client_ref().id();\\n   306\\t    let db_id = ctx.selected_db_id();\\n   307\\t    for j in 1..argc {\\n   308\\t        let key = ctx.arg_owned(j)?;\\n   309\\t        watched_keys_index_add(db_id, &key, cid);\\n   310\\t    }\\n   311\\t    ctx.reply_simple_string(b\\\"OK\\\")\\n   312\\t}\\n   313\\t\\n   314\\t/// `UNWATCH` \u2014 remove every CAS watcher for this client.\\n   315\\tpub fn unwatch_command(ctx: &mut CommandContext) -> RedisResult<()> {\\n   316\\t    let cid = ctx.client_ref().id();\\n   317\\t    watched_keys_index_remove_client(cid);\\n   318\\t    let _ = watched_keys_take_dirty(cid);\\n   404\\t        assert!(!watched_keys_take_dirty(ctx.client_ref().id()));\\n   405\\t    }\\n   406\\t}\\n   407\\t\\n   408\\t// \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\\n   409\\t// PORT STATUS\\n   410\\t//   source:        src/multi.c (Round 8b dispatch-integration rewrite)\\n   411\\t//   target_crate:  redis-commands\\n   412\\t//   confidence:    medium\\n   413\\t//   todos:         0\\n   414\\t//   port_notes:    1\\n   415\\t//   unsafe_blocks: 0\\n   416\\t//   notes:         Cross-conn WATCH dirty propagation runs through the global\\n   417\\t//                  watched-keys index in redis-core::db keyed by logical DB id.\\n   418\\t//                  CLIENT PAUSE during EXEC, scripting (EVAL inside MULTI), and\\n\",\"exit_code\":0,\"status\":\"completed\"}}\n{\"type\":\"item.completed\",\"item\":{\"id\":\"item_170\",\"type\":\"agent_message\",\"text\":\"Completed `runtime-owner-14-cross-db-owner-routing`.\\n\\nChanged:\\n- [db.rs](/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/crates/redis-core/src/db.rs:54): WATCH index is now keyed by `(db_id, key)`.\\n- [db.rs](/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/crates/redis-core/src/db.rs:1533): `MOVE` routes destination DB access through `CommandContext`.\\n- [db.rs](/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/crates/redis-core/src/db.rs:1596): `COPY` routes explicit `DB n` through `CommandContext`.\\n- [db.rs](/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/crates/redis-core/src/db.rs:1714): `SWAPDB` uses context DB handles and keeps selected DB identity.\\n- [multi.rs](/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/crates/redis-commands/src/multi.rs:300): `WATCH` records the selected logical DB id.\\n- [21-runtime-owner-canaries.txt](/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/oracle/corpus/21-runtime-owner-canaries.txt:195): added cross-DB WATCH, MOVE/COPY, and SWAPDB canaries.\\n- [RUNTIME_OWNER_NEXT_PUSH.md](/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/docs/RUNTIME_OWNER_NEXT_PUSH.md:259): recorded packet 14 implementation status.\\n\\nEvidence written to [20260522T193310Z-f77259d-translator-runtime-owner-14-cross-db-owner-routing.json](/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/evidence/runs/20260522T193310Z-f77259d-translator-runtime-owner-14-cross-db-owner-routing.json).\\n\\nVerification:\\n- `cargo check -p redis-core -p redis-commands` passed.\\n- Focused redis-core / redis-commands WATCH and SWAPDB tests passed.\\n- `cargo build --bin redis-server` passed.\\n- `bash harness/oracle/smoke.sh --skip-build` passed: `22 pass / 0 fail / 0 skip`.\\n- New cross-DB canary subset passed against C reference: `57 commands`.\\n- `rustfmt --check` on touched Rust files passed.\\n- `git diff --check` on packet targets passed.\\n\\nCaveats:\\n- Full `python3 harness/oracle/wire-diff --suite runtime-owner` still times out in the runtime-owner canary file under pipelined replay. The isolated new cross-DB canary block passes; the timeout appears tied to existing `RESET` batching behavior.\\n- `cargo fmt --check -p redis-core -p redis-commands` fails on pre-existing unrelated formatting diffs, so I did not apply package/workspace formatting.\\n- `harness/evidence/ledger.jsonl` and `harness/history.jsonl` are dirty harness bookkeeping artifacts from the driver/smoke runs.\"}}\n{\"type\":\"item.completed\",\"item\":{\"id\":\"item_4\",\"type\":\"todo_list\",\"items\":[{\"text\":\"Read role, packet row, required docs, source ranges, and target surfaces\",\"completed\":true},{\"text\":\"Identify current global DB access and owner-routing boundary\",\"completed\":true},{\"text\":\"Patch scoped target files and canaries/docs\",\"completed\":false},{\"text\":\"Run focused checks and write evidence JSON\",\"completed\":false},{\"text\":\"Summarize changes and residual risks\",\"completed\":false}]}}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":13219975,\"cached_input_tokens\":12944512,\"output_tokens\":42424,\"reasoning_output_tokens\":16532}}\n",
+  "transcript_src": "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/loop/state/transcripts/20260522T193310Z-codex-translator-runtime-owner-14-cross-db-owner-routing.jsonl"
+}

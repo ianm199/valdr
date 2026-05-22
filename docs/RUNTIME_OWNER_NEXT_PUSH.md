@@ -260,6 +260,13 @@ owner-owned live DB migration is in scope.
    - remove `global_databases()` from `MOVE`, `COPY`, and `SWAPDB`;
    - strengthen runtime-owner canaries for SELECT plus cross-DB WATCH and
      SWAPDB behavior.
+   - implementation update: MOVE, COPY, and SWAPDB now use the
+     `CommandContext` DB-list route instead of naming the transitional global
+     DB store directly. WATCH dirty tracking is keyed by logical DB id plus
+     key bytes, and SWAPDB dirties the watched-key owners before swapping only
+     keyspace contents. The runtime-owner canary corpus now covers selected-DB
+     WATCH isolation, MOVE/COPY cross-DB routing, selected-DB persistence
+     across SWAPDB, and SWAPDB/WATCH invalidation.
 
 4. `runtime-owner-14-post-cross-db-oracle`
    - prove the cross-DB routing packet before the live DB owner changes.

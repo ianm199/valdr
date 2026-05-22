@@ -192,7 +192,72 @@ CLIENT GETNAME
 CLIENT SETNAME canary2
 CLIENT GETNAME
 
-# ── R. Cleanup — empty both touched DBs and confirm.
+# ── R. WATCH is scoped to the selected DB. A write to the same key bytes in
+#       DB 0 must not dirty a WATCH that was registered while DB 1 was
+#       selected.
+SELECT 0
+FLUSHALL
+SELECT 1
+SET watch_db_key db1_initial
+WATCH watch_db_key
+SELECT 0
+SET watch_db_key db0_value
+SELECT 1
+MULTI
+GET watch_db_key
+EXEC
+UNWATCH
+SELECT 0
+GET watch_db_key
+SELECT 1
+GET watch_db_key
+
+# ── S. MOVE and COPY route through the selected-DB context. MOVE transfers a
+#       key out of DB 0 into DB 1; COPY then writes from DB 1 back into DB 0
+#       without changing the selected DB.
+SELECT 0
+FLUSHALL
+SET route_src moved
+MOVE route_src 1
+EXISTS route_src
+SELECT 1
+GET route_src
+COPY route_src route_copy DB 0
+SELECT 0
+GET route_copy
+SELECT 1
+COPY route_src route_copy_local
+GET route_copy_local
+
+# ── T. SWAPDB swaps keyspace contents while the connection remains attached
+#       to the same selected DB id.
+SELECT 0
+FLUSHALL
+SET swap_key db0_value
+SELECT 1
+SET swap_key db1_value
+SWAPDB 0 1
+GET swap_key
+SELECT 0
+GET swap_key
+SELECT 1
+SWAPDB 0 1
+
+# ── U. SWAPDB dirties WATCH state for the logical DB that remains selected
+#       even when the watched key arrives from the replacement keyspace.
+SELECT 0
+FLUSHALL
+SET swap_watch_key db0_value
+SELECT 1
+WATCH swap_watch_key
+SWAPDB 0 1
+MULTI
+GET swap_watch_key
+EXEC
+GET swap_watch_key
+UNWATCH
+
+# ── V. Cleanup — empty both touched DBs and confirm.
 SELECT 0
 FLUSHALL
 DBSIZE

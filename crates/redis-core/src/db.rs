@@ -16,8 +16,8 @@
 //!
 //! PORT NOTE: `ctx.db()` / `ctx.db_mut()` now expose the selected DB, and
 //! `CommandContext` carries a DB-list route for staged cross-DB migration.
-//! Commands that still call `global_databases()` directly are transitional
-//! call sites for the runtime-owner-14 routing packet.
+//! Cross-DB commands use that route instead of naming the transitional global
+//! database store directly.
 //!
 //! PORT NOTE: C stringmatchlen (util.c) is replaced by the local `glob_match` helper,
 //! which handles `*` and `?` but not `[...]` character classes yet.
@@ -39,11 +39,11 @@ use crate::pubsub_registry::PubSubRegistry;
 
 /// Global cross-connection MULTI/WATCH support.
 ///
-/// `watched`: every WATCH-registered key maps to the set of client ids that
-/// asked to be notified. `dirty`: every client id whose watched set has been
-/// touched since the last EXEC. WATCH adds to `watched`; UNWATCH/EXEC clears
-/// the client from `watched`; `set_key`/`sync_delete` adds to `dirty`; EXEC
-/// reads-and-clears `dirty` for its own client id.
+/// `watched`: every WATCH-registered `(db_id, key)` maps to the set of client
+/// ids that asked to be notified. `dirty`: every client id whose watched set
+/// has been touched since the last EXEC. WATCH adds to `watched`; UNWATCH/EXEC
+/// clears the client from `watched`; `set_key`/`sync_delete` adds to `dirty`;
+/// EXEC reads-and-clears `dirty` for its own client id.
 ///
 /// PORT NOTE: deliberate architectural shortcut for Phase B. Real Redis stores
 /// the per-key watcher list on `serverDb.watched_keys` and mutates each
@@ -52,7 +52,7 @@ use crate::pubsub_registry::PubSubRegistry;
 /// `OnceLock` carries the same information. Initialise from `main.rs` startup.
 #[derive(Debug, Default)]
 pub struct WatchedKeysIndex {
-    pub watched: HashMap<RedisString, HashSet<ClientId>>,
+    pub watched: HashMap<(u32, RedisString), HashSet<ClientId>>,
     pub dirty: HashSet<ClientId>,
 }
 
@@ -324,8 +324,8 @@ fn watched_keys_sub_registrations(n: usize) {
         });
 }
 
-/// Register `client_id` as a watcher of `key` in the global index.
-pub fn watched_keys_index_add(key: &RedisString, client_id: ClientId) {
+/// Register `client_id` as a watcher of `key` in database `db_id`.
+pub fn watched_keys_index_add(db_id: u32, key: &RedisString, client_id: ClientId) {
     WATCHED_KEYS_REGISTRATIONS.fetch_add(1, Ordering::AcqRel);
     let idx = watched_keys_index();
     let mut guard = match idx.lock() {
@@ -334,7 +334,7 @@ pub fn watched_keys_index_add(key: &RedisString, client_id: ClientId) {
     };
     let inserted = guard
         .watched
-        .entry(key.clone())
+        .entry((db_id, key.clone()))
         .or_default()
         .insert(client_id);
     if !inserted {
@@ -360,10 +360,10 @@ pub fn watched_keys_index_remove_client(client_id: ClientId) {
     watched_keys_sub_registrations(removed);
 }
 
-/// Mark every client watching `key` as dirty.
+/// Mark every client watching `key` in database `db_id` as dirty.
 ///
 /// C: db.c → multi.c::touchWatchedKey. Called after every write to `key`.
-pub fn watched_keys_touch(key: &RedisString) {
+pub fn watched_keys_touch(db_id: u32, key: &RedisString) {
     if !watched_keys_any() {
         return;
     }
@@ -372,7 +372,8 @@ pub fn watched_keys_touch(key: &RedisString) {
         Ok(g) => g,
         Err(p) => p.into_inner(),
     };
-    let watchers = match guard.watched.get(key) {
+    let watched_key = (db_id, key.clone());
+    let watchers = match guard.watched.get(&watched_key) {
         Some(s) if !s.is_empty() => s.clone(),
         _ => return,
     };
@@ -389,6 +390,37 @@ pub fn watched_keys_take_dirty(client_id: ClientId) -> bool {
         Err(p) => p.into_inner(),
     };
     guard.dirty.remove(&client_id)
+}
+
+/// Mark WATCH clients dirty for every watched key in `emptied` that exists in
+/// either the old keyspace or the replacement keyspace.
+///
+/// C: multi.c::touchAllWatchedKeysInDb. Used by FLUSH/SWAP-style operations
+/// where the watched-key ownership remains attached to the logical DB id while
+/// the keyspace contents are replaced.
+fn watched_keys_touch_all_in_db(emptied: &RedisDb, replaced_with: Option<&RedisDb>) {
+    if !watched_keys_any() {
+        return;
+    }
+    let idx = watched_keys_index();
+    let mut guard = match idx.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let mut dirty_clients: Vec<ClientId> = Vec::new();
+    for ((db_id, key), watchers) in guard.watched.iter() {
+        if *db_id != emptied.id {
+            continue;
+        }
+        let exists_in_emptied = emptied.find(key).is_some();
+        let exists_in_replacement = replaced_with.is_some_and(|db| db.find(key).is_some());
+        if exists_in_emptied || exists_in_replacement {
+            dirty_clients.extend(watchers.iter().copied());
+        }
+    }
+    for cid in dirty_clients {
+        guard.dirty.insert(cid);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -776,7 +808,7 @@ impl RedisDb {
         // TODO(port): dbUntrackKeyWithVolatileItems if OBJ_HASH with volatile fields
         let existed = self.dict.remove(key).is_some();
         if existed {
-            watched_keys_touch(key);
+            watched_keys_touch(self.id, key);
         }
         existed
     }
@@ -852,7 +884,7 @@ impl RedisDb {
         self.dict.clear();
         self.avg_ttl = 0;
         for k in &watched_keys {
-            watched_keys_touch(k);
+            watched_keys_touch(self.id, k);
         }
     }
 
@@ -991,7 +1023,8 @@ impl RedisDb {
     ///
     /// C: db.c:1769 dbSwapDatabases (inner per-db swap)
     pub fn swap_contents_with(&mut self, other: &mut RedisDb) {
-        // TODO(port): touchAllWatchedKeysInDb(self, other) before swap
+        watched_keys_touch_all_in_db(self, Some(other));
+        watched_keys_touch_all_in_db(other, Some(self));
         // TODO(port): scanDatabaseForDeletedKeys(self, other) — XREADGROUP unblocking
         // TODO(port): scanDatabaseForReadyKeys(self) after swap — BLPOP/BRPOP unblocking
         std::mem::swap(&mut self.dict, &mut other.dict);
@@ -1014,7 +1047,7 @@ impl RedisDb {
             return;
         }
         let k = RedisString::from_bytes(key.as_ref());
-        watched_keys_touch(&k);
+        watched_keys_touch(self.id, &k);
     }
 
     // ── Migration shims for the architect stub ──────────────────────────────
@@ -1521,8 +1554,8 @@ pub fn move_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     };
 
     let target_db = ctx.validate_db_index(target_db)?;
-    let current_db_id = ctx.db().id() as i64;
-    if i64::from(target_db) == current_db_id {
+    let current_db_id = ctx.selected_db_id();
+    if target_db == current_db_id {
         return Err(RedisError::runtime(
             b"ERR source and destination objects are the same",
         ));
@@ -1534,19 +1567,20 @@ pub fn move_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         None => return ctx.reply_integer(0),
         Some(obj) => obj.clone(),
     };
-    let dest_arc = crate::databases::global_databases().get(target_db);
-    let mut dest_guard = match dest_arc.lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    if dest_guard.exists_raw(&key) && !replace {
+    let expire = ctx.db().get_expire(&key);
+    let inserted = ctx.with_db_index(target_db, |dest| {
+        if dest.exists_raw(&key) && !replace {
+            return false;
+        }
+        let mut new_obj = src_obj;
+        new_obj.expire = expire;
+        dest.insert(key.clone(), new_obj);
+        dest.signal_modified(&key);
+        true
+    })?;
+    if !inserted {
         return ctx.reply_integer(0);
     }
-    let expire = ctx.db().get_expire(&key);
-    let mut new_obj = src_obj;
-    new_obj.expire = expire;
-    dest_guard.insert(key.clone(), new_obj);
-    drop(dest_guard);
     ctx.db_mut().sync_delete(&key);
     ctx.notify_keyspace_event(NOTIFY_GENERIC, b"move_from", &key);
     notify_keyspace_event_global(NOTIFY_GENERIC, b"move_to", &key, target_db);
@@ -1565,7 +1599,7 @@ pub fn copy_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let dst_key = ctx.arg(2)?.clone();
 
     let mut replace = false;
-    let mut explicit_target_db: Option<i64> = None;
+    let mut explicit_target_db: Option<u32> = None;
     let mut j: usize = 3;
     while j < argc {
         let opt = ctx.arg(j)?.clone();
@@ -1581,14 +1615,14 @@ pub fn copy_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
             let parsed = parse_i64_from_bytes(val_bytes.as_bytes()).ok_or_else(|| {
                 RedisError::runtime(b"ERR value is not an integer or out of range")
             })?;
-            explicit_target_db = Some(i64::from(ctx.validate_db_index(parsed)?));
+            explicit_target_db = Some(ctx.validate_db_index(parsed)?);
             j += 2;
         } else {
             return Err(RedisError::runtime(b"ERR syntax error"));
         }
     }
 
-    let current_db_id = ctx.db().id() as i64;
+    let current_db_id = ctx.selected_db_id();
     let resolved_target_db = explicit_target_db.unwrap_or(current_db_id);
 
     if src_key == dst_key && resolved_target_db == current_db_id {
@@ -1606,31 +1640,23 @@ pub fn copy_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let mut new_obj = src_clone;
     new_obj.expire = expire;
 
-    if resolved_target_db == current_db_id {
-        if ctx.db_mut().exists_raw(&dst_key) && !replace {
-            return ctx.reply_integer(0);
+    let inserted = ctx.with_db_index(resolved_target_db, |dest| {
+        if dest.exists_raw(&dst_key) && !replace {
+            return false;
         }
-        ctx.db_mut().insert(dst_key.clone(), new_obj);
-        ctx.notify_keyspace_event(NOTIFY_GENERIC, b"copy_to", &dst_key);
-        return ctx.reply_integer(1);
-    }
-
-    let dest_arc = crate::databases::global_databases().get(resolved_target_db as u32);
-    let mut dest_guard = match dest_arc.lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    if dest_guard.exists_raw(&dst_key) && !replace {
+        dest.insert(dst_key.clone(), new_obj);
+        dest.signal_modified(&dst_key);
+        true
+    })?;
+    if !inserted {
         return ctx.reply_integer(0);
     }
-    dest_guard.insert(dst_key.clone(), new_obj);
-    drop(dest_guard);
-    notify_keyspace_event_global(
-        NOTIFY_GENERIC,
-        b"copy_to",
-        &dst_key,
-        resolved_target_db as u32,
-    );
+
+    if resolved_target_db == current_db_id {
+        ctx.notify_keyspace_event(NOTIFY_GENERIC, b"copy_to", &dst_key);
+    } else {
+        notify_keyspace_event_global(NOTIFY_GENERIC, b"copy_to", &dst_key, resolved_target_db);
+    }
     ctx.reply_integer(1)
 }
 
@@ -1699,7 +1725,7 @@ pub fn swapdb_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     if id1 < 0 || id1 >= db_count || id2 < 0 || id2 >= db_count {
         return Err(RedisError::runtime(b"ERR DB index is out of range"));
     }
-    let current_db_id = ctx.client_ref().db_index;
+    let current_db_id = ctx.selected_db_id();
     let id1u = id1 as u32;
     let id2u = id2 as u32;
 
@@ -1709,7 +1735,9 @@ pub fn swapdb_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 
     if current_db_id == id1u || current_db_id == id2u {
         let other_db_id = if current_db_id == id1u { id2u } else { id1u };
-        let other_arc = crate::databases::global_databases().get(other_db_id);
+        let Some(other_arc) = ctx.other_db_handle(other_db_id)? else {
+            return ctx.reply_simple_string(b"OK");
+        };
         let mut other_guard = match other_arc.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
@@ -1735,8 +1763,12 @@ pub fn swapdb_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         } else {
             (id2u, id1u)
         };
-        let lo_arc = crate::databases::global_databases().get(lo);
-        let hi_arc = crate::databases::global_databases().get(hi);
+        let Some(lo_arc) = ctx.other_db_handle(lo)? else {
+            return ctx.reply_simple_string(b"OK");
+        };
+        let Some(hi_arc) = ctx.other_db_handle(hi)? else {
+            return ctx.reply_simple_string(b"OK");
+        };
         let mut lo_guard = match lo_arc.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
@@ -1969,15 +2001,18 @@ mod tests {
         let cid = 9_101_001;
         watched_keys_index_remove_client(cid);
 
-        watched_keys_touch(&key);
+        watched_keys_touch(0, &key);
         assert!(!watched_keys_take_dirty(cid));
 
-        watched_keys_index_add(&key, cid);
-        watched_keys_touch(&key);
+        watched_keys_index_add(0, &key, cid);
+        watched_keys_touch(1, &key);
+        assert!(!watched_keys_take_dirty(cid));
+
+        watched_keys_touch(0, &key);
         assert!(watched_keys_take_dirty(cid));
 
         watched_keys_index_remove_client(cid);
-        watched_keys_touch(&key);
+        watched_keys_touch(0, &key);
         assert!(!watched_keys_take_dirty(cid));
     }
 
@@ -1992,6 +2027,23 @@ mod tests {
         assert!(!db1.exists_raw(&k(b"x")));
         assert!(db2.exists_raw(&k(b"x")));
         assert!(!db2.exists_raw(&k(b"y")));
+    }
+
+    #[test]
+    fn swap_contents_marks_watchers_on_logical_db() {
+        let key = k(b"swap-watch-key");
+        let cid = 9_101_003;
+        watched_keys_index_remove_client(cid);
+
+        let mut db0 = RedisDb::new(0);
+        let mut db1 = RedisDb::new(1);
+        db0.add(key.clone(), make_str_obj(b"from-db0"));
+        watched_keys_index_add(1, &key, cid);
+
+        db1.swap_contents_with(&mut db0);
+
+        assert!(watched_keys_take_dirty(cid));
+        watched_keys_index_remove_client(cid);
     }
 
     #[test]
@@ -2031,11 +2083,12 @@ mod tests {
 //   notes:         Core lookup/add/delete/expiry/set_key/swap translated faithfully.
 //                  Commands stubbed with ctx.db_mut() calls (expected name-resolution
 //                  errors — Phase 3 wires CommandContext to RedisServer).
-//                  kvstore/cluster slots, lazy-free, SCAN cursor, multi-db
-//                  MOVE/COPY/SWAPDB, keyspace notifications, and replication
-//                  propagation all carry TODO(port) and are deferred to Phase 3
-//                  (keyspace events, blocking) and Phase 4 (kvstore). SELECT
-//                  and DB-index validation now read CommandContext DB routing.
+//                  kvstore/cluster slots, lazy-free, SCAN cursor, full
+//                  keyspace notifications, and replication propagation all
+//                  carry TODO(port) and are deferred to Phase 3 (keyspace
+//                  events, blocking) and Phase 4 (kvstore). SELECT, DB-index
+//                  validation, MOVE/COPY/SWAPDB, and WATCH dirtying now read
+//                  CommandContext DB routing / logical DB ids.
 //                  Validator shows only expected E0432/E0282 name-resolution errors;
 //                  zero real syntax errors.
 // ──────────────────────────────────────────────────────────────────────────
