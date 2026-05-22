@@ -72,6 +72,24 @@ with the locked decisions. This re-attempt closes that gap:
 These are consistency edits. They do not change the production direction,
 do not add or remove a packet, and do not relax any TODO(human) gate.
 
+## Refinement 2026-05-22 (overnight owner-loop attempt)
+
+The operator approved a higher-risk overnight performance attempt after the
+canary/scaffold run. The scoped choice is documented in
+`docs/RUNTIME_OWNER_OVERNIGHT_ARCHITECTURE.md`:
+
+- use a standard-library nonblocking plain-TCP owner loop first;
+- do not add `mio`/`tokio`/raw poller dependencies tonight;
+- keep TLS on the existing thread-per-client path;
+- keep sharding and I/O threads out of scope;
+- keep normal `redis_commands::dispatch` in the product path;
+- treat benchmark numbers as alpha telemetry until the oracle is green.
+
+This is not a reversal of the production event-loop recommendation. It is a
+lower-blast-radius evidence step designed to answer whether removing the
+thread-per-client/mutex runtime shape is enough to materially close the current
+p100 simple-command gap before committing to a full poller migration.
+
 ---
 
 Status: architecture decision after the first Redis performance loop, 2026-05-21.

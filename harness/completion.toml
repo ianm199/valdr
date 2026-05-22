@@ -3,14 +3,14 @@ schema_version = 1
 [project]
 name = "valkey-rs-runtime-owner-run"
 target = "faithful runtime-owner planning + safe scaffold"
-description = "This run is complete when baseline conformance/performance evidence has been recorded, the faithful runtime-owner architecture map has landed, runtime-owner canaries pass, an inert RuntimeOwner scaffold lands without changing the default product path, and post-scaffold oracle/benchmark evidence exists."
+description = "This run is complete when baseline conformance/performance evidence has been recorded, runtime-owner canaries pass, the inert scaffold lands, the overnight owner-loop architecture pass lands, the std nonblocking plain-TCP owner loop is attempted, and post-owner-loop oracle/benchmark evidence exists."
 non_goals = [
   "Sharding",
   "Benchmark-only command fast paths",
   "Making the runtime-owner scaffold the default server loop",
   "Dropping ACL, MULTI/EXEC, scripting, expiration, pub/sub, blocking, AOF, RDB, or replication semantics for speed",
   "TLS owner-loop migration (locked out-of-scope this milestone by harness/architecture/decisions/runtime-ownership.md; gated on TODO(human) tls_migration_sequencing)",
-  "Adding a poller workspace dependency (mio/polling/tokio/raw-libc; locked as TODO(human) poller_dependency)",
+  "Adding a poller workspace dependency (mio/polling/tokio/raw-libc) during the overnight owner-loop experiment; docs/RUNTIME_OWNER_OVERNIGHT_ARCHITECTURE.md chooses std nonblocking first and defers mio to a follow-up",
   "Any public speed-parity claim sourced from a non-default experimental mode; numbers from this run are alpha telemetry only",
   "Authoring a runtime-owner-soak runner before harness/bench/run-soak.sh and the human-decided workload/threshold exist",
 ]
@@ -37,12 +37,23 @@ packets = [
   "runtime-owner-baseline-hotspots",
   "runtime-owner-0-faithful-map",
   "runtime-owner-1-canary-corpus",
-  "runtime-owner-1b-fix-canary-divergences",
+  "runtime-owner-1b-client-reset-getname",
+  "runtime-owner-1c-nested-multi-dirty-exec",
+  "runtime-owner-1d-exec-selected-db-routing",
   "runtime-owner-post-canary-oracle",
   "runtime-owner-2-scaffold-types",
   "runtime-owner-post-scaffold-oracle",
   "runtime-owner-post-scaffold-profile-matrix",
   "runtime-owner-post-scaffold-hotspots",
+  "runtime-owner-3-overnight-architecture",
+  "runtime-owner-4-std-nonblocking-owner-loop",
+  "runtime-owner-4-post-owner-loop-oracle",
+  "runtime-owner-4-post-owner-loop-profile-matrix",
+  "runtime-owner-4-post-owner-loop-hotspots",
+  "runtime-owner-5-owner-loop-polish",
+  "runtime-owner-5-post-polish-oracle",
+  "runtime-owner-5-post-polish-profile-matrix",
+  "runtime-owner-5-post-polish-hotspots",
 ]
 
 [[criterion]]
@@ -64,6 +75,27 @@ id = "latest-profile-hotspots"
 kind = "runner_latest_pass"
 required = true
 packet = "runtime-owner-post-scaffold-hotspots"
+runner = "bench-profile-hotspots-big"
+
+[[criterion]]
+id = "final-owner-loop-wire-smoke"
+kind = "runner_latest_pass"
+required = true
+packet = "runtime-owner-5-post-polish-oracle"
+runner = "wire-smoke"
+
+[[criterion]]
+id = "final-owner-loop-profile-matrix"
+kind = "runner_latest_pass"
+required = true
+packet = "runtime-owner-5-post-polish-profile-matrix"
+runner = "bench-profile-matrix"
+
+[[criterion]]
+id = "final-owner-loop-hotspots"
+kind = "runner_latest_pass"
+required = true
+packet = "runtime-owner-5-post-polish-hotspots"
 runner = "bench-profile-hotspots-big"
 
 [[criterion]]

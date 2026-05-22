@@ -45,7 +45,7 @@ inert_scaffold_rule = "no-product-path-change"
 tls_migration = "out-of-scope-this-milestone"
 
 [runtime.open_questions]
-poller_dependency = "TODO(human) — mio | polling | tokio | raw libc; pending"
+poller_dependency = "overnight experiment: std nonblocking linear scan first; mio remains recommended production follow-up"
 tls_migration_sequencing = "TODO(human) — never | follow-up | pre-default; pending"
 io_threads_parity = "TODO(human) — skip | follow-up | match-upstream; pending"
 soak_runner = "TODO(human) — harness/bench/run-soak.sh does not exist yet"
@@ -180,4 +180,5 @@ runner_capability_alignment = "harness/runners.toml wire-smoke runner must decla
 scaffold_vocabulary_single_source = "harness/architecture/object-vocabulary.tsv rows owned by crates/redis-server/src/runtime_owner.rs are the only authoritative scaffold type list. work-packets.jsonl runtime-owner-2-scaffold-types must not re-enumerate them."
 slot_id_is_newtype = "SlotId is a newtype around u32 in the scaffold; type confusion with db_index or replica_id is structurally prevented."
 no_poller_dep_before_human = "crates/redis-server/Cargo.toml must not gain mio/polling/tokio/raw-libc-epoll until TODO(human) poller_dependency in harness/architecture/decisions/runtime-ownership.md is answered."
+overnight_std_owner_first = "docs/RUNTIME_OWNER_OVERNIGHT_ARCHITECTURE.md allows a std nonblocking plain-TCP owner-loop experiment before adding a poller dependency; this may become the default plain-TCP path only after wire-smoke is green."
 no_soak_runner_before_script = "harness/runners.toml [[runner]] entries for runtime-owner-soak require harness/bench/run-soak.sh to exist; planned_runner row is the only acceptable placeholder until then."

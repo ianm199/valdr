@@ -127,6 +127,22 @@ or policy choices that require human review. The runtime-owner-3 (and later)
 implementation packets are blocked on them and must not be dispatched until each
 is answered in this section.
 
+### Overnight owner-loop experiment decision, 2026-05-22
+
+The operator approved an overnight attempt to move performance toward parity.
+For that run only, `docs/RUNTIME_OWNER_OVERNIGHT_ARCHITECTURE.md` answers the
+poller question by deliberately **not** adding `mio` yet. The first owner-loop
+implementation uses standard-library nonblocking plain-TCP sockets and a
+single owner loop. TLS remains on the existing thread-per-client path, sharding
+remains out of scope, I/O threads remain out of scope, and no benchmark-only
+command bypass is allowed.
+
+This does not supersede the production recommendation that a real poller such
+as `mio` is the likely long-term shape. It creates a lower-blast-radius
+evidence step: prove or disprove that removing the thread-per-client/mutex
+runtime shape moves the current p100 benchmark wall while preserving
+wire-smoke.
+
 - **TODO(human): poller dependency.** Options:
   (a) `mio` (cross-platform, std-shaped readiness API, mature),
   (b) `polling` crate (smaller surface),
