@@ -68,6 +68,10 @@ pub fn is_no_multi_command(name: &[u8]) -> bool {
     eq_ignore_ascii(name, NAME_MULTI) || eq_ignore_ascii(name, NAME_WATCH)
 }
 
+pub fn is_multi_command(name: &[u8]) -> bool {
+    eq_ignore_ascii(name, NAME_MULTI)
+}
+
 fn eq_ignore_ascii(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len()
         && a.iter().zip(b.iter()).all(|(x, y)| x.eq_ignore_ascii_case(y))
@@ -88,6 +92,26 @@ pub fn reject_no_multi_command(name: &[u8]) -> RedisError {
     msg.extend_from_slice(&lower);
     msg.extend_from_slice(b"' not allowed inside a transaction");
     RedisError::runtime(msg)
+}
+
+/// Mark the current MULTI block as failed due to a queue-time rejection.
+///
+/// Mirrors C `multi.c::flagTransaction`: keep the client in MULTI so EXEC can
+/// return EXECABORT, but discard commands already queued for the doomed batch.
+pub fn flag_transaction_dirty_exec(client: &mut Client) {
+    if !client.flag_multi() {
+        return;
+    }
+    client.set_flag_dirty_exec(true);
+    client.queued_argvs.clear();
+    if let Some(mstate) = client.mstate.as_mut() {
+        mstate.commands.clear();
+        mstate.cmd_flags = 0;
+        mstate.cmd_inv_flags = 0;
+        mstate.argv_len_sums = 0;
+        mstate.alloc_count = 0;
+        mstate.transaction_db_id = client.db_index as i32;
+    }
 }
 
 /// Append the client's current `argv` to its MULTI queue and reply `+QUEUED`.
@@ -264,6 +288,25 @@ mod tests {
         assert!(payload
             .as_bytes()
             .starts_with(b"ERR Command 'multi' not allowed inside a transaction"));
+    }
+
+    #[test]
+    fn nested_multi_rejection_marks_dirty_exec() {
+        let mut c = Client::new(4);
+        c.set_flag_multi(true);
+        c.queued_argvs.push(vec![RedisString::from_bytes(b"SET")]);
+        c.set_args(vec![RedisString::from_bytes(b"MULTI")]);
+        let mut ctx = CommandContext::new(&mut c);
+
+        let err = crate::dispatch::dispatch(&mut ctx).unwrap_err();
+
+        assert!(err
+            .to_resp_payload()
+            .as_bytes()
+            .starts_with(b"ERR Command 'multi' not allowed inside a transaction"));
+        assert!(ctx.client_ref().flag_multi());
+        assert!(ctx.client_ref().flag_dirty_exec());
+        assert!(ctx.client_ref().queued_argvs.is_empty());
     }
 
     #[test]

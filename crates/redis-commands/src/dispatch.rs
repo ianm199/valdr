@@ -131,6 +131,9 @@ pub fn dispatch(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     }
     if ctx.client_ref().flag_multi() {
         if crate::multi::is_no_multi_command(name.as_bytes()) {
+            if crate::multi::is_multi_command(name.as_bytes()) {
+                crate::multi::flag_transaction_dirty_exec(ctx.client_mut());
+            }
             return Err(crate::multi::reject_no_multi_command(name.as_bytes()));
         }
         if !crate::multi::is_tx_control_command(name.as_bytes()) {
