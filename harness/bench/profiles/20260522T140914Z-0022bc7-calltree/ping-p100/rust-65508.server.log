@@ -1,0 +1,5 @@
+redis-server: listening on 127.0.0.1:65508
+4321:M 1779458996 * PID: 4321
+4321:M 1779458996 * Server initialized
+4321:M 1779458996 * Ready to accept connections tcp
+redis-server: RuntimeOwner plain TCP loop enabled

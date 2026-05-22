@@ -1,0 +1,10 @@
+# valkey-rs call-tree profile benchmark
+# commit	0022bc7
+# os	Darwin 24.3.0
+# arch	arm64
+# cpu	Apple M3 Max
+workload	command	requests	clients	pipeline	payload	reference_rps	rust_rps	ratio	reference_p99_ms	rust_p99_ms	profiler	profile_artifacts
+get-p100	GET	20000000	50	100	64	3864734.25	3234675.75	0.836972	1.543	2.623	sample	harness/bench/profiles/20260522T140914Z-0022bc7-calltree/get-p100/get-p100.sample.txt,harness/bench/profiles/20260522T140914Z-0022bc7-calltree/get-p100/get-p100.sample.stderr.log
+set-p100	SET	10000000	50	100	64	2375861.25	1694915.25	0.713390	2.351	8.447	sample	harness/bench/profiles/20260522T140914Z-0022bc7-calltree/set-p100/set-p100.sample.txt,harness/bench/profiles/20260522T140914Z-0022bc7-calltree/set-p100/set-p100.sample.stderr.log
+incr-p100	INCR	10000000	50	100	64	3232062.00	1820498.75	0.563262	1.719	3.967	sample	harness/bench/profiles/20260522T140914Z-0022bc7-calltree/incr-p100/incr-p100.sample.txt,harness/bench/profiles/20260522T140914Z-0022bc7-calltree/incr-p100/incr-p100.sample.stderr.log
+ping-p100	PING_MBULK	20000000	50	100	64	4962779.00	3685277.25	0.742583	1.231	2.223	sample	harness/bench/profiles/20260522T140914Z-0022bc7-calltree/ping-p100/ping-p100.sample.txt,harness/bench/profiles/20260522T140914Z-0022bc7-calltree/ping-p100/ping-p100.sample.stderr.log

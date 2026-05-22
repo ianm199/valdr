@@ -1,0 +1,63 @@
+{
+  "captured_ts": "2026-05-22T14:07:51.634239Z",
+  "harness_context": {
+    "claim_level": "telemetry",
+    "commit": "70dcc11",
+    "git_dirty": true,
+    "git_status_short": [
+      " M harness/evidence/ledger.jsonl"
+    ],
+    "resources": [
+      "bench-results",
+      "benchmark-host",
+      "port:16379",
+      "port:6379",
+      "profiler"
+    ],
+    "run_id": "loop-6e4dc35668d06051",
+    "target_commit": "70dcc11184e090fce0d574ee24a2bcd38132429b",
+    "tree_hash": "c234561d0f2e7e8460ca3a9efca0845eb37556395e75768ca932cbc951033bcd"
+  },
+  "kind": "runner_result",
+  "packet": "runtime-owner-6-current-calltree",
+  "result": {
+    "artifacts": [],
+    "claim_level": "telemetry",
+    "evidence": {
+      "exception": "ValueError(\"method must be one of: oracle-diff, official-suite, external-suite, bench-load, fuzz-crash, security-check, json-command, runner-exception; got 'bench-load-profile-artifact'\")",
+      "harness_context": {
+        "claim_level": "telemetry",
+        "commit": "70dcc11",
+        "git_dirty": true,
+        "git_status_short": [
+          " M harness/evidence/ledger.jsonl"
+        ],
+        "resources": [
+          "bench-results",
+          "benchmark-host",
+          "port:16379",
+          "port:6379",
+          "profiler"
+        ],
+        "run_id": "loop-6e4dc35668d06051",
+        "target_commit": "70dcc11184e090fce0d574ee24a2bcd38132429b",
+        "tree_hash": "c234561d0f2e7e8460ca3a9efca0845eb37556395e75768ca932cbc951033bcd"
+      }
+    },
+    "measurements": [
+      {
+        "denominator": 1,
+        "metric": "runner_pass",
+        "name": "runtime-owner-6-current-calltree",
+        "numerator": 0
+      }
+    ],
+    "method": "runner-exception",
+    "runner_id": "bench-profile-calltree",
+    "schema_version": 1,
+    "status": "error",
+    "summary": "runner raised ValueError: method must be one of: oracle-diff, official-suite, external-suite, bench-load, fuzz-crash, security-check, json-command, runner-exception; got 'bench-load-profile-artifact'",
+    "surface": "runner"
+  },
+  "role": "runner"
+}
