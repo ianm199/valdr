@@ -10,7 +10,9 @@ JSON timeline and a self-contained HTML dashboard.
 from __future__ import annotations
 
 import argparse
+import csv
 import html
+import io
 import json
 import re
 import statistics
@@ -24,6 +26,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 LEDGER = ROOT / "harness/evidence/ledger.jsonl"
+RESULTS_DIR = ROOT / "harness/bench/results"
 DEFAULT_OUT = ROOT / "harness/bench/history"
 REMOTE_COMMIT_PREFIX = "https://github.com/ianm199/valkey-rs/commit/"
 
@@ -92,6 +95,44 @@ SERIES_DEFS = [
     },
 ]
 
+RAW_SERIES_DEFS = [
+    {
+        "id": "raw_legacy_median",
+        "label": "Legacy median",
+        "runner_kind": "raw-legacy",
+        "field": "median",
+        "color": "#a13d63",
+    },
+    {
+        "id": "raw_matrix_median",
+        "label": "Raw matrix median",
+        "runner_kind": "raw-profile-matrix",
+        "field": "median",
+        "color": "#2f6fed",
+    },
+    {
+        "id": "raw_hotspots_median",
+        "label": "Raw hotspots median",
+        "runner_kind": "raw-hotspots",
+        "field": "median",
+        "color": "#c16a1a",
+    },
+    {
+        "id": "raw_calltree_median",
+        "label": "Raw calltree median",
+        "runner_kind": "raw-calltree",
+        "field": "median",
+        "color": "#0f8f68",
+    },
+]
+
+RAW_KIND_LABEL = {
+    "raw-legacy": "Legacy benchmark",
+    "raw-profile-matrix": "Raw profile matrix",
+    "raw-hotspots": "Raw hotspots",
+    "raw-calltree": "Raw calltree",
+}
+
 
 @dataclass(frozen=True)
 class Point:
@@ -143,12 +184,164 @@ class Point:
         }
 
 
+def parse_float(value: Any) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_int(value: Any) -> int | None:
+    try:
+        if value is None or value == "":
+            return None
+        return int(str(value).replace("_", ""))
+    except (TypeError, ValueError):
+        return None
+
+
+def compact_ts(value: str) -> str:
+    try:
+        parsed = datetime.strptime(value, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+        return parsed.isoformat(timespec="seconds").replace("+00:00", "Z")
+    except ValueError:
+        return value
+
+
 def repo_link(path: str) -> str:
     if not path:
         return ""
     if path.startswith("harness/"):
         return "../../" + path[len("harness/") :]
     return "../../../" + path
+
+
+def parse_tsv_metadata(path: Path, lines: list[str]) -> dict[str, str]:
+    metadata: dict[str, str] = {}
+    for line in lines:
+        if not line.startswith("#"):
+            continue
+        body = line[1:].strip()
+        if "\t" in body:
+            key, value = body.split("\t", 1)
+        elif ":" in body:
+            key, value = body.split(":", 1)
+        else:
+            continue
+        metadata[key.strip()] = value.strip()
+
+    name_match = re.match(r"(?P<ts>\d{8}T\d{6}Z)-(?P<commit>[0-9a-f]+)", path.name)
+    if name_match:
+        metadata.setdefault("timestamp_utc", name_match.group("ts"))
+        metadata.setdefault("commit", name_match.group("commit"))
+    return metadata
+
+
+def raw_kind_from_path(path: Path, header: str) -> str | None:
+    if path.name.endswith("-profile-matrix.tsv") or header.startswith("profile\tcommand"):
+        return "raw-profile-matrix"
+    if path.name.endswith("-hotspots.tsv") or "sample_path" in header:
+        return "raw-hotspots"
+    if path.name.endswith("-calltree.tsv") or "profile_artifacts" in header:
+        return "raw-calltree"
+    if header.startswith("test\tupstream_rps"):
+        return "raw-legacy"
+    return None
+
+
+def raw_key(row: dict[str, str], kind: str) -> str:
+    if kind == "raw-profile-matrix":
+        profile = row.get("profile", "")
+        command = row.get("command", "")
+        return f"{profile}/{command}" if profile and command else command
+    if kind in {"raw-hotspots", "raw-calltree"}:
+        return row.get("workload") or row.get("command") or ""
+    return row.get("test") or row.get("command") or ""
+
+
+def raw_p99(row: dict[str, str], kind: str) -> float | None:
+    if kind == "raw-legacy":
+        return parse_float(row.get("valkey_rs_p99_ms"))
+    return parse_float(row.get("rust_p99_ms"))
+
+
+def infer_raw_shape(rows: list[dict[str, str]], metadata: dict[str, str]) -> dict[str, int | None]:
+    first = rows[0] if rows else {}
+    return {
+        "requests": parse_int(metadata.get("requests") or first.get("requests")),
+        "clients": parse_int(metadata.get("clients") or first.get("clients")),
+        "pipeline": parse_int(metadata.get("pipeline") or first.get("pipeline")),
+        "payload": parse_int(metadata.get("payload_bytes") or first.get("payload")),
+    }
+
+
+def raw_point_from_tsv(path: Path) -> dict[str, Any] | None:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    data_lines = [line for line in lines if line.strip() and not line.startswith("#")]
+    if not data_lines:
+        return None
+
+    header = data_lines[0]
+    kind = raw_kind_from_path(path, header)
+    if kind is None:
+        return None
+
+    metadata = parse_tsv_metadata(path, lines)
+    reader = csv.DictReader(io.StringIO("\n".join(data_lines)), delimiter="\t")
+    ratios: dict[str, float] = {}
+    p99_ms: dict[str, float] = {}
+    clean_rows: list[dict[str, str]] = []
+    for row in reader:
+        key = raw_key(row, kind)
+        if not key or key == "test":
+            continue
+        ratio = parse_float(row.get("ratio"))
+        if ratio is None:
+            continue
+        ratios[key] = ratio
+        p99 = raw_p99(row, kind)
+        if p99 is not None:
+            p99_ms[key] = p99
+        clean_rows.append(row)
+
+    if not ratios:
+        return None
+
+    values = list(ratios.values())
+    rel = str(path.relative_to(ROOT))
+    commit = metadata.get("commit", "")
+    shape = infer_raw_shape(clean_rows, metadata)
+    return {
+        "ts": compact_ts(metadata.get("timestamp_utc", "")),
+        "commit": commit,
+        "commit_subject": commit_subject(commit),
+        "commit_url": REMOTE_COMMIT_PREFIX + commit if commit else "",
+        "runner_kind": kind,
+        "runner_label": RAW_KIND_LABEL[kind],
+        "summary": (
+            f"{RAW_KIND_LABEL[kind]} median {statistics.median(values):.2f}x "
+            f"min {min(values):.2f}x max {max(values):.2f}x"
+        ),
+        "source": rel,
+        "source_url": repo_link(rel),
+        "ratios": ratios,
+        "p99_ms": p99_ms,
+        "median": statistics.median(values),
+        "min": min(values),
+        "max": max(values),
+        "get_p1": ratios.get("core-p1/GET"),
+        "get_p100": ratios.get("core-p100/GET") or ratios.get("get-p100") or ratios.get("GET"),
+        "set_p100": ratios.get("core-p100/SET") or ratios.get("set-p100") or ratios.get("SET"),
+        "incr_p100": ratios.get("core-p100/INCR") or ratios.get("incr-p100") or ratios.get("INCR"),
+        "ping_p100": (
+            ratios.get("core-p100/PING_MBULK")
+            or ratios.get("ping-p100")
+            or ratios.get("PING_MBULK")
+        ),
+        **shape,
+    }
 
 
 def load_json(path: Path) -> dict[str, Any] | None:
@@ -310,6 +503,8 @@ def build_history() -> dict[str, Any]:
     points = sorted(points_by_key.values(), key=lambda item: item.ts)
     point_dicts = [point.to_dict() for point in points]
     series = build_series(point_dicts)
+    raw_points = collect_raw_points()
+    raw_series = build_series(raw_points, RAW_SERIES_DEFS)
     latest = {}
     for point in point_dicts:
         latest[point["runner_kind"]] = point
@@ -332,17 +527,35 @@ def build_history() -> dict[str, Any]:
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "project": "valkey-rs",
         "point_count": len(point_dicts),
+        "raw_point_count": len(raw_points),
         "series_defs": SERIES_DEFS,
+        "raw_series_defs": RAW_SERIES_DEFS,
         "series": series,
+        "raw_series": raw_series,
         "points": point_dicts,
+        "raw_points": raw_points,
         "latest": latest,
         "annotations": annotations,
     }
 
 
-def build_series(points: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+def collect_raw_points() -> list[dict[str, Any]]:
+    points = []
+    if not RESULTS_DIR.exists():
+        return points
+    for path in sorted(RESULTS_DIR.glob("*.tsv")):
+        point = raw_point_from_tsv(path)
+        if point is not None:
+            points.append(point)
+    return sorted(points, key=lambda item: item["ts"])
+
+
+def build_series(
+    points: list[dict[str, Any]],
+    series_defs: list[dict[str, str]] = SERIES_DEFS,
+) -> dict[str, list[dict[str, Any]]]:
     series: dict[str, list[dict[str, Any]]] = {}
-    for spec in SERIES_DEFS:
+    for spec in series_defs:
         rows = []
         for idx, point in enumerate(points):
             if point["runner_kind"] != spec["runner_kind"]:
@@ -356,9 +569,9 @@ def build_series(points: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]
                     "ts": point["ts"],
                     "value": value,
                     "commit": point["commit"],
-                    "packet": point["packet"],
+                    "packet": point.get("packet") or point.get("source") or "",
                     "summary": point["summary"],
-                    "evidence_url": point["evidence_url"],
+                    "evidence_url": point.get("evidence_url") or point.get("source_url") or "",
                     "commit_url": point["commit_url"],
                 }
             )
@@ -369,6 +582,7 @@ def build_series(points: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]
 def render_html(history: dict[str, Any]) -> str:
     data = json.dumps(history, sort_keys=True)
     latest = history.get("latest", {})
+    raw_points = history.get("raw_points", [])
     latest_cards = []
     for key in ("profile-matrix", "hotspots", "calltree"):
         point = latest.get(key)
@@ -380,6 +594,18 @@ def render_html(history: dict[str, Any]) -> str:
               <div class="eyebrow">{html.escape(point['runner_label'])}</div>
               <div class="metric">{point['median']:.2f}x</div>
               <div class="subtle">{html.escape(point['commit'])} - {html.escape(point['packet'])}</div>
+            </article>
+            """
+        )
+    if raw_points:
+        worst_raw = min(raw_points, key=lambda point: point["median"])
+        latest_raw = raw_points[-1]
+        latest_cards.append(
+            f"""
+            <article class="metric-card">
+              <div class="eyebrow">Raw TSV climb</div>
+              <div class="metric">{worst_raw['median']:.2f}x &rarr; {latest_raw['median']:.2f}x</div>
+              <div class="subtle">worst raw point {html.escape(worst_raw['commit'])} to latest {html.escape(latest_raw['commit'])}</div>
             </article>
             """
         )
@@ -411,7 +637,7 @@ def render_html(history: dict[str, Any]) -> str:
     p {{ margin: 0; color: var(--muted); line-height: 1.5; }}
     a {{ color: var(--accent); text-decoration: none; }}
     a:hover {{ text-decoration: underline; }}
-    .grid {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }}
+    .grid {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }}
     .metric-card, .panel {{ background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }}
     .metric-card {{ padding: 16px; }}
     .eyebrow {{ color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }}
@@ -432,6 +658,7 @@ def render_html(history: dict[str, Any]) -> str:
     th {{ color: var(--muted); font-weight: 600; }}
     code {{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }}
     .note {{ background: #eef4ff; border: 1px solid #cbdcff; color: #23314d; border-radius: 8px; padding: 12px 14px; }}
+    .warn-note {{ background: #fff7eb; border-color: #f0c994; color: #3c2a12; }}
     @media (max-width: 900px) {{
       main {{ padding: 18px; }}
       header {{ display: block; }}
@@ -446,7 +673,7 @@ def render_html(history: dict[str, Any]) -> str:
       <h1>valkey-rs Performance History</h1>
       <p>Commit-keyed benchmark trajectory generated from <code>harness/evidence/ledger.jsonl</code> and runner evidence blobs.</p>
     </div>
-    <p class="subtle">Generated {html.escape(history['generated_at'])}<br>{history['point_count']} benchmark points</p>
+    <p class="subtle">Generated {html.escape(history['generated_at'])}<br>{history['point_count']} curated points · {history['raw_point_count']} raw TSV points</p>
   </header>
 
   <section class="grid">
@@ -468,6 +695,13 @@ def render_html(history: dict[str, Any]) -> str:
   </section>
 
   <section class="panel">
+    <h2>Granular Raw TSV History</h2>
+    <p class="note warn-note">This view includes early one-off TSVs and intermediate profiling runs from <code>harness/bench/results/</code>. It is telemetry, not a controlled release claim, and it is the right place to see the original ~0.05x to ~0.10x baseline.</p>
+    <div class="chart-wrap"><svg id="raw-chart" role="img" aria-label="Raw benchmark TSV throughput ratio over time"></svg></div>
+    <div class="legend" id="raw-legend"></div>
+  </section>
+
+  <section class="panel">
     <h2>Benchmark Points</h2>
     <table id="points-table">
       <thead>
@@ -479,6 +713,26 @@ def render_html(history: dict[str, Any]) -> str:
           <th>Median</th>
           <th>GET p100</th>
           <th>Evidence</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section class="panel">
+    <h2>Raw TSV Points</h2>
+    <table id="raw-table">
+      <thead>
+        <tr>
+          <th>Time</th>
+          <th>Kind</th>
+          <th>Commit</th>
+          <th>Shape</th>
+          <th>Median</th>
+          <th>Min</th>
+          <th>GET</th>
+          <th>PING</th>
+          <th>File</th>
         </tr>
       </thead>
       <tbody></tbody>
@@ -505,6 +759,7 @@ def render_html(history: dict[str, Any]) -> str:
 <script>
 const HISTORY = {data};
 const SERIES = Object.fromEntries(HISTORY.series_defs.map(s => [s.id, s]));
+const RAW_SERIES = Object.fromEntries(HISTORY.raw_series_defs.map(s => [s.id, s]));
 
 function fmtRatio(value) {{
   return value == null ? "" : Number(value).toFixed(2) + "x";
@@ -516,7 +771,7 @@ function shortTime(ts) {{
   return d.toLocaleTimeString([], {{hour: "2-digit", minute: "2-digit"}});
 }}
 
-function drawChart(svgId, legendId, seriesIds) {{
+function drawChart(svgId, legendId, seriesIds, seriesData = HISTORY.series, seriesDefs = SERIES, pointSource = HISTORY.points) {{
   const svg = document.getElementById(svgId);
   const legend = document.getElementById(legendId);
   const width = 1120, height = 420;
@@ -525,9 +780,9 @@ function drawChart(svgId, legendId, seriesIds) {{
   svg.innerHTML = "";
   legend.innerHTML = "";
 
-  const all = seriesIds.flatMap(id => (HISTORY.series[id] || []).map(p => ({{...p, seriesId: id}})));
+  const all = seriesIds.flatMap(id => (seriesData[id] || []).map(p => ({{...p, seriesId: id}})));
   if (!all.length) return;
-  const timestamps = [...new Set(HISTORY.points.map(p => p.ts))];
+  const timestamps = [...new Set(pointSource.map(p => p.ts))];
   const xByTs = new Map(timestamps.map((ts, idx) => [ts, idx]));
   const maxIndex = Math.max(1, timestamps.length - 1);
   const values = all.map(p => p.value);
@@ -565,8 +820,8 @@ function drawChart(svgId, legendId, seriesIds) {{
   xAxis.setAttribute("class", "axis");
   svg.appendChild(xAxis);
 
-  HISTORY.points.forEach((point, idx) => {{
-    if (idx % Math.ceil(HISTORY.points.length / 8) !== 0 && idx !== HISTORY.points.length - 1) return;
+  pointSource.forEach((point, idx) => {{
+    if (idx % Math.ceil(pointSource.length / 8) !== 0 && idx !== pointSource.length - 1) return;
     const tx = x(point.ts);
     const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
     text.setAttribute("x", tx);
@@ -580,8 +835,8 @@ function drawChart(svgId, legendId, seriesIds) {{
   }});
 
   for (const id of seriesIds) {{
-    const spec = SERIES[id];
-    const points = HISTORY.series[id] || [];
+    const spec = seriesDefs[id];
+    const points = seriesData[id] || [];
     if (!points.length) continue;
     const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
     path.setAttribute("class", "series-line");
@@ -640,11 +895,36 @@ function renderTables() {{
     `;
     atbody.appendChild(tr);
   }});
+
+  const rawBody = document.querySelector("#raw-table tbody");
+  rawBody.innerHTML = "";
+  [...HISTORY.raw_points].reverse().forEach(point => {{
+    const tr = document.createElement("tr");
+    const shape = [
+      point.requests ? `${{point.requests}} req` : "",
+      point.clients ? `c=${{point.clients}}` : "",
+      point.pipeline ? `p=${{point.pipeline}}` : "",
+      point.payload ? `d=${{point.payload}}` : "",
+    ].filter(Boolean).join(" · ");
+    tr.innerHTML = `
+      <td>${{shortTime(point.ts)}}</td>
+      <td>${{point.runner_label}}</td>
+      <td><a href="${{point.commit_url}}"><code>${{point.commit}}</code></a><div class="subtle">${{point.commit_subject || ""}}</div></td>
+      <td>${{shape}}</td>
+      <td>${{fmtRatio(point.median)}}</td>
+      <td>${{fmtRatio(point.min)}}</td>
+      <td>${{fmtRatio(point.get_p100)}}</td>
+      <td>${{fmtRatio(point.ping_p100)}}</td>
+      <td><a href="${{point.source_url}}">tsv</a></td>
+    `;
+    rawBody.appendChild(tr);
+  }});
 }}
 
 const REMOTE_COMMIT_PREFIX = "{REMOTE_COMMIT_PREFIX}";
 drawChart("median-chart", "median-legend", ["matrix_median", "hotspots_median", "calltree_median"]);
 drawChart("get-chart", "get-legend", ["matrix_get_p1", "matrix_get_p100", "hotspots_get_p100", "calltree_get_p100"]);
+drawChart("raw-chart", "raw-legend", ["raw_legacy_median", "raw_matrix_median", "raw_hotspots_median", "raw_calltree_median"], HISTORY.raw_series, RAW_SERIES, HISTORY.raw_points);
 renderTables();
 </script>
 </body>
