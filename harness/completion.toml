@@ -401,3 +401,26 @@ id = "no-ready-auto-packets"
 kind = "no_ready_packets"
 required = false
 selector = "auto"
+
+[[criterion]]
+id = "tcl-overnight-frontier-20260523-packets"
+kind = "packets_completed"
+required = true
+packets = [
+  "tcl-frontier-baseline-after-dump",
+  "tcl-hll-pfdebug-dispatch",
+  "tcl-post-hll-survey",
+  "tcl-sort-wire-minimal",
+  "tcl-post-sort-survey",
+  "tcl-slowlog-core-edges",
+  "tcl-post-slowlog-survey",
+  "tcl-functions-load-fcall-minimal",
+  "tcl-post-functions-survey",
+]
+
+[[criterion]]
+id = "tcl-overnight-frontier-final-survey"
+kind = "runner_latest_pass"
+required = true
+packet = "tcl-post-functions-survey"
+runner = "tcl-survey-unswept"
