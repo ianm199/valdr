@@ -119,6 +119,11 @@ better today after wave 5/6 fixes propagated):
 `unit/bitops`, `unit/bitfield`, `unit/geo`, `unit/hyperloglog`,
 `unit/scripting`, `unit/scan`, `unit/sort`, `unit/dump`, `unit/info`
 
+Current telemetry for this frontier is tracked by the manual
+`tcl-survey-unswept` runner; see `docs/TCL_COVERAGE_EXPANSION.md`.
+That runner records abort/no-summary cases separately from counted pass/fail
+cases so packet generation does not hide behind a single aggregate number.
+
 Not in scope for the surveyed run:
 
 - `unit/cluster` — deliberate gap (single-node only)
