@@ -340,10 +340,14 @@ pub fn setbit_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let on = on != 0;
 
     let min_len = ((bitoffset >> 3) + 1) as usize;
-    let mut bytes = read_string_bytes(ctx, &key)?;
+    let existing = lookup_string_bytes(ctx, &key)?;
+    let key_existed = existing.is_some();
+    let mut bytes = existing.unwrap_or_default();
+    let existing_len = bytes.len();
     if bytes.len() < min_len {
         bytes.resize(min_len, 0u8);
     }
+    let extended = bytes.len() != existing_len;
 
     let byte_idx = (bitoffset >> 3) as usize;
     let bit_shift = 7 - (bitoffset & 0x7);
@@ -352,9 +356,12 @@ pub fn setbit_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
     bytes[byte_idx] = (byteval & !(1u8 << bit_shift)) | (if on { 1u8 << bit_shift } else { 0 });
 
-    let obj = RedisObject::new_raw_string(&bytes);
-    ctx.db_mut()
-        .set_key(key, obj, redis_core::db::SETKEY_KEEPTTL);
+    if !key_existed || extended || bitval != on {
+        let obj = RedisObject::new_raw_string(&bytes);
+        ctx.db_mut()
+            .set_key(key, obj, redis_core::db::SETKEY_KEEPTTL);
+        ctx.server().add_dirty(1);
+    }
 
     ctx.reply_integer(if bitval { 1 } else { 0 })
 }
@@ -734,7 +741,7 @@ fn bitfield_generic(ctx: &mut CommandContext, readonly: bool) -> RedisResult<()>
         } else if subcmd.eq_ignore_ascii_case(b"set") && remargs >= 3 {
             if readonly {
                 return Err(RedisError::runtime(
-                    b"BITFIELD_RO only supports the GET subcommand",
+                    b"ERR BITFIELD_RO only supports the GET subcommand",
                 ));
             }
             let type_arg = ctx.arg_owned(j + 1)?;
@@ -762,7 +769,7 @@ fn bitfield_generic(ctx: &mut CommandContext, readonly: bool) -> RedisResult<()>
         } else if subcmd.eq_ignore_ascii_case(b"incrby") && remargs >= 3 {
             if readonly {
                 return Err(RedisError::runtime(
-                    b"BITFIELD_RO only supports the GET subcommand",
+                    b"ERR BITFIELD_RO only supports the GET subcommand",
                 ));
             }
             let type_arg = ctx.arg_owned(j + 1)?;
@@ -819,6 +826,7 @@ fn bitfield_generic(ctx: &mut CommandContext, readonly: bool) -> RedisResult<()>
         b
     };
     let extended = !is_readonly_ops && bytes.len() != existing_len;
+    let dirty_from_lookup = !is_readonly_ops && (extended || !key_existed);
 
     ctx.reply_array_header(ops.len())?;
 
@@ -869,7 +877,7 @@ fn bitfield_generic(ctx: &mut CommandContext, readonly: bool) -> RedisResult<()>
             if !fail_now {
                 ctx.reply_integer(retval)?;
                 set_signed_bitfield(&mut bytes, op.offset, op.bits as u64, newval);
-                if oldval != newval {
+                if dirty_from_lookup || oldval != newval {
                     changes += 1;
                 }
             } else {
@@ -901,7 +909,7 @@ fn bitfield_generic(ctx: &mut CommandContext, readonly: bool) -> RedisResult<()>
             if !fail_now {
                 ctx.reply_integer(retval as i64)?;
                 set_unsigned_bitfield(&mut bytes, op.offset, op.bits as u64, newval);
-                if oldval != newval {
+                if dirty_from_lookup || oldval != newval {
                     changes += 1;
                 }
             } else {
@@ -918,6 +926,9 @@ fn bitfield_generic(ctx: &mut CommandContext, readonly: bool) -> RedisResult<()>
             0
         };
         ctx.db_mut().set_key(key, obj, flags);
+    }
+    if changes > 0 {
+        ctx.server().add_dirty(changes as i64);
     }
 
     Ok(())
@@ -938,7 +949,8 @@ pub fn bitfield_ro_command(ctx: &mut CommandContext) -> RedisResult<()> {
 mod tests {
     use super::*;
     use redis_core::db::RedisDb;
-    use redis_core::Client;
+    use redis_core::{Client, PubSubRegistry, RedisServer};
+    use std::sync::{Arc, Mutex};
 
     fn rs(bytes: &[u8]) -> RedisString {
         RedisString::from_bytes(bytes)
@@ -1052,6 +1064,89 @@ mod tests {
             client.drain_reply(),
             b"*2\r\n:0\r\n:-9223372036854775808\r\n"
         );
+    }
+
+    #[test]
+    fn bitfield_ro_write_error_includes_err_prefix() {
+        let mut client = Client::new(1);
+        let mut db = RedisDb::new(0);
+        set_args(
+            &mut client,
+            &[b"BITFIELD_RO", b"bits", b"SET", b"i5", b"0", b"0"],
+        );
+
+        let mut ctx = CommandContext::with_db(&mut client, &mut db);
+        let err = bitfield_ro_command(&mut ctx).unwrap_err();
+
+        assert_eq!(
+            err.to_resp_payload().as_bytes(),
+            b"ERR BITFIELD_RO only supports the GET subcommand"
+        );
+    }
+
+    #[test]
+    fn setbit_and_bitfield_increment_server_dirty_only_when_changed() {
+        let mut client = Client::new(1);
+        let mut db = RedisDb::new(0);
+        let server = Arc::new(RedisServer::default());
+        let pubsub = Arc::new(Mutex::new(PubSubRegistry::default()));
+
+        set_args(&mut client, &[b"SETBIT", b"foo", b"0", b"0"]);
+        {
+            let mut ctx = CommandContext::with_server(
+                &mut client,
+                &mut db,
+                Arc::clone(&server),
+                Arc::clone(&pubsub),
+            );
+            setbit_command(&mut ctx).unwrap();
+            assert_eq!(ctx.server().dirty(), 1);
+        }
+        client.drain_reply();
+
+        set_args(&mut client, &[b"SETBIT", b"foo", b"0", b"0"]);
+        {
+            let mut ctx = CommandContext::with_server(
+                &mut client,
+                &mut db,
+                Arc::clone(&server),
+                Arc::clone(&pubsub),
+            );
+            setbit_command(&mut ctx).unwrap();
+            assert_eq!(ctx.server().dirty(), 1);
+        }
+        client.drain_reply();
+
+        set_args(
+            &mut client,
+            &[b"BITFIELD", b"bar", b"SET", b"i5", b"0", b"0"],
+        );
+        {
+            let mut ctx = CommandContext::with_server(
+                &mut client,
+                &mut db,
+                Arc::clone(&server),
+                Arc::clone(&pubsub),
+            );
+            bitfield_command(&mut ctx).unwrap();
+            assert_eq!(ctx.server().dirty(), 2);
+        }
+        client.drain_reply();
+
+        set_args(
+            &mut client,
+            &[b"BITFIELD", b"bar", b"SET", b"i5", b"0", b"0"],
+        );
+        {
+            let mut ctx = CommandContext::with_server(
+                &mut client,
+                &mut db,
+                Arc::clone(&server),
+                Arc::clone(&pubsub),
+            );
+            bitfield_command(&mut ctx).unwrap();
+            assert_eq!(ctx.server().dirty(), 2);
+        }
     }
 
     #[test]

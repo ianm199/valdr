@@ -10,8 +10,8 @@
 //! `docs/PATH_TO_DEF3.md` §Eviction as the approved heuristic for Def 3.
 
 use std::io::Write;
-use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use redis_core::memory::approximate_memory_used;
@@ -43,7 +43,6 @@ fn now_unix_seconds() -> u64 {
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
-
 
 fn format_human_bytes(bytes: u64) -> String {
     if bytes >= 1024 * 1024 * 1024 {
@@ -121,7 +120,11 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let _ = writeln!(buf, "os:{}\r", std::env::consts::OS);
         let _ = writeln!(buf, "arch_bits:64\r");
         let _ = writeln!(buf, "process_id:{}\r", pid);
-        let _ = writeln!(buf, "tcp_port:{}\r", metrics.tcp_port.load(Ordering::Relaxed));
+        let _ = writeln!(
+            buf,
+            "tcp_port:{}\r",
+            metrics.tcp_port.load(Ordering::Relaxed)
+        );
         let _ = writeln!(buf, "uptime_in_seconds:{}\r", uptime);
         let _ = writeln!(buf, "uptime_in_days:{}\r", uptime / 86400);
         let _ = writeln!(buf, "hz:10\r");
@@ -158,7 +161,11 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let _ = writeln!(buf, "used_memory_rss_human:{}\r", format_human_bytes(rss));
         let _ = writeln!(buf, "used_memory_rss_source:{}\r", rss_source);
         let _ = writeln!(buf, "used_memory_peak:{}\r", used_memory);
-        let _ = writeln!(buf, "used_memory_peak_human:{}\r", format_human_bytes(used_memory));
+        let _ = writeln!(
+            buf,
+            "used_memory_peak_human:{}\r",
+            format_human_bytes(used_memory)
+        );
         let _ = writeln!(buf, "used_memory_estimated:true\r");
         let _ = writeln!(buf, "total_system_memory:0\r");
         let live_maxmemory = ctx.live_config().maxmemory();
@@ -173,7 +180,11 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if want(b"persistence") {
         let _ = writeln!(buf, "# Persistence\r");
         let _ = writeln!(buf, "loading:0\r");
-        let _ = writeln!(buf, "rdb_changes_since_last_save:0\r");
+        let _ = writeln!(
+            buf,
+            "rdb_changes_since_last_save:{}\r",
+            ctx.server().dirty()
+        );
         let _ = writeln!(buf, "rdb_bgsave_in_progress:0\r");
         let _ = writeln!(buf, "rdb_last_save_time:{}\r", server_start_time());
         let _ = writeln!(buf, "rdb_last_bgsave_status:ok\r");
@@ -200,10 +211,9 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if want(b"replication") {
         let repl = redis_core::replication::global_replication_state();
         let role = if repl.is_replica() { "slave" } else { "master" };
-        let runid_str = std::str::from_utf8(repl.runid())
-            .unwrap_or("0000000000000000000000000000000000000000");
-        let (backlog_first, master_offset, backlog_histlen, backlog_size) =
-            repl.backlog_snapshot();
+        let runid_str =
+            std::str::from_utf8(repl.runid()).unwrap_or("0000000000000000000000000000000000000000");
+        let (backlog_first, master_offset, backlog_histlen, backlog_size) = repl.backlog_snapshot();
         let replicas = repl.replicas_snapshot();
         let connected = replicas.len();
         let now_ms = std::time::SystemTime::now()
@@ -227,7 +237,11 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         }
         let _ = writeln!(buf, "master_replid:{}\r", runid_str);
         let _ = writeln!(buf, "master_repl_offset:{}\r", master_offset);
-        let backlog_active = if backlog_size > 0 && backlog_histlen > 0 { 1 } else { 0 };
+        let backlog_active = if backlog_size > 0 && backlog_histlen > 0 {
+            1
+        } else {
+            0
+        };
         let _ = writeln!(buf, "repl_backlog_active:{}\r", backlog_active);
         let _ = writeln!(buf, "repl_backlog_size:{}\r", backlog_size);
         let _ = writeln!(buf, "repl_backlog_first_byte_offset:{}\r", backlog_first);
@@ -261,11 +275,7 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         for i in 0..ctx.database_count() as u32 {
             let (keys, expires) = ctx.with_db_index(i, |db| (db.size(), db.expires_count()))?;
             if keys > 0 {
-                let _ = writeln!(
-                    buf,
-                    "db{}:keys={},expires={},avg_ttl=0\r",
-                    i, keys, expires
-                );
+                let _ = writeln!(buf, "db{}:keys={},expires={},avg_ttl=0\r", i, keys, expires);
             }
         }
         let _ = writeln!(buf, "\r");
@@ -294,7 +304,9 @@ fn ascii_eq_ignore_case(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    a.iter().zip(b.iter()).all(|(x, y)| ascii_lower(*x) == ascii_lower(*y))
+    a.iter()
+        .zip(b.iter())
+        .all(|(x, y)| ascii_lower(*x) == ascii_lower(*y))
 }
 
 fn ascii_lower(b: u8) -> u8 {

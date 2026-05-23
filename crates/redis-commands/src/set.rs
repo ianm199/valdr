@@ -190,9 +190,7 @@ pub fn sadd_command(ctx: &mut CommandContext) -> RedisResult<()> {
             if !obj.is_set() {
                 return Err(RedisError::wrong_type());
             }
-            let s = obj
-                .inline_set_mut()
-                .expect("is_set confirms set encoding");
+            let s = obj.inline_set_mut().expect("is_set confirms set encoding");
             let mut count: i64 = 0;
             for m in members {
                 if s.data.insert(m) {
@@ -537,9 +535,7 @@ pub fn smove_command(ctx: &mut CommandContext) -> RedisResult<()> {
         }
         None => {
             let mut obj = RedisObject::new_set();
-            let h = obj
-                .set_mut()
-                .expect("new_set constructs an Inline set");
+            let h = obj.set_mut().expect("new_set constructs an Inline set");
             h.insert(member);
             ctx.db_mut().set_key(dst_key.clone(), obj, 0);
         }
@@ -620,10 +616,7 @@ fn diff_sets(mut sets: Vec<HashSet<RedisString>>) -> HashSet<RedisString> {
 }
 
 /// Reply with an unordered array of the supplied members.
-fn reply_member_array(
-    ctx: &mut CommandContext,
-    members: HashSet<RedisString>,
-) -> RedisResult<()> {
+fn reply_member_array(ctx: &mut CommandContext, members: HashSet<RedisString>) -> RedisResult<()> {
     let collected: Vec<RedisString> = members.into_iter().collect();
     ctx.reply_array_header(collected.len())?;
     for m in collected {
@@ -633,11 +626,7 @@ fn reply_member_array(
 }
 
 /// Store `members` at `dst`, deleting `dst` when `members` is empty.
-fn store_set(
-    ctx: &mut CommandContext,
-    dst: RedisString,
-    members: HashSet<RedisString>,
-) -> i64 {
+fn store_set(ctx: &mut CommandContext, dst: RedisString, members: HashSet<RedisString>) -> i64 {
     if members.is_empty() {
         ctx.db_mut().sync_delete(&dst);
         return 0;
@@ -645,9 +634,7 @@ fn store_set(
     let len = members.len() as i64;
     let mut obj = RedisObject::new_set();
     {
-        let h = obj
-            .set_mut()
-            .expect("new_set constructs an Inline set");
+        let h = obj.set_mut().expect("new_set constructs an Inline set");
         for m in members {
             h.insert(m);
         }
@@ -694,9 +681,7 @@ pub fn sintercard_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let numkeys = parse_strict_i64(&numkeys_raw)
         .ok()
         .filter(|&n| n >= 1)
-        .ok_or_else(|| {
-            RedisError::runtime(b"ERR numkeys should be greater than 0")
-        })?;
+        .ok_or_else(|| RedisError::runtime(b"ERR numkeys should be greater than 0"))?;
     let numkeys = numkeys as usize;
     if numkeys > argc - 2 {
         return Err(RedisError::runtime(
@@ -715,9 +700,7 @@ pub fn sintercard_command(ctx: &mut CommandContext) -> RedisResult<()> {
             limit = parse_strict_i64(&limit_raw)
                 .ok()
                 .filter(|&n| n >= 0)
-                .ok_or_else(|| {
-                    RedisError::runtime(b"ERR LIMIT can't be negative")
-                })?;
+                .ok_or_else(|| RedisError::runtime(b"ERR LIMIT can't be negative"))?;
             j += 2;
         } else {
             return Err(RedisError::syntax(b"syntax error"));
@@ -785,21 +768,23 @@ pub fn sdiffstore_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
 /// SSCAN key cursor [MATCH pattern] [COUNT count]
 ///
-/// Linear-cursor iteration over the members of a set. Returns a two-element
-/// reply `[next_cursor, members]`, matching real Redis's wire shape. The
-/// cursor is a `u64` byte-offset into the snapshot taken at call time;
-/// the resize-safe reverse-binary cursor lands once the kvstore primitive
-/// is ported.
+/// Snapshot iteration over the members of a set. Returns a two-element reply
+/// `[next_cursor, members]`, matching real Redis's wire shape.
+///
+/// PORT NOTE: until the real kvstore/reverse-binary cursor primitive lands,
+/// SSCAN replies with every currently matching member in one call and cursor
+/// `0`. Redis/Valkey only treats COUNT as a work hint, so returning the full
+/// snapshot is legal and avoids dropping stable members when the set shrinks
+/// between cursor calls (the upstream issue #4906 regression).
 pub fn sscan_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
     if argc < 3 {
         return Err(RedisError::wrong_number_of_args(b"sscan"));
     }
     let key = ctx.arg_owned(1usize)?;
-    let cursor = parse_u64_cursor(ctx.arg(2)?.as_bytes())?;
+    let _cursor = parse_u64_cursor(ctx.arg(2)?.as_bytes())?;
 
     let mut pattern: Option<Vec<u8>> = None;
-    let mut count: i64 = 10;
     let mut j = 3usize;
     while j < argc {
         let opt = ctx.arg(j)?;
@@ -818,7 +803,6 @@ pub fn sscan_command(ctx: &mut CommandContext) -> RedisResult<()> {
             if n < 1 {
                 return Err(RedisError::syntax(b"syntax error"));
             }
-            count = n;
             j += 2;
         } else {
             return Err(RedisError::syntax(b"syntax error"));
@@ -829,13 +813,8 @@ pub fn sscan_command(ctx: &mut CommandContext) -> RedisResult<()> {
         None => Vec::new(),
         Some(h) => h.iter().cloned().collect(),
     };
-    let total = members.len() as u64;
-    let start = cursor as usize;
-    let stop = (start + count as usize).min(members.len());
-    let next_cursor: u64 = if stop as u64 >= total { 0 } else { stop as u64 };
-
     let mut matched: Vec<RedisString> = Vec::new();
-    for m in members.into_iter().skip(start).take(count as usize) {
+    for m in members {
         if let Some(ref pat) = pattern {
             if !glob_match(pat, m.as_bytes()) {
                 continue;
@@ -845,7 +824,7 @@ pub fn sscan_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
 
     ctx.reply_array_header(2usize)?;
-    ctx.reply_bulk(next_cursor.to_string().as_bytes())?;
+    ctx.reply_bulk(b"0")?;
     ctx.reply_array_header(matched.len())?;
     for m in matched {
         ctx.reply_bulk_string(m)?;
