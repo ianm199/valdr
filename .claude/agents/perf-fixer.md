@@ -1,6 +1,6 @@
 ---
 name: perf-fixer
-description: Makes bounded behavior or performance fixes under harness evidence. For Redis/Valkey, this role is allowed to change logic only inside the packet targets and must preserve drop-in semantics.
+description: Makes bounded behavior or performance fixes under harness evidence. For Redis/Valkey, this role changes the packet's primary work surface plus declared collateral and must preserve drop-in semantics.
 tools: Read, Edit, Bash, Grep
 model: sonnet
 ---
@@ -27,8 +27,11 @@ gates still pass.
   ownership for speed or convenience.
 - Do not edit pinned reference source, upstream TCL tests, normalizers, or
   benchmark scripts unless the packet explicitly lists them as targets.
-- Keep changes scoped to the packet target files. If the fix needs a new target,
-  make the smallest typed-artifact note explaining why.
+- Treat packet targets as the primary work surface, not as the whole semantic
+  boundary. If the evidence or upstream source proves the true owner is outside
+  the target list, do not force the behavior into the wrong file. Use declared
+  collateral when present; otherwise make the smallest packet-scope note and
+  stop so the packet can be widened before retrying.
 - No new `unsafe` unless the packet explicitly grants it and updates the unsafe
   budget.
 - Rust files you materially edit must keep a valid `PORT STATUS` trailer.
@@ -45,7 +48,9 @@ gates still pass.
    ```
 
 2. Read the upstream Valkey source for the command semantics.
-3. Read the Rust target implementation and identify the exact divergence.
+3. Read the Rust target implementation and identify the exact divergence. Also
+   name the canonical owner of the behavior before editing. If the canonical
+   owner is not a target or declared collateral, stop with a packet-scope miss.
 4. Make the smallest faithful fix.
 5. Run focused checks first, then broader gates:
 

@@ -61,7 +61,9 @@ tcl-frontier-v3-baseline
        └─ tcl-post-scripting-conversion-survey-v3
             └─ tcl-scripting-wait-waitaof-v3
                  └─ tcl-post-scripting-wait-survey-v3
-                      └─ tcl-core-expanded-survey-v2
+                      └─ tcl-scripting-cjson-v3
+                           └─ tcl-post-scripting-cjson-survey-v3
+                                └─ tcl-core-expanded-survey-v2
 ```
 
 ## SORT Frontier
@@ -87,25 +89,73 @@ encoding, and Lua reply-conversion paths. Do not special-case test names.
 
 ## Scripting Frontier
 
-Current failures in `reference/valkey/tests/unit/scripting.tcl`:
+Current status in `reference/valkey/tests/unit/scripting.tcl` after the
+WAIT/WAITAOF packet:
 
-- `EVAL - Scripts do not block on wait`
-- abort at `WAITAOF` unknown command during script/function mode
+- the script/runtime error boundary is RESP-safe again: `redis.call(...)`
+  runtime errors no longer leak Lua stack-trace newlines into the outer error
+  reply.
+- script-safe `WAIT` and `WAITAOF` now run through normal dispatch without
+  blocking in the current single-node envelope.
+- the focused scripting run now reaches `EVAL - JSON numeric decoding` and
+  aborts because the sandbox has no `cjson` global.
 
-Failure classes:
+Failure classes fixed in this wave:
 
-- `WAIT`/`WAITAOF` need script-safe nonblocking behavior. For the current
-  single-node non-replication envelope, returning zero is faithful enough for
-  these tests if the command path remains normal and explicit.
+- `WAIT` is no longer blocked inside redis.call/pcall; script-safe
+  nonblocking behavior uses existing dispatch + normal handler path.
+- `WAITAOF` is now known and executed through normal dispatch with script-safe
+  nonblocking replies in this single-node envelope.
+- Lua runtime errors from `redis.call` are converted into one-line RESP errors
+  before leaving EVAL/FUNCTION, preserving Tcl protocol framing.
+
+Packet-scope correction: `tcl-scripting-wait-waitaof-v3` originally named only
+`dispatch.rs`, `eval.rs`, and this doc as targets even though `replication.rs`
+is the canonical owner for `WAIT`/`WAITAOF`. That made the packet guide the
+Builder toward a wrong ownership move. The packet now explicitly includes
+`replication.rs`; `eval.rs` only owns the inner-script `deny_blocking` dispatch
+flag.
+
+General packet-scope rule from this failure: packet `targets` are the primary
+work surface, not the whole semantic boundary. A worker must identify the
+canonical owner before editing. If the owner is outside `targets` and outside
+declared collateral, the correct output is a packet-scope miss, not a fake
+implementation in the wrong file.
 
 Bronze status:
 
 - `47d7fbf` fixed the Lua reply conversion / selected-DB restoration packet.
-- The focused scripting survey now reaches the planned Silver frontier:
-  `EVAL - Scripts do not block on wait`, then aborts at unknown `WAITAOF`.
+- This packet carried the focused scripting survey past the planned Silver
+  frontier: `EVAL - Scripts do not block on wait` and the following `WAITAOF`
+  dispatch point now pass under the current single-node envelope.
 
-Next packet target: fix script-safe WAIT/WAITAOF behavior without broad
-replication work or dispatcher bypasses.
+Latest packet target done: script-safe WAIT/WAITAOF handled.
+
+Latest focused proof command, using a custom port range because another
+long-running TCL survey held the default range:
+
+```bash
+cargo build --bin redis-server
+cd reference/valkey
+VALKEY_BIN_DIR=$PWD/../../target/debug \
+  tclsh tests/test_helper.tcl --single unit/scripting --clients 1 \
+  --skip-leaks --tags "-needs:repl -needs:debug -external:skip" \
+  --quiet --baseport 31111 --portcount 8000
+```
+
+Observed next abort:
+
+```text
+EVAL - JSON numeric decoding
+ERR [string "function_library"]:4: attempt to index global 'cjson' (a nil value).
+```
+
+Current next frontier after this wave:
+
+- `unit/scripting`: embedded Redis Lua libraries, starting with a minimal
+  Redis-compatible `cjson` table in the Lua sandbox.
+- `unit/sort`: still the five concrete SORT failures above unless that sibling
+  packet has already landed.
 
 ## Run Discipline
 

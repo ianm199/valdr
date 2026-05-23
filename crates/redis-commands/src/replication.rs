@@ -10,8 +10,8 @@
 //! per-client outbound mpsc senders — the same writer-thread mechanism that
 //! PUBLISH and BLPOP wakes ride on.
 
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use redis_core::blocked_keys::{
@@ -131,9 +131,8 @@ pub fn replconf_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
                 return Err(RedisError::wrong_number_of_args(b"replconf"));
             }
             let port_str = ctx.arg_owned(2usize)?;
-            let port = parse_port(port_str.as_bytes()).ok_or_else(|| {
-                RedisError::runtime(b"ERR invalid port number".to_vec())
-            })?;
+            let port = parse_port(port_str.as_bytes())
+                .ok_or_else(|| RedisError::runtime(b"ERR invalid port number".to_vec()))?;
             let repl = global_replication_state();
             let client_id = ctx.client_ref().id();
             {
@@ -147,9 +146,7 @@ pub fn replconf_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             }
             ctx.reply_simple_string(b"OK")
         }
-        b"ip-address" => {
-            ctx.reply_simple_string(b"OK")
-        }
+        b"ip-address" => ctx.reply_simple_string(b"OK"),
         b"capa" => {
             let repl = global_replication_state();
             let client_id = ctx.client_ref().id();
@@ -195,9 +192,7 @@ pub fn replconf_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             maybe_wake_wait_clients();
             Ok(())
         }
-        b"getack" => {
-            ctx.reply_simple_string(b"OK")
-        }
+        b"getack" => ctx.reply_simple_string(b"OK"),
         _ => {
             let mut msg = b"ERR Unknown REPLCONF subcommand: '".to_vec();
             msg.extend_from_slice(sub.as_bytes());
@@ -219,18 +214,21 @@ pub fn wait_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ctx.arg_count() != 3 {
         return Err(RedisError::wrong_number_of_args(b"wait"));
     }
-    let numreplicas_str = ctx.arg_owned(1usize)?;
-    let timeout_str = ctx.arg_owned(2usize)?;
-    let numreplicas = parse_i64(numreplicas_str.as_bytes())
+
+    let numreplicas = parse_i64(ctx.arg(1usize)?.as_bytes())
         .map_err(|_| RedisError::runtime(b"ERR value is not an integer or out of range".to_vec()))?
         as usize;
-    let timeout_ms = parse_i64(timeout_str.as_bytes())
-        .map_err(|_| RedisError::runtime(b"ERR value is not an integer or out of range".to_vec()))?;
+    let timeout_ms = parse_i64(ctx.arg(2usize)?.as_bytes()).map_err(|_| {
+        RedisError::runtime(b"ERR value is not an integer or out of range".to_vec())
+    })?;
 
     let repl = global_replication_state();
     let target_offset = repl.master_offset();
-
     let current_acked = count_acked_replicas(&repl, target_offset);
+
+    if ctx.client_ref().flag_deny_blocking() {
+        return ctx.reply_integer(current_acked as i64);
+    }
 
     if numreplicas == 0 || current_acked >= numreplicas {
         return ctx.reply_integer(current_acked as i64);
@@ -283,6 +281,47 @@ pub fn wait_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     }
     ctx.client_mut().blocked_on_keys = true;
     Ok(())
+}
+
+/// `WAITAOF numlocal numreplicas timeout`
+///
+/// Minimal non-replication-safe implementation:
+/// returns a two-element array immediately without blocking.
+pub fn waitaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
+    if ctx.arg_count() != 4 {
+        return Err(RedisError::wrong_number_of_args(b"waitaof"));
+    }
+
+    let numlocal = parse_i64(ctx.arg(1usize)?.as_bytes()).map_err(|_| {
+        RedisError::runtime(b"ERR value is not an integer or out of range".to_vec())
+    })?;
+    if !(0..=1).contains(&numlocal) {
+        return Err(RedisError::runtime(
+            b"ERR Value for numlocal is out of range [0,1]",
+        ));
+    }
+
+    let _numreplicas = parse_i64(ctx.arg(2usize)?.as_bytes()).map_err(|_| {
+        RedisError::runtime(b"ERR value is not an integer or out of range".to_vec())
+    })?;
+    let _timeout = parse_i64(ctx.arg(3usize)?.as_bytes()).map_err(|_| {
+        RedisError::runtime(b"ERR value is not an integer or out of range".to_vec())
+    })?;
+
+    if numlocal > 0 && !ctx.live_config().appendonly() {
+        return Err(RedisError::runtime(
+            b"ERR WAITAOF cannot be used when numlocal is set but appendonly is disabled.",
+        ));
+    }
+
+    let repl = global_replication_state();
+    let target_offset = repl.master_offset();
+    let ackreplicas = count_acked_replicas(&repl, target_offset) as i64;
+    let acklocal = 0;
+
+    ctx.reply_array_header(2)?;
+    ctx.reply_integer(acklocal)?;
+    ctx.reply_integer(ackreplicas)
 }
 
 /// Return the count of replicas whose acknowledged offset is `>= target`.
@@ -378,7 +417,13 @@ fn handle_psync(
 
     if can_partial {
         if let Some(sender) = outbound {
-            register_replica(&repl, client_id, ReplicaState::Online, provided_offset, sender);
+            register_replica(
+                &repl,
+                client_id,
+                ReplicaState::Online,
+                provided_offset,
+                sender,
+            );
         }
         let line = continue_reply(our_runid);
         ctx.client_mut().reply_buf.extend_from_slice(&line);
@@ -497,8 +542,9 @@ fn register_replica(
 /// sentinel and is accepted verbatim. Other negatives produce a protocol
 /// error to match real Redis behaviour.
 fn parse_offset(bytes: &[u8]) -> RedisResult<i64> {
-    let s = std::str::from_utf8(bytes)
-        .map_err(|_| RedisError::runtime(b"ERR value is not an integer or out of range".to_vec()))?;
+    let s = std::str::from_utf8(bytes).map_err(|_| {
+        RedisError::runtime(b"ERR value is not an integer or out of range".to_vec())
+    })?;
     s.parse::<i64>()
         .map_err(|_| RedisError::runtime(b"ERR value is not an integer or out of range".to_vec()))
 }
@@ -574,6 +620,34 @@ mod tests {
         let reply = c.drain_reply();
         assert!(reply.starts_with(b"+FULLRESYNC "));
         assert!(c.is_replica);
+    }
+
+    #[test]
+    fn wait_deny_blocking_returns_current_acks() {
+        let mut c = Client::new(3);
+        c.set_args(vec![
+            RedisString::from_bytes(b"WAIT"),
+            RedisString::from_bytes(b"1"),
+            RedisString::from_bytes(b"0"),
+        ]);
+        c.set_flag_deny_blocking(true);
+        let mut ctx = CommandContext::new(&mut c);
+        wait_command(&mut ctx).unwrap();
+        assert_eq!(c.drain_reply(), b":0\r\n");
+    }
+
+    #[test]
+    fn waitaof_single_node_returns_progress_pair() {
+        let mut c = Client::new(4);
+        c.set_args(vec![
+            RedisString::from_bytes(b"WAITAOF"),
+            RedisString::from_bytes(b"0"),
+            RedisString::from_bytes(b"1"),
+            RedisString::from_bytes(b"0"),
+        ]);
+        let mut ctx = CommandContext::new(&mut c);
+        waitaof_command(&mut ctx).unwrap();
+        assert_eq!(c.drain_reply(), b"*2\r\n:0\r\n:0\r\n");
     }
 }
 

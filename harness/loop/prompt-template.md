@@ -17,16 +17,35 @@ Packet: **`{{PACKET_ID}}`**
 - Targeted capabilities: {{CAPABILITIES}}
 - Dependencies: {{DEPENDENCIES_STATEMENT}}
 
+# Scope Model
+
+The target files are the packet's primary work surface. They are not a promise
+that all relevant ownership lives there. Before editing, identify the canonical
+owner of the behavior from source, evidence, local module boundaries, and any
+architecture docs. If that owner is outside the target list:
+
+- Use it if it is listed as allowed collateral.
+- If it is not listed, do not force behavior into the wrong target file. Leave a
+  concise packet-scope note in the packet doc or final response and stop so the
+  queue can be widened before retrying.
+
+Guidance should constrain the search; it must not strangle the architecture.
+
 # Required Inputs Before Writing
 
 1. `PORTING.md`.
 2. `harness/type-vocabulary.tsv`.
 3. `harness/work-packets.jsonl`, especially the full row for `{{PACKET_ID}}`.
 4. `harness/envelope.toml`.
-5. `harness/architecture/decisions/runtime-ownership.md`.
-6. `docs/RUNTIME_OWNERSHIP_PLAN.md`, `docs/BENCHMARKS.md`, and `docs/RUNTIME_OWNER_HARNESS_RUN.md`.
-7. The target files listed above.
-8. The source ranges listed above, if this packet maps to upstream source.
+5. The target files listed above.
+6. The source ranges listed above, if this packet maps to upstream source.
+7. Architecture and evidence docs relevant to this packet's resources:
+   - runtime-owner packets: `harness/architecture/decisions/runtime-ownership.md`,
+     `docs/RUNTIME_OWNERSHIP_PLAN.md`, `docs/BENCHMARKS.md`, and
+     `docs/RUNTIME_OWNER_HARNESS_RUN.md`;
+   - TCL conformance packets: `docs/TCL_NEXT_FRONTIER_20260523.md`,
+     `docs/TCL_FULL_SUITE_GOAL_20260523.md`, and latest TCL survey evidence;
+   - performance packets: latest benchmark/profile result named in the packet.
 {{ADDITIONAL_INPUTS}}
 
 # Hard Rules
@@ -40,9 +59,9 @@ Packet: **`{{PACKET_ID}}`**
   runner output only; the harness will turn that into authoritative evidence.
 - Do not invent duplicate canonical types or APIs. Use the vocabulary files; escalate cross-cutting questions with `TODO(architect):`.
 - Keep changes scoped to the packet target files and declared collateral. If the
-  packet needs another file, make the smallest typed-artifact edit that explains
-  why and stop after preserving evidence; the packet boundary should be widened
-  before the loop retries.
+  packet needs another file, make the smallest typed-artifact note that explains
+  the true owner and stop after preserving evidence; the packet boundary should
+  be widened before the loop retries.
 - Do not run workspace-wide `cargo fmt`. Use `cargo fmt --check` or format only the packet target files; broad formatting churn is a failed packet.
 - Prefer faithful semantics over local speed. Performance work must keep conformance gates green.
 - No new `unsafe` unless the packet explicitly grants it and updates the unsafe budget with a narrow rationale.
@@ -59,7 +78,8 @@ A faster non-drop-in Redis is a failed packet.
 
 1. Read the role file and packet row.
 2. Read the relevant architecture docs and current benchmark/oracle evidence.
-3. State the subsystem boundary you are changing in your notes before editing.
+3. State the subsystem boundary and canonical owner you are changing in your
+   notes before editing.
 4. Make the smallest implementation or typed-artifact change that satisfies the packet.
 5. Run focused checks first, then broader gates.
 6. Stop when this packet is complete. Do not opportunistically continue into the next packet.

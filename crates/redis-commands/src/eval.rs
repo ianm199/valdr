@@ -363,6 +363,41 @@ fn lua_to_resp(value: &LuaValue, out: &mut Vec<u8>) {
     }
 }
 
+fn runtime_error_payload(message: &str) -> Vec<u8> {
+    let without_trace = message
+        .split_once("\nstack traceback")
+        .map(|(head, _)| head)
+        .unwrap_or(message);
+    let first_line = without_trace
+        .split(['\r', '\n'])
+        .next()
+        .unwrap_or("")
+        .trim();
+    let mut normalized = first_line.to_owned();
+    if normalized.is_empty() {
+        normalized = "ERR Error running script".to_string();
+    }
+    if normalized.starts_with("ERR unknown command") {
+        normalized.replace_range(4..11, "Unknown");
+    }
+    if normalized.contains("wrong number of arguments") {
+        normalized = normalized.replace("wrong number of arguments", "wrong number of args");
+    }
+
+    let bytes = normalized.as_bytes();
+    let first_token_is_error_code = bytes
+        .iter()
+        .take_while(|b| **b != b' ')
+        .all(u8::is_ascii_uppercase);
+
+    let mut out = Vec::new();
+    if !bytes.starts_with(b"ERR ") && !first_token_is_error_code {
+        out.extend_from_slice(b"ERR ");
+    }
+    out.extend_from_slice(bytes);
+    out
+}
+
 /// Coerce one Lua argument passed to `redis.call(...)` into the byte
 /// string the dispatch table expects. Integers/numbers are stringified
 /// using Lua's `tostring`-compatible rule (integers stay integral).
@@ -426,7 +461,7 @@ fn run_inner_command(
 ) -> Result<ReplyValue, RedisError> {
     if args.is_empty() {
         return Err(RedisError::runtime(
-            b"ERR wrong number of args calling Redis command",
+            b"Please specify at least one argument for this call",
         ));
     }
 
@@ -439,8 +474,12 @@ fn run_inner_command(
         .collect();
     ctx.client_mut().set_args(new_argv);
 
+    let old_deny_blocking = ctx.client_ref().flag_deny_blocking();
+    ctx.client_mut().set_flag_deny_blocking(true);
+
     let name_bytes = args[0].clone();
     let dispatch_result = dispatch_command_name(ctx, &name_bytes);
+    ctx.client_mut().set_flag_deny_blocking(old_deny_blocking);
 
     let raw_reply: Vec<u8> = {
         let buf = &mut ctx.client_mut().reply_buf;
@@ -1108,9 +1147,7 @@ fn run_loaded_function(
             ctx.client_mut().reply_buf.extend_from_slice(&out);
             Ok(())
         }
-        Err(LuaError::RuntimeError(msg)) => {
-            Err(RedisError::runtime(format!("ERR {}", msg).into_bytes()))
-        }
+        Err(LuaError::RuntimeError(msg)) => Err(RedisError::runtime(runtime_error_payload(&msg))),
         Err(LuaError::SyntaxError { message, .. }) => Err(RedisError::runtime(
             format!("ERR Error compiling function: {}", message).into_bytes(),
         )),
@@ -1339,9 +1376,7 @@ fn run_script(
             ctx.client_mut().reply_buf.extend_from_slice(&out);
             Ok(())
         }
-        Err(LuaError::RuntimeError(msg)) => {
-            Err(RedisError::runtime(format!("ERR {}", msg).into_bytes()))
-        }
+        Err(LuaError::RuntimeError(msg)) => Err(RedisError::runtime(runtime_error_payload(&msg))),
         Err(LuaError::SyntaxError { message, .. }) => Err(RedisError::runtime(
             format!("ERR Error compiling script: {}", message).into_bytes(),
         )),
@@ -1644,6 +1679,83 @@ mod tests {
         eval_command(&mut ctx).unwrap();
         assert_eq!(client.db_index, 10);
         assert_eq!(client.drain_reply(), b"+OK\r\n");
+    }
+
+    #[test]
+    fn eval_redis_call_error_is_single_resp_error_line() {
+        let mut client = redis_core::Client::new(8);
+        client.set_args(vec![
+            RedisString::from_bytes(b"EVAL"),
+            RedisString::from_bytes(b"redis.call('nosuchcommand')"),
+            RedisString::from_bytes(b"0"),
+        ]);
+        let mut ctx = CommandContext::new(&mut client);
+        let err = eval_command(&mut ctx).unwrap_err();
+        let payload = err.to_resp_payload();
+        let bytes = payload.as_bytes();
+        assert!(bytes.starts_with(b"ERR "));
+        assert!(bytes
+            .windows(b"unknown command".len())
+            .any(|w| w.eq_ignore_ascii_case(b"unknown command")));
+        assert!(!bytes.contains(&b'\n'));
+        assert!(!bytes.contains(&b'\r'));
+        assert!(!bytes
+            .windows(b"stack traceback".len())
+            .any(|w| w == b"stack traceback"));
+    }
+
+    #[test]
+    fn run_inner_wait_is_script_safe() {
+        let mut client = redis_core::Client::new(1);
+        let mut outer: redis_core::Client = redis_core::Client::new(1);
+        client.set_args(vec![
+            RedisString::from_bytes(b"SET"),
+            RedisString::from_bytes(b"x"),
+            RedisString::from_bytes(b"1"),
+        ]);
+        let original_args = client.argv.clone();
+        let mut ctx = CommandContext::new(&mut client);
+        let reply =
+            run_inner_command(&mut ctx, &[b"WAIT".to_vec(), b"1".to_vec(), b"0".to_vec()]).unwrap();
+
+        match reply {
+            ReplyValue::Integer(v) => assert_eq!(v, 0),
+            _ => panic!("expected integer reply from WAIT inside script"),
+        }
+        assert_eq!(client.argv, original_args);
+
+        let mut wait_ctx = CommandContext::new(&mut outer);
+        let wait_reply = run_inner_command(
+            &mut wait_ctx,
+            &[
+                b"WAITAOF".to_vec(),
+                b"0".to_vec(),
+                b"1".to_vec(),
+                b"0".to_vec(),
+            ],
+        )
+        .unwrap();
+        match wait_reply {
+            ReplyValue::Array(items) => {
+                assert_eq!(items.len(), 2);
+                assert!(matches!(items[0], ReplyValue::Integer(0)));
+                assert!(matches!(items[1], ReplyValue::Integer(0)));
+            }
+            _ => panic!("expected two-item array reply from WAITAOF inside script"),
+        }
+
+        wait_ctx.client_mut().set_args(vec![
+            RedisString::from_bytes(b"waitaof"),
+            RedisString::from_bytes(b"0"),
+            RedisString::from_bytes(b"1"),
+            RedisString::from_bytes(b"0"),
+        ]);
+        let direct = crate::dispatch::dispatch_command_name(&mut wait_ctx, b"waitaof");
+        if direct.is_ok() {
+            assert_eq!(wait_ctx.client_mut().drain_reply(), b"*2\r\n:0\r\n:0\r\n");
+        } else {
+            panic!("WAITAOF handler should be registered");
+        }
     }
 
     #[test]

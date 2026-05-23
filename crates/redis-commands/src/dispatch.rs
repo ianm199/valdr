@@ -1605,6 +1605,10 @@ pub static HANDLERS: &[DispatchEntry] = &[
         name: b"WAIT",
         handler: crate::replication::wait_command,
     },
+    DispatchEntry {
+        name: b"WAITAOF",
+        handler: crate::replication::waitaof_command,
+    },
     // ── BLOOM FILTER (RedisBloom BF.* — overnight agent) ──────────────────
     DispatchEntry {
         name: b"BF.RESERVE",
