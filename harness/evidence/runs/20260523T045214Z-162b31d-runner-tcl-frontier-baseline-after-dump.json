@@ -1,0 +1,822 @@
+{
+  "captured_ts": "2026-05-23T04:52:36.238268Z",
+  "harness_context": {
+    "claim_level": "telemetry",
+    "commit": "162b31d",
+    "git_dirty": true,
+    "git_status_short": [
+      " M harness/evidence/ledger.jsonl"
+    ],
+    "resources": [
+      "cargo-target",
+      "oracle-results",
+      "port-range:21111-29111"
+    ],
+    "run_id": "loop-d531d6574af7efd0",
+    "target_commit": "162b31d8c75171e7d290fdde4a0523c2d513306c",
+    "tree_hash": "e153969c58db9153e69bed4f06d9bd8033cea80f2f76700c942a2ef6032cd8e3"
+  },
+  "kind": "runner_result",
+  "packet": "tcl-frontier-baseline-after-dump",
+  "result": {
+    "artifacts": [
+      {
+        "kind": "tcl-survey-log",
+        "path": "harness/oracle/results/tcl-survey/20260523T045215Z/setup.json"
+      },
+      {
+        "kind": "tcl-survey-log",
+        "path": "harness/oracle/results/tcl-survey/20260523T045215Z/unit__bitops.json",
+        "test": "unit/bitops"
+      },
+      {
+        "kind": "tcl-survey-log",
+        "path": "harness/oracle/results/tcl-survey/20260523T045215Z/unit__bitfield.json",
+        "test": "unit/bitfield"
+      },
+      {
+        "kind": "tcl-survey-log",
+        "path": "harness/oracle/results/tcl-survey/20260523T045215Z/unit__geo.json",
+        "test": "unit/geo"
+      },
+      {
+        "kind": "tcl-survey-log",
+        "path": "harness/oracle/results/tcl-survey/20260523T045215Z/unit__hyperloglog.json",
+        "test": "unit/hyperloglog"
+      },
+      {
+        "kind": "tcl-survey-log",
+        "path": "harness/oracle/results/tcl-survey/20260523T045215Z/unit__scripting.json",
+        "test": "unit/scripting"
+      },
+      {
+        "kind": "tcl-survey-log",
+        "path": "harness/oracle/results/tcl-survey/20260523T045215Z/unit__scan.json",
+        "test": "unit/scan"
+      },
+      {
+        "kind": "tcl-survey-log",
+        "path": "harness/oracle/results/tcl-survey/20260523T045215Z/unit__sort.json",
+        "test": "unit/sort"
+      },
+      {
+        "kind": "tcl-survey-log",
+        "path": "harness/oracle/results/tcl-survey/20260523T045215Z/unit__dump.json",
+        "test": "unit/dump"
+      },
+      {
+        "kind": "tcl-survey-log",
+        "path": "harness/oracle/results/tcl-survey/20260523T045215Z/unit__info.json",
+        "test": "unit/info"
+      },
+      {
+        "kind": "tcl-survey-log",
+        "path": "harness/oracle/results/tcl-survey/20260523T045215Z/unit__slowlog.json",
+        "test": "unit/slowlog"
+      }
+    ],
+    "claim_level": "telemetry",
+    "evidence": {
+      "clients": 1,
+      "deny_tags": [
+        "needs:repl",
+        "needs:debug",
+        "external:skip"
+      ],
+      "files": [
+        {
+          "abort_test": null,
+          "elapsed_s": 1.2284719171002507,
+          "exception": null,
+          "failed": 0,
+          "failures": [],
+          "log": "harness/oracle/results/tcl-survey/20260523T045215Z/unit__bitops.json",
+          "passed": 50,
+          "returncode": 0,
+          "test": "unit/bitops",
+          "timed_out": false,
+          "total": 50
+        },
+        {
+          "abort_test": null,
+          "elapsed_s": 0.529917582985945,
+          "exception": null,
+          "failed": 0,
+          "failures": [],
+          "log": "harness/oracle/results/tcl-survey/20260523T045215Z/unit__bitfield.json",
+          "passed": 18,
+          "returncode": 0,
+          "test": "unit/bitfield",
+          "timed_out": false,
+          "total": 18
+        },
+        {
+          "abort_test": null,
+          "elapsed_s": 13.75898258399684,
+          "exception": null,
+          "failed": 0,
+          "failures": [],
+          "log": "harness/oracle/results/tcl-survey/20260523T045215Z/unit__geo.json",
+          "passed": 71,
+          "returncode": 0,
+          "test": "unit/geo",
+          "timed_out": false,
+          "total": 71
+        },
+        {
+          "abort_test": "HyperLogLogs are promote from sparse to dense",
+          "elapsed_s": 0.229287541937083,
+          "exception": "ERR unknown command 'pfdebug'.",
+          "failed": null,
+          "failures": [
+            "HyperLogLog self test passes in tests/unit/hyperloglog.tcl"
+          ],
+          "log": "harness/oracle/results/tcl-survey/20260523T045215Z/unit__hyperloglog.json",
+          "passed": null,
+          "returncode": 1,
+          "test": "unit/hyperloglog",
+          "timed_out": false,
+          "total": 0
+        },
+        {
+          "abort_test": "EVAL - Does Lua interpreter replies to our requests?",
+          "elapsed_s": 0.23697862506378442,
+          "exception": "ERR Unknown FUNCTION subcommand: load.",
+          "failed": null,
+          "failures": [],
+          "log": "harness/oracle/results/tcl-survey/20260523T045215Z/unit__scripting.json",
+          "passed": null,
+          "returncode": 1,
+          "test": "unit/scripting",
+          "timed_out": false,
+          "total": 0
+        },
+        {
+          "abort_test": null,
+          "elapsed_s": 4.266756625031121,
+          "exception": null,
+          "failed": 0,
+          "failures": [],
+          "log": "harness/oracle/results/tcl-survey/20260523T045215Z/unit__scan.json",
+          "passed": 21,
+          "returncode": 0,
+          "test": "unit/scan",
+          "timed_out": false,
+          "total": 21
+        },
+        {
+          "abort_test": "$title: SORT BY key",
+          "elapsed_s": 0.23085283394902945,
+          "exception": "ERR unknown command 'sort'.",
+          "failed": null,
+          "failures": [],
+          "log": "harness/oracle/results/tcl-survey/20260523T045215Z/unit__sort.json",
+          "passed": null,
+          "returncode": 1,
+          "test": "unit/sort",
+          "timed_out": false,
+          "total": 0
+        },
+        {
+          "abort_test": null,
+          "elapsed_s": 0.24263837502803653,
+          "exception": null,
+          "failed": 0,
+          "failures": [],
+          "log": "harness/oracle/results/tcl-survey/20260523T045215Z/unit__dump.json",
+          "passed": 13,
+          "returncode": 0,
+          "test": "unit/dump",
+          "timed_out": false,
+          "total": 13
+        },
+        {
+          "abort_test": null,
+          "elapsed_s": 0.07403120794333518,
+          "exception": null,
+          "failed": 0,
+          "failures": [],
+          "log": "harness/oracle/results/tcl-survey/20260523T045215Z/unit__info.json",
+          "passed": 0,
+          "returncode": 0,
+          "test": "unit/info",
+          "timed_out": false,
+          "total": 0
+        },
+        {
+          "abort_test": "SLOWLOG - the commands in script are recorded normally - is_eval: $is_eval",
+          "elapsed_s": 0.25363391707651317,
+          "exception": "ERR Unknown FUNCTION subcommand: load.",
+          "failed": null,
+          "failures": [
+            "SLOWLOG - Rewritten commands are logged as their original command in tests/unit/slowlog.tcl",
+            "SLOWLOG - count must be >= -1 in tests/unit/slowlog.tcl",
+            "SLOWLOG - blocking command is reported only after unblocked in tests/unit/slowlog.tcl"
+          ],
+          "log": "harness/oracle/results/tcl-survey/20260523T045215Z/unit__slowlog.json",
+          "passed": null,
+          "returncode": 1,
+          "test": "unit/slowlog",
+          "timed_out": false,
+          "total": 0
+        }
+      ],
+      "harness_context": {
+        "claim_level": "telemetry",
+        "commit": "162b31d",
+        "git_dirty": true,
+        "git_status_short": [
+          " M harness/evidence/ledger.jsonl"
+        ],
+        "resources": [
+          "cargo-target",
+          "oracle-results",
+          "port-range:21111-29111"
+        ],
+        "run_id": "loop-d531d6574af7efd0",
+        "target_commit": "162b31d8c75171e7d290fdde4a0523c2d513306c",
+        "tree_hash": "e153969c58db9153e69bed4f06d9bd8033cea80f2f76700c942a2ef6032cd8e3"
+      },
+      "json_command": {
+        "command": [
+          "python3",
+          "harness/oracle/tcl-survey.py",
+          "--skip-build",
+          "--timeout-s",
+          "90",
+          "--files",
+          "unit/bitops,unit/bitfield,unit/geo,unit/hyperloglog,unit/scripting,unit/scan,unit/sort,unit/dump,unit/info,unit/slowlog"
+        ],
+        "cwd": ".",
+        "resources": [
+          "oracle-results",
+          "cargo-target",
+          "port-range:21111-29111"
+        ],
+        "stderr": ""
+      },
+      "kind": "tcl_survey",
+      "run_id": "20260523T045215Z",
+      "setup": {
+        "cmd": [
+          "bash",
+          "harness/oracle/setup_tcl_runner.sh",
+          "--skip-build"
+        ],
+        "elapsed_s": 0.009740667068399489,
+        "returncode": 0,
+        "timed_out": false
+      },
+      "timeout_s": 90
+    },
+    "measurements": [
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_completed",
+        "name": "unit/bitops",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/bitops"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_timeout",
+        "name": "unit/bitops",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/bitops"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_no_summary",
+        "name": "unit/bitops",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/bitops"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_pass_count",
+        "name": "unit/bitops",
+        "target": "rust-vs-reference",
+        "test": "unit/bitops",
+        "unit": "tests",
+        "value": 50
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_fail_count",
+        "name": "unit/bitops",
+        "target": "rust-vs-reference",
+        "test": "unit/bitops",
+        "unit": "tests",
+        "value": 0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_total_count",
+        "name": "unit/bitops",
+        "target": "rust-vs-reference",
+        "test": "unit/bitops",
+        "unit": "tests",
+        "value": 50
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 50,
+        "kind": "official",
+        "metric": "tcl_file_pass_ratio",
+        "name": "unit/bitops",
+        "numerator": 50,
+        "target": "rust-vs-reference",
+        "test": "unit/bitops",
+        "unit": "pass/total",
+        "value": 1.0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_completed",
+        "name": "unit/bitfield",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/bitfield"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_timeout",
+        "name": "unit/bitfield",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/bitfield"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_no_summary",
+        "name": "unit/bitfield",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/bitfield"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_pass_count",
+        "name": "unit/bitfield",
+        "target": "rust-vs-reference",
+        "test": "unit/bitfield",
+        "unit": "tests",
+        "value": 18
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_fail_count",
+        "name": "unit/bitfield",
+        "target": "rust-vs-reference",
+        "test": "unit/bitfield",
+        "unit": "tests",
+        "value": 0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_total_count",
+        "name": "unit/bitfield",
+        "target": "rust-vs-reference",
+        "test": "unit/bitfield",
+        "unit": "tests",
+        "value": 18
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 18,
+        "kind": "official",
+        "metric": "tcl_file_pass_ratio",
+        "name": "unit/bitfield",
+        "numerator": 18,
+        "target": "rust-vs-reference",
+        "test": "unit/bitfield",
+        "unit": "pass/total",
+        "value": 1.0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_completed",
+        "name": "unit/geo",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/geo"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_timeout",
+        "name": "unit/geo",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/geo"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_no_summary",
+        "name": "unit/geo",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/geo"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_pass_count",
+        "name": "unit/geo",
+        "target": "rust-vs-reference",
+        "test": "unit/geo",
+        "unit": "tests",
+        "value": 71
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_fail_count",
+        "name": "unit/geo",
+        "target": "rust-vs-reference",
+        "test": "unit/geo",
+        "unit": "tests",
+        "value": 0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_total_count",
+        "name": "unit/geo",
+        "target": "rust-vs-reference",
+        "test": "unit/geo",
+        "unit": "tests",
+        "value": 71
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 71,
+        "kind": "official",
+        "metric": "tcl_file_pass_ratio",
+        "name": "unit/geo",
+        "numerator": 71,
+        "target": "rust-vs-reference",
+        "test": "unit/geo",
+        "unit": "pass/total",
+        "value": 1.0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_completed",
+        "name": "unit/hyperloglog",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/hyperloglog"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_timeout",
+        "name": "unit/hyperloglog",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/hyperloglog"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_no_summary",
+        "name": "unit/hyperloglog",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/hyperloglog"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_completed",
+        "name": "unit/scripting",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/scripting"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_timeout",
+        "name": "unit/scripting",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/scripting"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_no_summary",
+        "name": "unit/scripting",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/scripting"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_completed",
+        "name": "unit/scan",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/scan"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_timeout",
+        "name": "unit/scan",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/scan"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_no_summary",
+        "name": "unit/scan",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/scan"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_pass_count",
+        "name": "unit/scan",
+        "target": "rust-vs-reference",
+        "test": "unit/scan",
+        "unit": "tests",
+        "value": 21
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_fail_count",
+        "name": "unit/scan",
+        "target": "rust-vs-reference",
+        "test": "unit/scan",
+        "unit": "tests",
+        "value": 0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_total_count",
+        "name": "unit/scan",
+        "target": "rust-vs-reference",
+        "test": "unit/scan",
+        "unit": "tests",
+        "value": 21
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 21,
+        "kind": "official",
+        "metric": "tcl_file_pass_ratio",
+        "name": "unit/scan",
+        "numerator": 21,
+        "target": "rust-vs-reference",
+        "test": "unit/scan",
+        "unit": "pass/total",
+        "value": 1.0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_completed",
+        "name": "unit/sort",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/sort"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_timeout",
+        "name": "unit/sort",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/sort"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_no_summary",
+        "name": "unit/sort",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/sort"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_completed",
+        "name": "unit/dump",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/dump"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_timeout",
+        "name": "unit/dump",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/dump"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_no_summary",
+        "name": "unit/dump",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/dump"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_pass_count",
+        "name": "unit/dump",
+        "target": "rust-vs-reference",
+        "test": "unit/dump",
+        "unit": "tests",
+        "value": 13
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_fail_count",
+        "name": "unit/dump",
+        "target": "rust-vs-reference",
+        "test": "unit/dump",
+        "unit": "tests",
+        "value": 0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_total_count",
+        "name": "unit/dump",
+        "target": "rust-vs-reference",
+        "test": "unit/dump",
+        "unit": "tests",
+        "value": 13
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 13,
+        "kind": "official",
+        "metric": "tcl_file_pass_ratio",
+        "name": "unit/dump",
+        "numerator": 13,
+        "target": "rust-vs-reference",
+        "test": "unit/dump",
+        "unit": "pass/total",
+        "value": 1.0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_completed",
+        "name": "unit/info",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/info"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_timeout",
+        "name": "unit/info",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/info"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_no_summary",
+        "name": "unit/info",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/info"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_pass_count",
+        "name": "unit/info",
+        "target": "rust-vs-reference",
+        "test": "unit/info",
+        "unit": "tests",
+        "value": 0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_fail_count",
+        "name": "unit/info",
+        "target": "rust-vs-reference",
+        "test": "unit/info",
+        "unit": "tests",
+        "value": 0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_total_count",
+        "name": "unit/info",
+        "target": "rust-vs-reference",
+        "test": "unit/info",
+        "unit": "tests",
+        "value": 0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_completed",
+        "name": "unit/slowlog",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/slowlog"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_timeout",
+        "name": "unit/slowlog",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/slowlog"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_no_summary",
+        "name": "unit/slowlog",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/slowlog"
+      }
+    ],
+    "method": "official-suite",
+    "runner_id": "tcl-survey-unswept",
+    "schema_version": 1,
+    "status": "pass",
+    "summary": "TCL survey: 10 files, 173 passed tests, 0 failed tests, 0 timed out, 4 without summary",
+    "surface": "correctness"
+  },
+  "role": "runner"
+}
