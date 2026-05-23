@@ -129,7 +129,11 @@ pub(crate) fn check_unsigned_bitfield_overflow(
     bits: u64,
     owtype: OverflowType,
 ) -> (i32, u64) {
-    let max: u64 = if bits == 64 { u64::MAX } else { (1u64 << bits) - 1 };
+    let max: u64 = if bits == 64 {
+        u64::MAX
+    } else {
+        (1u64 << bits) - 1
+    };
     let maxincr = (max - value) as i64;
     let minincr = -(value as i64);
 
@@ -164,7 +168,11 @@ pub(crate) fn check_signed_bitfield_overflow(
     bits: u64,
     owtype: OverflowType,
 ) -> (i32, i64) {
-    let max: i64 = if bits == 64 { i64::MAX } else { (1i64 << (bits - 1)) - 1 };
+    let max: i64 = if bits == 64 {
+        i64::MAX
+    } else {
+        (1i64 << (bits - 1)) - 1
+    };
     let min: i64 = (-max) - 1;
 
     let maxincr = ((max as u64).wrapping_sub(value as u64)) as i64;
@@ -175,19 +183,21 @@ pub(crate) fn check_signed_bitfield_overflow(
         let c = (value as u64).wrapping_add(incr as u64);
         let c = if bits < 64 {
             let mask = u64::MAX << bits;
-            if c & msb != 0 { c | mask } else { c & !mask }
+            if c & msb != 0 {
+                c | mask
+            } else {
+                c & !mask
+            }
         } else {
             c
         };
         c as i64
     };
 
-    let overflowed = value > max
-        || (bits != 64 && incr > maxincr)
-        || (value >= 0 && incr > 0 && incr > maxincr);
-    let underflowed = value < min
-        || (bits != 64 && incr < minincr)
-        || (value < 0 && incr < 0 && incr < minincr);
+    let overflowed =
+        value > max || (bits != 64 && incr > maxincr) || (value >= 0 && incr > 0 && incr > maxincr);
+    let underflowed =
+        value < min || (bits != 64 && incr < minincr) || (value < 0 && incr < 0 && incr < minincr);
 
     if overflowed {
         let limit = match owtype {
@@ -213,7 +223,11 @@ fn parse_i64_from_bytes(bytes: &[u8]) -> Option<i64> {
     if bytes.is_empty() {
         return None;
     }
-    let (neg, digits) = if bytes[0] == b'-' { (true, &bytes[1..]) } else { (false, bytes) };
+    let (neg, digits) = if bytes[0] == b'-' {
+        (true, &bytes[1..])
+    } else {
+        (false, bytes)
+    };
     if digits.is_empty() {
         return None;
     }
@@ -224,7 +238,11 @@ fn parse_i64_from_bytes(bytes: &[u8]) -> Option<i64> {
         }
         val = val.checked_mul(10)?.checked_add((b - b'0') as i64)?;
     }
-    if neg { val.checked_neg() } else { Some(val) }
+    if neg {
+        val.checked_neg()
+    } else {
+        Some(val)
+    }
 }
 
 /// Parse a bit offset, honoring the `#<n>` BITFIELD hash form when `hash` is true.
@@ -270,19 +288,27 @@ fn get_bitfield_type_from_arg(arg: &[u8]) -> Result<(bool, u32), RedisError> {
     Ok((sign, llbits as u32))
 }
 
-/// Read the current string bytes for `key`, returning an empty vec for missing keys.
+/// Read the current string bytes for `key`, preserving the missing-key distinction.
 ///
 /// Returns `Err(WrongType)` if the key exists and holds a non-string value.
-fn read_string_bytes(ctx: &CommandContext, key: &RedisString) -> Result<Vec<u8>, RedisError> {
+fn lookup_string_bytes(
+    ctx: &CommandContext,
+    key: &RedisString,
+) -> Result<Option<Vec<u8>>, RedisError> {
     match ctx.db().find(key) {
-        None => Ok(Vec::new()),
+        None => Ok(None),
         Some(obj) => {
             if !obj.is_string() {
                 return Err(RedisError::wrong_type());
             }
-            Ok(obj.string_bytes_owned())
+            Ok(Some(obj.string_bytes_owned()))
         }
     }
+}
+
+/// Read the current string bytes for `key`, returning an empty vec for missing keys.
+fn read_string_bytes(ctx: &CommandContext, key: &RedisString) -> Result<Vec<u8>, RedisError> {
+    Ok(lookup_string_bytes(ctx, key)?.unwrap_or_default())
 }
 
 /// SETBIT key offset bitvalue
@@ -299,7 +325,9 @@ pub fn setbit_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let on = parse_i64_from_bytes(val_arg.as_bytes())
         .ok_or_else(|| RedisError::runtime(b"bit is not an integer or out of range"))?;
     if on & !1 != 0 {
-        return Err(RedisError::runtime(b"bit is not an integer or out of range"));
+        return Err(RedisError::runtime(
+            b"bit is not an integer or out of range",
+        ));
     }
     let on = on != 0;
 
@@ -317,7 +345,8 @@ pub fn setbit_command(ctx: &mut CommandContext) -> RedisResult<()> {
     bytes[byte_idx] = (byteval & !(1u8 << bit_shift)) | (if on { 1u8 << bit_shift } else { 0 });
 
     let obj = RedisObject::new_raw_string(&bytes);
-    ctx.db_mut().set_key(key, obj, redis_core::db::SETKEY_KEEPTTL);
+    ctx.db_mut()
+        .set_key(key, obj, redis_core::db::SETKEY_KEEPTTL);
 
     ctx.reply_integer(if bitval { 1 } else { 0 })
 }
@@ -369,7 +398,9 @@ pub fn bitop_command(ctx: &mut CommandContext) -> RedisResult<()> {
     };
 
     if op == BitOp::Not && argc != 4 {
-        return Err(RedisError::runtime(b"BITOP NOT must be called with a single source key."));
+        return Err(RedisError::runtime(
+            b"BITOP NOT must be called with a single source key.",
+        ));
     }
 
     let target_key = ctx.arg_owned(2usize)?;
@@ -413,35 +444,25 @@ pub fn bitop_command(ctx: &mut CommandContext) -> RedisResult<()> {
     ctx.reply_integer(maxlen as i64)
 }
 
-/// BITCOUNT key [start end [BYTE|BIT]]
+/// BITCOUNT key [start [end [BIT|BYTE]]]
 pub fn bitcount_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
-    let key = ctx.arg_owned(1usize)?;
-
-    if let Some(obj) = ctx.db().find(&key) {
-        if !obj.is_string() {
-            return Err(RedisError::wrong_type());
-        }
-    }
 
     if argc == 2 {
-        let bytes = read_string_bytes(ctx, &key)?;
-        if bytes.is_empty() {
+        let key = ctx.arg_owned(1usize)?;
+        let Some(bytes) = lookup_string_bytes(ctx, &key)? else {
             return ctx.reply_integer(0);
-        }
+        };
         return ctx.reply_integer(server_popcount(&bytes));
-    }
-
-    if argc != 4 && argc != 5 {
+    } else if argc != 3 && argc != 4 && argc != 5 {
         return Err(RedisError::syntax(b"syntax error"));
     }
 
+    let key = ctx.arg_owned(1usize)?;
     let start_arg = ctx.arg_owned(2usize)?;
-    let end_arg = ctx.arg_owned(3usize)?;
-    let mut start = parse_i64_from_bytes(start_arg.as_bytes())
-        .ok_or_else(|| RedisError::runtime(b"value is not an integer or out of range"))?;
-    let mut end = parse_i64_from_bytes(end_arg.as_bytes())
-        .ok_or_else(|| RedisError::runtime(b"value is not an integer or out of range"))?;
+    let mut start =
+        parse_i64_from_bytes(start_arg.as_bytes()).ok_or_else(RedisError::not_integer)?;
+    let mut end;
 
     let mut isbit = false;
     if argc == 5 {
@@ -455,25 +476,45 @@ pub fn bitcount_command(ctx: &mut CommandContext) -> RedisResult<()> {
             return Err(RedisError::syntax(b"syntax error"));
         }
     }
-
-    let bytes = read_string_bytes(ctx, &key)?;
-    if bytes.is_empty() {
-        return ctx.reply_integer(0);
+    if argc >= 4 {
+        let end_arg = ctx.arg_owned(3usize)?;
+        end = parse_i64_from_bytes(end_arg.as_bytes()).ok_or_else(RedisError::not_integer)?;
+    } else {
+        end = 0;
     }
+
+    let Some(bytes) = lookup_string_bytes(ctx, &key)? else {
+        return ctx.reply_integer(0);
+    };
     let strlen = bytes.len() as i64;
     let mut totlen = strlen;
-    if isbit {
-        totlen <<= 3;
+
+    if argc < 4 {
+        end = totlen - 1;
     }
 
     if start < 0 && end < 0 && start > end {
         return ctx.reply_integer(0);
     }
-    if start < 0 { start += totlen; }
-    if end < 0 { end += totlen; }
-    if start < 0 { start = 0; }
-    if end < 0 { end = 0; }
-    if end >= totlen { end = totlen - 1; }
+    if isbit {
+        totlen <<= 3;
+    }
+
+    if start < 0 {
+        start += totlen;
+    }
+    if end < 0 {
+        end += totlen;
+    }
+    if start < 0 {
+        start = 0;
+    }
+    if end < 0 {
+        end = 0;
+    }
+    if end >= totlen {
+        end = totlen - 1;
+    }
 
     let mut first_byte_neg_mask: u8 = 0;
     let mut last_byte_neg_mask: u8 = 0;
@@ -495,8 +536,16 @@ pub fn bitcount_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
     if first_byte_neg_mask != 0 || last_byte_neg_mask != 0 {
         let edge_bytes = [
-            if first_byte_neg_mask != 0 { bytes[byte_start] & first_byte_neg_mask } else { 0 },
-            if last_byte_neg_mask != 0 { bytes[byte_end] & last_byte_neg_mask } else { 0 },
+            if first_byte_neg_mask != 0 {
+                bytes[byte_start] & first_byte_neg_mask
+            } else {
+                0
+            },
+            if last_byte_neg_mask != 0 {
+                bytes[byte_end] & last_byte_neg_mask
+            } else {
+                0
+            },
         ];
         count -= server_popcount(&edge_bytes);
     }
@@ -512,39 +561,22 @@ pub fn bitpos_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
     let key = ctx.arg_owned(1usize)?;
     let bit_arg = ctx.arg_owned(2usize)?;
-    let bit = parse_i64_from_bytes(bit_arg.as_bytes())
-        .ok_or_else(|| RedisError::runtime(b"value is not an integer or out of range"))? as i32;
+    let bit = parse_i64_from_bytes(bit_arg.as_bytes()).ok_or_else(RedisError::not_integer)? as i32;
 
     if bit != 0 && bit != 1 {
         return Err(RedisError::runtime(b"The bit argument must be 1 or 0."));
     }
 
-    if let Some(obj) = ctx.db().find(&key) {
-        if !obj.is_string() {
-            return Err(RedisError::wrong_type());
-        }
-    }
-
-    let bytes = read_string_bytes(ctx, &key)?;
-    if bytes.is_empty() {
-        return ctx.reply_integer(if bit == 1 { -1 } else { 0 });
-    }
-    let strlen = bytes.len() as i64;
-
     let mut start: i64 = 0;
-    let mut end: i64;
+    let mut end: Option<i64> = None;
     let mut end_given = false;
     let mut isbit = false;
 
     if argc >= 4 {
         let start_arg = ctx.arg_owned(3usize)?;
-        start = parse_i64_from_bytes(start_arg.as_bytes())
-            .ok_or_else(|| RedisError::runtime(b"value is not an integer or out of range"))?;
+        start = parse_i64_from_bytes(start_arg.as_bytes()).ok_or_else(RedisError::not_integer)?;
         if argc >= 5 {
             let end_arg = ctx.arg_owned(4usize)?;
-            end = parse_i64_from_bytes(end_arg.as_bytes())
-                .ok_or_else(|| RedisError::runtime(b"value is not an integer or out of range"))?;
-            end_given = true;
             if argc == 6 {
                 let unit_arg = ctx.arg_owned(5usize)?;
                 let unit = unit_arg.as_bytes();
@@ -556,22 +588,36 @@ pub fn bitpos_command(ctx: &mut CommandContext) -> RedisResult<()> {
                     return Err(RedisError::syntax(b"syntax error"));
                 }
             }
-        } else {
-            end = strlen - 1;
+            end =
+                Some(parse_i64_from_bytes(end_arg.as_bytes()).ok_or_else(RedisError::not_integer)?);
+            end_given = true;
         }
-    } else {
-        end = strlen - 1;
     }
 
+    let Some(bytes) = lookup_string_bytes(ctx, &key)? else {
+        return ctx.reply_integer(if bit == 1 { -1 } else { 0 });
+    };
+    let strlen = bytes.len() as i64;
+    let mut end = end.unwrap_or(strlen - 1);
     let mut totlen = strlen;
     if isbit {
         totlen <<= 3;
     }
-    if start < 0 { start += totlen; }
-    if end < 0 { end += totlen; }
-    if start < 0 { start = 0; }
-    if end < 0 { end = 0; }
-    if end >= totlen { end = totlen - 1; }
+    if start < 0 {
+        start += totlen;
+    }
+    if end < 0 {
+        end += totlen;
+    }
+    if start < 0 {
+        start = 0;
+    }
+    if end < 0 {
+        end = 0;
+    }
+    if end >= totlen {
+        end = totlen - 1;
+    }
 
     let mut first_byte_neg_mask: u8 = 0;
     let mut last_byte_neg_mask: u8 = 0;
@@ -636,7 +682,11 @@ pub fn bitpos_command(ctx: &mut CommandContext) -> RedisResult<()> {
         return ctx.reply_integer(-1);
     }
 
-    let final_pos = if pos != -1 { pos + (search_start << 3) } else { -1 };
+    let final_pos = if pos != -1 {
+        pos + (search_start << 3)
+    } else {
+        -1
+    };
     ctx.reply_integer(final_pos)
 }
 
@@ -664,11 +714,20 @@ fn bitfield_generic(ctx: &mut CommandContext, readonly: bool) -> RedisResult<()>
             let (sign, bits) = get_bitfield_type_from_arg(type_arg.as_bytes())?;
             let off_arg = ctx.arg_owned(j + 2)?;
             let offset = get_bit_offset_from_arg(off_arg.as_bytes(), true, bits as i32)?;
-            ops.push(BitfieldOp { offset, incr: 0, opcode: BitfieldOpCode::Get, owtype, bits, sign });
+            ops.push(BitfieldOp {
+                offset,
+                incr: 0,
+                opcode: BitfieldOpCode::Get,
+                owtype,
+                bits,
+                sign,
+            });
             j += 3;
         } else if subcmd.eq_ignore_ascii_case(b"set") && remargs >= 3 {
             if readonly {
-                return Err(RedisError::runtime(b"BITFIELD_RO only supports the GET subcommand"));
+                return Err(RedisError::runtime(
+                    b"BITFIELD_RO only supports the GET subcommand",
+                ));
             }
             let type_arg = ctx.arg_owned(j + 1)?;
             let (sign, bits) = get_bitfield_type_from_arg(type_arg.as_bytes())?;
@@ -683,11 +742,20 @@ fn bitfield_generic(ctx: &mut CommandContext, readonly: bool) -> RedisResult<()>
             if highest_write_offset < span {
                 highest_write_offset = span;
             }
-            ops.push(BitfieldOp { offset, incr: val, opcode: BitfieldOpCode::Set, owtype, bits, sign });
+            ops.push(BitfieldOp {
+                offset,
+                incr: val,
+                opcode: BitfieldOpCode::Set,
+                owtype,
+                bits,
+                sign,
+            });
             j += 4;
         } else if subcmd.eq_ignore_ascii_case(b"incrby") && remargs >= 3 {
             if readonly {
-                return Err(RedisError::runtime(b"BITFIELD_RO only supports the GET subcommand"));
+                return Err(RedisError::runtime(
+                    b"BITFIELD_RO only supports the GET subcommand",
+                ));
             }
             let type_arg = ctx.arg_owned(j + 1)?;
             let (sign, bits) = get_bitfield_type_from_arg(type_arg.as_bytes())?;
@@ -702,7 +770,14 @@ fn bitfield_generic(ctx: &mut CommandContext, readonly: bool) -> RedisResult<()>
             if highest_write_offset < span {
                 highest_write_offset = span;
             }
-            ops.push(BitfieldOp { offset, incr: val, opcode: BitfieldOpCode::IncrBy, owtype, bits, sign });
+            ops.push(BitfieldOp {
+                offset,
+                incr: val,
+                opcode: BitfieldOpCode::IncrBy,
+                owtype,
+                bits,
+                sign,
+            });
             j += 4;
         } else if subcmd.eq_ignore_ascii_case(b"overflow") && remargs >= 1 {
             let ow_arg = ctx.arg_owned(j + 1)?;
@@ -764,12 +839,20 @@ fn bitfield_generic(ctx: &mut CommandContext, readonly: bool) -> RedisResult<()>
                 check_signed_bitfield_overflow(oldval, op.incr, op.bits as u64, op.owtype);
             let overflowed = overflow_dir != 0;
             let (newval, retval) = if op.opcode == BitfieldOpCode::IncrBy {
-                let nv = if overflowed { wrapped } else { oldval.wrapping_add(op.incr) };
+                let nv = if overflowed {
+                    wrapped
+                } else {
+                    oldval.wrapping_add(op.incr)
+                };
                 (nv, nv)
             } else {
                 let (set_overflow, set_wrapped) =
                     check_signed_bitfield_overflow(op.incr, 0, op.bits as u64, op.owtype);
-                let nv = if set_overflow != 0 { set_wrapped } else { op.incr };
+                let nv = if set_overflow != 0 {
+                    set_wrapped
+                } else {
+                    op.incr
+                };
                 (nv, oldval)
             };
 
@@ -796,7 +879,11 @@ fn bitfield_generic(ctx: &mut CommandContext, readonly: bool) -> RedisResult<()>
                 let setval = op.incr as u64;
                 let (set_overflow, set_wrapped) =
                     check_unsigned_bitfield_overflow(setval, 0, op.bits as u64, op.owtype);
-                let nv = if set_overflow != 0 { set_wrapped } else { setval };
+                let nv = if set_overflow != 0 {
+                    set_wrapped
+                } else {
+                    setval
+                };
                 (nv, oldval)
             };
 
@@ -815,7 +902,11 @@ fn bitfield_generic(ctx: &mut CommandContext, readonly: bool) -> RedisResult<()>
 
     if !is_readonly_ops && (changes > 0 || extended || !key_existed) {
         let obj = RedisObject::new_raw_string(&bytes);
-        let flags = if key_existed { redis_core::db::SETKEY_KEEPTTL } else { 0 };
+        let flags = if key_existed {
+            redis_core::db::SETKEY_KEEPTTL
+        } else {
+            0
+        };
         ctx.db_mut().set_key(key, obj, flags);
     }
 
@@ -832,3 +923,88 @@ pub fn bitfield_command(ctx: &mut CommandContext) -> RedisResult<()> {
 pub fn bitfield_ro_command(ctx: &mut CommandContext) -> RedisResult<()> {
     bitfield_generic(ctx, true)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use redis_core::db::RedisDb;
+    use redis_core::Client;
+
+    fn rs(bytes: &[u8]) -> RedisString {
+        RedisString::from_bytes(bytes)
+    }
+
+    fn set_args(client: &mut Client, args: &[&[u8]]) {
+        client.set_args(args.iter().map(|arg| rs(arg)).collect());
+    }
+
+    #[test]
+    fn bitcount_accepts_start_without_end() {
+        let mut client = Client::new(1);
+        let mut db = RedisDb::new(0);
+        db.set_key(rs(b"s"), RedisObject::new_raw_string(b"foobar"), 0);
+        set_args(&mut client, &[b"BITCOUNT", b"s", b"1"]);
+
+        let mut ctx = CommandContext::with_db(&mut client, &mut db);
+        bitcount_command(&mut ctx).unwrap();
+
+        assert_eq!(client.drain_reply(), b":22\r\n");
+    }
+
+    #[test]
+    fn bitcount_parses_integer_args_before_type_check() {
+        let mut client = Client::new(1);
+        let mut db = RedisDb::new(0);
+        db.set_key(rs(b"s"), RedisObject::new_list(), 0);
+        set_args(&mut client, &[b"BITCOUNT", b"s", b"a", b"b"]);
+
+        let mut ctx = CommandContext::with_db(&mut client, &mut db);
+        let err = bitcount_command(&mut ctx).unwrap_err();
+
+        assert_eq!(
+            err.to_resp_payload().as_bytes(),
+            b"ERR value is not an integer or out of range"
+        );
+    }
+
+    #[test]
+    fn bitpos_parses_range_before_missing_key_reply() {
+        let mut client = Client::new(1);
+        let mut db = RedisDb::new(0);
+        set_args(&mut client, &[b"BITPOS", b"missing", b"0", b"a", b"b"]);
+
+        let mut ctx = CommandContext::with_db(&mut client, &mut db);
+        let err = bitpos_command(&mut ctx).unwrap_err();
+
+        assert_eq!(
+            err.to_resp_payload().as_bytes(),
+            b"ERR value is not an integer or out of range"
+        );
+    }
+
+    #[test]
+    fn bitpos_validates_unit_before_end_integer_when_unit_slot_exists() {
+        let mut client = Client::new(1);
+        let mut db = RedisDb::new(0);
+        set_args(
+            &mut client,
+            &[b"BITPOS", b"missing", b"0", b"1", b"hello", b"hello2"],
+        );
+
+        let mut ctx = CommandContext::with_db(&mut client, &mut db);
+        let err = bitpos_command(&mut ctx).unwrap_err();
+
+        assert_eq!(err.to_resp_payload().as_bytes(), b"ERR syntax error");
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// PORT STATUS
+//   source:        src/bitops.c  (1431 lines, bitmap commands and helpers)
+//   target_crate:  redis-commands
+//   confidence:    medium
+//   todos:         0
+//   port_notes:    0
+//   unsafe_blocks: 0
+//   notes:         Safe bitmap command port; BITFIELD arithmetic remains under Tcl frontier coverage.
+// ──────────────────────────────────────────────────────────────────────────

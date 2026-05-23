@@ -53,6 +53,18 @@ zset behavior. The follow-up `tcl-post-geo-survey` runner remains required to
 refresh the official `unit/geo` count because local implementation verification
 was limited by loopback bind denial in the Codex sandbox.
 
+## BITOPS Packet Note
+
+`tcl-bitops-bitcount-bitpos-edges` targets only BITCOUNT/BITPOS parser and
+range-edge semantics in `crates/redis-commands/src/bitops.rs`, matching
+`reference/valkey/src/bitops.c:943-1125`. It accepts Valkey's start-only
+`BITCOUNT` form and preserves upstream error precedence by parsing numeric
+range arguments and optional `BIT|BYTE` units before key lookup/type checks.
+
+It deliberately does not touch BITFIELD. The follow-up
+`tcl-post-bitops-survey` runner remains the telemetry gate for the refreshed
+`unit/bitops` frontier.
+
 ## Why These Four
 
 `unit/geo` is first because it reaches `Test Summary`, so the pass/fail count is

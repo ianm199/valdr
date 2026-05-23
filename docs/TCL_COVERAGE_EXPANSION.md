@@ -94,6 +94,20 @@ for the implementation could not bind the upstream TCL helper ports, so
 `tcl-post-geo-survey` remains the typed evidence gate that must refresh the
 post-fix `unit/geo` count on a runner host with loopback bind permission.
 
+## BITOPS Edge Packet
+
+`tcl-bitops-bitcount-bitpos-edges` is scoped to
+`crates/redis-commands/src/bitops.rs` and the first `unit/bitops` abort from
+the post-GEO survey. The implementation mirrors
+`reference/valkey/src/bitops.c:943-1125` for `BITCOUNT key [start [end
+[BIT|BYTE]]]` and `BITPOS key bit [start [end [BIT|BYTE]]]`: optional
+start-only `BITCOUNT`, argument parse order before key lookup/type checks, unit
+validation order, and missing-key `BITPOS` handling.
+
+This remains telemetry. The follow-up `tcl-post-bitops-survey` runner must
+refresh whether `unit/bitops` now reaches a counted summary or exposes the next
+frontier, likely in the deferred BITFIELD surface.
+
 ## What This Says About "Spark Skeleton" Work
 
 Do not use cheap agents to mass-author trusted command behavior. The useful
