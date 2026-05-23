@@ -804,7 +804,7 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
     if int_conversion_error {
         // C: sort.c:525-526.
         return Err(RedisError::runtime(
-            b"One or more scores can't be converted into double",
+            b"ERR One or more scores can't be converted into double",
         ));
     }
 
@@ -863,7 +863,7 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
 
         if !result_list.is_empty() {
             // C: sort.c:587-594.
-            let obj = RedisObject::new_list_from_vec(result_list);
+            let obj = RedisObject::new_quicklist_from_vec(result_list);
             ctx.db_mut().set_key(store_key.clone(), obj, 0);
             ctx.notify_keyspace_event(NOTIFY_LIST, b"sortstore", &store_key);
         } else if {

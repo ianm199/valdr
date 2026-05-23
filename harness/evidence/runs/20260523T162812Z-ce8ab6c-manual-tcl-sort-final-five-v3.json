@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "kind": "manual_packet_acceptance",
+  "packet": "tcl-sort-final-five-v3",
+  "role": "perf-fixer",
+  "runtime": "codex",
+  "commit": "ce8ab6c",
+  "target_commit": "ce8ab6ca0c6248bca289950d5ae5f62b3677f91e",
+  "captured_ts": "2026-05-23T16:28:12Z",
+  "summary": "Accepted after widening the packet model to allow declared collateral. The original agent fix changed QuickList representation for SORT STORE, which required AOF rewrite iteration collateral.",
+  "transcript": "harness/loop/state/transcripts/20260523T155415Z-codex-perf-fixer-tcl-sort-final-five-v3.jsonl",
+  "last_message": "harness/loop/state/transcripts/20260523T155415Z-codex-perf-fixer-tcl-sort-final-five-v3.last.txt",
+  "scope_result": {
+    "original_gate": "no_out_of_scope_changes",
+    "original_failure": "crates/redis-commands/src/aof.rs was changed outside the packet targets",
+    "resolution": "The packet now declares crates/redis-commands/src/aof.rs as allowed_collateral because SORT STORE list representation is persisted by AOF rewrite."
+  },
+  "checks": [
+    {
+      "command": "cargo check --workspace",
+      "status": "pass",
+      "notes": "Completed before smoke was interrupted; warnings were pre-existing."
+    },
+    {
+      "command": "cargo build --bin redis-server",
+      "status": "pass"
+    },
+    {
+      "command": "python3 harness/oracle/tcl-survey.py --skip-build --timeout-s 120 --files unit/sort",
+      "status": "pass",
+      "summary": "unit/sort: 54 passed, 0 failed",
+      "artifact": "harness/oracle/results/tcl-survey/20260523T161435Z/unit__sort.json"
+    },
+    {
+      "command": "bash harness/oracle/smoke.sh --skip-build",
+      "status": "pass",
+      "summary": "23 scripts passed, 0 failed, 0 skipped"
+    },
+    {
+      "command": "git diff --check -- crates/redis-commands/src/aof.rs crates/redis-commands/src/eval.rs crates/redis-commands/src/sort.rs crates/redis-core/src/object.rs harness/work-packets.jsonl harness/loop/prompt-template.md harness/evidence/ledger.jsonl",
+      "status": "pass"
+    }
+  ],
+  "changed_files": [
+    "crates/redis-commands/src/aof.rs",
+    "crates/redis-commands/src/eval.rs",
+    "crates/redis-commands/src/sort.rs",
+    "crates/redis-core/src/object.rs",
+    "harness/work-packets.jsonl",
+    "harness/loop/prompt-template.md",
+    "harness/evidence/ledger.jsonl"
+  ],
+  "allowed_collateral": [
+    {
+      "path": "crates/redis-commands/src/aof.rs",
+      "why": "SORT STORE uses the same list representation persisted by AOF rewrite."
+    }
+  ]
+}

@@ -12,6 +12,8 @@ Packet: **`{{PACKET_ID}}`**
 {{SOURCE_RANGES}}
 - Target file(s):
 {{TARGETS}}
+- Allowed collateral file(s):
+{{ALLOWED_COLLATERAL}}
 - Targeted capabilities: {{CAPABILITIES}}
 - Dependencies: {{DEPENDENCIES_STATEMENT}}
 
@@ -37,7 +39,10 @@ Packet: **`{{PACKET_ID}}`**
   for `record-completion.py`. Put proof in your final response and generated
   runner output only; the harness will turn that into authoritative evidence.
 - Do not invent duplicate canonical types or APIs. Use the vocabulary files; escalate cross-cutting questions with `TODO(architect):`.
-- Keep changes scoped to the packet target files. If the packet needs another file, make the smallest typed-artifact edit that explains why.
+- Keep changes scoped to the packet target files and declared collateral. If the
+  packet needs another file, make the smallest typed-artifact edit that explains
+  why and stop after preserving evidence; the packet boundary should be widened
+  before the loop retries.
 - Do not run workspace-wide `cargo fmt`. Use `cargo fmt --check` or format only the packet target files; broad formatting churn is a failed packet.
 - Prefer faithful semantics over local speed. Performance work must keep conformance gates green.
 - No new `unsafe` unless the packet explicitly grants it and updates the unsafe budget with a narrow rationale.

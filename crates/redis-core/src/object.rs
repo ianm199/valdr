@@ -119,7 +119,7 @@ pub enum ListEncoding {
     ListPack(Vec<u8>),
     /// Doubly-linked list of list-pack nodes (OBJ_ENCODING_QUICKLIST).
     // TODO(architect): replace VecDeque with real encoding in Phase 4
-    QuickList(Vec<RedisString>),
+    QuickList(VecDeque<RedisString>),
 }
 
 /// Sticky minimum encoding for an `InlineSet`.
@@ -563,7 +563,7 @@ impl RedisObject {
     /// C: createQuicklistObject(fill, compress) → object.c:481
     pub fn new_quicklist(_fill: i32, _compress: i32) -> Self {
         // TODO(port): pass fill/compress to the real QuickList when redis-ds lands (Phase 4)
-        Self::bare(ObjectKind::List(ListEncoding::QuickList(Vec::new())))
+        Self::bare(ObjectKind::List(ListEncoding::QuickList(VecDeque::new())))
     }
 
     /// Create a list object with ListPack encoding.
@@ -581,13 +581,18 @@ impl RedisObject {
         Self::bare(ObjectKind::List(ListEncoding::Inline(deque)))
     }
 
+    /// Create a `QuickList` list object pre-populated from an existing `VecDeque`.
+    pub fn new_quicklist_from_vec(deque: VecDeque<RedisString>) -> Self {
+        Self::bare(ObjectKind::List(ListEncoding::QuickList(deque)))
+    }
+
     /// Borrow the inner list `VecDeque` for a list-encoded object.
     ///
-    /// Returns `None` for non-list objects and for the stub `ListPack`/
-    /// `QuickList` encodings that this round does not populate.
+    /// Returns `None` for non-list objects and for the stub `ListPack`
+    /// encoding that this round does not populate.
     pub fn list(&self) -> Option<&VecDeque<RedisString>> {
         match &self.kind {
-            ObjectKind::List(ListEncoding::Inline(d)) => Some(d),
+            ObjectKind::List(ListEncoding::Inline(d) | ListEncoding::QuickList(d)) => Some(d),
             _ => None,
         }
     }
@@ -595,7 +600,7 @@ impl RedisObject {
     /// Mutably borrow the inner list `VecDeque` for a list-encoded object.
     pub fn list_mut(&mut self) -> Option<&mut VecDeque<RedisString>> {
         match &mut self.kind {
-            ObjectKind::List(ListEncoding::Inline(d)) => Some(d),
+            ObjectKind::List(ListEncoding::Inline(d) | ListEncoding::QuickList(d)) => Some(d),
             _ => None,
         }
     }

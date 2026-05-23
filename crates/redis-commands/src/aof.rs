@@ -310,10 +310,8 @@ fn write_aof_rewrite_db_contents<W: Write>(
             }
             ObjectKind::List(enc) => {
                 let elements: Vec<RedisString> = match enc {
-                    redis_core::object::ListEncoding::Inline(dq) => {
-                        dq.iter().cloned().collect()
-                    }
-                    redis_core::object::ListEncoding::QuickList(v) => v.clone(),
+                    redis_core::object::ListEncoding::Inline(dq) => dq.iter().cloned().collect(),
+                    redis_core::object::ListEncoding::QuickList(dq) => dq.iter().cloned().collect(),
                     redis_core::object::ListEncoding::ListPack(_) => Vec::new(),
                 };
                 for chunk in elements.chunks(64) {

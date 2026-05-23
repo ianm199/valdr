@@ -141,11 +141,6 @@ impl ParserCallbacks for ReplyBuilder {
                 break;
             }
         }
-        if !self.errored {
-            let frame = self.stack.pop().unwrap_or_default();
-            self.pending_lens.pop();
-            self.deliver(ReplyValue::Array(frame));
-        }
     }
     fn on_set(&mut self, cursor: &mut ParserCursor<'_>, len: i64, proto: &[u8]) {
         self.on_array(cursor, len, proto);
