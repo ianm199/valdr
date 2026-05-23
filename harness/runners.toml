@@ -66,6 +66,26 @@ claim_level = "telemetry"
 capabilities = ["performance-profile-matrix", "faithful-runtime-ownership"]
 
 [[runner]]
+id = "tcl-survey-unswept"
+kind = "json_command"
+surface = "correctness"
+method = "official-suite"
+workload = "unswept-tcl-unit-files"
+command = [
+  "python3",
+  "harness/oracle/tcl-survey.py",
+  "--skip-build",
+  "--timeout-s",
+  "90",
+  "--files",
+  "unit/bitops,unit/bitfield,unit/geo,unit/hyperloglog,unit/scripting,unit/scan,unit/sort,unit/dump,unit/info,unit/slowlog",
+]
+timeout_s = 1500
+resources = ["oracle-results", "cargo-target", "port-range:21111-29111"]
+claim_level = "telemetry"
+capabilities = ["official-tcl-coverage"]
+
+[[runner]]
 id = "regress-core-p100-ping"
 kind = "performance_regression"
 surface = "performance"
