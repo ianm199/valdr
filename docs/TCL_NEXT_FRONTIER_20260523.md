@@ -85,23 +85,23 @@ encoding, and Lua reply-conversion paths. Do not special-case test names.
 
 Current failures in `reference/valkey/tests/unit/scripting.tcl`:
 
-- `EVAL - Redis multi bulk -> Lua type conversion`
-- `EVAL - SELECT inside Lua should not affect the caller`
 - `EVAL - Scripts do not block on wait`
 - abort at `WAITAOF` unknown command during script/function mode
 
 Failure classes:
 
-- Redis array replies are not converted into Lua table values with the same
-  shape upstream exposes.
-- `SELECT` inside Lua leaks back into the caller's selected DB.
 - `WAIT`/`WAITAOF` need script-safe nonblocking behavior. For the current
   single-node non-replication envelope, returning zero is faithful enough for
   these tests if the command path remains normal and explicit.
 
-Packet target: first fix Lua array conversion and selected-DB restoration, then
-fix script-safe WAIT/WAITAOF behavior as a second packet. Splitting these avoids
-combining Lua representation bugs with command coverage.
+Bronze status:
+
+- `47d7fbf` fixed the Lua reply conversion / selected-DB restoration packet.
+- The focused scripting survey now reaches the planned Silver frontier:
+  `EVAL - Scripts do not block on wait`, then aborts at unknown `WAITAOF`.
+
+Next packet target: fix script-safe WAIT/WAITAOF behavior without broad
+replication work or dispatcher bypasses.
 
 ## Run Discipline
 

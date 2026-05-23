@@ -1,0 +1,52 @@
+{
+  "captured_ts": "2026-05-23T17:11:55.874240Z",
+  "gate_results": {
+    "cargo_check_redis-commands": {
+      "detail": "cargo check -p redis-commands: clean",
+      "ok": true
+    },
+    "cargo_check_workspace": {
+      "detail": "cargo check --workspace: clean",
+      "ok": true
+    },
+    "cargo_test_redis-commands_eval": {
+      "detail": "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 46 filtered out; finished in 0.00s",
+      "ok": true
+    },
+    "no_out_of_scope_changes": {
+      "detail": "no changed files outside packet targets",
+      "ok": true
+    },
+    "oracle_reference_only": {
+      "detail": "no harness/oracle/run-smoke.sh present",
+      "ok": true
+    },
+    "target_files_modified": {
+      "detail": "perf-fixer touched 1/4 candidate target(s)",
+      "ok": true
+    },
+    "trailer_present": {
+      "detail": "all touched Rust targets carry PORT STATUS trailers",
+      "ok": true
+    }
+  },
+  "harness_context": {
+    "commit": "47d7fbf",
+    "git_dirty": true,
+    "git_status_short": [
+      " M docs/TCL_NEXT_FRONTIER_20260523.md",
+      " M harness/evidence/ledger.jsonl",
+      "?? harness/evidence/runs/20260523T170847Z-47d7fbf-perf-fixer-tcl-scripting-conversion-select-v3.json"
+    ],
+    "run_id": "loop-f51f59ca5a8bf293",
+    "target_commit": "47d7fbf37b66dd1b0806aa83b55feba505d2a5cf",
+    "tree_hash": "7dd19a454fc5df6e4b427df82b1f0e2e7036d2a737365a0bf4da4456fc8c0d6d"
+  },
+  "kind": "agent_transcript",
+  "packet": "tcl-scripting-conversion-select-v3",
+  "prompt_hash": "e24043c1a3349a0f",
+  "role": "perf-fixer",
+  "transcript_bytes": 1227,
+  "transcript_preview": "127.0.0.1 - - [23/May/2026 13:07:46] \"HEAD / HTTP/1.1\" 200 -\n127.0.0.1 - - [23/May/2026 13:07:47] \"GET / HTTP/1.1\" 200 -\n127.0.0.1 - - [23/May/2026 13:08:00] \"GET / HTTP/1.1\" 200 -\n127.0.0.1 - - [23/May/2026 13:08:01] code 404, message File not found\n127.0.0.1 - - [23/May/2026 13:08:01] \"GET /favicon.ico HTTP/1.1\" 404 -\n127.0.0.1 - - [23/May/2026 13:08:09] \"GET / HTTP/1.1\" 200 -\n127.0.0.1 - - [23/May/2026 13:08:09] code 404, message File not found\n127.0.0.1 - - [23/May/2026 13:08:09] \"GET /favicon.ico HTTP/1.1\" 404 -\n127.0.0.1 - - [23/May/2026 13:08:39] \"GET /history.json?check=1779556119441 HTTP/1.1\" 200 -\n127.0.0.1 - - [23/May/2026 13:09:09] \"GET /history.json?check=1779556149440 HTTP/1.1\" 200 -\n127.0.0.1 - - [23/May/2026 13:09:39] \"GET /history.json?check=1779556179440 HTTP/1.1\" 200 -\n127.0.0.1 - - [23/May/2026 13:10:09] \"GET /history.json?check=1779556209440 HTTP/1.1\" 200 -\n127.0.0.1 - - [23/May/2026 13:10:40] \"GET /history.json?check=1779556239823 HTTP/1.1\" 200 -\n127.0.0.1 - - [23/May/2026 13:10:44] \"GET / HTTP/1.1\" 200 -\n127.0.0.1 - - [23/May/2026 13:11:10] \"GET /history.json?check=1779556269823 HTTP/1.1\" 200 -\n127.0.0.1 - - [23/May/2026 13:11:40] \"GET /history.json?check=1779556299823 HTTP/1.1\" 200 -\n",
+  "transcript_src": "/tmp/claude-502/-Users-ianmclaughlin-PycharmProjects-rustExperiments-lua-rs-port/50e182f9-a105-4242-851f-cffef806d317/tasks/b4tfe5e8z.output"
+}
