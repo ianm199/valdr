@@ -32,6 +32,7 @@ pub mod replica_dialer;
 pub mod replication;
 pub mod set;
 pub mod slowlog_cmd;
+pub mod sort;
 pub mod stream;
 pub mod string;
 pub mod zset;

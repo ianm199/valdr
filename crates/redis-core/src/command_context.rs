@@ -411,6 +411,22 @@ impl<'a> CommandContext<'a> {
             .ok_or_else(|| RedisError::wrong_number_of_args(self.command_name()))
     }
 
+    /// Borrow argv bytes for translated command code.
+    pub fn arg_bytes<I: ArgIndex>(&self, i: I) -> RedisResult<&[u8]> {
+        let idx = i.into_arg_index()?;
+        self.client
+            .arg(idx)
+            .map(|s| s.as_bytes())
+            .ok_or_else(|| RedisError::wrong_number_of_args(self.command_name()))
+    }
+
+    /// Parse a signed decimal argv as `i64` without converting Redis data to UTF-8.
+    pub fn arg_parse_i64<I: ArgIndex>(&self, i: I) -> RedisResult<i64> {
+        let bytes = self.arg_bytes(i)?;
+        parse_i64_from_bytes(bytes)
+            .ok_or_else(|| RedisError::runtime(b"ERR value is not an integer or out of range"))
+    }
+
     /// Argv accessor returning a `RedisObject::String` wrapper.
     ///
     /// STUB — Phase B placeholder mapping a raw argv `RedisString` into the
@@ -509,6 +525,46 @@ impl<'a> CommandContext<'a> {
     /// the server keyed by `client.db_index`.
     pub fn db_mut(&mut self) -> &mut RedisDb {
         self.db.as_mut()
+    }
+
+    /// Clone a live object by raw key bytes using the normal read lookup path.
+    pub fn lookup_key_read_by_bytes(&mut self, key: &[u8]) -> RedisResult<Option<RedisObject>> {
+        let key = RedisString::from_bytes(key);
+        Ok(self
+            .db_mut()
+            .lookup_key_read_with_flags(&key, crate::db::LOOKUP_NONE)
+            .cloned())
+    }
+
+    /// Return a hash field value as a string object for translated pattern lookups.
+    pub fn hash_get_field_as_object(
+        &self,
+        obj: &RedisObject,
+        field: &[u8],
+    ) -> RedisResult<Option<RedisObject>> {
+        let Some(hash) = obj.hash() else {
+            return Ok(None);
+        };
+        let field = RedisString::from_bytes(field);
+        Ok(hash.get(&field).cloned().map(RedisObject::from_string))
+    }
+
+    /// Reply with a string object's byte representation.
+    pub fn reply_bulk_object(&mut self, obj: &RedisObject) -> RedisResult<()> {
+        let bytes = obj.string_bytes();
+        self.reply_bulk(bytes.as_ref())
+    }
+
+    /// Whether this command is executing inside Lua/script context.
+    ///
+    /// The current Lua bridge dispatches inner commands through the same client
+    /// without a dedicated script flag, so this remains false until that state
+    /// is represented on `Client`.
+    ///
+    /// TODO(architect): add a canonical script-context bit to `Client` or the
+    /// dispatch route before commands depend on script-specific semantics.
+    pub fn is_script_context(&self) -> bool {
+        false
     }
 
     /// Number of logical databases visible to this command context.
@@ -922,6 +978,32 @@ fn lock_db_handle(db: &Arc<Mutex<RedisDb>>) -> MutexGuard<'_, RedisDb> {
     }
 }
 
+fn parse_i64_from_bytes(bytes: &[u8]) -> Option<i64> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let (negative, digits) = if bytes[0] == b'-' {
+        (true, &bytes[1..])
+    } else {
+        (false, bytes)
+    };
+    if digits.is_empty() {
+        return None;
+    }
+    let mut value: i64 = 0;
+    for &byte in digits {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        value = value.checked_mul(10)?.checked_add((byte - b'0') as i64)?;
+    }
+    if negative {
+        value.checked_neg()
+    } else {
+        Some(value)
+    }
+}
+
 /// Encode a RESP2 `*3 message channel payload` array.
 pub fn encode_pubsub_message_resp2(channel: &RedisString, message: &RedisString) -> Vec<u8> {
     let mut buf = Vec::with_capacity(32 + channel.as_bytes().len() + message.as_bytes().len());
@@ -1180,7 +1262,7 @@ mod tests {
 //   source:        architect packet (PORTING.md §2 #5 + §4.5 reply mapping)
 //   target_crate:  redis-core
 //   confidence:    high
-//   todos:         2
+//   todos:         3
 //   port_notes:    1
 //   unsafe_blocks: 0
 //   notes:         Reply writer, arg access, and transitional DB-list routing.

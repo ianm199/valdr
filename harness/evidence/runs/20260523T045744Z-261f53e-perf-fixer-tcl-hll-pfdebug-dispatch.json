@@ -1,0 +1,131 @@
+{
+  "captured_ts": "2026-05-23T05:20:52Z",
+  "kind": "perf_fixer_result",
+  "packet": "tcl-hll-pfdebug-dispatch",
+  "prompt_hash": "2764ba82b00deff9",
+  "status": "pass",
+  "claim_level": "telemetry",
+  "harness_context": {
+    "commit": "261f53e",
+    "target_commit": "261f53e8f1efd51468cc62d3179386d55f0a41a9",
+    "git_dirty": true,
+    "git_status_short": [
+      " M crates/redis-commands/src/dispatch.rs",
+      " M crates/redis-commands/src/hyperloglog.rs",
+      " M docs/TCL_COVERAGE_EXPANSION.md",
+      " M docs/TCL_OVERNIGHT_FRONTIER_20260523.md",
+      " M harness/evidence/ledger.jsonl",
+      " M harness/history.jsonl"
+    ],
+    "resources": [
+      "cargo-target",
+      "oracle-results",
+      "port-range:21111-29111"
+    ]
+  },
+  "subsystem_boundary": "Normal command dispatch plus PFDEBUG HyperLogLog debug surface. The packet does not bypass ACL/transactions/expiration/AOF/replication/RDB hooks and does not rewrite PFADD, PFCOUNT, or PFMERGE.",
+  "source_mapping": {
+    "source_files": [
+      "reference/valkey/src/hyperloglog.c:1980-2106",
+      "reference/valkey/src/hyperloglog.c:369-400",
+      "reference/valkey/tests/unit/hyperloglog.tcl:323-329"
+    ],
+    "target_files": [
+      "crates/redis-commands/src/dispatch.rs",
+      "crates/redis-commands/src/hyperloglog.rs",
+      "docs/TCL_COVERAGE_EXPANSION.md",
+      "docs/TCL_OVERNIGHT_FRONTIER_20260523.md"
+    ]
+  },
+  "implementation": [
+    "Registered PFDEBUG in the shared command dispatch table.",
+    "Implemented PFDEBUG GETREG, DECODE, ENCODING, and TODENSE against the existing stored HLL byte representation.",
+    "Preserved the current SIMD stub behavior while returning Valkey-shaped PFDEBUG subcommand arity and argument errors.",
+    "Adjusted dense register get/set helpers to mirror Valkey's packed-register byte-after-end sentinel behavior without unsafe code.",
+    "Updated packet telemetry docs without promoting the result to a public conformance claim."
+  ],
+  "measurements": [
+    {
+      "name": "initial_focused_hll_survey",
+      "artifact": "harness/oracle/results/tcl-survey/20260523T050005Z/unit__hyperloglog.json",
+      "status": "fail",
+      "summary": "unit/hyperloglog aborted before Test Summary on unknown PFDEBUG after the PFSELFTEST unknown-command failure.",
+      "abort_test": "HyperLogLogs are promote from sparse to dense",
+      "exception": "ERR unknown command 'pfdebug'."
+    },
+    {
+      "name": "direct_pfdebug_getreg_wire_check",
+      "status": "pass",
+      "summary": "After FLUSHDB and PFADD hll a, PFDEBUG GETREG hll returned RESP array header *16384 through the Rust server.",
+      "values": {
+        "flushdb_reply": "+OK",
+        "pfadd_reply": ":1",
+        "pfdebug_getreg_header": "*16384",
+        "pfdebug_getreg_array_16384": true
+      }
+    },
+    {
+      "name": "final_focused_hll_survey",
+      "artifact": "harness/oracle/results/tcl-survey/20260523T051422Z/unit__hyperloglog.json",
+      "status": "pass",
+      "summary": "TCL survey: 1 files, 23 passed tests, 3 failed tests, 0 timed out, 0 without summary",
+      "values": {
+        "passed": 23,
+        "failed": 3,
+        "total": 26,
+        "timed_out": 0,
+        "without_summary": 0,
+        "pass_ratio": 0.8846153846153846
+      },
+      "remaining_failures": [
+        "HyperLogLog self test passes in tests/unit/hyperloglog.tcl",
+        "Change hll-sparse-max-bytes in tests/unit/hyperloglog.tcl",
+        "Hyperloglog promote to dense well in different hll-sparse-max-bytes in tests/unit/hyperloglog.tcl"
+      ]
+    }
+  ],
+  "checks": [
+    {
+      "cmd": "cargo check -p redis-commands",
+      "status": "pass",
+      "returncode": 0,
+      "notes": "Completed with existing repository warnings."
+    },
+    {
+      "cmd": "cargo build -p redis-server",
+      "status": "pass",
+      "returncode": 0,
+      "notes": "Updated target/debug/redis-server for the TCL runner; completed with existing repository warnings."
+    },
+    {
+      "cmd": "python3 harness/oracle/tcl-survey.py --skip-build --timeout-s 90 --files unit/hyperloglog",
+      "status": "pass",
+      "returncode": 0,
+      "artifact": "harness/oracle/results/tcl-survey/20260523T051422Z/unit__hyperloglog.json"
+    },
+    {
+      "cmd": "cargo check --workspace",
+      "status": "pass",
+      "returncode": 0,
+      "notes": "Completed with existing repository warnings."
+    },
+    {
+      "cmd": "cargo build --release -p redis-server",
+      "status": "pass",
+      "returncode": 0,
+      "notes": "Completed with existing repository warnings."
+    },
+    {
+      "cmd": "bash harness/oracle/smoke.sh --skip-build",
+      "status": "pass",
+      "returncode": 0,
+      "summary": "Smoke corpus: 23 pass, 0 fail, 0 skip."
+    }
+  ],
+  "residual_risk": [
+    "PFSELFTEST remains unknown and is intentionally outside this packet.",
+    "hll-sparse-max-bytes config promotion remains outside this packet.",
+    "This evidence is telemetry-only and does not change public conformance claims."
+  ],
+  "unsafe_blocks_added": 0
+}

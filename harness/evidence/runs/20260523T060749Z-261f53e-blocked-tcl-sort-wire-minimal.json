@@ -1,0 +1,113 @@
+{
+  "captured_ts": "2026-05-23T06:07:49.393103Z",
+  "harness_context": {
+    "commit": "261f53e",
+    "git_dirty": true,
+    "git_status_short": [
+      " M crates/redis-commands/src/dispatch.rs",
+      " M crates/redis-commands/src/hyperloglog.rs",
+      " M crates/redis-commands/src/lib.rs",
+      " M crates/redis-commands/src/sort.rs",
+      " M crates/redis-core/src/command_context.rs",
+      " M docs/TCL_COVERAGE_EXPANSION.md",
+      " M docs/TCL_OVERNIGHT_FRONTIER_20260523.md",
+      " M harness/evidence/ledger.jsonl",
+      " M harness/history.jsonl",
+      "?? harness/evidence/runs/20260523T045744Z-261f53e-perf-fixer-tcl-hll-pfdebug-dispatch.json",
+      "?? harness/evidence/runs/20260523T052354Z-261f53e-perf-fixer-tcl-hll-pfdebug-dispatch.json",
+      "?? harness/evidence/runs/20260523T053458Z-261f53e-blocked-tcl-hll-pfdebug-dispatch.json",
+      "?? harness/evidence/runs/20260523T053458Z-261f53e-runner-tcl-post-hll-survey.json",
+      "?? harness/evidence/runs/20260523T053550Z-261f53e-perf-fixer-tcl-sort-wire-minimal.json",
+      "?? harness/evidence/runs/20260523T055825Z-261f53e-perf-fixer-tcl-sort-wire-minimal.json"
+    ],
+    "run_id": "loop-b69c0a59817234c2",
+    "target_commit": "261f53e8f1efd51468cc62d3179386d55f0a41a9",
+    "tree_hash": "566a45ea8a8d8ac88a544d830b90dfd7ca56c184aa58eb8bed5d3838ccaa2451"
+  },
+  "kind": "packet_blocked",
+  "packet": "tcl-sort-wire-minimal",
+  "reason_code": "repeated_packet_failure",
+  "role": "perf-fixer",
+  "schema_version": 1,
+  "state": {
+    "capabilities": [
+      "official-tcl-coverage",
+      "sort"
+    ],
+    "commit": "261f53e",
+    "evidence_path": "harness/evidence/runs/20260523T055825Z-261f53e-perf-fixer-tcl-sort-wire-minimal.json",
+    "git_dirty": true,
+    "git_status_short": [
+      " M crates/redis-commands/src/dispatch.rs",
+      " M crates/redis-commands/src/hyperloglog.rs",
+      " M crates/redis-commands/src/lib.rs",
+      " M crates/redis-commands/src/sort.rs",
+      " M crates/redis-core/src/command_context.rs",
+      " M docs/TCL_COVERAGE_EXPANSION.md",
+      " M docs/TCL_OVERNIGHT_FRONTIER_20260523.md",
+      " M harness/evidence/ledger.jsonl",
+      " M harness/history.jsonl",
+      "?? harness/evidence/runs/20260523T045744Z-261f53e-perf-fixer-tcl-hll-pfdebug-dispatch.json",
+      "?? harness/evidence/runs/20260523T052354Z-261f53e-perf-fixer-tcl-hll-pfdebug-dispatch.json",
+      "?? harness/evidence/runs/20260523T053458Z-261f53e-blocked-tcl-hll-pfdebug-dispatch.json",
+      "?? harness/evidence/runs/20260523T053458Z-261f53e-runner-tcl-post-hll-survey.json",
+      "?? harness/evidence/runs/20260523T053550Z-261f53e-perf-fixer-tcl-sort-wire-minimal.json"
+    ],
+    "mode": "perf-fixer",
+    "packet": {
+      "capabilities": [
+        "official-tcl-coverage",
+        "sort"
+      ],
+      "claim_level": "telemetry",
+      "cost_hint": "large",
+      "depends_on": [
+        "tcl-post-hll-survey"
+      ],
+      "id": "tcl-sort-wire-minimal",
+      "note": "Wire the already-translated SORT/SORT_RO module into the crate and repair compile/API gaps until unit/sort advances past unknown-command and obvious translation issues. Preserve upstream SORT semantics from sort.c: BY, GET, LIMIT, ASC/DESC, ALPHA, STORE, and SORT_RO rejecting STORE. Scope cap: if STORE or hash-pattern lookup needs a larger CommandContext design, land a faithful read-only subset plus an explicit blocker rather than returning fake data. Reproduce with: python3 harness/oracle/tcl-survey.py --skip-build --timeout-s 120 --files unit/sort. Do not special-case the tests; use RedisObject collection iterators and normal db access.",
+      "phase": 102,
+      "resources": [
+        "sort",
+        "command-dispatch",
+        "oracle-results",
+        "cargo-target"
+      ],
+      "role": "perf-fixer",
+      "schema_version": 1,
+      "selector": "auto",
+      "source_ranges": [
+        "reference/valkey/src/sort.c:49-622",
+        "reference/valkey/tests/unit/sort.tcl:*"
+      ],
+      "targets": [
+        "crates/redis-commands/src/lib.rs",
+        "crates/redis-commands/src/dispatch.rs",
+        "crates/redis-commands/src/sort.rs",
+        "crates/redis-core/src/command_context.rs",
+        "crates/redis-core/src/object.rs",
+        "docs/TCL_COVERAGE_EXPANSION.md",
+        "docs/TCL_OVERNIGHT_FRONTIER_20260523.md"
+      ]
+    },
+    "packet_id": "tcl-sort-wire-minimal",
+    "prompt_hash": "51a261b6ef6fd651",
+    "role": "perf-fixer",
+    "run_id": "loop-b69c0a59817234c2",
+    "runner_id": null,
+    "target_commit": "261f53e8f1efd51468cc62d3179386d55f0a41a9",
+    "targets": [
+      "crates/redis-commands/src/lib.rs",
+      "crates/redis-commands/src/dispatch.rs",
+      "crates/redis-commands/src/sort.rs",
+      "crates/redis-core/src/command_context.rs",
+      "crates/redis-core/src/object.rs",
+      "docs/TCL_COVERAGE_EXPANSION.md",
+      "docs/TCL_OVERNIGHT_FRONTIER_20260523.md"
+    ],
+    "tree_hash": "c04f7c2b2ca06d59407535f7e761c3fd0a457eb4658e3ace109a51b5b411eac4",
+    "ts": "2026-05-23T05:58:25.357982Z"
+  },
+  "summary": "same packet failed 2 consecutive time(s); loop stopped to avoid repeated unsafe churn",
+  "worker": "supervisor"
+}

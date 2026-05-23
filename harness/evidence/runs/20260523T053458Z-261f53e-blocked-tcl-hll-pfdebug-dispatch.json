@@ -1,0 +1,93 @@
+{
+  "captured_ts": "2026-05-23T05:34:58.647437Z",
+  "harness_context": {
+    "commit": "261f53e",
+    "git_dirty": true,
+    "git_status_short": [
+      " M crates/redis-commands/src/dispatch.rs",
+      " M crates/redis-commands/src/hyperloglog.rs",
+      " M docs/TCL_COVERAGE_EXPANSION.md",
+      " M docs/TCL_OVERNIGHT_FRONTIER_20260523.md",
+      " M harness/evidence/ledger.jsonl",
+      " M harness/history.jsonl",
+      "?? harness/evidence/runs/20260523T045744Z-261f53e-perf-fixer-tcl-hll-pfdebug-dispatch.json",
+      "?? harness/evidence/runs/20260523T052354Z-261f53e-perf-fixer-tcl-hll-pfdebug-dispatch.json"
+    ],
+    "run_id": "loop-b456374f630953aa",
+    "target_commit": "261f53e8f1efd51468cc62d3179386d55f0a41a9",
+    "tree_hash": "8566c7fd09dcec9d299421382133afc8eaee4a446c600680585de8c0ce661755"
+  },
+  "kind": "packet_blocked",
+  "packet": "tcl-hll-pfdebug-dispatch",
+  "reason_code": "repeated_packet_failure",
+  "role": "perf-fixer",
+  "schema_version": 1,
+  "state": {
+    "capabilities": [
+      "official-tcl-coverage",
+      "hyperloglog"
+    ],
+    "commit": "261f53e",
+    "evidence_path": "harness/evidence/runs/20260523T052354Z-261f53e-perf-fixer-tcl-hll-pfdebug-dispatch.json",
+    "git_dirty": true,
+    "git_status_short": [
+      " M crates/redis-commands/src/dispatch.rs",
+      " M crates/redis-commands/src/hyperloglog.rs",
+      " M docs/TCL_COVERAGE_EXPANSION.md",
+      " M docs/TCL_OVERNIGHT_FRONTIER_20260523.md",
+      " M harness/evidence/ledger.jsonl",
+      " M harness/history.jsonl",
+      "?? harness/evidence/runs/20260523T045744Z-261f53e-perf-fixer-tcl-hll-pfdebug-dispatch.json"
+    ],
+    "mode": "perf-fixer",
+    "packet": {
+      "capabilities": [
+        "official-tcl-coverage",
+        "hyperloglog"
+      ],
+      "claim_level": "telemetry",
+      "cost_hint": "small",
+      "depends_on": [
+        "tcl-frontier-baseline-after-dump"
+      ],
+      "id": "tcl-hll-pfdebug-dispatch",
+      "note": "Focused HLL packet. `pfdebug_command` already exists in `crates/redis-commands/src/hyperloglog.rs`; unit/hyperloglog currently aborts because PFDEBUG is unknown. Wire PFDEBUG into dispatch and fix only the immediate TCL-facing PFDEBUG semantics needed to advance the file. First target is `PFDEBUG GETREG hll` returning an array of 16384 registers after PFADD. Reproduce with: python3 harness/oracle/tcl-survey.py --skip-build --timeout-s 90 --files unit/hyperloglog. Do not rewrite PFADD/PFCOUNT/PFMERGE or invent a second HLL representation.",
+      "phase": 101,
+      "resources": [
+        "hyperloglog",
+        "command-dispatch",
+        "oracle-results",
+        "cargo-target"
+      ],
+      "role": "perf-fixer",
+      "schema_version": 1,
+      "selector": "auto",
+      "source_ranges": [
+        "reference/valkey/src/hyperloglog.c:1980-2106",
+        "reference/valkey/tests/unit/hyperloglog.tcl:323-329"
+      ],
+      "targets": [
+        "crates/redis-commands/src/dispatch.rs",
+        "crates/redis-commands/src/hyperloglog.rs",
+        "docs/TCL_COVERAGE_EXPANSION.md",
+        "docs/TCL_OVERNIGHT_FRONTIER_20260523.md"
+      ]
+    },
+    "packet_id": "tcl-hll-pfdebug-dispatch",
+    "prompt_hash": "9b08932e359171d0",
+    "role": "perf-fixer",
+    "run_id": "loop-b456374f630953aa",
+    "runner_id": null,
+    "target_commit": "261f53e8f1efd51468cc62d3179386d55f0a41a9",
+    "targets": [
+      "crates/redis-commands/src/dispatch.rs",
+      "crates/redis-commands/src/hyperloglog.rs",
+      "docs/TCL_COVERAGE_EXPANSION.md",
+      "docs/TCL_OVERNIGHT_FRONTIER_20260523.md"
+    ],
+    "tree_hash": "8a9ee272a643336bee550113b047e3e24653876814aad5b4fd543c644d899a06",
+    "ts": "2026-05-23T05:23:54.522937Z"
+  },
+  "summary": "same packet failed 2 consecutive time(s); loop stopped to avoid repeated unsafe churn",
+  "worker": "supervisor"
+}

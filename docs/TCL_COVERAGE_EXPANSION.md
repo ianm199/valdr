@@ -76,7 +76,7 @@ Latest focused survey, 2026-05-23:
 | `unit/info` | 0 pass / 0 fail | Tag-filtered / no meaningful tests under this policy | Runner-scope issue |
 | `unit/hyperloglog` | no summary | `PFDEBUG` missing during sparse/dense test | Medium, debug + sparse/dense semantics |
 | `unit/scripting` | no summary | `FUNCTION LOAD` missing before basic EVAL block | Large, split functions vs EVAL |
-| `unit/sort` | no summary | `SORT BY`: unknown command | Medium if dispatch gap, large if semantics absent |
+| `unit/sort` | no summary | After `tcl-sort-wire-minimal`: reaches `COMMAND GETKEYS`; two earlier STORE encoding assertions are blocked on the legacy `list-max-ziplist-size` CONFIG alias | Sort wired; connection metadata remains |
 | `unit/slowlog` | no summary | `FUNCTION LOAD` missing in scripting slowlog block | Split from core slowlog edges |
 
 Previous baseline before this wave was 62 counted passes, 9 counted failures,
@@ -156,6 +156,57 @@ RESTORE validates checksum/version, honors strict vs relaxed
 serialization path. The `unit/dump` telemetry is now 13/13 under the current
 deny-tag policy.
 
+## HLL PFDEBUG Dispatch Packet
+
+`tcl-hll-pfdebug-dispatch` is scoped to normal command dispatch and the
+TCL-facing PFDEBUG surface in `crates/redis-commands/src/hyperloglog.rs`. The
+packet wires `PFDEBUG` into the shared dispatcher and implements
+`GETREG`, `DECODE`, `ENCODING`, and `TODENSE` against the existing stored HLL
+bytes. It also matches Valkey's packed dense-register sentinel behavior without
+adding a second HyperLogLog representation.
+
+This remains telemetry. The focused `unit/hyperloglog` survey now reaches a
+summary instead of aborting on unknown `PFDEBUG`:
+
+```text
+run: harness/oracle/results/tcl-survey/20260523T052712Z/unit__hyperloglog.json
+23 passed
+3 failed
+0 timed out
+0 without summary
+```
+
+The remaining focused failures are `PFSELFTEST` dispatch/implementation and the
+`hll-sparse-max-bytes` config-driven sparse-to-dense frontier. Those need
+separate packets; this packet does not rewrite PFADD, PFCOUNT, or PFMERGE.
+
+## SORT Wire Packet
+
+`tcl-sort-wire-minimal` is scoped to wiring the already-translated SORT surface
+through normal command dispatch. The packet adds `sort.rs` to the command crate,
+registers `SORT` and `SORT_RO`, and fills the minimal `CommandContext` helpers
+needed by the translation for raw argv parsing, read lookup, hash field lookup,
+bulk-object replies, and STORE writes.
+
+The focused `unit/sort` survey now advances past the prior unknown-command
+wall:
+
+```text
+run: harness/oracle/results/tcl-survey/20260523T054433Z/unit__sort.json
+0 counted passed tests
+0 counted failed tests
+0 timed out
+1 without summary
+```
+
+The file now stops at `COMMAND GETKEYS sort ...`, which is owned by
+`crates/redis-commands/src/connection.rs` and was outside this packet's writable
+targets. The two earlier reported STORE assertions are not SORT data failures:
+the stored list values and lengths pass, but the test expects quicklist because
+`CONFIG GET list-max-ziplist-size` does not expose the legacy alias in the Rust
+connection surface. That alias is also in `connection.rs` and needs a separate
+metadata/config packet.
+
 ## What This Says About "Spark Skeleton" Work
 
 Do not use cheap agents to mass-author trusted command behavior. The useful
@@ -179,13 +230,14 @@ Recommended next packet order:
    - caveat: split around function/scripting-dependent tests
    - why: core slowlog failures are visible before the scripting abort
 
-2. `tcl-hyperloglog-sparse-dense`
+2. `tcl-hyperloglog-config-selftest`
    - target: `crates/redis-commands/src/hyperloglog.rs`
-   - caveat: `PFDEBUG` may need a test-only/official-suite-compatible subset
+   - caveat: split `PFSELFTEST` from `hll-sparse-max-bytes` config promotion
 
-3. `tcl-sort-wire`
-   - target: sort command registration and semantics
-   - caveat: likely large if implementation is not wired to current context
+3. `tcl-sort-connection-metadata`
+   - target: `crates/redis-commands/src/connection.rs`
+   - caveat: split from SORT semantics; needed for `COMMAND GETKEYS` and the
+     legacy `list-max-ziplist-size` CONFIG alias used by `unit/sort`
 
 4. `tcl-functions-load-minimal`
    - target: function registry / FUNCTION LOAD enough for scripting and slowlog

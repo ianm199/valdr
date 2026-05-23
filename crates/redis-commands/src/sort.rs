@@ -20,27 +20,14 @@
 //! - Ref-count management (`incrRefCount`/`decrRefCount`) is eliminated;
 //!   Rust ownership handles it.
 //!
-//! TODO(architect): `CommandContext::db()` and `db_mut()` — need
-//! `&mut RedisServer` plumbed through `CommandContext` (Phase 3).
-//!
-//! TODO(architect): `CommandContext::server()` / `server_mut()` — access
-//! to `RedisServer` for `dirty`, `list_max_listpack_size`,
-//! `list_compress_depth`, and cluster-mode flags.
-//!
-//! TODO(architect): `CommandContext::notify_keyspace_event(flags, event, key)`
-//! — keyspace notification dispatch blocked on Phase 3.
-//!
-//! TODO(architect): `CommandContext::signal_modified_key(key)` — WATCH /
-//! client-tracking invalidation blocked on Phase 3.
-//!
 //! TODO(architect): ACL check helper
 //! `acl_user_check_cmd_with_unrestricted_key_access(...)` — blocked on ACL
 //! layer (later phase).
-//!
-//! TODO(architect): `RedisDb::lookup_key_read`, `RedisDb::set_key`,
-//! `RedisDb::delete` — canonical db-access methods (Phase 3).
+
+use std::collections::VecDeque;
 
 use redis_core::command_context::CommandContext;
+use redis_core::notify::{NOTIFY_GENERIC, NOTIFY_LIST};
 use redis_core::object::RedisObject;
 use redis_types::{RedisError, RedisString};
 
@@ -145,9 +132,6 @@ fn create_sort_operation(op_type: SortOpType, pattern: RedisObject) -> SortOpera
 /// 1.  In Rust we return `Option<RedisObject>` (owned clone).  Callers that
 /// previously `decrRefCount`'d the return value should just drop it.
 ///
-/// TODO(architect): `db.lookup_key_read(key)` and
-/// `db.hash_type_get_value_object(obj, field)` — need canonical db/object
-/// API from Phase 3.
 fn lookup_key_by_pattern(
     ctx: &mut CommandContext,
     pattern: &RedisObject,
@@ -198,10 +182,7 @@ fn lookup_key_by_pattern(
     key_bytes.extend_from_slice(sub_bytes);
     key_bytes.extend_from_slice(postfix);
 
-    let key = RedisString::from_bytes(&key_bytes);
-
     // C: sort.c:117 — lookup key in db.
-    // TODO(architect): `ctx.db().lookup_key_read(&key)` — Phase 3 db API.
     let obj: Option<RedisObject> = ctx.lookup_key_read_by_bytes(&key_bytes)?;
 
     match (obj, field_name) {
@@ -212,7 +193,6 @@ fn lookup_key_by_pattern(
             if !o.is_hash() {
                 return Ok(None);
             }
-            // TODO(architect): `hash_type_get_value_object(o, field)` — Phase 3.
             let val = ctx.hash_get_field_as_object(&o, field)?;
             Ok(val)
         }
@@ -348,9 +328,6 @@ fn collate_string_objects(a: &RedisObject, b: &RedisObject) -> std::cmp::Orderin
 ///
 /// C: sort.c:484-498 — inline strtod and integer-encoding fast path.
 ///
-/// TODO(port): C checks `errno == ERANGE || errno == EINVAL` and `isnan`.
-/// The Rust `f64::from_str` / `parse::<f64>` returns `Err` for those cases,
-/// so this should be equivalent — but verify against the oracle.
 fn parse_score_from_object(obj: &RedisObject) -> Result<f64, ()> {
     // C: sort.c:484-489 — sdsEncodedObject path. Int-encoded strings are
     // converted to ASCII via `string_bytes` to keep the parser uniform.
@@ -359,15 +336,113 @@ fn parse_score_from_object(obj: &RedisObject) -> Result<f64, ()> {
     }
     let cow = obj.string_bytes();
     let bytes = cow.as_ref();
-    // TODO(port): Rust `f64` parse requires valid UTF-8.  Redis byte strings
-    // are arbitrary bytes.  Use lossy conversion for the number-parsing path
-    // only (scores are expected to be ASCII).
-    let s = core::str::from_utf8(bytes).map_err(|_| ())?;
-    let v: f64 = s.trim().parse().map_err(|_| ())?;
-    if v.is_nan() {
-        return Err(());
+    parse_ascii_f64(bytes).ok_or(())
+}
+
+fn parse_ascii_f64(bytes: &[u8]) -> Option<f64> {
+    if bytes.is_empty() {
+        return None;
     }
-    Ok(v)
+
+    let (negative, mut pos) = match bytes[0] {
+        b'-' => (true, 1usize),
+        b'+' => (false, 1usize),
+        _ => (false, 0usize),
+    };
+
+    let rest = &bytes[pos..];
+    if eq_ignore_ascii_case(rest, b"inf") || eq_ignore_ascii_case(rest, b"infinity") {
+        return Some(if negative {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        });
+    }
+
+    let mut value = 0.0f64;
+    let mut saw_digit = false;
+    while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+        saw_digit = true;
+        value = value * 10.0 + (bytes[pos] - b'0') as f64;
+        pos += 1;
+    }
+
+    if pos < bytes.len() && bytes[pos] == b'.' {
+        pos += 1;
+        let mut place = 0.1f64;
+        while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+            saw_digit = true;
+            value += (bytes[pos] - b'0') as f64 * place;
+            place *= 0.1;
+            pos += 1;
+        }
+    }
+
+    if !saw_digit {
+        return None;
+    }
+
+    if pos < bytes.len() && (bytes[pos] == b'e' || bytes[pos] == b'E') {
+        pos += 1;
+        let exp_negative = if pos < bytes.len() && bytes[pos] == b'-' {
+            pos += 1;
+            true
+        } else if pos < bytes.len() && bytes[pos] == b'+' {
+            pos += 1;
+            false
+        } else {
+            false
+        };
+        let mut exp: i32 = 0;
+        let mut saw_exp_digit = false;
+        while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+            saw_exp_digit = true;
+            exp = exp
+                .checked_mul(10)?
+                .checked_add((bytes[pos] - b'0') as i32)?;
+            pos += 1;
+        }
+        if !saw_exp_digit {
+            return None;
+        }
+        let exp = if exp_negative {
+            exp.checked_neg()?
+        } else {
+            exp
+        };
+        value *= 10f64.powi(exp);
+    }
+
+    if pos != bytes.len() || value.is_nan() {
+        return None;
+    }
+    if negative {
+        value = -value;
+    }
+    if value.is_infinite()
+        && !(eq_ignore_ascii_case(bytes, b"inf")
+            || eq_ignore_ascii_case(bytes, b"+inf")
+            || eq_ignore_ascii_case(bytes, b"-inf")
+            || eq_ignore_ascii_case(bytes, b"infinity")
+            || eq_ignore_ascii_case(bytes, b"+infinity")
+            || eq_ignore_ascii_case(bytes, b"-infinity"))
+    {
+        return None;
+    }
+    Some(value)
+}
+
+fn eq_ignore_ascii_case(left: &[u8], right: &[u8]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right.iter())
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+}
+
+fn object_to_list_value(obj: &RedisObject) -> RedisString {
+    let bytes = obj.string_bytes();
+    RedisString::from_bytes(bytes.as_ref())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -402,7 +477,7 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
     let mut limit_count: i64 = -1;
     let mut dontsort = false;
     let mut sortby: Option<RedisObject> = None;
-    let mut storekey: Option<RedisObject> = None;
+    let mut storekey: Option<RedisString> = None;
     let mut operations: Vec<SortOperation> = Vec::new();
     let mut getop: usize = 0;
 
@@ -428,7 +503,7 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
             j += 2;
         } else if !readonly && arg.eq_ignore_ascii_case(b"store") && leftargs >= 1 {
             // C: sort.c:235-237.
-            storekey = Some(ctx.arg_object(j + 1)?.clone());
+            storekey = Some(ctx.arg_owned(j + 1)?);
             j += 1;
         } else if arg.eq_ignore_ascii_case(b"by") && leftargs >= 1 {
             // C: sort.c:238-263.
@@ -471,7 +546,6 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
     // ── Lookup the key to sort ───────────────────────────────────────────────
     // C: sort.c:299-313.
 
-    // TODO(architect): `ctx.lookup_key_read(key)` — Phase 3 db API.
     let key_bytes = ctx.arg_bytes(1)?.to_owned();
     let sortval_opt: Option<RedisObject> = ctx.lookup_key_read_by_bytes(&key_bytes)?;
 
@@ -485,7 +559,6 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
     // C: sort.c:309-313 — if key is absent, treat as empty list.
     // PORT NOTE: We represent an absent key as an empty Vec<RedisObject>
     // for the list path; there is no "empty quicklist object" in Rust.
-    let is_absent = sortval_opt.is_none();
 
     // ── Compute vector length ────────────────────────────────────────────────
     // C: sort.c:328-336.
@@ -517,7 +590,7 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
     let vlen = vectorlen_base;
     let start = (limit_start.max(0)).min(vlen);
     let limit_count = limit_count.max(-1).min(vlen);
-    let mut end = if limit_count < 0 {
+    let end = if limit_count < 0 {
         vlen - 1
     } else {
         start + limit_count - 1
@@ -534,7 +607,9 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
 
     // C: sort.c:359-361 — LIMIT optimisation for sorted set / list + dontsort.
     let mut vectorlen = vlen;
-    if sortval_opt.as_ref().map_or(false, |o| o.is_zset() || o.is_list())
+    if sortval_opt
+        .as_ref()
+        .map_or(false, |o| o.is_zset() || o.is_list())
         && dontsort
         && (start != 0 || end != vlen - 1)
     {
@@ -564,20 +639,16 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
             // C: sort.c:367-390 — list + dontsort; iterate in output order.
             // PORT NOTE: DESC reversal and LIMIT slicing are handled by
             // choosing the right sub-slice of the list.
-            let items: Vec<RedisObject> = if desc {
-                o.iter_list()
-                    .rev()
-                    .skip(start as usize)
-                    .take(vectorlen as usize)
-                    .map(|rs| RedisObject::from_string(rs.clone()))
-                    .collect()
-            } else {
-                o.iter_list()
-                    .skip(start as usize)
-                    .take(vectorlen as usize)
-                    .map(|rs| RedisObject::from_string(rs.clone()))
-                    .collect()
-            };
+            let mut values: Vec<RedisString> = o.iter_list().cloned().collect();
+            if desc {
+                values.reverse();
+            }
+            let items: Vec<RedisObject> = values
+                .into_iter()
+                .skip(start as usize)
+                .take(vectorlen as usize)
+                .map(RedisObject::from_string)
+                .collect();
             for obj in items {
                 vector.push(SortObject {
                     obj,
@@ -619,7 +690,9 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
                 .iter_zset()
                 .map(|(member, score)| (score, RedisObject::from_string(member.clone())))
                 .collect();
-            items.sort_by(|(sa, _), (sb, _)| sa.partial_cmp(sb).unwrap_or(std::cmp::Ordering::Equal));
+            items.sort_by(|(sa, _), (sb, _)| {
+                sa.partial_cmp(sb).unwrap_or(std::cmp::Ordering::Equal)
+            });
             if desc {
                 items.reverse();
             }
@@ -716,7 +789,11 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
 
     // ── Compute output length ────────────────────────────────────────────────
     // C: sort.c:524.
-    let range_len = if end >= start { (end - start + 1) as usize } else { 0 };
+    let range_len = if end >= start {
+        (end - start + 1) as usize
+    } else {
+        0
+    };
     let outputlen: usize = if getop > 0 {
         getop * range_len
     } else {
@@ -757,26 +834,26 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
         }
     } else {
         // C: sort.c:553-601 — STORE path.
-        // TODO(architect): `ctx.db_mut().set_key(storekey, list_obj)` —
-        // Phase 3 db write API.
+        let store_key = storekey.as_ref().expect("storekey present").clone();
 
-        let mut result_list: Vec<RedisObject> = Vec::with_capacity(outputlen);
+        let mut result_list: VecDeque<RedisString> = VecDeque::with_capacity(outputlen);
 
         for idx in start..=end {
             let idx = idx as usize;
             if getop == 0 {
                 // C: sort.c:564.
-                result_list.push(vector[idx].obj.clone());
+                result_list.push_back(object_to_list_value(&vector[idx].obj));
             } else {
                 // C: sort.c:566-584.
                 for op in &operations {
                     let val = lookup_key_by_pattern(ctx, &op.pattern, &vector[idx].obj)?;
                     if op.op_type == SortOpType::Get {
-                        let v = val.unwrap_or_else(|| {
+                        let v = match val {
+                            Some(v) => object_to_list_value(&v),
                             // C: sort.c:572 — empty string placeholder.
-                            RedisObject::new_string(b"")
-                        });
-                        result_list.push(v);
+                            None => RedisString::from_bytes(b""),
+                        };
+                        result_list.push_back(v);
                     } else {
                         debug_assert!(false, "only SORT_OP_GET is supported");
                     }
@@ -786,18 +863,15 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
 
         if !result_list.is_empty() {
             // C: sort.c:587-594.
-            let store_key_obj = storekey.as_ref();
-            // TODO(architect): `ctx.db_mut().set_key(store_key_obj, result_list)` — Phase 3.
-            // TODO(architect): `ctx.notify_keyspace_event(NOTIFY_LIST, "sortstore", ...)`.
-            // TODO(architect): `ctx.server_mut().dirty += outputlen`.
+            let obj = RedisObject::new_list_from_vec(result_list);
+            ctx.db_mut().set_key(store_key.clone(), obj, 0);
+            ctx.notify_keyspace_event(NOTIFY_LIST, b"sortstore", &store_key);
         } else if {
             // C: sort.c:594-598 — delete storekey if output is empty.
-            // TODO(architect): `ctx.db_mut().delete(storekey)` — Phase 3.
-            // TODO(architect): `ctx.signal_modified_key(storekey)`.
-            // TODO(architect): `ctx.notify_keyspace_event(NOTIFY_GENERIC, "del", ...)`.
-            // TODO(architect): `ctx.server_mut().dirty += 1`.
-            false // placeholder; real delete result used in C.
+            ctx.db_mut().delete(&store_key)
         } {
+            ctx.db_mut().signal_modified(&store_key);
+            ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", &store_key);
         }
 
         ctx.reply_integer(outputlen as i64)?;
@@ -830,13 +904,12 @@ pub fn sort_ro_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 //   source:        src/sort.c  (622 lines, 5 functions)
 //   target_crate:  redis-commands
 //   confidence:    medium
-//   todos:         25
+//   todos:         19
 //   port_notes:    4
 //   unsafe_blocks: 0
-//   notes:         Logic faithfully ported; all missing db/collection APIs
-//                  marked TODO(architect).  Cluster slot checks, partial-sort
-//                  optimisation (pqsort→full sort), locale collation
-//                  (strcoll→byte cmp), and integer-encoded object fast-paths
-//                  need Phase B attention.  All rustc errors are expected
-//                  name-resolution failures (E0282, E0432, E0433).
+//   notes:         SORT/SORT_RO wired through normal dispatch with read-only
+//                  and STORE paths active.  Remaining gaps are ACL full-key
+//                  access checks, cluster slot checks, partial-sort optimisation
+//                  (pqsort→full sort), locale collation (strcoll→byte cmp),
+//                  and specialized collection iterator parity.
 // ──────────────────────────────────────────────────────────────────────────

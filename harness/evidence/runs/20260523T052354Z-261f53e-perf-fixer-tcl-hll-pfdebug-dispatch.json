@@ -1,0 +1,139 @@
+{
+  "captured_ts": "2026-05-23T05:32:30Z",
+  "kind": "perf_fixer_result",
+  "packet": "tcl-hll-pfdebug-dispatch",
+  "prompt_hash": "9b08932e359171d0",
+  "status": "pass",
+  "claim_level": "telemetry",
+  "harness_context": {
+    "commit": "261f53e",
+    "target_commit": "261f53e8f1efd51468cc62d3179386d55f0a41a9",
+    "git_dirty": true,
+    "git_status_short": [
+      " M crates/redis-commands/src/dispatch.rs",
+      " M crates/redis-commands/src/hyperloglog.rs",
+      " M docs/TCL_COVERAGE_EXPANSION.md",
+      " M docs/TCL_OVERNIGHT_FRONTIER_20260523.md",
+      " M harness/evidence/ledger.jsonl",
+      " M harness/history.jsonl",
+      "?? harness/evidence/runs/20260523T045744Z-261f53e-perf-fixer-tcl-hll-pfdebug-dispatch.json",
+      "?? harness/evidence/runs/20260523T052354Z-261f53e-perf-fixer-tcl-hll-pfdebug-dispatch.json"
+    ],
+    "resources": [
+      "cargo-target",
+      "oracle-results",
+      "hyperloglog",
+      "command-dispatch"
+    ]
+  },
+  "subsystem_boundary": "Normal redis_commands::dispatch registration plus the HyperLogLog PFDEBUG debug surface. The packet keeps ACL, transactions, expiration, pub/sub, blocking wakeups, AOF, replication, RDB, and normal dispatcher semantics in place and does not rewrite PFADD, PFCOUNT, or PFMERGE.",
+  "source_mapping": {
+    "source_files": [
+      "reference/valkey/src/hyperloglog.c:1980-2106",
+      "reference/valkey/tests/unit/hyperloglog.tcl:323-329",
+      "reference/valkey/src/server.c:1980-2106",
+      "reference/valkey/src/server.c:323-329"
+    ],
+    "target_files": [
+      "crates/redis-commands/src/dispatch.rs",
+      "crates/redis-commands/src/hyperloglog.rs",
+      "docs/TCL_COVERAGE_EXPANSION.md",
+      "docs/TCL_OVERNIGHT_FRONTIER_20260523.md"
+    ]
+  },
+  "implementation": [
+    "Registered PFDEBUG in the shared dispatch table.",
+    "Implemented PFDEBUG GETREG, DECODE, ENCODING, TODENSE, and the SIMD status/toggle stub against the existing stored HLL bytes.",
+    "GETREG promotes sparse HLL values to dense before returning 16384 packed register values, matching Valkey's debug command behavior.",
+    "Dense register get/set now treats the byte after the packed dense slice as a zero sentinel instead of indexing past the Rust slice.",
+    "Updated TCL frontier docs as telemetry only; no public conformance claim was expanded."
+  ],
+  "measurements": [
+    {
+      "name": "baseline_focused_hll_survey_before_fix",
+      "artifact": "harness/oracle/results/tcl-survey/20260523T045215Z/unit__hyperloglog.json",
+      "status": "fail",
+      "summary": "unit/hyperloglog aborted before Test Summary on unknown PFDEBUG.",
+      "abort_test": "HyperLogLogs are promote from sparse to dense",
+      "exception": "ERR unknown command 'pfdebug'."
+    },
+    {
+      "name": "focused_hll_survey_after_fix",
+      "artifact": "harness/oracle/results/tcl-survey/20260523T052712Z/unit__hyperloglog.json",
+      "status": "pass",
+      "summary": "TCL survey: 1 files, 23 passed tests, 3 failed tests, 0 timed out, 0 without summary",
+      "values": {
+        "passed": 23,
+        "failed": 3,
+        "total": 26,
+        "timed_out": 0,
+        "without_summary": 0,
+        "pass_ratio": 0.8846153846153846
+      },
+      "remaining_failures": [
+        "HyperLogLog self test passes in tests/unit/hyperloglog.tcl",
+        "Change hll-sparse-max-bytes in tests/unit/hyperloglog.tcl",
+        "Hyperloglog promote to dense well in different hll-sparse-max-bytes in tests/unit/hyperloglog.tcl"
+      ]
+    }
+  ],
+  "checks": [
+    {
+      "cmd": "cargo check -p redis-commands",
+      "status": "pass",
+      "returncode": 0,
+      "notes": "Completed with existing repository warnings."
+    },
+    {
+      "cmd": "cargo build -p redis-server",
+      "status": "pass",
+      "returncode": 0,
+      "notes": "Updated target/debug/redis-server for the TCL runner; completed with existing repository warnings."
+    },
+    {
+      "cmd": "python3 harness/oracle/tcl-survey.py --skip-build --timeout-s 90 --files unit/hyperloglog",
+      "status": "pass",
+      "returncode": 0,
+      "artifact": "harness/oracle/results/tcl-survey/20260523T052712Z/unit__hyperloglog.json"
+    },
+    {
+      "cmd": "cargo check --workspace",
+      "status": "pass",
+      "returncode": 0,
+      "notes": "Completed with existing repository warnings."
+    },
+    {
+      "cmd": "cargo build --release -p redis-server",
+      "status": "pass",
+      "returncode": 0,
+      "notes": "Updated target/release/redis-server for smoke; completed with existing repository warnings."
+    },
+    {
+      "cmd": "bash harness/oracle/smoke.sh --skip-build",
+      "status": "pass",
+      "returncode": 0,
+      "summary": "Smoke corpus: 23 pass, 0 fail, 0 skip."
+    }
+  ],
+  "non_gating_checks": [
+    {
+      "cmd": "cargo fmt --check",
+      "status": "fail_existing_format_debt",
+      "returncode": 1,
+      "notes": "Workspace-wide check reports large pre-existing formatting diffs across unrelated crates; no formatting write was run."
+    },
+    {
+      "cmd": "rustfmt --check crates/redis-commands/src/dispatch.rs crates/redis-commands/src/hyperloglog.rs",
+      "status": "fail_existing_format_debt",
+      "returncode": 1,
+      "notes": "Packet target files are not rustfmt-clean before this narrow packet; formatting them would create broad dispatch/HLL churn outside the behavioral fix."
+    }
+  ],
+  "residual_risk": [
+    "PFSELFTEST remains outside this packet and still fails the focused TCL survey.",
+    "CONFIG SET hll-sparse-max-bytes sparse-to-dense behavior remains outside this packet and accounts for the other two focused TCL failures.",
+    "PFDEBUG SIMD remains a scalar-port status stub because no safe SIMD/global simd_enabled architecture exists yet.",
+    "This evidence is telemetry-only and does not change public conformance claims."
+  ],
+  "unsafe_blocks_added": 0
+}

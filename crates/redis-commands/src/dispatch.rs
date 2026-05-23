@@ -840,7 +840,11 @@ pub static HANDLERS: &[DispatchEntry] = &[
     // ── HYPERLOGLOG (Round 9 HLL) ──────────────────────────────────────────
     DispatchEntry { name: b"PFADD", handler: crate::hyperloglog::pfadd_command },
     DispatchEntry { name: b"PFCOUNT", handler: crate::hyperloglog::pfcount_command },
+    DispatchEntry { name: b"PFDEBUG", handler: crate::hyperloglog::pfdebug_command },
     DispatchEntry { name: b"PFMERGE", handler: crate::hyperloglog::pfmerge_command },
+    // ── SORT (TCL frontier) ───────────────────────────────────────────────
+    DispatchEntry { name: b"SORT", handler: crate::sort::sort_command },
+    DispatchEntry { name: b"SORT_RO", handler: crate::sort::sort_ro_command },
     // ── INTROSPECTION (Round 9 INFO/CONFIG) ────────────────────────────────
     DispatchEntry { name: b"INFO", handler: crate::info::info_command },
     DispatchEntry { name: b"LASTSAVE", handler: crate::info::lastsave_command },

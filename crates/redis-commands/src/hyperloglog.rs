@@ -192,7 +192,9 @@ pub fn hll_dense_get_register(registers: &[u8], regnum: usize) -> u8 {
     let fb = regnum * HLL_BITS as usize & 7;
     let fb8 = 8 - fb;
     let b0 = registers[byte_idx] as u32;
-    let b1 = registers[byte_idx + 1] as u32;
+    // C reads the byte after the last packed register and relies on SDS's
+    // implicit NUL terminator. Rust slices do not include that sentinel.
+    let b1 = registers.get(byte_idx + 1).copied().unwrap_or(0) as u32;
     ((b0 >> fb | b1 << fb8) & HLL_REGISTER_MAX as u32) as u8
 }
 
@@ -202,10 +204,12 @@ pub fn hll_dense_set_register(registers: &mut [u8], regnum: usize, val: u8) {
     let fb = regnum * HLL_BITS as usize & 7;
     let fb8 = 8 - fb;
     let v = val as u32;
-    registers[byte_idx] &= !(HLL_REGISTER_MAX << fb) as u8;
+    registers[byte_idx] &= !((HLL_REGISTER_MAX as u32) << fb) as u8;
     registers[byte_idx] |= (v << fb) as u8;
-    registers[byte_idx + 1] &= !(HLL_REGISTER_MAX >> fb8) as u8;
-    registers[byte_idx + 1] |= (v >> fb8) as u8;
+    if let Some(next) = registers.get_mut(byte_idx + 1) {
+        *next &= !((HLL_REGISTER_MAX as u32) >> fb8) as u8;
+        *next |= (v >> fb8) as u8;
+    }
 }
 
 // ── Sparse opcode helpers ─────────────────────────────────────────────────────
@@ -971,6 +975,77 @@ fn require_hll_object(obj: &RedisObject) -> Result<&[u8], RedisError> {
 
 // ── Command entry points ──────────────────────────────────────────────────────
 
+fn append_decimal_usize(out: &mut Vec<u8>, mut n: usize) {
+    if n == 0 {
+        out.push(b'0');
+        return;
+    }
+    let mut digits = [0u8; 20];
+    let mut len = 0;
+    while n > 0 {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+    }
+    for digit in digits[..len].iter().rev() {
+        out.push(*digit);
+    }
+}
+
+fn pfdebug_arity_error(subcmd: &[u8]) -> RedisError {
+    let mut msg = Vec::with_capacity(
+        b"ERR Wrong number of arguments for the '' subcommand".len() + subcmd.len(),
+    );
+    msg.extend_from_slice(b"ERR Wrong number of arguments for the '");
+    msg.extend_from_slice(subcmd);
+    msg.extend_from_slice(b"' subcommand");
+    RedisError::runtime(msg)
+}
+
+fn pfdebug_unknown_subcommand(subcmd: &[u8]) -> RedisError {
+    let mut msg =
+        Vec::with_capacity(b"ERR Unknown PFDEBUG subcommand ''".len() + subcmd.len());
+    msg.extend_from_slice(b"ERR Unknown PFDEBUG subcommand '");
+    msg.extend_from_slice(subcmd);
+    msg.push(b'\'');
+    RedisError::runtime(msg)
+}
+
+fn pfdebug_decode_sparse(buf: &[u8]) -> Result<Vec<u8>, RedisError> {
+    if hll_encoding(buf) != HLL_SPARSE {
+        return Err(RedisError::runtime(b"ERR HLL encoding is not sparse"));
+    }
+
+    let mut decoded = Vec::new();
+    let mut pos = HLL_HDR_SIZE;
+    while pos < buf.len() {
+        let b = buf[pos];
+        if sparse_is_zero(b) {
+            decoded.extend_from_slice(b"z:");
+            append_decimal_usize(&mut decoded, sparse_zero_len(b));
+            pos += 1;
+        } else if sparse_is_xzero(b) {
+            if pos + 1 >= buf.len() {
+                return Err(RedisError::runtime(INVALID_HLL_ERR));
+            }
+            decoded.extend_from_slice(b"Z:");
+            append_decimal_usize(&mut decoded, sparse_xzero_len(b, buf[pos + 1]));
+            pos += 2;
+        } else {
+            decoded.extend_from_slice(b"v:");
+            append_decimal_usize(&mut decoded, sparse_val_value(b) as usize);
+            decoded.push(b',');
+            append_decimal_usize(&mut decoded, sparse_val_len(b));
+            pos += 1;
+        }
+        decoded.push(b' ');
+    }
+    if decoded.last() == Some(&b' ') {
+        decoded.pop();
+    }
+    Ok(decoded)
+}
+
 /// PFADD key element [element ...]
 ///
 /// Adds elements to the HyperLogLog stored at `key`, creating a fresh sparse
@@ -1186,15 +1261,14 @@ pub fn pfdebug_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         return Err(RedisError::wrong_number_of_args(b"PFDEBUG"));
     }
 
-    let subcmd = ctx.arg(1)?;
+    let subcmd = ctx.arg_owned(1usize)?;
+    let subcmd_bytes = subcmd.as_bytes();
 
     // SIMD subcommand: toggle/report SIMD usage.
     // C: hyperloglog.c:1992-2009
-    if subcmd.eq_ignore_ascii_case(b"simd") {
+    if subcmd_bytes.eq_ignore_ascii_case(b"simd") {
         if argc != 3 {
-            return Err(RedisError::runtime(
-                b"Wrong number of arguments for the 'simd' subcommand",
-            ));
+            return Err(pfdebug_arity_error(subcmd_bytes));
         }
         let arg = ctx.arg(2)?;
         if arg.eq_ignore_ascii_case(b"on") {
@@ -1202,50 +1276,61 @@ pub fn pfdebug_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         } else if arg.eq_ignore_ascii_case(b"off") {
             // TODO(architect): set server-level simd_enabled=false.
         } else {
-            return Err(RedisError::runtime(b"Argument must be ON or OFF"));
+            return Err(RedisError::runtime(b"ERR Argument must be ON or OFF"));
         }
         // SIMD always "disabled" in this port (no SIMD paths yet).
         return ctx.reply_simple_string(b"disabled");
     }
 
     // All other subcommands require a key as argv[2].
-    if argc < 3 {
-        return Err(RedisError::runtime(
-            b"Wrong number of arguments for PFDEBUG subcommand",
-        ));
+    if argc != 3 {
+        return Err(pfdebug_arity_error(subcmd_bytes));
     }
-    let key = ctx.arg(2)?;
-    let _ = key;
 
-    // TODO(port): lookup_key_write(key); validate; unshare; extract buf.
-    // Placeholder: return an error until DB wiring is in place.
-    let _buf: Vec<u8> = Vec::new(); // placeholder
+    let key = ctx.arg_owned(2usize)?;
+    let mut buf = match ctx.db_mut().lookup_key_write(&key) {
+        Some(obj) => require_hll_bytes(obj)?,
+        None => return Err(RedisError::runtime(b"ERR The specified key does not exist")),
+    };
 
-    if subcmd.eq_ignore_ascii_case(b"getreg") {
-        // PFDEBUG GETREG: promote to dense if needed, reply array of register values.
-        // TODO(port): hll_sparse_to_dense if sparse; reply_array_header(HLL_REGISTERS);
-        // for each register: reply_integer(hll_dense_get_register(...))
+    if subcmd_bytes.eq_ignore_ascii_case(b"getreg") {
+        let mut converted = false;
+        if hll_encoding(&buf) == HLL_SPARSE {
+            hll_sparse_to_dense(&mut buf)?;
+            converted = true;
+        }
+        if converted {
+            ctx.db_mut()
+                .replace_value(&key, RedisObject::from_string(RedisString::from_vec(buf.clone())));
+        }
         ctx.reply_array_header(HLL_REGISTERS as i64)?;
-        for _ in 0..HLL_REGISTERS {
-            ctx.reply_integer(0)?;
+        for j in 0..HLL_REGISTERS {
+            let val = hll_dense_get_register(&buf[HLL_HDR_SIZE..], j);
+            ctx.reply_integer(val as i64)?;
         }
         Ok(())
-    } else if subcmd.eq_ignore_ascii_case(b"decode") {
-        // PFDEBUG DECODE: decode sparse opcodes into human-readable form.
-        // TODO(port): walk sparse opcodes, build decoded byte string, reply_bulk.
-        let decoded: Vec<u8> = Vec::new(); // placeholder
+    } else if subcmd_bytes.eq_ignore_ascii_case(b"decode") {
+        let decoded = pfdebug_decode_sparse(&buf)?;
         ctx.reply_bulk(&decoded)
-    } else if subcmd.eq_ignore_ascii_case(b"encoding") {
-        // PFDEBUG ENCODING: reply "dense" or "sparse".
-        // TODO(port): check buf encoding and reply the appropriate string.
-        ctx.reply_simple_string(b"sparse")
-    } else if subcmd.eq_ignore_ascii_case(b"todense") {
-        // PFDEBUG TODENSE: promote to dense, reply :1 if converted, :0 if already dense.
-        // TODO(port): hll_sparse_to_dense(buf); dirty++; reply 1 or 0.
-        ctx.reply_integer(0)
+    } else if subcmd_bytes.eq_ignore_ascii_case(b"encoding") {
+        let name = if hll_encoding(&buf) == HLL_DENSE {
+            b"dense".as_slice()
+        } else {
+            b"sparse".as_slice()
+        };
+        ctx.reply_simple_string(name)
+    } else if subcmd_bytes.eq_ignore_ascii_case(b"todense") {
+        let converted = if hll_encoding(&buf) == HLL_SPARSE {
+            hll_sparse_to_dense(&mut buf)?;
+            ctx.db_mut()
+                .replace_value(&key, RedisObject::from_string(RedisString::from_vec(buf)));
+            1
+        } else {
+            0
+        };
+        ctx.reply_integer(converted)
     } else {
-        // TODO(port): format subcommand name into error message (needs byte-safe formatting).
-        Err(RedisError::runtime(b"Unknown PFDEBUG subcommand"))
+        Err(pfdebug_unknown_subcommand(subcmd_bytes))
     }
 }
 
@@ -1254,14 +1339,12 @@ pub fn pfdebug_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 //   source:        src/hyperloglog.c  (2107 lines, 27 functions)
 //   target_crate:  redis-commands
 //   confidence:    medium
-//   todos:         31  (15 TODO(architect) for DB/config/signal wiring; 15 TODO(port) for
-//                       rand() and DB placeholder stubs; 1 TODO(architect) in hll_count panic)
+//   todos:         9
 //   port_notes:    4
 //   unsafe_blocks: 0   (must be 0 in pilot crates)
 //   notes:         Core algorithm fully translated (MurmurHash64A, pat_len, dense/sparse
-//                  encoding, sigma/tau estimator, merge, compress). Command bodies are
-//                  structurally complete but DB access is stubbed with TODO(architect)
-//                  pending Phase 3 CommandContext API. SIMD paths (AVX2/NEON) elided —
-//                  scalar fallback only. pfselftest rand() dependency flagged TODO(port).
-//                  Syntax-check shows only expected E0432/E0433 name-resolution errors.
+//                  encoding, sigma/tau estimator, merge, compress). PFDEBUG uses the
+//                  stored HLL bytes for GETREG, DECODE, ENCODING, and TODENSE. SIMD paths
+//                  (AVX2/NEON) elided — scalar fallback only. pfselftest rand() dependency
+//                  remains flagged above.
 // ──────────────────────────────────────────────────────────────────────────────
