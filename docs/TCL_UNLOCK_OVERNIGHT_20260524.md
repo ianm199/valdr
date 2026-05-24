@@ -216,3 +216,33 @@ The morning scoreboard should be:
 The goal is not "everything green by morning." The goal is to reduce
 `abort/no-summary` and `timeout`, and turn hidden tests into either `proved` or
 concrete `known-fail` rows.
+
+## Wave C queue, 2026-05-24
+
+The first post-tracking inventory exposed one harness visibility bug: colored
+TCL `Test Summary` lines were not parsed, so green files like `unit/type/zset`
+were misclassified as `no-summary`. After stripping ANSI before summary parse,
+the current counted result is:
+
+```text
+full upstream TCL:      245 files / 4299 source test blocks
+counted TCL results:   1014 pass / 5 fail / 1019 counted
+single_node_core_v1:   1038 proved / 162 known-fail / 677 abort / 613 timeout / 41 not-swept
+```
+
+Wave C is intentionally broader than another tiny frontier fix:
+
+- `tcl-list-timeout-post-ds-v2` remains the next mainline packet. It targets
+  the 148-test `unit/type/list` timeout after the Redis-DS quicklist/listpack
+  wave.
+- `tcl-tracking-info-counters-v1` follows the minimal tracking packet and adds
+  real INFO counters so `unit/tracking` can move beyond `Tracking info is
+  correct`.
+- `tcl-string-lcs-v1` ports Valkey's LCS command shape for the current
+  `unit/type/string` abort.
+- `tcl-hashexpire-repl-stream-v1` targets the current 226-test
+  `unit/hashexpire` abort where `attach_to_replication_stream` sees
+  `+FULLRESYNC` instead of a counted command stream.
+- `tcl-scripting-bit-lib-v1` is marked `manual` for a side worktree: it should
+  install the Redis Lua `bit` library without conflicting with the main
+  list/quicklist path.
