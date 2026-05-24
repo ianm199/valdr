@@ -53,6 +53,12 @@ Total cheap-bulk cost: `$0.0926`.
 4. `ds-adlist-source-port-v1`
    - Integrate useful adlist behavior into canonical `LinkedList`.
    - Goal: append/prepend/delete/index/search/iteration tests.
+   - Closeout: canonical `LinkedList` now owns a safe `VecDeque`-backed
+     implementation with head/tail insertion, pop/delete, index, search,
+     forward/backward iteration, rotation, clone-based duplication, join, and
+     focused unit tests. Stable C node pointers and dup/free/match callbacks
+     remain intentionally reshaped into Rust-owned storage plus Clone/Drop/
+     PartialEq/search closures.
 
 5. `redis-ds-unit-after-wave1-v1`
    - Runner: `cargo test -p redis-ds`.
