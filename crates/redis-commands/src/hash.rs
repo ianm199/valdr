@@ -28,9 +28,8 @@
 //! state. Replace with the real `serverGenRandomNumber` style sampling
 //! once the RNG state is exposed through `CommandContext`.
 //!
-//! TODO(architect): HEXPIRE / HPEXPIRE / HEXPIREAT / HPEXPIREAT /
-//! HEXPIRETIME / HPEXPIRETIME / HPERSIST / HTTL / HPTTL family needs the
-//! per-field expiry data model from t_hash.c — defer to Phase 5.
+//! TODO(architect): replace the pragmatic per-field expiry side table with
+//! object-owned HASH_2 metadata once the real hash table encoding lands.
 //!
 //! TODO(port): HINCRBYFLOAT formats the result with Rust's default
 //! f64 `{}` formatter rather than the C long-double `%.17Lg` routine.
@@ -78,12 +77,18 @@ pub fn volatile_hash_key_count(dbid: u32, db: &redis_core::db::RedisDb) -> u64 {
         Ok(g) => g,
         Err(p) => p.into_inner(),
     };
+    let now = now_ms();
     db.iter_for_eviction()
         .filter(|(key, obj)| {
-            obj.is_hash()
-                && guard
-                    .keys()
-                    .any(|exp| exp.dbid == dbid && exp.key == **key)
+            let Some(hash) = obj.hash() else {
+                return false;
+            };
+            guard.iter().any(|(exp, when)| {
+                exp.dbid == dbid
+                    && exp.key == **key
+                    && *when > now
+                    && hash.contains_key(&exp.field)
+            })
         })
         .count() as u64
 }
@@ -118,6 +123,19 @@ fn clear_hash_expiries(dbid: u32, key: &RedisString) {
         Err(p) => p.into_inner(),
     };
     guard.retain(|exp, _| !(exp.dbid == dbid && exp.key == *key));
+}
+
+fn reset_hash_expiry_state_if_db_empty(ctx: &CommandContext) {
+    if ctx.db().size() != 0 {
+        return;
+    }
+    let dbid = ctx.selected_db_id();
+    let mut guard = match field_expires().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    guard.retain(|exp, _| exp.dbid != dbid);
+    EXPIRED_FIELDS.store(0, Ordering::Relaxed);
 }
 
 fn field_expiry_ms(dbid: u32, key: &RedisString, field: &RedisString) -> Option<i64> {
@@ -281,13 +299,27 @@ enum HashSetExpiry {
     Set(i64),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum HashExpireCondition {
-    None,
-    Nx,
-    Xx,
-    Gt,
-    Lt,
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct HashExpireFlags {
+    nx: bool,
+    xx: bool,
+    gt: bool,
+    lt: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct HSetExOptions {
+    key_nx: bool,
+    key_xx: bool,
+    field_nx: bool,
+    field_xx: bool,
+    expiry: HashSetExpiry,
+}
+
+impl Default for HashSetExpiry {
+    fn default() -> Self {
+        Self::None
+    }
 }
 
 fn expire_time_from(kind: HashExpiryKind, raw: i64) -> i64 {
@@ -318,11 +350,23 @@ fn invalid_expire_time(command: &[u8]) -> RedisError {
     RedisError::runtime(format!("ERR invalid expire time in '{}' command", cmd).into_bytes())
 }
 
+fn find_fields_index(ctx: &CommandContext, start: usize) -> RedisResult<usize> {
+    for idx in start..ctx.arg_count() {
+        if ctx.arg(idx)?.as_bytes().eq_ignore_ascii_case(b"FIELDS") {
+            return Ok(idx);
+        }
+    }
+    Err(RedisError::syntax(b"syntax error"))
+}
+
 fn parse_fields_count(ctx: &CommandContext, fields_idx: usize) -> Result<usize, RedisError> {
-    if fields_idx + 1 >= ctx.arg_count()
-        || !ctx.arg(fields_idx)?.as_bytes().eq_ignore_ascii_case(b"FIELDS")
-    {
+    if !ctx.arg(fields_idx)?.as_bytes().eq_ignore_ascii_case(b"FIELDS") {
         return Err(RedisError::syntax(b"syntax error"));
+    }
+    if fields_idx + 1 >= ctx.arg_count() {
+        return Err(RedisError::runtime(
+            b"ERR numfields should be greater than 0 and match the provided number of fields",
+        ));
     }
     let n = parse_strict_i64(ctx.arg(fields_idx + 1)?.as_bytes())?;
     if n <= 0 {
@@ -371,6 +415,148 @@ fn parse_hash_field_value_list(
     Ok(pairs)
 }
 
+fn parse_expire_time_arg(ctx: &CommandContext, idx: usize, kind: HashExpiryKind) -> RedisResult<i64> {
+    let raw = parse_strict_i64(ctx.arg(idx)?.as_bytes())?;
+    if raw < 0 {
+        return Err(invalid_expire_time(ctx.arg(0)?.as_bytes()));
+    }
+    Ok(expire_time_from(kind, raw))
+}
+
+fn parse_hgetex_options(
+    ctx: &CommandContext,
+) -> RedisResult<(HashSetExpiry, Vec<RedisString>)> {
+    let fields_idx = find_fields_index(ctx, 2)?;
+    let mut expiry = HashSetExpiry::None;
+    let mut idx = 2usize;
+    while idx < fields_idx {
+        let token = ctx.arg(idx)?.as_bytes();
+        if token.eq_ignore_ascii_case(b"PERSIST") {
+            if !matches!(expiry, HashSetExpiry::None | HashSetExpiry::KeepTtl) {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            expiry = HashSetExpiry::KeepTtl;
+            idx += 1;
+        } else if let Some(kind) = parse_hash_expiry_kind(token) {
+            if !matches!(expiry, HashSetExpiry::None) || idx + 1 >= fields_idx {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            expiry = HashSetExpiry::Set(parse_expire_time_arg(ctx, idx + 1, kind)?);
+            idx += 2;
+        } else {
+            return Err(RedisError::syntax(b"syntax error"));
+        }
+    }
+    Ok((expiry, parse_hash_field_list(ctx, fields_idx)?))
+}
+
+fn parse_hsetex_options(
+    ctx: &CommandContext,
+) -> RedisResult<(HSetExOptions, Vec<(RedisString, RedisString)>)> {
+    let fields_idx = find_fields_index(ctx, 2)?;
+    let mut opts = HSetExOptions::default();
+    let mut idx = 2usize;
+    while idx < fields_idx {
+        let token = ctx.arg(idx)?.as_bytes();
+        if token.eq_ignore_ascii_case(b"NX") {
+            if opts.key_xx {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            opts.key_nx = true;
+            idx += 1;
+        } else if token.eq_ignore_ascii_case(b"XX") {
+            if opts.key_nx {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            opts.key_xx = true;
+            idx += 1;
+        } else if token.eq_ignore_ascii_case(b"FNX") {
+            if opts.field_xx {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            opts.field_nx = true;
+            idx += 1;
+        } else if token.eq_ignore_ascii_case(b"FXX") {
+            if opts.field_nx {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            opts.field_xx = true;
+            idx += 1;
+        } else if token.eq_ignore_ascii_case(b"KEEPTTL") {
+            if !matches!(opts.expiry, HashSetExpiry::None | HashSetExpiry::KeepTtl) {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            opts.expiry = HashSetExpiry::KeepTtl;
+            idx += 1;
+        } else if let Some(kind) = parse_hash_expiry_kind(token) {
+            if !matches!(opts.expiry, HashSetExpiry::None) || idx + 1 >= fields_idx {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            opts.expiry = HashSetExpiry::Set(parse_expire_time_arg(ctx, idx + 1, kind)?);
+            idx += 2;
+        } else {
+            return Err(RedisError::syntax(b"syntax error"));
+        }
+    }
+    Ok((opts, parse_hash_field_value_list(ctx, fields_idx)?))
+}
+
+fn parse_hash_expire_flags(ctx: &CommandContext, fields_idx: usize) -> RedisResult<HashExpireFlags> {
+    let mut flags = HashExpireFlags::default();
+    let mut idx = 3usize;
+    while idx < fields_idx {
+        let token = ctx.arg(idx)?.as_bytes();
+        if token.eq_ignore_ascii_case(b"NX") {
+            flags.nx = true;
+        } else if token.eq_ignore_ascii_case(b"XX") {
+            flags.xx = true;
+        } else if token.eq_ignore_ascii_case(b"GT") {
+            flags.gt = true;
+        } else if token.eq_ignore_ascii_case(b"LT") {
+            flags.lt = true;
+        } else {
+            return Err(RedisError::runtime(b"ERR Unsupported option"));
+        }
+        idx += 1;
+    }
+    if flags.nx && (flags.xx || flags.gt || flags.lt) {
+        return Err(RedisError::runtime(
+            b"ERR NX and XX, GT or LT options at the same time are not compatible",
+        ));
+    }
+    if flags.gt && flags.lt {
+        return Err(RedisError::runtime(
+            b"ERR GT and LT options at the same time are not compatible",
+        ));
+    }
+    Ok(flags)
+}
+
+fn cleanup_hash_after_field_deletes(
+    ctx: &mut CommandContext,
+    dbid: u32,
+    key: &RedisString,
+    removed: i64,
+    event: &[u8],
+) -> RedisResult<()> {
+    if removed == 0 {
+        return Ok(());
+    }
+    let key_removed = matches!(
+        ctx.db().lookup_key_read(key),
+        Some(o) if o.hash().map(|h| h.is_empty()).unwrap_or(false)
+    );
+    if key_removed {
+        ctx.db_mut().sync_delete(key);
+        clear_hash_expiries(dbid, key);
+    }
+    ctx.notify_keyspace_event(NOTIFY_HASH, event, key);
+    if key_removed {
+        ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", key);
+    }
+    Ok(())
+}
+
 fn reply_optional_values(
     ctx: &mut CommandContext,
     values: Vec<Option<RedisString>>,
@@ -396,6 +582,7 @@ pub fn hset_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if argc < 4 || (argc - 2) % 2 != 0 {
         return Err(RedisError::wrong_number_of_args(b"hset"));
     }
+    reset_hash_expiry_state_if_db_empty(ctx);
     let key = ctx.arg_owned(1usize)?;
     let key_ref = key.clone();
     let mut pairs: Vec<(RedisString, RedisString)> = Vec::with_capacity((argc - 2) / 2);
@@ -406,6 +593,8 @@ pub fn hset_command(ctx: &mut CommandContext) -> RedisResult<()> {
         pairs.push((field, value));
         j += 2;
     }
+    purge_expired_hash_fields(ctx, &key)?;
+    let dbid = ctx.selected_db_id();
     let existing = ctx.db_mut().lookup_key_write(&key);
     let added: i64 = match existing {
         None => {
@@ -416,6 +605,7 @@ pub fn hset_command(ctx: &mut CommandContext) -> RedisResult<()> {
                     .expect("new_hash constructs an Inline hash");
                 let mut count: i64 = 0;
                 for (f, v) in pairs {
+                    remove_field_expiry(dbid, &key, &f);
                     if map.insert(f, v).is_none() {
                         count += 1;
                     }
@@ -432,6 +622,7 @@ pub fn hset_command(ctx: &mut CommandContext) -> RedisResult<()> {
             let map = obj.hash_mut().expect("is_hash confirms hash encoding");
             let mut count: i64 = 0;
             for (f, v) in pairs {
+                remove_field_expiry(dbid, &key, &f);
                 if map.insert(f, v).is_none() {
                     count += 1;
                 }
@@ -452,6 +643,7 @@ pub fn hmset_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if argc < 4 || (argc - 2) % 2 != 0 {
         return Err(RedisError::wrong_number_of_args(b"hmset"));
     }
+    reset_hash_expiry_state_if_db_empty(ctx);
     let key = ctx.arg_owned(1usize)?;
     let key_ref = key.clone();
     let mut pairs: Vec<(RedisString, RedisString)> = Vec::with_capacity((argc - 2) / 2);
@@ -462,6 +654,8 @@ pub fn hmset_command(ctx: &mut CommandContext) -> RedisResult<()> {
         pairs.push((field, value));
         j += 2;
     }
+    purge_expired_hash_fields(ctx, &key)?;
+    let dbid = ctx.selected_db_id();
     match ctx.db_mut().lookup_key_write(&key) {
         None => {
             let mut obj = RedisObject::new_hash();
@@ -470,6 +664,7 @@ pub fn hmset_command(ctx: &mut CommandContext) -> RedisResult<()> {
                     .hash_mut()
                     .expect("new_hash constructs an Inline hash");
                 for (f, v) in pairs {
+                    remove_field_expiry(dbid, &key, &f);
                     map.insert(f, v);
                 }
             }
@@ -481,6 +676,7 @@ pub fn hmset_command(ctx: &mut CommandContext) -> RedisResult<()> {
             }
             let map = obj.hash_mut().expect("is_hash confirms hash encoding");
             for (f, v) in pairs {
+                remove_field_expiry(dbid, &key, &f);
                 map.insert(f, v);
             }
         }
@@ -497,10 +693,13 @@ pub fn hsetnx_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if ctx.arg_count() != 4 {
         return Err(RedisError::wrong_number_of_args(b"hsetnx"));
     }
+    reset_hash_expiry_state_if_db_empty(ctx);
     let key = ctx.arg_owned(1usize)?;
     let key_ref = key.clone();
     let field = ctx.arg_owned(2usize)?;
     let value = ctx.arg_owned(3usize)?;
+    purge_expired_hash_fields(ctx, &key)?;
+    let dbid = ctx.selected_db_id();
     let inserted: i64 = match ctx.db_mut().lookup_key_write(&key) {
         None => {
             let mut obj = RedisObject::new_hash();
@@ -508,6 +707,7 @@ pub fn hsetnx_command(ctx: &mut CommandContext) -> RedisResult<()> {
                 let map = obj
                     .hash_mut()
                     .expect("new_hash constructs an Inline hash");
+                remove_field_expiry(dbid, &key, &field);
                 map.insert(field, value);
             }
             ctx.db_mut().set_key(key, obj, 0);
@@ -521,6 +721,7 @@ pub fn hsetnx_command(ctx: &mut CommandContext) -> RedisResult<()> {
             if map.contains_key(&field) {
                 0
             } else {
+                remove_field_expiry(dbid, &key, &field);
                 map.insert(field, value);
                 1
             }
@@ -542,6 +743,7 @@ pub fn hget_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
     let key = ctx.arg_owned(1usize)?;
     let field = ctx.arg_owned(2usize)?;
+    purge_expired_hash_fields(ctx, &key)?;
     let value: Option<RedisString> = match as_hash_ref(ctx.db().lookup_key_read(&key))? {
         None => None,
         Some(h) => h.get(&field).cloned(),
@@ -566,6 +768,7 @@ pub fn hmget_command(ctx: &mut CommandContext) -> RedisResult<()> {
     for j in 2..argc {
         fields.push(ctx.arg_owned(j)?);
     }
+    purge_expired_hash_fields(ctx, &key)?;
     let mut values: Vec<Option<RedisString>> = Vec::with_capacity(fields.len());
     match as_hash_ref(ctx.db().lookup_key_read(&key))? {
         None => {
@@ -603,6 +806,8 @@ pub fn hdel_command(ctx: &mut CommandContext) -> RedisResult<()> {
     for j in 2..argc {
         fields.push(ctx.arg_owned(j)?);
     }
+    purge_expired_hash_fields(ctx, &key)?;
+    let dbid = ctx.selected_db_id();
     let removed: i64 = {
         let map = match as_hash_mut(ctx.db_mut().lookup_key_write(&key))? {
             None => return ctx.reply_integer(0),
@@ -611,6 +816,7 @@ pub fn hdel_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let mut count: i64 = 0;
         for f in &fields {
             if map.remove(f).is_some() {
+                remove_field_expiry(dbid, &key, f);
                 count += 1;
             }
         }
@@ -656,6 +862,8 @@ pub fn hgetdel_command(ctx: &mut CommandContext) -> RedisResult<()> {
     for j in 4..argc {
         fields.push(ctx.arg_owned(j)?);
     }
+    purge_expired_hash_fields(ctx, &key)?;
+    let dbid = ctx.selected_db_id();
 
     let mut removed: i64 = 0;
     let key_removed: bool;
@@ -668,6 +876,7 @@ pub fn hgetdel_command(ctx: &mut CommandContext) -> RedisResult<()> {
         for field in &fields {
             match map.remove(field) {
                 Some(value) => {
+                    remove_field_expiry(dbid, &key, field);
                     removed += 1;
                     values.push(Some(value));
                 }
@@ -705,6 +914,160 @@ fn reply_hgetdel_values(
     Ok(())
 }
 
+/// HGETEX key [EX seconds|PX milliseconds|EXAT seconds|PXAT milliseconds|PERSIST]
+///        FIELDS num field [field ...]
+pub fn hgetex_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    if ctx.arg_count() < 5 {
+        return Err(RedisError::wrong_number_of_args(b"hgetex"));
+    }
+    let key = ctx.arg_owned(1usize)?;
+    let (mode, fields) = parse_hgetex_options(ctx)?;
+    purge_expired_hash_fields(ctx, &key)?;
+    let dbid = ctx.selected_db_id();
+    let now = now_ms();
+
+    let mut values = Vec::with_capacity(fields.len());
+    let mut changed = 0i64;
+    let mut expired = 0i64;
+    {
+        let map = match as_hash_mut(ctx.db_mut().lookup_key_write(&key))? {
+            None => return reply_optional_values(ctx, vec![None; fields.len()]),
+            Some(h) => h,
+        };
+        for field in &fields {
+            values.push(map.get(field).cloned());
+        }
+        match mode {
+            HashSetExpiry::None => {}
+            HashSetExpiry::KeepTtl => {
+                for field in &fields {
+                    if map.contains_key(field) && remove_field_expiry(dbid, &key, field) {
+                        changed += 1;
+                    }
+                }
+            }
+            HashSetExpiry::Set(when) if when <= now => {
+                for field in &fields {
+                    remove_field_expiry(dbid, &key, field);
+                    if map.remove(field).is_some() {
+                        changed += 1;
+                        expired += 1;
+                    }
+                }
+            }
+            HashSetExpiry::Set(when) => {
+                for field in &fields {
+                    if map.contains_key(field) {
+                        set_field_expiry(dbid, &key, field, when);
+                        changed += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    match mode {
+        HashSetExpiry::KeepTtl if changed > 0 => {
+            ctx.notify_keyspace_event(NOTIFY_HASH, b"hpersist", &key);
+        }
+        HashSetExpiry::Set(when) if changed > 0 && when <= now => {
+            EXPIRED_FIELDS.fetch_add(expired as u64, Ordering::Relaxed);
+            cleanup_hash_after_field_deletes(ctx, dbid, &key, expired, b"hexpired")?;
+        }
+        HashSetExpiry::Set(_) if changed > 0 => {
+            ctx.notify_keyspace_event(NOTIFY_HASH, b"hexpire", &key);
+        }
+        _ => {}
+    }
+
+    reply_optional_values(ctx, values)
+}
+
+/// HSETEX key [NX|XX] [FNX|FXX] [EX seconds|PX milliseconds|EXAT seconds|
+/// PXAT milliseconds|KEEPTTL] FIELDS num field value [field value ...]
+pub fn hsetex_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    if ctx.arg_count() < 5 {
+        return Err(RedisError::wrong_number_of_args(b"hsetex"));
+    }
+    reset_hash_expiry_state_if_db_empty(ctx);
+    let key = ctx.arg_owned(1usize)?;
+    let (opts, pairs) = parse_hsetex_options(ctx)?;
+    if let Some(obj) = ctx.db().lookup_key_read(&key) {
+        if !obj.is_hash() {
+            return Err(RedisError::wrong_type());
+        }
+    }
+    purge_expired_hash_fields(ctx, &key)?;
+
+    let dbid = ctx.selected_db_id();
+    let now = now_ms();
+    let key_exists = ctx.db().lookup_key_read(&key).is_some();
+    if (opts.key_nx && key_exists) || (opts.key_xx && !key_exists) {
+        return ctx.reply_integer(0);
+    }
+
+    if opts.field_nx || opts.field_xx {
+        let existing = as_hash_ref(ctx.db().lookup_key_read(&key))?;
+        if opts.field_xx && existing.is_none() {
+            return ctx.reply_integer(0);
+        }
+        if let Some(map) = existing {
+            for (field, _) in &pairs {
+                if (opts.field_nx && map.contains_key(field))
+                    || (opts.field_xx && !map.contains_key(field))
+                {
+                    return ctx.reply_integer(0);
+                }
+            }
+        }
+    }
+
+    let expires_now = matches!(opts.expiry, HashSetExpiry::Set(when) if when <= now);
+    if expires_now {
+        let mut removed_existing = 0i64;
+        if let Some(map) = as_hash_mut(ctx.db_mut().lookup_key_write(&key))? {
+            for (field, _) in &pairs {
+                remove_field_expiry(dbid, &key, field);
+                if map.remove(field).is_some() {
+                    removed_existing += 1;
+                }
+            }
+        }
+        let expired = pairs.len() as i64;
+        EXPIRED_FIELDS.fetch_add(expired as u64, Ordering::Relaxed);
+        ctx.notify_keyspace_event(NOTIFY_HASH, b"hset", &key);
+        ctx.notify_keyspace_event(NOTIFY_HASH, b"hexpire", &key);
+        cleanup_hash_after_field_deletes(ctx, dbid, &key, removed_existing, b"hexpired")?;
+        if removed_existing == 0 {
+            ctx.notify_keyspace_event(NOTIFY_HASH, b"hexpired", &key);
+        }
+        return ctx.reply_integer(1);
+    }
+
+    if ctx.db().lookup_key_read(&key).is_none() {
+        ctx.db_mut().set_key(key.clone(), RedisObject::new_hash(), 0);
+    }
+    {
+        let map = as_hash_mut(ctx.db_mut().lookup_key_write(&key))?
+            .expect("hash was created or already checked");
+        for (field, value) in &pairs {
+            map.insert(field.clone(), value.clone());
+            match opts.expiry {
+                HashSetExpiry::None => {
+                    remove_field_expiry(dbid, &key, field);
+                }
+                HashSetExpiry::KeepTtl => {}
+                HashSetExpiry::Set(when) => set_field_expiry(dbid, &key, field, when),
+            }
+        }
+    }
+    ctx.notify_keyspace_event(NOTIFY_HASH, b"hset", &key);
+    if matches!(opts.expiry, HashSetExpiry::Set(_)) {
+        ctx.notify_keyspace_event(NOTIFY_HASH, b"hexpire", &key);
+    }
+    ctx.reply_integer(1)
+}
+
 /// HEXISTS key field
 ///
 /// Replies `:1\r\n` if the field is present, `:0\r\n` otherwise.
@@ -714,6 +1077,7 @@ pub fn hexists_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
     let key = ctx.arg_owned(1usize)?;
     let field = ctx.arg_owned(2usize)?;
+    purge_expired_hash_fields(ctx, &key)?;
     let present: i64 = match as_hash_ref(ctx.db().lookup_key_read(&key))? {
         None => 0,
         Some(h) => i64::from(h.contains_key(&field)),
@@ -730,6 +1094,7 @@ pub fn hlen_command(ctx: &mut CommandContext) -> RedisResult<()> {
         return Err(RedisError::wrong_number_of_args(b"hlen"));
     }
     let key = ctx.arg_owned(1usize)?;
+    purge_expired_hash_fields(ctx, &key)?;
     let len: i64 = match as_hash_ref(ctx.db().lookup_key_read(&key))? {
         None => 0,
         Some(h) => h.len() as i64,
@@ -747,6 +1112,7 @@ pub fn hstrlen_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
     let key = ctx.arg_owned(1usize)?;
     let field = ctx.arg_owned(2usize)?;
+    purge_expired_hash_fields(ctx, &key)?;
     let len: i64 = match as_hash_ref(ctx.db().lookup_key_read(&key))? {
         None => 0,
         Some(h) => h.get(&field).map(|v| v.as_bytes().len() as i64).unwrap_or(0),
@@ -765,6 +1131,7 @@ pub fn hgetall_command(ctx: &mut CommandContext) -> RedisResult<()> {
         return Err(RedisError::wrong_number_of_args(b"hgetall"));
     }
     let key = ctx.arg_owned(1usize)?;
+    purge_expired_hash_fields(ctx, &key)?;
     let pairs: Vec<(RedisString, RedisString)> = match as_hash_ref(ctx.db().lookup_key_read(&key))?
     {
         None => Vec::new(),
@@ -786,6 +1153,7 @@ pub fn hkeys_command(ctx: &mut CommandContext) -> RedisResult<()> {
         return Err(RedisError::wrong_number_of_args(b"hkeys"));
     }
     let key = ctx.arg_owned(1usize)?;
+    purge_expired_hash_fields(ctx, &key)?;
     let fields: Vec<RedisString> = match as_hash_ref(ctx.db().lookup_key_read(&key))? {
         None => Vec::new(),
         Some(h) => h.keys().cloned().collect(),
@@ -805,6 +1173,7 @@ pub fn hvals_command(ctx: &mut CommandContext) -> RedisResult<()> {
         return Err(RedisError::wrong_number_of_args(b"hvals"));
     }
     let key = ctx.arg_owned(1usize)?;
+    purge_expired_hash_fields(ctx, &key)?;
     let values: Vec<RedisString> = match as_hash_ref(ctx.db().lookup_key_read(&key))? {
         None => Vec::new(),
         Some(h) => h.values().cloned().collect(),
@@ -826,9 +1195,11 @@ pub fn hincrby_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if ctx.arg_count() != 4 {
         return Err(RedisError::wrong_number_of_args(b"hincrby"));
     }
+    reset_hash_expiry_state_if_db_empty(ctx);
     let key = ctx.arg_owned(1usize)?;
     let field = ctx.arg_owned(2usize)?;
     let delta = parse_strict_i64(ctx.arg(3)?.as_bytes())?;
+    purge_expired_hash_fields(ctx, &key)?;
     let key_existed = ctx.db().lookup_key_read(&key).is_some();
     let next: i64 = if key_existed {
         let map = match as_hash_mut(ctx.db_mut().lookup_key_write(&key))? {
@@ -873,9 +1244,11 @@ pub fn hincrbyfloat_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if ctx.arg_count() != 4 {
         return Err(RedisError::wrong_number_of_args(b"hincrbyfloat"));
     }
+    reset_hash_expiry_state_if_db_empty(ctx);
     let key = ctx.arg_owned(1usize)?;
     let field = ctx.arg_owned(2usize)?;
     let delta = parse_strict_f64(ctx.arg(3)?.as_bytes())?;
+    purge_expired_hash_fields(ctx, &key)?;
     let key_existed = ctx.db().lookup_key_read(&key).is_some();
     let result_bytes: Vec<u8> = if key_existed {
         let map = match as_hash_mut(ctx.db_mut().lookup_key_write(&key))? {
@@ -952,6 +1325,7 @@ pub fn hrandfield_command(ctx: &mut CommandContext) -> RedisResult<()> {
         return Err(RedisError::wrong_number_of_args(b"hrandfield"));
     }
     let key = ctx.arg_owned(1usize)?;
+    purge_expired_hash_fields(ctx, &key)?;
     let count_opt: Option<i64> = if argc >= 3 {
         Some(parse_hrandfield_count(ctx.arg(2)?.as_bytes())?)
     } else {
@@ -1036,6 +1410,191 @@ pub fn hrandfield_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
 }
 
+fn hash_expire_command(ctx: &mut CommandContext, kind: HashExpiryKind) -> RedisResult<()> {
+    if ctx.arg_count() < 6 {
+        return Err(RedisError::wrong_number_of_args(ctx.arg(0)?.as_bytes()));
+    }
+    let key = ctx.arg_owned(1usize)?;
+    let when = parse_expire_time_arg(ctx, 2, kind)?;
+    let fields_idx = find_fields_index(ctx, 3)?;
+    let flags = parse_hash_expire_flags(ctx, fields_idx)?;
+    let fields = parse_hash_field_list(ctx, fields_idx)?;
+    purge_expired_hash_fields(ctx, &key)?;
+
+    let dbid = ctx.selected_db_id();
+    let now = now_ms();
+    let mut results = Vec::with_capacity(fields.len());
+    let mut updated = 0i64;
+    let mut expired = 0i64;
+    {
+        let map = match as_hash_mut(ctx.db_mut().lookup_key_write(&key))? {
+            None => {
+                results.resize(fields.len(), -2);
+                return reply_integer_array(ctx, &results);
+            }
+            Some(h) => h,
+        };
+        for field in &fields {
+            if !map.contains_key(field) {
+                results.push(-2);
+                continue;
+            }
+            let current = field_expiry_ms(dbid, &key, field);
+            if flags.nx && current.is_some() {
+                results.push(0);
+                continue;
+            }
+            if flags.xx && current.is_none() {
+                results.push(0);
+                continue;
+            }
+            if flags.gt && current.map_or(true, |old| when <= old) {
+                results.push(0);
+                continue;
+            }
+            if flags.lt && current.is_some_and(|old| when >= old) {
+                results.push(0);
+                continue;
+            }
+            if when <= now {
+                remove_field_expiry(dbid, &key, field);
+                map.remove(field);
+                expired += 1;
+                results.push(2);
+            } else {
+                set_field_expiry(dbid, &key, field, when);
+                updated += 1;
+                results.push(1);
+            }
+        }
+    }
+
+    if expired > 0 {
+        EXPIRED_FIELDS.fetch_add(expired as u64, Ordering::Relaxed);
+        cleanup_hash_after_field_deletes(ctx, dbid, &key, expired, b"hexpired")?;
+    } else if updated > 0 {
+        ctx.notify_keyspace_event(NOTIFY_HASH, b"hexpire", &key);
+    }
+    reply_integer_array(ctx, &results)
+}
+
+pub fn hexpire_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    hash_expire_command(ctx, HashExpiryKind::Ex)
+}
+
+pub fn hpexpire_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    hash_expire_command(ctx, HashExpiryKind::Px)
+}
+
+pub fn hexpireat_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    hash_expire_command(ctx, HashExpiryKind::ExAt)
+}
+
+pub fn hpexpireat_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    hash_expire_command(ctx, HashExpiryKind::PxAt)
+}
+
+pub fn hpersist_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    if ctx.arg_count() < 5 {
+        return Err(RedisError::wrong_number_of_args(b"hpersist"));
+    }
+    let key = ctx.arg_owned(1usize)?;
+    let fields = parse_hash_field_list(ctx, 2)?;
+    purge_expired_hash_fields(ctx, &key)?;
+    let dbid = ctx.selected_db_id();
+    let mut results = Vec::with_capacity(fields.len());
+    let mut changed = 0i64;
+    match as_hash_ref(ctx.db().lookup_key_read(&key))? {
+        None => results.resize(fields.len(), -2),
+        Some(map) => {
+            for field in &fields {
+                if !map.contains_key(field) {
+                    results.push(-2);
+                } else if remove_field_expiry(dbid, &key, field) {
+                    changed += 1;
+                    results.push(1);
+                } else {
+                    results.push(-1);
+                }
+            }
+        }
+    }
+    if changed > 0 {
+        ctx.notify_keyspace_event(NOTIFY_HASH, b"hpersist", &key);
+    }
+    reply_integer_array(ctx, &results)
+}
+
+#[derive(Clone, Copy)]
+enum HashTtlMode {
+    TtlSeconds,
+    TtlMilliseconds,
+    ExpireTimeSeconds,
+    ExpireTimeMilliseconds,
+}
+
+fn hash_ttl_command(ctx: &mut CommandContext, mode: HashTtlMode) -> RedisResult<()> {
+    if ctx.arg_count() < 5 {
+        return Err(RedisError::wrong_number_of_args(ctx.arg(0)?.as_bytes()));
+    }
+    let key = ctx.arg_owned(1usize)?;
+    let fields = parse_hash_field_list(ctx, 2)?;
+    purge_expired_hash_fields(ctx, &key)?;
+    let dbid = ctx.selected_db_id();
+    let now = now_ms();
+    let mut results = Vec::with_capacity(fields.len());
+    match as_hash_ref(ctx.db().lookup_key_read(&key))? {
+        None => results.resize(fields.len(), -2),
+        Some(map) => {
+            for field in &fields {
+                if !map.contains_key(field) {
+                    results.push(-2);
+                    continue;
+                }
+                match field_expiry_ms(dbid, &key, field) {
+                    None => results.push(-1),
+                    Some(when) => {
+                        let value = match mode {
+                            HashTtlMode::TtlMilliseconds => when.saturating_sub(now).max(0),
+                            HashTtlMode::TtlSeconds => {
+                                (when.saturating_sub(now).max(0) + 500) / 1000
+                            }
+                            HashTtlMode::ExpireTimeMilliseconds => when,
+                            HashTtlMode::ExpireTimeSeconds => (when + 500) / 1000,
+                        };
+                        results.push(value);
+                    }
+                }
+            }
+        }
+    }
+    reply_integer_array(ctx, &results)
+}
+
+pub fn httl_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    hash_ttl_command(ctx, HashTtlMode::TtlSeconds)
+}
+
+pub fn hpttl_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    hash_ttl_command(ctx, HashTtlMode::TtlMilliseconds)
+}
+
+pub fn hexpiretime_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    hash_ttl_command(ctx, HashTtlMode::ExpireTimeSeconds)
+}
+
+pub fn hpexpiretime_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    hash_ttl_command(ctx, HashTtlMode::ExpireTimeMilliseconds)
+}
+
+fn reply_integer_array(ctx: &mut CommandContext, values: &[i64]) -> RedisResult<()> {
+    ctx.reply_array_header(values.len())?;
+    for value in values {
+        ctx.reply_integer(*value)?;
+    }
+    Ok(())
+}
+
 /// HSCAN key cursor [MATCH pattern] [COUNT count] [NOVALUES]
 ///
 /// Linear-cursor iteration over the field/value pairs of a hash. Matches
@@ -1053,6 +1612,7 @@ pub fn hscan_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
     let key = ctx.arg_owned(1usize)?;
     let cursor = parse_u64_cursor(ctx.arg(2)?.as_bytes())?;
+    purge_expired_hash_fields(ctx, &key)?;
 
     let mut pattern: Option<Vec<u8>> = None;
     let mut count: i64 = 10;
@@ -1269,17 +1829,13 @@ mod tests {
 // PORT STATUS
 //   source:        src/t_hash.c
 //   target_crate:  redis-commands
-//   confidence:    high
-//   todos:         4
-//   port_notes:    0
+//   confidence:    medium
+//   todos:         3
+//   port_notes:    1
 //   unsafe_blocks: 0
-//   notes:         Round 3 byte-exact implementations for HSET, HSETNX,
-//                  HGET, HGETDEL, HDEL, HEXISTS, HLEN, HSTRLEN, HGETALL,
-//                  HKEYS, HVALS, HMGET, HMSET, HINCRBY, HINCRBYFLOAT, and
-//                  HRANDFIELD backed by the pragmatic HashEncoding::Inline
-//                  encoding from redis-core::object. HSCAN, HEXPIRE
-//                  family, true HRANDFIELD randomness, and long-double
-//                  HINCRBYFLOAT parity remain TODO. Phase 4 will swap
-//                  Inline for the real ListPack / HashTable encodings
-//                  from redis-ds.
+//   notes:         Hash commands use pragmatic HashEncoding::Inline storage.
+//                  Basic hash field expiry commands are backed by a side table
+//                  pending object-owned HASH_2 metadata. Active expiry,
+//                  replication/AOF rewrite parity, true HRANDFIELD randomness,
+//                  and long-double HINCRBYFLOAT parity remain TODO.
 // ──────────────────────────────────────────────────────────────────────────

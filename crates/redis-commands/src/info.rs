@@ -244,6 +244,7 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let _ = writeln!(buf, "total_net_output_bytes:0\r");
         let _ = writeln!(buf, "rejected_connections:{}\r", rejected);
         let _ = writeln!(buf, "expired_keys:{}\r", expired_keys);
+        let _ = writeln!(buf, "expired_fields:{}\r", crate::hash::expired_fields_count());
         let _ = writeln!(buf, "evicted_keys:{}\r", evicted_keys);
         let _ = writeln!(buf, "keyspace_hits:{}\r", hits);
         let _ = writeln!(buf, "keyspace_misses:{}\r", misses);
@@ -318,9 +319,19 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if want(b"keyspace") {
         let _ = writeln!(buf, "# Keyspace\r");
         for i in 0..ctx.database_count() as u32 {
-            let (keys, expires) = ctx.with_db_index(i, |db| (db.size(), db.expires_count()))?;
+            let (keys, expires, volatile_items) = ctx.with_db_index(i, |db| {
+                (
+                    db.size(),
+                    db.expires_count(),
+                    crate::hash::volatile_hash_key_count(i, db),
+                )
+            })?;
             if keys > 0 {
-                let _ = writeln!(buf, "db{}:keys={},expires={},avg_ttl=0\r", i, keys, expires);
+                let _ = writeln!(
+                    buf,
+                    "db{}:keys={},expires={},avg_ttl=0,keys_with_volatile_items={}\r",
+                    i, keys, expires, volatile_items
+                );
             }
         }
         let _ = writeln!(buf, "\r");

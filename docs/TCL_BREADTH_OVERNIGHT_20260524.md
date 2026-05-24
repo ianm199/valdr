@@ -331,6 +331,17 @@ Non-goals for this packet:
 If this packet becomes too large, split after the data model plus `HGETEX` and
 `HSETEX`; do not burn the night on full field TTL parity.
 
+Closeout note 2026-05-24: implemented the pragmatic side-table field-expiry
+model plus `HGETEX`, `HSETEX`, `HEXPIRE`/`HPEXPIRE`, `HEXPIREAT`/`HPEXPIREAT`,
+`HTTL`/`HPTTL`, `HEXPIRETIME`/`HPEXPIRETIME`, and `HPERSIST`, including lazy
+purge on hash reads/writes, `expired_fields`, `keys_with_volatile_items`, and
+basic keyspace notifications. Focused `unit/hashexpire` now clears all local
+hash-expiry assertion failures before the first remaining abort:
+`HSETEX is not replicating validation arguments`. That abort is in replication
+stream/AOF rewrite behavior, explicitly outside this packet's non-goals, and
+should be split to a replication/propagation packet before claiming the whole
+TCL file green.
+
 ## Run Command
 
 Codex autonomous loop, breadth selector only:

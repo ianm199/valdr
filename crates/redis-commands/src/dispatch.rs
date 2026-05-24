@@ -1090,6 +1090,50 @@ pub static HANDLERS: &[DispatchEntry] = &[
         handler: crate::hash::hgetdel_command,
     },
     DispatchEntry {
+        name: b"HGETEX",
+        handler: crate::hash::hgetex_command,
+    },
+    DispatchEntry {
+        name: b"HSETEX",
+        handler: crate::hash::hsetex_command,
+    },
+    DispatchEntry {
+        name: b"HEXPIRE",
+        handler: crate::hash::hexpire_command,
+    },
+    DispatchEntry {
+        name: b"HPEXPIRE",
+        handler: crate::hash::hpexpire_command,
+    },
+    DispatchEntry {
+        name: b"HEXPIREAT",
+        handler: crate::hash::hexpireat_command,
+    },
+    DispatchEntry {
+        name: b"HPEXPIREAT",
+        handler: crate::hash::hpexpireat_command,
+    },
+    DispatchEntry {
+        name: b"HTTL",
+        handler: crate::hash::httl_command,
+    },
+    DispatchEntry {
+        name: b"HPTTL",
+        handler: crate::hash::hpttl_command,
+    },
+    DispatchEntry {
+        name: b"HEXPIRETIME",
+        handler: crate::hash::hexpiretime_command,
+    },
+    DispatchEntry {
+        name: b"HPEXPIRETIME",
+        handler: crate::hash::hpexpiretime_command,
+    },
+    DispatchEntry {
+        name: b"HPERSIST",
+        handler: crate::hash::hpersist_command,
+    },
+    DispatchEntry {
         name: b"HMGET",
         handler: crate::hash::hmget_command,
     },
