@@ -47,6 +47,9 @@ struct CommandMetadata {
     no_auth: bool,
     denyoom: bool,
     skip_commandlog: bool,
+    skip_monitor: bool,
+    admin: bool,
+    monitor_admin: bool,
     acl_categories: u64,
 }
 
@@ -270,17 +273,23 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
     }
 
     let initial_slowlog_gate = ctx.live_config().slowlog_timing_gate();
-    let start =
-        (initial_slowlog_gate.should_time() && !metadata.skip_commandlog).then(elapsed_start);
+    let should_time_slowlog = initial_slowlog_gate.should_time() && !metadata.skip_commandlog;
+    let start = elapsed_start();
+    let pre_reply_len = ctx.client_ref().reply_buf.len();
     let result = (entry.handler)(ctx);
     let command_blocked = result.is_ok() && ctx.client_ref().blocked_on_keys;
     let elapsed_micros = if command_blocked {
         None
     } else {
-        start.map(elapsed_us)
+        Some(elapsed_us(start))
     };
+    let reply_bytes = ctx
+        .client_ref()
+        .reply_buf
+        .len()
+        .saturating_sub(pre_reply_len);
     let should_record_slowlog = match elapsed_micros {
-        Some(elapsed_micros) if !command_blocked => ctx
+        Some(elapsed_micros) if should_time_slowlog && !command_blocked => ctx
             .live_config()
             .slowlog_timing_gate()
             .should_record(elapsed_micros),
@@ -308,22 +317,40 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
     };
 
     let mut argv_snapshot: Option<Vec<RedisString>> = None;
-    if (command_blocked && start.is_some())
+    let successful_complete = result.is_ok() && !command_blocked;
+    if (command_blocked && should_time_slowlog)
         || should_record_slowlog
         || aof.is_some()
         || replication.is_some()
+        || successful_complete
     {
         argv_snapshot = Some(snapshot_argv(ctx));
     }
 
     if command_blocked {
-        if let (Some(argv), Some(start_micros)) = (argv_snapshot.take(), start) {
+        if let Some(argv) = argv_snapshot.take() {
             crate::slowlog_cmd::remember_blocked_slowlog_entry(
                 argv,
-                start_micros,
+                start,
                 ctx.client_ref().id(),
                 ctx.client_ref().name.clone(),
             );
+        }
+    }
+
+    if successful_complete {
+        if let (Some(argv), Some(elapsed_micros)) = (argv_snapshot.as_ref(), elapsed_micros) {
+            crate::slowlog_cmd::record_latency_histogram(argv, elapsed_micros);
+            crate::slowlog_cmd::record_large_commandlog_entries(
+                argv,
+                request_size_bytes(argv),
+                reply_bytes as u64,
+                ctx.client_ref().id(),
+                ctx.client_ref().name.clone(),
+            );
+            if !metadata.skip_monitor && !metadata.monitor_admin {
+                crate::connection::feed_monitors(ctx, argv);
+            }
         }
     }
 
@@ -358,6 +385,13 @@ fn snapshot_argv(ctx: &CommandContext<'_>) -> Vec<RedisString> {
     (0..ctx.arg_count())
         .filter_map(|i| ctx.client_ref().arg(i).cloned())
         .collect()
+}
+
+fn request_size_bytes(argv: &[RedisString]) -> u64 {
+    argv.iter().fold(0u64, |acc, arg| {
+        acc.saturating_add(arg.as_bytes().len() as u64)
+            .saturating_add(8)
+    })
 }
 
 fn should_propagate_write_command(ctx: &CommandContext<'_>, original_name: &[u8]) -> bool {
@@ -399,19 +433,70 @@ fn command_metadata_table() -> &'static [(&'static [u8], CommandMetadata)] {
                 }
             }
         }
+        for (name, metadata) in rows.iter_mut() {
+            metadata.monitor_admin = runtime_monitor_admin_flag(name, *metadata);
+        }
         rows.sort_by(|(left, _), (right, _)| ascii_casecmp(left, right));
         rows
     })
+}
+
+fn runtime_monitor_admin_flag(name: &[u8], metadata: CommandMetadata) -> bool {
+    if !metadata.admin {
+        return false;
+    }
+
+    let expected_function = generated_command_function_name(name);
+    let mut fallback: Option<&'static GeneratedCommandSpec> = None;
+    for spec in COMMANDS
+        .iter()
+        .filter(|spec| ascii_eq_ignore_case(spec.name.as_bytes(), name))
+    {
+        if spec.function.as_bytes() == expected_function.as_slice() {
+            return spec.flags.contains(&CommandFlag::ADMIN);
+        }
+        if fallback.is_none() && !spec.flags.contains(&CommandFlag::ONLY_SENTINEL) {
+            fallback = Some(spec);
+        }
+    }
+
+    match fallback {
+        Some(spec) if spec.function.is_empty() => metadata.admin,
+        Some(spec) => spec.flags.contains(&CommandFlag::ADMIN),
+        None => metadata.admin,
+    }
+}
+
+fn generated_command_function_name(name: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(name.len() + b"Command".len());
+    let mut uppercase_next = false;
+    for &byte in name {
+        if byte == b'-' || byte == b'_' {
+            uppercase_next = true;
+            continue;
+        }
+        let lower = ascii_lower(byte);
+        if uppercase_next {
+            out.push(lower.to_ascii_uppercase());
+            uppercase_next = false;
+        } else {
+            out.push(lower);
+        }
+    }
+    out.extend_from_slice(b"Command");
+    out
 }
 
 impl CommandMetadata {
     fn include(&mut self, flags: &[CommandFlag], acl_categories: &[crate::generated::AclCategory]) {
         for flag in flags {
             match flag {
+                CommandFlag::ADMIN => self.admin = true,
                 CommandFlag::WRITE => self.write = true,
                 CommandFlag::NO_AUTH => self.no_auth = true,
                 CommandFlag::DENYOOM => self.denyoom = true,
                 CommandFlag::SKIP_COMMANDLOG => self.skip_commandlog = true,
+                CommandFlag::SKIP_MONITOR => self.skip_monitor = true,
                 _ => {}
             }
         }
@@ -1383,6 +1468,10 @@ pub static HANDLERS: &[DispatchEntry] = &[
         name: b"MEMORY",
         handler: crate::connection::memory_command,
     },
+    DispatchEntry {
+        name: b"MODULE",
+        handler: crate::connection::module_command,
+    },
     // ── PUB/SUB (Round 8a) ─────────────────────────────────────────────────
     DispatchEntry {
         name: b"SUBSCRIBE",
@@ -1406,7 +1495,7 @@ pub static HANDLERS: &[DispatchEntry] = &[
     },
     DispatchEntry {
         name: b"PUBSUB",
-        handler: crate::pubsub::pubsub_command,
+        handler: crate::connection::pubsub_command,
     },
     // ── HYPERLOGLOG (Round 9 HLL) ──────────────────────────────────────────
     DispatchEntry {
@@ -1515,8 +1604,16 @@ pub static HANDLERS: &[DispatchEntry] = &[
         handler: crate::slowlog_cmd::slowlog_command,
     },
     DispatchEntry {
+        name: b"COMMANDLOG",
+        handler: crate::slowlog_cmd::commandlog_command,
+    },
+    DispatchEntry {
         name: b"LATENCY",
         handler: crate::slowlog_cmd::latency_command,
+    },
+    DispatchEntry {
+        name: b"MONITOR",
+        handler: crate::connection::monitor_command,
     },
     // ── PERSISTENCE (Round 18) ─────────────────────────────────────────────
     DispatchEntry {

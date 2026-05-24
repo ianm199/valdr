@@ -2102,6 +2102,7 @@ pub fn object_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 
     if subcmd_bytes == b"help" && ctx.arg_count() == 2 {
         let help: &[&[u8]] = &[
+            b"OBJECT <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
             b"ENCODING <key>",
             b"    Return the kind of internal representation used to store the value",
             b"    associated with a <key>.",

@@ -238,6 +238,7 @@ pub struct ClientFlags {
     pub dirty_exec: bool,
     pub deny_blocking: bool,
     pub blocked: bool,
+    pub monitor: bool,
     pub aof_client: bool,
     pub reply_off: bool,
     pub reply_skip_next: bool,
@@ -348,6 +349,7 @@ impl Client {
         self.resp_proto = 2;
         self.tracking = ClientTrackingState::default();
         self.import_source = false;
+        self.authenticated_user = initial_authenticated_user();
         self.subscribed_channels.clear();
         self.subscribed_patterns.clear();
         self.pending_wakes.clear();

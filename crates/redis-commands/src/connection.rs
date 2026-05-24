@@ -4,8 +4,10 @@
 //! Most handlers operate purely against the client's argv and reply buffer;
 //! they never need to touch the keyspace.
 
+use std::collections::HashMap;
 use std::io::Write;
-use std::sync::Arc;
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use redis_core::acl::{
@@ -25,6 +27,20 @@ use crate::live_config_handle;
 
 /// Default Valkey `maxclients` value. Re-exported from `LiveConfig`.
 pub const DEFAULT_MAX_CLIENTS: u64 = redis_core::live_config::DEFAULT_MAX_CLIENTS;
+
+static MONITOR_CLIENTS: OnceLock<Mutex<HashMap<u64, Sender<Vec<u8>>>>> = OnceLock::new();
+
+fn monitor_clients() -> &'static Mutex<HashMap<u64, Sender<Vec<u8>>>> {
+    MONITOR_CLIENTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn reply_help(ctx: &mut CommandContext<'_>, lines: &[&[u8]]) -> RedisResult<()> {
+    ctx.reply_array_header(lines.len())?;
+    for line in lines {
+        ctx.reply_bulk(line)?;
+    }
+    Ok(())
+}
 
 /// Return the process-global `maxclients` limit. Read directly from the live
 /// config; the accept loop calls this on every connection attempt.
@@ -105,6 +121,22 @@ pub fn function_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     }
     let sub = ctx.arg_owned(1usize)?;
     let sub_bytes = sub.as_bytes();
+    if ascii_eq_ignore_case(sub_bytes, b"HELP") {
+        let lines: &[&[u8]] = &[
+            b"FUNCTION <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+            b"LOAD [REPLACE] <FUNCTION CODE>",
+            b"    Create a new library with the functions in the given code.",
+            b"LIST",
+            b"    Return information about loaded libraries.",
+            b"DELETE <library-name>",
+            b"    Delete the given library.",
+            b"FLUSH",
+            b"    Delete all libraries.",
+            b"HELP",
+            b"    Return this help.",
+        ];
+        return reply_help(ctx, lines);
+    }
     if ascii_eq_ignore_case(sub_bytes, b"LOAD") {
         return crate::eval::function_load_command(ctx);
     }
@@ -193,14 +225,36 @@ pub fn config_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     }
     if ascii_eq_ignore_case(sub_bytes, b"RESETSTAT") {
         server_metrics().reset_stats();
+        crate::slowlog_cmd::reset_latency_histograms();
         return ctx.reply_simple_string(b"OK");
     }
     if ascii_eq_ignore_case(sub_bytes, b"REWRITE") {
         return ctx.reply_simple_string(b"OK");
     }
-    let mut msg = Vec::with_capacity(b"ERR Unknown CONFIG subcommand: ".len() + sub_bytes.len());
-    msg.extend_from_slice(b"ERR Unknown CONFIG subcommand: ");
+    if ascii_eq_ignore_case(sub_bytes, b"HELP") {
+        let lines: &[&[u8]] = &[
+            b"CONFIG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+            b"GET <pattern> [<pattern> ...]",
+            b"    Return parameters matching the glob-like patterns.",
+            b"SET <parameter> <value> [<parameter> <value> ...]",
+            b"    Set one or more configuration parameters.",
+            b"RESETSTAT",
+            b"    Reset server statistics.",
+            b"REWRITE",
+            b"    Rewrite the configuration file.",
+            b"HELP",
+            b"    Return this help.",
+        ];
+        return reply_help(ctx, lines);
+    }
+    let mut msg = Vec::with_capacity(
+        b"ERR unknown subcommand or wrong number of arguments for '".len()
+            + sub_bytes.len()
+            + 1,
+    );
+    msg.extend_from_slice(b"ERR unknown subcommand or wrong number of arguments for '");
     msg.extend_from_slice(sub_bytes);
+    msg.push(b'\'');
     Err(RedisError::runtime(msg))
 }
 
@@ -516,16 +570,36 @@ fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
                 cfg.set_hll_sparse_max_bytes(n);
             }
         }
-        b"slowlog-log-slower-than" => {
+        b"slowlog-log-slower-than" | b"commandlog-execution-slower-than" => {
             if let Some(n) = parse_i64_strict(value) {
                 cfg.set_slowlog_threshold_micros(n);
                 crate::slowlog_cmd::set_slowlog_threshold(n);
             }
         }
-        b"slowlog-max-len" => {
+        b"slowlog-max-len" | b"commandlog-slow-execution-max-len" => {
             if let Some(n) = parse_usize_strict(value) {
                 cfg.set_slowlog_max_len(n);
                 crate::slowlog_cmd::set_slowlog_max_len(n);
+            }
+        }
+        b"commandlog-request-larger-than" => {
+            if let Some(n) = parse_i64_strict(value) {
+                crate::slowlog_cmd::set_commandlog_large_request_threshold(n);
+            }
+        }
+        b"commandlog-large-request-max-len" => {
+            if let Some(n) = parse_usize_strict(value) {
+                crate::slowlog_cmd::set_commandlog_large_request_max_len(n);
+            }
+        }
+        b"commandlog-reply-larger-than" => {
+            if let Some(n) = parse_i64_strict(value) {
+                crate::slowlog_cmd::set_commandlog_large_reply_threshold(n);
+            }
+        }
+        b"commandlog-large-reply-max-len" => {
+            if let Some(n) = parse_usize_strict(value) {
+                crate::slowlog_cmd::set_commandlog_large_reply_max_len(n);
             }
         }
         b"active-expire-effort" => {
@@ -853,6 +927,24 @@ pub fn memory_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     }
     let sub = ctx.arg_owned(1usize)?;
     let sub_bytes = sub.as_bytes();
+    if ascii_eq_ignore_case(sub_bytes, b"HELP") {
+        let lines: &[&[u8]] = &[
+            b"MEMORY <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+            b"USAGE <key> [SAMPLES <count>]",
+            b"    Return memory in bytes used by <key> and its value.",
+            b"STATS",
+            b"    Return information about the memory usage of the server.",
+            b"MALLOC-STATS",
+            b"    Return internal statistics report from the memory allocator.",
+            b"DOCTOR",
+            b"    Return memory problems report.",
+            b"PURGE",
+            b"    Attempt to purge dirty pages for reclamation by the allocator.",
+            b"HELP",
+            b"    Return this help.",
+        ];
+        return reply_help(ctx, lines);
+    }
     if ascii_eq_ignore_case(sub_bytes, b"USAGE") {
         if ctx.arg_count() < 3 {
             return Err(RedisError::wrong_number_of_args(b"memory|usage"));
@@ -975,8 +1067,133 @@ pub fn reset_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ctx.arg_count() != 1 {
         return Err(RedisError::wrong_number_of_args(b"reset"));
     }
+    unregister_monitor_client(ctx.client_ref().id());
     ctx.client_mut().reset_state();
     ctx.reply_simple_string(b"RESET")
+}
+
+/// `MONITOR`.
+///
+/// Registers the connection for best-effort command stream messages. The full
+/// Valkey implementation models monitors as replica clients; this port keeps a
+/// narrow sender list so RESET and normal request parsing continue to work.
+pub fn monitor_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
+    if ctx.arg_count() != 1 {
+        return Err(RedisError::wrong_number_of_args(b"monitor"));
+    }
+    let id = ctx.client_ref().id();
+    if let Some(registry) = ctx.pubsub.as_ref() {
+        let sender = {
+            let guard = match registry.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            guard.sender_for(id)
+        };
+        if let Some(sender) = sender {
+            let mut monitors = match monitor_clients().lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            monitors.insert(id, sender);
+        }
+    }
+    ctx.client_mut().flags.monitor = true;
+    ctx.reply_simple_string(b"OK")
+}
+
+pub fn unregister_monitor_client(id: u64) {
+    if let Some(monitors) = MONITOR_CLIENTS.get() {
+        let mut guard = match monitors.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard.remove(&id);
+    }
+}
+
+pub fn feed_monitors(ctx: &CommandContext<'_>, argv: &[RedisString]) {
+    if argv.is_empty() {
+        return;
+    }
+    let monitor_rows: Vec<(u64, Sender<Vec<u8>>)> = {
+        let guard = match monitor_clients().lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if guard.is_empty() {
+            return;
+        }
+        guard.iter().map(|(id, tx)| (*id, tx.clone())).collect()
+    };
+
+    let payload = monitor_payload(ctx, argv);
+    let mut dead = Vec::new();
+    for (id, tx) in monitor_rows {
+        if tx.send(payload.clone()).is_err() {
+            dead.push(id);
+        }
+    }
+    if !dead.is_empty() {
+        let mut guard = match monitor_clients().lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        for id in dead {
+            guard.remove(&id);
+        }
+    }
+}
+
+fn monitor_payload(ctx: &CommandContext<'_>, argv: &[RedisString]) -> Vec<u8> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let addr = ctx
+        .client_ref()
+        .addr
+        .as_deref()
+        .unwrap_or("127.0.0.1:0");
+    let mut out = Vec::new();
+    let _ = write!(
+        out,
+        "+{}.{:06} [{} {}] ",
+        now.as_secs(),
+        now.subsec_micros(),
+        ctx.selected_db_index(),
+        addr
+    );
+    for (idx, arg) in argv.iter().enumerate() {
+        if idx > 0 {
+            out.push(b' ');
+        }
+        append_monitor_quoted_arg(&mut out, arg.as_bytes());
+    }
+    out.extend_from_slice(b"\r\n");
+    out
+}
+
+fn append_monitor_quoted_arg(out: &mut Vec<u8>, bytes: &[u8]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    out.push(b'"');
+    for &byte in bytes {
+        match byte {
+            b'\\' => out.extend_from_slice(b"\\\\"),
+            b'"' => out.extend_from_slice(b"\\\""),
+            b'\n' => out.extend_from_slice(b"\\n"),
+            b'\r' => out.extend_from_slice(b"\\r"),
+            b'\t' => out.extend_from_slice(b"\\t"),
+            7 => out.extend_from_slice(b"\\a"),
+            8 => out.extend_from_slice(b"\\b"),
+            32..=126 => out.push(byte),
+            _ => {
+                out.extend_from_slice(b"\\x");
+                out.push(HEX[(byte >> 4) as usize]);
+                out.push(HEX[(byte & 0x0f) as usize]);
+            }
+        }
+    }
+    out.push(b'"');
 }
 
 /// `DEBUG <subcommand> [args]`.
@@ -1350,6 +1567,9 @@ fn client_flags_string(client: &redis_core::client::Client) -> String {
     if client.blocked_on_keys || client.flag_blocked() {
         out.push('b');
     }
+    if client.flags.monitor {
+        out.push('O');
+    }
     if out.is_empty() {
         out.push('N');
     }
@@ -1500,7 +1720,10 @@ fn parse_client_list_filters(ctx: &CommandContext<'_>) -> RedisResult<ClientList
                 return Err(RedisError::syntax(b"syntax error"));
             }
             let flags = String::from_utf8_lossy(ctx.arg(idx + 1)?.as_bytes()).into_owned();
-            if flags.chars().any(|c| !matches!(c, 'N' | 'b' | 't' | 'B' | 'R' | 'I')) {
+            if flags
+                .chars()
+                .any(|c| !matches!(c, 'N' | 'b' | 't' | 'B' | 'R' | 'I' | 'O'))
+            {
                 return Err(RedisError::runtime(
                     format!("ERR Unknown flags found in the provided filter: {}", flags)
                         .into_bytes(),
@@ -1774,6 +1997,28 @@ pub fn client_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         }
         return ctx.reply_integer(0);
     }
+    if ascii_eq_ignore_case(sub_bytes, b"HELP") {
+        let lines: &[&[u8]] = &[
+            b"CLIENT <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+            b"ID",
+            b"    Return the current connection id.",
+            b"GETNAME",
+            b"    Return the current connection name.",
+            b"SETNAME <name>",
+            b"    Assign a name to the current connection.",
+            b"LIST [options ...]",
+            b"    Return information about client connections.",
+            b"INFO",
+            b"    Return information about the current client connection.",
+            b"TRACKING <ON|OFF> [options ...]",
+            b"    Enable or disable server assisted client side caching.",
+            b"REPLY <ON|OFF|SKIP>",
+            b"    Control whether the server replies to commands.",
+            b"HELP",
+            b"    Return this help.",
+        ];
+        return reply_help(ctx, lines);
+    }
     if ascii_eq_ignore_case(sub_bytes, b"PAUSE")
         || ascii_eq_ignore_case(sub_bytes, b"KILL")
     {
@@ -2000,6 +2245,51 @@ fn client_import_source_command(ctx: &mut CommandContext<'_>) -> RedisResult<()>
     Err(RedisError::syntax(b"syntax error"))
 }
 
+/// `PUBSUB`, with local `HELP` coverage before deferring to the pub/sub module.
+pub fn pubsub_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
+    if ctx.arg_count() == 2 {
+        let sub = ctx.arg_owned(1usize)?;
+        if ascii_eq_ignore_case(sub.as_bytes(), b"HELP") {
+            let lines: &[&[u8]] = &[
+                b"PUBSUB <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+                b"CHANNELS [<pattern>]",
+                b"    Return the currently active channels matching a pattern.",
+                b"NUMSUB [<channel> ...]",
+                b"    Return the number of subscribers for the specified channels.",
+                b"NUMPAT",
+                b"    Return number of subscriptions to patterns.",
+                b"HELP",
+                b"    Return this help.",
+            ];
+            return reply_help(ctx, lines);
+        }
+    }
+    crate::pubsub::pubsub_command(ctx)
+}
+
+/// `MODULE HELP|LIST`.
+pub fn module_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
+    if ctx.arg_count() == 2 {
+        let sub = ctx.arg_owned(1usize)?;
+        if ascii_eq_ignore_case(sub.as_bytes(), b"HELP") {
+            let lines: &[&[u8]] = &[
+                b"MODULE <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+                b"LIST",
+                b"    Return a list of loaded modules.",
+                b"HELP",
+                b"    Return this help.",
+            ];
+            return reply_help(ctx, lines);
+        }
+        if ascii_eq_ignore_case(sub.as_bytes(), b"LIST") {
+            return ctx.reply_array_header(0usize);
+        }
+    }
+    Err(RedisError::syntax(
+        b"unknown subcommand or wrong number of arguments",
+    ))
+}
+
 /// `COMMAND` / `COMMAND COUNT` / `COMMAND GETKEYS`.
 ///
 /// `COMMAND` (no args) replies with an array of bulk-string command names
@@ -2019,6 +2309,18 @@ pub fn command_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         return ctx.reply_frame(&RespFrame::array(items));
     }
     let sub = ctx.arg_owned(1usize)?;
+    if ascii_eq_ignore_case(sub.as_bytes(), b"HELP") {
+        let lines: &[&[u8]] = &[
+            b"COMMAND <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+            b"COUNT",
+            b"    Return the total number of commands in this server.",
+            b"GETKEYS <full-command>",
+            b"    Return the keys from a full command.",
+            b"HELP",
+            b"    Return this help.",
+        ];
+        return reply_help(ctx, lines);
+    }
     if ascii_eq_ignore_case(sub.as_bytes(), b"COUNT") {
         if ctx.arg_count() != 2 {
             return Err(RedisError::wrong_number_of_args(b"command|count"));
