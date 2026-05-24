@@ -72,6 +72,12 @@ Source anchors:
 - `reference/valkey/src/server.c` argument parsing for `ARGS_SET_IFEQ`.
 - `reference/valkey/tests/unit/type/string.tcl`.
 
+Result 2026-05-24: implemented SET `IFEQ` parser and conditional write
+semantics in `crates/redis-commands/src/string.rs`. Focused TCL proof
+`harness/oracle/results/tcl-survey/20260524T180220Z/unit__type__string.json`
+now passes the IFEQ block and advances the file frontier to the existing
+`LCS basic` gap.
+
 ### 4. Functions metadata / early library behavior
 
 Packet: `tcl-functions-library-metadata-v1`.

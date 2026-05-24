@@ -279,22 +279,30 @@ pub fn set_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 
     let mut flags: u32 = 0;
     let mut expire_at_ms: Option<i64> = None;
+    let mut comparison: Option<RedisString> = None;
     let mut j = 3usize;
     while j < argc {
         let opt = ctx.arg_owned(j)?;
         let opt_bytes = opt.as_bytes();
         if opt_bytes.eq_ignore_ascii_case(b"NX") {
-            if flags & SET_FLAG_XX != 0 {
+            if flags & (SET_FLAG_XX | SET_FLAG_IFEQ) != 0 {
                 return Err(RedisError::runtime(b"ERR syntax error"));
             }
             flags |= SET_FLAG_NX;
             j += 1;
         } else if opt_bytes.eq_ignore_ascii_case(b"XX") {
-            if flags & SET_FLAG_NX != 0 {
+            if flags & (SET_FLAG_NX | SET_FLAG_IFEQ) != 0 {
                 return Err(RedisError::runtime(b"ERR syntax error"));
             }
             flags |= SET_FLAG_XX;
             j += 1;
+        } else if opt_bytes.eq_ignore_ascii_case(b"IFEQ") {
+            if flags & (SET_FLAG_NX | SET_FLAG_XX | SET_FLAG_IFEQ) != 0 || j + 1 >= argc {
+                return Err(RedisError::runtime(b"ERR syntax error"));
+            }
+            flags |= SET_FLAG_IFEQ;
+            comparison = Some(ctx.arg_owned(j + 1)?);
+            j += 2;
         } else if opt_bytes.eq_ignore_ascii_case(b"GET") {
             flags |= SET_FLAG_GET;
             j += 1;
@@ -368,29 +376,46 @@ pub fn set_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         }
     }
 
-    let key_exists = ctx.db_mut().lookup_key_write(&key).is_some();
+    let needs_current_value = flags & (SET_FLAG_GET | SET_FLAG_IFEQ) != 0;
+    let (key_exists, prev_bytes): (bool, Option<Vec<u8>>) =
+        match ctx.db_mut().lookup_key_write(&key) {
+            None => (false, None),
+            Some(obj) => {
+                if needs_current_value {
+                    match &obj.kind {
+                        ObjectKind::String(_) => (true, Some(obj.string_bytes_owned())),
+                        _ => return Err(RedisError::wrong_type()),
+                    }
+                } else {
+                    (true, None)
+                }
+            }
+        };
+    if flags & SET_FLAG_IFEQ != 0 {
+        let Some(compare) = comparison.as_ref() else {
+            return Err(RedisError::runtime(b"ERR syntax error"));
+        };
+        if !prev_bytes
+            .as_ref()
+            .is_some_and(|bytes| bytes.as_slice() == compare.as_bytes())
+        {
+            if flags & SET_FLAG_GET != 0 {
+                return reply_optional_bulk(ctx, prev_bytes);
+            }
+            return ctx.reply_null_bulk();
+        }
+    }
     if flags & SET_FLAG_NX != 0 && key_exists {
         if flags & SET_FLAG_GET != 0 {
-            return reply_get_value(ctx, &key);
+            return reply_optional_bulk(ctx, prev_bytes);
         }
         return ctx.reply_null_bulk();
     }
     if flags & SET_FLAG_XX != 0 && !key_exists {
         if flags & SET_FLAG_GET != 0 {
-            return ctx.reply_null_bulk();
+            return reply_optional_bulk(ctx, prev_bytes);
         }
         return ctx.reply_null_bulk();
-    }
-
-    let mut prev_bytes: Option<Vec<u8>> = None;
-    if flags & SET_FLAG_GET != 0 {
-        match ctx.db().find(&key) {
-            None => prev_bytes = None,
-            Some(obj) => match &obj.kind {
-                ObjectKind::String(_) => prev_bytes = Some(obj.string_bytes_owned()),
-                _ => return Err(RedisError::wrong_type()),
-            },
-        }
     }
 
     let setkey_flags = if flags & SET_FLAG_KEEPTTL != 0 {
@@ -426,26 +451,16 @@ pub fn set_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     }
 
     if flags & SET_FLAG_GET != 0 {
-        match prev_bytes {
-            None => ctx.reply_null_bulk(),
-            Some(b) => ctx.reply_bulk_string(RedisString::from_bytes(&b)),
-        }
+        reply_optional_bulk(ctx, prev_bytes)
     } else {
         ctx.reply_simple_string(b"OK")
     }
 }
 
-/// Helper for SET with NX+GET when the key already existed.
-fn reply_get_value(ctx: &mut CommandContext, key: &RedisString) -> Result<(), RedisError> {
-    match ctx.db().find(key) {
+fn reply_optional_bulk(ctx: &mut CommandContext, bytes: Option<Vec<u8>>) -> Result<(), RedisError> {
+    match bytes {
         None => ctx.reply_null_bulk(),
-        Some(obj) => match &obj.kind {
-            ObjectKind::String(_) => {
-                let bytes = obj.string_bytes_owned();
-                ctx.reply_bulk_string(RedisString::from_bytes(&bytes))
-            }
-            _ => Err(RedisError::wrong_type()),
-        },
+        Some(bytes) => ctx.reply_bulk_string(RedisString::from_bytes(&bytes)),
     }
 }
 
