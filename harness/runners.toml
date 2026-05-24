@@ -122,6 +122,18 @@ claim_level = "telemetry"
 capabilities = ["official-tcl-coverage", "full-suite-accounting"]
 
 [[runner]]
+id = "single-node-core-dashboard"
+kind = "json_command"
+surface = "correctness"
+method = "official-suite-accounting"
+workload = "single-node-core-v1-dashboard"
+command = ["python3", "harness/oracle/single-node-core-dashboard.py"]
+timeout_s = 120
+resources = ["oracle-results"]
+claim_level = "telemetry"
+capabilities = ["official-tcl-coverage", "single-node-core", "full-suite-accounting"]
+
+[[runner]]
 id = "persistence-rdb-cycle"
 kind = "json_command"
 surface = "correctness"
