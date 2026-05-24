@@ -77,6 +77,13 @@ Total cheap-bulk cost: `$0.0926`.
 6. `ds-quicklist-mvp-v1`
    - Only after listpack. Use the generated draft as API checklist, but keep
      MVP bounded: push/pop/index/iteration/count, no compression/bookmarks.
+   - Closeout: canonical `QuickList` now owns a safe `VecDeque` of
+     ListPack-backed or plain nodes with Valkey fill-limit accounting,
+     head/tail push and pop, positive/negative index lookup, owned forward and
+     reverse iteration, count/node-count helpers, large-element plain-node
+     handling, and focused unit tests. LZF compression, bookmarks, iterator
+     mutation, node split/merge insertion paths, and object-model wiring remain
+     later packets.
 
 7. `ds-rax-behavior-map-v1`
    - Use the generated draft and upstream source to land a safe behavior-first
