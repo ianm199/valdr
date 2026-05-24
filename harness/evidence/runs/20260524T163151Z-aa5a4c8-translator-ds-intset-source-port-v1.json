@@ -1,0 +1,85 @@
+{
+  "captured_ts": "2026-05-24T16:41:25.541321Z",
+  "gate_results": {
+    "cargo_check_redis-ds": {
+      "detail": "cargo check -p redis-ds: clean",
+      "ok": true
+    },
+    "cargo_check_workspace": {
+      "detail": "cargo check --workspace: clean",
+      "ok": true
+    },
+    "cargo_test_redis-ds_intset": {
+      "detail": "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 21 filtered out; finished in 0.00s",
+      "ok": true
+    },
+    "no_out_of_scope_changes": {
+      "detail": "no changed files outside packet targets or declared collateral; collateral: harness/source-drafts.tsv",
+      "ok": true
+    },
+    "oracle_reference_only": {
+      "detail": "no harness/oracle/run-smoke.sh present",
+      "ok": true
+    },
+    "target_files_modified": {
+      "detail": "translator touched 2/2 candidate target(s)",
+      "ok": true
+    },
+    "trailer_present": {
+      "detail": "all touched Rust targets carry PORT STATUS trailers",
+      "ok": true
+    }
+  },
+  "harness_context": {
+    "commit": "aa5a4c8",
+    "git_dirty": true,
+    "git_status_short": [
+      " M crates/redis-ds/src/intset.rs",
+      " M docs/REDIS_DS_SOURCE_SHAPED_OVERNIGHT_20260524.md",
+      " M harness/evidence/ledger.jsonl",
+      " M harness/source-drafts.tsv"
+    ],
+    "run_id": "loop-d194800f6b0623ff",
+    "target_commit": "aa5a4c8f4b81d79c40109bf31fd7cfca200b4972",
+    "tree_hash": "1fac253232be7f9d9ce6bc3e9c87fb5f8391c6190b39da56899cc5a0185f4e10"
+  },
+  "kind": "agent_transcript",
+  "packet": "ds-intset-source-port-v1",
+  "prompt_hash": "4aca0b69b6f19809",
+  "role": "translator",
+  "runtime_metadata": {
+    "approval": "never",
+    "cmd": [
+      "codex",
+      "--ask-for-approval",
+      "never",
+      "exec",
+      "--cd",
+      "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port",
+      "--add-dir",
+      "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port",
+      "--sandbox",
+      "danger-full-access",
+      "--json",
+      "--output-last-message",
+      "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/loop/state/transcripts/20260524T163151Z-codex-translator-ds-intset-source-port-v1.last.txt",
+      "-"
+    ],
+    "finished_at": "2026-05-24T16:41:25Z",
+    "last_message_path": "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/loop/state/transcripts/20260524T163151Z-codex-translator-ds-intset-source-port-v1.last.txt",
+    "model": null,
+    "packet": "ds-intset-source-port-v1",
+    "profile": null,
+    "project": "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port",
+    "prompt_source": "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/loop/state/next-prompt.md",
+    "return_code": 0,
+    "role": "translator",
+    "runtime": "codex",
+    "sandbox": "danger-full-access",
+    "started_at": "2026-05-24T16:31:51Z",
+    "transcript_path": "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/loop/state/transcripts/20260524T163151Z-codex-translator-ds-intset-source-port-v1.jsonl"
+  },
+  "transcript_bytes": 960042,
+  "transcript_preview": "     assert!(!set.find(4));\\n   601\\t    }\\n   602\\t\\n   603\\t    #[test]\\n   604\\t    fn intset_insert_alias_returns_updated_set() {\\n   605\\t        let (set, added) = IntSet::new().insert(11);\\n   606\\t        assert!(added);\\n   607\\t        assert_eq!(set.get(0), Some(11));\\n   608\\t    }\\n   609\\t\\n   610\\t    #[test]\\n   611\\t    fn intset_upgrade_appends_positive_out_of_range_value() {\\n   612\\t        let mut set = IntSet::new();\\n   613\\t        assert!(set.add(1));\\n   614\\t        assert!(set.add(i16::MAX as i64 + 1));\\n   615\\t\\n   616\\t        assert_encoding(&set, INTSET_ENC_INT32);\\n   617\\t        assert_eq!(set.len(), 2);\\n   618\\t        assert_eq!(set.get(0), Some(1));\\n   619\\t        assert_eq!(set.get(1), Some(i16::MAX as i64 + 1));\\n   620\\t        assert_eq!(set.blob_len(), HEADER_LEN + 2 * 4);\\n   621\\t    }\\n   622\\t\\n   623\\t    #[test]\\n   624\\t    fn intset_upgrade_prepends_negative_out_of_range_value() {\\n   625\\t        let mut set = IntSet::new();\\n   626\\t        assert!(set.add(1));\\n   627\\t        assert!(set.add(i16::MIN as i64 - 1));\\n   628\\t\\n   629\\t        assert_encoding(&set, INTSET_ENC_INT32);\\n   630\\t        assert_eq!(set.get(0), Some(i16::MIN as i64 - 1));\\n   631\\t        assert_eq!(set.get(1), Some(1));\\n   632\\t    }\\n   633\\t\\n   634\\t    #[test]\\n   635\\t    fn intset_upgrade_to_i64_preserves_existing_values() {\\n   636\\t        let mut set = IntSet::new();\\n   637\\t        assert!(set.add(i32::MIN as i64));\\n   638\\t        assert!(set.add(i64::MAX));\\n   639\\t\\n   640\\t        assert_encoding(&set, INTSET_ENC_INT64);\\n   641\\t        assert_eq!(set.get(0), Some(i32::MIN as i64));\\n   642\\t        assert_eq!(set.get(1), Some(i64::MAX));\\n   643\\t    }\\n   644\\t\\n   645\\t    #[test]\\n   646\\t    fn intset_remove_shifts_tail_and_keeps_encoding() {\\n   647\\t        let mut set = IntSet::new();\\n   648\\t        assert!(set.add(1));\\n   649\\t        assert!(set.add(2));\\n   650\\t        assert!(set.add(3));\\n   651\\t        assert!(set.remove(2));\\n   652\\t        assert!(!set.remove(42));\\n   653\\t\\n   654\\t        assert_eq!(set.len(), 2);\\n   655\\t        assert_eq!(set.get(0), Some(1));\\n   656\\t        assert_eq!(set.get(1), Some(3));\\n   657\\t        assert_eq!(set.get(2), None);\\n   658\\t    }\\n   659\\t\\n   660\\t    #[test]\\n   661\\t    fn intset_min_max_random_are_non_panicking() {\\n   662\\t        let mut set = IntSet::new();\\n   663\\t        assert_eq!(set.min(), None);\\n   664\\t        assert_eq!(set.max(), None);\\n   665\\t        assert_eq!(set.random(), None);\\n   666\\t\\n   667\\t        assert!(set.add(10));\\n   668\\t        assert!(set.add(-10));\\n   669\\t        assert!(set.add(0));\\n   670\\t\\n   671\\t        assert_eq!(set.min(), Some(-10));\\n   672\\t        assert_eq!(set.max(), Some(10));\\n   673\\t        let random = set.random();\\n   674\\t        assert!(matches!(random, Some(-10) | Some(0) | Some(10)));\\n   675\\t    }\\n   676\\t\\n   677\\t    #[test]\\n   678\\t    fn intset_validate_integrity_matches_valkey_header_rules() {\\n   679\\t        let raw = make_raw(&[1, 3], Encoding::Int16);\\n   680\\t        assert!(IntSet::validate_integrity(&raw, false));\\n   681\\t        assert!(IntSet::validate_integrity(&raw, true));\\n   682\\t\\n   683\\t        assert!(!IntSet::validate_integrity(&raw[..4], false));\\n   684\\t\\n   685\\t        let mut bad_encoding = raw.clone();\\n   686\\t        write_u32_le(&mut bad_encoding, 0, 1);\\n   687\\t        assert!(!IntSet::validate_integrity(&bad_encoding, false));\\n   688\\t\\n   689\\t        let mut bad_size = raw.clone();\\n   690\\t        write_u32_le(&mut bad_size, 4, 3);\\n   691\\t        assert!(!IntSet::validate_integrity(&bad_size, false));\\n   692\\t\\n   693\\t        let empty = IntSet::new();\\n   694\\t        assert!(!IntSet::validate_integrity(empty.as_bytes(), false));\\n   695\\t    }\\n   696\\t\\n   697\\t    #[test]\\n   698\\t    fn intset_validate_integrity_deep_rejects_unsorted_or_duplicate_values() {\\n   699\\t        let unsorted = make_raw(&[3, 1], Encoding::Int16);\\n   700\\t        assert!(IntSet::validate_integrity(&unsorted, false));\\n   701\\t        assert!(!IntSet::validate_integrity(&unsorted, true));\\n   702\\t\\n   703\\t        let duplicate = make_raw(&[2, 2], Encoding::Int16);\\n   704\\t        assert!(IntSet::validate_integrity(&duplicate, false));\\n   705\\t        assert!(!IntSet::validate_integrity(&duplicate, true));\\n   706\\t    }\\n   707\\t\\n   708\\t    #[test]\\n   709\\t    fn intset_from_raw_bytes_requires_deep_valid_blob() {\\n   710\\t        let raw = make_raw(&[-7, 9], Encoding::Int16);\\n   711\\t        let set = IntSet::from_raw_bytes(raw.clone());\\n   712\\t        assert!(set.is_some());\\n   713\\t        if let Some(set) = set {\\n   714\\t            assert_eq!(set.as_bytes(), raw.as_slice());\\n   715\\t            assert_eq!(set.get(0), Some(-7));\\n   716\\t            assert_eq!(set.get(1), Some(9));\\n   717\\t        }\\n   718\\t\\n   719\\t        assert!(IntSet::from_raw_bytes(make_raw(&[4, 4], Encoding::Int16)).is_none());\\n   720\\t    }\\n   721\\t\\n   722\\t    #[test]\\n   723\\t    fn intset_dup_copies_the_encoded_blob() {\\n   724\\t        let mut set = IntSet::new();\\n   725\\t        assert!(set.add(1));\\n   726\\t        assert!(set.add(2));\\n   727\\t        let copy = set.dup();\\n   728\\t        assert_eq!(set, copy);\\n   729\\t        assert_eq!(set.as_bytes(), copy.as_bytes());\\n   730\\t    }\\n   731\\t}\\n   732\\t\\n   733\\t// --------------------------------------------------------------------------\\n   734\\t// PORT STATUS\\n   735\\t//   source:        reference/valkey/src/intset.c, reference/valkey/src/intset.h\\n   736\\t//   target_crate:  redis-ds\\n   737\\t//   confidence:    high\\n   738\\t//   todos:         0\\n   739\\t//   port_notes:    2\\n   740\\t//   unsafe_blocks: 0\\n   741\\t//   notes:         Source-shaped safe byte-buffer implementation; Valkey\\n   742\\t//                  little-endian blob layout preserved. Public random/min/max\\n   743\\t//                  are non-panicking Option APIs where C asserts non-empty.\\n   744\\t// --------------------------------------------------------------------------\\n\",\"exit_code\":0,\"status\":\"completed\"}}\n{\"type\":\"item.completed\",\"item\":{\"id\":\"item_105\",\"type\":\"agent_message\",\"text\":\"Implemented `ds-intset-source-port-v1`.\\n\\nChanged [intset.rs](/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/crates/redis-ds/src/intset.rs:57) from a skeleton into a safe Valkey-compatible byte-buffer `IntSet` with encoding upgrades, sorted insert/remove/find, random/min/max/get/len/blob_len, raw blob validation, `from_raw_bytes`, `as_bytes`, and focused tests. Updated the packet closeout note in [REDIS_DS_SOURCE_SHAPED_OVERNIGHT_20260524.md](/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/docs/REDIS_DS_SOURCE_SHAPED_OVERNIGHT_20260524.md:41) and marked the generated draft consumed in [source-drafts.tsv](/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/source-drafts.tsv:30).\\n\\nProof:\\n- `rustc --edition 2021 --crate-type=lib --emit=metadata -o /tmp/syntax-check crates/redis-ds/src/intset.rs`: pass\\n- `rustfmt --edition 2021 --check crates/redis-ds/src/intset.rs`: pass\\n- `cargo test -p redis-ds intset`: pass, 12 tests\\n- `cargo check --workspace`: pass with existing warnings\\n- `git diff --check`: pass\\n\\nI did not touch `harness/evidence/ledger.jsonl`; it was already dirty before this packet.\"}}\n{\"type\":\"item.completed\",\"item\":{\"id\":\"item_73\",\"type\":\"todo_list\",\"items\":[{\"text\":\"Read packet rules, source, draft, architecture, and required surfaces\",\"completed\":true},{\"text\":\"Replace IntSet skeleton with safe source-shaped byte-buffer implementation\",\"completed\":true},{\"text\":\"Update packet docs/source-draft status\",\"completed\":true},{\"text\":\"Run focused tests and workspace check\",\"completed\":true}]}}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":4893754,\"cached_input_tokens\":4673152,\"output_tokens\":26138,\"reasoning_output_tokens\":9315}}\n",
+  "transcript_src": "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/loop/state/transcripts/20260524T163151Z-codex-translator-ds-intset-source-port-v1.jsonl"
+}

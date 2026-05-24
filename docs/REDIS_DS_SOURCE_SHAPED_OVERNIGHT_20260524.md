@@ -41,6 +41,10 @@ Total cheap-bulk cost: `$0.0926`.
 2. `ds-intset-source-port-v1`
    - Integrate the generated `intset.rs` draft into the canonical owner.
    - Goal: byte-faithful `IntSet` plus tests.
+   - Closeout: canonical `IntSet` now owns a safe Valkey-compatible byte blob
+     implementation with add/remove/find/random/min/max/get/len/blob_len,
+     validation, raw-byte construction, and focused unit tests. Object-model
+     wiring remains a later packet.
 
 3. `ds-ziplist-readonly-v1`
    - Integrate the generated `ziplist.rs` draft as a legacy read-only decoder.
@@ -73,4 +77,3 @@ Total cheap-bulk cost: `$0.0926`.
 - No `unsafe`.
 - No external dependencies.
 - No UTF-8 conversion for Redis payload bytes.
-
