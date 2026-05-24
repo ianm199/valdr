@@ -197,7 +197,9 @@ def stop_server(server: Server | None) -> str:
     return ""
 
 
-def expect_startup_failure(directory: Path, *, extra: list[str] | None = None) -> dict[str, Any]:
+def expect_startup_failure(
+    directory: Path, *, extra: list[str] | None = None, appendonly: bool = True
+) -> dict[str, Any]:
     port = free_port()
     cmd = [
         str(RUST_BIN),
@@ -207,9 +209,9 @@ def expect_startup_failure(directory: Path, *, extra: list[str] | None = None) -
         "127.0.0.1",
         "--dir",
         str(directory),
-        "--appendonly",
-        "yes",
     ]
+    if appendonly:
+        cmd += ["--appendonly", "yes"]
     if extra:
         cmd += extra
     proc = subprocess.Popen(
@@ -788,8 +790,62 @@ def scenario_multipart_rewrite_sequence_advance(tmp: Path) -> dict[str, Any]:
         stop_server(server)
 
 
+def scenario_rdb_corrupt_file_fatal_startup(tmp: Path) -> dict[str, Any]:
+    # integration/rdb.tcl: "Server should not start if RDB is corrupted".
+    (tmp / "dump.rdb").write_bytes(b"REDIS-not-a-valid-rdb\xff\x00garbage-bytes")
+    return expect_startup_failure(tmp, appendonly=False, extra=["--dbfilename", "dump.rdb"])
+
+
+def scenario_rdb_missing_file_empty_startup(tmp: Path) -> dict[str, Any]:
+    # integration/rdb.tcl: "Server started empty with non-existing RDB file".
+    server = start_server(tmp)
+    try:
+        client = RespClient(server.port)
+        try:
+            pong = client.command("PING")
+            dbsize = client.command("DBSIZE")
+            return {"passed": pong == "PONG" and dbsize == 0, "pong": pong, "dbsize": dbsize}
+        finally:
+            client.close()
+    finally:
+        stop_server(server)
+
+
+def scenario_rdb_bgsave_status_ok_file_written(tmp: Path) -> dict[str, Any]:
+    # BGSAVE forks a COW child, writes dump.rdb, and reports ok status.
+    server = start_server(tmp, extra=["--save", ""])
+    try:
+        client = RespClient(server.port)
+        try:
+            populate_complex(client)
+            reply = bulk(client.command("BGSAVE"))
+            text = ""
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline:
+                info = client.command("INFO", "persistence")
+                text = info.decode("utf-8", "replace") if isinstance(info, bytes) else str(info)
+                if "rdb_bgsave_in_progress:0" in text and "rdb_last_bgsave_status:ok" in text:
+                    break
+                time.sleep(0.1)
+            rdb_exists = (tmp / "dump.rdb").exists()
+            status_ok = "rdb_last_bgsave_status:ok" in text
+            return {
+                "passed": rdb_exists and status_ok and reply == "Background saving started",
+                "reply": reply,
+                "rdb_exists": rdb_exists,
+                "status_ok": status_ok,
+            }
+        finally:
+            client.close()
+    finally:
+        stop_server(server)
+
+
 SCENARIOS: list[Scenario] = [
     Scenario("rdb-debug-reload-complex-dataset", "persistence-rdb", scenario_rdb_debug_reload_complex),
+    Scenario("rdb-corrupt-file-fatal-startup", "persistence-rdb", scenario_rdb_corrupt_file_fatal_startup),
+    Scenario("rdb-missing-file-empty-startup", "persistence-rdb", scenario_rdb_missing_file_empty_startup),
+    Scenario("rdb-bgsave-status-ok-file-written", "persistence-rdb", scenario_rdb_bgsave_status_ok_file_written),
     Scenario("aof-debug-loadaof-complex-dataset", "persistence-aof", scenario_aof_debug_loadaof_complex),
     Scenario("expires-after-rdb-reload", "persistence-rdb", scenario_expires_after_rdb_reload),
     Scenario("expires-after-aof-loadaof", "persistence-aof", scenario_expires_after_aof_loadaof),
