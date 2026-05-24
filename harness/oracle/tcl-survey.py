@@ -107,7 +107,7 @@ def parse_files(raw: str | None) -> list[str]:
 
 
 def parse_summary(output: str) -> tuple[int | None, int | None]:
-    matches = SUMMARY_RE.findall(output)
+    matches = SUMMARY_RE.findall(ANSI_RE.sub("", output))
     if not matches:
         return None, None
     passed, failed = matches[-1]

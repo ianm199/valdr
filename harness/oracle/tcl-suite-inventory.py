@@ -57,7 +57,7 @@ def test_name_from_log(path: Path, payload: dict[str, Any]) -> str | None:
 
 
 def parse_summary(output: str) -> tuple[int | None, int | None]:
-    matches = SUMMARY_RE.findall(output)
+    matches = SUMMARY_RE.findall(ANSI_RE.sub("", output))
     if not matches:
         return None, None
     passed, failed = matches[-1]
