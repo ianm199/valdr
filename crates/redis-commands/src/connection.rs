@@ -66,12 +66,11 @@ pub fn set_max_clients(n: u64) {
 /// wrong-arity error.
 pub fn ping_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     match ctx.arg_count() {
-        1 if ctx.client_ref().in_pubsub_mode() && ctx.client_ref().resp_proto == 2 => {
-            ctx.reply_frame(&RespFrame::array(vec![
+        1 if ctx.client_ref().in_pubsub_mode() && ctx.client_ref().resp_proto == 2 => ctx
+            .reply_frame(&RespFrame::array(vec![
                 RespFrame::bulk(RedisString::from_static(b"pong")),
                 RespFrame::bulk(RedisString::from_static(b"")),
-            ]))
-        }
+            ])),
         2 if ctx.client_ref().in_pubsub_mode() && ctx.client_ref().resp_proto == 2 => {
             let msg = ctx.arg_owned(1usize)?;
             ctx.reply_frame(&RespFrame::array(vec![
@@ -229,6 +228,7 @@ pub fn config_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     }
     if ascii_eq_ignore_case(sub_bytes, b"RESETSTAT") {
         server_metrics().reset_stats();
+        crate::hash::reset_expired_fields_count();
         crate::slowlog_cmd::reset_latency_histograms();
         return ctx.reply_simple_string(b"OK");
     }
@@ -252,9 +252,7 @@ pub fn config_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         return reply_help(ctx, lines);
     }
     let mut msg = Vec::with_capacity(
-        b"ERR unknown subcommand or wrong number of arguments for '".len()
-            + sub_bytes.len()
-            + 1,
+        b"ERR unknown subcommand or wrong number of arguments for '".len() + sub_bytes.len() + 1,
     );
     msg.extend_from_slice(b"ERR unknown subcommand or wrong number of arguments for '");
     msg.extend_from_slice(sub_bytes);
@@ -1164,11 +1162,7 @@ fn monitor_payload(ctx: &CommandContext<'_>, argv: &[RedisString]) -> Vec<u8> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
-    let addr = ctx
-        .client_ref()
-        .addr
-        .as_deref()
-        .unwrap_or("127.0.0.1:0");
+    let addr = ctx.client_ref().addr.as_deref().unwrap_or("127.0.0.1:0");
     let mut out = Vec::new();
     let _ = write!(
         out,
@@ -1768,13 +1762,16 @@ fn format_snapshot_client_info_line(
 ) -> Vec<u8> {
     let mut line = Vec::with_capacity(320);
     let flags = snapshot_flags_vec(snap);
-    let capa = if snap.capa_redirect { b"r".as_slice() } else { b"".as_slice() };
+    let capa = if snap.capa_redirect {
+        b"r".as_slice()
+    } else {
+        b"".as_slice()
+    };
     let multi = snap.queued_multi_count.map(|n| n as i64).unwrap_or(-1);
     let _ = write!(
         line,
         "id={} addr={} laddr=127.0.0.1:0 fd=0 name=",
-        snap.id,
-        snap.addr,
+        snap.id, snap.addr,
     );
     if let Some(name) = &snap.name {
         line.extend_from_slice(name.as_bytes());
@@ -1933,7 +1930,9 @@ fn parse_client_list_filters(ctx: &CommandContext<'_>) -> RedisResult<ClientList
                     break;
                 };
                 if id < 1 {
-                    return Err(RedisError::runtime(b"ERR client-id should be greater than 0"));
+                    return Err(RedisError::runtime(
+                        b"ERR client-id should be greater than 0",
+                    ));
                 }
                 if negative {
                     filters.not_ids.push(id as u64);
@@ -1998,7 +1997,10 @@ fn parse_client_list_filters(ctx: &CommandContext<'_>) -> RedisResult<ClientList
             idx += 2;
         } else if opt_bytes.eq_ignore_ascii_case(b"MAXAGE") {
             let value = require_filter_value(ctx, idx)?;
-            filters.maxage = Some(parse_positive_i64_for_client_filter(value.as_bytes(), b"maxage")?);
+            filters.maxage = Some(parse_positive_i64_for_client_filter(
+                value.as_bytes(),
+                b"maxage",
+            )?);
             idx += 2;
         } else if opt_bytes.eq_ignore_ascii_case(b"FLAGS") {
             let value = require_filter_value(ctx, idx)?;
@@ -2092,11 +2094,7 @@ fn current_client_matches_filters(
     if !filters.not_ids.is_empty() && filters.not_ids.contains(&client.id) {
         return false;
     }
-    let addr = client
-        .addr
-        .as_deref()
-        .unwrap_or("127.0.0.1:0")
-        .as_bytes();
+    let addr = client.addr.as_deref().unwrap_or("127.0.0.1:0").as_bytes();
     if let Some(expected) = &filters.addr {
         if expected.as_slice() != addr {
             return false;
@@ -2263,13 +2261,21 @@ fn snapshot_matches_filters(
         }
     }
     if let Some(expected) = &filters.user {
-        let actual = snap.user.as_ref().map(|u| u.as_bytes()).unwrap_or(b"default");
+        let actual = snap
+            .user
+            .as_ref()
+            .map(|u| u.as_bytes())
+            .unwrap_or(b"default");
         if expected.as_slice() != actual {
             return false;
         }
     }
     if let Some(expected) = &filters.not_user {
-        let actual = snap.user.as_ref().map(|u| u.as_bytes()).unwrap_or(b"default");
+        let actual = snap
+            .user
+            .as_ref()
+            .map(|u| u.as_bytes())
+            .unwrap_or(b"default");
         if expected.as_slice() == actual {
             return false;
         }
@@ -2312,13 +2318,21 @@ fn snapshot_matches_filters(
         }
     }
     if let Some(expected) = &filters.capa {
-        let actual = if snap.capa_redirect { b"r".as_slice() } else { b"".as_slice() };
+        let actual = if snap.capa_redirect {
+            b"r".as_slice()
+        } else {
+            b"".as_slice()
+        };
         if !flags_match(actual, expected) {
             return false;
         }
     }
     if let Some(expected) = &filters.not_capa {
-        let actual = if snap.capa_redirect { b"r".as_slice() } else { b"".as_slice() };
+        let actual = if snap.capa_redirect {
+            b"r".as_slice()
+        } else {
+            b"".as_slice()
+        };
         if flags_match(actual, expected) {
             return false;
         }
@@ -2639,8 +2653,9 @@ fn client_tracking_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
                     b"ERR A client can only redirect to a single other client",
                 ));
             }
-            let id = parse_i64_strict(ctx.arg(idx + 1)?.as_bytes())
-                .ok_or_else(|| RedisError::runtime(b"ERR value is not an integer or out of range"))?;
+            let id = parse_i64_strict(ctx.arg(idx + 1)?.as_bytes()).ok_or_else(|| {
+                RedisError::runtime(b"ERR value is not an integer or out of range")
+            })?;
             if id < 0 {
                 return Err(RedisError::runtime(
                     b"ERR value is not an integer or out of range",
@@ -2738,7 +2753,10 @@ fn client_tracking_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             }
         } else {
             for prefix in prefixes {
-                if !effective_prefixes.iter().any(|existing| existing == &prefix) {
+                if !effective_prefixes
+                    .iter()
+                    .any(|existing| existing == &prefix)
+                {
                     effective_prefixes.push(prefix);
                 }
             }
@@ -2763,8 +2781,7 @@ fn client_caching_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         return Err(RedisError::wrong_number_of_args(b"client|caching"));
     }
     let opt = ctx.arg_owned(2usize)?;
-    if !ascii_eq_ignore_case(opt.as_bytes(), b"YES")
-        && !ascii_eq_ignore_case(opt.as_bytes(), b"NO")
+    if !ascii_eq_ignore_case(opt.as_bytes(), b"YES") && !ascii_eq_ignore_case(opt.as_bytes(), b"NO")
     {
         return Err(RedisError::syntax(b"syntax error"));
     }
@@ -2789,7 +2806,10 @@ fn client_caching_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         }
         tracking.caching = true;
     }
-    redis_core::tracking::sync_runtime_client_tracking(ctx.client_ref().id, &ctx.client_ref().tracking);
+    redis_core::tracking::sync_runtime_client_tracking(
+        ctx.client_ref().id,
+        &ctx.client_ref().tracking,
+    );
     refresh_client_info_registry(ctx.client_ref());
     ctx.reply_simple_string(b"OK")
 }

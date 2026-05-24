@@ -97,15 +97,20 @@ pub fn psync_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     }
     let provided_runid = ctx.arg_owned(1usize)?;
     let provided_offset = parse_offset(ctx.arg_owned(2usize)?.as_bytes())?;
-    handle_psync(ctx, provided_runid.as_bytes(), provided_offset)
+    handle_psync(ctx, provided_runid.as_bytes(), provided_offset, true)
 }
 
-/// `SYNC` — deprecated alias for `PSYNC ? -1` (always-full-resync).
+/// `SYNC` — legacy full-resync request.
+///
+/// This intentionally does not emit the `+FULLRESYNC ...` prelude. Upstream
+/// Valkey marks old `SYNC` clients as `pre_psync` and sends the RDB bulk
+/// payload directly; the Tcl test helper `attach_to_replication_stream`
+/// depends on that legacy wire shape.
 pub fn sync_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ctx.arg_count() != 1 {
         return Err(RedisError::wrong_number_of_args(b"sync"));
     }
-    handle_psync(ctx, b"?", -1)
+    handle_psync(ctx, b"?", -1, false)
 }
 
 /// `REPLCONF <subcommand> [args ...]`
@@ -402,6 +407,7 @@ fn handle_psync(
     ctx: &mut CommandContext<'_>,
     provided_runid: &[u8],
     provided_offset: i64,
+    send_fullresync_line: bool,
 ) -> RedisResult<()> {
     let repl = global_replication_state();
     let our_runid = repl.runid();
@@ -432,6 +438,8 @@ fn handle_psync(
     }
 
     let snapshot_offset = master_offset;
+    repl.selected_db
+        .store(-1, std::sync::atomic::Ordering::Release);
     if let Some(sender) = outbound {
         register_replica(
             &repl,
@@ -441,8 +449,10 @@ fn handle_psync(
             sender,
         );
     }
-    let line = fullresync_reply(our_runid, snapshot_offset);
-    ctx.client_mut().reply_buf.extend_from_slice(&line);
+    if send_fullresync_line {
+        let line = fullresync_reply(our_runid, snapshot_offset);
+        ctx.client_mut().reply_buf.extend_from_slice(&line);
+    }
     ctx.client_mut().is_replica = true;
 
     arm_full_sync_bgsave(ctx, &repl, client_id, snapshot_offset);
@@ -618,7 +628,10 @@ mod tests {
         let mut ctx = CommandContext::new(&mut c);
         sync_command(&mut ctx).unwrap();
         let reply = c.drain_reply();
-        assert!(reply.starts_with(b"+FULLRESYNC "));
+        assert!(
+            reply.is_empty(),
+            "legacy SYNC should wait for raw RDB bulk, not emit PSYNC prelude"
+        );
         assert!(c.is_replica);
     }
 

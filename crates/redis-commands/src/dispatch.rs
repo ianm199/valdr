@@ -300,6 +300,9 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
         .reply_buf
         .len()
         .saturating_sub(pre_reply_len);
+    if result.is_ok() && !command_blocked {
+        maybe_copy_hash_field_expiry_metadata(ctx, name, pre_reply_len);
+    }
     let should_record_slowlog = match elapsed_micros {
         Some(elapsed_micros) if should_time_slowlog && !command_blocked => ctx
             .live_config()
@@ -387,7 +390,7 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
     }
     if let Some(repl) = replication {
         if let Some(argv) = argv_snapshot.as_ref() {
-            propagate_write_to_replicas(&repl, argv);
+            propagate_write_to_replicas(&repl, ctx.selected_db_id(), argv);
         }
     }
 
@@ -405,6 +408,50 @@ fn request_size_bytes(argv: &[RedisString]) -> u64 {
         acc.saturating_add(arg.as_bytes().len() as u64)
             .saturating_add(8)
     })
+}
+
+fn maybe_copy_hash_field_expiry_metadata(
+    ctx: &mut CommandContext<'_>,
+    name: &[u8],
+    pre_reply_len: usize,
+) {
+    if !ascii_eq_ignore_case(name, b"COPY") {
+        return;
+    }
+    let reply = &ctx.client_ref().reply_buf[pre_reply_len..];
+    if reply != b":1\r\n" {
+        return;
+    }
+    let src_key = match ctx.client_ref().arg(1).cloned() {
+        Some(key) => key,
+        None => return,
+    };
+    let dst_key = match ctx.client_ref().arg(2).cloned() {
+        Some(key) => key,
+        None => return,
+    };
+    let src_dbid = ctx.selected_db_id();
+    let dst_dbid = copy_target_db(ctx).unwrap_or(src_dbid);
+    crate::hash::copy_hash_field_expiries(src_dbid, &src_key, dst_dbid, &dst_key);
+}
+
+fn copy_target_db(ctx: &CommandContext<'_>) -> Option<u32> {
+    let mut idx = 3usize;
+    while idx + 1 < ctx.arg_count() {
+        let opt = ctx.client_ref().arg(idx)?;
+        if opt.as_bytes().eq_ignore_ascii_case(b"DB") {
+            let raw = ctx.client_ref().arg(idx + 1)?;
+            let s = core::str::from_utf8(raw.as_bytes()).ok()?;
+            let parsed = s.parse::<u32>().ok()?;
+            return Some(parsed);
+        }
+        idx += if opt.as_bytes().eq_ignore_ascii_case(b"REPLACE") {
+            1
+        } else {
+            2
+        };
+    }
+    None
 }
 
 fn should_propagate_write_command(ctx: &CommandContext<'_>, original_name: &[u8]) -> bool {
@@ -686,9 +733,14 @@ fn enforce_maxmemory_gate(
 /// can re-sync via PSYNC.
 fn propagate_write_to_replicas(
     repl: &redis_core::replication::ReplicationState,
+    selected_db: u32,
     argv: &[RedisString],
 ) {
+    let select_bytes = replication_select_bytes_if_needed(repl, selected_db);
     let argv_bytes = crate::aof::encode_resp_command(argv);
+    if let Some(select_bytes) = select_bytes.as_ref() {
+        repl.append_to_backlog(select_bytes);
+    }
     repl.append_to_backlog(&argv_bytes);
     let guard = match repl.replicas.lock() {
         Ok(g) => g,
@@ -699,6 +751,15 @@ fn propagate_write_to_replicas(
             conn.state.load(std::sync::atomic::Ordering::Acquire),
         ) == redis_core::replication::ReplicaState::Online
         {
+            if let Some(select_bytes) = select_bytes.as_ref() {
+                if conn.outbound_sender.send(select_bytes.clone()).is_err() {
+                    eprintln!(
+                        "redis-server: replication SELECT fan-out failed for client {}",
+                        conn.client_id
+                    );
+                    continue;
+                }
+            }
             if conn.outbound_sender.send(argv_bytes.clone()).is_err() {
                 eprintln!(
                     "redis-server: replication fan-out failed for client {}",
@@ -707,6 +768,24 @@ fn propagate_write_to_replicas(
             }
         }
     }
+}
+
+fn replication_select_bytes_if_needed(
+    repl: &redis_core::replication::ReplicationState,
+    selected_db: u32,
+) -> Option<Vec<u8>> {
+    let selected_db = selected_db as i32;
+    let previous = repl
+        .selected_db
+        .swap(selected_db, std::sync::atomic::Ordering::AcqRel);
+    if previous == selected_db {
+        return None;
+    }
+    let argv = [
+        RedisString::from_bytes(b"SELECT"),
+        RedisString::from_bytes(selected_db.to_string().as_bytes()),
+    ];
+    Some(crate::aof::encode_resp_command(&argv))
 }
 
 /// Commands a replica client is allowed to issue back to the master after

@@ -726,7 +726,7 @@ impl RedisObject {
     /// `HashTable` encodings that this round does not populate.
     pub fn hash(&self) -> Option<&HashMap<RedisString, RedisString>> {
         match &self.kind {
-            ObjectKind::Hash(HashEncoding::Inline(h)) => Some(h),
+            ObjectKind::Hash(HashEncoding::Inline(h) | HashEncoding::HashTable(h)) => Some(h),
             _ => None,
         }
     }
@@ -734,8 +734,20 @@ impl RedisObject {
     /// Mutably borrow the inner field/value `HashMap` for a hash-encoded object.
     pub fn hash_mut(&mut self) -> Option<&mut HashMap<RedisString, RedisString>> {
         match &mut self.kind {
-            ObjectKind::Hash(HashEncoding::Inline(h)) => Some(h),
+            ObjectKind::Hash(HashEncoding::Inline(h) | HashEncoding::HashTable(h)) => Some(h),
             _ => None,
+        }
+    }
+
+    /// Promote the interim inline hash map to the explicit hashtable variant.
+    ///
+    /// This preserves the same Rust `HashMap` storage while making
+    /// `OBJECT ENCODING` report `"hashtable"` for cases where upstream
+    /// upgrades a hash out of listpack form.
+    pub fn promote_hash_to_hashtable(&mut self) {
+        if let ObjectKind::Hash(HashEncoding::Inline(h)) = &mut self.kind {
+            let map = std::mem::take(h);
+            self.kind = ObjectKind::Hash(HashEncoding::HashTable(map));
         }
     }
 

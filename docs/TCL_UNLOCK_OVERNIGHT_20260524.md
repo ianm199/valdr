@@ -436,3 +436,12 @@ Side packet result, 2026-05-24:
 - `unit/scripting` now advances past the bit and `os.clock` frontiers to
   `Script with RESP3 map`; it is still no-summary until RESP3 map/protocol and
   globals-protection errors are addressed.
+- `tcl-hashexpire-repl-stream-v1` flipped `unit/hashexpire` to a counted
+  clean file: 207/207. The fix set legacy `SYNC` apart from `PSYNC` during
+  full resync, emits replication `SELECT` frames when DB selection changes,
+  rewrites `HSETEX` propagation to canonical `PXAT` without validation flags,
+  preserves hash-field expiry metadata across `COPY`, handles import-mode
+  zero-TTL hash fields without eager deletion, and moves `expired_fields`
+  reset ownership from opportunistic empty-DB `HSET` cleanup to
+  `CONFIG RESETSTAT`. Evidence:
+  `harness/oracle/results/tcl-survey/20260524T225345Z/unit__hashexpire.json`.

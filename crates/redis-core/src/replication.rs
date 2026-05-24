@@ -303,6 +303,12 @@ pub struct ReplicationState {
     /// finished shipping the RDB and catch-up bytes to every waiter; then
     /// reset to `None`.
     pub repl_bgsave_job: Mutex<Option<ReplBgsaveJob>>,
+    /// Database id last emitted into the replication command stream.
+    ///
+    /// Upstream tracks this as `server.slaveseldb` so the first write after
+    /// a replica attaches is prefixed with `SELECT <db>`, and later writes
+    /// only pay the SELECT frame when the selected DB changes.
+    pub selected_db: AtomicI32,
     /// Set to `true` by `REPLICAOF NO ONE` to signal the running dialer thread
     /// to exit its reconnection loop immediately.
     pub dialer_stop_flag: AtomicBool,
@@ -322,6 +328,7 @@ impl ReplicationState {
             repl_state: AtomicU8::new(repl_state_code::MASTER),
             repl_child_pid: AtomicI32::new(0),
             repl_bgsave_job: Mutex::new(None),
+            selected_db: AtomicI32::new(-1),
             dialer_stop_flag: AtomicBool::new(false),
         }
     }
