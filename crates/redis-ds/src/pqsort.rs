@@ -94,13 +94,7 @@ fn ranges_overlap(partition_l: usize, partition_r: usize, lrange: usize, rrange:
 // PORT NOTE: C `lrange`/`rrange` are raw pointers into the original array.
 // Here they are absolute element indices.  `abs_offset` tracks where the
 // current `slice` starts within the original array.
-fn pqsort_inner<T, F>(
-    slice: &mut [T],
-    abs_offset: usize,
-    lrange: usize,
-    rrange: usize,
-    cmp: &F,
-)
+fn pqsort_inner<T, F>(slice: &mut [T], abs_offset: usize, lrange: usize, rrange: usize, cmp: &F)
 where
     F: Fn(&T, &T) -> i32,
 {

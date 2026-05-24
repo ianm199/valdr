@@ -174,7 +174,10 @@ fn decode_entry(blob: &[u8], pos: usize) -> io::Result<EntryResult> {
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("unknown listpack encoding byte 0x{:02x} at offset {}", enc, pos),
+                    format!(
+                        "unknown listpack encoding byte 0x{:02x} at offset {}",
+                        enc, pos
+                    ),
                 ));
             }
         }
@@ -206,7 +209,10 @@ fn backlen_byte_count(l: u64) -> usize {
 
 fn need_bytes(blob: &[u8], pos: usize, needed: usize) -> io::Result<()> {
     if pos + needed > blob.len() {
-        Err(io::Error::new(io::ErrorKind::InvalidData, "listpack truncated"))
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "listpack truncated",
+        ))
     } else {
         Ok(())
     }
@@ -274,7 +280,8 @@ impl ListpackBuilder {
             let total = 1 + slen;
             self.body.extend_from_slice(&encode_backlen(total as u64));
         } else if slen < 4096 {
-            self.body.push(LP_ENCODING_12BIT_STR | ((slen >> 8) as u8 & 0x0F));
+            self.body
+                .push(LP_ENCODING_12BIT_STR | ((slen >> 8) as u8 & 0x0F));
             self.body.push((slen & 0xFF) as u8);
             self.body.extend_from_slice(s);
             let total = 2 + slen;
@@ -326,25 +333,41 @@ fn encode_integer(v: i64, buf: &mut [u8; 9]) -> usize {
         buf[0] = v as u8;
         1
     } else if (-4096..=4095).contains(&v) {
-        let adj = if v < 0 { ((1i64 << 13) + v) as u64 } else { v as u64 };
+        let adj = if v < 0 {
+            ((1i64 << 13) + v) as u64
+        } else {
+            v as u64
+        };
         buf[0] = ((adj >> 8) as u8) | LP_ENCODING_13BIT_INT;
         buf[1] = (adj & 0xFF) as u8;
         2
     } else if (-32_768..=32_767).contains(&v) {
-        let adj = if v < 0 { ((1i64 << 16) + v) as u64 } else { v as u64 };
+        let adj = if v < 0 {
+            ((1i64 << 16) + v) as u64
+        } else {
+            v as u64
+        };
         buf[0] = LP_ENCODING_16BIT_INT;
         buf[1] = (adj & 0xFF) as u8;
         buf[2] = ((adj >> 8) & 0xFF) as u8;
         3
     } else if (-8_388_608..=8_388_607).contains(&v) {
-        let adj = if v < 0 { ((1i64 << 24) + v) as u64 } else { v as u64 };
+        let adj = if v < 0 {
+            ((1i64 << 24) + v) as u64
+        } else {
+            v as u64
+        };
         buf[0] = LP_ENCODING_24BIT_INT;
         buf[1] = (adj & 0xFF) as u8;
         buf[2] = ((adj >> 8) & 0xFF) as u8;
         buf[3] = ((adj >> 16) & 0xFF) as u8;
         4
     } else if (-2_147_483_648..=2_147_483_647).contains(&v) {
-        let adj = if v < 0 { ((1i64 << 32) + v) as u64 } else { v as u64 };
+        let adj = if v < 0 {
+            ((1i64 << 32) + v) as u64
+        } else {
+            v as u64
+        };
         buf[0] = LP_ENCODING_32BIT_INT;
         buf[1] = (adj & 0xFF) as u8;
         buf[2] = ((adj >> 8) & 0xFF) as u8;
@@ -498,7 +521,13 @@ mod tests {
         let entries = decode_listpack(&blob).unwrap();
         assert_eq!(entries.len(), values.len());
         for (i, &v) in values.iter().enumerate() {
-            assert_eq!(entries[i], v.to_string().into_bytes(), "value {} at index {}", v, i);
+            assert_eq!(
+                entries[i],
+                v.to_string().into_bytes(),
+                "value {} at index {}",
+                v,
+                i
+            );
         }
     }
 

@@ -149,11 +149,17 @@ pub struct InlineSet {
 
 impl InlineSet {
     pub fn new() -> Self {
-        Self { data: HashSet::new(), sticky: InlineSetEncoding::Auto }
+        Self {
+            data: HashSet::new(),
+            sticky: InlineSetEncoding::Auto,
+        }
     }
 
     pub fn from_hash_set(data: HashSet<RedisString>) -> Self {
-        Self { data, sticky: InlineSetEncoding::Auto }
+        Self {
+            data,
+            sticky: InlineSetEncoding::Auto,
+        }
     }
 }
 
@@ -501,7 +507,11 @@ impl RedisObject {
 
     /// Create an object with no LRU init and no expire.
     fn bare(kind: ObjectKind) -> Self {
-        Self { lru: 0, expire: EXPIRY_NONE, kind }
+        Self {
+            lru: 0,
+            expire: EXPIRY_NONE,
+            kind,
+        }
     }
 
     /// Create a raw-string object (OBJ_ENCODING_RAW).
@@ -641,7 +651,9 @@ impl RedisObject {
     /// collection into a fully-formed `RedisObject` without an intermediate
     /// empty-then-insert construction.
     pub fn new_set_from_set(members: HashSet<RedisString>) -> Self {
-        Self::bare(ObjectKind::Set(SetEncoding::Inline(InlineSet::from_hash_set(members))))
+        Self::bare(ObjectKind::Set(SetEncoding::Inline(
+            InlineSet::from_hash_set(members),
+        )))
     }
 
     /// Borrow the inner member `HashSet` for a set-encoded object.
@@ -779,7 +791,9 @@ impl RedisObject {
     /// Create a stream object with the pragmatic Inline encoding.
     /// C: createStreamObject() → object.c:541
     pub fn new_stream() -> Self {
-        Self::bare(ObjectKind::Stream(StreamEncoding::Inline(InlineStream::new())))
+        Self::bare(ObjectKind::Stream(StreamEncoding::Inline(
+            InlineStream::new(),
+        )))
     }
 
     /// Borrow the inner `InlineStream` for a stream-encoded object.
@@ -940,7 +954,11 @@ impl RedisObject {
     /// Return the expiry in milliseconds, or `None` if no expiry.
     /// C: objectGetExpire(o) → object.c:299
     pub fn get_expire(&self) -> Option<i64> {
-        if self.expire == EXPIRY_NONE { None } else { Some(self.expire) }
+        if self.expire == EXPIRY_NONE {
+            None
+        } else {
+            Some(self.expire)
+        }
     }
 
     /// Set the expiry in milliseconds. `None` clears it.
@@ -963,7 +981,9 @@ impl RedisObject {
                 let s = format_long_long(*n);
                 Ok(Cow::Owned(s))
             }
-            _ => Err(RedisError::runtime(b"ERR decoded() called on non-string object")),
+            _ => Err(RedisError::runtime(
+                b"ERR decoded() called on non-string object",
+            )),
         }
     }
 
@@ -1039,7 +1059,9 @@ impl RedisObject {
             ObjectKind::String(StringEncoding::Raw(s) | StringEncoding::Embstr(s)) => {
                 parse_long_long(s.as_bytes()).ok_or_else(RedisError::not_integer)
             }
-            _ => Err(RedisError::runtime(b"ERR get_long_long on non-string object")),
+            _ => Err(RedisError::runtime(
+                b"ERR get_long_long on non-string object",
+            )),
         }
     }
 
@@ -1071,9 +1093,7 @@ impl RedisObject {
     /// C: stringObjectLen(o) → object.c:1017
     pub fn string_len(&self) -> Result<usize, RedisError> {
         match &self.kind {
-            ObjectKind::String(StringEncoding::Raw(s) | StringEncoding::Embstr(s)) => {
-                Ok(s.len())
-            }
+            ObjectKind::String(StringEncoding::Raw(s) | StringEncoding::Embstr(s)) => Ok(s.len()),
             ObjectKind::String(StringEncoding::Int(n)) => Ok(decimal_digit_count(*n)),
             _ => Err(RedisError::runtime(b"ERR string_len on non-string object")),
         }
@@ -1657,14 +1677,14 @@ pub fn create_string_object_from_long_double(value: f64, human_friendly: bool) -
 /// C: dupStringObject(o) → object.c:464
 pub fn dup_string_object(o: &RedisObject) -> Result<RedisObject, RedisError> {
     match &o.kind {
-        ObjectKind::String(StringEncoding::Raw(s)) => {
-            Ok(create_raw_string_object(s.as_bytes()))
-        }
+        ObjectKind::String(StringEncoding::Raw(s)) => Ok(create_raw_string_object(s.as_bytes())),
         ObjectKind::String(StringEncoding::Embstr(s)) => {
             Ok(create_embedded_string_object(s.as_bytes()))
         }
         ObjectKind::String(StringEncoding::Int(n)) => Ok(RedisObject::new_int_string(*n)),
-        _ => Err(RedisError::runtime(b"ERR dup_string_object called on non-string")),
+        _ => Err(RedisError::runtime(
+            b"ERR dup_string_object called on non-string",
+        )),
     }
 }
 
@@ -1743,7 +1763,10 @@ pub fn check_type(obj: Option<&RedisObject>, expected: ObjectType) -> Result<(),
 
 /// Return `Ok(())` if the byte string can be parsed as an `i64`, writing the value.
 /// C: isSdsRepresentableAsLongLong(s, llval) → object.c:833
-pub fn is_sds_representable_as_long_long(s: &RedisString, llval: &mut i64) -> Result<(), RedisError> {
+pub fn is_sds_representable_as_long_long(
+    s: &RedisString,
+    llval: &mut i64,
+) -> Result<(), RedisError> {
     match parse_long_long(s.as_bytes()) {
         Some(v) => {
             *llval = v;
@@ -1790,9 +1813,8 @@ pub fn get_double_from_object_or_reply(
     o: Option<&RedisObject>,
     msg: Option<&[u8]>,
 ) -> Result<f64, RedisError> {
-    get_double_from_object(o).map_err(|_| {
-        RedisError::runtime(msg.unwrap_or(b"value is not a valid float"))
-    })
+    get_double_from_object(o)
+        .map_err(|_| RedisError::runtime(msg.unwrap_or(b"value is not a valid float")))
 }
 
 /// Extract a `f64` (as long double) from a string object, or 0 if `o` is `None`.
@@ -1810,9 +1832,8 @@ pub fn get_long_double_from_object_or_reply(
     o: Option<&RedisObject>,
     msg: Option<&[u8]>,
 ) -> Result<f64, RedisError> {
-    get_long_double_from_object(o).map_err(|_| {
-        RedisError::runtime(msg.unwrap_or(b"value is not a valid float"))
-    })
+    get_long_double_from_object(o)
+        .map_err(|_| RedisError::runtime(msg.unwrap_or(b"value is not a valid float")))
 }
 
 /// Extract an `i64` from a string object, or 0 if `o` is `None`.
@@ -1830,9 +1851,8 @@ pub fn get_long_long_from_object_or_reply(
     o: Option<&RedisObject>,
     msg: Option<&[u8]>,
 ) -> Result<i64, RedisError> {
-    get_long_long_from_object(o).map_err(|_| {
-        RedisError::runtime(msg.unwrap_or(b"value is not an integer or out of range"))
-    })
+    get_long_long_from_object(o)
+        .map_err(|_| RedisError::runtime(msg.unwrap_or(b"value is not an integer or out of range")))
 }
 
 /// Extract a `long` as `i64`, checking it fits in `[i64::MIN, i64::MAX]`.
@@ -1858,8 +1878,11 @@ pub fn get_range_long_from_object_or_reply(
         let err = match msg {
             Some(m) => RedisError::runtime(m),
             None => RedisError::runtime(
-                format!("value is out of range, value must between {} and {}", min, max)
-                    .as_bytes(),
+                format!(
+                    "value is out of range, value must between {} and {}",
+                    min, max
+                )
+                .as_bytes(),
             ),
         };
         return Err(err);
@@ -1947,11 +1970,7 @@ fn compare_bytes(a: &[u8], b: &[u8]) -> i64 {
 /// Returns `true` if the value was updated.
 /// C: objectSetLRUOrLFU(val, lfu_freq, lru_idle_secs) → object.c:1668
 /// TODO(port): needs access to lrulfu module (lrulfu_isUsingLFU, lfu_import, lru_import).
-pub fn object_set_lru_or_lfu(
-    obj: &mut RedisObject,
-    lfu_freq: i64,
-    lru_idle_secs: i64,
-) -> bool {
+pub fn object_set_lru_or_lfu(obj: &mut RedisObject, lfu_freq: i64, lru_idle_secs: i64) -> bool {
     // TODO(port): check global maxmemory_policy once server state is accessible
     if lfu_freq >= 0 {
         debug_assert!(lfu_freq <= u8::MAX as i64);
@@ -1982,37 +2001,42 @@ pub fn object_compute_size(
     // TODO(port): implement full size estimation per object.c:1194-1356
     // Blocked on: ListPack, QuickList, IntSet, ZSet, Stream, rax types from redis-ds.
     match &o.kind {
-        ObjectKind::String(StringEncoding::Raw(s)) => {
-            std::mem::size_of::<RedisObject>() + s.len()
-        }
+        ObjectKind::String(StringEncoding::Raw(s)) => std::mem::size_of::<RedisObject>() + s.len(),
         ObjectKind::String(StringEncoding::Embstr(s)) => {
             std::mem::size_of::<RedisObject>() + s.len()
         }
         ObjectKind::String(StringEncoding::Int(_)) => std::mem::size_of::<RedisObject>(),
         ObjectKind::List(ListEncoding::Inline(d)) => {
             std::mem::size_of::<RedisObject>()
-                + d.iter().map(|s| s.len() + std::mem::size_of::<usize>()).sum::<usize>()
+                + d.iter()
+                    .map(|s| s.len() + std::mem::size_of::<usize>())
+                    .sum::<usize>()
         }
         ObjectKind::List(ListEncoding::ListPack(lp)) => {
             std::mem::size_of::<RedisObject>() + lp.len()
         }
         ObjectKind::List(ListEncoding::QuickList(ql)) => {
             std::mem::size_of::<RedisObject>()
-                + ql.iter().map(|s| s.len() + std::mem::size_of::<usize>()).sum::<usize>()
+                + ql.iter()
+                    .map(|s| s.len() + std::mem::size_of::<usize>())
+                    .sum::<usize>()
         }
         ObjectKind::Set(SetEncoding::Inline(s)) => {
             std::mem::size_of::<RedisObject>()
-                + s.data.iter().map(|m| m.len() + std::mem::size_of::<usize>()).sum::<usize>()
+                + s.data
+                    .iter()
+                    .map(|m| m.len() + std::mem::size_of::<usize>())
+                    .sum::<usize>()
         }
-        ObjectKind::Set(SetEncoding::ListPack(lp)) => {
-            std::mem::size_of::<RedisObject>() + lp.len()
-        }
+        ObjectKind::Set(SetEncoding::ListPack(lp)) => std::mem::size_of::<RedisObject>() + lp.len(),
         ObjectKind::Set(SetEncoding::IntSet(is)) => {
             std::mem::size_of::<RedisObject>() + is.len() * 8
         }
         ObjectKind::Set(SetEncoding::HashTable(ht)) => {
             std::mem::size_of::<RedisObject>()
-                + ht.iter().map(|s| s.len() + std::mem::size_of::<usize>()).sum::<usize>()
+                + ht.iter()
+                    .map(|s| s.len() + std::mem::size_of::<usize>())
+                    .sum::<usize>()
         }
         ObjectKind::ZSet(ZSetEncoding::Inline(z)) => {
             std::mem::size_of::<RedisObject>()
@@ -2046,12 +2070,8 @@ pub fn object_compute_size(
                     .sum::<usize>()
         }
         ObjectKind::Stream(_) | ObjectKind::Module => std::mem::size_of::<RedisObject>(),
-        ObjectKind::Json(v) => {
-            std::mem::size_of::<RedisObject>() + v.to_string().len()
-        }
-        ObjectKind::Bloom(bf) => {
-            std::mem::size_of::<RedisObject>() + bf.bits.len()
-        }
+        ObjectKind::Json(v) => std::mem::size_of::<RedisObject>() + v.to_string().len(),
+        ObjectKind::Bloom(bf) => std::mem::size_of::<RedisObject>() + bf.bits.len(),
     }
 }
 
@@ -2149,7 +2169,9 @@ pub fn object_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         };
         ctx.reply_integer(freq)?;
     } else {
-        return Err(RedisError::runtime(b"ERR unknown subcommand or wrong number of arguments"));
+        return Err(RedisError::runtime(
+            b"ERR unknown subcommand or wrong number of arguments",
+        ));
     }
 
     Ok(())
@@ -2236,7 +2258,9 @@ pub fn memory_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         return Ok(());
     }
 
-    Err(RedisError::runtime(b"ERR unknown subcommand or wrong number of arguments for MEMORY"))
+    Err(RedisError::runtime(
+        b"ERR unknown subcommand or wrong number of arguments for MEMORY",
+    ))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2269,25 +2293,41 @@ impl RedisObject {
     pub fn flat(&self) -> Flat<'_> {
         match &self.kind {
             ObjectKind::String(e) => Flat::String(e),
-            ObjectKind::List(e)   => Flat::List(e),
-            ObjectKind::Hash(e)   => Flat::Hash(e),
-            ObjectKind::Set(e)    => Flat::Set(e),
-            ObjectKind::ZSet(e)   => Flat::ZSet(e),
+            ObjectKind::List(e) => Flat::List(e),
+            ObjectKind::Hash(e) => Flat::Hash(e),
+            ObjectKind::Set(e) => Flat::Set(e),
+            ObjectKind::ZSet(e) => Flat::ZSet(e),
             ObjectKind::Stream(_) => Flat::Stream,
-            ObjectKind::Module    => Flat::Module,
-            ObjectKind::Json(_)   => Flat::Json,
-            ObjectKind::Bloom(_)  => Flat::Bloom,
+            ObjectKind::Module => Flat::Module,
+            ObjectKind::Json(_) => Flat::Json,
+            ObjectKind::Bloom(_) => Flat::Bloom,
         }
     }
 
-    pub fn is_string(&self) -> bool { matches!(self.kind, ObjectKind::String(_)) }
-    pub fn is_list(&self)   -> bool { matches!(self.kind, ObjectKind::List(_)) }
-    pub fn is_hash(&self)   -> bool { matches!(self.kind, ObjectKind::Hash(_)) }
-    pub fn is_set(&self)    -> bool { matches!(self.kind, ObjectKind::Set(_)) }
-    pub fn is_zset(&self)   -> bool { matches!(self.kind, ObjectKind::ZSet(_)) }
-    pub fn is_stream(&self) -> bool { matches!(self.kind, ObjectKind::Stream(_)) }
-    pub fn is_json(&self)   -> bool { matches!(self.kind, ObjectKind::Json(_)) }
-    pub fn is_bloom(&self)  -> bool { matches!(self.kind, ObjectKind::Bloom(_)) }
+    pub fn is_string(&self) -> bool {
+        matches!(self.kind, ObjectKind::String(_))
+    }
+    pub fn is_list(&self) -> bool {
+        matches!(self.kind, ObjectKind::List(_))
+    }
+    pub fn is_hash(&self) -> bool {
+        matches!(self.kind, ObjectKind::Hash(_))
+    }
+    pub fn is_set(&self) -> bool {
+        matches!(self.kind, ObjectKind::Set(_))
+    }
+    pub fn is_zset(&self) -> bool {
+        matches!(self.kind, ObjectKind::ZSet(_))
+    }
+    pub fn is_stream(&self) -> bool {
+        matches!(self.kind, ObjectKind::Stream(_))
+    }
+    pub fn is_json(&self) -> bool {
+        matches!(self.kind, ObjectKind::Json(_))
+    }
+    pub fn is_bloom(&self) -> bool {
+        matches!(self.kind, ObjectKind::Bloom(_))
+    }
 
     /// Return the raw byte string if the object is `String(Raw|Embstr)`.
     /// `None` for Int-encoded strings or non-strings.
@@ -2309,8 +2349,12 @@ impl RedisObject {
     pub fn string_bytes(&self) -> std::borrow::Cow<'_, [u8]> {
         match &self.kind {
             ObjectKind::String(StringEncoding::Raw(s))
-            | ObjectKind::String(StringEncoding::Embstr(s)) => std::borrow::Cow::Borrowed(s.as_bytes()),
-            ObjectKind::String(StringEncoding::Int(n)) => std::borrow::Cow::Owned(n.to_string().into_bytes()),
+            | ObjectKind::String(StringEncoding::Embstr(s)) => {
+                std::borrow::Cow::Borrowed(s.as_bytes())
+            }
+            ObjectKind::String(StringEncoding::Int(n)) => {
+                std::borrow::Cow::Owned(n.to_string().into_bytes())
+            }
             _ => std::borrow::Cow::Borrowed(&[]),
         }
     }
@@ -2329,24 +2373,23 @@ impl RedisObject {
         }
     }
 
-
     /// Number of items in a List/Set/ZSet/Hash (best-effort across encodings).
     /// Returns 0 for non-collection types.
     pub fn collection_len(&self) -> usize {
         match &self.kind {
-            ObjectKind::List(ListEncoding::Inline(d))    => d.len(),
+            ObjectKind::List(ListEncoding::Inline(d)) => d.len(),
             ObjectKind::List(ListEncoding::QuickList(v)) => v.len(),
-            ObjectKind::List(ListEncoding::ListPack(_))  => 0,
-            ObjectKind::Set(SetEncoding::Inline(s))      => s.data.len(),
-            ObjectKind::Set(SetEncoding::HashTable(h))   => h.len(),
-            ObjectKind::Set(SetEncoding::IntSet(v))      => v.len(),
-            ObjectKind::Set(SetEncoding::ListPack(_))    => 0,
-            ObjectKind::ZSet(ZSetEncoding::Inline(z))    => z.len(),
-            ObjectKind::ZSet(ZSetEncoding::SkipList(v))  => v.len(),
-            ObjectKind::ZSet(ZSetEncoding::ListPack(_))  => 0,
+            ObjectKind::List(ListEncoding::ListPack(_)) => 0,
+            ObjectKind::Set(SetEncoding::Inline(s)) => s.data.len(),
+            ObjectKind::Set(SetEncoding::HashTable(h)) => h.len(),
+            ObjectKind::Set(SetEncoding::IntSet(v)) => v.len(),
+            ObjectKind::Set(SetEncoding::ListPack(_)) => 0,
+            ObjectKind::ZSet(ZSetEncoding::Inline(z)) => z.len(),
+            ObjectKind::ZSet(ZSetEncoding::SkipList(v)) => v.len(),
+            ObjectKind::ZSet(ZSetEncoding::ListPack(_)) => 0,
             ObjectKind::Hash(HashEncoding::HashTable(h)) => h.len(),
-            ObjectKind::Hash(HashEncoding::Inline(h))    => h.len(),
-            ObjectKind::Hash(HashEncoding::ListPack(_))  => 0,
+            ObjectKind::Hash(HashEncoding::Inline(h)) => h.len(),
+            ObjectKind::Hash(HashEncoding::ListPack(_)) => 0,
             _ => 0,
         }
     }
@@ -2381,9 +2424,7 @@ impl RedisObject {
             ObjectKind::ZSet(ZSetEncoding::Inline(z)) => {
                 Box::new(z.by_order.iter().map(|(s, m)| (m, s.get())))
             }
-            ObjectKind::ZSet(ZSetEncoding::SkipList(v)) => {
-                Box::new(v.iter().map(|(m, s)| (m, *s)))
-            }
+            ObjectKind::ZSet(ZSetEncoding::SkipList(v)) => Box::new(v.iter().map(|(m, s)| (m, *s))),
             _ => Box::new(std::iter::empty()),
         }
     }

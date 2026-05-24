@@ -339,7 +339,11 @@ pub fn geohash_calculate_areas_by_shape_wgs84(shape: &mut GeoShape) -> Option<Ge
         }
     }
 
-    Some(GeoHashRadius { hash, neighbors, area })
+    Some(GeoHashRadius {
+        hash,
+        neighbors,
+        area,
+    })
 }
 
 /// Left-align a geohash into a canonical 52-bit fixed-precision representation.
@@ -497,7 +501,12 @@ pub fn geohash_get_distance_if_in_polygon(
         j = i;
     }
     if inside {
-        Some(geohash_get_distance(centroid_lon, centroid_lat, point[0], point[1]))
+        Some(geohash_get_distance(
+            centroid_lon,
+            centroid_lat,
+            point[0],
+            point[1],
+        ))
     } else {
         None
     }

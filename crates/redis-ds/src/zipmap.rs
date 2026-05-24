@@ -235,10 +235,7 @@ impl ZipMap {
     /// ```
     ///
     /// C: zipmap.c:156-172 `zipmapNext` (out-pointer pattern → returned tuple)
-    pub fn next_entry(
-        &self,
-        offset: usize,
-    ) -> Result<Option<(ZipMapEntry, usize)>, RedisError> {
+    pub fn next_entry(&self, offset: usize) -> Result<Option<(ZipMapEntry, usize)>, RedisError> {
         let buf = &self.buf;
         if offset >= buf.len() || buf[offset] == ZIPMAP_END {
             return Ok(None);
@@ -410,13 +407,13 @@ mod tests {
         // Encodes {"foo": "bar"} — the example from the C file comment.
         // "\x01\x03foo\x03\x00bar\xff"
         vec![
-            0x01,             // zmlen = 1
-            0x03,             // key len = 3
+            0x01, // zmlen = 1
+            0x03, // key len = 3
             b'f', b'o', b'o', // key data
-            0x03,             // val len = 3
-            0x00,             // free = 0
+            0x03, // val len = 3
+            0x00, // free = 0
             b'b', b'a', b'r', // val data
-            0xFF,             // ZIPMAP_END
+            0xFF, // ZIPMAP_END
         ]
     }
 
@@ -478,12 +475,8 @@ mod tests {
         // {"foo": "bar", "hello": "world"}
         // "\x02\x03foo\x03\x00bar\x05hello\x05\x00world\xff"
         let zm_bytes: Vec<u8> = vec![
-            0x02,
-            0x03, b'f', b'o', b'o',
-            0x03, 0x00, b'b', b'a', b'r',
-            0x05, b'h', b'e', b'l', b'l', b'o',
-            0x05, 0x00, b'w', b'o', b'r', b'l', b'd',
-            0xFF,
+            0x02, 0x03, b'f', b'o', b'o', 0x03, 0x00, b'b', b'a', b'r', 0x05, b'h', b'e', b'l',
+            b'l', b'o', 0x05, 0x00, b'w', b'o', b'r', b'l', b'd', 0xFF,
         ];
         let zm = ZipMap::from_raw(zm_bytes);
         let mut off = zm.rewind();
@@ -503,9 +496,7 @@ mod tests {
         // Value has 2 free padding bytes after the payload.
         // key="k" (1 byte), val="v" (1 byte), free=2
         let zm_bytes: Vec<u8> = vec![
-            0x01,
-            0x01, b'k',
-            0x01, 0x02, b'v', 0x00, 0x00, // free=2, 2 padding bytes
+            0x01, 0x01, b'k', 0x01, 0x02, b'v', 0x00, 0x00, // free=2, 2 padding bytes
             0xFF,
         ];
         let zm = ZipMap::from_raw(zm_bytes);

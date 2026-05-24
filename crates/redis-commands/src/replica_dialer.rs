@@ -40,11 +40,7 @@ static GLOBAL_RDB_DIR: OnceLock<String> = OnceLock::new();
 ///
 /// Called once from the binary's main before any `REPLICAOF` command can be
 /// issued. Subsequent calls are no-ops (OnceLock semantics).
-pub fn install_dialer_resources(
-    server: Arc<RedisServer>,
-    our_port: u16,
-    rdb_dir: String,
-) {
+pub fn install_dialer_resources(server: Arc<RedisServer>, our_port: u16, rdb_dir: String) {
     let _ = GLOBAL_SERVER.set(server);
     let _ = GLOBAL_OUR_PORT.set(our_port);
     let _ = GLOBAL_RDB_DIR.set(rdb_dir);
@@ -58,9 +54,15 @@ pub fn install_dialer_resources(
 /// when the dialer resources have not been installed.
 pub fn spawn_replica_dialer(host: RedisString, port: u16) -> Result<(), &'static str> {
     let _ = (host, port);
-    let _ = GLOBAL_SERVER.get().ok_or("dialer resources not installed")?;
-    let _ = GLOBAL_OUR_PORT.get().ok_or("dialer resources not installed")?;
-    let _ = GLOBAL_RDB_DIR.get().ok_or("dialer resources not installed")?;
+    let _ = GLOBAL_SERVER
+        .get()
+        .ok_or("dialer resources not installed")?;
+    let _ = GLOBAL_OUR_PORT
+        .get()
+        .ok_or("dialer resources not installed")?;
+    let _ = GLOBAL_RDB_DIR
+        .get()
+        .ok_or("dialer resources not installed")?;
 
     // TODO(architect): replica apply must become a RuntimeOwner event/channel
     // before REPLICAOF can start after the owner-owned DB flip. The previous
@@ -90,7 +92,10 @@ fn dialer_loop(
         let stream = match TcpStream::connect(format!("{}:{}", host_str, port)) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("redis-server: replica: connect {}:{} failed: {}", host_str, port, e);
+                eprintln!(
+                    "redis-server: replica: connect {}:{} failed: {}",
+                    host_str, port, e
+                );
                 thread::sleep(Duration::from_secs(1));
                 continue;
             }
@@ -128,15 +133,21 @@ fn dialer_loop(
             continue;
         }
 
-        repl.master_repl_offset.store(initial_offset, Ordering::SeqCst);
-        repl.repl_state.store(repl_state_code::REPLICA_ONLINE, Ordering::SeqCst);
+        repl.master_repl_offset
+            .store(initial_offset, Ordering::SeqCst);
+        repl.repl_state
+            .store(repl_state_code::REPLICA_ONLINE, Ordering::SeqCst);
         eprintln!("redis-server: replica: ONLINE at offset {}", initial_offset);
 
         let ack_stream = match stream.try_clone() {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("redis-server: replica: try_clone for ACK thread failed: {}", e);
-                repl.repl_state.store(repl_state_code::REPLICA_CONNECTING, Ordering::SeqCst);
+                eprintln!(
+                    "redis-server: replica: try_clone for ACK thread failed: {}",
+                    e
+                );
+                repl.repl_state
+                    .store(repl_state_code::REPLICA_CONNECTING, Ordering::SeqCst);
                 thread::sleep(Duration::from_secs(1));
                 continue;
             }
@@ -150,7 +161,8 @@ fn dialer_loop(
 
         run_command_apply_loop(&stream, &repl, &db, &server);
 
-        repl.repl_state.store(repl_state_code::REPLICA_CONNECTING, Ordering::SeqCst);
+        repl.repl_state
+            .store(repl_state_code::REPLICA_CONNECTING, Ordering::SeqCst);
         eprintln!("redis-server: replica: disconnected, will reconnect");
         thread::sleep(Duration::from_secs(1));
     }
@@ -171,7 +183,10 @@ fn run_handshake(stream: &TcpStream, repl: &ReplicationState, our_port: u16) -> 
     }
 
     let port_str = our_port.to_string();
-    send_multibulk(stream, &[b"REPLCONF", b"listening-port", port_str.as_bytes()])?;
+    send_multibulk(
+        stream,
+        &[b"REPLCONF", b"listening-port", port_str.as_bytes()],
+    )?;
     let ok1 = read_line(stream)?;
     if !ok1.starts_with(b"+OK") {
         return Err(io::Error::new(
@@ -204,7 +219,10 @@ fn run_handshake(stream: &TcpStream, repl: &ReplicationState, our_port: u16) -> 
         let offset_str = our_offset.to_string();
         let runid_str = std::str::from_utf8(our_runid)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid runid"))?;
-        send_multibulk(stream, &[b"PSYNC", runid_str.as_bytes(), offset_str.as_bytes()])?;
+        send_multibulk(
+            stream,
+            &[b"PSYNC", runid_str.as_bytes(), offset_str.as_bytes()],
+        )?;
     } else {
         send_multibulk(stream, &[b"PSYNC", b"?", b"-1"])?;
     }
@@ -234,7 +252,9 @@ fn parse_psync_reply(line: &[u8]) -> io::Result<i64> {
     }
 
     if s.starts_with("+CONTINUE") {
-        return Ok(global_replication_state().master_repl_offset.load(Ordering::SeqCst));
+        return Ok(global_replication_state()
+            .master_repl_offset
+            .load(Ordering::SeqCst));
     }
 
     Err(io::Error::new(
@@ -256,9 +276,9 @@ fn read_fullresync_rdb(stream: &TcpStream) -> io::Result<Vec<u8>> {
             format!("expected $<size>, got: {}", header_str),
         )
     })?;
-    let size: usize = size_str.parse().map_err(|_| {
-        io::Error::new(io::ErrorKind::InvalidData, "cannot parse RDB size")
-    })?;
+    let size: usize = size_str
+        .parse()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "cannot parse RDB size"))?;
 
     let mut buf = vec![0u8; size];
     read_exact_from_stream(stream, &mut buf)?;
@@ -318,7 +338,8 @@ fn run_command_apply_loop(
         loop {
             match redis_protocol::parse_inline_or_multibulk(&read_buf) {
                 Ok(Some((argv, consumed))) => {
-                    repl.master_repl_offset.fetch_add(consumed as i64, Ordering::SeqCst);
+                    repl.master_repl_offset
+                        .fetch_add(consumed as i64, Ordering::SeqCst);
                     read_buf.drain(..consumed);
 
                     if argv.is_empty() {
@@ -354,7 +375,11 @@ fn is_getack(argv: &[RedisString]) -> bool {
 /// Uses a discarding `CommandContext` (replies written into a `Client` whose
 /// `reply_buf` is never flushed to a socket). The `is_replica` flag on the
 /// client prevents re-propagation of the write to our own downstream replicas.
-fn apply_command_locally(argv: &[RedisString], db: &Arc<Mutex<RedisDb>>, server: &Arc<RedisServer>) {
+fn apply_command_locally(
+    argv: &[RedisString],
+    db: &Arc<Mutex<RedisDb>>,
+    server: &Arc<RedisServer>,
+) {
     if argv.is_empty() {
         return;
     }
@@ -472,7 +497,10 @@ fn read_exact_from_stream(stream: &TcpStream, buf: &mut [u8]) -> io::Result<()> 
     while filled < buf.len() {
         let n = stream_read_slice(stream, &mut buf[filled..])?;
         if n == 0 {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "EOF reading RDB"));
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "EOF reading RDB",
+            ));
         }
         filled += n;
     }
@@ -480,7 +508,8 @@ fn read_exact_from_stream(stream: &TcpStream, buf: &mut [u8]) -> io::Result<()> 
 }
 
 fn lock_db(db: &Arc<Mutex<RedisDb>>) -> io::Result<std::sync::MutexGuard<'_, RedisDb>> {
-    db.lock().map_err(|_| io::Error::new(io::ErrorKind::Other, "DB mutex poisoned"))
+    db.lock()
+        .map_err(|_| io::Error::new(io::ErrorKind::Other, "DB mutex poisoned"))
 }
 
 fn stream_write(stream: &TcpStream, data: &[u8]) -> io::Result<()> {

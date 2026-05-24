@@ -68,9 +68,7 @@ use std::io::{self, Read, Write};
 
 use redis_types::RedisString;
 
-use redis_ds::stream::{
-    Consumer, ConsumerGroup, InlineStream, PelEntry, StreamEntry, StreamId,
-};
+use redis_ds::stream::{Consumer, ConsumerGroup, InlineStream, PelEntry, StreamEntry, StreamId};
 
 use crate::object::RedisObject;
 
@@ -486,10 +484,7 @@ mod tests {
     fn make_entry(ms: u64, seq: u64, fields: &[(&str, &str)]) -> StreamEntry {
         StreamEntry {
             id: StreamId::new(ms, seq),
-            fields: fields
-                .iter()
-                .map(|(f, v)| (rs(f), rs(v)))
-                .collect(),
+            fields: fields.iter().map(|(f, v)| (rs(f), rs(v))).collect(),
         }
     }
 

@@ -43,7 +43,10 @@ const QUICKLIST_NODE_CONTAINER_PACKED: u64 = 2;
 /// count followed by each element as a raw-byte length-prefixed string.
 pub fn save_list_object(w: &mut impl Write, obj: &RedisObject) -> io::Result<()> {
     let list = obj.list().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidData, "save_list_object called on non-list object")
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "save_list_object called on non-list object",
+        )
     })?;
     write_len(w, list.len() as u64)?;
     for elem in list {

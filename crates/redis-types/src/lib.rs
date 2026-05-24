@@ -8,8 +8,8 @@
 //! registry. This crate is the foundation: no dependencies on other
 //! port crates.
 
-pub mod string;
 pub mod error;
+pub mod string;
 
 pub use error::{RedisError, RedisResult};
 pub use string::RedisString;

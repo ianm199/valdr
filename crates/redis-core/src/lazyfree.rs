@@ -19,11 +19,11 @@
 //! with `TODO(architect)` indicating which crate and phase will supply the
 //! canonical type.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::object::RedisObject;
 use crate::db::RedisDb;
+use crate::object::RedisObject;
 use redis_types::RedisString;
 
 // ── Global atomic counters ─────────────────────────────────────────────────────
@@ -192,9 +192,7 @@ pub fn lazyfree_free_replication_backlog_ref_mem(blocks: OpaqueAdList, index: Op
 /// Drop the `replicaKeysWithExpire` dict and update counters.
 ///
 /// C: lazyfree.c:89-95, `lazyFreeReplicaKeysWithExpire`
-pub fn lazyfree_free_replica_keys_with_expire(
-    replica_keys_with_expire: HashMap<RedisString, i64>,
-) {
+pub fn lazyfree_free_replica_keys_with_expire(replica_keys_with_expire: HashMap<RedisString, i64>) {
     let len = replica_keys_with_expire.len();
     drop(replica_keys_with_expire);
     LAZYFREE_OBJECTS.fetch_sub(len, Ordering::Relaxed);
@@ -426,9 +424,7 @@ pub fn free_replication_backlog_ref_mem_async(blocks: OpaqueAdList, index: Opaqu
 /// C: lazyfree.c:283-290, `freeReplicaKeysWithExpireAsync`
 ///
 /// TODO(architect): wire the BIO job once bio.rs lands.
-pub fn free_replica_keys_with_expire_async(
-    replica_keys_with_expire: HashMap<RedisString, i64>,
-) {
+pub fn free_replica_keys_with_expire_async(replica_keys_with_expire: HashMap<RedisString, i64>) {
     let len = replica_keys_with_expire.len();
     if len > LAZYFREE_THRESHOLD {
         LAZYFREE_OBJECTS.fetch_add(len, Ordering::Relaxed);

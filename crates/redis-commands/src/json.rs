@@ -118,7 +118,9 @@ fn lex_path(path: &str) -> Result<Vec<PathToken>, RedisError> {
                 }
                 let s = std::str::from_utf8(&bytes[start..pos])
                     .map_err(|_| RedisError::runtime(b"ERR invalid path encoding"))?;
-                let idx: i64 = s.parse().map_err(|_| RedisError::runtime(b"ERR invalid array index"))?;
+                let idx: i64 = s
+                    .parse()
+                    .map_err(|_| RedisError::runtime(b"ERR invalid array index"))?;
                 if pos >= len || bytes[pos] != b']' {
                     return Err(RedisError::runtime(b"ERR expected ']'"));
                 }
@@ -136,10 +138,18 @@ fn lex_path(path: &str) -> Result<Vec<PathToken>, RedisError> {
 fn resolve_index(idx: i64, len: usize) -> Option<usize> {
     if idx >= 0 {
         let u = idx as usize;
-        if u < len { Some(u) } else { None }
+        if u < len {
+            Some(u)
+        } else {
+            None
+        }
     } else {
         let abs = (-idx) as usize;
-        if abs <= len { Some(len - abs) } else { None }
+        if abs <= len {
+            Some(len - abs)
+        } else {
+            None
+        }
     }
 }
 
@@ -158,12 +168,10 @@ fn eval_tokens<'a>(value: &'a Value, tokens: &[PathToken], pos: usize) -> Vec<&'
             _ => vec![],
         },
         PathToken::Index(idx) => match value {
-            Value::Array(arr) => {
-                match resolve_index(*idx, arr.len()) {
-                    Some(i) => eval_tokens(&arr[i], tokens, pos + 1),
-                    None => vec![],
-                }
-            }
+            Value::Array(arr) => match resolve_index(*idx, arr.len()) {
+                Some(i) => eval_tokens(&arr[i], tokens, pos + 1),
+                None => vec![],
+            },
             _ => vec![],
         },
         PathToken::Wildcard => match value {
@@ -219,7 +227,10 @@ fn query_path<'a>(root: &'a Value, path: &str) -> Result<Vec<&'a Value>, RedisEr
 /// Owned variant: clone all matched values.
 fn query_path_owned(root: &Value, path: &str) -> Result<Vec<Value>, RedisError> {
     let tokens = lex_path(path)?;
-    Ok(eval_tokens(root, &tokens, 0).into_iter().map(|v| v.clone()).collect())
+    Ok(eval_tokens(root, &tokens, 0)
+        .into_iter()
+        .map(|v| v.clone())
+        .collect())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -270,7 +281,9 @@ fn set_recursive(
                         Ok(true)
                     } else {
                         match map.get_mut(k_owned.as_str()) {
-                            Some(child) => set_recursive(child, tokens, pos + 1, new_val, flag_nx, flag_xx),
+                            Some(child) => {
+                                set_recursive(child, tokens, pos + 1, new_val, flag_nx, flag_xx)
+                            }
                             None => Err(RedisError::runtime(b"ERR path does not exist")),
                         }
                     }
@@ -292,7 +305,9 @@ fn set_recursive(
             }
             _ => Err(RedisError::runtime(b"ERR path traversal into non-array")),
         },
-        _ => Err(RedisError::runtime(b"ERR wildcard/recursive not supported in SET path")),
+        _ => Err(RedisError::runtime(
+            b"ERR wildcard/recursive not supported in SET path",
+        )),
     }
 }
 
@@ -316,7 +331,11 @@ fn delete_recursive(v: &mut Value, tokens: &[PathToken], pos: usize) -> i64 {
             match v {
                 Value::Object(map) => {
                     if is_last {
-                        if map.remove(k_owned.as_str()).is_some() { 1 } else { 0 }
+                        if map.remove(k_owned.as_str()).is_some() {
+                            1
+                        } else {
+                            0
+                        }
                     } else {
                         match map.get_mut(k_owned.as_str()) {
                             Some(child) => delete_recursive(child, tokens, pos + 1),
@@ -355,7 +374,9 @@ fn delete_recursive(v: &mut Value, tokens: &[PathToken], pos: usize) -> i64 {
                     arr.clear();
                     count
                 } else {
-                    arr.iter_mut().map(|child| delete_recursive(child, tokens, pos + 1)).sum()
+                    arr.iter_mut()
+                        .map(|child| delete_recursive(child, tokens, pos + 1))
+                        .sum()
                 }
             }
             Value::Object(map) => {
@@ -364,7 +385,9 @@ fn delete_recursive(v: &mut Value, tokens: &[PathToken], pos: usize) -> i64 {
                     map.clear();
                     count
                 } else {
-                    map.values_mut().map(|child| delete_recursive(child, tokens, pos + 1)).sum()
+                    map.values_mut()
+                        .map(|child| delete_recursive(child, tokens, pos + 1))
+                        .sum()
                 }
             }
             _ => 0,
@@ -389,7 +412,8 @@ fn delete_recursive_descent(
             } else if let Some(child) = map.get_mut(key) {
                 count += delete_recursive(child, tokens, next_pos);
             }
-            let other_keys: Vec<String> = map.keys().filter(|k| k.as_str() != key).cloned().collect();
+            let other_keys: Vec<String> =
+                map.keys().filter(|k| k.as_str() != key).cloned().collect();
             for k in other_keys {
                 if let Some(child) = map.get_mut(k.as_str()) {
                     count += delete_recursive_descent(child, key, tokens, next_pos, is_last);
@@ -438,13 +462,16 @@ fn num_op_recursive(
             match v {
                 Value::Object(map) => {
                     if is_last {
-                        let target = map.get_mut(k_owned.as_str())
+                        let target = map
+                            .get_mut(k_owned.as_str())
                             .ok_or_else(|| RedisError::runtime(b"ERR path does not exist"))?;
                         apply_num_op(target, operand, is_multiply)?;
                         Ok(vec![target.clone()])
                     } else {
                         match map.get_mut(k_owned.as_str()) {
-                            Some(child) => num_op_recursive(child, tokens, pos + 1, operand, is_multiply),
+                            Some(child) => {
+                                num_op_recursive(child, tokens, pos + 1, operand, is_multiply)
+                            }
                             None => Err(RedisError::runtime(b"ERR path does not exist")),
                         }
                     }
@@ -475,7 +502,9 @@ fn num_op_recursive(
                             if apply_num_op(child, operand, is_multiply).is_ok() {
                                 results.push(child.clone());
                             }
-                        } else if let Ok(sub) = num_op_recursive(child, tokens, pos + 1, operand, is_multiply) {
+                        } else if let Ok(sub) =
+                            num_op_recursive(child, tokens, pos + 1, operand, is_multiply)
+                        {
                             results.extend(sub);
                         }
                     }
@@ -487,7 +516,16 @@ fn num_op_recursive(
         PathToken::RecursiveKey(k) => {
             let k_owned = k.clone();
             let mut results = vec![];
-            collect_num_op_recursive(v, &k_owned, tokens, pos + 1, is_last, operand, is_multiply, &mut results);
+            collect_num_op_recursive(
+                v,
+                &k_owned,
+                tokens,
+                pos + 1,
+                is_last,
+                operand,
+                is_multiply,
+                &mut results,
+            );
             Ok(results)
         }
     }
@@ -501,9 +539,14 @@ fn apply_num_op(v: &mut Value, operand: f64, is_multiply: bool) -> Result<(), Re
             } else if let Some(u) = n.as_u64() {
                 u as f64
             } else {
-                n.as_f64().ok_or_else(|| RedisError::runtime(b"ERR number conversion failed"))?
+                n.as_f64()
+                    .ok_or_else(|| RedisError::runtime(b"ERR number conversion failed"))?
             };
-            let result = if is_multiply { current * operand } else { current + operand };
+            let result = if is_multiply {
+                current * operand
+            } else {
+                current + operand
+            };
             if result.fract() == 0.0 && result >= i64::MIN as f64 && result <= i64::MAX as f64 {
                 *n = serde_json::Number::from(result as i64);
             } else {
@@ -537,21 +580,41 @@ fn collect_num_op_recursive(
                         }
                     }
                 } else if let Some(child) = map.get_mut(key) {
-                    if let Ok(sub) = num_op_recursive(child, tokens, next_pos, operand, is_multiply) {
+                    if let Ok(sub) = num_op_recursive(child, tokens, next_pos, operand, is_multiply)
+                    {
                         out.extend(sub);
                     }
                 }
             }
-            let child_keys: Vec<String> = map.keys().filter(|k| k.as_str() != key).cloned().collect();
+            let child_keys: Vec<String> =
+                map.keys().filter(|k| k.as_str() != key).cloned().collect();
             for ck in child_keys {
                 if let Some(child) = map.get_mut(ck.as_str()) {
-                    collect_num_op_recursive(child, key, tokens, next_pos, is_last, operand, is_multiply, out);
+                    collect_num_op_recursive(
+                        child,
+                        key,
+                        tokens,
+                        next_pos,
+                        is_last,
+                        operand,
+                        is_multiply,
+                        out,
+                    );
                 }
             }
         }
         Value::Array(arr) => {
             for child in arr.iter_mut() {
-                collect_num_op_recursive(child, key, tokens, next_pos, is_last, operand, is_multiply, out);
+                collect_num_op_recursive(
+                    child,
+                    key,
+                    tokens,
+                    next_pos,
+                    is_last,
+                    operand,
+                    is_multiply,
+                    out,
+                );
             }
         }
         _ => {}
@@ -765,7 +828,11 @@ fn arrinsert_op(
                     (raw_idx as usize).min(len)
                 } else {
                     let abs = (-raw_idx) as usize;
-                    if abs > len { 0 } else { len - abs }
+                    if abs > len {
+                        0
+                    } else {
+                        len - abs
+                    }
                 };
                 for (offset, val) in new_vals.iter().enumerate() {
                     arr.insert(insert_pos + offset, val.clone());
@@ -796,7 +863,11 @@ fn arrinsert_recursive(
             (raw_idx as usize).min(len)
         } else {
             let abs = (-raw_idx) as usize;
-            if abs > len { 0 } else { len - abs }
+            if abs > len {
+                0
+            } else {
+                len - abs
+            }
         };
         for (offset, val) in new_vals.iter().enumerate() {
             arr.insert(insert_pos + offset, val.clone());
@@ -812,13 +883,17 @@ fn arrinsert_recursive(
                 Value::Object(map) => {
                     if is_last {
                         match map.get_mut(k_owned.as_str()) {
-                            Some(Value::Array(arr)) => vec![Some(do_insert(arr, raw_idx, new_vals))],
+                            Some(Value::Array(arr)) => {
+                                vec![Some(do_insert(arr, raw_idx, new_vals))]
+                            }
                             Some(_) => vec![None],
                             None => vec![],
                         }
                     } else {
                         match map.get_mut(k_owned.as_str()) {
-                            Some(child) => arrinsert_recursive(child, tokens, pos + 1, raw_idx, new_vals),
+                            Some(child) => {
+                                arrinsert_recursive(child, tokens, pos + 1, raw_idx, new_vals)
+                            }
                             None => vec![],
                         }
                     }
@@ -960,7 +1035,11 @@ fn clear_recursive(v: &mut Value, tokens: &[PathToken], pos: usize) -> i64 {
     match &tokens[pos] {
         PathToken::Root => {
             if is_last {
-                if clear_value(v) { 1 } else { 0 }
+                if clear_value(v) {
+                    1
+                } else {
+                    0
+                }
             } else {
                 clear_recursive(v, tokens, pos + 1)
             }
@@ -971,7 +1050,13 @@ fn clear_recursive(v: &mut Value, tokens: &[PathToken], pos: usize) -> i64 {
                 Value::Object(map) => {
                     if is_last {
                         match map.get_mut(k_owned.as_str()) {
-                            Some(target) => if clear_value(target) { 1 } else { 0 },
+                            Some(target) => {
+                                if clear_value(target) {
+                                    1
+                                } else {
+                                    0
+                                }
+                            }
                             None => 0,
                         }
                     } else {
@@ -991,7 +1076,11 @@ fn clear_recursive(v: &mut Value, tokens: &[PathToken], pos: usize) -> i64 {
                     None => 0,
                     Some(i) => {
                         if is_last {
-                            if clear_value(&mut arr[i]) { 1 } else { 0 }
+                            if clear_value(&mut arr[i]) {
+                                1
+                            } else {
+                                0
+                            }
                         } else {
                             clear_recursive(&mut arr[i], tokens, pos + 1)
                         }
@@ -1006,7 +1095,9 @@ fn clear_recursive(v: &mut Value, tokens: &[PathToken], pos: usize) -> i64 {
                 Value::Array(arr) => {
                     for child in arr.iter_mut() {
                         if is_last {
-                            if clear_value(child) { count += 1; }
+                            if clear_value(child) {
+                                count += 1;
+                            }
                         } else {
                             count += clear_recursive(child, tokens, pos + 1);
                         }
@@ -1029,7 +1120,11 @@ fn json_type_name(v: &Value) -> &'static str {
         Value::Null => "null",
         Value::Bool(_) => "boolean",
         Value::Number(n) => {
-            if n.is_i64() || n.is_u64() { "integer" } else { "number" }
+            if n.is_i64() || n.is_u64() {
+                "integer"
+            } else {
+                "number"
+            }
         }
         Value::String(_) => "string",
         Value::Array(_) => "array",
@@ -1113,7 +1208,9 @@ pub fn json_set_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let existing = ctx.db_mut().lookup_key_write(&key);
     match existing {
         None => {
-            return Err(RedisError::runtime(b"ERR key does not exist for non-root path"));
+            return Err(RedisError::runtime(
+                b"ERR key does not exist for non-root path",
+            ));
         }
         Some(obj) => {
             if !obj.is_json() {
@@ -1373,7 +1470,11 @@ pub fn json_strappend_command(ctx: &mut CommandContext) -> RedisResult<()> {
         .map_err(|_| RedisError::runtime(b"ERR invalid JSON for appended value"))?;
     let append_str = match &append_val {
         Value::String(s) => s.clone(),
-        _ => return Err(RedisError::runtime(b"ERR appended value is not a JSON string")),
+        _ => {
+            return Err(RedisError::runtime(
+                b"ERR appended value is not a JSON string",
+            ))
+        }
     };
 
     let tokens = lex_path(&path_str)?;
@@ -1429,10 +1530,13 @@ pub fn json_strlen_command(ctx: &mut CommandContext) -> RedisResult<()> {
     };
 
     let matches = query_path_owned(&root, &path_str)?;
-    let lengths: Vec<Option<i64>> = matches.iter().map(|m| match m {
-        Value::String(s) => Some(s.len() as i64),
-        _ => None,
-    }).collect();
+    let lengths: Vec<Option<i64>> = matches
+        .iter()
+        .map(|m| match m {
+            Value::String(s) => Some(s.len() as i64),
+            _ => None,
+        })
+        .collect();
     ctx.reply_array_header(lengths.len())?;
     for r in lengths {
         match r {
@@ -1511,10 +1615,13 @@ pub fn json_objlen_command(ctx: &mut CommandContext) -> RedisResult<()> {
     };
 
     let matches = query_path_owned(&root, &path_str)?;
-    let lens: Vec<Option<i64>> = matches.iter().map(|m| match m {
-        Value::Object(map) => Some(map.len() as i64),
-        _ => None,
-    }).collect();
+    let lens: Vec<Option<i64>> = matches
+        .iter()
+        .map(|m| match m {
+            Value::Object(map) => Some(map.len() as i64),
+            _ => None,
+        })
+        .collect();
     ctx.reply_array_header(lens.len())?;
     for r in lens {
         match r {
@@ -1601,10 +1708,13 @@ pub fn json_arrlen_command(ctx: &mut CommandContext) -> RedisResult<()> {
     };
 
     let matches = query_path_owned(&root, &path_str)?;
-    let lens: Vec<Option<i64>> = matches.iter().map(|m| match m {
-        Value::Array(arr) => Some(arr.len() as i64),
-        _ => None,
-    }).collect();
+    let lens: Vec<Option<i64>> = matches
+        .iter()
+        .map(|m| match m {
+            Value::Array(arr) => Some(arr.len() as i64),
+            _ => None,
+        })
+        .collect();
     ctx.reply_array_header(lens.len())?;
     for r in lens {
         match r {
@@ -1788,12 +1898,10 @@ pub fn json_mget_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let root_opt = get_json_clone(ctx.db().lookup_key_read(key));
         match root_opt {
             Ok(None) => results.push(None),
-            Ok(Some(root)) => {
-                match query_path_owned(&root, &path_str) {
-                    Ok(matches) => results.push(Some(serialize_matches(&matches))),
-                    Err(_) => results.push(None),
-                }
-            }
+            Ok(Some(root)) => match query_path_owned(&root, &path_str) {
+                Ok(matches) => results.push(Some(serialize_matches(&matches))),
+                Err(_) => results.push(None),
+            },
             Err(_) => results.push(None),
         }
     }

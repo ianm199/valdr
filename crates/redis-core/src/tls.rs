@@ -125,7 +125,10 @@ impl TlsConfig {
 
 fn load_certs(path: &Path) -> io::Result<Vec<CertificateDer<'static>>> {
     let file = File::open(path).map_err(|e| {
-        io::Error::new(e.kind(), format!("cannot open cert file '{}': {e}", path.display()))
+        io::Error::new(
+            e.kind(),
+            format!("cannot open cert file '{}': {e}", path.display()),
+        )
     })?;
     let mut reader = BufReader::new(file);
     rustls_pemfile::certs(&mut reader)
@@ -135,7 +138,10 @@ fn load_certs(path: &Path) -> io::Result<Vec<CertificateDer<'static>>> {
 
 fn load_private_key(path: &Path) -> io::Result<PrivateKeyDer<'static>> {
     let file = File::open(path).map_err(|e| {
-        io::Error::new(e.kind(), format!("cannot open key file '{}': {e}", path.display()))
+        io::Error::new(
+            e.kind(),
+            format!("cannot open key file '{}': {e}", path.display()),
+        )
     })?;
     let mut reader = BufReader::new(file);
     rustls_pemfile::private_key(&mut reader)
@@ -184,7 +190,10 @@ mod tests {
         let cert = write_temp("mtls_cert.pem", b"not a cert");
         let key = write_temp("mtls_key.pem", b"not a key");
         let result = TlsConfig::from_paths(&cert, &key, None, true);
-        assert!(result.is_err(), "mtls without CA path should return an error");
+        assert!(
+            result.is_err(),
+            "mtls without CA path should return an error"
+        );
     }
 }
 

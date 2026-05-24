@@ -38,7 +38,9 @@ pub fn current_lru_clock() -> LruClock {
 /// Atomically bump the LRU clock by one tick. Used by both the background
 /// ticker thread and tests that need to advance the clock deterministically.
 pub fn tick_lru_clock() -> LruClock {
-    lru_clock_handle().fetch_add(1, Ordering::Relaxed).wrapping_add(1)
+    lru_clock_handle()
+        .fetch_add(1, Ordering::Relaxed)
+        .wrapping_add(1)
 }
 
 /// Spawn a 1Hz background thread that increments the LRU clock once per

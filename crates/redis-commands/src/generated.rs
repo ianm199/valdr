@@ -7,8 +7,12 @@
 // Total commands: 425
 // Source commit: see harness/source.toml
 
-#![allow(dead_code, non_camel_case_types, clippy::needless_borrow, clippy::redundant_static_lifetimes)]
-
+#![allow(
+    dead_code,
+    non_camel_case_types,
+    clippy::needless_borrow,
+    clippy::redundant_static_lifetimes
+)]
 
 /// All command flags seen across commands. Source order matches Valkey.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

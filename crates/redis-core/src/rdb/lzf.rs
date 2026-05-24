@@ -34,10 +34,16 @@ pub fn lzf_decompress(input: &[u8], output_len: usize) -> io::Result<Vec<u8>> {
         if ctrl < 32 {
             let run = ctrl + 1;
             if op + run > output_len {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "lzf: output overflow in literal run"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "lzf: output overflow in literal run",
+                ));
             }
             if ip + run > input.len() {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "lzf: input underrun in literal run"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "lzf: input underrun in literal run",
+                ));
             }
             out[op..op + run].copy_from_slice(&input[ip..ip + run]);
             ip += run;
@@ -47,14 +53,20 @@ pub fn lzf_decompress(input: &[u8], output_len: usize) -> io::Result<Vec<u8>> {
             let mut back = ((ctrl & 0x1f) << 8) + 1;
 
             if ip >= input.len() {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "lzf: truncated back-reference"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "lzf: truncated back-reference",
+                ));
             }
 
             if len == 7 {
                 len += input[ip] as usize;
                 ip += 1;
                 if ip >= input.len() {
-                    return Err(io::Error::new(io::ErrorKind::InvalidData, "lzf: truncated extended-length byte"));
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "lzf: truncated extended-length byte",
+                    ));
                 }
             }
 
@@ -64,10 +76,16 @@ pub fn lzf_decompress(input: &[u8], output_len: usize) -> io::Result<Vec<u8>> {
             len += 2;
 
             if op + len > output_len {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "lzf: output overflow in back-reference"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "lzf: output overflow in back-reference",
+                ));
             }
             if back > op {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "lzf: back-reference before output start"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "lzf: back-reference before output start",
+                ));
             }
 
             let mut src = op - back;
@@ -115,11 +133,7 @@ mod tests {
 
     #[test]
     fn back_reference_copies_prior_bytes() {
-        let compressed = vec![
-            0x00, b'A',
-            (1u8 << 5) | 0u8,
-            0u8,
-        ];
+        let compressed = vec![0x00, b'A', (1u8 << 5) | 0u8, 0u8];
         let decompressed = lzf_decompress(&compressed, 4).unwrap();
         assert_eq!(decompressed, b"AAAA");
     }

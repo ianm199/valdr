@@ -120,7 +120,10 @@ impl Default for LatencyTimeSeries {
             max: 0,
             sum: 0,
             cnt: 0,
-            samples: [LatencySample { time: 0, latency: 0 }; LATENCY_TS_LEN],
+            samples: [LatencySample {
+                time: 0,
+                latency: 0,
+            }; LATENCY_TS_LEN],
         }
     }
 }
@@ -416,9 +419,8 @@ impl LatencyMonitor {
 
             eventnum += 1;
             if eventnum == 1 {
-                report.extend_from_slice(
-                    b"Latency spikes are observed in this Valkey instance.\n\n",
-                );
+                report
+                    .extend_from_slice(b"Latency spikes are observed in this Valkey instance.\n\n");
             }
 
             // Per-event summary line.
@@ -428,13 +430,7 @@ impl LatencyMonitor {
             } else {
                 0.0
             };
-            report.extend_from_slice(
-                format!(
-                    "{}. ",
-                    eventnum
-                )
-                .as_bytes(),
-            );
+            report.extend_from_slice(format!("{}. ", eventnum).as_bytes());
             report.extend_from_slice(event);
             report.extend_from_slice(
                 format!(
@@ -461,8 +457,11 @@ impl LatencyMonitor {
                     "excellent"
                 };
                 report.extend_from_slice(
-                    format!(" Fork rate is {:.2} GB/sec ({}).", cfg.stat_fork_rate, fork_quality)
-                        .as_bytes(),
+                    format!(
+                        " Fork rate is {:.2} GB/sec ({}).",
+                        cfg.stat_fork_rate, fork_quality
+                    )
+                    .as_bytes(),
                 );
             }
 
@@ -863,8 +862,11 @@ fn latency_command_gen_sparkline(event: &[u8], ts: &LatencyTimeSeries) -> Vec<u8
     let mut graph: Vec<u8> = Vec::new();
     graph.extend_from_slice(event);
     graph.extend_from_slice(
-        format!(" - high {} ms, low {} ms (all time high {} ms)\n", ts.max, 0u32, ts.max)
-            .as_bytes(),
+        format!(
+            " - high {} ms, low {} ms (all time high {} ms)\n",
+            ts.max, 0u32, ts.max
+        )
+        .as_bytes(),
     );
     for _ in 0..LATENCY_GRAPH_COLS {
         graph.push(b'-');
@@ -999,7 +1001,9 @@ pub fn latency_command(
             ctx.reply_bulk(line)?;
         }
     } else {
-        return Err(RedisError::syntax(b"Unknown subcommand or wrong number of arguments"));
+        return Err(RedisError::syntax(
+            b"Unknown subcommand or wrong number of arguments",
+        ));
     }
 
     Ok(())

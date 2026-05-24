@@ -81,15 +81,12 @@ pub type ServerPatternMap = HashMap<RedisString, HashSet<ClientId>>;
 /// Returns an `ERR pub/sub not available` runtime error when the context has
 /// no registry. That branch is reachable only from unit tests; production
 /// callers always construct contexts via `CommandContext::with_db_and_pubsub`.
-fn registry_handle(
-    ctx: &CommandContext,
-) -> Result<Arc<Mutex<PubSubRegistry>>, RedisError> {
+fn registry_handle(ctx: &CommandContext) -> Result<Arc<Mutex<PubSubRegistry>>, RedisError> {
     match ctx.pubsub.as_ref() {
         Some(r) => Ok(Arc::clone(r)),
         None => Err(RedisError::runtime(b"ERR pub/sub registry unavailable")),
     }
 }
-
 
 /// SUBSCRIBE channel [channel ...]
 pub fn subscribe_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
@@ -373,11 +370,9 @@ pub fn pubsub_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
             };
             ctx.reply_integer(count)
         }
-        b"shardchannels" | b"shardnumsub" => {
-            Err(RedisError::runtime(
-                b"ERR sharded pub/sub not yet implemented in this port",
-            ))
-        }
+        b"shardchannels" | b"shardnumsub" => Err(RedisError::runtime(
+            b"ERR sharded pub/sub not yet implemented in this port",
+        )),
         b"help" if argc == 2 => {
             let help_lines: &[&[u8]] = &[
                 b"CHANNELS [<pattern>]",
@@ -501,7 +496,9 @@ mod tests {
         subscribe_command(&mut ctx).expect("subscribe");
         let reply = c.drain_reply();
         assert_eq!(reply, b"*3\r\n$9\r\nsubscribe\r\n$3\r\nchA\r\n:1\r\n");
-        assert!(c.subscribed_channels.contains(&RedisString::from_bytes(b"chA")));
+        assert!(c
+            .subscribed_channels
+            .contains(&RedisString::from_bytes(b"chA")));
     }
 
     #[test]

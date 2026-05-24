@@ -379,7 +379,11 @@ fn deliver_to_waiter(db: &mut RedisDb, key: &RedisString, waiter: BlockedWaiter)
                 }
             }
         }
-        BlockedAction::Move { side, dst_key, dst_side } => {
+        BlockedAction::Move {
+            side,
+            dst_key,
+            dst_side,
+        } => {
             let side = *side;
             let dst_key = dst_key.clone();
             let dst_side = *dst_side;
@@ -433,11 +437,7 @@ fn deliver_to_waiter(db: &mut RedisDb, key: &RedisString, waiter: BlockedWaiter)
 /// When `xx` is true (LPUSHX / RPUSHX), a missing key short-circuits to
 /// `:0\r\n` without creating one. Otherwise the key is auto-created with
 /// the pragmatic Inline encoding before pushing.
-fn push_generic(
-    ctx: &mut CommandContext,
-    position: ListPosition,
-    xx: bool,
-) -> RedisResult<()> {
+fn push_generic(ctx: &mut CommandContext, position: ListPosition, xx: bool) -> RedisResult<()> {
     let argc = ctx.arg_count();
     if argc < 3 {
         return Err(RedisError::wrong_number_of_args(ctx.command_name()));
@@ -456,9 +456,7 @@ fn push_generic(
             }
             let mut obj = RedisObject::new_list();
             {
-                let deque = obj
-                    .list_mut()
-                    .expect("new_list constructs an Inline list");
+                let deque = obj.list_mut().expect("new_list constructs an Inline list");
                 for v in values {
                     match position {
                         ListPosition::Head => deque.push_front(v),
@@ -474,9 +472,7 @@ fn push_generic(
             if !obj.is_list() {
                 return Err(RedisError::wrong_type());
             }
-            let deque = obj
-                .list_mut()
-                .expect("is_list confirms list encoding");
+            let deque = obj.list_mut().expect("is_list confirms list encoding");
             for v in values {
                 match position {
                     ListPosition::Head => deque.push_front(v),
@@ -542,9 +538,7 @@ fn pop_generic(ctx: &mut CommandContext, position: ListPosition) -> RedisResult<
         match obj {
             None => None,
             Some(o) => {
-                let deque = o
-                    .list_mut()
-                    .expect("is_list confirms list encoding");
+                let deque = o.list_mut().expect("is_list confirms list encoding");
                 let take = match count {
                     None => 1,
                     Some(n) => (n as usize).min(deque.len()),
@@ -932,9 +926,7 @@ fn lmove_generic(
         None => {
             let mut obj = RedisObject::new_list();
             {
-                let deque = obj
-                    .list_mut()
-                    .expect("new_list constructs an Inline list");
+                let deque = obj.list_mut().expect("new_list constructs an Inline list");
                 match whereto {
                     ListPosition::Head => deque.push_front(value.clone()),
                     ListPosition::Tail => deque.push_back(value.clone()),
@@ -983,7 +975,13 @@ pub fn rpoplpush_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
     let src_key = ctx.arg_owned(1usize)?;
     let dst_key = ctx.arg_owned(2usize)?;
-    lmove_generic(ctx, src_key, dst_key, ListPosition::Tail, ListPosition::Head)
+    lmove_generic(
+        ctx,
+        src_key,
+        dst_key,
+        ListPosition::Tail,
+        ListPosition::Head,
+    )
 }
 
 /// LMPOP numkeys key [key ...] LEFT|RIGHT [COUNT count]
@@ -1001,9 +999,7 @@ pub fn lmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let numkeys_signed = parse_strict_i64(ctx.arg(1)?.as_bytes())
         .map_err(|_| RedisError::runtime(b"ERR numkeys should be greater than 0"))?;
     if numkeys_signed <= 0 {
-        return Err(RedisError::runtime(
-            b"ERR numkeys should be greater than 0",
-        ));
+        return Err(RedisError::runtime(b"ERR numkeys should be greater than 0"));
     }
     let numkeys = numkeys_signed as usize;
     if numkeys + 3 > argc {
@@ -1029,9 +1025,7 @@ pub fn lmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
         count = parse_strict_i64(ctx.arg(j + 1)?.as_bytes())
             .map_err(|_| RedisError::runtime(b"ERR count should be greater than 0"))?;
         if count <= 0 {
-            return Err(RedisError::runtime(
-                b"ERR count should be greater than 0",
-            ));
+            return Err(RedisError::runtime(b"ERR count should be greater than 0"));
         }
         got_count = true;
         j += 2;
@@ -1047,9 +1041,7 @@ pub fn lmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
         }
         let mut popped: Vec<RedisString> = Vec::with_capacity(count as usize);
         if let Some(obj) = ctx.db_mut().lookup_key_write(key) {
-            let deque = obj
-                .list_mut()
-                .expect("is_list confirmed above");
+            let deque = obj.list_mut().expect("is_list confirmed above");
             let take = (count as usize).min(deque.len());
             for _ in 0..take {
                 let next = match position {
@@ -1131,16 +1123,12 @@ pub fn lpos_command(ctx: &mut CommandContext) -> RedisResult<()> {
             rank = parsed;
         } else if ob.eq_ignore_ascii_case(b"COUNT") {
             if parsed < 0 {
-                return Err(RedisError::runtime(
-                    b"ERR COUNT can't be negative",
-                ));
+                return Err(RedisError::runtime(b"ERR COUNT can't be negative"));
             }
             count = Some(parsed);
         } else if ob.eq_ignore_ascii_case(b"MAXLEN") {
             if parsed < 0 {
-                return Err(RedisError::runtime(
-                    b"ERR MAXLEN can't be negative",
-                ));
+                return Err(RedisError::runtime(b"ERR MAXLEN can't be negative"));
             }
             maxlen = parsed;
         } else {
@@ -1234,9 +1222,8 @@ pub fn lpos_command(ctx: &mut CommandContext) -> RedisResult<()> {
 /// they never actually block — but the parse must still happen so callers
 /// learn about invalid arguments.
 fn parse_blocking_timeout(bytes: &[u8]) -> Result<f64, RedisError> {
-    let s = core::str::from_utf8(bytes).map_err(|_| {
-        RedisError::runtime(b"ERR timeout is not a float or out of range")
-    })?;
+    let s = core::str::from_utf8(bytes)
+        .map_err(|_| RedisError::runtime(b"ERR timeout is not a float or out of range"))?;
     if s.starts_with(char::is_whitespace) || s.ends_with(char::is_whitespace) {
         return Err(RedisError::runtime(
             b"ERR timeout is not a float or out of range",
@@ -1538,9 +1525,7 @@ pub fn blmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let numkeys_signed = parse_strict_i64(ctx.arg(2)?.as_bytes())
         .map_err(|_| RedisError::runtime(b"ERR numkeys should be greater than 0"))?;
     if numkeys_signed <= 0 {
-        return Err(RedisError::runtime(
-            b"ERR numkeys should be greater than 0",
-        ));
+        return Err(RedisError::runtime(b"ERR numkeys should be greater than 0"));
     }
     let numkeys = numkeys_signed as usize;
     if numkeys + 4 > argc {

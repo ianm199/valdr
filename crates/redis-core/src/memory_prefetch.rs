@@ -345,7 +345,9 @@ fn hashtable_prefetch(batch: &mut PrefetchCommandsBatch) {
     init_batch_info(batch);
 
     loop {
-        let Some(idx) = batch.next_pending_idx() else { break };
+        let Some(idx) = batch.next_pending_idx() else {
+            break;
+        };
         let state = batch.prefetch_info[idx].state;
         match state {
             PrefetchState::Entry => prefetch_entry(batch, idx),
@@ -355,7 +357,10 @@ fn hashtable_prefetch(batch: &mut PrefetchCommandsBatch) {
                 // C: default: serverPanic("Unknown prefetch state %d", info->state)
                 // TODO(architect): confirm whether panic! is appropriate here, or
                 // whether a logged error and break is preferred.
-                debug_assert!(false, "next_pending_idx returned a Done slot — invariant broken");
+                debug_assert!(
+                    false,
+                    "next_pending_idx returned a Done slot — invariant broken"
+                );
                 break;
             }
         }
@@ -437,11 +442,7 @@ fn prefetch_commands(batch: &mut PrefetchCommandsBatch) {
 ///   `argc: i32`                 → `argc: i32`
 ///   `serverDb *db`              → `db_index: usize` (no direct db ref here)
 ///   `slot: i32`                 → `slot: i32`
-fn add_command_to_batch(
-    _batch: &mut PrefetchCommandsBatch,
-    _argc: i32,
-    slot: i32,
-) {
+fn add_command_to_batch(_batch: &mut PrefetchCommandsBatch, _argc: i32, slot: i32) {
     // TODO(port): call getKeysFromCommand(cmd, argv, argc, &result) and iterate
     // over result.keys[i].pos to identify argv positions that are keys.
     //
@@ -503,11 +504,8 @@ pub fn free_prefetch_commands_batch() {
 /// TODO(architect): `server.prefetch_batch_max_size` needed to re-read the new
 /// value after the change.  Passed as a parameter here.
 pub fn on_max_batch_size_change(new_max: usize) -> bool {
-    let has_clients = BATCH.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .map_or(false, |b| b.client_count > 0)
-    });
+    let has_clients =
+        BATCH.with(|cell| cell.borrow().as_ref().map_or(false, |b| b.client_count > 0));
 
     if has_clients {
         // Batch in progress — defer the resize.
@@ -538,11 +536,8 @@ pub fn on_max_batch_size_change(new_max: usize) -> bool {
 /// client table to resolve `ClientId` → `&mut Client`.  Current signature
 /// cannot implement the dispatch loop without that reference.
 pub fn process_clients_commands_batch() -> Result<(), RedisError> {
-    let has_batch_with_clients = BATCH.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .map_or(false, |b| b.client_count > 0)
-    });
+    let has_batch_with_clients =
+        BATCH.with(|cell| cell.borrow().as_ref().map_or(false, |b| b.client_count > 0));
 
     if !has_batch_with_clients {
         return Ok(());
@@ -606,9 +601,7 @@ pub fn process_clients_commands_batch() -> Result<(), RedisError> {
 ///
 /// TODO(architect): `READ_FLAGS_BAD_ARITY` and `READ_FLAGS_PREFETCHED` bit
 /// constants — define in `crates/redis-core/src/client.rs`.
-pub fn add_command_to_batch_and_process_if_full(
-    client: &mut Client,
-) -> Result<(), RedisError> {
+pub fn add_command_to_batch_and_process_if_full(client: &mut Client) -> Result<(), RedisError> {
     let batch_exists = BATCH.with(|cell| cell.borrow().is_some());
     if !batch_exists {
         return Err(RedisError::runtime(b"no prefetch batch initialised"));

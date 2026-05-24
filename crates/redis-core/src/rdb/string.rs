@@ -20,7 +20,9 @@ use std::io::{self, Read, Write};
 use crate::object::{is_canonical_i64_ascii, ObjectKind, RedisObject, StringEncoding};
 
 use super::lzf::lzf_decompress;
-use super::varint::{load_len, write_len, RDB_ENC_INT16, RDB_ENC_INT32, RDB_ENC_INT8, RDB_ENC_LZF, RDB_ENCVAL};
+use super::varint::{
+    load_len, write_len, RDB_ENCVAL, RDB_ENC_INT16, RDB_ENC_INT32, RDB_ENC_INT8, RDB_ENC_LZF,
+};
 
 /// Threshold in bytes below which a loaded raw string gets `Embstr` encoding.
 const EMBSTR_LIMIT: usize = 44;

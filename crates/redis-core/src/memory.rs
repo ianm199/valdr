@@ -71,7 +71,9 @@ pub fn approximate_object_bytes(kind: &ObjectKind) -> u64 {
                 .map(|(k, _)| k.as_bytes().len() as u64 + 24)
                 .sum(),
             ZSetEncoding::ListPack(b) => b.len() as u64,
-            ZSetEncoding::SkipList(v) => v.iter().map(|(k, _)| k.as_bytes().len() as u64 + 24).sum(),
+            ZSetEncoding::SkipList(v) => {
+                v.iter().map(|(k, _)| k.as_bytes().len() as u64 + 24).sum()
+            }
         },
         ObjectKind::Stream(_) => 64,
         ObjectKind::Module => 0,

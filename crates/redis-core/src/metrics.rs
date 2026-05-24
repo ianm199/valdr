@@ -142,11 +142,7 @@ pub fn rss_bytes() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
         let text = std::fs::read_to_string("/proc/self/statm").ok()?;
-        let rss_pages: u64 = text
-            .split_whitespace()
-            .nth(1)?
-            .parse()
-            .ok()?;
+        let rss_pages: u64 = text.split_whitespace().nth(1)?.parse().ok()?;
         Some(rss_pages * 4096)
     }
     #[cfg(not(target_os = "linux"))]

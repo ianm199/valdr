@@ -29,7 +29,10 @@ pub struct StreamId {
 
 impl StreamId {
     pub const ZERO: StreamId = StreamId { ms: 0, seq: 0 };
-    pub const MAX: StreamId = StreamId { ms: u64::MAX, seq: u64::MAX };
+    pub const MAX: StreamId = StreamId {
+        ms: u64::MAX,
+        seq: u64::MAX,
+    };
 
     pub const fn new(ms: u64, seq: u64) -> Self {
         Self { ms, seq }
@@ -52,9 +55,15 @@ impl StreamId {
             if self.ms == u64::MAX {
                 return None;
             }
-            Some(StreamId { ms: self.ms + 1, seq: 0 })
+            Some(StreamId {
+                ms: self.ms + 1,
+                seq: 0,
+            })
         } else {
-            Some(StreamId { ms: self.ms, seq: self.seq + 1 })
+            Some(StreamId {
+                ms: self.ms,
+                seq: self.seq + 1,
+            })
         }
     }
 
@@ -65,9 +74,15 @@ impl StreamId {
             if self.ms == 0 {
                 return None;
             }
-            Some(StreamId { ms: self.ms - 1, seq: u64::MAX })
+            Some(StreamId {
+                ms: self.ms - 1,
+                seq: u64::MAX,
+            })
         } else {
-            Some(StreamId { ms: self.ms, seq: self.seq - 1 })
+            Some(StreamId {
+                ms: self.ms,
+                seq: self.seq - 1,
+            })
         }
     }
 }
@@ -93,8 +108,13 @@ pub fn parse_stream_id(input: &[u8], default_seq: u64) -> Result<StreamId, Strea
     let s = core::str::from_utf8(input).map_err(|_| StreamIdParseError::Malformed)?;
     match s.find('-') {
         None => {
-            let ms = s.parse::<u64>().map_err(|_| StreamIdParseError::Malformed)?;
-            Ok(StreamId { ms, seq: default_seq })
+            let ms = s
+                .parse::<u64>()
+                .map_err(|_| StreamIdParseError::Malformed)?;
+            Ok(StreamId {
+                ms,
+                seq: default_seq,
+            })
         }
         Some(idx) => {
             let (ms_part, dash_seq) = s.split_at(idx);
@@ -102,8 +122,12 @@ pub fn parse_stream_id(input: &[u8], default_seq: u64) -> Result<StreamId, Strea
             if ms_part.is_empty() || seq_part.is_empty() {
                 return Err(StreamIdParseError::Malformed);
             }
-            let ms = ms_part.parse::<u64>().map_err(|_| StreamIdParseError::Malformed)?;
-            let seq = seq_part.parse::<u64>().map_err(|_| StreamIdParseError::Malformed)?;
+            let ms = ms_part
+                .parse::<u64>()
+                .map_err(|_| StreamIdParseError::Malformed)?;
+            let seq = seq_part
+                .parse::<u64>()
+                .map_err(|_| StreamIdParseError::Malformed)?;
             Ok(StreamId { ms, seq })
         }
     }

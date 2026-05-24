@@ -37,7 +37,10 @@ use super::varint::{load_len, write_len};
 /// followed by alternating member strings and 8-byte LE binary doubles.
 pub fn save_zset_object(w: &mut impl Write, obj: &RedisObject) -> io::Result<()> {
     let zset = obj.zset().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidData, "save_zset_object called on non-zset object")
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "save_zset_object called on non-zset object",
+        )
     })?;
     write_len(w, zset.len() as u64)?;
     for (score, member) in &zset.by_order {
@@ -126,10 +129,17 @@ mod tests {
 
     #[test]
     fn float_scores_roundtrip() {
-        let pairs = [("neg", -1.5), ("zero", 0.0), ("half", 0.5), ("pi", std::f64::consts::PI)];
+        let pairs = [
+            ("neg", -1.5),
+            ("zero", 0.0),
+            ("half", 0.5),
+            ("pi", std::f64::consts::PI),
+        ];
         let result = roundtrip(&pairs);
         for (m, s) in &pairs {
-            let loaded = result.score(&redis_types::RedisString::from_bytes(m.as_bytes())).unwrap();
+            let loaded = result
+                .score(&redis_types::RedisString::from_bytes(m.as_bytes()))
+                .unwrap();
             assert_eq!(loaded.to_bits(), s.to_bits(), "score mismatch for {m}");
         }
     }
@@ -139,7 +149,9 @@ mod tests {
         let pairs = [("pos_inf", f64::INFINITY), ("neg_inf", f64::NEG_INFINITY)];
         let result = roundtrip(&pairs);
         for (m, s) in &pairs {
-            let loaded = result.score(&redis_types::RedisString::from_bytes(m.as_bytes())).unwrap();
+            let loaded = result
+                .score(&redis_types::RedisString::from_bytes(m.as_bytes()))
+                .unwrap();
             assert_eq!(loaded.to_bits(), s.to_bits(), "score mismatch for {m}");
         }
     }

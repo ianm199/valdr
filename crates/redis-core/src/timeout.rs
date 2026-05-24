@@ -183,7 +183,10 @@ pub fn decode_timeout_key(buf: &[u8; CLIENT_ST_KEY_LEN]) -> (u64, ClientId) {
     let mut id_bytes = [0u8; 8];
     id_bytes.copy_from_slice(&buf[8..]);
 
-    (u64::from_be_bytes(deadline_bytes), u64::from_le_bytes(id_bytes))
+    (
+        u64::from_be_bytes(deadline_bytes),
+        u64::from_le_bytes(id_bytes),
+    )
 }
 
 // ── Timeout-table mutation ────────────────────────────────────────────────────
@@ -306,9 +309,8 @@ pub fn get_timeout_from_object_or_reply(
             // PERF(port): C uses `long double` (80-bit extended on x86); Rust
             // uses f64 (64-bit).  Sub-millisecond fractional-second precision
             // may differ slightly — profile in Phase B if SET PX Tcl tests diverge.
-            let ftval: f64 = object_get_long_double(object).map_err(|_| {
-                RedisError::runtime(b"timeout is not a float or out of range")
-            })?;
+            let ftval: f64 = object_get_long_double(object)
+                .map_err(|_| RedisError::runtime(b"timeout is not a float or out of range"))?;
 
             // C: ftval *= 1000.0;  /* seconds => millisec */
             let ftval_ms = ftval * 1000.0_f64;
@@ -327,9 +329,8 @@ pub fn get_timeout_from_object_or_reply(
             //        "timeout is not an integer or out of range")
             // TODO(port): replace stub with RedisObject::get_long_long() once
             // object.c is ported (redis-core::object).
-            object_get_long_long(object).map_err(|_| {
-                RedisError::runtime(b"timeout is not an integer or out of range")
-            })?
+            object_get_long_long(object)
+                .map_err(|_| RedisError::runtime(b"timeout is not an integer or out of range"))?
         }
     };
 
@@ -362,7 +363,9 @@ pub fn get_timeout_from_object_or_reply(
 /// object.rs is ported.
 fn object_get_long_double(obj: &RedisObject) -> RedisResult<f64> {
     let _ = obj;
-    Err(RedisError::runtime(b"object_get_long_double: not yet implemented"))
+    Err(RedisError::runtime(
+        b"object_get_long_double: not yet implemented",
+    ))
 }
 
 /// Decode a `RedisObject` as a signed 64-bit integer.
@@ -374,7 +377,9 @@ fn object_get_long_double(obj: &RedisObject) -> RedisResult<f64> {
 /// object.rs is ported.
 fn object_get_long_long(obj: &RedisObject) -> RedisResult<i64> {
     let _ = obj;
-    Err(RedisError::runtime(b"object_get_long_long: not yet implemented"))
+    Err(RedisError::runtime(
+        b"object_get_long_long: not yet implemented",
+    ))
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

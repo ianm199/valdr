@@ -36,7 +36,10 @@ use super::varint::{load_len, write_len};
 /// count followed by each member as a raw-byte length-prefixed string.
 pub fn save_set_object(w: &mut impl Write, obj: &RedisObject) -> io::Result<()> {
     let set = obj.set().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidData, "save_set_object called on non-set object")
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "save_set_object called on non-set object",
+        )
     })?;
     write_len(w, set.len() as u64)?;
     for member in set {
@@ -116,6 +119,9 @@ mod tests {
         save_set_object(&mut buf, &obj).unwrap();
         let mut cursor = Cursor::new(&buf);
         let loaded = load_set_object(&mut cursor).unwrap();
-        assert!(loaded.set().unwrap().contains(&RedisString::from_vec(member)));
+        assert!(loaded
+            .set()
+            .unwrap()
+            .contains(&RedisString::from_vec(member)));
     }
 }

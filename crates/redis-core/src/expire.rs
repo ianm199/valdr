@@ -11,17 +11,17 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
 use std::sync::OnceLock;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use redis_types::{RedisError, RedisString};
 
 use crate::command_context::CommandContext;
-use crate::db::{LOOKUP_NOTOUCH, RedisDb};
+use crate::db::{RedisDb, LOOKUP_NOTOUCH};
 use crate::metrics::{server_metrics, ServerMetrics};
-use crate::notify::{NOTIFY_GENERIC};
+use crate::notify::NOTIFY_GENERIC;
 use crate::object::RedisObject;
 use crate::server::RedisServer;
 
@@ -73,8 +73,8 @@ pub type MonoTime = u64;
 // C: expire.c:53-54 — used to compute running-average TTL with a closed-form
 // geometric series instead of a loop.
 static AVG_TTL_FACTOR: [f64; 16] = [
-    0.98, 0.9604, 0.941192, 0.922368, 0.903921, 0.885842, 0.868126, 0.850763,
-    0.833748, 0.817073, 0.800731, 0.784717, 0.769022, 0.753642, 0.738569, 0.723798,
+    0.98, 0.9604, 0.941192, 0.922368, 0.903921, 0.885842, 0.868126, 0.850763, 0.833748, 0.817073,
+    0.800731, 0.784717, 0.769022, 0.753642, 0.738569, 0.723798,
 ];
 
 // ── Public types from expire.h ───────────────────────────────────────────
@@ -143,7 +143,10 @@ struct ExpireState {
 
 impl ExpireState {
     const fn zeroed() -> Self {
-        Self { current_db: 0, timelimit_exit: false }
+        Self {
+            current_db: 0,
+            timelimit_exit: false,
+        }
     }
 }
 
@@ -155,8 +158,7 @@ static ACTIVE_EXPIRE_STATE: Mutex<[ExpireState; ACTIVE_EXPIRY_TYPE_COUNT]> =
 
 // C: expire.c:544, dict *replicaKeysWithExpire — key → bitmask of db IDs.
 // TODO(architect): move into RedisServer to avoid module-level global state.
-static REPLICA_KEYS_WITH_EXPIRE: Mutex<Option<HashMap<RedisString, u64>>> =
-    Mutex::new(None);
+static REPLICA_KEYS_WITH_EXPIRE: Mutex<Option<HashMap<RedisString, u64>>> = Mutex::new(None);
 
 // C: expire.c:475, static monotime last_fast_cycle_start_time
 static LAST_FAST_CYCLE_START: Mutex<MonoTime> = Mutex::new(0);
@@ -209,7 +211,10 @@ pub fn active_expire_cycle_try_expire(
 ) -> bool {
     // TODO(port): RedisObject::expire_ms() not yet on object stub.
     let t: MsTime = val.expire_ms().unwrap_or(EXPIRY_NONE);
-    debug_assert!(t >= 0, "expire time passed to try_expire must be non-negative");
+    debug_assert!(
+        t >= 0,
+        "expire time passed to try_expire must be non-negative"
+    );
     if now > t {
         // TODO(port): enterExecutionUnit / exitExecutionUnit not yet ported.
         // TODO(port): objectGetKey not yet on RedisObject stub.
@@ -292,8 +297,7 @@ pub fn active_expire_cycle_job(
     let effort = active_expire_effort(server);
     let config_cycle_acceptable_stale = ACTIVE_EXPIRE_CYCLE_ACCEPTABLE_STALE - effort;
     let keys_per_loop: u64 =
-        ACTIVE_EXPIRE_CYCLE_KEYS_PER_LOOP
-        + ACTIVE_EXPIRE_CYCLE_KEYS_PER_LOOP / 4 * effort as u64;
+        ACTIVE_EXPIRE_CYCLE_KEYS_PER_LOOP + ACTIVE_EXPIRE_CYCLE_KEYS_PER_LOOP / 4 * effort as u64;
 
     let job_idx = job_type as usize;
 
@@ -306,7 +310,9 @@ pub fn active_expire_cycle_job(
     // and stale percentage is acceptable.
     if cycle_type == ACTIVE_EXPIRE_CYCLE_FAST {
         let should_skip = {
-            let guard = ACTIVE_EXPIRE_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            let guard = ACTIVE_EXPIRE_STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             !guard[job_idx].timelimit_exit
                 && expired_stale_perc_now < config_cycle_acceptable_stale as f64
         };
@@ -318,7 +324,9 @@ pub fn active_expire_cycle_job(
     // C: expire.c:239 — scan all DBs if last call hit the time limit.
     let db_count = server.db_count();
     let dbs_per_call = {
-        let guard = ACTIVE_EXPIRE_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = ACTIVE_EXPIRE_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if CRON_DBS_PER_CALL > db_count || guard[job_idx].timelimit_exit {
             db_count
         } else {
@@ -326,7 +334,9 @@ pub fn active_expire_cycle_job(
         }
     };
     {
-        let mut guard = ACTIVE_EXPIRE_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = ACTIVE_EXPIRE_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         guard[job_idx].timelimit_exit = false;
     }
 
@@ -348,7 +358,10 @@ pub fn active_expire_cycle_job(
     let mut j: usize = 0;
     loop {
         let tl_exit = {
-            ACTIVE_EXPIRE_STATE.lock().unwrap_or_else(|e| e.into_inner())[job_idx].timelimit_exit
+            ACTIVE_EXPIRE_STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())[job_idx]
+                .timelimit_exit
         };
         if dbs_performed >= dbs_per_call || tl_exit || j >= db_count {
             break;
@@ -356,7 +369,9 @@ pub fn active_expire_cycle_job(
         j += 1;
 
         let db_idx = {
-            let mut guard = ACTIVE_EXPIRE_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = ACTIVE_EXPIRE_STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             let idx = guard[job_idx].current_db as usize % db_count;
             guard[job_idx].current_db = guard[job_idx].current_db.wrapping_add(1);
             idx
@@ -449,8 +464,9 @@ pub fn active_expire_cycle_job(
             // C: expire.c:401-408, enforce time limit.
             if (iteration & time_check_mask) == 0 {
                 if elapsed_us(start) > timelimit_us as u64 {
-                    let mut guard =
-                        ACTIVE_EXPIRE_STATE.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut guard = ACTIVE_EXPIRE_STATE
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
                     guard[job_idx].timelimit_exit = true;
                     // TODO(port): server.stat_expired_time_cap_reached_count not on stub.
                     break;
@@ -499,13 +515,17 @@ pub fn active_expire_cycle(server: &mut RedisServer, cycle_type: i32) -> UsTime 
             ACTIVE_EXPIRE_CYCLE_FAST_DURATION + ACTIVE_EXPIRE_CYCLE_FAST_DURATION / 4 * effort;
 
         let start = get_monotonic_us();
-        let last = *LAST_FAST_CYCLE_START.lock().unwrap_or_else(|e| e.into_inner());
+        let last = *LAST_FAST_CYCLE_START
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
 
         // C: expire.c:476 — never repeat a fast cycle within its own duration window.
         if (start as i64) < (last as i64 + config_cycle_fast_duration * 2) {
             return 0;
         }
-        *LAST_FAST_CYCLE_START.lock().unwrap_or_else(|e| e.into_inner()) = start;
+        *LAST_FAST_CYCLE_START
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = start;
         config_cycle_fast_duration
     } else {
         let config_cycle_slow_time_perc = ACTIVE_EXPIRE_CYCLE_SLOW_TIME_PERC + 2 * effort;
@@ -517,22 +537,46 @@ pub fn active_expire_cycle(server: &mut RedisServer, cycle_type: i32) -> UsTime 
     // TODO(port): serverAssert(server.also_propagate.numops == 0) — also_propagate not on stub.
 
     let mut elapsed: UsTime = 0;
-    let start_with_fields = *EXPIRE_CYCLE_START_WITH_FIELDS.lock().unwrap_or_else(|e| e.into_inner());
+    let start_with_fields = *EXPIRE_CYCLE_START_WITH_FIELDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
 
     // C: expire.c:495-501 — alternate which expiry type gets priority.
     if start_with_fields {
-        elapsed += active_expire_cycle_job(server, ActiveExpiryType::Fields, cycle_type, timelimit_us - elapsed);
-        elapsed += active_expire_cycle_job(server, ActiveExpiryType::Keys, cycle_type, timelimit_us - elapsed);
+        elapsed += active_expire_cycle_job(
+            server,
+            ActiveExpiryType::Fields,
+            cycle_type,
+            timelimit_us - elapsed,
+        );
+        elapsed += active_expire_cycle_job(
+            server,
+            ActiveExpiryType::Keys,
+            cycle_type,
+            timelimit_us - elapsed,
+        );
     } else {
-        elapsed += active_expire_cycle_job(server, ActiveExpiryType::Keys, cycle_type, timelimit_us - elapsed);
-        elapsed += active_expire_cycle_job(server, ActiveExpiryType::Fields, cycle_type, timelimit_us - elapsed);
+        elapsed += active_expire_cycle_job(
+            server,
+            ActiveExpiryType::Keys,
+            cycle_type,
+            timelimit_us - elapsed,
+        );
+        elapsed += active_expire_cycle_job(
+            server,
+            ActiveExpiryType::Fields,
+            cycle_type,
+            timelimit_us - elapsed,
+        );
     }
 
     // TODO(port): server.stat_expire_cycle_time_used not yet on stub.
     // TODO(port): latencyAddSampleIfNeeded("expire-cycle", elapsed) not yet ported.
     // TODO(port): latencyTraceIfNeeded(db, expire_cycle, elapsed) — `db` N/A here per C code bug.
 
-    *EXPIRE_CYCLE_START_WITH_FIELDS.lock().unwrap_or_else(|e| e.into_inner()) = !start_with_fields;
+    *EXPIRE_CYCLE_START_WITH_FIELDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = !start_with_fields;
     elapsed
 }
 
@@ -541,7 +585,9 @@ pub fn active_expire_cycle(server: &mut RedisServer, cycle_type: i32) -> UsTime 
 /// Runs at most 64 iterations or 1 ms, whichever comes first.
 pub fn expire_replica_keys(server: &mut RedisServer) {
     let has_keys = {
-        let guard = REPLICA_KEYS_WITH_EXPIRE.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = REPLICA_KEYS_WITH_EXPIRE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         guard.as_ref().map(|h| !h.is_empty()).unwrap_or(false)
     };
     if !has_keys {
@@ -557,8 +603,12 @@ pub fn expire_replica_keys(server: &mut RedisServer) {
         // placeholder until a proper random-key helper is ported.
         // PERF(port): C uses random selection to avoid hot-spot bias; first-entry is O(1) but biased.
         let entry = {
-            let guard = REPLICA_KEYS_WITH_EXPIRE.lock().unwrap_or_else(|e| e.into_inner());
-            guard.as_ref().and_then(|h| h.iter().next().map(|(k, v)| (k.clone(), *v)))
+            let guard = REPLICA_KEYS_WITH_EXPIRE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            guard
+                .as_ref()
+                .and_then(|h| h.iter().next().map(|(k, v)| (k.clone(), *v)))
         };
         let (keyname, dbids) = match entry {
             Some(pair) => pair,
@@ -589,7 +639,9 @@ pub fn expire_replica_keys(server: &mut RedisServer) {
 
         // C: expire.c:592-595 — update or remove the bitmap entry.
         {
-            let mut guard = REPLICA_KEYS_WITH_EXPIRE.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = REPLICA_KEYS_WITH_EXPIRE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if let Some(h) = guard.as_mut() {
                 if new_dbids != 0 {
                     h.insert(keyname.clone(), new_dbids);
@@ -607,7 +659,9 @@ pub fn expire_replica_keys(server: &mut RedisServer) {
             break;
         }
         let is_empty = {
-            let guard = REPLICA_KEYS_WITH_EXPIRE.lock().unwrap_or_else(|e| e.into_inner());
+            let guard = REPLICA_KEYS_WITH_EXPIRE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             guard.as_ref().map(|h| h.is_empty()).unwrap_or(true)
         };
         if is_empty {
@@ -635,7 +689,9 @@ pub fn remember_replica_key_with_expire(db: &RedisDb, key: &RedisObject) {
         }
     };
 
-    let mut guard = REPLICA_KEYS_WITH_EXPIRE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut guard = REPLICA_KEYS_WITH_EXPIRE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let h = guard.get_or_insert_with(HashMap::new);
     // C: expire.c:621-629 — dictAddOrFind; if new entry, copy the SDS key and zero bitmap.
     let entry = h.entry(key_bytes).or_insert(0u64);
@@ -645,7 +701,9 @@ pub fn remember_replica_key_with_expire(db: &RedisDb, key: &RedisObject) {
 // ── expire.c:637-640, getReplicaKeyWithExpireCount ────────────────────────
 /// Returns the number of keys currently tracked in the replica expire dict.
 pub fn get_replica_key_with_expire_count() -> usize {
-    let guard = REPLICA_KEYS_WITH_EXPIRE.lock().unwrap_or_else(|e| e.into_inner());
+    let guard = REPLICA_KEYS_WITH_EXPIRE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     guard.as_ref().map(|h| h.len()).unwrap_or(0)
 }
 
@@ -653,7 +711,9 @@ pub fn get_replica_key_with_expire_count() -> usize {
 /// Drops all replica expire tracking, optionally asynchronously.
 pub fn flush_replica_keys_with_expire_list(_async_free: bool) {
     // TODO(port): freeReplicaKeysWithExpireAsync not yet ported; always drop synchronously.
-    let mut guard = REPLICA_KEYS_WITH_EXPIRE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut guard = REPLICA_KEYS_WITH_EXPIRE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     *guard = None;
 }
 
@@ -776,7 +836,9 @@ pub fn expire_generic_command(
     let mut flag: i32 = 0;
     let argc = ctx.arg_count();
     if argc < 3 {
-        return Err(RedisError::wrong_number_of_args(ctx.command_name().to_vec()));
+        return Err(RedisError::wrong_number_of_args(
+            ctx.command_name().to_vec(),
+        ));
     }
     parse_extended_expire_arguments(ctx, &mut flag, argc)?;
 
@@ -822,7 +884,9 @@ pub fn expire_generic_command(
 
     if check_already_expired(ctx.server(), when) {
         ctx.db_mut().sync_delete(&key);
-        server_metrics().expired_keys.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        server_metrics()
+            .expired_keys
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", &key);
         return ctx.reply_integer(1);
     }
@@ -866,7 +930,10 @@ pub fn ttl_generic_command(
     output_abs: bool,
 ) -> Result<(), RedisError> {
     let key = ctx.arg(1)?.clone();
-    let exists = ctx.db_mut().lookup_key_read_with_flags(&key, LOOKUP_NOTOUCH).is_some();
+    let exists = ctx
+        .db_mut()
+        .lookup_key_read_with_flags(&key, LOOKUP_NOTOUCH)
+        .is_some();
     if !exists {
         return ctx.reply_integer(-2);
     }
@@ -874,7 +941,11 @@ pub fn ttl_generic_command(
     if expire == crate::object::EXPIRY_NONE {
         return ctx.reply_integer(-1);
     }
-    let raw_ttl: i64 = if output_abs { expire } else { expire - ms_time_now() };
+    let raw_ttl: i64 = if output_abs {
+        expire
+    } else {
+        expire - ms_time_now()
+    };
     let ttl = raw_ttl.max(0);
     let out = if output_ms { ttl } else { (ttl + 500) / 1000 };
     ctx.reply_integer(out)
@@ -915,7 +986,6 @@ pub fn persist_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         ctx.reply_integer(0)
     }
 }
-
 
 // ── expire.c:968-975, timestampIsExpired ─────────────────────────────────
 /// Returns `true` if `when` represents an already-elapsed Unix millisecond timestamp.
@@ -996,8 +1066,9 @@ fn parse_i64_from_redis_string(s: &RedisString) -> Result<i64, RedisError> {
 /// `ERR invalid expire time in '<cmd>' command`. The C macro
 /// `addReplyErrorExpireTime` embeds the command name in the same way.
 fn expire_time_error(cmd_name: &[u8]) -> RedisError {
-    let mut buf =
-        Vec::with_capacity(b"ERR invalid expire time in '".len() + cmd_name.len() + b"' command".len());
+    let mut buf = Vec::with_capacity(
+        b"ERR invalid expire time in '".len() + cmd_name.len() + b"' command".len(),
+    );
     buf.extend_from_slice(b"ERR invalid expire time in '");
     buf.extend_from_slice(cmd_name);
     buf.extend_from_slice(b"' command");
@@ -1056,7 +1127,10 @@ impl ActiveExpireConfig {
     }
 
     pub fn snapshot(&self) -> (u8, u32) {
-        (self.effort.load(Ordering::Relaxed), self.hz.load(Ordering::Relaxed))
+        (
+            self.effort.load(Ordering::Relaxed),
+            self.hz.load(Ordering::Relaxed),
+        )
     }
 
     pub fn set_effort(&self, effort: u8) {
@@ -1230,13 +1304,29 @@ mod active_expire_tests {
         {
             let mut guard = db.lock().expect("lock");
             let past = 1i64;
-            guard.add(RedisString::from_bytes(b"a"), make_str_obj_with_expire(b"v", past));
-            guard.add(RedisString::from_bytes(b"b"), make_str_obj_with_expire(b"v", past));
-            guard.add(RedisString::from_bytes(b"c"), make_str_obj_with_expire(b"v", past));
-            guard.add(RedisString::from_bytes(b"keep"), make_str_obj_with_expire(b"v", EXPIRY_NONE));
+            guard.add(
+                RedisString::from_bytes(b"a"),
+                make_str_obj_with_expire(b"v", past),
+            );
+            guard.add(
+                RedisString::from_bytes(b"b"),
+                make_str_obj_with_expire(b"v", past),
+            );
+            guard.add(
+                RedisString::from_bytes(b"c"),
+                make_str_obj_with_expire(b"v", past),
+            );
+            guard.add(
+                RedisString::from_bytes(b"keep"),
+                make_str_obj_with_expire(b"v", EXPIRY_NONE),
+            );
         }
         let deleted = run_active_expire_tick(&db, 1, None);
-        assert!(deleted >= 3, "expected to reap at least 3 expired keys, got {}", deleted);
+        assert!(
+            deleted >= 3,
+            "expected to reap at least 3 expired keys, got {}",
+            deleted
+        );
         let guard = db.lock().expect("lock");
         assert!(guard.exists_raw(&RedisString::from_bytes(b"keep")));
     }

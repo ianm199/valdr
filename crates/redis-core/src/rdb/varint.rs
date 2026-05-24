@@ -107,8 +107,22 @@ mod tests {
 
     #[test]
     fn roundtrip_boundary_values() {
-        for n in [0u64, 1, 62, 63, 64, 127, 255, 16382, 16383, 16384, 65535,
-                  u32::MAX as u64, u32::MAX as u64 + 1, u64::MAX / 2] {
+        for n in [
+            0u64,
+            1,
+            62,
+            63,
+            64,
+            127,
+            255,
+            16382,
+            16383,
+            16384,
+            65535,
+            u32::MAX as u64,
+            u32::MAX as u64 + 1,
+            u64::MAX / 2,
+        ] {
             roundtrip(n);
         }
     }

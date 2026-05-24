@@ -445,7 +445,9 @@ pub fn conn_type_register(mut ct: Box<dyn ConnectionTypeTrait>) -> Result<(), Re
         .map_err(|_| RedisError::runtime(b"connTypeRegister: registry mutex poisoned"))?;
 
     if reg[slot].is_some() {
-        return Err(RedisError::runtime(b"connTypeRegister: type already registered"));
+        return Err(RedisError::runtime(
+            b"connTypeRegister: type already registered",
+        ));
     }
 
     // PORT NOTE: C called serverLog(LL_VERBOSE, "Connection type %s registering", …).
@@ -486,7 +488,9 @@ pub fn connection_by_type(type_id: ConnectionTypeId) -> Result<ConnectionTypeId,
 
     if reg[slot].is_none() {
         // PORT NOTE: C called serverLog(LL_WARNING, "Missing implement of connection type %s", …).
-        return Err(RedisError::runtime(b"connectionByType: type not registered"));
+        return Err(RedisError::runtime(
+            b"connectionByType: type not registered",
+        ));
     }
 
     Ok(type_id)
@@ -514,7 +518,9 @@ where
 
     match reg[slot].as_deref() {
         Some(ct) => Ok(f(ct)),
-        None => Err(RedisError::runtime(b"with_conn_type: connection type not registered")),
+        None => Err(RedisError::runtime(
+            b"with_conn_type: connection type not registered",
+        )),
     }
 }
 
@@ -592,9 +598,7 @@ pub fn conn_type_cleanup_all() -> Result<(), RedisError> {
 pub fn conn_type_has_pending_data() -> Result<bool, RedisError> {
     let reg = registry()
         .lock()
-        .map_err(|_| {
-            RedisError::runtime(b"conn_type_has_pending_data: registry mutex poisoned")
-        })?;
+        .map_err(|_| RedisError::runtime(b"conn_type_has_pending_data: registry mutex poisoned"))?;
 
     for slot in reg.iter() {
         if let Some(ct) = slot.as_ref() {
@@ -611,11 +615,9 @@ pub fn conn_type_has_pending_data() -> Result<bool, RedisError> {
 ///
 /// C: `connTypeProcessPendingData` in connection.c:138-152
 pub fn conn_type_process_pending_data() -> Result<i32, RedisError> {
-    let reg = registry()
-        .lock()
-        .map_err(|_| {
-            RedisError::runtime(b"conn_type_process_pending_data: registry mutex poisoned")
-        })?;
+    let reg = registry().lock().map_err(|_| {
+        RedisError::runtime(b"conn_type_process_pending_data: registry mutex poisoned")
+    })?;
 
     let mut total: i32 = 0;
     for slot in reg.iter() {
@@ -700,7 +702,9 @@ pub fn conn_blocking_connect(
     timeout_ms: i64,
 ) -> Result<(), RedisError> {
     let type_id = conn.type_id;
-    with_conn_type(type_id, |ct| ct.blocking_connect(conn, addr, port, timeout_ms))?
+    with_conn_type(type_id, |ct| {
+        ct.blocking_connect(conn, addr, port, timeout_ms)
+    })?
 }
 
 /// Write bytes to the connection. Short write possible; see `ConnectionState` on error.
@@ -891,10 +895,7 @@ pub fn conn_get_peer_cert(conn: &Connection) -> Result<Option<RedisString>, Redi
 /// Defer event-loop state updates to the main thread (IO threads + TLS path).
 ///
 /// C: `connSetPostponeUpdateState` (inline) in connection.h:520-524
-pub fn conn_set_postpone_update_state(
-    conn: &mut Connection,
-    on: bool,
-) -> Result<(), RedisError> {
+pub fn conn_set_postpone_update_state(conn: &mut Connection, on: bool) -> Result<(), RedisError> {
     let type_id = conn.type_id;
     with_conn_type(type_id, |ct| ct.postpone_update_state(conn, on))?;
     Ok(())
@@ -934,10 +935,7 @@ pub fn conn_create_accepted(type_id: ConnectionTypeId, fd: i32) -> Result<Connec
 /// Configure a connection-type backend (e.g. load TLS certificates).
 ///
 /// C: `connTypeConfigure` (inline) in connection.h:469-472
-pub fn conn_type_configure(
-    type_id: ConnectionTypeId,
-    reconfigure: bool,
-) -> Result<(), RedisError> {
+pub fn conn_type_configure(type_id: ConnectionTypeId, reconfigure: bool) -> Result<(), RedisError> {
     with_conn_type_mut(type_id, |ct| ct.configure(reconfigure))?
 }
 

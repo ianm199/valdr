@@ -380,27 +380,30 @@ mod tests {
             (b"new", b"value", 9),
         ]);
         let res = try_evict_to_fit(&mut db, 0, MaxmemoryPolicyCode::AllkeysLru, 10, 1);
-        assert!(matches!(res, EvictionOutcome::Evicted(_) | EvictionOutcome::StillOver));
+        assert!(matches!(
+            res,
+            EvictionOutcome::Evicted(_) | EvictionOutcome::StillOver
+        ));
     }
 
     #[test]
     fn allkeys_lfu_evicts_lowest_counter() {
-        let mut db = db_with(&[
-            (b"rare", b"value", 1),
-            (b"freq", b"value", 9),
-        ]);
+        let mut db = db_with(&[(b"rare", b"value", 1), (b"freq", b"value", 9)]);
         let res = try_evict_to_fit(&mut db, 0, MaxmemoryPolicyCode::AllkeysLfu, 10, 1);
-        assert!(matches!(res, EvictionOutcome::Evicted(_) | EvictionOutcome::StillOver));
+        assert!(matches!(
+            res,
+            EvictionOutcome::Evicted(_) | EvictionOutcome::StillOver
+        ));
     }
 
     #[test]
     fn allkeys_random_evicts_something() {
-        let mut db = db_with(&[
-            (b"a", b"value", 1),
-            (b"b", b"value", 2),
-        ]);
+        let mut db = db_with(&[(b"a", b"value", 1), (b"b", b"value", 2)]);
         let res = try_evict_to_fit(&mut db, 0, MaxmemoryPolicyCode::AllkeysRandom, 10, 1);
-        assert!(matches!(res, EvictionOutcome::Evicted(_) | EvictionOutcome::StillOver));
+        assert!(matches!(
+            res,
+            EvictionOutcome::Evicted(_) | EvictionOutcome::StillOver
+        ));
     }
 
     #[test]
@@ -411,16 +414,16 @@ mod tests {
             (b"with_ttl", b"value", 2, far_future),
         ]);
         let res = try_evict_to_fit(&mut db, 0, MaxmemoryPolicyCode::VolatileLru, 10, 1);
-        assert!(matches!(res, EvictionOutcome::Evicted(_) | EvictionOutcome::StillOver));
+        assert!(matches!(
+            res,
+            EvictionOutcome::Evicted(_) | EvictionOutcome::StillOver
+        ));
         assert!(db.find(&RedisString::from_bytes(b"no_ttl")).is_some());
     }
 
     #[test]
     fn volatile_lru_with_no_ttl_keys_returns_still_over() {
-        let mut db = db_with(&[
-            (b"a", b"value", 1),
-            (b"b", b"value", 2),
-        ]);
+        let mut db = db_with(&[(b"a", b"value", 1), (b"b", b"value", 2)]);
         let res = try_evict_to_fit(&mut db, 0, MaxmemoryPolicyCode::VolatileLru, 10, 1);
         assert_eq!(res, EvictionOutcome::StillOver);
         assert_eq!(db.len(), 2);
@@ -433,11 +436,27 @@ mod tests {
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
         let mut db = db_with_ttl(&[
-            (b"soon", b"value_that_is_big_enough_to_matter", 1, now_ms + 1_000),
-            (b"later", b"value_that_is_big_enough_to_matter", 2, now_ms + 100_000),
+            (
+                b"soon",
+                b"value_that_is_big_enough_to_matter",
+                1,
+                now_ms + 1_000,
+            ),
+            (
+                b"later",
+                b"value_that_is_big_enough_to_matter",
+                2,
+                now_ms + 100_000,
+            ),
         ]);
         let size_after_one = approximate_memory_used(&db) / 2 + 1;
-        try_evict_to_fit(&mut db, size_after_one, MaxmemoryPolicyCode::VolatileTtl, 10, 1);
+        try_evict_to_fit(
+            &mut db,
+            size_after_one,
+            MaxmemoryPolicyCode::VolatileTtl,
+            10,
+            1,
+        );
         assert!(db.find(&RedisString::from_bytes(b"later")).is_some());
     }
 
@@ -449,6 +468,9 @@ mod tests {
             lfu_update(&mut obj, 10, 0);
         }
         let after = obj.lru & 0xFF;
-        assert!(after >= LFU_INIT_VAL as u32, "counter should not fall below init value without decay");
+        assert!(
+            after >= LFU_INIT_VAL as u32,
+            "counter should not fall below init value without decay"
+        );
     }
 }

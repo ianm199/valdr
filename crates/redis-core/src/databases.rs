@@ -54,7 +54,11 @@ impl GlobalDatabases {
         if idx1 == idx2 {
             return;
         }
-        let (lo, hi) = if idx1 < idx2 { (idx1, idx2) } else { (idx2, idx1) };
+        let (lo, hi) = if idx1 < idx2 {
+            (idx1, idx2)
+        } else {
+            (idx2, idx1)
+        };
         let mut lo_guard = match self.dbs[lo].lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),

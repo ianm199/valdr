@@ -276,8 +276,14 @@ fn geohash_move_y(hash: &mut GeoHashBits, d: i8) {
 ///
 /// C: `geohashGetCoordRange` — geohash.c:110-117.
 pub fn geohash_get_coord_range() -> (GeoHashRange, GeoHashRange) {
-    let long_range = GeoHashRange { max: GEO_LONG_MAX, min: GEO_LONG_MIN };
-    let lat_range = GeoHashRange { max: GEO_LAT_MAX, min: GEO_LAT_MIN };
+    let long_range = GeoHashRange {
+        max: GEO_LONG_MAX,
+        min: GEO_LONG_MIN,
+    };
+    let lat_range = GeoHashRange {
+        max: GEO_LAT_MAX,
+        min: GEO_LAT_MIN,
+    };
     (long_range, lat_range)
 }
 
@@ -320,10 +326,8 @@ pub fn geohash_encode(
         return None;
     }
 
-    let lat_offset =
-        (latitude - lat_range.min) / (lat_range.max - lat_range.min);
-    let long_offset =
-        (longitude - long_range.min) / (long_range.max - long_range.min);
+    let lat_offset = (latitude - lat_range.min) / (lat_range.max - lat_range.min);
+    let long_offset = (longitude - long_range.min) / (long_range.max - long_range.min);
 
     // Convert to fixed-point based on step size.
     let lat_fp = lat_offset * ((1u64 << step) as f64);
@@ -522,8 +526,18 @@ mod tests {
         let decoded = geohash_decode_to_long_lat_wgs84(hash).expect("decode should succeed");
 
         // Precision at step=26 is sub-millimetre; allow 1e-5 degree tolerance.
-        assert!((decoded[0] - lon).abs() < 1e-5, "lon mismatch: {} vs {}", decoded[0], lon);
-        assert!((decoded[1] - lat).abs() < 1e-5, "lat mismatch: {} vs {}", decoded[1], lat);
+        assert!(
+            (decoded[0] - lon).abs() < 1e-5,
+            "lon mismatch: {} vs {}",
+            decoded[0],
+            lon
+        );
+        assert!(
+            (decoded[1] - lat).abs() < 1e-5,
+            "lat mismatch: {} vs {}",
+            decoded[1],
+            lat
+        );
     }
 
     #[test]
@@ -542,10 +556,23 @@ mod tests {
     fn neighbors_are_distinct() {
         let hash = geohash_encode_wgs84(0.0, 0.0, 10).expect("encode");
         let n = geohash_neighbors(&hash);
-        let cells = [n.north, n.south, n.east, n.west, n.north_east, n.north_west, n.south_east, n.south_west];
+        let cells = [
+            n.north,
+            n.south,
+            n.east,
+            n.west,
+            n.north_east,
+            n.north_west,
+            n.south_east,
+            n.south_west,
+        ];
         for i in 0..cells.len() {
             for j in (i + 1)..cells.len() {
-                assert_ne!(cells[i].bits, cells[j].bits, "neighbours[{}] == neighbours[{}]", i, j);
+                assert_ne!(
+                    cells[i].bits, cells[j].bits,
+                    "neighbours[{}] == neighbours[{}]",
+                    i, j
+                );
             }
         }
     }

@@ -21,7 +21,9 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU16, AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{
+    AtomicBool, AtomicI32, AtomicI64, AtomicU16, AtomicU32, AtomicU8, Ordering,
+};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -556,9 +558,13 @@ impl ReplicationState {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
-        guard
-            .as_ref()
-            .map(|j| (j.temp_path.clone(), j.waiting_replicas.clone(), j.snapshot_offset))
+        guard.as_ref().map(|j| {
+            (
+                j.temp_path.clone(),
+                j.waiting_replicas.clone(),
+                j.snapshot_offset,
+            )
+        })
     }
 
     /// Send `bytes` through the outbound sender of the replica identified by
@@ -752,7 +758,6 @@ mod tests {
         assert!(line.ends_with(b" 42\r\n"));
         assert_eq!(line.len(), b"+FULLRESYNC ".len() + 40 + b" 42\r\n".len());
     }
-
 }
 
 // ──────────────────────────────────────────────────────────────────────────

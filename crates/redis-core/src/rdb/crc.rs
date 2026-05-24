@@ -64,8 +64,7 @@ mod tests {
     fn crc64_jones_known_vector() {
         let result = crc64(0, b"123456789");
         assert_eq!(
-            result,
-            0xe9c6d914c4b8d9ca,
+            result, 0xe9c6d914c4b8d9ca,
             "CRC64-Jones of '123456789' must be 0xe9c6d914c4b8d9ca, got 0x{:016x}",
             result
         );

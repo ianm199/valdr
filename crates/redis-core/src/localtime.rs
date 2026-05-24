@@ -168,10 +168,10 @@ mod tests {
     fn epoch_zero_utc() {
         // 1970-01-01 00:00:00 UTC with no timezone offset.
         let bd = nolocks_localtime(0, 0, 0);
-        assert_eq!(bd.tm_year, 70);  // 1970 - 1900
-        assert_eq!(bd.tm_mon, 0);   // January
+        assert_eq!(bd.tm_year, 70); // 1970 - 1900
+        assert_eq!(bd.tm_mon, 0); // January
         assert_eq!(bd.tm_mday, 1);
-        assert_eq!(bd.tm_wday, 4);  // Thursday
+        assert_eq!(bd.tm_wday, 4); // Thursday
         assert_eq!(bd.tm_yday, 0);
         assert_eq!(bd.tm_hour, 0);
         assert_eq!(bd.tm_min, 0);
@@ -185,7 +185,7 @@ mod tests {
         let t: i64 = 1_705_322_096;
         let bd = nolocks_localtime(t, 0, 0);
         assert_eq!(bd.tm_year, 124); // 2024 - 1900
-        assert_eq!(bd.tm_mon, 0);    // January
+        assert_eq!(bd.tm_mon, 0); // January
         assert_eq!(bd.tm_mday, 15);
         assert_eq!(bd.tm_hour, 12);
         assert_eq!(bd.tm_min, 34);

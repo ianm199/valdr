@@ -93,7 +93,9 @@ fn parse_multibulk(buf: &[u8]) -> Result<Option<(Vec<RedisString>, usize)>, Redi
         return Ok(Some((Vec::new(), pos)));
     }
     if argc > PROTO_REQ_MULTIBULK_MAX_LEN {
-        return Err(RedisError::runtime(b"Protocol error: invalid multibulk length"));
+        return Err(RedisError::runtime(
+            b"Protocol error: invalid multibulk length",
+        ));
     }
 
     let mut argv: Vec<RedisString> = Vec::with_capacity(argc as usize);
@@ -161,7 +163,9 @@ fn parse_multibulk_into(
         return Ok(Some(pos));
     }
     if argc > PROTO_REQ_MULTIBULK_MAX_LEN {
-        return Err(RedisError::runtime(b"Protocol error: invalid multibulk length"));
+        return Err(RedisError::runtime(
+            b"Protocol error: invalid multibulk length",
+        ));
     }
 
     let argc = argc as usize;
@@ -243,10 +247,7 @@ fn parse_inline(buf: &[u8]) -> Result<Option<(Vec<RedisString>, usize)>, RedisEr
     Ok(Some((argv, newline + 1)))
 }
 
-fn parse_inline_into(
-    buf: &[u8],
-    out: &mut Vec<RedisString>,
-) -> Result<Option<usize>, RedisError> {
+fn parse_inline_into(buf: &[u8], out: &mut Vec<RedisString>) -> Result<Option<usize>, RedisError> {
     out.clear();
     let (argv, consumed) = match parse_inline(buf)? {
         Some(v) => v,
@@ -316,7 +317,9 @@ fn read_resp_integer(
         return Ok(None);
     }
     if buf[cr_idx + 1] != b'\n' {
-        return Err(RedisError::runtime(b"Protocol error: invalid CRLF in request"));
+        return Err(RedisError::runtime(
+            b"Protocol error: invalid CRLF in request",
+        ));
     }
     let value = parse_i64_ascii(&buf[pos..cr_idx], err_msg)?;
     Ok(Some((value, cr_idx + 2)))
@@ -414,11 +417,26 @@ fn split_inline_tokens(line: &[u8]) -> Result<Vec<RedisString>, RedisError> {
                             b'\\' if i + 1 < line.len() => {
                                 i += 1;
                                 match line[i] {
-                                    b'n' => { token.push(b'\n'); i += 1; }
-                                    b'r' => { token.push(b'\r'); i += 1; }
-                                    b't' => { token.push(b'\t'); i += 1; }
-                                    b'b' => { token.push(0x08); i += 1; }
-                                    b'a' => { token.push(0x07); i += 1; }
+                                    b'n' => {
+                                        token.push(b'\n');
+                                        i += 1;
+                                    }
+                                    b'r' => {
+                                        token.push(b'\r');
+                                        i += 1;
+                                    }
+                                    b't' => {
+                                        token.push(b'\t');
+                                        i += 1;
+                                    }
+                                    b'b' => {
+                                        token.push(0x08);
+                                        i += 1;
+                                    }
+                                    b'a' => {
+                                        token.push(0x07);
+                                        i += 1;
+                                    }
                                     b'x' if i + 2 < line.len()
                                         && is_hex(line[i + 1])
                                         && is_hex(line[i + 2]) =>
@@ -428,10 +446,16 @@ fn split_inline_tokens(line: &[u8]) -> Result<Vec<RedisString>, RedisError> {
                                         );
                                         i += 3;
                                     }
-                                    other => { token.push(other); i += 1; }
+                                    other => {
+                                        token.push(other);
+                                        i += 1;
+                                    }
                                 }
                             }
-                            other => { token.push(other); i += 1; }
+                            other => {
+                                token.push(other);
+                                i += 1;
+                            }
                         }
                     }
                 }
@@ -452,12 +476,18 @@ fn split_inline_tokens(line: &[u8]) -> Result<Vec<RedisString>, RedisError> {
                                 token.push(b'\'');
                                 i += 2;
                             }
-                            other => { token.push(other); i += 1; }
+                            other => {
+                                token.push(other);
+                                i += 1;
+                            }
                         }
                     }
                 }
                 b if is_inline_whitespace(b) => break,
-                other => { token.push(other); i += 1; }
+                other => {
+                    token.push(other);
+                    i += 1;
+                }
             }
         }
         argv.push(RedisString::from_bytes(&token));
@@ -501,7 +531,9 @@ mod tests {
 
     #[test]
     fn inline_with_args_lf_only() {
-        let (argv, n) = parse_inline_or_multibulk(b"SET foo bar\n").unwrap().unwrap();
+        let (argv, n) = parse_inline_or_multibulk(b"SET foo bar\n")
+            .unwrap()
+            .unwrap();
         assert_eq!(n, 12);
         assert_eq!(argv.len(), 3);
         assert_eq!(argv[0].as_bytes(), b"SET");
@@ -538,7 +570,9 @@ mod tests {
         let key_ptr = argv[1].as_bytes().as_ptr();
         let cap = argv.capacity();
 
-        let n = parse_inline_or_multibulk_into(buf, &mut argv).unwrap().unwrap();
+        let n = parse_inline_or_multibulk_into(buf, &mut argv)
+            .unwrap()
+            .unwrap();
 
         assert_eq!(n, buf.len());
         assert!(argv.capacity() >= cap);

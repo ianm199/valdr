@@ -45,7 +45,12 @@ fn bloom_params(capacity: u64, error_rate: f64) -> (u64, u32) {
 }
 
 /// Allocate a new BloomFilter with the given parameters.
-fn new_bloom_filter(capacity: u64, error_rate: f64, expansion: u32, nonscaling: bool) -> BloomFilter {
+fn new_bloom_filter(
+    capacity: u64,
+    error_rate: f64,
+    expansion: u32,
+    nonscaling: bool,
+) -> BloomFilter {
     let (bit_count, n_hashes) = bloom_params(capacity, error_rate);
     let byte_count = ((bit_count + 7) / 8) as usize;
     BloomFilter {
@@ -163,7 +168,9 @@ pub fn bf_reserve_command(ctx: &mut CommandContext) -> RedisResult<()> {
         return Err(RedisError::runtime(b"ERR (0 < error rate range < 1) "));
     }
     if capacity == 0 {
-        return Err(RedisError::runtime(b"ERR (capacity should be larger than 0)"));
+        return Err(RedisError::runtime(
+            b"ERR (capacity should be larger than 0)",
+        ));
     }
 
     let mut expansion: u32 = 2;
@@ -207,7 +214,11 @@ pub fn bf_add_command(ctx: &mut CommandContext) -> RedisResult<()> {
     ensure_bloom_exists(ctx, &key)?;
 
     let mut bf = match ctx.db_mut().lookup_key_write(&key) {
-        None => return Err(RedisError::runtime(b"ERR internal: bloom key vanished after auto-create")),
+        None => {
+            return Err(RedisError::runtime(
+                b"ERR internal: bloom key vanished after auto-create",
+            ))
+        }
         Some(obj) => match obj.bloom_mut() {
             Some(b) => b.clone(),
             None => return Err(bloom_wrong_type_error()),
@@ -215,7 +226,8 @@ pub fn bf_add_command(ctx: &mut CommandContext) -> RedisResult<()> {
     };
 
     let added = bloom_add(&mut bf, &item);
-    ctx.db_mut().insert(key, RedisObject::new_bloom_from_filter(bf));
+    ctx.db_mut()
+        .insert(key, RedisObject::new_bloom_from_filter(bf));
     ctx.reply_integer(if added { 1 } else { 0 })
 }
 
@@ -235,7 +247,11 @@ pub fn bf_madd_command(ctx: &mut CommandContext) -> RedisResult<()> {
     ensure_bloom_exists(ctx, &key)?;
 
     let mut bf = match ctx.db_mut().lookup_key_write(&key) {
-        None => return Err(RedisError::runtime(b"ERR internal: bloom key vanished after auto-create")),
+        None => {
+            return Err(RedisError::runtime(
+                b"ERR internal: bloom key vanished after auto-create",
+            ))
+        }
         Some(obj) => match obj.bloom_mut() {
             Some(b) => b.clone(),
             None => return Err(bloom_wrong_type_error()),
@@ -243,7 +259,8 @@ pub fn bf_madd_command(ctx: &mut CommandContext) -> RedisResult<()> {
     };
 
     let results: Vec<bool> = items.iter().map(|item| bloom_add(&mut bf, item)).collect();
-    ctx.db_mut().insert(key, RedisObject::new_bloom_from_filter(bf));
+    ctx.db_mut()
+        .insert(key, RedisObject::new_bloom_from_filter(bf));
 
     ctx.reply_array_header(results.len())?;
     for added in results {
@@ -373,7 +390,8 @@ pub fn bf_insert_command(ctx: &mut CommandContext) -> RedisResult<()> {
             },
         };
         let results: Vec<bool> = items.iter().map(|item| bloom_add(&mut bf, item)).collect();
-        ctx.db_mut().insert(key, RedisObject::new_bloom_from_filter(bf));
+        ctx.db_mut()
+            .insert(key, RedisObject::new_bloom_from_filter(bf));
         ctx.reply_array_header(results.len())?;
         for added in results {
             ctx.reply_integer(if added { 1 } else { 0 })?;

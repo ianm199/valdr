@@ -50,10 +50,10 @@
 
 #![allow(dead_code, unused_variables, unused_mut, unused_assignments)]
 
-use std::collections::VecDeque;
 use crate::db::RedisDb;
 use crate::object::RedisObject;
 use redis_types::RedisString;
+use std::collections::VecDeque;
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -103,7 +103,7 @@ pub(crate) type GetClientChannelsFn = fn() -> ();
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DoneStatus {
     NotDone = 0,
-    Done    = 1,
+    Done = 1,
 }
 
 /// Value type stored in a dict being defrag-scanned.
@@ -111,10 +111,10 @@ pub(crate) enum DoneStatus {
 ///    `_VAL_VOID_PTR`, `_VAL_LUA_SCRIPT`
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SdsDictValType {
-    NoVal     = 0,
-    IsSds     = 1,
-    IsStrob   = 2,
-    VoidPtr   = 3,
+    NoVal = 0,
+    IsSds = 1,
+    IsStrob = 2,
+    VoidPtr = 3,
     LuaScript = 4,
 }
 
@@ -150,13 +150,17 @@ pub(crate) struct KvstoreIterState {
     /// Token identifying which kvstore is being iterated.
     /// Used to detect flushdb/swapdb changes between calls.
     pub kvs_id: usize,
-    pub slot:   i32,
+    pub slot: i32,
     pub cursor: u64,
 }
 
 impl KvstoreIterState {
     fn new_for_kvs(kvs_id: usize) -> Self {
-        Self { kvs_id, slot: KVS_SLOT_DEFRAG_LUT, cursor: 0 }
+        Self {
+            kvs_id,
+            slot: KVS_SLOT_DEFRAG_LUT,
+            cursor: 0,
+        }
     }
 }
 
@@ -165,14 +169,14 @@ impl KvstoreIterState {
 #[derive(Debug, Default, Clone)]
 pub(crate) struct DefragKeysCtx {
     pub kvstate: KvstoreIterState,
-    pub dbid:    usize,
+    pub dbid: usize,
 }
 
 /// Private data for a pubsub channels defrag stage.
 /// C: `defragPubSubCtx { kvstoreIterState kvstate; getClientChannelsFn getPubSubChannels; }`
 #[derive(Clone)]
 pub(crate) struct DefragPubSubCtx {
-    pub kvstate:             KvstoreIterState,
+    pub kvstate: KvstoreIterState,
     pub get_pubsub_channels: GetClientChannelsFn,
 }
 
@@ -190,42 +194,42 @@ pub(crate) struct DefragPubSubCtx {
 #[derive(Debug)]
 pub struct DefragContext {
     /// µs when the current cycle started. C: `start_cycle`
-    pub start_cycle:          Monotime,
+    pub start_cycle: Monotime,
     /// `stat_active_defrag_hits` at cycle start. C: `start_defrag_hits`
-    pub start_defrag_hits:    i64,
+    pub start_defrag_hits: i64,
     /// Stages waiting to execute. C: `remaining_stages` (list*)
-    pub remaining_stages:     VecDeque<StageDescriptor>,
+    pub remaining_stages: VecDeque<StageDescriptor>,
     /// Stage currently executing. C: `current_stage`
-    pub current_stage:        Option<StageDescriptor>,
+    pub current_stage: Option<StageDescriptor>,
     /// Event-loop timer ID, or `AE_DELETED_EVENT_ID`. C: `timeproc_id`
-    pub timeproc_id:          i64,
+    pub timeproc_id: i64,
     /// End-µs of the previous timeproc call. C: `timeproc_end_time`
-    pub timeproc_end_time:    Monotime,
+    pub timeproc_end_time: Monotime,
     /// Accumulated CPU-overage in µs. C: `timeproc_overage_us`
-    pub timeproc_overage_us:  i64,
+    pub timeproc_overage_us: i64,
     /// Persisted kvstore-iteration state. C: `static kvstoreIterState state`
-    pub kvstore_iter_state:   KvstoreIterState,
+    pub kvstore_iter_state: KvstoreIterState,
     /// Last-seen CPU-target %; detects config changes. C: `static int prevCpuPercent`
-    pub prev_cpu_percent:     i32,
+    pub prev_cpu_percent: i32,
     /// Keys deferred for large-item processing. C: `static list *defrag_later`
-    pub defrag_later:         VecDeque<RedisString>,
+    pub defrag_later: VecDeque<RedisString>,
     /// Cursor within the current deferred item. C: `static unsigned long defrag_later_cursor`
-    pub defrag_later_cursor:  u64,
+    pub defrag_later_cursor: u64,
 }
 
 impl DefragContext {
     pub fn new() -> Self {
         Self {
-            start_cycle:         0,
-            start_defrag_hits:   0,
-            remaining_stages:    VecDeque::new(),
-            current_stage:       None,
-            timeproc_id:         AE_DELETED_EVENT_ID,
-            timeproc_end_time:   0,
+            start_cycle: 0,
+            start_defrag_hits: 0,
+            remaining_stages: VecDeque::new(),
+            current_stage: None,
+            timeproc_id: AE_DELETED_EVENT_ID,
+            timeproc_end_time: 0,
             timeproc_overage_us: 0,
-            kvstore_iter_state:  KvstoreIterState::default(),
-            prev_cpu_percent:    0,
-            defrag_later:        VecDeque::new(),
+            kvstore_iter_state: KvstoreIterState::default(),
+            prev_cpu_percent: 0,
+            defrag_later: VecDeque::new(),
             defrag_later_cursor: 0,
         }
     }
@@ -238,7 +242,9 @@ impl DefragContext {
 }
 
 impl Default for DefragContext {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ── Global defrag singleton ────────────────────────────────────────────────────
@@ -261,19 +267,27 @@ thread_local! {
 
 /// C: `allocatorShouldDefrag(ptr)` — should this allocation be relocated?
 #[inline(always)]
-fn allocator_should_defrag() -> bool { false }
+fn allocator_should_defrag() -> bool {
+    false
+}
 
 /// C: `allocatorDefragAlloc(size)` — fresh allocation outside the thread cache.
-fn allocator_defrag_alloc(_size: usize) -> Option<Vec<u8>> { None }
+fn allocator_defrag_alloc(_size: usize) -> Option<Vec<u8>> {
+    None
+}
 
 /// C: `allocatorDefragFree(ptr, size)` — free the old allocation.
 fn allocator_defrag_free(_data: Vec<u8>) {}
 
 /// C: `zmalloc_size(ptr)` — allocator-tracked allocation size.
-fn zmalloc_size() -> usize { 0 }
+fn zmalloc_size() -> usize {
+    0
+}
 
 /// C: `getAllocatorFragmentation(&frag_bytes)` — fragmentation ratio and bytes.
-fn get_allocator_fragmentation() -> (f32, usize) { (0.0, 0) }
+fn get_allocator_fragmentation() -> (f32, usize) {
+    (0.0, 0)
+}
 
 // ── Monotonic time helpers ─────────────────────────────────────────────────────
 
@@ -298,15 +312,21 @@ fn elapsed_ms(start: Monotime) -> i64 {
 
 /// C: `server.stat_active_defrag_hits`
 /// TODO(architect): wire to `RedisServer` stats field.
-fn server_stat_defrag_hits() -> i64 { 0 }
+fn server_stat_defrag_hits() -> i64 {
+    0
+}
 
 /// C: `server.stat_active_defrag_scanned`
 /// TODO(architect): wire to `RedisServer` stats field.
-fn server_stat_defrag_scanned() -> u64 { 0 }
+fn server_stat_defrag_scanned() -> u64 {
+    0
+}
 
 /// C: `hasActiveChildProcess()` — bgsave/bgrewrite/etc. in progress.
 /// TODO(architect): wire to `RedisServer`.
-fn has_active_child_process() -> bool { false }
+fn has_active_child_process() -> bool {
+    false
+}
 
 // ── Generic allocation defrag ──────────────────────────────────────────────────
 
@@ -316,7 +336,9 @@ fn has_active_child_process() -> bool { false }
 /// C: `activeDefragAllocWithoutFree(ptr, *allocation_size)` — src/defrag.c:163
 ///
 /// TODO(architect): allocator introspection required; always returns `None`.
-fn active_defrag_alloc_without_free(_data: &[u8]) -> Option<Vec<u8>> { None }
+fn active_defrag_alloc_without_free(_data: &[u8]) -> Option<Vec<u8>> {
+    None
+}
 
 /// Defrag a generic byte allocation.
 /// Returns `Some(new_data)` if relocated; old data must NOT be accessed.
@@ -324,7 +346,9 @@ fn active_defrag_alloc_without_free(_data: &[u8]) -> Option<Vec<u8>> { None }
 /// C: `activeDefragAlloc(ptr)` — src/defrag.c:187
 ///
 /// TODO(architect): allocator introspection required; always returns `None`.
-pub fn active_defrag_alloc(_data: Vec<u8>) -> Option<Vec<u8>> { None }
+pub fn active_defrag_alloc(_data: Vec<u8>) -> Option<Vec<u8>> {
+    None
+}
 
 /// Defrag a `RedisString` (C: `sds`).
 /// Returns `Some(new_string)` if relocated; old string must NOT be accessed.
@@ -337,14 +361,18 @@ pub fn active_defrag_alloc(_data: Vec<u8>) -> Option<Vec<u8>> { None }
 /// sense (moving the heap block) but requires allocator introspection.
 ///
 /// TODO(architect): allocator introspection required; always returns `None`.
-pub fn active_defrag_sds(_s: RedisString) -> Option<RedisString> { None }
+pub fn active_defrag_sds(_s: RedisString) -> Option<RedisString> {
+    None
+}
 
 // ── Object-level defrag ────────────────────────────────────────────────────────
 
 /// Try to defrag a `RedisObject` without freeing the old block.
 /// C: `activeDefragStringObWithoutFree(ob, *size)` — src/defrag.c:214
 /// TODO(architect): allocator introspection required; always returns `None`.
-fn active_defrag_string_ob_without_free(_ob: &RedisObject) -> Option<RedisObject> { None }
+fn active_defrag_string_ob_without_free(_ob: &RedisObject) -> Option<RedisObject> {
+    None
+}
 
 /// Defrag a string-type `RedisObject`.
 /// Returns `Some(new_obj)` if relocated; old obj must NOT be accessed.
@@ -355,7 +383,9 @@ fn active_defrag_string_ob_without_free(_ob: &RedisObject) -> Option<RedisObject
 /// In Rust, `RedisObject` is owned and never shared by reference count.
 ///
 /// TODO(architect): allocator introspection required; always returns `None`.
-pub fn active_defrag_string_ob(_ob: &RedisObject) -> Option<RedisObject> { None }
+pub fn active_defrag_string_ob(_ob: &RedisObject) -> Option<RedisObject> {
+    None
+}
 
 // ── Sorted-set / skiplist defrag (Phase 4 stubs) ──────────────────────────────
 
@@ -428,7 +458,9 @@ fn scan_later_list(_ob: &mut RedisObject, cursor: &mut u64, _endtime: Monotime) 
 /// Continue defragging a large skiplist-encoded sorted set.
 /// C: `scanLaterZset(ob, *cursor)` — src/defrag.c:441
 /// TODO(port): Phase 4 — ZSet types not yet defined.
-fn scan_later_zset(_ob: &mut RedisObject, cursor: &mut u64) { *cursor = 0; }
+fn scan_later_zset(_ob: &mut RedisObject, cursor: &mut u64) {
+    *cursor = 0;
+}
 
 /// Hashtable scan callback that only bumps `stat_active_defrag_scanned`.
 /// C: `scanHashtableCallbackCountScanned` — src/defrag.c:449
@@ -438,12 +470,16 @@ fn scan_hashtable_callback_count_scanned() {}
 /// Continue defragging a large hashtable-encoded set.
 /// C: `scanLaterSet(ob, *cursor)` — src/defrag.c:455
 /// TODO(port): `hashtable` (redis-ds) not yet available.
-fn scan_later_set(_ob: &mut RedisObject, cursor: &mut u64) { *cursor = 0; }
+fn scan_later_set(_ob: &mut RedisObject, cursor: &mut u64) {
+    *cursor = 0;
+}
 
 /// Continue defragging a large hashtable-encoded hash.
 /// C: `scanLaterHash(ob, *cursor)` — src/defrag.c:461
 /// TODO(port): `hashTypeScanDefrag` / `hashtable` (redis-ds) not yet available.
-fn scan_later_hash(_ob: &mut RedisObject, cursor: &mut u64) { *cursor = 0; }
+fn scan_later_hash(_ob: &mut RedisObject, cursor: &mut u64) {
+    *cursor = 0;
+}
 
 // ── Type-specific defrag ───────────────────────────────────────────────────────
 
@@ -472,7 +508,9 @@ fn defrag_set(_defrag_ctx: &mut DefragContext, _ob: &mut RedisObject) {}
 /// Defrag a single rax node.
 /// C: `defragRaxNode(noderef)` — src/defrag.c:542
 /// TODO(port): Phase 4/5 — `rax`/`raxNode` (RadixTree, redis-ds) not yet available.
-fn defrag_rax_node() -> bool { false }
+fn defrag_rax_node() -> bool {
+    false
+}
 
 /// Continue defragging a stream's listpack entries.
 /// Returns `true` if time expired with more work remaining.
@@ -485,8 +523,8 @@ fn defrag_rax_node() -> bool { false }
 ///
 /// TODO(port): Phase 5 — `stream`/`streamID`/`raxIterator` not yet defined.
 fn scan_later_stream_listpacks(
-    _ob:      &mut RedisObject,
-    cursor:   &mut u64,
+    _ob: &mut RedisObject,
+    cursor: &mut u64,
     _endtime: Monotime,
 ) -> bool {
     *cursor = 0;
@@ -571,11 +609,7 @@ fn defrag_key(defrag_ctx: &mut DefragContext, db: &mut RedisDb, ob: &mut RedisOb
 ///
 /// TODO(port): per-key hit/miss stats (`stat_active_defrag_key_hits`, etc.)
 /// require `&mut RedisServer`; thread through when the signature stabilises.
-fn db_keys_scan_callback(
-    defrag_ctx: &mut DefragContext,
-    db:         &mut RedisDb,
-    ob:         &mut RedisObject,
-) {
+fn db_keys_scan_callback(defrag_ctx: &mut DefragContext, db: &mut RedisDb, ob: &mut RedisObject) {
     // C: long long hits_before = server.stat_active_defrag_hits;
     defrag_key(defrag_ctx, db, ob);
     // C: if (hits != hits_before) stat_active_defrag_key_hits++ else key_misses++
@@ -598,10 +632,10 @@ fn defrag_pubsub_scan_callback(_ctx: &mut DefragPubSubCtx) {}
 ///
 /// C: `defragLaterItem(ob, *cursor, endtime, dbid)` — src/defrag.c:816-843
 fn defrag_later_item(
-    ob:      Option<&mut RedisObject>,
-    cursor:  &mut u64,
+    ob: Option<&mut RedisObject>,
+    cursor: &mut u64,
     endtime: Monotime,
-    _dbid:   usize,
+    _dbid: usize,
 ) -> bool {
     let Some(ob) = ob else {
         *cursor = 0; // C: object deleted; reset cursor and continue
@@ -647,8 +681,8 @@ fn defrag_later_step(defrag_ctx: &mut DefragContext, endtime: Monotime) -> DoneS
     }
 
     let mut iterations: u32 = 0;
-    let mut prev_defragged   = server_stat_defrag_hits();
-    let mut prev_scanned     = server_stat_defrag_scanned();
+    let mut prev_defragged = server_stat_defrag_hits();
+    let mut prev_scanned = server_stat_defrag_scanned();
 
     while !defrag_ctx.defrag_later.is_empty() {
         // C: key = listFirst(defrag_later)->value;
@@ -658,7 +692,9 @@ fn defrag_later_step(defrag_ctx: &mut DefragContext, endtime: Monotime) -> DoneS
         // Placeholder: treat front item as processed immediately.
         let timed_out = false;
 
-        if timed_out { break; }
+        if timed_out {
+            break;
+        }
 
         if defrag_ctx.defrag_later_cursor == 0 {
             // C: item finished; move to next
@@ -667,17 +703,23 @@ fn defrag_later_step(defrag_ctx: &mut DefragContext, endtime: Monotime) -> DoneS
 
         iterations += 1;
         if iterations > 16
-            || server_stat_defrag_hits()    > prev_defragged
+            || server_stat_defrag_hits() > prev_defragged
             || server_stat_defrag_scanned().wrapping_sub(prev_scanned) > 64
         {
-            if get_monotonic_us() > endtime { break; }
-            iterations    = 0;
+            if get_monotonic_us() > endtime {
+                break;
+            }
+            iterations = 0;
             prev_defragged = server_stat_defrag_hits();
-            prev_scanned   = server_stat_defrag_scanned();
+            prev_scanned = server_stat_defrag_scanned();
         }
     }
 
-    if defrag_ctx.defrag_later.is_empty() { DoneStatus::Done } else { DoneStatus::NotDone }
+    if defrag_ctx.defrag_later.is_empty() {
+        DoneStatus::Done
+    } else {
+        DoneStatus::NotDone
+    }
 }
 
 // ── defragStageKvstoreHelper ───────────────────────────────────────────────────
@@ -700,8 +742,8 @@ fn defrag_later_step(defrag_ctx: &mut DefragContext, endtime: Monotime) -> DoneS
 /// faithfully translated; the actual scan calls are no-op placeholders.
 fn defrag_stage_kvstore_helper(
     defrag_ctx: &mut DefragContext,
-    kvs_id:     usize,
-    endtime:    Monotime,
+    kvs_id: usize,
+    endtime: Monotime,
 ) -> DoneStatus {
     // C: if (endtime == 0) { state.kvs = kvs; state.slot = KVS_SLOT_DEFRAG_LUT; ... }
     if endtime == 0 {
@@ -720,8 +762,12 @@ fn defrag_stage_kvstore_helper(
             // C: state.cursor = kvstoreHashtableDefragTables(kvs, state.cursor, activeDefragAlloc)
             // TODO(port): kvstoreHashtableDefragTables not yet available.
             defrag_ctx.kvstore_iter_state.cursor = 0; // placeholder: LUT pass done immediately
-            if get_monotonic_us() >= endtime { return DoneStatus::NotDone; }
-            if defrag_ctx.kvstore_iter_state.cursor == 0 { break; }
+            if get_monotonic_us() >= endtime {
+                return DoneStatus::NotDone;
+            }
+            if defrag_ctx.kvstore_iter_state.cursor == 0 {
+                break;
+            }
         }
         defrag_ctx.kvstore_iter_state.slot = KVS_SLOT_UNASSIGNED;
     }
@@ -731,7 +777,9 @@ fn defrag_stage_kvstore_helper(
     loop {
         iterations += 1;
         if iterations > 16 {
-            if get_monotonic_us() >= endtime { break; }
+            if get_monotonic_us() >= endtime {
+                break;
+            }
             iterations = 0;
         }
 
@@ -776,14 +824,16 @@ fn defrag_stage_kvstore_helper(
 /// C's `static defragKeysCtx ctx` is captured in the closure as well.
 fn defrag_stage_db_keys(
     defrag_ctx: &mut DefragContext,
-    dbid:        usize,
-    ctx:         &mut DefragKeysCtx,
-    endtime:     Monotime,
+    dbid: usize,
+    ctx: &mut DefragKeysCtx,
+    endtime: Monotime,
 ) -> DoneStatus {
     debug_assert_eq!(ctx.dbid, dbid);
     // TODO(port): obtain real kvs_id from server.db[dbid].keys pointer identity.
     let kvs_id = dbid;
-    if endtime == 0 { ctx.dbid = dbid; /* fall through to helper init */ }
+    if endtime == 0 {
+        ctx.dbid = dbid; /* fall through to helper init */
+    }
     defrag_stage_kvstore_helper(defrag_ctx, kvs_id, endtime)
 }
 
@@ -791,8 +841,8 @@ fn defrag_stage_db_keys(
 /// C: `defragStageExpiresKvstore(endtime, target, privdata)` — src/defrag.c:977
 fn defrag_stage_expires_kvstore(
     defrag_ctx: &mut DefragContext,
-    dbid:        usize,
-    endtime:     Monotime,
+    dbid: usize,
+    endtime: Monotime,
 ) -> DoneStatus {
     // TODO(port): obtain real kvs_id from server.db[dbid].expires.
     let kvs_id = dbid.wrapping_add(1_000_000);
@@ -803,8 +853,8 @@ fn defrag_stage_expires_kvstore(
 /// C: `defragStageKeysWithvolaItemsKvstore(endtime, target, privdata)` — src/defrag.c:986
 fn defrag_stage_keys_with_vola_items(
     defrag_ctx: &mut DefragContext,
-    dbid:        usize,
-    endtime:     Monotime,
+    dbid: usize,
+    endtime: Monotime,
 ) -> DoneStatus {
     // TODO(port): obtain real kvs_id from server.db[dbid].keys_with_volatile_items.
     let kvs_id = dbid.wrapping_add(2_000_000);
@@ -816,8 +866,8 @@ fn defrag_stage_keys_with_vola_items(
 /// TODO(port): pubsub kvstore / client channel accessor not yet available.
 fn defrag_stage_pubsub_kvstore(
     defrag_ctx: &mut DefragContext,
-    kvs_id:      usize,
-    endtime:     Monotime,
+    kvs_id: usize,
+    endtime: Monotime,
 ) -> DoneStatus {
     defrag_stage_kvstore_helper(defrag_ctx, kvs_id, endtime)
 }
@@ -826,7 +876,9 @@ fn defrag_stage_pubsub_kvstore(
 /// C: `defragLuaScripts(endtime, target, privdata)` — src/defrag.c:1005-1014
 /// TODO(port): Phase 7 — `evalScriptsDict`/`scriptIsRunning` not yet available.
 fn defrag_stage_lua_scripts(_defrag_ctx: &mut DefragContext, endtime: Monotime) -> DoneStatus {
-    if endtime == 0 { return DoneStatus::NotDone; }
+    if endtime == 0 {
+        return DoneStatus::NotDone;
+    }
     // C: if (scriptIsRunning()) return DEFRAG_DONE;
     // C: activeDefragSdsDict(evalScriptsDict(), DEFRAG_SDS_DICT_VAL_LUA_SCRIPT);
     // TODO(port): Phase 7 — Lua scripting not yet available.
@@ -837,7 +889,9 @@ fn defrag_stage_lua_scripts(_defrag_ctx: &mut DefragContext, endtime: Monotime) 
 /// C: `defragModuleGlobals(endtime, target, privdata)` — src/defrag.c:1017-1023
 /// TODO(port): Phase 10 — `moduleDefragGlobals` not yet available.
 fn defrag_stage_module_globals(_defrag_ctx: &mut DefragContext, endtime: Monotime) -> DoneStatus {
-    if endtime == 0 { return DoneStatus::NotDone; }
+    if endtime == 0 {
+        return DoneStatus::NotDone;
+    }
     // C: moduleDefragGlobals();
     // TODO(port): Phase 10 — module API not yet available.
     DoneStatus::Done
@@ -848,7 +902,9 @@ fn defrag_stage_module_globals(_defrag_ctx: &mut DefragContext, endtime: Monotim
 /// Append a stage closure to the pending stage queue.
 /// C: `addDefragStage(stage_fn, target, privdata)` — src/defrag.c:1031-1037
 fn add_defrag_stage(defrag_ctx: &mut DefragContext, stage_fn: StageFnBox) {
-    defrag_ctx.remaining_stages.push_back(StageDescriptor { stage_fn });
+    defrag_ctx
+        .remaining_stages
+        .push_back(StageDescriptor { stage_fn });
 }
 
 // ── Cycle lifecycle ────────────────────────────────────────────────────────────
@@ -883,7 +939,9 @@ fn end_defrag_cycle(defrag_ctx: &mut DefragContext, normal_termination: bool) {
     // C: serverLog(LL_VERBOSE, "Active defrag done in %dms, reallocated=%d, frag=%.0f%%, ...")
     eprintln!(
         "Active defrag done in {}ms, frag={:.0}%, frag_bytes={}",
-        elapsed_ms(defrag_ctx.start_cycle), frag_pct, frag_bytes,
+        elapsed_ms(defrag_ctx.start_cycle),
+        frag_pct,
+        frag_bytes,
     );
 
     // C: server.stat_total_active_defrag_time += elapsedUs(stat_last_active_defrag_time);
@@ -907,16 +965,16 @@ fn end_defrag_cycle(defrag_ctx: &mut DefragContext, normal_termination: bool) {
 /// `target_cpu_percent`: `server.active_defrag_cpu_percent` (1–99)
 /// `cycle_us`:           `server.active_defrag_cycle_us` (minimum duty-cycle µs)
 fn compute_defrag_cycle_us(
-    defrag_ctx:         &mut DefragContext,
+    defrag_ctx: &mut DefragContext,
     target_cpu_percent: i32,
-    cycle_us:           i64,
+    cycle_us: i64,
 ) -> i64 {
     debug_assert!(target_cpu_percent > 0 && target_cpu_percent < 100);
 
     if target_cpu_percent != defrag_ctx.prev_cpu_percent {
         // C: target% changed; don't consider wait time (prevents stale adjustment).
         defrag_ctx.timeproc_end_time = 0;
-        defrag_ctx.prev_cpu_percent  = target_cpu_percent;
+        defrag_ctx.prev_cpu_percent = target_cpu_percent;
     }
 
     if defrag_ctx.timeproc_end_time == 0 {
@@ -925,12 +983,10 @@ fn compute_defrag_cycle_us(
         return cycle_us;
     }
 
-    let waited_us =
-        get_monotonic_us().saturating_sub(defrag_ctx.timeproc_end_time) as i64;
+    let waited_us = get_monotonic_us().saturating_sub(defrag_ctx.timeproc_end_time) as i64;
     // C: D = P * W / (100 - P)  — duty time to achieve target CPU%
     // C: With D = duty, W = wait, P = percent:  D/(D+W) = P/100  → D = P*W/(100-P)
-    let mut dc =
-        (target_cpu_percent as i64) * waited_us / (100 - target_cpu_percent as i64);
+    let mut dc = (target_cpu_percent as i64) * waited_us / (100 - target_cpu_percent as i64);
     // C: Adjust for accumulated overage from previous cycles.
     dc -= defrag_ctx.timeproc_overage_us;
     defrag_ctx.timeproc_overage_us = 0;
@@ -949,17 +1005,18 @@ fn compute_defrag_cycle_us(
 ///
 /// C: `computeDelayMs(intendedEndtime)` — src/defrag.c:1140-1162
 fn compute_delay_ms(
-    defrag_ctx:         &mut DefragContext,
-    intended_endtime:   Monotime,
+    defrag_ctx: &mut DefragContext,
+    intended_endtime: Monotime,
     target_cpu_percent: i32,
-    cycle_us:           i64,
+    cycle_us: i64,
 ) -> i64 {
     defrag_ctx.timeproc_end_time = get_monotonic_us();
-    let overage =
-        defrag_ctx.timeproc_end_time as i64 - intended_endtime as i64;
+    let overage = defrag_ctx.timeproc_end_time as i64 - intended_endtime as i64;
     defrag_ctx.timeproc_overage_us += overage;
     // C: Allow underage to reduce existing overage, but don't accumulate underage.
-    if defrag_ctx.timeproc_overage_us < 0 { defrag_ctx.timeproc_overage_us = 0; }
+    if defrag_ctx.timeproc_overage_us < 0 {
+        defrag_ctx.timeproc_overage_us = 0;
+    }
 
     debug_assert!(target_cpu_percent > 0 && target_cpu_percent < 100);
     // C: totalCycleTimeUs = cycle_us * 100 / targetCpuPercent
@@ -967,9 +1024,10 @@ fn compute_delay_ms(
     let total_cycle_time_us = cycle_us * 100 / (target_cpu_percent as i64);
     let mut delay_us = total_cycle_time_us - cycle_us;
     // C: Only count the non-duty fraction of the overage as extra delay.
-    delay_us +=
-        defrag_ctx.timeproc_overage_us * (100 - target_cpu_percent as i64) / 100;
-    if delay_us < 0 { delay_us = 0; }
+    delay_us += defrag_ctx.timeproc_overage_us * (100 - target_cpu_percent as i64) / 100;
+    if delay_us < 0 {
+        delay_us = 0;
+    }
     delay_us / 1_000 // µs → ms (round down)
 }
 
@@ -989,15 +1047,13 @@ fn compute_delay_ms(
 /// TODO(port): event-loop callback signature will change when Phase 2 lands.
 /// TODO(port): `latencyStartMonitor`/`latencyEndMonitor` not yet available.
 pub fn active_defrag_time_proc(
-    defrag_ctx:            &mut DefragContext,
+    defrag_ctx: &mut DefragContext,
     active_defrag_enabled: bool,
-    target_cpu_percent:    i32,
-    cycle_us:              i64,
+    target_cpu_percent: i32,
+    cycle_us: i64,
 ) -> i64 {
     // C: serverAssert(defrag.current_stage || listLength(remaining_stages) > 0)
-    debug_assert!(
-        defrag_ctx.current_stage.is_some() || !defrag_ctx.remaining_stages.is_empty()
-    );
+    debug_assert!(defrag_ctx.current_stage.is_some() || !defrag_ctx.remaining_stages.is_empty());
 
     if !active_defrag_enabled {
         // C: Defrag disabled while running → terminate.
@@ -1011,9 +1067,9 @@ pub fn active_defrag_time_proc(
         return 100; // poll again in 100ms
     }
 
-    let starttime     = get_monotonic_us();
+    let starttime = get_monotonic_us();
     let duty_cycle_us = compute_defrag_cycle_us(defrag_ctx, target_cpu_percent, cycle_us);
-    let endtime       = starttime.saturating_add(duty_cycle_us as u64);
+    let endtime = starttime.saturating_add(duty_cycle_us as u64);
     let mut have_more_work = true;
 
     // C: latencyStartMonitor(latency); — TODO(port): latency tracking not yet available.
@@ -1025,7 +1081,8 @@ pub fn active_defrag_time_proc(
                 let status = (stage.stage_fn)(0);
                 // C: serverAssert(status == DEFRAG_NOT_DONE)
                 debug_assert_eq!(
-                    status, DoneStatus::NotDone,
+                    status,
+                    DoneStatus::NotDone,
                     "stage initialisation must return NotDone"
                 );
                 defrag_ctx.current_stage = Some(stage);
@@ -1039,14 +1096,12 @@ pub fn active_defrag_time_proc(
             }
         }
 
-        have_more_work = defrag_ctx.current_stage.is_some()
-            || !defrag_ctx.remaining_stages.is_empty();
+        have_more_work =
+            defrag_ctx.current_stage.is_some() || !defrag_ctx.remaining_stages.is_empty();
 
         // C: while (haveMoreWork && getMonotonicUs() <= endtime - active_defrag_cycle_us)
         // If a stage completed early and a full cycle's time remains, start another.
-        if !have_more_work
-            || get_monotonic_us() > endtime.saturating_sub(cycle_us as u64)
-        {
+        if !have_more_work || get_monotonic_us() > endtime.saturating_sub(cycle_us as u64) {
             break;
         }
     }
@@ -1071,24 +1126,32 @@ pub fn active_defrag_time_proc(
 /// TODO(port): `monitorActiveDefrag()` call when not running requires config
 ///   from `RedisServer`; placeholder call passes caller-supplied args.
 pub fn defrag_while_blocked(
-    defrag_ctx:            &mut DefragContext,
+    defrag_ctx: &mut DefragContext,
     active_defrag_enabled: bool,
-    target_cpu_percent:    i32,
-    cycle_us:              i64,
-    db_count:              usize,
+    target_cpu_percent: i32,
+    cycle_us: i64,
+    db_count: usize,
 ) {
     if !defrag_ctx.is_running() {
         // C: if (!defragIsRunning()) monitorActiveDefrag();
         monitor_active_defrag(
-            defrag_ctx, active_defrag_enabled, target_cpu_percent, db_count,
+            defrag_ctx,
+            active_defrag_enabled,
+            target_cpu_percent,
+            db_count,
         );
     }
 
-    if !defrag_ctx.is_running() { return; }
+    if !defrag_ctx.is_running() {
+        return;
+    }
 
     let timeproc_id = defrag_ctx.timeproc_id;
     let reschedule_delay = active_defrag_time_proc(
-        defrag_ctx, active_defrag_enabled, target_cpu_percent, cycle_us,
+        defrag_ctx,
+        active_defrag_enabled,
+        target_cpu_percent,
+        cycle_us,
     );
     if reschedule_delay == AE_NOMORE {
         // C: aeDeleteTimeEvent(server.el, timeproc_id);
@@ -1134,50 +1197,76 @@ pub fn begin_defrag_cycle(defrag_ctx: &mut DefragContext, db_count: usize) {
         });
 
         // C: addDefragStage(defragStageExpiresKvstore, (void*)(uintptr_t)dbid, NULL)
-        add_defrag_stage(defrag_ctx, Box::new(move |_endtime: Monotime| {
-            // TODO(port): call defrag_stage_expires_kvstore(defrag_ctx, dbid, endtime)
-            DoneStatus::Done
-        }));
+        add_defrag_stage(
+            defrag_ctx,
+            Box::new(move |_endtime: Monotime| {
+                // TODO(port): call defrag_stage_expires_kvstore(defrag_ctx, dbid, endtime)
+                DoneStatus::Done
+            }),
+        );
 
         // C: addDefragStage(defragStageKeysWithvolaItemsKvstore, ...)
-        add_defrag_stage(defrag_ctx, Box::new(move |_endtime: Monotime| {
-            // TODO(port): call defrag_stage_keys_with_vola_items(defrag_ctx, dbid, endtime)
-            DoneStatus::Done
-        }));
+        add_defrag_stage(
+            defrag_ctx,
+            Box::new(move |_endtime: Monotime| {
+                // TODO(port): call defrag_stage_keys_with_vola_items(defrag_ctx, dbid, endtime)
+                DoneStatus::Done
+            }),
+        );
     }
 
     // C: addDefragStage(defragStagePubsubKvstore, server.pubsub_channels, &fn_wrapper)
-    add_defrag_stage(defrag_ctx, Box::new(|endtime: Monotime| {
-        if endtime == 0 { return DoneStatus::NotDone; }
-        // TODO(port): pubsub_channels kvstore identity not yet accessible here.
-        DoneStatus::Done
-    }));
+    add_defrag_stage(
+        defrag_ctx,
+        Box::new(|endtime: Monotime| {
+            if endtime == 0 {
+                return DoneStatus::NotDone;
+            }
+            // TODO(port): pubsub_channels kvstore identity not yet accessible here.
+            DoneStatus::Done
+        }),
+    );
 
     // C: addDefragStage(defragStagePubsubKvstore, server.pubsubshard_channels, &fn_wrapper)
-    add_defrag_stage(defrag_ctx, Box::new(|endtime: Monotime| {
-        if endtime == 0 { return DoneStatus::NotDone; }
-        // TODO(port): pubsubshard_channels kvstore identity not yet accessible here.
-        DoneStatus::Done
-    }));
+    add_defrag_stage(
+        defrag_ctx,
+        Box::new(|endtime: Monotime| {
+            if endtime == 0 {
+                return DoneStatus::NotDone;
+            }
+            // TODO(port): pubsubshard_channels kvstore identity not yet accessible here.
+            DoneStatus::Done
+        }),
+    );
 
     // C: addDefragStage(defragLuaScripts, NULL, NULL)
-    add_defrag_stage(defrag_ctx, Box::new(|endtime: Monotime| {
-        if endtime == 0 { return DoneStatus::NotDone; }
-        // TODO(port): Phase 7 — Lua script defrag not yet available.
-        DoneStatus::Done
-    }));
+    add_defrag_stage(
+        defrag_ctx,
+        Box::new(|endtime: Monotime| {
+            if endtime == 0 {
+                return DoneStatus::NotDone;
+            }
+            // TODO(port): Phase 7 — Lua script defrag not yet available.
+            DoneStatus::Done
+        }),
+    );
 
     // C: addDefragStage(defragModuleGlobals, NULL, NULL)
-    add_defrag_stage(defrag_ctx, Box::new(|endtime: Monotime| {
-        if endtime == 0 { return DoneStatus::NotDone; }
-        // TODO(port): Phase 10 — module defrag not yet available.
-        DoneStatus::Done
-    }));
+    add_defrag_stage(
+        defrag_ctx,
+        Box::new(|endtime: Monotime| {
+            if endtime == 0 {
+                return DoneStatus::NotDone;
+            }
+            // TODO(port): Phase 10 — module defrag not yet available.
+            DoneStatus::Done
+        }),
+    );
 
-    defrag_ctx.current_stage       = None;
-    defrag_ctx.start_cycle         = get_monotonic_us();
-    defrag_ctx.start_defrag_hits   = server_stat_defrag_hits();
-    defrag_ctx.timeproc_end_time   = 0;
+    defrag_ctx.current_stage = None;
+    defrag_ctx.start_cycle = get_monotonic_us();
+    defrag_ctx.start_defrag_hits = server_stat_defrag_hits();
+    defrag_ctx.timeproc_end_time = 0;
     defrag_ctx.timeproc_overage_us = 0;
 
     // C: defrag.timeproc_id = aeCreateTimeEvent(server.el, 0, activeDefragTimeProc, NULL, NULL);
@@ -1202,20 +1291,18 @@ pub fn begin_defrag_cycle(defrag_ctx: &mut DefragContext, db_count: usize) {
 ///   `INTERPOLATE(x, x1, x2, y1, y2)` — linear interpolation
 ///   `LIMIT(y, min, max)` — clamp
 pub fn update_defrag_cpu_percent(
-    defrag_ctx:            &DefragContext,
-    current_cpu_percent:   i32,
-    threshold_lower:       f32,
-    threshold_upper:       f32,
-    cpu_min:               i32,
-    cpu_max:               i32,
-    ignore_bytes:          usize,
+    defrag_ctx: &DefragContext,
+    current_cpu_percent: i32,
+    threshold_lower: f32,
+    threshold_upper: f32,
+    cpu_min: i32,
+    cpu_max: i32,
+    ignore_bytes: usize,
     configuration_changed: bool,
 ) -> i32 {
     let (frag_pct, frag_bytes) = get_allocator_fragmentation();
 
-    if current_cpu_percent == 0
-        && (frag_pct < threshold_lower || frag_bytes < ignore_bytes)
-    {
+    if current_cpu_percent == 0 && (frag_pct < threshold_lower || frag_bytes < ignore_bytes) {
         return 0;
     }
 
@@ -1259,14 +1346,18 @@ pub fn update_defrag_cpu_percent(
 /// TODO(port): `updateDefragCpuPercent` needs full config params; for Phase A
 /// the caller is responsible for computing and passing `target_cpu_percent`.
 pub fn monitor_active_defrag(
-    defrag_ctx:            &mut DefragContext,
+    defrag_ctx: &mut DefragContext,
     active_defrag_enabled: bool,
-    target_cpu_percent:    i32,
-    db_count:              usize,
+    target_cpu_percent: i32,
+    db_count: usize,
 ) {
-    if !active_defrag_enabled { return; }
+    if !active_defrag_enabled {
+        return;
+    }
     // C: if (hasActiveChildProcess()) return;
-    if has_active_child_process() { return; }
+    if has_active_child_process() {
+        return;
+    }
     // C: updateDefragCpuPercent(); — adjusts server.active_defrag_cpu_percent.
     // PORT NOTE: updateDefragCpuPercent is now a pure function; the caller must
     // apply the returned value.  This function uses the pre-updated percent.

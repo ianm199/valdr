@@ -12,11 +12,11 @@
 //!
 //! C source: `notify.c` (159 lines, 3 functions)
 
-use redis_types::error::RedisError;
-use redis_types::string::RedisString;
 use crate::client::Client;
 use crate::object::RedisObject;
 use crate::server::RedisServer;
+use redis_types::error::RedisError;
+use redis_types::string::RedisString;
 
 // ── Notification-class flag constants ─────────────────────────────────────────
 // C: server.h:654-671, `NOTIFY_*` #defines

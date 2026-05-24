@@ -101,7 +101,10 @@ impl MaxmemoryPolicy {
     /// True when the policy applies to every key, not only volatile ones.
     /// C: `server.maxmemory_policy & MAXMEMORY_FLAG_ALLKEYS`
     pub fn is_allkeys(self) -> bool {
-        matches!(self, Self::AllkeysLru | Self::AllkeysLfu | Self::AllkeysRandom)
+        matches!(
+            self,
+            Self::AllkeysLru | Self::AllkeysLfu | Self::AllkeysRandom
+        )
     }
 
     /// True when the policy uses the candidate pool (LRU, LFU, or TTL order).
@@ -208,7 +211,10 @@ pub fn eviction_pool_alloc() -> EvictionPool {
         dbid: 0,
         slot: 0,
     });
-    EvictionPool { entries, next_db: 0 }
+    EvictionPool {
+        entries,
+        next_db: 0,
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -266,7 +272,10 @@ fn eviction_pool_insert_candidate(
             // C: evict.c:161 — pool is full: decrement k then shift 1..k leftward,
             // discarding the entry with the lowest idle score (slot 0).
             // C: `k--; sds cached = pool[0].cached; sdsfree(pool[0].key); memmove(pool, pool+1, k); pool[k].cached = cached`
-            debug_assert!(k > 0, "k underflow guard: k==0 AND pool full is caught by the first if");
+            debug_assert!(
+                k > 0,
+                "k underflow guard: k==0 AND pool full is caught by the first if"
+            );
             k -= 1;
             let saved_cached = std::mem::take(&mut pool.entries[0].cached);
             pool.entries[0].key = None; // drop the key with lowest idle (worst candidate)
@@ -376,8 +385,7 @@ pub fn free_memory_get_not_counted_memory(server: &RedisServer) -> usize {
         //             constants in the networking / replication modules.
         let proto_reply_chunk_bytes: usize = 16 * 1024; // placeholder
         let block_overhead: usize = 64; // placeholder: sizeof(replBufBlock) + sizeof(listNode)
-        let extra_approx =
-            (repl_backlog_size / proto_reply_chunk_bytes + 1) * block_overhead;
+        let extra_approx = (repl_backlog_size / proto_reply_chunk_bytes + 1) * block_overhead;
         let counted_mem = repl_backlog_size + extra_approx;
         if repl_buffer_mem > counted_mem {
             overhead += repl_buffer_mem - counted_mem;
@@ -747,8 +755,8 @@ pub fn perform_evictions(server: &RedisServer) -> EvictResult {
             // TODO(port): latencyStartMonitor(eviction_latency)
             // TODO(port): enterExecutionUnit(1, 0)
             let before_mem: usize = 0; // TODO(port): zmalloc_used_memory()
-            // TODO(port): server.db_generic_delete(best_dbid, bk, lazyfree_lazy_eviction)
-            //             C: dbGenericDelete(db, keyobj, server.lazyfree_lazy_eviction, DB_FLAG_KEY_EVICTED)
+                                       // TODO(port): server.db_generic_delete(best_dbid, bk, lazyfree_lazy_eviction)
+                                       //             C: dbGenericDelete(db, keyobj, server.lazyfree_lazy_eviction, DB_FLAG_KEY_EVICTED)
             let after_mem: usize = 0; // TODO(port): zmalloc_used_memory() after delete
             let delta = before_mem as i64 - after_mem as i64;
             mem_freed += delta;

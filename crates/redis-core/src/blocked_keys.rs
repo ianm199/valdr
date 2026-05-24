@@ -57,14 +57,22 @@ pub enum BlockedSide {
 /// acknowledged `target_offset` or the timeout fires.
 #[derive(Debug, Clone)]
 pub enum BlockedAction {
-    Pop { side: BlockedSide, count: u64 },
+    Pop {
+        side: BlockedSide,
+        count: u64,
+    },
     Move {
         side: BlockedSide,
         dst_key: RedisString,
         dst_side: BlockedSide,
     },
-    ZSetPop { reverse: bool, count: u64 },
-    Stream { id_after: StreamId },
+    ZSetPop {
+        reverse: bool,
+        count: u64,
+    },
+    Stream {
+        id_after: StreamId,
+    },
     StreamGroup {
         id_after: StreamId,
         group: RedisString,
@@ -72,7 +80,10 @@ pub enum BlockedAction {
         count: Option<i64>,
         noack: bool,
     },
-    Wait { target_offset: i64, numreplicas: usize },
+    Wait {
+        target_offset: i64,
+        numreplicas: usize,
+    },
 }
 
 impl BlockedAction {
@@ -93,9 +104,7 @@ impl BlockedAction {
             BlockedAction::ZSetPop { .. } => b"*-1\r\n".to_vec(),
             BlockedAction::Stream { .. } => b"$-1\r\n".to_vec(),
             BlockedAction::StreamGroup { .. } => b"*-1\r\n".to_vec(),
-            BlockedAction::Wait { .. } => {
-                format!(":{}\r\n", acked_count).into_bytes()
-            }
+            BlockedAction::Wait { .. } => format!(":{}\r\n", acked_count).into_bytes(),
         }
     }
 
@@ -176,10 +185,9 @@ impl BlockedKeysIndex {
     /// Remove `client_id` from every key queue and return its waiter record.
     pub fn remove_client(&mut self, client_id: ClientId) -> Option<BlockedWaiter> {
         let waiter = self.waiters.remove(&client_id)?;
-        let _ =
-            BLOCKED_KEYS_WAITERS.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                Some(current.saturating_sub(1))
-            });
+        let _ = BLOCKED_KEYS_WAITERS.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            Some(current.saturating_sub(1))
+        });
         for key in &waiter.keys {
             if let Some(deque) = self.keys.get_mut(key) {
                 deque.retain(|cid| *cid != client_id);
@@ -226,7 +234,9 @@ impl BlockedKeysIndex {
         let mut out = Vec::new();
         for cid in client_ids {
             let matches = match self.waiters.get(&cid) {
-                Some(w) => matches!(&w.action, BlockedAction::Stream { id_after } if *id_after < new_id),
+                Some(w) => {
+                    matches!(&w.action, BlockedAction::Stream { id_after } if *id_after < new_id)
+                }
                 None => false,
             };
             if matches {
@@ -255,7 +265,9 @@ impl BlockedKeysIndex {
         let mut out = Vec::new();
         for cid in client_ids {
             let matches = match self.waiters.get(&cid) {
-                Some(w) => matches!(&w.action, BlockedAction::StreamGroup { id_after, .. } if *id_after < new_id),
+                Some(w) => {
+                    matches!(&w.action, BlockedAction::StreamGroup { id_after, .. } if *id_after < new_id)
+                }
                 None => false,
             };
             if matches {
@@ -366,7 +378,11 @@ impl BlockedKeysIndex {
     pub fn all_blocked_keys(&self) -> Vec<RedisString> {
         self.keys
             .keys()
-            .filter(|k| self.keys[*k].iter().any(|cid| self.waiters.contains_key(cid)))
+            .filter(|k| {
+                self.keys[*k]
+                    .iter()
+                    .any(|cid| self.waiters.contains_key(cid))
+            })
             .cloned()
             .collect()
     }
@@ -396,7 +412,10 @@ impl BlockedKeysIndex {
             .waiters
             .iter()
             .filter_map(|(cid, w)| match &w.action {
-                BlockedAction::Wait { target_offset, numreplicas } => {
+                BlockedAction::Wait {
+                    target_offset,
+                    numreplicas,
+                } => {
                     let count = acked_count_for(*target_offset);
                     if count >= *numreplicas {
                         Some((*cid, count))
@@ -474,7 +493,10 @@ mod tests {
             client_id: id,
             sender: tx,
             keys,
-            action: BlockedAction::Pop { side: BlockedSide::Head, count: 0 },
+            action: BlockedAction::Pop {
+                side: BlockedSide::Head,
+                count: 0,
+            },
             deadline_ms: deadline,
             resp_proto: 2,
         }

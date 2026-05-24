@@ -194,9 +194,11 @@ impl<'a> ParserCursor<'a> {
     ///
     /// C: `resp_parser.c:208-227` — `parseReply`
     pub fn parse_next(&mut self, cb: &mut dyn ParserCallbacks) -> Result<(), RedisError> {
-        let byte = self.buf.get(self.pos).copied().ok_or_else(|| {
-            RedisError::runtime(b"resp parser: buffer exhausted")
-        })?;
+        let byte = self
+            .buf
+            .get(self.pos)
+            .copied()
+            .ok_or_else(|| RedisError::runtime(b"resp parser: buffer exhausted"))?;
 
         match byte {
             b'$' => self.parse_bulk(cb),
@@ -311,10 +313,12 @@ impl<'a> ParserCursor<'a> {
         self.pos = cr + 2; // advance to start of payload (past length CRLF)
 
         if bulklen < 4 {
-            return Err(RedisError::runtime(b"resp parser: verbatim string payload too short"));
+            return Err(RedisError::runtime(
+                b"resp parser: verbatim string payload too short",
+            ));
         }
         let format = &self.buf[self.pos..self.pos + 3]; // 3-byte format tag (e.g. b"txt")
-        // Byte at self.pos + 3 is ':' separator — not passed to callback.
+                                                        // Byte at self.pos + 3 is ':' separator — not passed to callback.
         let data_end = self.pos + bulklen;
         let data = &self.buf[self.pos + 4..data_end]; // payload after "tag:"
         self.pos = data_end + 2; // advance past payload + trailing CRLF
@@ -369,9 +373,11 @@ impl<'a> ParserCursor<'a> {
     /// `#t\r\n` → `true`; `#f\r\n` (or any non-`t` byte) → `false`.
     fn parse_bool(&mut self, cb: &mut dyn ParserCallbacks) -> Result<(), RedisError> {
         let proto_start = self.pos;
-        let type_byte = self.buf.get(self.pos + 1).copied().ok_or_else(|| {
-            RedisError::runtime(b"resp parser: truncated boolean frame")
-        })?;
+        let type_byte = self
+            .buf
+            .get(self.pos + 1)
+            .copied()
+            .ok_or_else(|| RedisError::runtime(b"resp parser: truncated boolean frame"))?;
         let cr = self.find_cr(self.pos + 1)?;
         self.pos = cr + 2; // advance past CRLF
         let proto = &self.buf[proto_start..self.pos];

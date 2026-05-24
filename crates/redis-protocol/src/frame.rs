@@ -313,7 +313,11 @@ pub fn format_double_text(d: f64) -> Vec<u8> {
         return b"nan".to_vec();
     }
     if d.is_infinite() {
-        return if d > 0.0 { b"inf".to_vec() } else { b"-inf".to_vec() };
+        return if d > 0.0 {
+            b"inf".to_vec()
+        } else {
+            b"-inf".to_vec()
+        };
     }
     if d == 0.0 {
         return b"0".to_vec();
@@ -414,7 +418,10 @@ mod tests {
 
     #[test]
     fn error_line() {
-        assert_eq!(enc(RespFrame::error(b"ERR foo".as_slice())), b"-ERR foo\r\n");
+        assert_eq!(
+            enc(RespFrame::error(b"ERR foo".as_slice())),
+            b"-ERR foo\r\n"
+        );
     }
 
     #[test]
@@ -440,7 +447,10 @@ mod tests {
 
     #[test]
     fn nested_array() {
-        let f = RespFrame::array(vec![RespFrame::integer(1), RespFrame::bulk(b"x".as_slice())]);
+        let f = RespFrame::array(vec![
+            RespFrame::integer(1),
+            RespFrame::bulk(b"x".as_slice()),
+        ]);
         assert_eq!(enc(f), b"*2\r\n:1\r\n$1\r\nx\r\n");
     }
 
@@ -491,7 +501,9 @@ mod tests {
 
     #[test]
     fn resp3_big_number() {
-        let f = RespFrame::BigNumber(RedisString::from_bytes(b"3492890328409238509324850943850943825024385"));
+        let f = RespFrame::BigNumber(RedisString::from_bytes(
+            b"3492890328409238509324850943850943825024385",
+        ));
         assert_eq!(
             enc3(f),
             b"(3492890328409238509324850943850943825024385\r\n".as_slice(),
@@ -542,8 +554,14 @@ mod tests {
     #[test]
     fn resp3_map_falls_back_to_flat_array_under_resp2() {
         let f = RespFrame::Map(vec![
-            (RespFrame::bulk(b"a".as_slice()), RespFrame::bulk(b"1".as_slice())),
-            (RespFrame::bulk(b"b".as_slice()), RespFrame::bulk(b"2".as_slice())),
+            (
+                RespFrame::bulk(b"a".as_slice()),
+                RespFrame::bulk(b"1".as_slice()),
+            ),
+            (
+                RespFrame::bulk(b"b".as_slice()),
+                RespFrame::bulk(b"2".as_slice()),
+            ),
         ]);
         assert_eq!(
             enc(f),

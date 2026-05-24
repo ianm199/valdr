@@ -60,7 +60,10 @@ struct GeoPoint {
 /// Decode a 52-bit geohash score to `[longitude, latitude]`.
 /// C: geo.c:100-103, decodeGeohash.
 fn decode_geohash(bits: f64) -> Option<[f64; 2]> {
-    let hash = GeoHashBits { bits: bits as u64, step: GEO_STEP_MAX };
+    let hash = GeoHashBits {
+        bits: bits as u64,
+        step: GEO_STEP_MAX,
+    };
     geohash_decode_to_long_lat_wgs84(hash)
 }
 
@@ -125,12 +128,11 @@ fn extract_long_lat_or_reply(
         let raw = ctx.arg(arg_base + i)?.as_bytes().to_vec();
         xy[i] = parse_geo_f64(&raw)?;
     }
-    if xy[0] < GEO_LONG_MIN
-        || xy[0] > GEO_LONG_MAX
-        || xy[1] < GEO_LAT_MIN
-        || xy[1] > GEO_LAT_MAX
-    {
-        let msg = format!("ERR invalid longitude,latitude pair {},{}\r\n", xy[0], xy[1]);
+    if xy[0] < GEO_LONG_MIN || xy[0] > GEO_LONG_MAX || xy[1] < GEO_LAT_MIN || xy[1] > GEO_LAT_MAX {
+        let msg = format!(
+            "ERR invalid longitude,latitude pair {},{}\r\n",
+            xy[0], xy[1]
+        );
         return Err(RedisError::runtime(msg.as_bytes()));
     }
     Ok(())
@@ -237,12 +239,9 @@ fn geo_within_shape(shape: &GeoShape, score: f64) -> Option<([f64; 2], f64)> {
             xy[0],
             xy[1],
         )?,
-        GeoShapeKind::Polygon { points } => geohash_get_distance_if_in_polygon(
-            shape.xy[0],
-            shape.xy[1],
-            [xy[0], xy[1]],
-            points,
-        )?,
+        GeoShapeKind::Polygon { points } => {
+            geohash_get_distance_if_in_polygon(shape.xy[0], shape.xy[1], [xy[0], xy[1]], points)?
+        }
     };
     Some((xy, distance))
 }
@@ -355,7 +354,9 @@ fn members_of_all_neighbors(
 // ── Sort comparators ──────────────────────────────────────────────────────────
 
 fn sort_gp_asc(a: &GeoPoint, b: &GeoPoint) -> std::cmp::Ordering {
-    a.dist.partial_cmp(&b.dist).unwrap_or(std::cmp::Ordering::Equal)
+    a.dist
+        .partial_cmp(&b.dist)
+        .unwrap_or(std::cmp::Ordering::Equal)
 }
 
 fn sort_gp_desc(a: &GeoPoint, b: &GeoPoint) -> std::cmp::Ordering {
@@ -599,7 +600,9 @@ pub fn georadius_generic(
             && flags & RADIUS_NOSTORE == 0
             && flags & GEOSEARCH_FLAG == 0
         {
-            storekey = Some(RedisString::from_bytes(ctx.arg(base_args + i + 1)?.as_bytes()));
+            storekey = Some(RedisString::from_bytes(
+                ctx.arg(base_args + i + 1)?.as_bytes(),
+            ));
             storedist = false;
             i += 1;
         } else if arg.eq_ignore_ascii_case(b"storedist")
@@ -607,7 +610,9 @@ pub fn georadius_generic(
             && flags & RADIUS_NOSTORE == 0
             && flags & GEOSEARCH_FLAG == 0
         {
-            storekey = Some(RedisString::from_bytes(ctx.arg(base_args + i + 1)?.as_bytes()));
+            storekey = Some(RedisString::from_bytes(
+                ctx.arg(base_args + i + 1)?.as_bytes(),
+            ));
             storedist = true;
             i += 1;
         } else if arg.eq_ignore_ascii_case(b"storedist")
@@ -663,7 +668,10 @@ pub fn georadius_generic(
         {
             let (conversion, w, h) = extract_box_or_reply(ctx, base_args + i + 1)?;
             shape.conversion = conversion;
-            shape.kind = GeoShapeKind::Rectangle { height: h, width: w };
+            shape.kind = GeoShapeKind::Rectangle {
+                height: h,
+                width: w,
+            };
             bybox = true;
             i += 3;
         } else if arg.eq_ignore_ascii_case(b"bypolygon")
@@ -771,8 +779,11 @@ pub fn georadius_generic(
     }
 
     let result_length = ga.len();
-    let returned_items =
-        if count == 0 || (result_length as i64) < count { result_length } else { count as usize };
+    let returned_items = if count == 0 || (result_length as i64) < count {
+        result_length
+    } else {
+        count as usize
+    };
 
     if sort == SORT_ASC {
         ga.sort_by(sort_gp_asc);
@@ -916,8 +927,14 @@ pub fn geohash_command(ctx: &mut CommandContext) -> RedisResult<()> {
             Some(v) => v,
         };
 
-        let long_range = GeoHashRange { min: -180.0, max: 180.0 };
-        let lat_range = GeoHashRange { min: -90.0, max: 90.0 };
+        let long_range = GeoHashRange {
+            min: -180.0,
+            max: 180.0,
+        };
+        let lat_range = GeoHashRange {
+            min: -90.0,
+            max: 90.0,
+        };
         let hash = match geohash_encode(&long_range, &lat_range, xy[0], xy[1], 26) {
             None => {
                 ctx.reply_null()?;

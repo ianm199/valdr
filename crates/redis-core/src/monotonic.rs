@@ -212,9 +212,7 @@ mod x86_tsc {
             return false;
         };
         for line in cpuinfo.split(|&b: &u8| b == b'\n') {
-            if line.starts_with(b"flags")
-                && line.windows(12).any(|w| w == b"constant_tsc")
-            {
+            if line.starts_with(b"flags") && line.windows(12).any(|w| w == b"constant_tsc") {
                 return true;
             }
         }

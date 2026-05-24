@@ -393,7 +393,10 @@ pub fn reqres_append_response(
         }
     }
 
-    debug_assert!(ret > 0, "reqres_append_response: zero response bytes captured");
+    debug_assert!(
+        ret > 0,
+        "reqres_append_response: zero response bytes captured"
+    );
 
     // Flush accumulated buffer (request + response) to the log file.
     // C: logreqres.c:270–274 — fopen/fwrite/fclose.

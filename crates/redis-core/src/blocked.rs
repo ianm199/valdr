@@ -75,7 +75,10 @@ impl BlockingType {
 
     /// Returns `true` for the three blocking types that wait on data keys.
     pub fn is_key_blocking(self) -> bool {
-        matches!(self, BlockingType::List | BlockingType::ZSet | BlockingType::Stream)
+        matches!(
+            self,
+            BlockingType::List | BlockingType::ZSet | BlockingType::Stream
+        )
     }
 }
 
@@ -192,9 +195,15 @@ pub enum ObjectTypeHint {
 
 impl From<&RedisObject> for ObjectTypeHint {
     fn from(obj: &RedisObject) -> Self {
-        if obj.is_list()   { return ObjectTypeHint::List; }
-        if obj.is_zset()   { return ObjectTypeHint::ZSet; }
-        if obj.is_stream() { return ObjectTypeHint::Stream; }
+        if obj.is_list() {
+            return ObjectTypeHint::List;
+        }
+        if obj.is_zset() {
+            return ObjectTypeHint::ZSet;
+        }
+        if obj.is_stream() {
+            return ObjectTypeHint::Stream;
+        }
         ObjectTypeHint::Other
     }
 }
@@ -490,11 +499,11 @@ pub fn disconnect_or_redirect_all_blocked_clients(
 /// C: `static blocking_type getBlockedTypeByType(int type)` — blocked.c:505
 fn get_blocked_type_by_obj_type(obj_type: ObjectTypeHint) -> BlockingType {
     match obj_type {
-        ObjectTypeHint::List   => BlockingType::List,
-        ObjectTypeHint::ZSet   => BlockingType::ZSet,
+        ObjectTypeHint::List => BlockingType::List,
+        ObjectTypeHint::ZSet => BlockingType::ZSet,
         ObjectTypeHint::Module => BlockingType::Module,
         ObjectTypeHint::Stream => BlockingType::Stream,
-        ObjectTypeHint::Other  => BlockingType::None,
+        ObjectTypeHint::Other => BlockingType::None,
     }
 }
 

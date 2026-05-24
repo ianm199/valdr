@@ -40,7 +40,10 @@ use super::varint::{load_len, write_len};
 /// followed by alternating raw-byte field and value strings.
 pub fn save_hash_object(w: &mut impl Write, obj: &RedisObject) -> io::Result<()> {
     let hash = obj.hash().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidData, "save_hash_object called on non-hash object")
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "save_hash_object called on non-hash object",
+        )
     })?;
     write_len(w, hash.len() as u64)?;
     for (field, value) in hash {
@@ -59,7 +62,10 @@ pub fn load_hash_object(r: &mut impl Read) -> io::Result<RedisObject> {
     for _ in 0..n {
         let field_bytes = read_rdb_string(r)?;
         let value_bytes = read_rdb_string(r)?;
-        hash.insert(RedisString::from_vec(field_bytes), RedisString::from_vec(value_bytes));
+        hash.insert(
+            RedisString::from_vec(field_bytes),
+            RedisString::from_vec(value_bytes),
+        );
     }
     Ok(RedisObject::new_hash_from_map(hash))
 }
@@ -81,7 +87,10 @@ mod tests {
     fn roundtrip(pairs: &[(&str, &str)]) -> HashMap<RedisString, RedisString> {
         let mut hash = HashMap::new();
         for (f, v) in pairs {
-            hash.insert(RedisString::from_bytes(f.as_bytes()), RedisString::from_bytes(v.as_bytes()));
+            hash.insert(
+                RedisString::from_bytes(f.as_bytes()),
+                RedisString::from_bytes(v.as_bytes()),
+            );
         }
         let obj = RedisObject::new_hash_from_map(hash);
 
@@ -103,7 +112,9 @@ mod tests {
         let result = roundtrip(&[("field1", "value1")]);
         assert_eq!(result.len(), 1);
         assert_eq!(
-            result.get(&RedisString::from_bytes(b"field1")).map(|v| v.as_bytes()),
+            result
+                .get(&RedisString::from_bytes(b"field1"))
+                .map(|v| v.as_bytes()),
             Some(b"value1".as_slice())
         );
     }
@@ -115,7 +126,9 @@ mod tests {
         assert_eq!(result.len(), 3);
         for (f, v) in &pairs {
             assert_eq!(
-                result.get(&RedisString::from_bytes(f.as_bytes())).map(|r| r.as_bytes()),
+                result
+                    .get(&RedisString::from_bytes(f.as_bytes()))
+                    .map(|r| r.as_bytes()),
                 Some(v.as_bytes())
             );
         }
@@ -126,7 +139,10 @@ mod tests {
         let field: Vec<u8> = (0u8..=255).collect();
         let value: Vec<u8> = (0u8..=127).collect();
         let mut hash = HashMap::new();
-        hash.insert(RedisString::from_vec(field.clone()), RedisString::from_vec(value.clone()));
+        hash.insert(
+            RedisString::from_vec(field.clone()),
+            RedisString::from_vec(value.clone()),
+        );
         let obj = RedisObject::new_hash_from_map(hash);
         let mut buf: Vec<u8> = Vec::new();
         save_hash_object(&mut buf, &obj).unwrap();
@@ -134,7 +150,9 @@ mod tests {
         let loaded = load_hash_object(&mut cursor).unwrap();
         let result = loaded.hash().unwrap();
         assert_eq!(
-            result.get(&RedisString::from_vec(field)).map(|v| v.as_bytes()),
+            result
+                .get(&RedisString::from_vec(field))
+                .map(|v| v.as_bytes()),
             Some(value.as_slice())
         );
     }

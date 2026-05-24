@@ -163,21 +163,20 @@ fn lookup_key_by_pattern(
     let after_star = &pat_bytes[star_pos + 1..];
 
     // C: sort.c:98-103 — detect hash-dereference `->field`.
-    let (postfix, field_name): (&[u8], Option<&[u8]>) =
-        if let Some(arrow) = find_arrow(after_star) {
-            let field = &after_star[arrow + 2..];
-            if field.is_empty() {
-                (after_star, None)
-            } else {
-                (&after_star[..arrow], Some(field))
-            }
-        } else {
+    let (postfix, field_name): (&[u8], Option<&[u8]>) = if let Some(arrow) = find_arrow(after_star)
+    {
+        let field = &after_star[arrow + 2..];
+        if field.is_empty() {
             (after_star, None)
-        };
+        } else {
+            (&after_star[..arrow], Some(field))
+        }
+    } else {
+        (after_star, None)
+    };
 
     // C: sort.c:105-113 — build substituted key name.
-    let mut key_bytes: Vec<u8> =
-        Vec::with_capacity(prefix.len() + sub_bytes.len() + postfix.len());
+    let mut key_bytes: Vec<u8> = Vec::with_capacity(prefix.len() + sub_bytes.len() + postfix.len());
     key_bytes.extend_from_slice(prefix);
     key_bytes.extend_from_slice(sub_bytes);
     key_bytes.extend_from_slice(postfix);

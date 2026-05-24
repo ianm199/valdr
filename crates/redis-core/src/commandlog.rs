@@ -19,9 +19,9 @@
 //! the public functions accept `&mut [CommandLog; CommandLogType::NUM]` as an
 //! explicit parameter.
 
-use std::collections::VecDeque;
-use redis_types::{RedisError, RedisResult, RedisString};
 use crate::command_context::CommandContext;
+use redis_types::{RedisError, RedisResult, RedisString};
+use std::collections::VecDeque;
 
 // ── Constants ─────────────────────────────────────────────────────────────
 // C: commandlog.h:35-36
@@ -392,9 +392,8 @@ pub fn commandlog_command(
         // Clone both args before any mutable ctx borrows.
         let count_arg = ctx.arg(2)?.clone();
         let type_arg = ctx.arg(3)?.clone();
-        let mut count = parse_range_long(count_arg.as_bytes(), -1, i64::MAX).ok_or_else(|| {
-            RedisError::runtime(b"count should be greater than or equal to -1")
-        })?;
+        let mut count = parse_range_long(count_arg.as_bytes(), -1, i64::MAX)
+            .ok_or_else(|| RedisError::runtime(b"count should be greater than or equal to -1"))?;
         let log_type = commandlog_parse_type(type_arg.as_bytes())?;
         if count == -1 {
             count = logs[log_type.as_index()].entries.len() as i64;
@@ -450,8 +449,7 @@ fn commandlog_create_entry(
                 // C: sdsnewlen(ptr, COMMANDLOG_ENTRY_MAX_STRING)
                 //    + sdscatprintf("... (%lu more bytes)", extra)
                 let extra = arg.len() - COMMANDLOG_ENTRY_MAX_STRING;
-                let mut truncated: Vec<u8> =
-                    arg.as_bytes()[..COMMANDLOG_ENTRY_MAX_STRING].to_vec();
+                let mut truncated: Vec<u8> = arg.as_bytes()[..COMMANDLOG_ENTRY_MAX_STRING].to_vec();
                 let suffix = format!("... ({} more bytes)", extra);
                 truncated.extend_from_slice(suffix.as_bytes());
                 ce_argv.push(RedisString::from_vec(truncated));
@@ -501,8 +499,7 @@ fn commandlog_push_entry_if_needed(
     }
     if value >= log.threshold {
         // C: listAddNodeHead — newest entry goes to the front.
-        let entry =
-            commandlog_create_entry(argv, value, &mut log.entry_id, peerid, cname);
+        let entry = commandlog_create_entry(argv, value, &mut log.entry_id, peerid, cname);
         log.entries.push_front(entry);
     }
     // C: while (listLength > max_len) listDelNode(listLast(...))
@@ -528,11 +525,7 @@ fn commandlog_reset(log: &mut CommandLog) {
 /// `count` must be >= 0; pass the log length to return all entries.
 ///
 /// C: `commandlogGetReply` (commandlog.c:120-144)
-fn commandlog_get_reply(
-    ctx: &mut CommandContext,
-    log: &CommandLog,
-    count: i64,
-) -> RedisResult<()> {
+fn commandlog_get_reply(ctx: &mut CommandContext, log: &CommandLog, count: i64) -> RedisResult<()> {
     let actual_count = if count <= 0 {
         0_usize
     } else {
@@ -718,14 +711,17 @@ mod tests {
 
     #[test]
     fn create_entry_truncates_argc() {
-        let argv: Vec<RedisString> =
-            (0..COMMANDLOG_ENTRY_MAX_ARGC + 5).map(|i| rs(format!("arg{}", i).as_bytes())).collect();
+        let argv: Vec<RedisString> = (0..COMMANDLOG_ENTRY_MAX_ARGC + 5)
+            .map(|i| rs(format!("arg{}", i).as_bytes()))
+            .collect();
         let mut id = 0u64;
         let entry = commandlog_create_entry(&argv, 0, &mut id, rs(b"peer"), rs(b""));
         assert_eq!(entry.argv.len(), COMMANDLOG_ENTRY_MAX_ARGC);
         let last = entry.argv.last().unwrap().as_bytes();
         assert!(last.windows(3).any(|w| w == b"..."));
-        assert!(last.windows(b"more arguments".len()).any(|w| w == b"more arguments"));
+        assert!(last
+            .windows(b"more arguments".len())
+            .any(|w| w == b"more arguments"));
     }
 
     #[test]
@@ -757,8 +753,14 @@ mod tests {
 
     #[test]
     fn commandlog_type_from_bytes() {
-        assert_eq!(CommandLogType::from_bytes(b"slow"), Some(CommandLogType::Slow));
-        assert_eq!(CommandLogType::from_bytes(b"SLOW"), Some(CommandLogType::Slow));
+        assert_eq!(
+            CommandLogType::from_bytes(b"slow"),
+            Some(CommandLogType::Slow)
+        );
+        assert_eq!(
+            CommandLogType::from_bytes(b"SLOW"),
+            Some(CommandLogType::Slow)
+        );
         assert_eq!(
             CommandLogType::from_bytes(b"large-request"),
             Some(CommandLogType::LargeRequest)

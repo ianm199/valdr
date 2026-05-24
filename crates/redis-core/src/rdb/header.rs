@@ -9,7 +9,7 @@
 use std::io::{self, Read, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::varint::{write_len, RDB_ENC_INT16, RDB_ENC_INT32, RDB_ENCVAL};
+use super::varint::{write_len, RDB_ENCVAL, RDB_ENC_INT16, RDB_ENC_INT32};
 
 pub const RDB_VERSION: u16 = 11;
 /// Valkey's no-magic DUMP/RESTORE payload version.
@@ -121,7 +121,11 @@ fn write_aux_integer(writer: &mut impl Write, key: &[u8], n: i64) -> io::Result<
 
 /// Write the 9-byte RDB magic header: `REDIS0011`.
 pub fn write_magic(writer: &mut impl Write) -> io::Result<()> {
-    let header = format!("{}{:04}", std::str::from_utf8(RDB_MAGIC_REDIS).unwrap(), RDB_VERSION);
+    let header = format!(
+        "{}{:04}",
+        std::str::from_utf8(RDB_MAGIC_REDIS).unwrap(),
+        RDB_VERSION
+    );
     writer.write_all(header.as_bytes())
 }
 
@@ -155,13 +159,17 @@ pub fn read_magic(reader: &mut impl Read) -> io::Result<u16> {
             .parse()
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "non-numeric RDB version"))
     } else if magic.starts_with(RDB_MAGIC_VALKEY) {
-        let version_str = std::str::from_utf8(&magic[6..9])
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "non-UTF8 VALKEY RDB version"))?;
-        version_str
-            .parse()
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "non-numeric VALKEY RDB version"))
+        let version_str = std::str::from_utf8(&magic[6..9]).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "non-UTF8 VALKEY RDB version")
+        })?;
+        version_str.parse().map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "non-numeric VALKEY RDB version")
+        })
     } else {
-        Err(io::Error::new(io::ErrorKind::InvalidData, "invalid RDB magic"))
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid RDB magic",
+        ))
     }
 }
 
@@ -190,12 +198,10 @@ pub fn read_rdb_string(reader: &mut impl Read) -> io::Result<Vec<u8>> {
                 reader.read_exact(&mut b)?;
                 Ok(i32::from_le_bytes(b).to_string().into_bytes())
             }
-            super::varint::RDB_ENC_LZF => {
-                Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "LZF-compressed strings not supported in Round 18",
-                ))
-            }
+            super::varint::RDB_ENC_LZF => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "LZF-compressed strings not supported in Round 18",
+            )),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "unknown RDB string encoding",

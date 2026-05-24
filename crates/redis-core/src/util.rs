@@ -187,8 +187,16 @@ fn stringmatchlen_impl(
                             matched = true;
                         }
                     } else {
-                        let pc = if nocase { pat[0].to_ascii_lowercase() } else { pat[0] };
-                        let sc = if nocase { s[0].to_ascii_lowercase() } else { s[0] };
+                        let pc = if nocase {
+                            pat[0].to_ascii_lowercase()
+                        } else {
+                            pat[0]
+                        };
+                        let sc = if nocase {
+                            s[0].to_ascii_lowercase()
+                        } else {
+                            s[0]
+                        };
                         if pc == sc {
                             matched = true;
                         }
@@ -211,16 +219,32 @@ fn stringmatchlen_impl(
                     pat = &pat[1..];
                 }
                 // fall through to default literal match
-                let pc = if nocase { pat[0].to_ascii_lowercase() } else { pat[0] };
-                let sc = if nocase { s[0].to_ascii_lowercase() } else { s[0] };
+                let pc = if nocase {
+                    pat[0].to_ascii_lowercase()
+                } else {
+                    pat[0]
+                };
+                let sc = if nocase {
+                    s[0].to_ascii_lowercase()
+                } else {
+                    s[0]
+                };
                 if pc != sc {
                     return false;
                 }
                 s = &s[1..];
             }
             _ => {
-                let pc = if nocase { pat[0].to_ascii_lowercase() } else { pat[0] };
-                let sc = if nocase { s[0].to_ascii_lowercase() } else { s[0] };
+                let pc = if nocase {
+                    pat[0].to_ascii_lowercase()
+                } else {
+                    pat[0]
+                };
+                let sc = if nocase {
+                    s[0].to_ascii_lowercase()
+                } else {
+                    s[0]
+                };
                 if pc != sc {
                     return false;
                 }
@@ -291,7 +315,9 @@ pub fn string_match_len_fuzz_test() -> i32 {
     let mut cycles = 10_000_000i32;
 
     let lcg = |state: &mut u64| -> u8 {
-        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (*state >> 33) as u8 & 0x7f
     };
 
@@ -764,9 +790,17 @@ pub fn d2string(buf: &mut [u8], value: f64) -> usize {
     let s: &[u8] = if value.is_nan() {
         b"nan"
     } else if value.is_infinite() {
-        if value < 0.0 { b"-inf" } else { b"inf" }
+        if value < 0.0 {
+            b"-inf"
+        } else {
+            b"inf"
+        }
     } else if value == 0.0 {
-        if 1.0_f64 / value < 0.0 { b"-0" } else { b"0" }
+        if 1.0_f64 / value < 0.0 {
+            b"-0"
+        } else {
+            b"0"
+        }
     } else if let Some(ll) = double2ll(value) {
         let n = ll_to_string(buf, ll);
         return n;
@@ -797,11 +831,15 @@ pub fn fixedpoint_d2string(dst: &mut [u8], dvalue: f64, fractional_digits: i32) 
     // C: util.c:867-965
     let fd = fractional_digits as usize;
     if fractional_digits < 1 || fractional_digits > 17 {
-        if !dst.is_empty() { dst[0] = 0; }
+        if !dst.is_empty() {
+            dst[0] = 0;
+        }
         return 0;
     }
     if dst.len() < fd + 3 {
-        if !dst.is_empty() { dst[0] = 0; }
+        if !dst.is_empty() {
+            dst[0] = 0;
+        }
         return 0;
     }
 
@@ -816,18 +854,35 @@ pub fn fixedpoint_d2string(dst: &mut [u8], dvalue: f64, fractional_digits: i32) 
     }
 
     static POWERS_OF_TEN: [f64; 18] = [
-        1.0, 10.0, 100.0, 1_000.0, 10_000.0, 100_000.0, 1_000_000.0,
-        10_000_000.0, 100_000_000.0, 1_000_000_000.0, 10_000_000_000.0,
-        100_000_000_000.0, 1_000_000_000_000.0, 10_000_000_000_000.0,
-        100_000_000_000_000.0, 1_000_000_000_000_000.0,
-        10_000_000_000_000_000.0, 100_000_000_000_000_000.0,
+        1.0,
+        10.0,
+        100.0,
+        1_000.0,
+        10_000.0,
+        100_000.0,
+        1_000_000.0,
+        10_000_000.0,
+        100_000_000.0,
+        1_000_000_000.0,
+        10_000_000_000.0,
+        100_000_000_000.0,
+        1_000_000_000_000.0,
+        10_000_000_000_000.0,
+        100_000_000_000_000.0,
+        1_000_000_000_000_000.0,
+        10_000_000_000_000_000.0,
+        100_000_000_000_000_000.0,
     ];
 
     let svalue = (dvalue * POWERS_OF_TEN[fd]).round() as i64;
 
     let negative = svalue < 0;
     let mut value: u64 = if negative {
-        if svalue != i64::MIN { (-svalue) as u64 } else { (i64::MAX as u64) + 1 }
+        if svalue != i64::MIN {
+            (-svalue) as u64
+        } else {
+            (i64::MAX as u64) + 1
+        }
     } else {
         svalue as u64
     };
@@ -845,12 +900,16 @@ pub fn fixedpoint_d2string(dst: &mut [u8], dvalue: f64, fractional_digits: i32) 
     // Total bytes written: sign + integer_digits + '.' + fractional_digits + '\0'
     let content_size = integer_digits + 1 + fd;
     if sign_len + content_size + 1 > dst.len() {
-        if !dst.is_empty() { dst[0] = 0; }
+        if !dst.is_empty() {
+            dst[0] = 0;
+        }
         return 0;
     }
 
     // Write sign
-    if negative { dst[0] = b'-'; }
+    if negative {
+        dst[0] = b'-';
+    }
 
     let off = sign_len; // where digit content starts
 
@@ -1094,7 +1153,11 @@ pub fn set_random_seed(seed_str: &[u8]) {
 ///
 /// C: `void getRandomSeedCString(char *buff, size_t len)`, util.c:1131-1142.
 pub fn get_random_seed(buf: &mut [u8]) {
-    debug_assert_eq!(buf.len(), 129, "buf must be 129 bytes (128 hex digits + NUL)");
+    debug_assert_eq!(
+        buf.len(),
+        129,
+        "buf must be 129 bytes (128 hex digits + NUL)"
+    );
     let mut state = RANDOM_STATE.lock().unwrap_or_else(|e| e.into_inner());
     if !state.initialized {
         initialize_random_seed(&mut state);
@@ -1340,7 +1403,9 @@ fn u2string_signal_safe(base: u32, mut val: u64, out: &mut [u8]) -> usize {
         i -= 1;
         tmp[i] = HEX[(val % base as u64) as usize];
         val /= base as u64;
-        if val == 0 { break; }
+        if val == 0 {
+            break;
+        }
     }
     let digits = &tmp[i..];
     let n = digits.len().min(out.len());
@@ -1367,9 +1432,15 @@ fn i2string_signal_safe(base: u32, val: i64, out: &mut [u8]) -> usize {
     }
     if base == 10 {
         // Minus-prefix then absolute value
-        if out.is_empty() { return 0; }
+        if out.is_empty() {
+            return 0;
+        }
         out[0] = b'-';
-        let abs_val: u64 = if val != i64::MIN { (-val) as u64 } else { (i64::MAX as u64) + 1 };
+        let abs_val: u64 = if val != i64::MIN {
+            (-val) as u64
+        } else {
+            (i64::MAX as u64) + 1
+        };
         let n = u2string_signal_safe(10, abs_val, &mut out[1..]);
         return 1 + n;
     }
@@ -1498,8 +1569,14 @@ pub fn wang_hash64(mut hash: u64) -> u64 {
 
 /// Trim leading/trailing ASCII whitespace from a byte slice.
 fn trim_ascii(s: &[u8]) -> &[u8] {
-    let start = s.iter().position(|&b| !b.is_ascii_whitespace()).unwrap_or(s.len());
-    let end = s.iter().rposition(|&b| !b.is_ascii_whitespace()).map_or(0, |i| i + 1);
+    let start = s
+        .iter()
+        .position(|&b| !b.is_ascii_whitespace())
+        .unwrap_or(s.len());
+    let end = s
+        .iter()
+        .rposition(|&b| !b.is_ascii_whitespace())
+        .map_or(0, |i| i + 1);
     &s[start..end.max(start)]
 }
 
@@ -1521,7 +1598,7 @@ fn libc_enotdir() -> i32 {
 
 /// Stub constants for errno values used in `fsync_file_dir`.
 /// TODO(port): replace with libc::EBADF / libc::EINVAL once libc dep is wired.
-const LIBC_EBADF: i32 = 9;   // POSIX EBADF
+const LIBC_EBADF: i32 = 9; // POSIX EBADF
 const LIBC_EINVAL: i32 = 22; // POSIX EINVAL
 
 // ──────────────────────────────────────────────────────────────────────────
