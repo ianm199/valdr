@@ -27,4 +27,8 @@ crates/redis-core/src/syscheck.rs	live-rooted	compile	Compile-ready system-check
 crates/redis-core/src/threads_mngr.rs	live-rooted	compile	Compile-ready thread-manager scaffold; rooted so compiler now guards it.
 crates/redis-core/src/tracking.rs	live-rooted	compile	Client-tracking invalidation logic is compile-ready; rooted for future TCL tracking work.
 crates/redis-commands/src/vector.rs	live-rooted	compile	Compile-ready vector.c translation with tests; rooted in redis-commands.
-
+source-drafts/generated/redis-ds-wave-20260524/crates/redis-ds/src/intset.rs	generated-draft	repair-and-integrate	DeepSeek cheap-bulk draft from intset.c/intset.h; good candidate for canonical IntSet repair.
+source-drafts/generated/redis-ds-wave-20260524/crates/redis-ds/src/ziplist.rs	generated-draft	repair-and-integrate	DeepSeek cheap-bulk read-mostly ziplist draft; contains one UTF-8 helper to remove during integration.
+source-drafts/generated/redis-ds-wave-20260524/crates/redis-ds/src/adlist.rs	generated-draft	repair-and-integrate	DeepSeek cheap-bulk adlist draft; safe Rc/RefCell shape may need simplification before live use.
+source-drafts/generated/redis-ds-wave-20260524/crates/redis-ds/src/quicklist.rs	generated-draft	scaffold-after-listpack	DeepSeek quicklist draft captures API surface but has listpack TODO stubs; integrate only after ListPack is canonical.
+source-drafts/generated/redis-ds-wave-20260524/crates/redis-ds/src/rax.rs	generated-draft	behavior-map-first	DeepSeek rax draft has many todo! nodes; use as behavior map, not direct product code.

@@ -325,3 +325,16 @@ decision_doc = "harness/architecture/decisions/runtime-ownership.md"
 script_required = "harness/bench/run-soak.sh"
 rationale = "Locked as TODO(human) by runtime-owner-0-faithful-map: no public performance claim until a long-duration soak runner exists. Script does not exist yet; do not author runner entry until human picks scope (workloads, duration, allowed regression band)."
 expected_capabilities = ["performance-profile-matrix", "faithful-runtime-ownership"]
+
+[[runner]]
+id = "redis-ds-unit"
+kind = "external_suite"
+surface = "correctness"
+method = "external-suite"
+metric = "redis_ds_unit_pass"
+target = "rust-unit"
+command = ["cargo", "test", "-p", "redis-ds"]
+timeout_s = 900
+resources = ["cargo-target", "redis-ds"]
+claim_level = "internal-regression-gate"
+capabilities = ["redis-ds-encodings"]
