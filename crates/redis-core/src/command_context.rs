@@ -340,6 +340,51 @@ impl<'a> CommandContext<'a> {
             .unwrap_or(b"<unknown>")
     }
 
+    /// Apply the packet-level CLIENT TRACKING hooks after a command succeeds.
+    ///
+    /// This is intentionally narrow: it records the common read-command key
+    /// shapes used by the official tracking TCL and sends invalidations for
+    /// the matching write-command shapes through the existing outbound
+    /// pub/sub channels.
+    pub fn apply_client_tracking_after_command(&mut self, name: &[u8], is_write: bool) {
+        if is_write {
+            let mutation = tracking_mutation_for_command(name, &self.client.argv);
+            if mutation.all_keys {
+                let pubsub = self.pubsub.as_ref().cloned();
+                crate::tracking::runtime_invalidate_all(&mut *self.client, pubsub.as_ref());
+            } else if !mutation.keys.is_empty() {
+                let pubsub = self.pubsub.as_ref().cloned();
+                let defer_bcast = self.client.flag_deny_blocking();
+                crate::tracking::runtime_invalidate_keys(
+                    self.client.id,
+                    &mut *self.client,
+                    pubsub.as_ref(),
+                    &mutation.keys,
+                    mutation.force_send_to_source,
+                    defer_bcast,
+                );
+            }
+        } else {
+            let keys = tracking_read_keys_for_command(name, &self.client.argv);
+            if !keys.is_empty() {
+                crate::tracking::runtime_remember_read_keys(
+                    self.client.id,
+                    &self.client.tracking,
+                    &keys,
+                );
+            }
+        }
+
+        if !ascii_eq_ignore_case(name, b"CLIENT") && self.client.tracking.caching {
+            self.client.tracking.caching = false;
+            crate::tracking::sync_runtime_client_tracking(self.client.id, &self.client.tracking);
+        }
+        if !self.client.flag_deny_blocking() {
+            let pubsub = self.pubsub.as_ref().cloned();
+            crate::tracking::runtime_flush_pending_bcast(&mut *self.client, pubsub.as_ref());
+        }
+    }
+
     // ── Reply writers ─────────────────────────────────────────────
 
     pub fn reply_simple_string(&mut self, bytes: &[u8]) -> RedisResult<()> {
@@ -1092,6 +1137,179 @@ pub fn encode_pubsub_pmessage_resp3(
         &mut buf,
     );
     buf
+}
+
+#[derive(Default)]
+struct TrackingMutation {
+    keys: Vec<RedisString>,
+    all_keys: bool,
+    force_send_to_source: bool,
+}
+
+fn ascii_eq_ignore_case(left: &[u8], right: &[u8]) -> bool {
+    left.eq_ignore_ascii_case(right)
+}
+
+fn tracking_read_keys_for_command(name: &[u8], argv: &[RedisString]) -> Vec<RedisString> {
+    if ascii_eq_ignore_case(name, b"GET")
+        || ascii_eq_ignore_case(name, b"HGET")
+        || ascii_eq_ignore_case(name, b"HEXISTS")
+        || ascii_eq_ignore_case(name, b"HLEN")
+        || ascii_eq_ignore_case(name, b"HGETALL")
+        || ascii_eq_ignore_case(name, b"HKEYS")
+        || ascii_eq_ignore_case(name, b"HVALS")
+        || ascii_eq_ignore_case(name, b"HSTRLEN")
+        || ascii_eq_ignore_case(name, b"HRANDFIELD")
+        || ascii_eq_ignore_case(name, b"LINDEX")
+        || ascii_eq_ignore_case(name, b"LLEN")
+        || ascii_eq_ignore_case(name, b"LRANGE")
+        || ascii_eq_ignore_case(name, b"SCARD")
+        || ascii_eq_ignore_case(name, b"SISMEMBER")
+        || ascii_eq_ignore_case(name, b"SMEMBERS")
+        || ascii_eq_ignore_case(name, b"ZCARD")
+        || ascii_eq_ignore_case(name, b"ZRANGE")
+        || ascii_eq_ignore_case(name, b"ZSCORE")
+        || ascii_eq_ignore_case(name, b"TYPE")
+        || ascii_eq_ignore_case(name, b"TTL")
+        || ascii_eq_ignore_case(name, b"PTTL")
+    {
+        return argv.get(1).cloned().into_iter().collect();
+    }
+    if ascii_eq_ignore_case(name, b"MGET") {
+        return argv.iter().skip(1).cloned().collect();
+    }
+    if ascii_eq_ignore_case(name, b"HMGET") {
+        return argv.get(1).cloned().into_iter().collect();
+    }
+    if ascii_eq_ignore_case(name, b"EVAL")
+        || ascii_eq_ignore_case(name, b"EVAL_RO")
+        || ascii_eq_ignore_case(name, b"EVALSHA")
+        || ascii_eq_ignore_case(name, b"EVALSHA_RO")
+        || ascii_eq_ignore_case(name, b"FCALL")
+        || ascii_eq_ignore_case(name, b"FCALL_RO")
+    {
+        return tracking_script_keys(argv);
+    }
+    Vec::new()
+}
+
+fn tracking_script_keys(argv: &[RedisString]) -> Vec<RedisString> {
+    let Some(numkeys_arg) = argv.get(2) else {
+        return Vec::new();
+    };
+    let Some(numkeys) = parse_i64_from_bytes(numkeys_arg.as_bytes()) else {
+        return Vec::new();
+    };
+    if numkeys <= 0 {
+        return Vec::new();
+    }
+    let start = 3usize;
+    let end = start.saturating_add(numkeys as usize).min(argv.len());
+    argv[start..end].to_vec()
+}
+
+fn tracking_mutation_for_command(name: &[u8], argv: &[RedisString]) -> TrackingMutation {
+    if ascii_eq_ignore_case(name, b"FLUSHALL") || ascii_eq_ignore_case(name, b"FLUSHDB") {
+        return TrackingMutation {
+            all_keys: true,
+            ..TrackingMutation::default()
+        };
+    }
+
+    let mut out = TrackingMutation::default();
+    if ascii_eq_ignore_case(name, b"MSET") || ascii_eq_ignore_case(name, b"MSETNX") {
+        out.keys = argv
+            .iter()
+            .enumerate()
+            .skip(1)
+            .filter_map(|(idx, arg)| (idx % 2 == 1).then_some(arg.clone()))
+            .collect();
+        return out;
+    }
+    if ascii_eq_ignore_case(name, b"DEL") || ascii_eq_ignore_case(name, b"UNLINK") {
+        out.keys = argv.iter().skip(1).cloned().collect();
+        return out;
+    }
+    if ascii_eq_ignore_case(name, b"RENAME") || ascii_eq_ignore_case(name, b"RENAMENX") {
+        out.keys.extend(argv.get(1).cloned());
+        out.keys.extend(argv.get(2).cloned());
+        return out;
+    }
+    if ascii_eq_ignore_case(name, b"BLMOVE") || ascii_eq_ignore_case(name, b"LMOVE") {
+        out.keys.extend(argv.get(1).cloned());
+        out.keys.extend(argv.get(2).cloned());
+        return out;
+    }
+
+    if command_mutates_first_key(name) {
+        out.keys.extend(argv.get(1).cloned());
+        out.force_send_to_source = command_sets_expiry(name, argv);
+    }
+    out
+}
+
+fn command_mutates_first_key(name: &[u8]) -> bool {
+    ascii_eq_ignore_case(name, b"SET")
+        || ascii_eq_ignore_case(name, b"SETEX")
+        || ascii_eq_ignore_case(name, b"PSETEX")
+        || ascii_eq_ignore_case(name, b"SETNX")
+        || ascii_eq_ignore_case(name, b"GETSET")
+        || ascii_eq_ignore_case(name, b"GETDEL")
+        || ascii_eq_ignore_case(name, b"GETEX")
+        || ascii_eq_ignore_case(name, b"SETBIT")
+        || ascii_eq_ignore_case(name, b"SETRANGE")
+        || ascii_eq_ignore_case(name, b"APPEND")
+        || ascii_eq_ignore_case(name, b"INCR")
+        || ascii_eq_ignore_case(name, b"INCRBY")
+        || ascii_eq_ignore_case(name, b"INCRBYFLOAT")
+        || ascii_eq_ignore_case(name, b"DECR")
+        || ascii_eq_ignore_case(name, b"DECRBY")
+        || ascii_eq_ignore_case(name, b"EXPIRE")
+        || ascii_eq_ignore_case(name, b"PEXPIRE")
+        || ascii_eq_ignore_case(name, b"EXPIREAT")
+        || ascii_eq_ignore_case(name, b"PEXPIREAT")
+        || ascii_eq_ignore_case(name, b"EXPIRETIME")
+        || ascii_eq_ignore_case(name, b"PEXPIRETIME")
+        || ascii_eq_ignore_case(name, b"PERSIST")
+        || ascii_eq_ignore_case(name, b"HSET")
+        || ascii_eq_ignore_case(name, b"HSETNX")
+        || ascii_eq_ignore_case(name, b"HMSET")
+        || ascii_eq_ignore_case(name, b"HDEL")
+        || ascii_eq_ignore_case(name, b"HINCRBY")
+        || ascii_eq_ignore_case(name, b"HINCRBYFLOAT")
+        || ascii_eq_ignore_case(name, b"LPUSH")
+        || ascii_eq_ignore_case(name, b"RPUSH")
+        || ascii_eq_ignore_case(name, b"LPUSHX")
+        || ascii_eq_ignore_case(name, b"RPUSHX")
+        || ascii_eq_ignore_case(name, b"LPOP")
+        || ascii_eq_ignore_case(name, b"RPOP")
+        || ascii_eq_ignore_case(name, b"LSET")
+        || ascii_eq_ignore_case(name, b"LREM")
+        || ascii_eq_ignore_case(name, b"LTRIM")
+        || ascii_eq_ignore_case(name, b"LINSERT")
+        || ascii_eq_ignore_case(name, b"ZADD")
+        || ascii_eq_ignore_case(name, b"ZINCRBY")
+        || ascii_eq_ignore_case(name, b"ZREM")
+        || ascii_eq_ignore_case(name, b"SADD")
+        || ascii_eq_ignore_case(name, b"SREM")
+        || ascii_eq_ignore_case(name, b"XADD")
+        || ascii_eq_ignore_case(name, b"XDEL")
+}
+
+fn command_sets_expiry(name: &[u8], argv: &[RedisString]) -> bool {
+    if ascii_eq_ignore_case(name, b"SETEX") || ascii_eq_ignore_case(name, b"PSETEX") {
+        return true;
+    }
+    if !ascii_eq_ignore_case(name, b"SET") {
+        return false;
+    }
+    argv.iter().skip(3).any(|arg| {
+        let bytes = arg.as_bytes();
+        ascii_eq_ignore_case(bytes, b"EX")
+            || ascii_eq_ignore_case(bytes, b"PX")
+            || ascii_eq_ignore_case(bytes, b"EXAT")
+            || ascii_eq_ignore_case(bytes, b"PXAT")
+    })
 }
 
 fn glob_match_ascii_ci(pattern: &[u8], text: &[u8]) -> bool {

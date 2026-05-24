@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "kind": "manual_packet_salvage",
+  "packet": "tcl-client-tracking-minimal-v1",
+  "target_commit": "dbca7e7569ce1dc17ac9afee4d134e8718205bc4",
+  "ts": "2026-05-24T20:44:23Z",
+  "reason": "The Codex packet completed useful tracking work outside the parent loop. A later record-completion attempt hung in the generic wire-smoke gate with both reference and Rust servers listening, so this packet is recorded manually against focused evidence instead of claiming the broad smoke gate.",
+  "agent_transcript": "harness/loop/state/transcripts/20260524T201650Z-codex-test-fixer-tcl-client-tracking-minimal-v1.jsonl",
+  "agent_summary": "Implemented stateful CLIENT TRACKING ON/OFF, CLIENT CACHING, CLIENT GETREDIR, CLIENT TRACKINGINFO, BCAST prefix collision handling, runtime read tracking, common write invalidations, tracked BLMOVE wake invalidation, and tracking runtime reset on client reset.",
+  "changed_files": [
+    "crates/redis-commands/src/connection.rs",
+    "crates/redis-commands/src/dispatch.rs",
+    "crates/redis-commands/src/list.rs",
+    "crates/redis-core/src/client.rs",
+    "crates/redis-core/src/command_context.rs",
+    "crates/redis-core/src/tracking.rs",
+    "docs/TCL_UNLOCK_OVERNIGHT_20260524.md",
+    "harness/evidence/ledger.jsonl"
+  ],
+  "manual_gates": {
+    "cargo_check_workspace": {
+      "passed": true,
+      "command": "cargo check --workspace",
+      "note": "Existing warnings only."
+    },
+    "focused_tcl_unit_tracking": {
+      "status": "advanced_to_concrete_failures",
+      "command": "python3 harness/oracle/tcl-survey.py --runner-id tcl-client-tracking-minimal-v1-manual --timeout-s 120 --files unit/tracking",
+      "latest_evidence": "harness/oracle/results/tcl-survey/20260524T204044Z/unit__tracking.json",
+      "timed_out": false,
+      "returncode": 1,
+      "frontier": "Tracking info is correct",
+      "exception": "can't read \"total_items\": no such variable"
+    },
+    "wire_smoke_record_completion": {
+      "passed": false,
+      "status": "not_claimed",
+      "note": "record-completion hung in bash harness/oracle/smoke.sh --skip-build; the hung reference and Rust server processes were killed before this manual salvage."
+    }
+  },
+  "remaining_failures": [
+    "INFO does not emit tracking_total_items, tracking_total_keys, tracking_total_prefixes, or tracking_clients.",
+    "Script read-key tracking still misses some read-only command calls.",
+    "Broken redirect push behavior is incomplete when the redirect client terminates.",
+    "Switching from normal tracking to BCAST mode does not invalidate pre-BCAST keys exactly like upstream.",
+    "Some same-connection invalidation ordering around HDEL, MULTI/EXEC, eviction, FLUSHALL, and FLUSHDB still differs from upstream."
+  ],
+  "harness_learning": [
+    "Large packets need declared secondary target files for dispatch/list hooks, otherwise the useful implementation lands outside the first packet's narrow target set.",
+    "Generic completion gates need hard timeouts around smoke runners so a useful packet cannot be wedged by a broad post-run gate."
+  ],
+  "status": "accepted_with_caveat"
+}

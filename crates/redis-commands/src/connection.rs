@@ -4,7 +4,7 @@
 //! Most handlers operate purely against the client's argv and reply buffer;
 //! they never need to touch the keyspace.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -831,6 +831,16 @@ fn apply_config_set_for_context(
 ) -> RedisResult<()> {
     if ascii_eq_ignore_case(key, b"appendonly") {
         return apply_appendonly_config_set(ctx, cfg, value);
+    }
+    if ascii_eq_ignore_case(key, b"tracking-table-max-keys") {
+        if let Some(max_keys) = parse_usize_strict(value) {
+            let pubsub = ctx.pubsub.as_ref().cloned();
+            redis_core::tracking::runtime_limit_tracked_keys(
+                max_keys,
+                ctx.client_mut(),
+                pubsub.as_ref(),
+            );
+        }
     }
     apply_config_set(cfg, key, value);
     Ok(())
@@ -2579,14 +2589,6 @@ pub fn client_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     Err(RedisError::runtime(msg))
 }
 
-fn client_id_exists(id: u64) -> bool {
-    let guard = match client_info_registry().lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    guard.all().iter().any(|snap| snap.id == id)
-}
-
 fn client_tracking_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ctx.arg_count() < 3 {
         return Err(RedisError::wrong_number_of_args(b"client|tracking"));
@@ -2606,16 +2608,16 @@ fn client_tracking_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             if idx + 1 >= ctx.arg_count() {
                 return Err(RedisError::syntax(b"syntax error"));
             }
+            if redirect != 0 {
+                return Err(RedisError::runtime(
+                    b"ERR A client can only redirect to a single other client",
+                ));
+            }
             let id = parse_i64_strict(ctx.arg(idx + 1)?.as_bytes())
                 .ok_or_else(|| RedisError::runtime(b"ERR value is not an integer or out of range"))?;
             if id < 0 {
                 return Err(RedisError::runtime(
                     b"ERR value is not an integer or out of range",
-                ));
-            }
-            if !client_id_exists(id as u64) && id as u64 != ctx.client_ref().id {
-                return Err(RedisError::runtime(
-                    b"ERR The client ID you want redirect to does not exist",
                 ));
             }
             redirect = id;
@@ -2644,7 +2646,9 @@ fn client_tracking_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     }
 
     if ascii_eq_ignore_case(mode.as_bytes(), b"OFF") {
+        let client_id = ctx.client_ref().id;
         ctx.client_mut().tracking = redis_core::client::ClientTrackingState::default();
+        redis_core::tracking::remove_runtime_client_tracking(client_id);
         refresh_client_info_registry(ctx.client_ref());
         return ctx.reply_simple_string(b"OK");
     }
@@ -2679,6 +2683,41 @@ fn client_tracking_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             b"ERR You can't switch OPTIN/OPTOUT mode before disabling tracking for this client",
         ));
     }
+    if bcast {
+        let existing: Option<HashSet<Vec<u8>>> = if client.tracking.enabled && client.tracking.bcast
+        {
+            Some(
+                client
+                    .tracking
+                    .prefixes
+                    .iter()
+                    .map(|prefix| prefix.as_bytes().to_vec())
+                    .collect(),
+            )
+        } else {
+            None
+        };
+        let prefix_refs: Vec<&[u8]> = prefixes.iter().map(|prefix| prefix.as_bytes()).collect();
+        redis_core::tracking::check_prefix_collisions(&prefix_refs, existing.as_ref())?;
+    }
+    let mut effective_prefixes = if bcast && client.tracking.enabled && client.tracking.bcast {
+        client.tracking.prefixes.clone()
+    } else {
+        Vec::new()
+    };
+    if bcast {
+        if prefixes.is_empty() {
+            if effective_prefixes.is_empty() {
+                effective_prefixes.push(RedisString::from_bytes(b""));
+            }
+        } else {
+            for prefix in prefixes {
+                if !effective_prefixes.iter().any(|existing| existing == &prefix) {
+                    effective_prefixes.push(prefix);
+                }
+            }
+        }
+    }
     client.tracking.enabled = true;
     client.tracking.bcast = bcast;
     client.tracking.optin = optin;
@@ -2687,7 +2726,8 @@ fn client_tracking_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     client.tracking.caching = false;
     client.tracking.broken_redirect = false;
     client.tracking.redirect = redirect;
-    client.tracking.prefixes = prefixes;
+    client.tracking.prefixes = effective_prefixes;
+    redis_core::tracking::sync_runtime_client_tracking(client.id, &client.tracking);
     refresh_client_info_registry(ctx.client_ref());
     ctx.reply_simple_string(b"OK")
 }
@@ -2723,6 +2763,7 @@ fn client_caching_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         }
         tracking.caching = true;
     }
+    redis_core::tracking::sync_runtime_client_tracking(ctx.client_ref().id, &ctx.client_ref().tracking);
     refresh_client_info_registry(ctx.client_ref());
     ctx.reply_simple_string(b"OK")
 }

@@ -392,6 +392,18 @@ fn deliver_to_waiter(db: &mut RedisDb, key: &RedisString, waiter: BlockedWaiter)
             }
             crate::slowlog_cmd::record_blocked_slowlog_entry(waiter.client_id);
             push_one(db, &dst_key, value, dst_side);
+            if waiter.resp_proto == 3
+                && redis_core::tracking::runtime_take_tracked_key_for_client(
+                    waiter.client_id,
+                    &dst_key,
+                )
+            {
+                let payload = redis_core::tracking::runtime_encode_invalidation_for_proto(
+                    waiter.resp_proto,
+                    std::slice::from_ref(&dst_key),
+                );
+                let _ = waiter.sender.send(payload);
+            }
             wake_blocked_for_key(db, &dst_key);
         }
         BlockedAction::ZSetPop { .. } => {

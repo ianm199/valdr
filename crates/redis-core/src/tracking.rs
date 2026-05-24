@@ -38,9 +38,13 @@
 //!
 //! C: tracking.c
 
-use crate::client::ClientId;
+use crate::client::{Client, ClientId, ClientTrackingState};
+use crate::client_info::client_info_registry;
+use crate::pubsub_registry::PubSubRegistry;
+use redis_protocol::RespFrame;
 use redis_types::{RedisError, RedisString};
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, OnceLock};
 
 // ── Local types ────────────────────────────────────────────────────────────
 
@@ -172,6 +176,431 @@ impl TrackingState {
     }
 }
 
+// ── Minimal live tracking runtime ─────────────────────────────────────────
+
+#[derive(Debug, Default)]
+struct RuntimeTrackingState {
+    clients: HashMap<ClientId, ClientTrackingState>,
+    table: HashMap<RedisString, HashSet<ClientId>>,
+    bcast_pending: HashMap<(ClientId, RedisString), Vec<RedisString>>,
+}
+
+#[derive(Debug)]
+struct RuntimeTrackingDelivery {
+    owner_id: ClientId,
+    recipient_id: ClientId,
+    redirect: Option<ClientId>,
+    keys: Vec<RedisString>,
+}
+
+static RUNTIME_TRACKING: OnceLock<Mutex<RuntimeTrackingState>> = OnceLock::new();
+
+fn runtime_tracking() -> &'static Mutex<RuntimeTrackingState> {
+    RUNTIME_TRACKING.get_or_init(|| Mutex::new(RuntimeTrackingState::default()))
+}
+
+fn lock_runtime_tracking() -> std::sync::MutexGuard<'static, RuntimeTrackingState> {
+    match runtime_tracking().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    }
+}
+
+fn remove_client_from_runtime_table(rt: &mut RuntimeTrackingState, client_id: ClientId) {
+    rt.table.retain(|_, ids| {
+        ids.remove(&client_id);
+        !ids.is_empty()
+    });
+    rt.bcast_pending
+        .retain(|(pending_client_id, _), _| *pending_client_id != client_id);
+}
+
+/// Synchronize the packet-level per-client state into the small live tracking
+/// runtime used by the current Rust server.
+pub fn sync_runtime_client_tracking(client_id: ClientId, state: &ClientTrackingState) {
+    let mut rt = lock_runtime_tracking();
+    if state.enabled {
+        rt.clients.insert(client_id, state.clone());
+        if state.bcast {
+            remove_client_from_runtime_table(&mut rt, client_id);
+        }
+    } else {
+        rt.clients.remove(&client_id);
+        remove_client_from_runtime_table(&mut rt, client_id);
+    }
+}
+
+/// Remove all live tracking references for a client.
+pub fn remove_runtime_client_tracking(client_id: ClientId) {
+    let mut rt = lock_runtime_tracking();
+    rt.clients.remove(&client_id);
+    remove_client_from_runtime_table(&mut rt, client_id);
+}
+
+/// Remember that `client_id` read `keys` while normal tracking was enabled.
+pub fn runtime_remember_read_keys(
+    client_id: ClientId,
+    state: &ClientTrackingState,
+    keys: &[RedisString],
+) {
+    if keys.is_empty() || !state.enabled || state.bcast {
+        return;
+    }
+    if (state.optin && !state.caching) || (state.optout && state.caching) {
+        return;
+    }
+
+    let mut rt = lock_runtime_tracking();
+    if !rt.clients.contains_key(&client_id) {
+        rt.clients.insert(client_id, state.clone());
+    }
+    for key in keys {
+        rt.table.entry(key.clone()).or_default().insert(client_id);
+    }
+}
+
+fn key_matches_prefix(key: &RedisString, prefix: &RedisString) -> bool {
+    key.as_bytes().starts_with(prefix.as_bytes())
+}
+
+fn add_unique_key(keys: &mut Vec<RedisString>, key: &RedisString) {
+    if !keys.iter().any(|existing| existing == key) {
+        keys.push(key.clone());
+    }
+}
+
+fn runtime_recipient_for(state: &ClientTrackingState, owner_id: ClientId) -> (ClientId, Option<ClientId>) {
+    if state.redirect > 0 {
+        let redirect = state.redirect as ClientId;
+        (redirect, Some(redirect))
+    } else {
+        (owner_id, None)
+    }
+}
+
+fn runtime_collect_key_deliveries(
+    rt: &mut RuntimeTrackingState,
+    source_id: ClientId,
+    keys: &[RedisString],
+    force_send_to_source: bool,
+    defer_bcast: bool,
+) -> Vec<RuntimeTrackingDelivery> {
+    let mut by_client: HashMap<ClientId, Vec<RedisString>> = HashMap::new();
+    for key in keys {
+        let Some(ids) = rt.table.remove(key) else {
+            continue;
+        };
+        for client_id in ids {
+            let Some(state) = rt.clients.get(&client_id) else {
+                continue;
+            };
+            if !state.enabled || state.bcast {
+                continue;
+            }
+            if state.noloop && client_id == source_id && !force_send_to_source {
+                continue;
+            }
+            add_unique_key(by_client.entry(client_id).or_default(), key);
+        }
+    }
+
+    let mut deliveries = Vec::new();
+    for (client_id, keys) in by_client {
+        if let Some(state) = rt.clients.get(&client_id) {
+            let (recipient_id, redirect) = runtime_recipient_for(state, client_id);
+            deliveries.push(RuntimeTrackingDelivery {
+                owner_id: client_id,
+                recipient_id,
+                redirect,
+                keys,
+            });
+        }
+    }
+
+    let mut bcast_by_client: HashMap<ClientId, Vec<RedisString>> = HashMap::new();
+    for (client_id, state) in &rt.clients {
+        if !state.enabled || !state.bcast {
+            continue;
+        }
+        if state.noloop && *client_id == source_id && !force_send_to_source {
+            continue;
+        }
+        for key in keys {
+            let matching_prefixes: Vec<RedisString> = if state.prefixes.is_empty() {
+                vec![RedisString::from_bytes(b"")]
+            } else {
+                state
+                    .prefixes
+                    .iter()
+                    .filter(|prefix| key_matches_prefix(key, prefix))
+                    .cloned()
+                    .collect()
+            };
+            for prefix in matching_prefixes {
+                if defer_bcast {
+                    add_unique_key(
+                        rt.bcast_pending
+                            .entry((*client_id, prefix.clone()))
+                            .or_default(),
+                        key,
+                    );
+                } else {
+                    add_unique_key(bcast_by_client.entry(*client_id).or_default(), key);
+                }
+            }
+        }
+    }
+    for (client_id, keys) in bcast_by_client {
+        if let Some(state) = rt.clients.get(&client_id) {
+            let (recipient_id, redirect) = runtime_recipient_for(state, client_id);
+            deliveries.push(RuntimeTrackingDelivery {
+                owner_id: client_id,
+                recipient_id,
+                redirect,
+                keys,
+            });
+        }
+    }
+
+    deliveries
+}
+
+fn runtime_collect_pending_bcast_deliveries(
+    rt: &mut RuntimeTrackingState,
+) -> Vec<RuntimeTrackingDelivery> {
+    let pending: Vec<((ClientId, RedisString), Vec<RedisString>)> =
+        rt.bcast_pending.drain().collect();
+    let mut deliveries = Vec::new();
+    for ((client_id, _prefix), keys) in pending {
+        let Some(state) = rt.clients.get(&client_id) else {
+            continue;
+        };
+        if !state.enabled || !state.bcast {
+            continue;
+        }
+        let (recipient_id, redirect) = runtime_recipient_for(state, client_id);
+        deliveries.push(RuntimeTrackingDelivery {
+            owner_id: client_id,
+            recipient_id,
+            redirect,
+            keys,
+        });
+    }
+    deliveries
+}
+
+fn runtime_collect_all_deliveries(rt: &RuntimeTrackingState) -> Vec<RuntimeTrackingDelivery> {
+    let mut deliveries = Vec::new();
+    for (client_id, state) in &rt.clients {
+        if !state.enabled {
+            continue;
+        }
+        let (recipient_id, redirect) = runtime_recipient_for(state, *client_id);
+        deliveries.push(RuntimeTrackingDelivery {
+            owner_id: *client_id,
+            recipient_id,
+            redirect,
+            keys: Vec::new(),
+        });
+    }
+    deliveries
+}
+
+fn tracking_keys_frame(keys: &[RedisString]) -> RespFrame {
+    RespFrame::array(
+        keys.iter()
+            .cloned()
+            .map(RespFrame::bulk)
+            .collect::<Vec<RespFrame>>(),
+    )
+}
+
+fn tracking_resp3_push(keys: &[RedisString]) -> RespFrame {
+    RespFrame::Push(vec![
+        RespFrame::bulk(RedisString::from_static(b"invalidate")),
+        tracking_keys_frame(keys),
+    ])
+}
+
+fn tracking_resp2_pubsub_message(keys: &[RedisString]) -> RespFrame {
+    RespFrame::array(vec![
+        RespFrame::bulk(RedisString::from_static(b"message")),
+        RespFrame::bulk(RedisString::from_static(b"__redis__:invalidate")),
+        tracking_keys_frame(keys),
+    ])
+}
+
+fn encode_tracking_message_for_proto(proto: i32, keys: &[RedisString]) -> Vec<u8> {
+    let mut out = Vec::new();
+    if proto == 3 {
+        redis_protocol::encode_resp3(&tracking_resp3_push(keys), &mut out);
+    } else {
+        redis_protocol::encode_resp2(&tracking_resp2_pubsub_message(keys), &mut out);
+    }
+    out
+}
+
+/// Encode an invalidation push/pubsub payload for a known protocol version.
+pub fn runtime_encode_invalidation_for_proto(proto: i32, keys: &[RedisString]) -> Vec<u8> {
+    encode_tracking_message_for_proto(proto, keys)
+}
+
+/// Return true once for a client/key pair recorded in the normal tracking table.
+pub fn runtime_take_tracked_key_for_client(client_id: ClientId, key: &RedisString) -> bool {
+    let mut rt = lock_runtime_tracking();
+    let tracked = rt
+        .clients
+        .get(&client_id)
+        .is_some_and(|state| state.enabled && !state.bcast);
+    if !tracked {
+        return false;
+    }
+    let mut remove_key = false;
+    let found = match rt.table.get_mut(key) {
+        Some(ids) => {
+            let found = ids.remove(&client_id);
+            remove_key = ids.is_empty();
+            found
+        }
+        None => false,
+    };
+    if remove_key {
+        rt.table.remove(key);
+    }
+    found
+}
+
+fn runtime_client_exists(client_id: ClientId) -> bool {
+    let guard = match client_info_registry().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    guard.all().iter().any(|snap| snap.id == client_id)
+}
+
+fn mark_runtime_redirect_broken(current: &mut Client, redirect: ClientId) {
+    current.tracking.broken_redirect = true;
+    sync_runtime_client_tracking(current.id, &current.tracking);
+    if current.resp_proto == 3 {
+        current.write_push_frame(&RespFrame::Push(vec![
+            RespFrame::bulk(RedisString::from_static(b"tracking-redir-broken")),
+            RespFrame::Integer(redirect as i64),
+        ]));
+    }
+}
+
+fn runtime_deliver_messages(
+    current: &mut Client,
+    pubsub: Option<&Arc<Mutex<PubSubRegistry>>>,
+    deliveries: Vec<RuntimeTrackingDelivery>,
+) {
+    for delivery in deliveries {
+        if delivery.recipient_id == current.id {
+            if current.resp_proto == 3 {
+                current.write_push_frame(&tracking_resp3_push(&delivery.keys));
+            } else if current.in_pubsub_mode() {
+                current.write_push_frame(&tracking_resp2_pubsub_message(&delivery.keys));
+            }
+            continue;
+        }
+
+        let Some(registry) = pubsub else {
+            if delivery.owner_id == current.id {
+                if let Some(redirect) = delivery.redirect {
+                    mark_runtime_redirect_broken(current, redirect);
+                }
+            }
+            continue;
+        };
+        let sent = {
+            let guard = match registry.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            if !runtime_client_exists(delivery.recipient_id) {
+                false
+            } else {
+                let proto = guard.resp_proto(delivery.recipient_id);
+                let bytes = encode_tracking_message_for_proto(proto, &delivery.keys);
+                guard.send_to(delivery.recipient_id, bytes)
+            }
+        };
+        if !sent && delivery.owner_id == current.id {
+            if let Some(redirect) = delivery.redirect {
+                mark_runtime_redirect_broken(current, redirect);
+            }
+        }
+    }
+}
+
+/// Send invalidations for modified keys using the packet-level live runtime.
+pub fn runtime_invalidate_keys(
+    source_id: ClientId,
+    current: &mut Client,
+    pubsub: Option<&Arc<Mutex<PubSubRegistry>>>,
+    keys: &[RedisString],
+    force_send_to_source: bool,
+    defer_bcast: bool,
+) {
+    if keys.is_empty() {
+        return;
+    }
+    let deliveries = {
+        let mut rt = lock_runtime_tracking();
+        runtime_collect_key_deliveries(
+            &mut rt,
+            source_id,
+            keys,
+            force_send_to_source,
+            defer_bcast,
+        )
+    };
+    runtime_deliver_messages(current, pubsub, deliveries);
+}
+
+/// Flush BCAST invalidations accumulated while a transaction is draining.
+pub fn runtime_flush_pending_bcast(
+    current: &mut Client,
+    pubsub: Option<&Arc<Mutex<PubSubRegistry>>>,
+) {
+    let deliveries = {
+        let mut rt = lock_runtime_tracking();
+        runtime_collect_pending_bcast_deliveries(&mut rt)
+    };
+    runtime_deliver_messages(current, pubsub, deliveries);
+}
+
+/// Evict tracked-key entries until the runtime table is at or below `max_keys`.
+pub fn runtime_limit_tracked_keys(
+    max_keys: usize,
+    current: &mut Client,
+    pubsub: Option<&Arc<Mutex<PubSubRegistry>>>,
+) {
+    let keys = {
+        let rt = lock_runtime_tracking();
+        let over = rt.table.len().saturating_sub(max_keys);
+        rt.table.keys().take(over).cloned().collect::<Vec<_>>()
+    };
+    for key in keys {
+        runtime_invalidate_keys(current.id, current, pubsub, &[key], true, false);
+    }
+}
+
+/// Send an "all keys invalidated" notification to every tracking client.
+pub fn runtime_invalidate_all(
+    current: &mut Client,
+    pubsub: Option<&Arc<Mutex<PubSubRegistry>>>,
+) {
+    let deliveries = {
+        let mut rt = lock_runtime_tracking();
+        let deliveries = runtime_collect_all_deliveries(&rt);
+        rt.table.clear();
+        rt.bcast_pending.clear();
+        deliveries
+    };
+    runtime_deliver_messages(current, pubsub, deliveries);
+}
+
 // ── Trait: minimal client view required by the tracking subsystem ──────────
 
 /// The minimal interface that the tracking subsystem needs from a client.
@@ -288,7 +717,7 @@ pub fn check_prefix_collisions(
             for existing_prefix in existing {
                 if string_check_prefix(existing_prefix.as_slice(), p) {
                     let mut msg = Vec::new();
-                    msg.extend_from_slice(b"Prefix '");
+                    msg.extend_from_slice(b"ERR Prefix '");
                     msg.extend_from_slice(p);
                     msg.extend_from_slice(b"' overlaps with an existing prefix '");
                     msg.extend_from_slice(existing_prefix.as_slice());
@@ -301,7 +730,7 @@ pub fn check_prefix_collisions(
         for &q in &new_prefixes[(i + 1)..] {
             if string_check_prefix(p, q) {
                 let mut msg = Vec::new();
-                msg.extend_from_slice(b"Prefix '");
+                msg.extend_from_slice(b"ERR Prefix '");
                 msg.extend_from_slice(p);
                 msg.extend_from_slice(b"' overlaps with another provided prefix '");
                 msg.extend_from_slice(q);

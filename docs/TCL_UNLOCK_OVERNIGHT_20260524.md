@@ -174,6 +174,22 @@ Source anchors:
 Scope cap: parse ON/OFF/TRACKINGINFO and maintain per-client visible state.
 Do not claim full cache-invalidation semantics unless tests prove it.
 
+Packet result note, 2026-05-24:
+
+- Implemented stateful `CLIENT TRACKING ON/OFF`, `CLIENT CACHING`,
+  `CLIENT GETREDIR`, `CLIENT TRACKINGINFO`, prefix collision handling, and a
+  minimal live invalidation runtime for common read/write key shapes.
+- Focused proof now reaches `Tracking info is correct` without the earlier
+  tracking timeout. The remaining abort is outside this packet boundary:
+  `INFO` does not emit `tracking_total_items`, `tracking_total_keys`,
+  `tracking_total_prefixes`, or `tracking_clients`.
+- Required boundary widening: add `crates/redis-commands/src/info.rs` to a
+  follow-up packet so INFO can report the runtime tracking counters.
+- Non-goals intentionally left for a later tracking fidelity packet:
+  complete script read-key introspection, exact self-push ordering for every
+  command family, eviction-before-response ordering, and full server-owned
+  tracking state integration.
+
 ### 8. List timeout after Redis-DS wave
 
 Packet: `tcl-list-timeout-post-ds-v2`.

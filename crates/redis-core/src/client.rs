@@ -357,6 +357,7 @@ impl Client {
         self.flags = ClientFlags::default();
         self.resp_proto = 2;
         self.tracking = ClientTrackingState::default();
+        crate::tracking::remove_runtime_client_tracking(self.id);
         self.import_source = false;
         self.authenticated_user = initial_authenticated_user();
         self.capa_redirect = false;

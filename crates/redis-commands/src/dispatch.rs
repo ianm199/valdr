@@ -208,7 +208,10 @@ pub fn dispatch(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             return crate::multi::queue_current_command(ctx);
         }
     }
-    if ctx.client_ref().in_pubsub_mode() && !crate::pubsub::is_allowed_in_subscribe_mode(name) {
+    if ctx.client_ref().in_pubsub_mode()
+        && !name.eq_ignore_ascii_case(b"HELLO")
+        && !crate::pubsub::is_allowed_in_subscribe_mode(name)
+    {
         return Err(crate::pubsub::subscribe_mode_error(name));
     }
     dispatch_command_name(ctx, name)
@@ -339,6 +342,7 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
     }
 
     if successful_complete {
+        ctx.apply_client_tracking_after_command(name, metadata.write);
         if let (Some(argv), Some(elapsed_micros)) = (argv_snapshot.as_ref(), elapsed_micros) {
             crate::slowlog_cmd::record_latency_histogram(argv, elapsed_micros);
             crate::slowlog_cmd::record_large_commandlog_entries(
