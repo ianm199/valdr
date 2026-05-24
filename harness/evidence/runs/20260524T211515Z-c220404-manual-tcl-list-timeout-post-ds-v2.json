@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "packet": "tcl-list-timeout-post-ds-v2",
+  "role": "test-fixer",
+  "runtime": "codex",
+  "manual_salvage": true,
+  "target_commit": "c22040498689605765d515d1f6df98d01ea7b68a",
+  "summary": "Converted unit/type/list from timeout/no-summary to a counted upstream TCL result: 251 passed, 3 failed, 0 timed out, 0 without summary.",
+  "claim_level": "telemetry",
+  "surface": "correctness",
+  "method": "official-suite",
+  "checks": {
+    "cargo_check_workspace": {
+      "status": "pass",
+      "command": "cargo check --workspace --quiet",
+      "notes": "Warnings only."
+    },
+    "focused_tcl_unit_type_list": {
+      "status": "pass_with_known_failures",
+      "command": "PATH=/tmp/tclwrap-list:$PATH python3 harness/oracle/tcl-survey.py --runner-id tcl-list-focused-post-fix-verify --skip-build --timeout-s 180 --files unit/type/list",
+      "artifact": "harness/oracle/results/tcl-survey/20260524T211226Z/unit__type__list.json",
+      "passed": 251,
+      "failed": 3,
+      "timed_out": false,
+      "no_summary": false,
+      "elapsed_s": 7.760145291991648,
+      "remaining_failures": [
+        "List listpack -> quicklist encoding conversion",
+        "Blocking command accounted only once in commandstats",
+        "Blocking command accounted only once in commandstats after timeout"
+      ]
+    }
+  },
+  "scope_note": "The original packet targeted list/object/quicklist. The actual timeout crossed list blocking, CLIENT UNBLOCK/UNPAUSE, object encoding reporting, and runtime-owner foreign wake cleanup, so the serialized targets include connection.rs and runtime_owner.rs.",
+  "targets": [
+    "crates/redis-commands/src/connection.rs",
+    "crates/redis-commands/src/list.rs",
+    "crates/redis-core/src/object.rs",
+    "crates/redis-server/src/runtime_owner.rs",
+    "docs/CONFORMANCE.md",
+    "docs/TCL_UNLOCK_OVERNIGHT_20260524.md"
+  ]
+}

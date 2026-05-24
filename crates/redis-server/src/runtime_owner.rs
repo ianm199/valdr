@@ -870,6 +870,12 @@ impl RuntimeOwner {
                 };
                 match recv_result {
                     Ok(payload) => {
+                        if slot.client.blocked_on_keys {
+                            slot.client.blocked_on_keys = false;
+                            if let Ok(mut guard) = client_info_registry().lock() {
+                                guard.set_blocked(slot.client.id, false);
+                            }
+                        }
                         slot.queue_write_owned(payload);
                         writable_slots.push(slot.id());
                         progressed = true;

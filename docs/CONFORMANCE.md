@@ -95,6 +95,51 @@ connection is intact), so a one-off `--durable` run is a cheap way to quantify
 how much real signal sits behind a given abort — but it is a diagnostic, not
 the conformance number of record.
 
+### Attack strategy: chase the detonator chain, file by file
+
+Because ~40% of the single-node-core denominator is hidden behind aborts (and
+~13% behind timeouts), the highest-leverage work is *unhiding* whole files, not
+fixing wording in tests that already run. The loop:
+
+```
+Phase 1 — UNHIDE:  find the abort → implement the missing global/command →
+                   re-run → find the next abort → repeat UNTIL the file reaches
+                   its summary line.
+Phase 2 — CONFORM: the file's tests are now visible and counted → grind err->ok.
+```
+
+Three rules keep this honest:
+
+1. **A frontier advance pays nothing until the file flips.** Killing one
+   detonator in a file that has several moves the dashboard by zero — every
+   block stays in the abort lump until the file runs to its summary. The unit
+   of payout is the *file flipping to summary*, not the individual unlock. So
+   commit to clearing a file's whole chain, or don't start it.
+
+2. **Scout with `--durable` before committing.** A one-off durable pass (a
+   diagnostic, never the number of record) reveals, in one shot: how many
+   detonators are in the chain, the pass-ceiling (how many blocks would land in
+   `proved` vs `known-fail` once the file runs), and which "fails" are real vs
+   reply-desync noise. That decides whether a file is worth it before investing:
+   a 2-detonator chain guarding 150 easy passes is a jackpot; a 6-detonator
+   chain guarding 10 passes is not.
+
+3. **"Unhide" is not "proved".** When a file flips, its blocks split into
+   `proved` (the ones that pass) and `known-fail` (the ones that fail). Chasing
+   aborts buys *visibility*; only the passing subset buys *proved*. Estimate the
+   proved-gain from the durable `ok` ceiling, not from the file's block count.
+
+Prioritize across files by `(blocks hidden) x (chain is short / ceiling is
+high)`. This is why the unlock waves open with files like `unit/hashexpire`
+(226 blocks aborting on one missing `HGETEX`) rather than a one-line wording
+fix. Timeouts are the parallel hidden bucket — same leverage, different failure
+mode (a hang or busy-loop instead of a raised error).
+
+Harness-product direction: an agent should not have to *rediscover* the next
+abort by re-running. The durable scout should be promoted to a pre-computed
+**per-file detonator map** (ordered chain + ok/fail ceiling), so each unlock
+packet is handed its exact position in the chain instead of groping forward.
+
 ## Wire-diff smoke
 
 The 23 scripts in `harness/oracle/corpus/` are sent to both

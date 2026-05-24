@@ -14,6 +14,7 @@ use redis_core::acl::{
     category as acl_category, category_name_to_bit, global_acl_state, hex_to_hash, sha256_hash,
     AclUser, ALL_CATEGORY_NAMES,
 };
+use redis_core::blocked_keys::blocked_keys_index;
 use redis_core::client_info::client_info_registry;
 use redis_core::live_config::{LiveConfig, MaxmemoryPolicyCode};
 use redis_core::metrics::server_metrics;
@@ -2541,20 +2542,44 @@ pub fn client_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             return Err(RedisError::wrong_number_of_args(b"client|unblock"));
         }
         let id_arg = ctx.arg_owned(2usize)?;
-        if parse_i64_strict(id_arg.as_bytes()).is_none() {
+        let Some(client_id) = parse_i64_strict(id_arg.as_bytes()) else {
+            return Err(RedisError::runtime(
+                b"ERR value is not an integer or out of range",
+            ));
+        };
+        if client_id < 0 {
             return Err(RedisError::runtime(
                 b"ERR value is not an integer or out of range",
             ));
         }
+        let mut error_mode = false;
         if ctx.arg_count() == 4 {
             let mode = ctx.arg_owned(3usize)?;
-            if !ascii_eq_ignore_case(mode.as_bytes(), b"TIMEOUT")
-                && !ascii_eq_ignore_case(mode.as_bytes(), b"ERROR")
-            {
+            if ascii_eq_ignore_case(mode.as_bytes(), b"TIMEOUT") {
+                error_mode = false;
+            } else if ascii_eq_ignore_case(mode.as_bytes(), b"ERROR") {
+                error_mode = true;
+            } else {
                 return Err(RedisError::syntax(b"syntax error"));
             }
         }
-        return ctx.reply_integer(0);
+        let waiter = {
+            let mut idx = match blocked_keys_index().lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            idx.remove_client(client_id as u64)
+        };
+        let Some(waiter) = waiter else {
+            return ctx.reply_integer(0);
+        };
+        let reply = if error_mode {
+            b"-UNBLOCKED client unblocked via CLIENT UNBLOCK\r\n".to_vec()
+        } else {
+            waiter.action.timeout_reply_bytes().to_vec()
+        };
+        let delivered = waiter.sender.send(reply).is_ok();
+        return ctx.reply_integer(if delivered { 1 } else { 0 });
     }
     if ascii_eq_ignore_case(sub_bytes, b"HELP") {
         let lines: &[&[u8]] = &[
@@ -2579,6 +2604,7 @@ pub fn client_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         return reply_help(ctx, lines);
     }
     if ascii_eq_ignore_case(sub_bytes, b"PAUSE")
+        || ascii_eq_ignore_case(sub_bytes, b"UNPAUSE")
         || ascii_eq_ignore_case(sub_bytes, b"KILL")
     {
         return ctx.reply_simple_string(b"OK");

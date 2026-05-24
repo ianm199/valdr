@@ -23,6 +23,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, OnceLock};
 
+use redis_ds::listpack::ListPack;
 use redis_ds::stream::InlineStream;
 use redis_types::{RedisError, RedisString};
 
@@ -1277,26 +1278,15 @@ where
 // Free-standing object creation helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Maximum payload size of any single element before a list is reported as
-/// `quicklist` rather than `listpack`. The test suite uses an 8 KiB filler
-/// to force the `quicklist` encoding path; setting the threshold at 4 KiB
-/// keeps the bound below that filler size.
-pub const LIST_LISTPACK_MAX_ELEMENT_BYTES: usize = 4 * 1024;
+/// Valkey quicklist negative-fill size tiers for `list-max-listpack-size`.
+///
+/// C: `quicklist.c` `optimization_level[]`.
+const LISTPACK_NEG_FILL_LIMITS: [usize; 5] = [4096, 8192, 16384, 32768, 65536];
 
-/// Approximate aggregate bytes a single listpack node can hold before the
-/// list is reported as `quicklist`. Matches Valkey's default
-/// `list-max-listpack-size = -2` (8 KiB per node) doubled to leave room for
-/// the small per-entry overhead that the C listpack format imposes.
-pub const LIST_LISTPACK_NODE_MAX_BYTES: usize = 16 * 1024;
-
-/// Valkey default `list-max-listpack-size` entry-count cap used by the
-/// `OBJECT ENCODING` listpack→quicklist heuristic. Lists with more entries
-/// report `quicklist`.
-pub const LIST_LISTPACK_MAX_ENTRIES: usize = 128;
-
-/// Per-element byte cap used by the listpack heuristic. Mirrors Valkey's
-/// default `list-max-listpack-size` per-element threshold.
-pub const LIST_LISTPACK_MAX_ELEMENT_SOFT_BYTES: usize = 64;
+/// Safety cap used when `list-max-listpack-size` is a positive entry count.
+///
+/// C: `quicklist.c` `SIZE_SAFETY_LIMIT`.
+const LISTPACK_SIZE_SAFETY_LIMIT: usize = 8192;
 
 /// Valkey default `hash-max-listpack-entries`. Hashes with more entries
 /// report `hashtable`.
@@ -1327,48 +1317,45 @@ pub const ZSET_LISTPACK_MAX_ENTRIES: usize = 128;
 /// longer than this report `skiplist`.
 pub const ZSET_LISTPACK_MAX_VALUE_BYTES: usize = 64;
 
-/// Decide whether an `Inline`-encoded list should be reported as
-/// `quicklist`. The C port uses a real quicklist; here we approximate by
-/// summing element byte sizes and flagging any single oversized element.
-fn list_inline_is_quicklist(d: &VecDeque<RedisString>) -> bool {
-    let mut total: usize = 0;
-    for v in d {
-        let len = v.as_bytes().len();
-        if len > LIST_LISTPACK_MAX_ELEMENT_BYTES {
-            return true;
-        }
-        total = total.saturating_add(len).saturating_add(11);
-        if total > LIST_LISTPACK_NODE_MAX_BYTES {
-            return true;
+fn listpack_node_limit(fill: i64) -> (usize, usize) {
+    if fill >= 0 {
+        let count = if fill == 0 { 1 } else { fill as usize };
+        (usize::MAX, count)
+    } else {
+        let offset = fill.saturating_neg().saturating_sub(1) as usize;
+        let idx = offset.min(LISTPACK_NEG_FILL_LIMITS.len() - 1);
+        (LISTPACK_NEG_FILL_LIMITS[idx], usize::MAX)
+    }
+}
+
+fn listpack_encoded_len(d: &VecDeque<RedisString>) -> Option<usize> {
+    let mut lp = ListPack::new();
+    for value in d {
+        if !lp.append(value.as_bytes()) {
+            return None;
         }
     }
-    false
+    Some(lp.bytes_len())
 }
 
 /// Encoding name reported for an `Inline`-encoded list.
 ///
-/// Returns `"quicklist"` when the list exceeds the entry-count threshold
-/// derived from `list-max-listpack-size`, when any element exceeds
-/// `LIST_LISTPACK_MAX_ELEMENT_SOFT_BYTES`, or when the aggregate listpack
-/// node-byte estimate trips the legacy `list_inline_is_quicklist` guard.
-/// Negative `list-max-listpack-size` values (byte-size caps in real Valkey)
-/// are treated as the compile-time default of `LIST_LISTPACK_MAX_ENTRIES`.
+/// Mirrors Valkey's listpack-to-quicklist conversion threshold: negative
+/// `list-max-listpack-size` values are byte-size caps, while non-negative
+/// values are entry-count caps guarded by the 8 KiB safety limit.
 fn list_inline_observed_encoding(d: &VecDeque<RedisString>) -> &'static str {
     let t = get_encoding_thresholds();
-    let entry_cap = if t.list_max_listpack_size > 0 {
-        t.list_max_listpack_size as usize
-    } else {
-        LIST_LISTPACK_MAX_ENTRIES
-    };
-    if d.len() > entry_cap {
+    let (size_limit, count_limit) = listpack_node_limit(t.list_max_listpack_size);
+    let Some(encoded_len) = listpack_encoded_len(d) else {
         return "quicklist";
-    }
-    for v in d {
-        if v.as_bytes().len() > LIST_LISTPACK_MAX_ELEMENT_SOFT_BYTES {
-            return "quicklist";
+    };
+    if size_limit != usize::MAX {
+        if encoded_len > size_limit {
+            "quicklist"
+        } else {
+            "listpack"
         }
-    }
-    if list_inline_is_quicklist(d) {
+    } else if encoded_len > LISTPACK_SIZE_SAFETY_LIMIT || d.len() > count_limit {
         "quicklist"
     } else {
         "listpack"

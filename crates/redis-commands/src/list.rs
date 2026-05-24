@@ -317,6 +317,19 @@ fn schedule_or_wake(ctx: &mut CommandContext, key: &RedisString) {
     }
 }
 
+fn list_len(db: &RedisDb, key: &RedisString) -> usize {
+    db.lookup_key_read(key)
+        .and_then(RedisObject::list)
+        .map(VecDeque::len)
+        .unwrap_or(0)
+}
+
+fn add_dirty_if_nonzero(ctx: &CommandContext, delta: i64) {
+    if delta > 0 {
+        ctx.server().add_dirty(delta);
+    }
+}
+
 /// Pop one or more elements to satisfy `waiter` and ship the encoded reply.
 ///
 /// For `BlockedAction::Pop` with `count == 0` (BLPOP / BRPOP shape), pops
@@ -434,6 +447,7 @@ fn push_generic(
     for j in 2..argc {
         values.push(ctx.arg_owned(j)?);
     }
+    let pushed_count = values.len() as i64;
     let existing = ctx.db_mut().lookup_key_write(&key);
     let new_len: i64 = match existing {
         None => {
@@ -472,7 +486,11 @@ fn push_generic(
             deque.len() as i64
         }
     };
+    let len_before_wake = list_len(ctx.db(), &key);
     schedule_or_wake(ctx, &key);
+    let len_after_wake = list_len(ctx.db(), &key);
+    let wake_pops = len_before_wake.saturating_sub(len_after_wake) as i64;
+    add_dirty_if_nonzero(ctx, pushed_count + wake_pops);
     let event = match position {
         ListPosition::Head => b"lpush" as &[u8],
         ListPosition::Tail => b"rpush" as &[u8],
@@ -548,6 +566,7 @@ fn pop_generic(ctx: &mut CommandContext, position: ListPosition) -> RedisResult<
     };
 
     let key_was_present = popped.is_some();
+    let removed_count = popped.as_ref().map(|v| v.len()).unwrap_or(0) as i64;
     let empty_after = matches!(
         ctx.db().lookup_key_read(&key),
         Some(o) if o.list().map(|d| d.is_empty()).unwrap_or(false)
@@ -565,6 +584,7 @@ fn pop_generic(ctx: &mut CommandContext, position: ListPosition) -> RedisResult<
             ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", &key);
         }
     }
+    add_dirty_if_nonzero(ctx, removed_count);
 
     match (count, popped) {
         (None, None) => ctx.reply_null_bulk(),
@@ -697,6 +717,7 @@ pub fn lset_command(ctx: &mut CommandContext) -> RedisResult<()> {
                 *slot = value;
             }
             ctx.notify_keyspace_event(NOTIFY_LIST, b"lset", &key);
+            ctx.server().add_dirty(1);
             ctx.reply_simple_string(b"OK")
         }
     }
@@ -761,6 +782,7 @@ pub fn lrem_command(ctx: &mut CommandContext) -> RedisResult<()> {
         if empty_after {
             ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", &key);
         }
+        ctx.server().add_dirty(removed);
     }
     ctx.reply_integer(removed)
 }
@@ -776,7 +798,7 @@ pub fn ltrim_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let key = ctx.arg_owned(1usize)?;
     let start = parse_strict_i64(ctx.arg(2)?.as_bytes())?;
     let stop = parse_strict_i64(ctx.arg(3)?.as_bytes())?;
-    let key_empty = {
+    let (key_empty, removed_count) = {
         let deque = match as_list_mut(ctx.db_mut().lookup_key_write(&key))? {
             None => return ctx.reply_simple_string(b"OK"),
             Some(d) => d,
@@ -785,7 +807,7 @@ pub fn ltrim_command(ctx: &mut CommandContext) -> RedisResult<()> {
         match resolve_range(start, stop, len) {
             None => {
                 deque.clear();
-                true
+                (true, len as i64)
             }
             Some((s, e)) => {
                 for _ in 0..s {
@@ -795,7 +817,7 @@ pub fn ltrim_command(ctx: &mut CommandContext) -> RedisResult<()> {
                 while deque.len() > new_len {
                     deque.pop_back();
                 }
-                deque.is_empty()
+                (deque.is_empty(), len.saturating_sub(new_len) as i64)
             }
         }
     };
@@ -806,6 +828,7 @@ pub fn ltrim_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if key_empty {
         ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", &key);
     }
+    add_dirty_if_nonzero(ctx, removed_count);
     ctx.reply_simple_string(b"OK")
 }
 
@@ -852,6 +875,7 @@ pub fn linsert_command(ctx: &mut CommandContext) -> RedisResult<()> {
     };
     if outcome > 0 {
         ctx.notify_keyspace_event(NOTIFY_LIST, b"linsert", &key);
+        ctx.server().add_dirty(1);
     }
     ctx.reply_integer(outcome)
 }
@@ -932,7 +956,11 @@ fn lmove_generic(
         ListPosition::Tail => b"rpush" as &[u8],
     };
     ctx.notify_keyspace_event(NOTIFY_LIST, dst_push_event, &dst_key);
+    let dst_len_before_wake = list_len(ctx.db(), &dst_key);
     schedule_or_wake(ctx, &dst_key);
+    let dst_len_after_wake = list_len(ctx.db(), &dst_key);
+    let wake_pops = dst_len_before_wake.saturating_sub(dst_len_after_wake) as i64;
+    add_dirty_if_nonzero(ctx, 1 + wake_pops);
     ctx.reply_bulk_string(value)
 }
 
@@ -1049,6 +1077,7 @@ pub fn lmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
         if empty_after {
             ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", key);
         }
+        add_dirty_if_nonzero(ctx, popped.len() as i64);
         ctx.reply_array_header(2)?;
         ctx.reply_bulk_string(key.clone())?;
         ctx.reply_array_header(popped.len())?;
@@ -1383,6 +1412,7 @@ fn bpop_generic(ctx: &mut CommandContext, position: ListPosition) -> RedisResult
         if empty_after {
             ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", key);
         }
+        ctx.server().add_dirty(1);
         ctx.reply_array_header(2)?;
         ctx.reply_bulk_string(key.clone())?;
         return ctx.reply_bulk_string(value);
@@ -1580,6 +1610,7 @@ pub fn blmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
         if empty_after {
             ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", key);
         }
+        add_dirty_if_nonzero(ctx, popped.len() as i64);
         ctx.reply_array_header(2)?;
         ctx.reply_bulk_string(key.clone())?;
         ctx.reply_array_header(popped.len())?;

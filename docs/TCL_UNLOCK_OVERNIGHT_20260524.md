@@ -223,6 +223,17 @@ Scope cap: fix the first measured timeout/hang or convert the file to counted
 failures. A full object-storage migration is too large for this packet unless
 it falls out naturally.
 
+Packet result note, 2026-05-24:
+
+- Converted `unit/type/list` from timeout/no-summary to counted TCL output:
+  **251 passed / 3 failed / 0 timed out / 0 without summary**.
+- Required boundary widening beyond the original list/object/quicklist target:
+  `CLIENT UNBLOCK`/`CLIENT UNPAUSE` behavior lives in `connection.rs`, and
+  cross-owner blocked-client wake cleanup lives in `runtime_owner.rs`.
+- The three remaining counted failures are now concrete follow-ups:
+  listpack-to-quicklist encoding threshold fidelity and two `BLPOP`
+  commandstats accounting rows.
+
 ## Final evidence
 
 The morning scoreboard should be:
