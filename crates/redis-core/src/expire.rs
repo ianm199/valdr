@@ -668,10 +668,12 @@ pub fn check_already_expired(server: &RedisServer, when: MsTime) -> bool {
     // C: if (server.current_client && server.current_client->slot_migration_job) return 0;
 
     // TODO(port): commandTimeSnapshot not yet ported; using ms_time_now() approximation.
-    // TODO(port): server.loading / server.primary_host / server.import_mode not on stub.
-    let _ = server;
+    // TODO(port): server.loading / server.primary_host not on stub.
+    // C: expire.c:675 — a primary in import-mode stores an already-expired key
+    // (with its past expire) instead of deleting it immediately, and waits for
+    // the import source to propagate the deletion.
     let now = ms_time_now();
-    when <= now
+    when <= now && !server.live_config.import_mode()
 }
 
 // ── expire.c:686-722, parseExtendedExpireArgumentsOrReply ─────────────────
@@ -818,8 +820,7 @@ pub fn expire_generic_command(
         return ctx.reply_integer(0);
     }
 
-    let now = ms_time_now();
-    if when <= now {
+    if check_already_expired(ctx.server(), when) {
         ctx.db_mut().sync_delete(&key);
         server_metrics().expired_keys.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", &key);

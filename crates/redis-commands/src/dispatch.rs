@@ -275,6 +275,15 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
         return Ok(());
     }
 
+    // C: db.c:2126/2144 + getExpirationPolicyWithFlags — a primary in
+    // import-mode lets an import-source client see otherwise-expired keys, and
+    // keeps expired keys (no lazy delete) for everyone else. Refresh the
+    // selected DB's per-command flags before the handler runs.
+    let import_mode = ctx.live_config().import_mode();
+    let import_source_active = ctx.client_ref().import_source && import_mode;
+    ctx.db_mut()
+        .set_import_expire_state(import_source_active, import_mode);
+
     let initial_slowlog_gate = ctx.live_config().slowlog_timing_gate();
     let should_time_slowlog = initial_slowlog_gate.should_time() && !metadata.skip_commandlog;
     let start = elapsed_start();

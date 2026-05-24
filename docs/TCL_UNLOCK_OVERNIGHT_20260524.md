@@ -204,6 +204,44 @@ errors!`**. This is the Phase-1 jackpot: ~104 source blocks move straight from
 the hidden `abort/no-summary` bucket into `proved`, with no new `known-fail`
 revealed.
 
+#### Side packet `tcl-expire-import-mode-v1`
+
+Result 2026-05-24: fixed the two counted `unit/expire.tcl` failures around
+import mode (the file already ran to summary at 63/2). Two pieces, faithful to
+upstream:
+
+- **Import-source visibility + import-mode keep** (test `Client can visit
+  expired key in import-source state`). Added per-command DB state set by the
+  dispatcher (`crates/redis-commands/src/dispatch.rs`) from
+  `client.import_source` + `import-mode`: an import-source client sees expired
+  keys as live (`RedisDb::is_expired` returns false, and the
+  `random_key`/`matching_keys`/`keys_snapshot_with_types` filters keep them), so
+  `TTL`->0/`GET`/`INCR`/`RANDOMKEY`/`SCAN`/`KEYS` all observe the key; and a
+  primary in import-mode reports expired keys as expired to normal clients but
+  does **not** lazily delete them (`expire_if_needed` KEEP_EXPIRED branch). C:
+  db.c:2126/2144 + `getExpirationPolicyWithFlags` (expire.c:995-1019).
+- **EXPIREAT past + import-mode** (test `Negative ttl will not cause server to
+  crash when import mode is on`). Wired `check_already_expired` (expire.rs) to
+  return false under import-mode and used it in `expire_generic_command`, so a
+  past `EXPIREAT` stores the (past) expire instead of deleting; no crash, keys
+  stay (dbsize holds) until import-mode is turned off and active expiry resumes.
+
+Verified by a clean RESP-framed wire probe (9/9 behaviors for both tests:
+normal `GET`->nil/`TTL`->-2 with `dbsize` held at 1, then import-source
+`TTL`->0/`GET`->1/`INCR`->2/`RANDOMKEY`/`SCAN`/`KEYS`->foo1; and EXPIREAT-past
+-> dbsize 2 + `PING` alive) plus a `redis-core` unit test covering all four
+expiry states. `cargo check --workspace` clean. Oracle confirmed: running
+`unit/expire` from an isolated copy of `tests/` (so `::tmproot` does not share
+`reference/valkey/tests/tmp/` with the concurrent breadth runner) passes
+**65 / 0**, up from 63 / 2 — a `fail` -> `pass` flip.
+
+Operational note: the intermittent `cat/head .../stdout: No such file` aborts
+seen across scripting/tracking/pause this session were a **tmp-dir collision**,
+not a port or code issue — a concurrent `test_helper` shares
+`reference/valkey/tests/tmp/` and its per-file cleanup races other runs. Side
+agents should verify single files from an isolated `tests/` copy (cwd with its
+own `./tests/tmp`).
+
 ### 4. Functions metadata / early library behavior
 
 Packet: `tcl-functions-library-metadata-v1`.

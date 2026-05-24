@@ -578,6 +578,19 @@ pub struct RedisDb {
     /// Average TTL for INFO keyspace stats.
     /// C: serverDb.avg_ttl — TODO(port): active-expiry cycle (Phase 3).
     pub avg_ttl: i64,
+
+    /// When true, lazy expiration is suppressed and expired keys stay visible
+    /// to lookups and key iteration. Set per-command by the dispatcher when a
+    /// primary is in `import-mode` and the calling client is in import-source
+    /// state. C: `server.current_client->flag.import_source` consulted by
+    /// `keyIsExpired` / `objectIsExpired` (db.c:2126/2144).
+    import_source_active: bool,
+
+    /// When true (a primary in `import-mode`), an expired key is still reported
+    /// as expired to non-import clients but is NOT lazily deleted — the server
+    /// waits for an explicit DEL from the import source. C: the `KEEP_EXPIRED`
+    /// branch of `getExpirationPolicyWithFlags` (expire.c:995-1019).
+    import_mode_keep: bool,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -619,10 +632,25 @@ impl RedisDb {
     /// C: db.c:2122 objectIsExpired / keyIsExpiredWithDictIndexImpl
     pub fn is_expired(&self, key: &RedisString) -> bool {
         // TODO(port): return false when server.loading is true
+        // C: db.c:2126/2144 — a primary in import-mode keeps expired keys
+        // visible to an import-source client.
+        if self.import_source_active {
+            return false;
+        }
         match self.dict.get(key) {
             None => false,
             Some(obj) => obj.expire != EXPIRY_NONE && obj.expire < Self::now_ms(),
         }
+    }
+
+    /// Sets the per-command import-expiry state. `import_source_active` keeps
+    /// expired keys fully visible to the current client; `import_mode_keep`
+    /// stops lazy expiration from deleting expired keys (they stay, reported as
+    /// expired). The dispatcher refreshes these before every command so they
+    /// reflect the current client and server state.
+    pub fn set_import_expire_state(&mut self, import_source_active: bool, import_mode_keep: bool) {
+        self.import_source_active = import_source_active;
+        self.import_mode_keep = import_mode_keep;
     }
 
     /// Check and optionally delete an expired key. Returns the new `KeyStatus`.
@@ -633,6 +661,12 @@ impl RedisDb {
             return KeyStatus::Valid;
         }
         if flags & EXPIRE_AVOID_DELETE_EXPIRED != 0 {
+            return KeyStatus::Expired;
+        }
+        // C: getExpirationPolicyWithFlags KEEP_EXPIRED — a primary in import-mode
+        // reports the key as expired but waits for the import source to delete
+        // it, so non-force lookups must not lazily remove it.
+        if self.import_mode_keep && flags & EXPIRE_FORCE_DELETE_EXPIRED == 0 {
             return KeyStatus::Expired;
         }
         // TODO(port): EXPIRE_FORCE_DELETE_EXPIRED — check replica mode before deleting
@@ -972,7 +1006,7 @@ impl RedisDb {
         let now = Self::now_ms();
         self.dict
             .iter()
-            .filter(|(_, obj)| obj.expire == EXPIRY_NONE || obj.expire >= now)
+            .filter(|(_, obj)| self.import_source_active || obj.expire == EXPIRY_NONE || obj.expire >= now)
             .filter(|(k, _)| all || glob_match(pattern, k.as_bytes()))
             .map(|(k, _)| k.clone())
             .collect()
@@ -991,7 +1025,7 @@ impl RedisDb {
         let now = Self::now_ms();
         self.dict
             .iter()
-            .filter(|(_, obj)| obj.expire == EXPIRY_NONE || obj.expire >= now)
+            .filter(|(_, obj)| self.import_source_active || obj.expire == EXPIRY_NONE || obj.expire >= now)
             .map(|(k, obj)| (k.clone(), object_kind_name(&obj.kind)))
             .collect()
     }
@@ -1014,7 +1048,7 @@ impl RedisDb {
             .cycle()
             .skip(start)
             .take(self.dict.len())
-            .find(|(_, obj)| obj.expire == EXPIRY_NONE || obj.expire >= now)
+            .find(|(_, obj)| self.import_source_active || obj.expire == EXPIRY_NONE || obj.expire >= now)
             .map(|(k, _)| k.clone())
     }
 
@@ -1935,6 +1969,42 @@ mod tests {
         db.add(key.clone(), obj);
         assert!(db.lookup_key_read_with_flags(&key, LOOKUP_NONE).is_none());
         assert!(!db.exists_raw(&key), "expired key should be lazily removed");
+    }
+
+    #[test]
+    fn import_source_active_keeps_expired_keys_visible() {
+        let mut db = RedisDb::new(0);
+        let key = k(b"foo1");
+        let mut obj = make_str_obj(b"1");
+        obj.expire = 1; // 1 ms since epoch — always in the past
+        db.add(key.clone(), obj);
+
+        // Normal client: the expired key is invisible to lookup and iteration.
+        assert!(db.is_expired(&key));
+        assert!(db.random_key().is_none());
+        assert!(db.matching_keys(b"*").is_empty());
+
+        // import-source state: the expired key stays visible everywhere, and
+        // is NOT lazily deleted on lookup.
+        db.set_import_expire_state(true, true);
+        assert!(!db.is_expired(&key));
+        assert!(db.lookup_key_read_with_flags(&key, LOOKUP_NONE).is_some());
+        assert!(db.exists_raw(&key), "import-source lookup must not delete the key");
+        assert_eq!(db.random_key(), Some(key.clone()));
+        assert_eq!(db.matching_keys(b"*"), vec![key.clone()]);
+
+        // import-mode, normal client: the key is reported expired (invisible)
+        // but a non-force read must NOT lazily delete it.
+        db.set_import_expire_state(false, true);
+        assert!(db.is_expired(&key));
+        assert!(db.lookup_key_read_with_flags(&key, LOOKUP_NONE).is_none());
+        assert!(db.exists_raw(&key), "import-mode must keep the expired key");
+
+        // No import mode: normal lazy expiration deletes on read.
+        db.set_import_expire_state(false, false);
+        assert!(db.is_expired(&key));
+        assert!(db.lookup_key_read_with_flags(&key, LOOKUP_NONE).is_none());
+        assert!(!db.exists_raw(&key), "without import mode the key is lazily deleted");
     }
 
     #[test]
