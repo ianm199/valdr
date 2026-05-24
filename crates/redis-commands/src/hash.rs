@@ -261,6 +261,22 @@ fn parse_strict_f64(bytes: &[u8]) -> Result<f64, RedisError> {
     Ok(v)
 }
 
+/// Parse an HINCRBYFLOAT increment. Unlike [`parse_strict_f64`], a parseable
+/// `nan`/`inf`/`+inf` is returned rather than rejected as "not a valid float";
+/// the caller reports the upstream `value is NaN or Infinity` error so the
+/// increment-argument case (C: t_hash.c:1004) is distinguished from a
+/// genuinely-unparseable value.
+fn parse_incr_f64(bytes: &[u8]) -> Result<f64, RedisError> {
+    if bytes.is_empty() {
+        return Err(RedisError::not_float());
+    }
+    let s = core::str::from_utf8(bytes).map_err(|_| RedisError::not_float())?;
+    if s.starts_with(char::is_whitespace) || s.ends_with(char::is_whitespace) {
+        return Err(RedisError::not_float());
+    }
+    s.parse::<f64>().map_err(|_| RedisError::not_float())
+}
+
 /// Borrow the inner hash `HashMap` of a hash-encoded `RedisObject`,
 /// raising `WRONGTYPE` if `obj` is any other kind.
 ///
@@ -1353,7 +1369,12 @@ pub fn hincrbyfloat_command(ctx: &mut CommandContext) -> RedisResult<()> {
     reset_hash_expiry_state_if_db_empty(ctx);
     let key = ctx.arg_owned(1usize)?;
     let field = ctx.arg_owned(2usize)?;
-    let delta = parse_strict_f64(ctx.arg(3)?.as_bytes())?;
+    let delta = parse_incr_f64(ctx.arg(3)?.as_bytes())?;
+    // C: t_hash.c:1004 — reject a NaN/Inf increment before touching the key, so
+    // `HINCRBYFLOAT k f +inf` errors and leaves the key uncreated.
+    if delta.is_nan() || delta.is_infinite() {
+        return Err(RedisError::runtime(b"ERR value is NaN or Infinity"));
+    }
     purge_expired_hash_fields(ctx, &key)?;
     let key_existed = ctx.db().lookup_key_read(&key).is_some();
     let result_bytes: Vec<u8> = if key_existed {
