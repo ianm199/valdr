@@ -52,6 +52,7 @@ use redis_core::command_context::CommandContext;
 use redis_core::db::LOOKUP_NONE;
 use redis_core::notify::{NOTIFY_GENERIC, NOTIFY_STRING};
 use redis_core::object::{ObjectKind, RedisObject};
+use redis_protocol::frame::RespFrame;
 use redis_types::{RedisError, RedisString};
 use std::io::Write;
 
@@ -1384,16 +1385,197 @@ pub fn strlen_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     ctx.reply_integer(len)
 }
 
+/// One emitted LCS match range, in the order the backward walk produces it.
+struct LcsMatch {
+    a_start: u32,
+    a_end: u32,
+    b_start: u32,
+    b_end: u32,
+    match_len: u32,
+}
+
+/// Reads a key for LCS: a missing key is the empty string; a non-string value
+/// is the upstream `The specified keys must contain string values` error
+/// (note: not `WRONGTYPE`, matching `lcsCommand`).
+fn lcs_lookup(ctx: &mut CommandContext, key: &RedisString) -> Result<Vec<u8>, RedisError> {
+    match ctx.db_mut().lookup_key_read_with_flags(key, LOOKUP_NONE) {
+        None => Ok(Vec::new()),
+        Some(obj) => match &obj.kind {
+            ObjectKind::String(_) => Ok(obj.string_bytes_owned()),
+            _ => Err(RedisError::runtime(
+                b"The specified keys must contain string values",
+            )),
+        },
+    }
+}
+
 /// LCS key1 key2 [LEN] [IDX] [MINMATCHLEN len] [WITHMATCHLEN]
 ///
 /// Implements the longest-common-subsequence algorithm via vanilla
-/// O(n·m) dynamic programming.
+/// O(n·m) dynamic programming, then walks the table backward to recover the
+/// LCS string and (for `IDX`) the matching index ranges.
 ///
-/// C: `lcsCommand` (t_string.c:841).
-pub fn lcs_command(_ctx: &mut CommandContext) -> Result<(), RedisError> {
-    Err(RedisError::runtime(
-        b"ERR LCS not yet implemented in the Rust port",
-    ))
+/// C: `lcsCommand` (t_string.c:842).
+pub fn lcs_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
+    if ctx.arg_count() < 3 {
+        return Err(RedisError::wrong_number_of_args(b"lcs"));
+    }
+    let key_a = ctx.arg_owned(1usize)?;
+    let key_b = ctx.arg_owned(2usize)?;
+
+    let mut getlen = false;
+    let mut getidx = false;
+    let mut withmatchlen = false;
+    let mut minmatchlen: i64 = 0;
+
+    let mut j = 3usize;
+    let argc = ctx.arg_count();
+    while j < argc {
+        let opt = ctx.arg_owned(j)?;
+        let opt = opt.as_bytes();
+        let moreargs = argc - 1 - j;
+        if opt.eq_ignore_ascii_case(b"IDX") {
+            getidx = true;
+        } else if opt.eq_ignore_ascii_case(b"LEN") {
+            getlen = true;
+        } else if opt.eq_ignore_ascii_case(b"WITHMATCHLEN") {
+            withmatchlen = true;
+        } else if opt.eq_ignore_ascii_case(b"MINMATCHLEN") && moreargs > 0 {
+            let raw = ctx.arg_owned(j + 1)?;
+            minmatchlen = parse_strict_i64(raw.as_bytes())
+                .ok_or_else(|| RedisError::runtime(b"ERR value is not an integer or out of range"))?;
+            if minmatchlen < 0 {
+                minmatchlen = 0;
+            }
+            j += 1;
+        } else {
+            return Err(RedisError::runtime(b"ERR syntax error"));
+        }
+        j += 1;
+    }
+
+    if getlen && getidx {
+        return Err(RedisError::runtime(
+            b"If you want both the length and indexes, please just use IDX.",
+        ));
+    }
+
+    let a = lcs_lookup(ctx, &key_a)?;
+    let b = lcs_lookup(ctx, &key_b)?;
+    let alen = a.len();
+    let blen = b.len();
+
+    // LCS[i][j] = length of the LCS of a[0..i] and b[0..j], stored row-major
+    // in a flat (alen+1)*(blen+1) table indexed as lcs[i*(blen+1) + j].
+    let width = blen + 1;
+    let mut lcs = vec![0u32; (alen + 1) * width];
+    for i in 1..=alen {
+        for k in 1..=blen {
+            lcs[i * width + k] = if a[i - 1] == b[k - 1] {
+                lcs[(i - 1) * width + (k - 1)] + 1
+            } else {
+                lcs[(i - 1) * width + k].max(lcs[i * width + (k - 1)])
+            };
+        }
+    }
+
+    let total_len = lcs[alen * width + blen];
+    let computelcs = getidx || !getlen;
+    let mut result = vec![0u8; total_len as usize];
+    let mut idx = total_len;
+    let mut matches: Vec<LcsMatch> = Vec::new();
+
+    // Sentinel: arange_start == alen means "no range currently open".
+    let mut i = alen;
+    let mut k = blen;
+    let mut arange_start = alen;
+    let mut arange_end = 0usize;
+    let mut brange_start = 0usize;
+    let mut brange_end = 0usize;
+
+    while computelcs && i > 0 && k > 0 {
+        let mut emit_range = false;
+        if a[i - 1] == b[k - 1] {
+            result[(idx - 1) as usize] = a[i - 1];
+            if arange_start == alen {
+                arange_start = i - 1;
+                arange_end = i - 1;
+                brange_start = k - 1;
+                brange_end = k - 1;
+            } else if arange_start == i && brange_start == k {
+                arange_start -= 1;
+                brange_start -= 1;
+            } else {
+                emit_range = true;
+            }
+            if arange_start == 0 || brange_start == 0 {
+                emit_range = true;
+            }
+            idx -= 1;
+            i -= 1;
+            k -= 1;
+        } else {
+            if lcs[(i - 1) * width + k] > lcs[i * width + (k - 1)] {
+                i -= 1;
+            } else {
+                k -= 1;
+            }
+            if arange_start != alen {
+                emit_range = true;
+            }
+        }
+
+        if emit_range {
+            let match_len = (arange_end - arange_start + 1) as u32;
+            if (minmatchlen == 0 || match_len as i64 >= minmatchlen) && getidx {
+                matches.push(LcsMatch {
+                    a_start: arange_start as u32,
+                    a_end: arange_end as u32,
+                    b_start: brange_start as u32,
+                    b_end: brange_end as u32,
+                    match_len,
+                });
+            }
+            arange_start = alen;
+        }
+    }
+
+    if getidx {
+        let match_frames: Vec<RespFrame> = matches
+            .iter()
+            .map(|m| {
+                let mut parts = vec![
+                    RespFrame::Array(Some(vec![
+                        RespFrame::Integer(m.a_start as i64),
+                        RespFrame::Integer(m.a_end as i64),
+                    ])),
+                    RespFrame::Array(Some(vec![
+                        RespFrame::Integer(m.b_start as i64),
+                        RespFrame::Integer(m.b_end as i64),
+                    ])),
+                ];
+                if withmatchlen {
+                    parts.push(RespFrame::Integer(m.match_len as i64));
+                }
+                RespFrame::Array(Some(parts))
+            })
+            .collect();
+        let reply = RespFrame::Map(vec![
+            (
+                RespFrame::bulk(RedisString::from_static(b"matches")),
+                RespFrame::Array(Some(match_frames)),
+            ),
+            (
+                RespFrame::bulk(RedisString::from_static(b"len")),
+                RespFrame::Integer(total_len as i64),
+            ),
+        ]);
+        ctx.reply_frame(&reply)
+    } else if getlen {
+        ctx.reply_integer(total_len as i64)
+    } else {
+        ctx.reply_bulk_string(RedisString::from_vec(result))
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────

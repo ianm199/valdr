@@ -220,7 +220,17 @@ impl ParserCallbacks for ReplyBuilder {
 /// semantics: bulk and simple strings become Lua strings, integers become
 /// Lua integers, nil becomes Lua nil, errors become `{err = msg}`, arrays
 /// become 1-indexed Lua tables.
-fn reply_to_lua(lua: &Lua, value: &ReplyValue) -> mlua::Result<LuaValue> {
+/// The RESP version the running script asked `redis.call` to surface, set by
+/// `redis.setresp(n)` and stored in the Lua registry (default 2, as in
+/// upstream). Controls whether map/set replies reach the script as RESP3
+/// `{map=...}`/`{set=...}` tables or as flat RESP2 arrays.
+fn script_resp_view(lua: &Lua) -> u8 {
+    lua.named_registry_value::<i64>("__redis_resp_view")
+        .map(|n| n as u8)
+        .unwrap_or(2)
+}
+
+fn reply_to_lua(lua: &Lua, value: &ReplyValue, resp_view: u8) -> mlua::Result<LuaValue> {
     match value {
         ReplyValue::Null => Ok(LuaValue::Nil),
         ReplyValue::Nil => Ok(LuaValue::Boolean(false)),
@@ -258,34 +268,52 @@ fn reply_to_lua(lua: &Lua, value: &ReplyValue) -> mlua::Result<LuaValue> {
         ReplyValue::Array(items) => {
             let t = lua.create_table()?;
             for (i, item) in items.iter().enumerate() {
-                let v = reply_to_lua(lua, item)?;
+                let v = reply_to_lua(lua, item, resp_view)?;
                 t.raw_set(i as i64 + 1, v)?;
             }
             Ok(LuaValue::Table(t))
         }
         ReplyValue::Map(items) => {
-            let out = lua.create_table()?;
-            let map = lua.create_table()?;
-            for pair in items.chunks(2) {
-                if pair.len() != 2 {
-                    continue;
+            if resp_view >= 3 {
+                let out = lua.create_table()?;
+                let map = lua.create_table()?;
+                for pair in items.chunks(2) {
+                    if pair.len() != 2 {
+                        continue;
+                    }
+                    let key = reply_to_lua(lua, &pair[0], resp_view)?;
+                    let value = reply_to_lua(lua, &pair[1], resp_view)?;
+                    map.raw_set(key, value)?;
                 }
-                let key = reply_to_lua(lua, &pair[0])?;
-                let value = reply_to_lua(lua, &pair[1])?;
-                map.raw_set(key, value)?;
+                out.raw_set("map", map)?;
+                Ok(LuaValue::Table(out))
+            } else {
+                let t = lua.create_table()?;
+                for (i, item) in items.iter().enumerate() {
+                    let v = reply_to_lua(lua, item, resp_view)?;
+                    t.raw_set(i as i64 + 1, v)?;
+                }
+                Ok(LuaValue::Table(t))
             }
-            out.raw_set("map", map)?;
-            Ok(LuaValue::Table(out))
         }
         ReplyValue::Set(items) => {
-            let out = lua.create_table()?;
-            let set = lua.create_table()?;
-            for item in items {
-                let value = reply_to_lua(lua, item)?;
-                set.raw_set(value, true)?;
+            if resp_view >= 3 {
+                let out = lua.create_table()?;
+                let set = lua.create_table()?;
+                for item in items {
+                    let value = reply_to_lua(lua, item, resp_view)?;
+                    set.raw_set(value, true)?;
+                }
+                out.raw_set("set", set)?;
+                Ok(LuaValue::Table(out))
+            } else {
+                let t = lua.create_table()?;
+                for (i, item) in items.iter().enumerate() {
+                    let v = reply_to_lua(lua, item, resp_view)?;
+                    t.raw_set(i as i64 + 1, v)?;
+                }
+                Ok(LuaValue::Table(t))
             }
-            out.raw_set("set", set)?;
-            Ok(LuaValue::Table(out))
         }
     }
 }
@@ -297,7 +325,18 @@ fn reply_to_lua(lua: &Lua, value: &ReplyValue) -> mlua::Result<LuaValue> {
 /// booleans → `:1` / null, tables → status if `.ok`, error if `.err`,
 /// otherwise a 1-indexed array (terminated at the first nil per Lua-array
 /// convention).
-fn lua_to_resp(value: &LuaValue, out: &mut Vec<u8>) {
+const LUA_REPLY_MAX_DEPTH: usize = 200;
+
+fn lua_to_resp(value: &LuaValue, out: &mut Vec<u8>, resp3: bool) {
+    lua_to_resp_inner(value, out, resp3, 0);
+}
+
+fn lua_to_resp_inner(value: &LuaValue, out: &mut Vec<u8>, resp3: bool, depth: usize) {
+    if depth > LUA_REPLY_MAX_DEPTH {
+        out.extend_from_slice(b"-ERR reached lua stack limit\r\n");
+        return;
+    }
+
     match value {
         LuaValue::Nil => out.extend_from_slice(b"$-1\r\n"),
         LuaValue::Boolean(true) => out.extend_from_slice(b":1\r\n"),
@@ -350,6 +389,42 @@ fn lua_to_resp(value: &LuaValue, out: &mut Vec<u8>) {
                 out.extend_from_slice(b"\r\n");
                 return;
             }
+            if let Ok(Some(map)) = t.get::<Option<LuaTable>>("map") {
+                let mut pairs: Vec<(LuaValue, LuaValue)> = Vec::new();
+                for entry in map.pairs::<LuaValue, LuaValue>() {
+                    if let Ok((k, v)) = entry {
+                        pairs.push((k, v));
+                    }
+                }
+                if resp3 {
+                    out.push(b'%');
+                    out.extend_from_slice(pairs.len().to_string().as_bytes());
+                } else {
+                    out.push(b'*');
+                    out.extend_from_slice((pairs.len() * 2).to_string().as_bytes());
+                }
+                out.extend_from_slice(b"\r\n");
+                for (k, v) in &pairs {
+                    lua_to_resp_inner(k, out, resp3, depth + 1);
+                    lua_to_resp_inner(v, out, resp3, depth + 1);
+                }
+                return;
+            }
+            if let Ok(Some(set)) = t.get::<Option<LuaTable>>("set") {
+                let mut members: Vec<LuaValue> = Vec::new();
+                for entry in set.pairs::<LuaValue, LuaValue>() {
+                    if let Ok((k, _)) = entry {
+                        members.push(k);
+                    }
+                }
+                out.push(if resp3 { b'~' } else { b'*' });
+                out.extend_from_slice(members.len().to_string().as_bytes());
+                out.extend_from_slice(b"\r\n");
+                for m in &members {
+                    lua_to_resp_inner(m, out, resp3, depth + 1);
+                }
+                return;
+            }
             let mut items: Vec<LuaValue> = Vec::new();
             let mut i: i64 = 1;
             loop {
@@ -367,7 +442,7 @@ fn lua_to_resp(value: &LuaValue, out: &mut Vec<u8>) {
             out.extend_from_slice(items.len().to_string().as_bytes());
             out.extend_from_slice(b"\r\n");
             for it in &items {
-                lua_to_resp(it, out);
+                lua_to_resp_inner(it, out, resp3, depth + 1);
             }
         }
         _ => out.extend_from_slice(b"$-1\r\n"),
@@ -407,6 +482,16 @@ fn runtime_error_payload(message: &str) -> Vec<u8> {
     }
     out.extend_from_slice(bytes);
     out
+}
+
+fn lua_execution_error_payload(kind: &str, err: LuaError) -> Vec<u8> {
+    match err {
+        LuaError::RuntimeError(msg) => runtime_error_payload(&msg),
+        LuaError::SyntaxError { message, .. } => {
+            runtime_error_payload(&format!("ERR Error compiling {kind}: {message}"))
+        }
+        other => runtime_error_payload(&format!("ERR Error running {kind}: {other}")),
+    }
 }
 
 /// Coerce one Lua argument passed to `redis.call(...)` into the byte
@@ -2654,7 +2739,7 @@ fn run_loaded_function(
                                     String::from_utf8_lossy(msg).into_owned(),
                                 ));
                             }
-                            reply_to_lua(lua_inner, &reply)
+                            reply_to_lua(lua_inner, &reply, script_resp_view(lua_inner))
                         }
                         Err(e) => Err(LuaError::RuntimeError(
                             String::from_utf8_lossy(e.to_resp_payload().as_bytes()).into_owned(),
@@ -2681,7 +2766,7 @@ fn run_loaded_function(
                     }
                     let mut borrow = cell.borrow_mut();
                     match run_inner_command(&mut **borrow, &arg_bytes) {
-                        Ok(reply) => reply_to_lua(lua_inner, &reply),
+                        Ok(reply) => reply_to_lua(lua_inner, &reply, script_resp_view(lua_inner)),
                         Err(e) => {
                             let msg = String::from_utf8_lossy(e.to_resp_payload().as_bytes())
                                 .into_owned();
@@ -2740,6 +2825,16 @@ fn run_loaded_function(
         redis_tbl.raw_set("status_reply", status_reply_fn)?;
         redis_tbl.raw_set("sha1hex", sha1hex_fn)?;
         redis_tbl.raw_set("replicate_commands", replicate_fn)?;
+        let setresp_fn = lua.create_function(|lua_inner, n: i64| -> mlua::Result<()> {
+            if n != 2 && n != 3 {
+                return Err(LuaError::RuntimeError(
+                    "RESP version must be 2 or 3".to_string(),
+                ));
+            }
+            lua_inner.set_named_registry_value("__redis_resp_view", n)?;
+            Ok(())
+        })?;
+        redis_tbl.raw_set("setresp", setresp_fn)?;
         redis_tbl.raw_set("register_function", register_fn)?;
         lua.globals().set("redis", redis_tbl.clone())?;
         lua.globals().set("server", redis_tbl)?;
@@ -2783,18 +2878,13 @@ fn run_loaded_function(
 
     match script_result {
         Ok(value) => {
+            let resp3 = ctx.client_ref().resp_proto >= 3;
             let mut out: Vec<u8> = Vec::new();
-            lua_to_resp(&value, &mut out);
+            lua_to_resp(&value, &mut out, resp3);
             ctx.client_mut().reply_buf.extend_from_slice(&out);
             Ok(())
         }
-        Err(LuaError::RuntimeError(msg)) => Err(RedisError::runtime(runtime_error_payload(&msg))),
-        Err(LuaError::SyntaxError { message, .. }) => Err(RedisError::runtime(
-            format!("ERR Error compiling function: {}", message).into_bytes(),
-        )),
-        Err(e) => Err(RedisError::runtime(
-            format!("ERR Error running function: {}", e).into_bytes(),
-        )),
+        Err(e) => Err(RedisError::runtime(lua_execution_error_payload("function", e))),
     }
 }
 
@@ -2971,7 +3061,7 @@ fn run_script(
                                 String::from_utf8_lossy(msg).into_owned(),
                             ));
                         }
-                        reply_to_lua(_lua, &reply)
+                        reply_to_lua(_lua, &reply, script_resp_view(_lua))
                     }
                     Err(e) => Err(LuaError::RuntimeError(
                         String::from_utf8_lossy(e.to_resp_payload().as_bytes()).into_owned(),
@@ -2987,7 +3077,7 @@ fn run_script(
                     let arg_bytes = collect_call_args(args)?;
                     let mut borrow = cell.borrow_mut();
                     match run_inner_command(&mut **borrow, &arg_bytes) {
-                        Ok(reply) => reply_to_lua(lua_inner, &reply),
+                        Ok(reply) => reply_to_lua(lua_inner, &reply, script_resp_view(lua_inner)),
                         Err(e) => {
                             let msg = String::from_utf8_lossy(e.to_resp_payload().as_bytes())
                                 .into_owned();
@@ -3028,6 +3118,16 @@ fn run_script(
         redis_tbl.raw_set("status_reply", status_reply_fn)?;
         redis_tbl.raw_set("sha1hex", sha1hex_fn)?;
         redis_tbl.raw_set("replicate_commands", replicate_fn)?;
+        let setresp_fn = lua.create_function(|lua_inner, n: i64| -> mlua::Result<()> {
+            if n != 2 && n != 3 {
+                return Err(LuaError::RuntimeError(
+                    "RESP version must be 2 or 3".to_string(),
+                ));
+            }
+            lua_inner.set_named_registry_value("__redis_resp_view", n)?;
+            Ok(())
+        })?;
+        redis_tbl.raw_set("setresp", setresp_fn)?;
         lua.globals().set("redis", redis_tbl.clone())?;
         lua.globals().set("server", redis_tbl)?;
 
@@ -3055,18 +3155,13 @@ fn run_script(
 
     match script_result {
         Ok(value) => {
+            let resp3 = ctx.client_ref().resp_proto >= 3;
             let mut out: Vec<u8> = Vec::new();
-            lua_to_resp(&value, &mut out);
+            lua_to_resp(&value, &mut out, resp3);
             ctx.client_mut().reply_buf.extend_from_slice(&out);
             Ok(())
         }
-        Err(LuaError::RuntimeError(msg)) => Err(RedisError::runtime(runtime_error_payload(&msg))),
-        Err(LuaError::SyntaxError { message, .. }) => Err(RedisError::runtime(
-            format!("ERR Error compiling script: {}", message).into_bytes(),
-        )),
-        Err(e) => Err(RedisError::runtime(
-            format!("ERR Error running script: {}", e).into_bytes(),
-        )),
+        Err(e) => Err(RedisError::runtime(lua_execution_error_payload("script", e))),
     }
 }
 
@@ -3462,20 +3557,84 @@ mod tests {
     fn resp3_double_and_null_reply_shapes_match_lua_bridge() {
         let lua = Lua::new();
 
-        let double = reply_to_lua(&lua, &ReplyValue::Double(1.25)).unwrap();
+        let double = reply_to_lua(&lua, &ReplyValue::Double(1.25), 3).unwrap();
         match double {
             LuaValue::Table(t) => assert_eq!(t.raw_get::<f64>("double").unwrap(), 1.25),
             other => panic!("expected table for RESP3 double, got {other:?}"),
         }
 
         assert!(matches!(
-            reply_to_lua(&lua, &ReplyValue::Null).unwrap(),
+            reply_to_lua(&lua, &ReplyValue::Null, 3).unwrap(),
             LuaValue::Nil
         ));
         assert!(matches!(
-            reply_to_lua(&lua, &ReplyValue::Nil).unwrap(),
+            reply_to_lua(&lua, &ReplyValue::Nil, 3).unwrap(),
             LuaValue::Boolean(false)
         ));
+    }
+
+    #[test]
+    fn map_reply_view_depends_on_setresp() {
+        let lua = Lua::new();
+        let reply = ReplyValue::Map(vec![
+            ReplyValue::Bulk(b"field".to_vec()),
+            ReplyValue::Bulk(b"value".to_vec()),
+        ]);
+
+        let resp3 = reply_to_lua(&lua, &reply, 3).unwrap();
+        match resp3 {
+            LuaValue::Table(t) => {
+                let map: LuaTable = t.raw_get("map").unwrap();
+                let v: mlua::String = map.get("field").unwrap();
+                assert_eq!(v.as_bytes().as_ref(), b"value");
+            }
+            other => panic!("expected {{map=...}} under setresp(3), got {other:?}"),
+        }
+
+        let resp2 = reply_to_lua(&lua, &reply, 2).unwrap();
+        match resp2 {
+            LuaValue::Table(t) => {
+                let f: mlua::String = t.raw_get(1).unwrap();
+                let v: mlua::String = t.raw_get(2).unwrap();
+                assert_eq!(f.as_bytes().as_ref(), b"field");
+                assert_eq!(v.as_bytes().as_ref(), b"value");
+                assert!(t.raw_get::<Option<LuaTable>>("map").unwrap().is_none());
+            }
+            other => panic!("expected flat array under setresp(2), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_table_encodes_per_client_resp_version() {
+        let lua = Lua::new();
+        let table = lua.create_table().unwrap();
+        let map = lua.create_table().unwrap();
+        map.raw_set("field", "value").unwrap();
+        table.raw_set("map", map).unwrap();
+        let value = LuaValue::Table(table);
+
+        let mut resp3 = Vec::new();
+        lua_to_resp(&value, &mut resp3, true);
+        assert_eq!(resp3, b"%1\r\n$5\r\nfield\r\n$5\r\nvalue\r\n");
+
+        let mut resp2 = Vec::new();
+        lua_to_resp(&value, &mut resp2, false);
+        assert_eq!(resp2, b"*2\r\n$5\r\nfield\r\n$5\r\nvalue\r\n");
+    }
+
+    #[test]
+    fn recursive_table_reply_hits_lua_stack_limit_instead_of_overflowing() {
+        let lua = Lua::new();
+        let a = lua.create_table().unwrap();
+        let b = lua.create_table().unwrap();
+        b.raw_set(1, a.clone()).unwrap();
+        a.raw_set(1, b).unwrap();
+
+        let mut out = Vec::new();
+        lua_to_resp(&LuaValue::Table(a), &mut out, true);
+
+        assert!(out.starts_with(b"*1\r\n"));
+        assert!(out.ends_with(b"-ERR reached lua stack limit\r\n"));
     }
 
     #[test]
@@ -3485,7 +3644,7 @@ mod tests {
         table.raw_set("double", 1.25).unwrap();
         let mut out = Vec::new();
 
-        lua_to_resp(&LuaValue::Table(table), &mut out);
+        lua_to_resp(&LuaValue::Table(table), &mut out, true);
 
         assert_eq!(out, b",1.25\r\n");
     }

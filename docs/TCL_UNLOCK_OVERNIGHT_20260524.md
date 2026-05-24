@@ -100,19 +100,65 @@ advances `unit/scripting` past `os.clock()` (line 784, which now busy-loops a
 real ~1s) and the dangerous-method/global-protection block; abort now lands at
 `Script with RESP3 map` (line 1058) — **22** more test blocks crossed.
 
-Next detonator (separate subsystem, not a scripting global): `Script with
-RESP3 map` aborts with `Bad protocol, 't' as reply type byte`. The test's first
-step is a *non-script* `r HELLO 3` + `r hgetall` expecting a RESP3 map, so the
-fault is in the RESP3 reply serialization layer (`redis-protocol` / connection
-reply path), not `eval.rs`. The frontier has left the scripting-globals chain
-and entered RESP3 encoding — that should be its own packet
-(`tcl-scripting-resp3-map-v1` or a `redis-protocol` packet), and the durable
-desync values seen earlier (`standalone`/`master`/`mode`/`id` leaking into
-later `[r read]`s) point at the HELLO/map RESP3 framing specifically.
+Next detonator: `Script with RESP3 map` aborts with `Bad protocol, 't' as
+reply type byte`. A raw-socket probe (2026-05-24) ruled out the core protocol:
+the *non-script* path is correct — `HELLO 3` returns a valid `%7` map and
+`HGETALL` returns `%1\r\n$5\r\nfield\r\n$5\r\nvalue\r\n`. The fault is therefore
+in the **scripting reply round-trip** in `eval.rs`, not `redis-protocol`:
+`run_script {redis.setresp(3); return redis.call('hgetall', KEYS[1])}` exercises
+(a) `redis.setresp(3)` making `redis.call` hand the script a RESP3 map-shaped
+Lua table, and (b) re-encoding that returned table to the client. The `'t'`
+desync points at the Lua-table -> reply conversion for the map case. This is a
+contained scripting-lane fix (next packet `tcl-scripting-resp3-map-v1`), still
+in `crates/redis-commands/src/eval.rs`.
+
+#### Side packet `tcl-scripting-resp3-map-v1`
+
+Result 2026-05-24: implemented `redis.setresp(n)` (validates 2/3, stored in the
+Lua registry, default 2 as upstream) and made the script reply round-trip
+RESP-aware in `crates/redis-commands/src/eval.rs`, both the EVAL and FUNCTION
+(fcall) paths:
+
+- `reply_to_lua` now takes the script's resp view: a Map/Set reply reaches the
+  script as a RESP3 `{map=...}`/`{set=...}` table under `setresp(3)` but as a
+  flat RESP2 array under `setresp(2)`.
+- `lua_to_resp` now encodes a returned `{map=...}` as a `%` map and `{set=...}`
+  as a `~` set **only when the client negotiated RESP3** (`client.resp_proto`),
+  otherwise as a flat `*` array — matching upstream's client-vs-script resp
+  matrix.
+- Lua execution errors are normalized to a single RESP-safe line across
+  runtime, callback, and syntax errors. This removed the hidden newline stack
+  trace that desynchronized the Tcl client after `redis.sha1hex()`.
+- Recursive Lua table replies are bounded with an upstream-shaped
+  `-ERR reached lua stack limit` guard instead of recursing until Rust stack
+  overflow.
+
+Wire-proven for all four cases in both paths (raw-socket probe):
+RESP3-client+`setresp(3)` -> `%1`; the other three (RESP3+2, RESP2+3, RESP2+2)
+-> flat `*2`. Focused `redis-commands` unit tests cover map reply view,
+map-table encoding, and recursive-table stack limiting; `cargo check
+--workspace` clean. Focused oracle:
+`harness/oracle/results/tcl-survey/20260524T214220Z/unit__scripting.json`.
+`unit/scripting` now runs past `os.clock`, dangerous-method,
+`lua bit.tohex bug`, RESP3-map, recursive object, and massive-unpack coverage,
+versus aborting at line 1058 before.
+
+Newly *revealed* downstream frontiers (separate packets, not regressions —
+they were hidden behind the 1058 abort): counted `[err]`s for Globals
+protection (`a=10` not erroring), command arity handling, Redis-namespace error
+reporting, and `CLUSTER RESET` inside a script. The current no-summary abort is
+later and different: `Script ACL check` authenticates as a restricted user, then
+the helper attempts `FUNCTION LOAD` and receives `NOPERM This user has no
+permissions to run the 'function' command`. That should be the next contained
+scripting/ACL packet, likely by matching upstream ACL categories for FUNCTION
+or by making the test helper's load path execute under the expected user
+context.
 
 Frontier progression on `unit/scripting.tcl`: cmsgpack (~line 540s) -> bit
-(574) -> os (784) -> RESP3 map (1058). Each link cleared; file still
-no-summary until the RESP3 chain is cleared too.
+(574) -> os (784) -> RESP3 map (1058, cleared) -> recursive reply stack guard
+-> scripting ACL/FUNCTION permission abort. File still no-summary until that
+ACL detonator clears, but the scripting-globals/reply chain through 1058 is
+done.
 
 ### 3. `SET IFEQ`
 
@@ -133,6 +179,30 @@ semantics in `crates/redis-commands/src/string.rs`. Focused TCL proof
 `harness/oracle/results/tcl-survey/20260524T180220Z/unit__type__string.json`
 now passes the IFEQ block and advances the file frontier to the existing
 `LCS basic` gap.
+
+#### Side packet `tcl-string-lcs-v1` — FILE FLIPPED TO SUMMARY
+
+Result 2026-05-24: implemented `LCS key1 key2 [LEN] [IDX] [MINMATCHLEN n]
+[WITHMATCHLEN]` in `crates/redis-commands/src/string.rs` (the registered
+handler was a stub). Faithful port of `lcsCommand` (t_string.c:842): vanilla
+O(n·m) DP table, backward walk to recover both the LCS string and the IDX match
+ranges, with the upstream contiguous-range extend/emit logic and `MINMATCHLEN`
+filter. A missing key reads as the empty string; a non-string value gives the
+upstream `The specified keys must contain string values` error (not WRONGTYPE).
+The `IDX` reply is built as a `RespFrame::Map` so `reply_frame` adapts it to the
+client's RESP version (RESP3 `%` map / RESP2 flat array) automatically.
+
+Wire-proven against the suite's RNA vectors: basic LCS == `rnalcs` (len 227),
+`LEN` == 227, and `IDX` / `IDX WITHMATCHLEN` / `IDX ... MINMATCHLEN 5` match the
+expected index structures byte-for-byte. `cargo check --workspace` clean.
+
+LCS was the **last** detonator in `unit/type/string.tcl`: clearing it flipped
+the whole file from `abort/no-summary` to a clean summary. Focused oracle:
+`harness/oracle/results/tcl-survey/20260524T214220Z/unit__type__string.json`.
+Result: **104 passed / 0 failed / 0 aborts, `\o/ All tests passed without
+errors!`**. This is the Phase-1 jackpot: ~104 source blocks move straight from
+the hidden `abort/no-summary` bucket into `proved`, with no new `known-fail`
+revealed.
 
 ### 4. Functions metadata / early library behavior
 

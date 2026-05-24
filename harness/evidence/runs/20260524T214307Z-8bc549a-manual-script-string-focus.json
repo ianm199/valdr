@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "kind": "manual_focus_evidence",
+  "ts": "2026-05-24T21:43:07Z",
+  "target_commit": "8bc549a61e9a6dec021a65e7f9f68577c1147e2b",
+  "git_dirty": true,
+  "surface": "correctness",
+  "method": "official-suite",
+  "summary": "Focused TCL proof after scripting RESP3/Lua and string LCS unlocks.",
+  "checks": [
+    {
+      "command": "cargo check --workspace --quiet",
+      "status": "pass"
+    },
+    {
+      "command": "cargo test -p redis-commands lua_ --quiet",
+      "status": "pass",
+      "summary": "3 passed"
+    },
+    {
+      "command": "cargo test -p redis-commands lcs --quiet",
+      "status": "pass",
+      "summary": "compiled; no LCS unit tests matched"
+    },
+    {
+      "command": "python3 harness/oracle/tcl-survey.py --runner-id tcl-focused-script-string-v1 --skip-build --timeout-s 180 --files unit/type/string,unit/scripting",
+      "status": "pass",
+      "summary": "TCL survey: 2 files, 104 passed tests, 0 failed tests, 0 timed out, 1 without summary"
+    }
+  ],
+  "artifacts": [
+    {
+      "kind": "tcl-survey-log",
+      "path": "harness/oracle/results/tcl-survey/20260524T214220Z/unit__type__string.json",
+      "summary": "unit/type/string: Test Summary: 104 passed, 0 failed"
+    },
+    {
+      "kind": "tcl-survey-log",
+      "path": "harness/oracle/results/tcl-survey/20260524T214220Z/unit__scripting.json",
+      "summary": "unit/scripting advances past RESP3 map and recursive reply stack guard; current abort is Script ACL check / FUNCTION permission"
+    }
+  ],
+  "frontier": {
+    "unit/type/string": "clean summary: 104 passed / 0 failed",
+    "unit/scripting": "next abort: Script ACL check receives NOPERM for FUNCTION LOAD after AUTH bob"
+  }
+}
