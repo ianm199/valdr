@@ -185,6 +185,20 @@ struct RuntimeTrackingState {
     bcast_pending: HashMap<(ClientId, RedisString), Vec<RedisString>>,
 }
 
+/// INFO-visible counters from the packet-level live tracking runtime.
+///
+/// Mirrors Valkey's `server.tracking_clients` plus
+/// `trackingGetTotalItems/Keys/Prefixes`. The canonical source-shaped
+/// implementation above still owns a `TrackingState`; the current server path
+/// uses `RuntimeTrackingState`, so INFO must read the live packet runtime.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RuntimeTrackingInfoCounters {
+    pub total_items: u64,
+    pub total_keys: u64,
+    pub total_prefixes: u64,
+    pub tracking_clients: u64,
+}
+
 #[derive(Debug)]
 struct RuntimeTrackingDelivery {
     owner_id: ClientId,
@@ -235,6 +249,39 @@ pub fn remove_runtime_client_tracking(client_id: ClientId) {
     let mut rt = lock_runtime_tracking();
     rt.clients.remove(&client_id);
     remove_client_from_runtime_table(&mut rt, client_id);
+}
+
+/// Snapshot the counters exposed in `INFO`.
+///
+/// C: `server.tracking_clients` and `trackingGetTotalItems`,
+/// `trackingGetTotalKeys`, `trackingGetTotalPrefixes` in tracking.c/server.c.
+pub fn runtime_tracking_info_counters() -> RuntimeTrackingInfoCounters {
+    let rt = lock_runtime_tracking();
+    let total_items = rt.table.values().map(|ids| ids.len() as u64).sum();
+    let total_keys = rt.table.len() as u64;
+    let mut prefixes: HashSet<RedisString> = HashSet::new();
+    let mut tracking_clients = 0u64;
+
+    for state in rt.clients.values() {
+        if !state.enabled {
+            continue;
+        }
+        tracking_clients += 1;
+        if state.bcast {
+            if state.prefixes.is_empty() {
+                prefixes.insert(RedisString::from_static(b""));
+            } else {
+                prefixes.extend(state.prefixes.iter().cloned());
+            }
+        }
+    }
+
+    RuntimeTrackingInfoCounters {
+        total_items,
+        total_keys,
+        total_prefixes: prefixes.len() as u64,
+        tracking_clients,
+    }
 }
 
 /// Remember that `client_id` read `keys` while normal tracking was enabled.
@@ -1347,6 +1394,54 @@ pub fn tracking_get_total_keys(tracking: &TrackingState) -> u64 {
 /// C: `uint64_t trackingGetTotalPrefixes(void)`.
 pub fn tracking_get_total_prefixes(tracking: &TrackingState) -> u64 {
     tracking.prefix_table.len() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn clear_runtime_tracking_for_test() {
+        let mut rt = lock_runtime_tracking();
+        rt.clients.clear();
+        rt.table.clear();
+        rt.bcast_pending.clear();
+    }
+
+    #[test]
+    fn runtime_tracking_info_counters_match_tracked_keys_and_bcast_prefixes() {
+        clear_runtime_tracking_for_test();
+
+        let normal = ClientTrackingState {
+            enabled: true,
+            redirect: 42,
+            ..ClientTrackingState::default()
+        };
+        sync_runtime_client_tracking(1, &normal);
+        runtime_remember_read_keys(
+            1,
+            &normal,
+            &[
+                RedisString::from_static(b"key1"),
+                RedisString::from_static(b"key2"),
+            ],
+        );
+
+        let bcast = ClientTrackingState {
+            enabled: true,
+            bcast: true,
+            prefixes: vec![RedisString::from_static(b"prefix:")],
+            ..ClientTrackingState::default()
+        };
+        sync_runtime_client_tracking(2, &bcast);
+
+        let counters = runtime_tracking_info_counters();
+        assert_eq!(counters.total_items, 2);
+        assert_eq!(counters.total_keys, 2);
+        assert_eq!(counters.total_prefixes, 1);
+        assert_eq!(counters.tracking_clients, 2);
+
+        clear_runtime_tracking_for_test();
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────

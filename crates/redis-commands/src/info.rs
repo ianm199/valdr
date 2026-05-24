@@ -93,6 +93,7 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let evicted_keys = metrics.evicted_keys.load(Ordering::Relaxed);
     let active_time_us = metrics.active_time_main_thread_us.load(Ordering::Relaxed);
     let maxclients = get_max_clients();
+    let tracking = redis_core::tracking::runtime_tracking_info_counters();
 
     let want = |name: &[u8]| -> bool {
         if has_all || has_default {
@@ -139,7 +140,7 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let _ = writeln!(buf, "connected_clients:{}\r", connected_clients);
         let _ = writeln!(buf, "maxclients:{}\r", maxclients);
         let _ = writeln!(buf, "blocked_clients:{}\r", blocked);
-        let _ = writeln!(buf, "tracking_clients:0\r");
+        let _ = writeln!(buf, "tracking_clients:{}\r", tracking.tracking_clients);
         let _ = writeln!(buf, "clients_in_timeout_table:0\r");
         let _ = writeln!(buf, "watching_clients:0\r");
         let _ = writeln!(buf, "client_recent_max_input_buffer:0\r");
@@ -251,6 +252,9 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let _ = writeln!(buf, "migrate_cached_sockets:0\r");
         let _ = writeln!(buf, "pubsub_channels:0\r");
         let _ = writeln!(buf, "pubsub_patterns:0\r");
+        let _ = writeln!(buf, "tracking_total_keys:{}\r", tracking.total_keys);
+        let _ = writeln!(buf, "tracking_total_items:{}\r", tracking.total_items);
+        let _ = writeln!(buf, "tracking_total_prefixes:{}\r", tracking.total_prefixes);
         let _ = writeln!(buf, "used_active_time_main_thread:{}\r", active_time_us);
         let _ = writeln!(buf, "\r");
     }

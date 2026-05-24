@@ -417,6 +417,18 @@ Wave C is intentionally broader than another tiny frontier fix:
 
 Side packet result, 2026-05-24:
 
+- `tcl-tracking-info-counters-v1` exposed live client-tracking counters in
+  `INFO` from the packet-level runtime (`redis-core/src/tracking.rs`), matching
+  the upstream `tracking.c`/`server.c` fields:
+  `tracking_clients`, `tracking_total_items`, `tracking_total_keys`, and
+  `tracking_total_prefixes`. A Rust unit test models the upstream scenario
+  directly: one normal tracking client reads `key1`/`key2`, one BCAST client
+  registers `prefix:`, and the snapshot reports `2 / 2 / 1 / 2`.
+  Manual RESP probing against the server confirms the exact INFO text expected
+  by `unit/tracking.tcl`. The full file still aborts before it can claim a
+  clean summary because earlier invalidation-order tests leave the Tcl client
+  stream desynchronized; this is a source-shaped sub-frontier fix, not a whole
+  file unlock.
 - `tcl-scripting-bit-lib-v1` installed the Valkey-compatible Lua `bit` global.
 - `tcl-scripting-os-clock-v1` installed the sandboxed Lua `os` table with only
   `os.clock`, plus the Lua `{double = n}` reply bridge required by the elapsed
