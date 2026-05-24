@@ -58,6 +58,13 @@ Source anchors:
 Scope cap: implement the pack/unpack subset needed by upstream scripting tests
 without adding a crate. Keep payloads byte-oriented.
 
+Result 2026-05-24: installed byte-oriented `cmsgpack` and `cmsgpack_safe`
+tables in the mlua scripting sandbox from `crates/redis-commands/src/eval.rs`.
+Focused proof `harness/oracle/results/tcl-survey/20260524T191412Z/unit__scripting.json`
+advances `unit/scripting` past the cmsgpack double, negative-int64, smoke, and
+circular-reference tests; the next frontier is the separate missing `bit`
+global.
+
 ### 3. `SET IFEQ`
 
 Packet: `tcl-string-ifeq-unlock-v1`.
