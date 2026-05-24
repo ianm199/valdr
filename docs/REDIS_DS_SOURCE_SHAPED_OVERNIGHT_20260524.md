@@ -37,6 +37,11 @@ Total cheap-bulk cost: `$0.0926`.
    - Use the older full `source-drafts/redis-ds/listpack_listpack.rs` plus
      upstream `listpack.c`.
    - Goal: real canonical `ListPack` with unit tests.
+   - Closeout: canonical `ListPack` now owns a safe Valkey-compatible byte blob
+     with header/count/EOF layout, compact integer and string entry encodings,
+     backlen navigation, append/prepend/insert/replace/delete, seek, compare,
+     find, merge, raw-byte validation, and focused unit tests. Object-model
+     wiring remains a later packet.
 
 2. `ds-intset-source-port-v1`
    - Integrate the generated `intset.rs` draft into the canonical owner.

@@ -8,7 +8,7 @@ source-drafts/redis-commands/lolwut_lolwut.rs	parked-reference	defer	LOLWUT fami
 source-drafts/redis-commands/lolwut_lolwut5.rs	parked-reference	defer	LOLWUT family has cross-module dependencies and low conformance priority.
 source-drafts/redis-commands/lolwut_lolwut6.rs	parked-reference	defer	LOLWUT family has external rand/dependency choices and low conformance priority.
 source-drafts/redis-commands/lolwut_lolwut9.rs	parked-reference	defer	LOLWUT family depends on missing translated CommandContext helpers and low conformance priority.
-source-drafts/redis-ds/listpack_listpack.rs	parked-reference	defer	Useful source-shaped listpack translation, but diverges from the live ListPack representation.
+source-drafts/redis-ds/listpack_listpack.rs	consumed	repair-and-integrate	Integrated into crates/redis-ds/src/listpack.rs by ds-listpack-canonicalize-v1; canonical ListPack now has a safe byte-buffer implementation and append/get/delete/seek/validate tests.
 source-drafts/redis-server/server.rs	parked-reference	defer	Alternate source-shaped server runtime draft conflicts with current runtime-owner architecture.
 crates/redis-core/src/bio.rs	live-rooted	compile	Compile-ready background-job translation; rooted so compiler now guards it.
 crates/redis-core/src/childinfo.rs	live-rooted	compile	Compile-ready child-info translation; rooted so compiler now guards it.
