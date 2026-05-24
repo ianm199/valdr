@@ -75,6 +75,10 @@ impl RedisError {
         RedisError::NotFloat
     }
 
+    pub fn io(kind: std::io::ErrorKind) -> Self {
+        RedisError::Io(kind)
+    }
+
     /// The RESP error-line bytes (without the leading `-` and trailing CRLF).
     /// Used by the reply writer when serializing this error onto the wire.
     pub fn to_resp_payload(&self) -> RedisString {

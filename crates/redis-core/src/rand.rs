@@ -255,6 +255,15 @@ pub fn server_lrand48() -> i32 {
     GLOBAL_STATE.with(|s| s.borrow_mut().lrand48())
 }
 
+/// Return a pseudo-random floating point value in `[0, 1)`.
+///
+/// Valkey's LFU counter logic uses this helper as a probability draw. The
+/// implementation is intentionally derived from `server_lrand48()` so it keeps
+/// the same deterministic PRNG source as the translated C code.
+pub fn rand_float() -> f64 {
+    (server_lrand48() as f64) / ((SERVER_LRAND48_MAX as f64) + 1.0)
+}
+
 /// Seeds the global PRNG with `seedval`.
 ///
 /// C: `rand.c:84-86, serverSrand48`
@@ -287,6 +296,16 @@ mod tests {
             let v = s.lrand48();
             assert!(v >= 0, "lrand48 must be non-negative");
             assert!(v <= SERVER_LRAND48_MAX);
+        }
+    }
+
+    #[test]
+    fn rand_float_is_unit_interval() {
+        server_srand48(123);
+        for _ in 0..1000 {
+            let v = rand_float();
+            assert!(v >= 0.0);
+            assert!(v < 1.0);
         }
     }
 

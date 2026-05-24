@@ -1898,11 +1898,11 @@ pub fn client_tracking_info_command(ctx: &mut CommandContext) -> RedisResult<()>
 /// C: networking.c:5744 `clientCommand`
 pub fn client_command(ctx: &mut CommandContext) -> RedisResult<()> {
     // The subcommand table is generated; the top-level just errors.
-    add_reply_subcommand_syntax_error(
-        ctx.client,
-        b"CLIENT",
-        ctx.arg(1).map(|s| s.as_bytes()).unwrap_or(b""),
-    );
+    let subcommand = ctx
+        .arg(1)
+        .map(|s| s.as_bytes().to_vec())
+        .unwrap_or_default();
+    add_reply_subcommand_syntax_error(ctx.client, b"CLIENT", &subcommand);
     Ok(())
 }
 

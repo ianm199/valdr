@@ -1,0 +1,30 @@
+path	status	action	reason
+source-drafts/redis-core/allocator_defrag.rs	parked-reference	defer	Compiled in default no-op mode, but real jemalloc path requires unsafe/FFI policy and allocator dependency decisions.
+source-drafts/redis-core/config.rs	parked-reference	defer	Substantial source-shaped config translation, but failed compile probe with crate-path/type mismatches and many TODO markers.
+source-drafts/redis-core/debug.rs	parked-reference	defer	Debug/crash-reporting draft depends on missing reply aliases, SHA1/backtrace/jemalloc choices, and unsafe/signal policy.
+source-drafts/redis-core/release.rs	parked-reference	defer	Release metadata draft expects a missing version module/build.rs strategy.
+source-drafts/redis-core/socket.rs	parked-reference	defer	Socket backend draft requires raw-fd/libc/event-loop policy; not the live runtime-owner path.
+source-drafts/redis-commands/lolwut_lolwut.rs	parked-reference	defer	LOLWUT family has cross-module dependencies and low conformance priority.
+source-drafts/redis-commands/lolwut_lolwut5.rs	parked-reference	defer	LOLWUT family has cross-module dependencies and low conformance priority.
+source-drafts/redis-commands/lolwut_lolwut6.rs	parked-reference	defer	LOLWUT family has external rand/dependency choices and low conformance priority.
+source-drafts/redis-commands/lolwut_lolwut9.rs	parked-reference	defer	LOLWUT family depends on missing translated CommandContext helpers and low conformance priority.
+source-drafts/redis-ds/listpack_listpack.rs	parked-reference	defer	Useful source-shaped listpack translation, but diverges from the live ListPack representation.
+source-drafts/redis-server/server.rs	parked-reference	defer	Alternate source-shaped server runtime draft conflicts with current runtime-owner architecture.
+crates/redis-core/src/bio.rs	live-rooted	compile	Compile-ready background-job translation; rooted so compiler now guards it.
+crates/redis-core/src/childinfo.rs	live-rooted	compile	Compile-ready child-info translation; rooted so compiler now guards it.
+crates/redis-core/src/cpu_affinity.rs	live-rooted	compile	Compile-ready CPU-affinity translation with feature-gated behavior; rooted so compiler now guards it.
+crates/redis-core/src/entry.rs	live-rooted	move-and-compile	Hash entry/expiry primitive belonged in core, not redis-server; moved and rooted.
+crates/redis-core/src/fifo.rs	live-rooted	compile	Compile-ready FIFO helper; rooted as dependency substrate for queue/mutexqueue code.
+crates/redis-core/src/lrulfu.rs	live-rooted	compile	LRU/LFU eviction-clock logic now compiles after exposing rand_float from redis-core::rand.
+crates/redis-core/src/mt19937.rs	live-rooted	compile	Compile-ready PRNG translation; rooted so compiler now guards it.
+crates/redis-core/src/mutexqueue.rs	live-rooted	compile	Compile-ready mutex queue helper once fifo is rooted.
+crates/redis-core/src/networking.rs	live-rooted	compile	Near-ready networking translation now compiles after a RedisError::io constructor and borrow cleanup.
+crates/redis-core/src/queues.rs	live-rooted	compile	Compile-ready queue substrate; rooted so compiler now guards it.
+crates/redis-core/src/rand.rs	live-rooted	compile	Compile-ready rand.c translation; now also exports rand_float for LFU.
+crates/redis-core/src/setproctitle.rs	live-rooted	compile	Compile-ready process-title scaffold; rooted so compiler now guards it.
+crates/redis-core/src/siphash.rs	live-rooted	compile	Compile-ready hash primitive; rooted so compiler now guards it.
+crates/redis-core/src/syscheck.rs	live-rooted	compile	Compile-ready system-check scaffold; rooted so compiler now guards it.
+crates/redis-core/src/threads_mngr.rs	live-rooted	compile	Compile-ready thread-manager scaffold; rooted so compiler now guards it.
+crates/redis-core/src/tracking.rs	live-rooted	compile	Client-tracking invalidation logic is compile-ready; rooted for future TCL tracking work.
+crates/redis-commands/src/vector.rs	live-rooted	compile	Compile-ready vector.c translation with tests; rooted in redis-commands.
+

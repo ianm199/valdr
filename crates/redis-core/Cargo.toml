@@ -5,6 +5,12 @@ edition.workspace = true
 license.workspace = true
 description = "Core server state: RedisServer, Client, RedisDb, RedisObject, CommandContext."
 
+[features]
+default = []
+cpu-affinity = []
+no_processor_clock = []
+tls = []
+
 [dependencies]
 redis-types = { workspace = true }
 redis-protocol = { workspace = true }

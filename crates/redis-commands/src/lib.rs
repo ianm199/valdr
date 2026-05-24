@@ -35,6 +35,7 @@ pub mod slowlog_cmd;
 pub mod sort;
 pub mod stream;
 pub mod string;
+pub mod vector;
 pub mod zset;
 
 pub use dispatch::{dispatch, lookup_command, DispatchEntry, Handler};

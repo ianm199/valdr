@@ -181,8 +181,8 @@ mod tests {
     #[test]
     fn known_date_2024_01_15_utc() {
         // 2024-01-15 12:34:56 UTC
-        // Computed externally: 1705318496
-        let t: i64 = 1_705_318_496;
+        // Computed externally: 1705322096
+        let t: i64 = 1_705_322_096;
         let bd = nolocks_localtime(t, 0, 0);
         assert_eq!(bd.tm_year, 124); // 2024 - 1900
         assert_eq!(bd.tm_mon, 0);    // January

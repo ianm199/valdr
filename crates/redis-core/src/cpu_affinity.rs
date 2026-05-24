@@ -262,7 +262,7 @@ mod tests {
 
     #[test]
     fn empty_is_ok() {
-        assert_eq!(parse_cpulist(b"").unwrap(), vec![]);
+        assert_eq!(parse_cpulist(b"").unwrap(), Vec::<i32>::new());
     }
 
     #[test]
