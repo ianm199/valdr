@@ -54,6 +54,12 @@ Total cheap-bulk cost: `$0.0926`.
 3. `ds-ziplist-readonly-v1`
    - Integrate the generated `ziplist.rs` draft as a legacy read-only decoder.
    - Goal: iterator / get / compare / validate tests without UTF-8 conversion.
+   - Closeout: canonical `Ziplist` now owns a safe read-only Valkey-compatible
+     byte blob decoder with header/blob length access, positive and negative
+     offset indexing, forward/backward iteration, byte and integer payload
+     reads, compare/find, safe-to-add, raw-byte deep validation, and focused
+     unit tests. Mutating ziplist writes and object-model/RDB wiring remain
+     later packets.
 
 4. `ds-adlist-source-port-v1`
    - Integrate useful adlist behavior into canonical `LinkedList`.
