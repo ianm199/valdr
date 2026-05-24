@@ -27,7 +27,7 @@ Result:
 | `ziplist.rs` | 1049 | Useful read-only decoder draft; remove UTF-8 parsing in integration. |
 | `adlist.rs` | 692 | Useful API map; likely simplify away `Rc<RefCell>` if possible. |
 | `quicklist.rs` | 1142 | Scaffold only until canonical `ListPack` exists. |
-| `rax.rs` | 437 | Behavior map only; many `todo!` markers. |
+| `rax.rs` | 437 | Consumed as a behavior map; canonical owner uses a safe ordered byte-key map. |
 
 Total cheap-bulk cost: `$0.0926`.
 
@@ -89,6 +89,12 @@ Total cheap-bulk cost: `$0.0926`.
    - Use the generated draft and upstream source to land a safe behavior-first
      ordered byte-key map API if feasible. If compressed-node parity is too
      large, land a clean architecture note and tests for the intended surface.
+   - Closeout: canonical `RadixTree` now owns a safe `BTreeMap`-backed ordered
+     byte-key map with insert, try-insert, find, mutable find, remove,
+     lexicographic seek, forward/reverse iteration, prefix iteration, size, and
+     focused unit tests. Valkey's packed compressed-node allocation layout,
+     iterator callbacks, random walk, and debug node introspection remain later
+     packets.
 
 8. `redis-ds-unit-after-wave2-v1`
    - Runner: `cargo test -p redis-ds`.
