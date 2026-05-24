@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "packet": "tcl-hashexpire-repl-stream-v1",
+  "runtime": "codex",
+  "commit": "cc65e6c",
+  "target_commit": "cc65e6c2846f80c54bb3b073aec591e291eb7920",
+  "claim_level": "telemetry",
+  "surface": "correctness",
+  "method": "official-suite",
+  "status": "pass",
+  "summary": "unit/hashexpire flipped to a fully counted pass after minimal replication stream, HSETEX propagation, COPY field-expiry, and expired_fields fixes.",
+  "commands": [
+    "cargo check --workspace --quiet",
+    "cargo test -p redis-commands sync_routes_through_full_resync --quiet",
+    "cargo test -p redis-commands psync_full_resync_with_question_mark --quiet",
+    "python3 harness/oracle/tcl-survey.py --skip-build --timeout-s 150 --files unit/hashexpire"
+  ],
+  "artifacts": [
+    {
+      "kind": "tcl-survey-log",
+      "path": "harness/oracle/results/tcl-survey/20260524T225345Z/unit__hashexpire.json",
+      "test": "unit/hashexpire"
+    }
+  ],
+  "measurements": [
+    {
+      "kind": "official",
+      "metric": "tcl_pass_count",
+      "test": "unit/hashexpire",
+      "value": 207,
+      "unit": "tests"
+    },
+    {
+      "kind": "official",
+      "metric": "tcl_fail_count",
+      "test": "unit/hashexpire",
+      "value": 0,
+      "unit": "tests"
+    },
+    {
+      "kind": "official",
+      "metric": "tcl_file_pass_ratio",
+      "test": "unit/hashexpire",
+      "numerator": 207,
+      "denominator": 207,
+      "value": 1.0,
+      "unit": "pass/total"
+    }
+  ],
+  "implementation_notes": [
+    "SYNC legacy full resync no longer emits +FULLRESYNC; PSYNC still does.",
+    "Replication emits SELECT frames when selected db changes, which lets upstream attach_to_replication_stream observe validation propagation.",
+    "HSETEX propagation rewrites validation flags to canonical PXAT form.",
+    "COPY preserves hash field expiry metadata.",
+    "Hash field import-mode zero TTL is handled without eager deletion.",
+    "CONFIG RESETSTAT resets expired_fields, and HSET no longer clears the global expired field counter."
+  ],
+  "notes": [
+    "The code commit was pushed before this manual harness record was added, leaving the packet dependency graph blocked until this evidence row was appended.",
+    "The focused TCL runner completed cleanly with no timeout and no no-summary bucket."
+  ]
+}
