@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "packet": "tcl-expire-import-mode-v1",
+  "runtime": "codex",
+  "commit": "e974f0a",
+  "claim_level": "telemetry",
+  "surface": "correctness",
+  "method": "official-suite",
+  "status": "pass",
+  "summary": "unit/expire flipped from 63 passed / 2 failed to 65 passed / 0 failed after import-mode expiry semantics",
+  "commands": [
+    "cargo check --workspace --quiet",
+    "cargo test -p redis-core import_source_active_keeps_expired_keys_visible --quiet",
+    "cargo build --bin redis-server --quiet",
+    "python3 harness/oracle/tcl-survey.py --runner-id tcl-expire-import-mode-v1 --skip-build --timeout-s 180 --files unit/expire"
+  ],
+  "artifacts": [
+    {
+      "kind": "tcl-survey-setup",
+      "path": "harness/oracle/results/tcl-survey/20260524T222256Z/setup.json"
+    },
+    {
+      "kind": "tcl-survey-log",
+      "path": "harness/oracle/results/tcl-survey/20260524T222256Z/unit__expire.json",
+      "test": "unit/expire"
+    }
+  ],
+  "measurements": [
+    {
+      "kind": "official",
+      "metric": "tcl_pass_count",
+      "test": "unit/expire",
+      "value": 65,
+      "unit": "tests"
+    },
+    {
+      "kind": "official",
+      "metric": "tcl_fail_count",
+      "test": "unit/expire",
+      "value": 0,
+      "unit": "tests"
+    },
+    {
+      "kind": "official",
+      "metric": "tcl_file_pass_ratio",
+      "test": "unit/expire",
+      "numerator": 65,
+      "denominator": 65,
+      "value": 1.0,
+      "unit": "pass/total"
+    }
+  ],
+  "notes": [
+    "Code was committed separately as e974f0a by a side agent while this verification run was in progress.",
+    "The focused TCL runner completed cleanly with no timeout and no no-summary bucket."
+  ]
+}
