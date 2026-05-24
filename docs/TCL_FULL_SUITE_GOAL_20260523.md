@@ -36,12 +36,66 @@ These numbers are different views, not interchangeable totals.
 |---|---|---:|
 | Full upstream inventory | All Valkey TCL tests in this checkout | 4,299 test blocks |
 | Historical scoped TCL claim | Cleanup-wave core unit-file survey | ~877 pass / ~73 fail |
-| Latest focused frontier run | `tcl-survey-unswept`, 10 files, telemetry only | 266 counted pass / 0 counted fail / 1 no-summary file |
+| Latest generated inventory | `tcl-suite-inventory`, all files | 487 pass / 2 fail / 489 counted |
+| Latest generated status map | `tcl-suite-inventory`, all files | 13 pass files, 1 fail file, 3 timeout files, 9 no-summary files, 219 skipped-by-policy files |
 | Broader core runner inventory | `tcl-survey-core`, 15 selected single-node files | 1,160 source test blocks |
 
 The useful mental model is therefore: we are around the first thousand counted
 upstream TCL passes, but we are not yet reporting against the full 4,299-test
 denominator.
+
+Generated source-test status snapshot:
+
+```text
+counted survey results     ###........................... 489 / 4,299
+passing files              ###........................... 427 / 4,299
+failing files              ..............................  65 / 4,299
+timeout files              ##............................ 264 / 4,299
+no-summary files           ######........................ 912 / 4,299
+skipped-by-policy files    ##################............ 2,631 / 4,299
+```
+
+The source-test status bars are file-level accounting. For example, a timeout
+file contributes all of its source `test` blocks to the timeout bucket, even if
+some tests passed before the timeout.
+
+Latest local generated artifacts:
+
+```text
+harness/oracle/results/tcl-suite-inventory/latest.json
+harness/oracle/results/tcl-suite-inventory/latest.md
+```
+
+Those files live under `harness/oracle/results/`, which is gitignored. Regenerate
+them with:
+
+```bash
+python3 harness/oracle/tcl-suite-inventory.py
+```
+
+## Code Size Snapshot
+
+Current physical line count, as of 2026-05-23:
+
+| Codebase | Files counted | Lines |
+|---|---:|---:|
+| Rust port crates, `crates/**/*.rs` | 128 | 86,183 |
+| Upstream Valkey core, `reference/valkey/src/*.{c,h}` | 212 | 180,348 |
+
+```text
+rust port vs upstream src  ##############................ 86,183 / 180,348
+```
+
+Rust crate breakdown:
+
+| Crate | Lines |
+|---|---:|
+| `redis-core` | 41,119 |
+| `redis-commands` | 34,922 |
+| `redis-server` | 4,756 |
+| `redis-ds` | 3,235 |
+| `redis-protocol` | 1,736 |
+| `redis-types` | 415 |
 
 ## Goal
 
@@ -59,8 +113,9 @@ intentionally waived.
 1. Keep focused frontier runners for fast packet work.
 2. Refresh `tcl-survey-core` after each frontier wave so the broader
    single-node count is current.
-3. Add a generated suite inventory that records every TCL file, test-block
-   count, tags denied, timeout/no-summary status, pass count, and fail count.
+3. Maintain the generated suite inventory that records every TCL file,
+   test-block count, timeout/no-summary status, pass count, fail count, and
+   skip policy.
 4. Expand from single-node unit files to all unit files.
 5. Add the missing infrastructure runners for multi-node replication,
    Sentinel, TLS, cluster, and module-related tests.

@@ -287,22 +287,25 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
         _ => false,
     };
 
-    let aof = if result.is_ok() && metadata.write && !command_blocked {
+    let propagate_write = result.is_ok()
+        && metadata.write
+        && !command_blocked
+        && should_propagate_write_command(ctx, name);
+    let aof = if propagate_write {
         crate::aof::aof_writer()
     } else {
         None
     };
-    let replication =
-        if result.is_ok() && metadata.write && !command_blocked && !ctx.client_ref().is_replica {
-            let repl = redis_core::replication::global_replication_state();
-            if repl.should_propagate_writes() {
-                Some(repl)
-            } else {
-                None
-            }
+    let replication = if propagate_write && !ctx.client_ref().is_replica {
+        let repl = redis_core::replication::global_replication_state();
+        if repl.should_propagate_writes() {
+            Some(repl)
         } else {
             None
-        };
+        }
+    } else {
+        None
+    };
 
     let mut argv_snapshot: Option<Vec<RedisString>> = None;
     if (command_blocked && start.is_some())
@@ -355,6 +358,16 @@ fn snapshot_argv(ctx: &CommandContext<'_>) -> Vec<RedisString> {
     (0..ctx.arg_count())
         .filter_map(|i| ctx.client_ref().arg(i).cloned())
         .collect()
+}
+
+fn should_propagate_write_command(ctx: &CommandContext<'_>, original_name: &[u8]) -> bool {
+    if original_name.eq_ignore_ascii_case(b"GETEX") {
+        return ctx
+            .client_ref()
+            .arg(0)
+            .is_some_and(|current| !current.as_bytes().eq_ignore_ascii_case(b"GETEX"));
+    }
+    true
 }
 
 /// Return the combined hot-path metadata for a named command.
@@ -986,6 +999,10 @@ pub static HANDLERS: &[DispatchEntry] = &[
     DispatchEntry {
         name: b"HGET",
         handler: crate::hash::hget_command,
+    },
+    DispatchEntry {
+        name: b"HGETDEL",
+        handler: crate::hash::hgetdel_command,
     },
     DispatchEntry {
         name: b"HMGET",
@@ -1720,6 +1737,7 @@ mod tests {
         assert!(lookup_command(b"ping").is_some());
         assert!(lookup_command(b"Ping").is_some());
         assert!(lookup_command(b"PiNg").is_some());
+        assert!(lookup_command(b"hgetdel").is_some());
     }
 
     #[test]

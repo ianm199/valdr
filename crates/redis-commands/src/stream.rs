@@ -216,8 +216,16 @@ fn reply_entry(ctx: &mut CommandContext, entry: &StreamEntry) -> RedisResult<()>
 #[derive(Debug, Clone, Copy)]
 enum TrimStrategy {
     None,
-    MaxLen(i64),
-    MinId(StreamId),
+    MaxLen {
+        target: usize,
+        approximate: bool,
+        limit: Option<usize>,
+    },
+    MinId {
+        min: StreamId,
+        approximate: bool,
+        limit: Option<usize>,
+    },
 }
 
 #[derive(Debug)]
@@ -249,31 +257,53 @@ fn parse_add_options(ctx: &CommandContext) -> Result<(AddOptions, usize), RedisE
                 return Err(RedisError::syntax(b"syntax error"));
             }
             let mut peek = ctx.arg(i)?.as_bytes();
+            let mut approximate = false;
             if peek == b"=" || peek == b"~" {
+                approximate = peek == b"~";
                 i += 1;
                 if i >= argc {
                     return Err(RedisError::syntax(b"syntax error"));
                 }
                 peek = ctx.arg(i)?.as_bytes();
             }
-            opts.trim = if is_maxlen {
+            let parsed_trim = if is_maxlen {
                 let n = parse_strict_i64(peek)?;
                 if n < 0 {
                     return Err(RedisError::syntax(
                         b"MAXLEN argument must be >= 0",
                     ));
                 }
-                TrimStrategy::MaxLen(n)
+                TrimStrategy::MaxLen {
+                    target: n as usize,
+                    approximate,
+                    limit: None,
+                }
             } else {
-                TrimStrategy::MinId(parse_explicit_id(peek)?)
+                TrimStrategy::MinId {
+                    min: parse_explicit_id(peek)?,
+                    approximate,
+                    limit: None,
+                }
             };
             i += 1;
+            let mut limit = None;
             if i < argc && ctx.arg(i)?.as_bytes().eq_ignore_ascii_case(b"LIMIT") {
-                i += 2;
-                if i > argc {
+                if !approximate {
+                    return Err(RedisError::syntax(
+                        b"syntax error, LIMIT cannot be used without the special ~ option",
+                    ));
+                }
+                if i + 1 >= argc {
                     return Err(RedisError::syntax(b"syntax error"));
                 }
+                let n = parse_strict_i64(ctx.arg(i + 1)?.as_bytes())?;
+                if n < 0 {
+                    return Err(RedisError::syntax(b"LIMIT argument must be >= 0"));
+                }
+                limit = Some(n as usize);
+                i += 2;
             }
+            opts.trim = parsed_trim.with_limit(limit);
             continue;
         }
         break;
@@ -301,33 +331,127 @@ fn auto_next_id(last_id: StreamId) -> StreamId {
 fn apply_trim(stream: &mut InlineStream, strategy: TrimStrategy) -> usize {
     match strategy {
         TrimStrategy::None => 0,
-        TrimStrategy::MaxLen(n) => {
-            let n = if n < 0 { 0 } else { n as usize };
+        TrimStrategy::MaxLen {
+            target,
+            approximate,
+            limit,
+        } => {
+            if approximate {
+                return apply_approx_maxlen_trim(stream, target, limit);
+            }
             let len = stream.entries.len();
-            if len <= n {
+            if len <= target {
                 return 0;
             }
-            let evict = len - n;
-            for entry in stream.entries.drain(0..evict) {
-                if entry.id > stream.max_deleted_id {
-                    stream.max_deleted_id = entry.id;
-                }
-            }
-            evict
+            drain_front(stream, len - target)
         }
-        TrimStrategy::MinId(min) => {
+        TrimStrategy::MinId {
+            min,
+            approximate,
+            limit,
+        } => {
             let cut = stream.lower_bound(&min);
             if cut == 0 {
                 return 0;
             }
-            for entry in stream.entries.drain(0..cut) {
-                if entry.id > stream.max_deleted_id {
-                    stream.max_deleted_id = entry.id;
-                }
+            if approximate {
+                return apply_approx_count_trim(stream, cut, limit);
             }
-            cut
+            drain_front(stream, cut)
         }
     }
+}
+
+impl TrimStrategy {
+    fn with_limit(self, limit: Option<usize>) -> Self {
+        match self {
+            TrimStrategy::MaxLen {
+                target,
+                approximate,
+                ..
+            } => TrimStrategy::MaxLen {
+                target,
+                approximate,
+                limit,
+            },
+            TrimStrategy::MinId {
+                min,
+                approximate,
+                ..
+            } => TrimStrategy::MinId {
+                min,
+                approximate,
+                limit,
+            },
+            TrimStrategy::None => TrimStrategy::None,
+        }
+    }
+}
+
+const APPROX_STREAM_NODE_ENTRIES: usize = 100;
+
+fn approx_trim_chunk_len(len: usize, limit: Option<usize>) -> usize {
+    match limit {
+        Some(n) if n <= 1 => 0,
+        Some(n) if n >= 30 => 10.min(len),
+        Some(n) => n.min(len),
+        None => APPROX_STREAM_NODE_ENTRIES.min(len),
+    }
+}
+
+fn apply_approx_maxlen_trim(
+    stream: &mut InlineStream,
+    target: usize,
+    limit: Option<usize>,
+) -> usize {
+    let mut evicted = 0usize;
+    let mut remaining_limit = limit.unwrap_or(usize::MAX);
+    loop {
+        let len = stream.entries.len();
+        if len <= target {
+            break;
+        }
+        let chunk = approx_trim_chunk_len(len, limit);
+        if chunk == 0 || chunk > remaining_limit || len.saturating_sub(chunk) < target {
+            break;
+        }
+        evicted += drain_front(stream, chunk);
+        remaining_limit = remaining_limit.saturating_sub(chunk);
+    }
+    evicted
+}
+
+fn apply_approx_count_trim(
+    stream: &mut InlineStream,
+    eligible: usize,
+    limit: Option<usize>,
+) -> usize {
+    let mut evicted = 0usize;
+    let mut remaining = eligible;
+    let mut remaining_limit = limit.unwrap_or(usize::MAX);
+    while remaining > 0 {
+        let chunk = approx_trim_chunk_len(stream.entries.len(), limit);
+        if chunk == 0 || chunk > remaining || chunk > remaining_limit {
+            break;
+        }
+        evicted += drain_front(stream, chunk);
+        remaining -= chunk;
+        remaining_limit = remaining_limit.saturating_sub(chunk);
+    }
+    evicted
+}
+
+fn drain_front(stream: &mut InlineStream, count: usize) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    let count = count.min(stream.entries.len());
+    for entry in stream.entries.drain(0..count) {
+        if entry.id > stream.max_deleted_id {
+            stream.max_deleted_id = entry.id;
+        }
+    }
+    count
 }
 
 fn parse_strict_i64(bytes: &[u8]) -> Result<i64, RedisError> {
@@ -449,8 +573,10 @@ pub fn xadd_command(ctx: &mut CommandContext) -> RedisResult<()> {
     };
 
     let new_entry = StreamEntry { id: new_id, fields: fields_for_wake };
-    wake_blocked_for_stream(ctx.db(), &key_for_wake, &new_entry);
-    wake_blocked_xreadgroup_for_key(ctx.db_mut(), &key_for_wake, &new_entry);
+    if !ctx.client_ref().flag_deny_blocking() {
+        wake_blocked_for_stream(ctx.db(), &key_for_wake, &new_entry);
+        wake_blocked_xreadgroup_for_key(ctx.db_mut(), &key_for_wake, &new_entry);
+    }
 
     ctx.notify_keyspace_event(NOTIFY_STREAM, b"xadd", &key_for_wake);
     ctx.reply_bulk_string(RedisString::from_vec(new_id.to_display_bytes()))
@@ -939,7 +1065,9 @@ fn parse_trim_args(ctx: &CommandContext, start: usize) -> Result<TrimStrategy, R
         return Err(RedisError::syntax(b"syntax error"));
     }
     let mut threshold_bytes = ctx.arg(idx)?.as_bytes();
+    let mut approximate = false;
     if threshold_bytes == b"=" || threshold_bytes == b"~" {
+        approximate = threshold_bytes == b"~";
         idx += 1;
         if idx >= argc {
             return Err(RedisError::syntax(b"syntax error"));
@@ -951,21 +1079,40 @@ fn parse_trim_args(ctx: &CommandContext, start: usize) -> Result<TrimStrategy, R
         if n < 0 {
             return Err(RedisError::syntax(b"MAXLEN argument must be >= 0"));
         }
-        TrimStrategy::MaxLen(n)
+        TrimStrategy::MaxLen {
+            target: n as usize,
+            approximate,
+            limit: None,
+        }
     } else {
-        TrimStrategy::MinId(parse_explicit_id(threshold_bytes)?)
+        TrimStrategy::MinId {
+            min: parse_explicit_id(threshold_bytes)?,
+            approximate,
+            limit: None,
+        }
     };
     idx += 1;
+    let mut limit = None;
     if idx < argc && ctx.arg(idx)?.as_bytes().eq_ignore_ascii_case(b"LIMIT") {
-        idx += 2;
-        if idx > argc {
+        if !approximate {
+            return Err(RedisError::syntax(
+                b"syntax error, LIMIT cannot be used without the special ~ option",
+            ));
+        }
+        if idx + 1 >= argc {
             return Err(RedisError::syntax(b"syntax error"));
         }
+        let n = parse_strict_i64(ctx.arg(idx + 1)?.as_bytes())?;
+        if n < 0 {
+            return Err(RedisError::syntax(b"LIMIT argument must be >= 0"));
+        }
+        limit = Some(n as usize);
+        idx += 2;
     }
     if idx != argc {
         return Err(RedisError::syntax(b"syntax error"));
     }
-    Ok(strategy)
+    Ok(strategy.with_limit(limit))
 }
 
 /// XTRIM key MAXLEN|MINID [=|~] threshold [LIMIT count]
@@ -1418,6 +1565,8 @@ fn stream_for_write<'db>(
 fn parse_id_or_dollar(arg: &[u8], stream: &InlineStream) -> Result<StreamId, RedisError> {
     if arg == b"$" {
         Ok(stream.last_id)
+    } else if arg == b"-" {
+        Ok(StreamId::ZERO)
     } else {
         parse_explicit_id(arg)
     }
@@ -1772,15 +1921,23 @@ pub fn xreadgroup_command(ctx: &mut CommandContext) -> RedisResult<()> {
                 group.entries_read = group.entries_read.saturating_add(max as u64);
                 if !noack {
                     for entry in &to_deliver {
-                        pel_add(
-                            group,
-                            &consumer_name,
-                            PelEntry {
-                                entry_id: entry.id,
-                                delivery_time_ms: now,
-                                delivery_count: 1,
-                            },
-                        );
+                        let next_count = group
+                            .pel_find(&entry.id)
+                            .map(|idx| group.pel[idx].delivery_count.saturating_add(1))
+                            .unwrap_or(1);
+                        if next_count > 1 {
+                            pel_reassign(group, &entry.id, &consumer_name, now, next_count);
+                        } else {
+                            pel_add(
+                                group,
+                                &consumer_name,
+                                PelEntry {
+                                    entry_id: entry.id,
+                                    delivery_time_ms: now,
+                                    delivery_count: 1,
+                                },
+                            );
+                        }
                     }
                 }
                 let delivered: Vec<(StreamEntry, bool)> =
@@ -2666,3 +2823,16 @@ pub fn install_stream_hooks() {
         }
     }));
 }
+
+// ──────────────────────────────────────────────────────────────────────────
+// PORT STATUS
+//   source:        reference/valkey/src/t_stream.c
+//   target_crate:  redis-commands
+//   confidence:    pragmatic Phase-B (inline storage, focused TCL parity)
+//   todos:         1
+//   port_notes:    2
+//   unsafe_blocks: 0
+//   notes:         Inline stream command coverage now handles measured trim,
+//                  wake-suppression, and consumer-group replay cases. EXEC
+//                  deferred multi-entry stream wake remains a follow-up.
+// ──────────────────────────────────────────────────────────────────────────

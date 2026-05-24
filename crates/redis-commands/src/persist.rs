@@ -20,7 +20,6 @@
 //! The `unsafe` block that wraps `fork + _exit` is the single unsafe surface in
 //! this crate: documented below with a SAFETY comment.
 
-use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
@@ -35,9 +34,10 @@ use redis_core::rdb::{
 use redis_core::replication::{global_replication_state, ReplBgsaveJob};
 use redis_core::util::mstime;
 use redis_core::CommandContext;
+use redis_core::PersistenceStatus;
 use redis_types::{RedisError, RedisResult};
 
-use crate::aof::{aof_writer, write_aof_rewrite_for_dbs};
+use crate::aof::aof_writer;
 
 fn ascii_lower(b: u8) -> u8 {
     if b.is_ascii_uppercase() {
@@ -83,11 +83,19 @@ pub fn save_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
             cfg.set_last_save_unix(now);
+            ctx.server()
+                .persistence
+                .set_rdb_last_bgsave_status(PersistenceStatus::Ok);
             ctx.reply_simple_string(b"OK")
         }
-        Err(e) => Err(RedisError::runtime(
-            format!("ERR SAVE failed: {}", e).into_bytes(),
-        )),
+        Err(e) => {
+            ctx.server()
+                .persistence
+                .set_rdb_last_bgsave_status(PersistenceStatus::Err);
+            Err(RedisError::runtime(
+                format!("ERR SAVE failed: {}", e).into_bytes(),
+            ))
+        }
     }
 }
 
@@ -239,6 +247,7 @@ pub fn bgsave_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     let cfg = Arc::clone(&server.live_config);
     let path: PathBuf = rdb_path(&cfg.rdb_dir(), &cfg.rdb_filename());
     let snapshot = ctx.snapshot_all_dbs()?;
+    let server_arc_for_thread = ctx.server_arc();
 
     #[cfg(unix)]
     {
@@ -284,8 +293,14 @@ pub fn bgsave_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
                         .map(|d| d.as_secs() as i64)
                         .unwrap_or(0);
                     cfg.set_last_save_unix(now);
+                    server_arc_for_thread
+                        .persistence
+                        .set_rdb_last_bgsave_status(PersistenceStatus::Ok);
                 }
                 Err(e) => {
+                    server_arc_for_thread
+                        .persistence
+                        .set_rdb_last_bgsave_status(PersistenceStatus::Err);
                     eprintln!("redis-server: BGSAVE failed: {}", e);
                 }
             }
@@ -392,9 +407,7 @@ pub fn bgsave_for_replication(
             let dbs = snapshots_to_dbs(&snapshot);
             let ok = save_rdb_databases(&dbs, &temp_for_thread).is_ok();
             if !ok {
-                eprintln!(
-                    "redis-server: BGSAVE-for-replication thread fallback save failed"
-                );
+                eprintln!("redis-server: BGSAVE-for-replication thread fallback save failed");
                 let _ = repl_for_thread.take_repl_bgsave_job();
                 repl_for_thread.set_repl_child_pid(0);
             }
@@ -408,9 +421,10 @@ pub fn bgsave_for_replication(
 
 /// `BGREWRITEAOF` — background AOF rewrite.
 ///
-/// On Unix, forks a child that walks the DB and writes a compacted AOF to a
-/// temp file, then atomically renames it over the existing AOF. The parent
-/// returns `+Background append only file rewriting started` immediately.
+/// The v1 implementation remains synchronous, but follows Valkey's multi-part
+/// AOF ordering: switch appends to a fresh INCR, write a new BASE, then persist
+/// a manifest naming the new BASE and active INCR. No child or thread renames
+/// over the active writer.
 ///
 /// When AOF is not enabled the command still succeeds but is a no-op (the
 /// canonical Valkey behaviour when appendonly=no).
@@ -419,84 +433,61 @@ pub fn bgrewriteaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         return Err(RedisError::wrong_number_of_args(b"bgrewriteaof"));
     }
 
-    let writer_arc = match aof_writer() {
-        Some(w) => w,
-        None => {
-            return ctx.reply_simple_string(b"Background append only file rewriting started");
-        }
-    };
-
-    let snapshot = ctx.snapshot_all_dbs()?;
-    let aof_path = writer_arc.path.clone();
-
-    #[cfg(unix)]
-    {
-        let pid = unsafe {
-            let p = libc::fork();
-            if p == 0 {
-                let tmp_path = {
-                    let mut t = aof_path.clone();
-                    let mut name = t.file_name().unwrap_or_default().to_os_string();
-                    name.push(".rewrite.tmp");
-                    t.set_file_name(name);
-                    t
-                };
-                let exit_code = match do_aof_rewrite(&snapshot, &tmp_path, &aof_path) {
-                    Ok(()) => 0i32,
-                    Err(_) => 1i32,
-                };
-                libc::_exit(exit_code);
-            }
-            p
-        };
-
-        if pid > 0 {
-            return ctx.reply_simple_string(b"Background append only file rewriting started");
-        }
-
-        eprintln!("redis-server: BGREWRITEAOF fork() failed, falling back to thread");
+    if aof_writer().is_none() {
+        return ctx.reply_simple_string(b"Background append only file rewriting started");
     }
 
-    let _ = thread::Builder::new()
-        .name("bgrewriteaof".to_string())
-        .spawn(move || {
-            let tmp_path = {
-                let mut t = aof_path.clone();
-                let mut name = t.file_name().unwrap_or_default().to_os_string();
-                name.push(".rewrite.tmp");
-                t.set_file_name(name);
-                t
-            };
-            if let Err(e) = do_aof_rewrite(&snapshot, &tmp_path, &aof_path) {
-                eprintln!("redis-server: BGREWRITEAOF failed: {}", e);
-            }
-        });
+    if ctx.server().persistence.aof_rewrite_in_progress() {
+        return Err(RedisError::runtime(
+            b"ERR Background append only file rewriting already in progress".to_vec(),
+        ));
+    }
 
-    ctx.reply_simple_string(b"Background append only file rewriting started")
-}
+    let snapshot = ctx.snapshot_all_dbs()?;
+    let dbs = snapshots_to_dbs(&snapshot);
+    let cfg = Arc::clone(&ctx.server().live_config);
+    let dir = cfg.rdb_dir();
+    let filename = cfg.appendfilename();
+    let dirname = cfg.appenddirname();
+    let policy = cfg.appendfsync();
+    let use_rdb_preamble = cfg.aof_use_rdb_preamble();
 
-/// Write a complete AOF rewrite for `snapshot` to `tmp_path`, then atomically
-/// rename it over `final_path`.
-fn do_aof_rewrite(
-    snapshot: &[(u32, Vec<(redis_types::RedisString, redis_core::RedisObject)>)],
-    tmp_path: &PathBuf,
-    final_path: &PathBuf,
-) -> std::io::Result<()> {
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(tmp_path)?;
-    let mut buf = BufWriter::new(file);
-    let dbs = snapshots_to_dbs(snapshot);
-    write_aof_rewrite_for_dbs(&dbs, &mut buf)?;
-    buf.flush()?;
-    std::fs::rename(tmp_path, final_path)?;
-    Ok(())
+    ctx.server().persistence.set_aof_rewrite_in_progress(true);
+    let result = crate::aof::rewrite_manifest_aof_from_dbs(
+        std::path::Path::new(&dir),
+        &filename,
+        &dirname,
+        &dbs,
+        policy,
+        use_rdb_preamble,
+    );
+    ctx.server().persistence.set_aof_rewrite_in_progress(false);
+
+    match result {
+        Ok((base_size, current_size)) => {
+            ctx.server().persistence.set_aof_base_size(base_size);
+            ctx.server().persistence.set_aof_current_size(current_size);
+            ctx.server()
+                .persistence
+                .set_aof_last_bgrewrite_status(PersistenceStatus::Ok);
+            ctx.reply_simple_string(b"Background append only file rewriting started")
+        }
+        Err(e) => {
+            ctx.server()
+                .persistence
+                .set_aof_last_bgrewrite_status(PersistenceStatus::Err);
+            Err(RedisError::runtime(
+                format!("ERR BGREWRITEAOF failed: {}", e).into_bytes(),
+            ))
+        }
+    }
 }
 
 fn snapshots_to_dbs(
-    snapshot: &[(u32, Vec<(redis_types::RedisString, redis_core::RedisObject)>)],
+    snapshot: &[(
+        u32,
+        Vec<(redis_types::RedisString, redis_core::RedisObject)>,
+    )],
 ) -> Vec<RedisDb> {
     snapshot
         .iter()

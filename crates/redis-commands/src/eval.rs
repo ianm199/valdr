@@ -20,15 +20,18 @@
 //! the full sandbox patch list.
 
 use std::cell::RefCell;
+use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::{Mutex, OnceLock};
 
 use mlua::{
-    Error as LuaError, Function as LuaFunction, Lua, MultiValue, RegistryKey, Table as LuaTable,
-    Value as LuaValue,
+    Error as LuaError, Function as LuaFunction, LightUserData, Lua, MultiValue, RegistryKey,
+    Table as LuaTable, Value as LuaValue,
 };
 
 use redis_core::CommandContext;
+use redis_protocol::frame::RespFrame;
 use redis_protocol::parser::{ParserCallbacks, ParserCursor};
 use redis_types::{RedisError, RedisResult, RedisString};
 
@@ -449,6 +452,427 @@ fn install_keys_argv(lua: &Lua, keys: &[RedisString], argv: &[RedisString]) -> m
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+struct CjsonConfig {
+    encode_max_depth: usize,
+    decode_max_depth: usize,
+    encode_invalid_numbers: bool,
+    decode_invalid_numbers: bool,
+    encode_keep_buffer: bool,
+    encode_number_precision: i64,
+}
+
+impl Default for CjsonConfig {
+    fn default() -> Self {
+        Self {
+            encode_max_depth: 1000,
+            decode_max_depth: 1000,
+            encode_invalid_numbers: false,
+            decode_invalid_numbers: false,
+            encode_keep_buffer: true,
+            encode_number_precision: 14,
+        }
+    }
+}
+
+fn cjson_null_value() -> LuaValue {
+    LuaValue::LightUserData(LightUserData(std::ptr::null_mut()))
+}
+
+fn is_cjson_null(value: &LuaValue) -> bool {
+    matches!(value, LuaValue::LightUserData(data) if data.0.is_null())
+}
+
+fn json_escape_string(bytes: &[u8]) -> mlua::Result<String> {
+    serde_json::to_string(String::from_utf8_lossy(bytes).as_ref())
+        .map_err(|err| LuaError::RuntimeError(format!("Cannot serialise string: {}", err)))
+}
+
+fn encode_json_number(n: f64, allow_invalid: bool) -> mlua::Result<String> {
+    if n.is_finite() {
+        if n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64 {
+            Ok((n as i64).to_string())
+        } else {
+            Ok(format!("{}", n))
+        }
+    } else if allow_invalid {
+        if n.is_nan() {
+            Ok("NaN".to_string())
+        } else if n.is_sign_positive() {
+            Ok("Infinity".to_string())
+        } else {
+            Ok("-Infinity".to_string())
+        }
+    } else {
+        Err(LuaError::RuntimeError(
+            "Cannot serialise number: must not be NaN or Infinity".to_string(),
+        ))
+    }
+}
+
+fn lua_value_to_json_string(
+    value: LuaValue,
+    cfg: &CjsonConfig,
+    depth: usize,
+) -> mlua::Result<String> {
+    if is_cjson_null(&value) {
+        return Ok("null".to_string());
+    }
+    match value {
+        LuaValue::Nil => Ok("null".to_string()),
+        LuaValue::Boolean(v) => Ok(if v { "true" } else { "false" }.to_string()),
+        LuaValue::Integer(n) => Ok(n.to_string()),
+        LuaValue::Number(n) => encode_json_number(n, cfg.encode_invalid_numbers),
+        LuaValue::String(s) => json_escape_string(s.as_bytes().as_ref()),
+        LuaValue::Table(t) => lua_table_to_json_string(t, cfg, depth + 1),
+        LuaValue::LightUserData(data) if data.0.is_null() => Ok("null".to_string()),
+        _ => Err(LuaError::RuntimeError(
+            "Cannot serialise value: unsupported Lua type".to_string(),
+        )),
+    }
+}
+
+fn lua_table_to_json_string(
+    table: LuaTable,
+    cfg: &CjsonConfig,
+    depth: usize,
+) -> mlua::Result<String> {
+    if depth > cfg.encode_max_depth {
+        return Err(LuaError::RuntimeError(
+            "Cannot serialise, excessive nesting".to_string(),
+        ));
+    }
+
+    let mut entries: Vec<(LuaValue, LuaValue)> = Vec::new();
+    for pair in table.pairs::<LuaValue, LuaValue>() {
+        entries.push(pair?);
+    }
+
+    let mut numeric_indexes: Vec<i64> = Vec::new();
+    let mut all_array_keys = !entries.is_empty();
+    for (key, _) in &entries {
+        match key {
+            LuaValue::Integer(i) if *i > 0 => numeric_indexes.push(*i),
+            LuaValue::Number(n)
+                if n.is_finite() && n.fract() == 0.0 && *n > 0.0 && *n <= i64::MAX as f64 =>
+            {
+                numeric_indexes.push(*n as i64)
+            }
+            _ => all_array_keys = false,
+        }
+    }
+    if all_array_keys {
+        numeric_indexes.sort_unstable();
+        let contiguous = numeric_indexes
+            .iter()
+            .enumerate()
+            .all(|(idx, key)| *key == idx as i64 + 1);
+        if contiguous {
+            let mut by_index: Vec<(i64, LuaValue)> = Vec::with_capacity(entries.len());
+            for (key, value) in entries {
+                let idx = match key {
+                    LuaValue::Integer(i) => i,
+                    LuaValue::Number(n) => n as i64,
+                    _ => unreachable!(),
+                };
+                by_index.push((idx, value));
+            }
+            by_index.sort_by_key(|(idx, _)| *idx);
+            let mut out = String::from("[");
+            for (idx, (_, value)) in by_index.into_iter().enumerate() {
+                if idx > 0 {
+                    out.push(',');
+                }
+                out.push_str(&lua_value_to_json_string(value, cfg, depth)?);
+            }
+            out.push(']');
+            return Ok(out);
+        }
+    }
+
+    let mut out = String::from("{");
+    for (idx, (key, value)) in entries.into_iter().enumerate() {
+        if idx > 0 {
+            out.push(',');
+        }
+        let key_string = match key {
+            LuaValue::String(s) => json_escape_string(s.as_bytes().as_ref())?,
+            LuaValue::Integer(i) => serde_json::to_string(&i.to_string())
+                .map_err(|err| LuaError::RuntimeError(err.to_string()))?,
+            LuaValue::Number(n)
+                if n.is_finite() && n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64 =>
+            {
+                serde_json::to_string(&(n as i64).to_string())
+                    .map_err(|err| LuaError::RuntimeError(err.to_string()))?
+            }
+            _ => {
+                return Err(LuaError::RuntimeError(
+                    "Cannot serialise table: table key must be a number or string".to_string(),
+                ))
+            }
+        };
+        out.push_str(&key_string);
+        out.push(':');
+        out.push_str(&lua_value_to_json_string(value, cfg, depth)?);
+    }
+    out.push('}');
+    Ok(out)
+}
+
+fn json_value_to_lua(
+    lua: &Lua,
+    value: &serde_json::Value,
+    max_depth: usize,
+    depth: usize,
+) -> mlua::Result<LuaValue> {
+    match value {
+        serde_json::Value::Null => Ok(cjson_null_value()),
+        serde_json::Value::Bool(v) => Ok(LuaValue::Boolean(*v)),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(LuaValue::Integer(i))
+            } else if let Some(u) = n.as_u64() {
+                if u <= i64::MAX as u64 {
+                    Ok(LuaValue::Integer(u as i64))
+                } else {
+                    Ok(LuaValue::Number(u as f64))
+                }
+            } else if let Some(f) = n.as_f64() {
+                Ok(LuaValue::Number(f))
+            } else {
+                Err(LuaError::RuntimeError(
+                    "Cannot deserialise number".to_string(),
+                ))
+            }
+        }
+        serde_json::Value::String(s) => Ok(LuaValue::String(lua.create_string(s.as_bytes())?)),
+        serde_json::Value::Array(items) => {
+            if depth + 1 > max_depth {
+                return Err(LuaError::RuntimeError(
+                    "Found too many nested data structures".to_string(),
+                ));
+            }
+            let table = lua.create_table()?;
+            for (idx, item) in items.iter().enumerate() {
+                table.raw_set(
+                    idx as i64 + 1,
+                    json_value_to_lua(lua, item, max_depth, depth + 1)?,
+                )?;
+            }
+            Ok(LuaValue::Table(table))
+        }
+        serde_json::Value::Object(map) => {
+            if depth + 1 > max_depth {
+                return Err(LuaError::RuntimeError(
+                    "Found too many nested data structures".to_string(),
+                ));
+            }
+            let table = lua.create_table()?;
+            for (key, item) in map {
+                table.raw_set(
+                    key.as_str(),
+                    json_value_to_lua(lua, item, max_depth, depth + 1)?,
+                )?;
+            }
+            Ok(LuaValue::Table(table))
+        }
+    }
+}
+
+fn cjson_bool_config<F>(
+    args: MultiValue,
+    cfg: &Rc<RefCell<CjsonConfig>>,
+    get: F,
+) -> mlua::Result<LuaValue>
+where
+    F: Fn(&mut CjsonConfig) -> &mut bool,
+{
+    let mut guard = cfg.borrow_mut();
+    let slot = get(&mut guard);
+    let old = *slot;
+    if args.is_empty() {
+        return Ok(LuaValue::Boolean(old));
+    }
+    if args.len() != 1 {
+        return Err(LuaError::RuntimeError("expected 1 argument".to_string()));
+    }
+    *slot = match args.front() {
+        Some(LuaValue::Boolean(v)) => *v,
+        Some(LuaValue::Integer(v)) => *v != 0,
+        Some(LuaValue::Number(v)) => *v != 0.0,
+        _ => {
+            return Err(LuaError::RuntimeError(
+                "expected boolean argument".to_string(),
+            ))
+        }
+    };
+    Ok(LuaValue::Boolean(old))
+}
+
+fn cjson_i64_config<F>(
+    args: MultiValue,
+    cfg: &Rc<RefCell<CjsonConfig>>,
+    get: F,
+) -> mlua::Result<LuaValue>
+where
+    F: Fn(&mut CjsonConfig) -> &mut i64,
+{
+    let mut guard = cfg.borrow_mut();
+    let slot = get(&mut guard);
+    let old = *slot;
+    if args.is_empty() {
+        return Ok(LuaValue::Integer(old));
+    }
+    if args.len() != 1 {
+        return Err(LuaError::RuntimeError("expected 1 argument".to_string()));
+    }
+    let next = match args.front() {
+        Some(LuaValue::Integer(v)) => *v,
+        Some(LuaValue::Number(v)) if v.is_finite() => *v as i64,
+        _ => {
+            return Err(LuaError::RuntimeError(
+                "expected integer argument".to_string(),
+            ))
+        }
+    };
+    if next <= 0 {
+        return Err(LuaError::RuntimeError(
+            "expected positive integer argument".to_string(),
+        ));
+    }
+    *slot = next;
+    Ok(LuaValue::Integer(old))
+}
+
+fn cjson_depth_config<F>(
+    args: MultiValue,
+    cfg: &Rc<RefCell<CjsonConfig>>,
+    get: F,
+) -> mlua::Result<LuaValue>
+where
+    F: Fn(&mut CjsonConfig) -> &mut usize,
+{
+    let mut guard = cfg.borrow_mut();
+    let slot = get(&mut guard);
+    let old = *slot as i64;
+    if args.is_empty() {
+        return Ok(LuaValue::Integer(old));
+    }
+    if args.len() != 1 {
+        return Err(LuaError::RuntimeError("expected 1 argument".to_string()));
+    }
+    let next = match args.front() {
+        Some(LuaValue::Integer(v)) => *v,
+        Some(LuaValue::Number(v)) if v.is_finite() => *v as i64,
+        _ => {
+            return Err(LuaError::RuntimeError(
+                "expected integer argument".to_string(),
+            ))
+        }
+    };
+    if next <= 0 {
+        return Err(LuaError::RuntimeError(
+            "expected positive integer argument".to_string(),
+        ));
+    }
+    *slot = next as usize;
+    Ok(LuaValue::Integer(old))
+}
+
+fn create_cjson_table(lua: &Lua, cfg: Rc<RefCell<CjsonConfig>>) -> mlua::Result<LuaTable> {
+    let table = lua.create_table()?;
+
+    let encode_cfg = Rc::clone(&cfg);
+    table.raw_set(
+        "encode",
+        lua.create_function(move |_lua, value: LuaValue| {
+            let cfg = encode_cfg.borrow();
+            lua_value_to_json_string(value, &cfg, 0)
+        })?,
+    )?;
+
+    let decode_cfg = Rc::clone(&cfg);
+    table.raw_set(
+        "decode",
+        lua.create_function(move |lua, input: mlua::String| {
+            let parsed: serde_json::Value =
+                serde_json::from_slice(input.as_bytes().as_ref()).map_err(|err| {
+                    LuaError::RuntimeError(format!("Expected value but found invalid JSON: {}", err))
+                })?;
+            let max_depth = decode_cfg.borrow().decode_max_depth;
+            json_value_to_lua(lua, &parsed, max_depth, 0)
+        })?,
+    )?;
+
+    let keep_cfg = Rc::clone(&cfg);
+    table.raw_set(
+        "encode_keep_buffer",
+        lua.create_function(move |_lua, args: MultiValue| {
+            cjson_bool_config(args, &keep_cfg, |cfg| &mut cfg.encode_keep_buffer)
+        })?,
+    )?;
+
+    let enc_depth_cfg = Rc::clone(&cfg);
+    table.raw_set(
+        "encode_max_depth",
+        lua.create_function(move |_lua, args: MultiValue| {
+            cjson_depth_config(args, &enc_depth_cfg, |cfg| &mut cfg.encode_max_depth)
+        })?,
+    )?;
+
+    let dec_depth_cfg = Rc::clone(&cfg);
+    table.raw_set(
+        "decode_max_depth",
+        lua.create_function(move |_lua, args: MultiValue| {
+            cjson_depth_config(args, &dec_depth_cfg, |cfg| &mut cfg.decode_max_depth)
+        })?,
+    )?;
+
+    let invalid_cfg = Rc::clone(&cfg);
+    table.raw_set(
+        "encode_invalid_numbers",
+        lua.create_function(move |_lua, args: MultiValue| {
+            cjson_bool_config(args, &invalid_cfg, |cfg| &mut cfg.encode_invalid_numbers)
+        })?,
+    )?;
+
+    let dec_invalid_cfg = Rc::clone(&cfg);
+    table.raw_set(
+        "decode_invalid_numbers",
+        lua.create_function(move |_lua, args: MultiValue| {
+            cjson_bool_config(args, &dec_invalid_cfg, |cfg| &mut cfg.decode_invalid_numbers)
+        })?,
+    )?;
+
+    let precision_cfg = Rc::clone(&cfg);
+    table.raw_set(
+        "encode_number_precision",
+        lua.create_function(move |_lua, args: MultiValue| {
+            cjson_i64_config(args, &precision_cfg, |cfg| &mut cfg.encode_number_precision)
+        })?,
+    )?;
+
+    table.raw_set(
+        "encode_sparse_array",
+        lua.create_function(|_lua, _args: MultiValue| Ok(LuaValue::Boolean(false)))?,
+    )?;
+    table.raw_set(
+        "new",
+        lua.create_function(|lua, _args: MultiValue| {
+            create_cjson_table(lua, Rc::new(RefCell::new(CjsonConfig::default())))
+        })?,
+    )?;
+    table.raw_set("null", cjson_null_value())?;
+    table.raw_set("_NAME", "cjson")?;
+    table.raw_set("_VERSION", "2.1.0")?;
+    Ok(table)
+}
+
+fn install_cjson(lua: &Lua) -> mlua::Result<()> {
+    let cjson = create_cjson_table(lua, Rc::new(RefCell::new(CjsonConfig::default())))?;
+    lua.globals().set("cjson", cjson)
+}
+
 /// Execute one inner command for `redis.call` / `redis.pcall`, capturing
 /// the reply bytes the handler appended to `reply_buf` and parsing them
 /// back into a [`ReplyValue`].
@@ -521,6 +945,182 @@ fn function_libraries() -> &'static Mutex<HashMap<Vec<u8>, LoadedFunctionLibrary
     LIBRARIES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn snapshot_function_libraries() -> Vec<LoadedFunctionLibrary> {
+    let guard = match function_libraries().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    guard.values().cloned().collect()
+}
+
+fn function_library_frame(library: &LoadedFunctionLibrary, with_code: bool) -> RespFrame {
+    let mut functions = library.functions.clone();
+    functions.sort_by(|a, b| ascii_casecmp_bytes(&a.name, &b.name));
+    let function_items = functions.iter().map(function_definition_frame).collect();
+    let mut fields = vec![
+        (
+            RespFrame::bulk(RedisString::from_static(b"library_name")),
+            RespFrame::bulk(RedisString::from_vec(library.name.clone())),
+        ),
+        (
+            RespFrame::bulk(RedisString::from_static(b"engine")),
+            RespFrame::bulk(RedisString::from_static(b"LUA")),
+        ),
+        (
+            RespFrame::bulk(RedisString::from_static(b"functions")),
+            RespFrame::array(function_items),
+        ),
+    ];
+    if with_code {
+        fields.push((
+            RespFrame::bulk(RedisString::from_static(b"library_code")),
+            RespFrame::bulk(RedisString::from_vec(library.code.clone())),
+        ));
+    }
+    RespFrame::Map(fields)
+}
+
+fn function_definition_frame(function: &FunctionDefinition) -> RespFrame {
+    let flags = if function.no_writes {
+        RespFrame::array(vec![RespFrame::bulk(RedisString::from_static(b"no-writes"))])
+    } else {
+        RespFrame::array(Vec::new())
+    };
+    RespFrame::Map(vec![
+        (
+            RespFrame::bulk(RedisString::from_static(b"name")),
+            RespFrame::bulk(RedisString::from_vec(function.name.clone())),
+        ),
+        (
+            RespFrame::bulk(RedisString::from_static(b"description")),
+            RespFrame::null_bulk(),
+        ),
+        (
+            RespFrame::bulk(RedisString::from_static(b"flags")),
+            flags,
+        ),
+    ])
+}
+
+#[derive(Clone, Copy)]
+enum RestoreMode {
+    Append,
+    Replace,
+    Flush,
+}
+
+const FUNCTION_DUMP_MAGIC: &[u8] = b"VALKEYRSFUNC1\n";
+
+fn encode_function_dump(libraries: &[LoadedFunctionLibrary]) -> Vec<u8> {
+    let mut libraries = libraries.to_vec();
+    libraries.sort_by(|a, b| ascii_casecmp_bytes(&a.name, &b.name));
+    let mut out = FUNCTION_DUMP_MAGIC.to_vec();
+    for library in libraries {
+        out.extend_from_slice(&hex_encode(&library.name));
+        out.push(b' ');
+        out.extend_from_slice(&hex_encode(&library.code));
+        out.push(b'\n');
+    }
+    out
+}
+
+fn decode_function_dump(payload: &[u8]) -> RedisResult<Vec<LoadedFunctionLibrary>> {
+    decode_function_dump_inner(payload).ok_or_else(function_dump_payload_error)
+}
+
+fn decode_function_dump_inner(payload: &[u8]) -> Option<Vec<LoadedFunctionLibrary>> {
+    let rest = payload.strip_prefix(FUNCTION_DUMP_MAGIC)?;
+    let mut libraries = Vec::new();
+    for line in rest.split(|b| *b == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let split = line.iter().position(|b| *b == b' ')?;
+        let name = hex_decode(&line[..split])?;
+        let code = hex_decode(&line[split + 1..])?;
+        let (parsed_name, library_body) = parse_function_library_header(&code).ok()?;
+        if parsed_name != name {
+            return None;
+        }
+        let functions = compile_function_library(library_body).ok()?;
+        libraries.push(LoadedFunctionLibrary {
+            name: parsed_name,
+            code,
+            functions,
+        });
+    }
+    Some(libraries)
+}
+
+fn function_dump_payload_error() -> RedisError {
+    RedisError::runtime(b"ERR DUMP payload version or checksum are wrong")
+}
+
+fn function_restore_arity_error() -> RedisError {
+    RedisError::runtime(
+        b"ERR unknown subcommand or wrong number of arguments for 'restore'. Try FUNCTION HELP.",
+    )
+}
+
+fn hex_encode(bytes: &[u8]) -> Vec<u8> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = Vec::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize]);
+        out.push(HEX[(byte & 0x0f) as usize]);
+    }
+    out
+}
+
+fn hex_decode(bytes: &[u8]) -> Option<Vec<u8>> {
+    if !bytes.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    for pair in bytes.chunks_exact(2) {
+        let hi = hex_value(pair[0])?;
+        let lo = hex_value(pair[1])?;
+        out.push((hi << 4) | lo);
+    }
+    Some(out)
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn glob_match_ascii_ci(pattern: &[u8], text: &[u8]) -> bool {
+    let (mut pi, mut ti, mut star, mut match_i) = (0usize, 0usize, None, 0usize);
+    while ti < text.len() {
+        if pi < pattern.len() && pattern[pi] == b'?' {
+            pi += 1;
+            ti += 1;
+        } else if pi < pattern.len() && ascii_lower(pattern[pi]) == ascii_lower(text[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < pattern.len() && pattern[pi] == b'*' {
+            star = Some(pi);
+            match_i = ti;
+            pi += 1;
+        } else if let Some(star_i) = star {
+            pi = star_i + 1;
+            match_i += 1;
+            ti = match_i;
+        } else {
+            return false;
+        }
+    }
+    while pi < pattern.len() && pattern[pi] == b'*' {
+        pi += 1;
+    }
+    pi == pattern.len()
+}
+
 /// `FUNCTION LOAD [REPLACE] <LIBRARY CODE>`.
 ///
 /// Minimal Valkey-compatible function loader for Lua libraries. It accepts the
@@ -568,12 +1168,16 @@ pub fn function_load_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 
 pub fn function_flush_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ctx.arg_count() > 3 {
-        return Err(RedisError::wrong_number_of_args(b"function|flush"));
+        return Err(RedisError::runtime(
+            b"ERR unknown subcommand or wrong number of arguments for 'flush'. Try FUNCTION HELP.",
+        ));
     }
     if ctx.arg_count() == 3 {
         let mode = ctx.arg_owned(2usize)?;
         if !ascii_eq_ci(mode.as_bytes(), b"ASYNC") && !ascii_eq_ci(mode.as_bytes(), b"SYNC") {
-            return Err(RedisError::syntax(b"syntax error"));
+            return Err(RedisError::runtime(
+                b"ERR FUNCTION FLUSH only supports SYNC|ASYNC",
+            ));
         }
     }
     let mut guard = match function_libraries().lock() {
@@ -597,6 +1201,123 @@ pub fn function_delete_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> 
         return Err(RedisError::runtime(b"ERR Library not found"));
     }
     ctx.reply_simple_string(b"OK")
+}
+
+pub fn function_list_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
+    let mut with_code = false;
+    let mut library_pattern: Option<Vec<u8>> = None;
+    let mut i = 2usize;
+    while i < ctx.arg_count() {
+        let arg = ctx.arg_owned(i)?;
+        if !with_code && ascii_eq_ci(arg.as_bytes(), b"WITHCODE") {
+            with_code = true;
+            i += 1;
+            continue;
+        }
+        if library_pattern.is_none() && ascii_eq_ci(arg.as_bytes(), b"LIBRARYNAME") {
+            if i + 1 >= ctx.arg_count() {
+                return Err(RedisError::runtime(b"ERR library name argument was not given"));
+            }
+            library_pattern = Some(ctx.arg_owned(i + 1)?.as_bytes().to_vec());
+            i += 2;
+            continue;
+        }
+        let mut msg = b"ERR Unknown argument ".to_vec();
+        msg.extend_from_slice(arg.as_bytes());
+        return Err(RedisError::runtime(msg));
+    }
+
+    let mut libraries = snapshot_function_libraries();
+    libraries.sort_by(|a, b| ascii_casecmp_bytes(&a.name, &b.name));
+    let items = libraries
+        .iter()
+        .filter(|library| match library_pattern.as_ref() {
+            Some(pattern) => glob_match_ascii_ci(pattern, &library.name),
+            None => true,
+        })
+        .map(|library| function_library_frame(library, with_code))
+        .collect();
+    ctx.reply_frame(&RespFrame::array(items))
+}
+
+pub fn function_dump_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
+    if ctx.arg_count() != 2 {
+        return Err(RedisError::wrong_number_of_args(b"function|dump"));
+    }
+    let libraries = snapshot_function_libraries();
+    let payload = encode_function_dump(&libraries);
+    ctx.reply_bulk(&payload)
+}
+
+pub fn function_restore_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
+    if ctx.arg_count() < 3 || ctx.arg_count() > 4 {
+        return Err(function_restore_arity_error());
+    }
+    let payload = ctx.arg_owned(2usize)?;
+    let mode = if ctx.arg_count() == 4 {
+        let mode = ctx.arg_owned(3usize)?;
+        if ascii_eq_ci(mode.as_bytes(), b"APPEND") {
+            RestoreMode::Append
+        } else if ascii_eq_ci(mode.as_bytes(), b"REPLACE") {
+            RestoreMode::Replace
+        } else if ascii_eq_ci(mode.as_bytes(), b"FLUSH") {
+            RestoreMode::Flush
+        } else {
+            let mut msg = b"ERR Unknown option given: ".to_vec();
+            msg.extend_from_slice(mode.as_bytes());
+            return Err(RedisError::runtime(msg));
+        }
+    } else {
+        RestoreMode::Append
+    };
+
+    let libraries = decode_function_dump(payload.as_bytes())?;
+    let mut guard = match function_libraries().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    if matches!(mode, RestoreMode::Flush) {
+        guard.clear();
+    }
+    let replace = matches!(mode, RestoreMode::Replace);
+    for library in libraries {
+        install_function_library(&mut guard, library, replace)?;
+    }
+    ctx.reply_simple_string(b"OK")
+}
+
+pub fn function_stats_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
+    if ctx.arg_count() != 2 {
+        return Err(RedisError::wrong_number_of_args(b"function|stats"));
+    }
+    let libraries = snapshot_function_libraries();
+    let functions_count = libraries
+        .iter()
+        .map(|library| library.functions.len() as i64)
+        .sum();
+    let engines = RespFrame::Map(vec![(
+        RespFrame::bulk(RedisString::from_static(b"LUA")),
+        RespFrame::Map(vec![
+            (
+                RespFrame::bulk(RedisString::from_static(b"libraries_count")),
+                RespFrame::integer(libraries.len() as i64),
+            ),
+            (
+                RespFrame::bulk(RedisString::from_static(b"functions_count")),
+                RespFrame::integer(functions_count),
+            ),
+        ]),
+    )]);
+    ctx.reply_frame(&RespFrame::Map(vec![
+        (
+            RespFrame::bulk(RedisString::from_static(b"running_script")),
+            RespFrame::Null,
+        ),
+        (
+            RespFrame::bulk(RedisString::from_static(b"engines")),
+            engines,
+        ),
+    ]))
 }
 
 pub fn function_kill_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
@@ -659,7 +1380,7 @@ fn fcall_command_generic(ctx: &mut CommandContext<'_>, ro: bool) -> RedisResult<
         argv.push(ctx.arg_owned(i)?);
     }
 
-    run_loaded_function(ctx, &library, &definition, &keys, &argv)
+    run_loaded_function(ctx, &library, &definition, &keys, &argv, ro)
 }
 
 fn install_function_library(
@@ -681,7 +1402,7 @@ fn install_function_library(
             if loaded
                 .functions
                 .iter()
-                .any(|new_fn| new_fn.name == existing.name)
+                .any(|new_fn| ascii_eq_ci(&new_fn.name, &existing.name))
             {
                 return Err(RedisError::runtime(b"ERR Function already exists"));
             }
@@ -698,7 +1419,7 @@ fn find_loaded_function(name: &[u8]) -> Option<(LoadedFunctionLibrary, FunctionD
     };
     for library in guard.values() {
         for function in &library.functions {
-            if function.name == name {
+            if ascii_eq_ci(&function.name, name) {
                 return Some((library.clone(), function.clone()));
             }
         }
@@ -727,7 +1448,10 @@ fn parse_function_library_header(code: &[u8]) -> RedisResult<(Vec<u8>, &[u8])> {
         .next()
         .ok_or_else(|| RedisError::runtime(b"ERR Missing library engine"))?;
     if !ascii_eq_ci(engine, b"lua") {
-        return Err(RedisError::runtime(b"ERR Unsupported function engine"));
+        let mut msg = b"ERR Engine '".to_vec();
+        msg.extend_from_slice(engine);
+        msg.extend_from_slice(b"' not found");
+        return Err(RedisError::runtime(msg));
     }
 
     let mut library_name: Option<Vec<u8>> = None;
@@ -736,9 +1460,7 @@ fn parse_function_library_header(code: &[u8]) -> RedisResult<(Vec<u8>, &[u8])> {
             if library_name.is_some() {
                 return Err(RedisError::runtime(b"ERR Duplicate library name metadata"));
             }
-            if name.is_empty() || name.iter().any(|b| *b == 0) {
-                return Err(RedisError::runtime(b"ERR Invalid library name"));
-            }
+            validate_library_name(name)?;
             library_name = Some(name.to_vec());
         } else {
             let mut msg = b"ERR Unknown library metadata: ".to_vec();
@@ -756,6 +1478,8 @@ fn compile_function_library(library_body: &[u8]) -> RedisResult<Vec<FunctionDefi
     let lua = Lua::new();
     install_sandbox(&lua)
         .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
+    install_cjson(&lua)
+        .map_err(|e| RedisError::runtime(format!("ERR Lua cjson install: {}", e).into_bytes()))?;
 
     let registered: RefCell<Vec<FunctionDefinition>> = RefCell::new(Vec::new());
     let load_result: Result<(), LuaError> = lua.scope(|scope| {
@@ -767,11 +1491,11 @@ fn compile_function_library(library_body: &[u8]) -> RedisResult<Vec<FunctionDefi
                 if registered
                     .borrow()
                     .iter()
-                    .any(|existing| existing.name == definition.name)
+                    .any(|existing| ascii_eq_ci(&existing.name, &definition.name))
                 {
                     return Err(LuaError::RuntimeError(
-                        "Function already exists".to_string(),
-                    ));
+                    "Function already exists".to_string(),
+                ));
                 }
                 registered.borrow_mut().push(definition);
                 Ok(())
@@ -955,12 +1679,28 @@ fn require_lua_function(value: LuaValue, error: &str) -> mlua::Result<LuaFunctio
 }
 
 fn validate_function_name(name: &[u8]) -> mlua::Result<()> {
-    if name.is_empty() || name.iter().any(|b| *b == 0) {
+    if !valid_function_library_name(name) {
         return Err(LuaError::RuntimeError(
-            "Function names can not be empty or contain null bytes".to_string(),
+            "Function names can only contain letters, numbers, or underscores(_) and must be at least one character long".to_string(),
         ));
     }
     Ok(())
+}
+
+fn validate_library_name(name: &[u8]) -> RedisResult<()> {
+    if !valid_function_library_name(name) {
+        return Err(RedisError::runtime(
+            b"ERR Library names can only contain letters, numbers, or underscores(_) and must be at least one character long",
+        ));
+    }
+    Ok(())
+}
+
+fn valid_function_library_name(name: &[u8]) -> bool {
+    !name.is_empty()
+        && name
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
 }
 
 fn flags_table_has_no_writes(flags: &LuaTable) -> mlua::Result<bool> {
@@ -995,12 +1735,15 @@ fn run_loaded_function(
     definition: &FunctionDefinition,
     keys: &[RedisString],
     argv: &[RedisString],
+    ro: bool,
 ) -> RedisResult<()> {
     let original_db = ctx.selected_db_index();
     let (_, library_body) = parse_function_library_header(&library.code)?;
     let lua = Lua::new();
     install_sandbox(&lua)
         .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
+    install_cjson(&lua)
+        .map_err(|e| RedisError::runtime(format!("ERR Lua cjson install: {}", e).into_bytes()))?;
     install_keys_argv(&lua, keys, argv)
         .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
 
@@ -1015,6 +1758,11 @@ fn run_loaded_function(
             scope.create_function_mut(
                 move |lua_inner, args: MultiValue| -> mlua::Result<LuaValue> {
                     let arg_bytes = collect_call_args(args)?;
+                    if ro && call_is_write_command(&arg_bytes) {
+                        return Err(LuaError::RuntimeError(
+                            "Write commands are not allowed from read-only scripts".to_string(),
+                        ));
+                    }
                     let mut borrow = cell.borrow_mut();
                     match run_inner_command(&mut **borrow, &arg_bytes) {
                         Ok(reply) => {
@@ -1038,6 +1786,16 @@ fn run_loaded_function(
             scope.create_function_mut(
                 move |lua_inner, args: MultiValue| -> mlua::Result<LuaValue> {
                     let arg_bytes = collect_call_args(args)?;
+                    if ro && call_is_write_command(&arg_bytes) {
+                        let t = lua_inner.create_table()?;
+                        t.raw_set(
+                            "err",
+                            lua_inner.create_string(
+                                "Write commands are not allowed from read-only scripts",
+                            )?,
+                        )?;
+                        return Ok(LuaValue::Table(t));
+                    }
                     let mut borrow = cell.borrow_mut();
                     match run_inner_command(&mut **borrow, &arg_bytes) {
                         Ok(reply) => reply_to_lua(lua_inner, &reply),
@@ -1082,7 +1840,7 @@ fn run_loaded_function(
                 if registrations
                     .borrow()
                     .iter()
-                    .any(|existing| existing.name == registration.name)
+                    .any(|existing| ascii_eq_ci(&existing.name, &registration.name))
                 {
                     return Err(LuaError::RuntimeError(
                         "Function already exists".to_string(),
@@ -1124,7 +1882,7 @@ fn run_loaded_function(
             let registrations = registrations.borrow();
             let registration = registrations
                 .iter()
-                .find(|registered| registered.name == definition.name)
+                .find(|registered| ascii_eq_ci(&registered.name, &definition.name))
                 .ok_or_else(|| LuaError::RuntimeError("Function not found".to_string()))?;
             if registration.no_writes != definition.no_writes {
                 return Err(LuaError::RuntimeError(
@@ -1163,6 +1921,42 @@ fn redis_strings_to_lua_table(lua: &Lua, values: &[RedisString]) -> mlua::Result
         table.raw_set(i as i64 + 1, lua.create_string(value.as_bytes())?)?;
     }
     Ok(table)
+}
+
+fn call_is_write_command(args: &[Vec<u8>]) -> bool {
+    let Some(command) = args.first() else {
+        return false;
+    };
+    let name = command.as_slice();
+    ascii_eq_ci(name, b"SET")
+        || ascii_eq_ci(name, b"SETEX")
+        || ascii_eq_ci(name, b"PSETEX")
+        || ascii_eq_ci(name, b"SETNX")
+        || ascii_eq_ci(name, b"GETSET")
+        || ascii_eq_ci(name, b"DEL")
+        || ascii_eq_ci(name, b"UNLINK")
+        || ascii_eq_ci(name, b"EXPIRE")
+        || ascii_eq_ci(name, b"PEXPIRE")
+        || ascii_eq_ci(name, b"EXPIREAT")
+        || ascii_eq_ci(name, b"PEXPIREAT")
+        || ascii_eq_ci(name, b"PERSIST")
+        || ascii_eq_ci(name, b"HSET")
+        || ascii_eq_ci(name, b"HDEL")
+        || ascii_eq_ci(name, b"LPUSH")
+        || ascii_eq_ci(name, b"RPUSH")
+        || ascii_eq_ci(name, b"LPOP")
+        || ascii_eq_ci(name, b"RPOP")
+        || ascii_eq_ci(name, b"SADD")
+        || ascii_eq_ci(name, b"SREM")
+        || ascii_eq_ci(name, b"ZADD")
+        || ascii_eq_ci(name, b"ZREM")
+        || ascii_eq_ci(name, b"INCR")
+        || ascii_eq_ci(name, b"DECR")
+        || ascii_eq_ci(name, b"INCRBY")
+        || ascii_eq_ci(name, b"DECRBY")
+        || ascii_eq_ci(name, b"APPEND")
+        || ascii_eq_ci(name, b"FLUSHDB")
+        || ascii_eq_ci(name, b"FLUSHALL")
 }
 
 /// `EVAL script numkeys key [key ...] arg [arg ...]`.
@@ -1267,6 +2061,8 @@ fn run_script(
     let lua = Lua::new();
     install_sandbox(&lua)
         .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
+    install_cjson(&lua)
+        .map_err(|e| RedisError::runtime(format!("ERR Lua cjson install: {}", e).into_bytes()))?;
     install_keys_argv(&lua, keys, argv)
         .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
 
@@ -1526,6 +2322,22 @@ fn ascii_eq_ci(a: &[u8], b: &[u8]) -> bool {
     a.iter()
         .zip(b.iter())
         .all(|(x, y)| ascii_lower(*x) == ascii_lower(*y))
+}
+
+fn ascii_casecmp_bytes(a: &[u8], b: &[u8]) -> Ordering {
+    let mut ai = a.iter();
+    let mut bi = b.iter();
+    loop {
+        match (ai.next(), bi.next()) {
+            (Some(x), Some(y)) => match ascii_lower(*x).cmp(&ascii_lower(*y)) {
+                Ordering::Equal => continue,
+                other => return other,
+            },
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (None, None) => return Ordering::Equal,
+        }
+    }
 }
 
 fn ascii_lower(b: u8) -> u8 {

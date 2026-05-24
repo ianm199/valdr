@@ -31,6 +31,7 @@
 //! ZMPOP / BZPOPMIN / BZPOPMAX land in follow-on rounds.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use redis_core::blocked_keys::{
     blocked_keys_index, deadline_from_timeout_secs, BlockedAction, BlockedWaiter,
@@ -115,6 +116,14 @@ fn format_score(score: f64) -> Vec<u8> {
         b"0".to_vec()
     } else if score == score.trunc() && score.abs() < 1e17 {
         format!("{}", score as i64).into_bytes()
+    } else if score.abs() >= 1e17 {
+        let raw = format!("{:.16e}", score);
+        let Some((mantissa, exponent)) = raw.split_once('e') else {
+            return raw.into_bytes();
+        };
+        let mantissa = mantissa.trim_end_matches('0').trim_end_matches('.');
+        let exponent = exponent.parse::<i32>().unwrap_or(0);
+        format!("{mantissa}e{exponent:+}").into_bytes()
     } else {
         format!("{}", score).into_bytes()
     }
@@ -365,7 +374,8 @@ pub fn zscore_command(ctx: &mut CommandContext) -> RedisResult<()> {
         Some(z) => z.score(&member),
     };
     match score {
-        Some(s) => ctx.reply_double(s),
+        Some(s) if ctx.client_ref().resp_proto == 3 => ctx.reply_double(s),
+        Some(s) => ctx.reply_bulk(&format_score(s)),
         None => ctx.reply_null_bulk(),
     }
 }
@@ -609,6 +619,16 @@ fn emit_range_reply(
     entries: Vec<(f64, RedisString)>,
     withscores: bool,
 ) -> RedisResult<()> {
+    if withscores && ctx.client_ref().resp_proto == 3 {
+        ctx.reply_array_header(entries.len())?;
+        for (score, member) in entries {
+            ctx.reply_array_header(2usize)?;
+            ctx.reply_bulk_string(member)?;
+            ctx.reply_double(score)?;
+        }
+        return Ok(());
+    }
+
     let len = if withscores {
         entries.len() * 2
     } else {
@@ -712,15 +732,27 @@ pub fn zrange_command(ctx: &mut CommandContext) -> RedisResult<()> {
         }
     }
 
-    if by_lex {
-        return Err(RedisError::syntax(
-            b"syntax error, BYLEX not implemented yet in this port",
-        ));
-    }
     if have_limit && !by_score && !by_lex {
         return Err(RedisError::runtime(
             b"ERR syntax error, LIMIT is only supported in combination with either BYSCORE or BYLEX",
         ));
+    }
+    if by_lex {
+        if withscores {
+            return Err(RedisError::syntax(b"syntax error"));
+        }
+        let (min, max) = if reverse {
+            (
+                parse_lex_bound(stop_bytes.as_bytes())?,
+                parse_lex_bound(start_bytes.as_bytes())?,
+            )
+        } else {
+            (
+                parse_lex_bound(start_bytes.as_bytes())?,
+                parse_lex_bound(stop_bytes.as_bytes())?,
+            )
+        };
+        return rangebylex_inner_with_bounds(ctx, &key, min, max, reverse, offset, count);
     }
 
     if by_score {
@@ -1087,8 +1119,19 @@ fn rangebylex_inner(ctx: &mut CommandContext, reverse: bool, cmd: &[u8]) -> Redi
     } else {
         (parse_lex_bound(arg_a.as_bytes())?, parse_lex_bound(arg_b.as_bytes())?)
     };
+    rangebylex_inner_with_bounds(ctx, &key, min, max, reverse, offset, count)
+}
 
-    let mut entries: Vec<(f64, RedisString)> = match as_zset_ref(ctx.db().lookup_key_read(&key))? {
+fn rangebylex_inner_with_bounds(
+    ctx: &mut CommandContext,
+    key: &RedisString,
+    min: LexBound,
+    max: LexBound,
+    reverse: bool,
+    offset: i64,
+    count: i64,
+) -> RedisResult<()> {
+    let mut entries: Vec<(f64, RedisString)> = match as_zset_ref(ctx.db().lookup_key_read(key))? {
         None => Vec::new(),
         Some(z) => z
             .iter_ascending()
@@ -1764,13 +1807,30 @@ pub fn zrangestore_command(ctx: &mut CommandContext) -> RedisResult<()> {
     ctx.reply_integer(stored)
 }
 
+static ZRANDMEMBER_CURSOR: AtomicU64 = AtomicU64::new(0);
+
+/// Parse a ZRANDMEMBER count argument, applying Redis's range rules.
+fn parse_zrandmember_count(bytes: &[u8]) -> Result<i64, RedisError> {
+    let v = parse_strict_i64(bytes)?;
+    if v == i64::MIN {
+        return Err(RedisError::out_of_range());
+    }
+    Ok(v)
+}
+
+fn next_zrandmember_start(len: usize) -> usize {
+    if len == 0 {
+        0
+    } else {
+        (ZRANDMEMBER_CURSOR.fetch_add(1, Ordering::Relaxed) as usize) % len
+    }
+}
+
 /// ZRANDMEMBER key [count [WITHSCORES]]
 ///
-/// Sampling is deterministic (first-iter-order) for now — real Redis
-/// uses the server PRNG. The behavioural difference is invisible to the
-/// wire-diff oracle only on single-member sets.
-///
-/// TODO(architect): seeded RNG plumbing for true randomness.
+/// Uses a rotating cursor over the sorted-set snapshot. This is not true
+/// server PRNG sampling, but it preserves the Redis reply shapes and covers
+/// all members under repeated calls until PRNG state is exposed here.
 pub fn zrandmember_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
     if argc < 2 || argc > 4 {
@@ -1778,7 +1838,7 @@ pub fn zrandmember_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
     let key = ctx.arg_owned(1usize)?;
     let count_opt: Option<i64> = if argc >= 3 {
-        Some(parse_strict_i64(ctx.arg(2)?.as_bytes())?)
+        Some(parse_zrandmember_count(ctx.arg(2)?.as_bytes())?)
     } else {
         None
     };
@@ -1793,6 +1853,11 @@ pub fn zrandmember_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if argc == 4 && count_opt.is_none() {
         return Err(RedisError::syntax(b"syntax error"));
     }
+    if let Some(count) = count_opt {
+        if withscores && (count < -(i64::MAX / 2) || count > i64::MAX / 2) {
+            return Err(RedisError::runtime(b"ERR value is out of range"));
+        }
+    }
 
     let entries: Vec<(f64, RedisString)> = match as_zset_ref(ctx.db().lookup_key_read(&key))? {
         None => Vec::new(),
@@ -1804,7 +1869,7 @@ pub fn zrandmember_command(ctx: &mut CommandContext) -> RedisResult<()> {
             if entries.is_empty() {
                 return ctx.reply_null_bulk();
             }
-            let (_, m) = &entries[0];
+            let (_, m) = &entries[next_zrandmember_start(entries.len())];
             ctx.reply_bulk_string(m.clone())
         }
         Some(count) => {
@@ -1812,23 +1877,36 @@ pub fn zrandmember_command(ctx: &mut CommandContext) -> RedisResult<()> {
                 return ctx.reply_array_header(0usize);
             }
             let mut emitted: Vec<(f64, RedisString)> = Vec::new();
+            let start = next_zrandmember_start(entries.len());
             if count > 0 {
                 let take = (count as usize).min(entries.len());
-                for item in entries.iter().take(take) {
-                    emitted.push(item.clone());
+                for i in 0..take {
+                    emitted.push(entries[(start + i) % entries.len()].clone());
                 }
             } else {
                 let take = count.unsigned_abs() as usize;
                 for i in 0..take {
-                    emitted.push(entries[i % entries.len()].clone());
+                    emitted.push(entries[(start + i) % entries.len()].clone());
                 }
             }
-            let header = if withscores { emitted.len() * 2 } else { emitted.len() };
-            ctx.reply_array_header(header)?;
-            for (s, m) in emitted {
-                ctx.reply_bulk_string(m)?;
-                if withscores {
+
+            if withscores && ctx.client_ref().resp_proto == 3 {
+                ctx.reply_array_header(emitted.len())?;
+                for (s, m) in emitted {
+                    ctx.reply_array_header(2usize)?;
+                    ctx.reply_bulk_string(m)?;
+                    ctx.reply_double(s)?;
+                }
+            } else if withscores {
+                ctx.reply_array_header(emitted.len() * 2)?;
+                for (s, m) in emitted {
+                    ctx.reply_bulk_string(m)?;
                     ctx.reply_bulk(&format_score(s))?;
+                }
+            } else {
+                ctx.reply_array_header(emitted.len())?;
+                for (_s, m) in emitted {
+                    ctx.reply_bulk_string(m)?;
                 }
             }
             Ok(())

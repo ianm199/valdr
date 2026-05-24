@@ -1,0 +1,112 @@
+{
+  "captured_ts": "2026-05-24T14:43:01.859014Z",
+  "gate_results": {
+    "cargo_check_redis-commands": {
+      "detail": "cargo check -p redis-commands: clean",
+      "ok": true
+    },
+    "cargo_check_workspace": {
+      "detail": "cargo check --workspace: clean",
+      "ok": true
+    },
+    "cargo_test_redis-commands_eval": {
+      "detail": "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 52 filtered out; finished in 0.00s",
+      "ok": true
+    },
+    "no_out_of_scope_changes": {
+      "detail": "no out-of-scope changes since dispatch; ignored pre-existing dirty files: crates/redis-commands/src/aof.rs, crates/redis-commands/src/connection.rs, crates/redis-commands/src/dispatch.rs, crates/redis-commands/src/hash.rs, crates/redis-commands/src/info.rs, crates/redis-commands/src/list.rs, crates/redis-commands/src/persist.rs, crates/redis-commands/src/string.rs, ... +51 more",
+      "ok": true
+    },
+    "oracle_reference_only": {
+      "detail": "no harness/oracle/run-smoke.sh present",
+      "ok": true
+    },
+    "target_files_modified": {
+      "detail": "test-fixer touched 2/2 candidate target(s)",
+      "ok": true
+    },
+    "trailer_present": {
+      "detail": "all touched Rust targets carry PORT STATUS trailers",
+      "ok": true
+    }
+  },
+  "harness_context": {
+    "commit": "a93a2ad",
+    "git_dirty": true,
+    "git_status_short": [
+      " M crates/redis-commands/src/aof.rs",
+      " M crates/redis-commands/src/connection.rs",
+      " M crates/redis-commands/src/dispatch.rs",
+      " M crates/redis-commands/src/eval.rs",
+      " M crates/redis-commands/src/hash.rs",
+      " M crates/redis-commands/src/info.rs",
+      " M crates/redis-commands/src/list.rs",
+      " M crates/redis-commands/src/persist.rs",
+      " M crates/redis-commands/src/string.rs",
+      " M crates/redis-commands/src/zset.rs",
+      " M crates/redis-core/src/client.rs",
+      " M crates/redis-core/src/db.rs",
+      " M crates/redis-core/src/lib.rs",
+      " M crates/redis-core/src/live_config.rs",
+      " M crates/redis-core/src/rdb/load.rs",
+      " M crates/redis-core/src/rdb/mod.rs",
+      " M crates/redis-core/src/server.rs",
+      " M crates/redis-server/src/main.rs",
+      " M docs/CONFORMANCE.md",
+      " M docs/TCL_FULL_SUITE_GOAL_20260523.md",
+      " M harness/completion.toml",
+      " M harness/evidence/ledger.jsonl",
+      " M harness/history.jsonl",
+      " M harness/oracle/tcl-survey.py",
+      " M harness/runners.toml",
+      " M harness/work-packets.jsonl",
+      "?? crates/redis-core/src/persistence.rs",
+      "?? docs/LOOP_OBSERVATIONS_20260523.md",
+      "?? docs/PERSISTENCE_BORING_SPEC_20260523.md",
+      "?? docs/SINGLE_NODE_CORE_V1_DASHBOARD.md",
+      "?? docs/TCL_BREADTH_OVERNIGHT_20260524.md",
+      "?? harness/evidence/runs/20260523T193242Z-a93a2ad-runner-persistence-frontier-baseline-v1.json",
+      "?? harness/evidence/runs/20260523T193243Z-a93a2ad-runner-persistence-current-rdb-cycle-v1.json",
+      "?? harness/evidence/runs/20260523T193244Z-a93a2ad-runner-persistence-current-aof-cycle-v1.json",
+      "?? harness/evidence/runs/20260523T193245Z-a93a2ad-runner-persistence-current-aof-rewrite-cycle-v1.json",
+      "?? harness/evidence/runs/20260523T193839Z-a93a2ad-test-fixer-persistence-aof-propagation-v1.json",
+      "?? harness/evidence/runs/20260523T195221Z-a93a2ad-runner-persistence-post-propagation-frontier-v1.json",
+      "?? harness/evidence/runs/20260523T195353Z-a93a2ad-architect-persistence-aof-manifest-architecture-v1.json",
+      "?? harness/evidence/runs/20260523T200221Z-a93a2ad-translator-persistence-aof-manifest-frontier-scenarios-v1.json",
+      "?? harness/evidence/runs/20260523T201159Z-a93a2ad-runner-persistence-aof-manifest-frontier-baseline-v1.json",
+      "?? harness/evidence/runs/20260523T201230Z-a93a2ad-test-fixer-persistence-aof-manifest-load-v1.json",
+      "?? harness/evidence/runs/20260523T202439Z-a93a2ad-runner-persistence-post-manifest-load-frontier-v1.json",
+      "?? harness/evidence/runs/20260523T202441Z-a93a2ad-test-fixer-persistence-aof-manifest-current-incr-v1.json",
+      "?? harness/evidence/runs/20260523T203149Z-a93a2ad-runner-persistence-post-manifest-current-incr-frontier-v1.json",
+      "?? harness/evidence/runs/20260523T203151Z-a93a2ad-test-fixer-persistence-aof-manifest-rewrite-finalize-v1.json",
+      "?? harness/evidence/runs/20260523T203850Z-a93a2ad-runner-persistence-post-manifest-rewrite-cycle-v1.json",
+      "?? harness/evidence/runs/20260523T203851Z-a93a2ad-runner-persistence-post-manifest-rewrite-frontier-v1.json",
+      "?? harness/evidence/runs/20260523T203853Z-a93a2ad-runner-persistence-focused-tcl-v1.json",
+      "?? harness/evidence/runs/20260523T204256Z-a93a2ad-runner-persistence-post-oracle-fix-frontier-v1.json",
+      "?? harness/evidence/runs/20260524T035900Z-a93a2ad-runner-tcl-breadth-current-red-baseline-v1.json",
+      "?? harness/evidence/runs/20260524T040713Z-a93a2ad-runner-tcl-breadth-unswept-scout-v1.json",
+      "?? harness/evidence/runs/20260524T040724Z-a93a2ad-test-fixer-tcl-hash-hgetdel-v1.json",
+      "?? harness/evidence/runs/20260524T125902Z-a93a2ad-test-fixer-tcl-zset-unified-range-bylex-v1.json",
+      "?? harness/evidence/runs/20260524T141148Z-a93a2ad-test-fixer-tcl-client-protocol-info-v1.json",
+      "?? harness/evidence/runs/20260524T143018Z-a93a2ad-test-fixer-tcl-hash-hgetdel-v1.json",
+      "?? harness/evidence/runs/20260524T143130Z-a93a2ad-test-fixer-tcl-list-timeout-frontier-v1.json",
+      "?? harness/launch-tcl-breadth-overnight.sh",
+      "?? harness/oracle/persistence-cycle.py",
+      "?? harness/oracle/persistence-frontier.py",
+      "?? harness/oracle/single-node-core-dashboard.py",
+      "?? harness/oracle/tcl-suite-inventory.py",
+      "?? harness/run-tcl-breadth-overnight.sh",
+      "?? harness/watch-tcl-breadth.sh"
+    ],
+    "run_id": "loop-a63c0c4cd06ff02a",
+    "target_commit": "a93a2ad1af8ca90e1e6e0e2b6c37569c1f48f30b",
+    "tree_hash": "1622c39f4f5e5b74c33e095658925d683db2f93cfc5a256c10c4642a0a083410"
+  },
+  "kind": "agent_transcript",
+  "packet": "tcl-scripting-cjson-lua-libs-v1",
+  "prompt_hash": "41be8b02ff24dfdb",
+  "role": "test-fixer",
+  "transcript_bytes": 73,
+  "transcript_preview": "watcher: master done at 14:42:50Z\n       1\nruns with exit_code:\n       1\n",
+  "transcript_src": "/tmp/claude-502/-Users-ianmclaughlin-PycharmProjects-rustExperiments/dc3a966a-abb4-4661-a465-5baf0bf5609e/tasks/bron8x5r6.output"
+}

@@ -21,15 +21,15 @@ use redis_types::RedisString;
 use super::crc::crc64;
 use super::hash::load_hash_object;
 use super::header::{
-    read_magic, read_rdb_string, RDB_OPCODE_AUX, RDB_OPCODE_EOF, RDB_OPCODE_EXPIRETIME,
-    RDB_OPCODE_EXPIRETIME_MS, RDB_OPCODE_FREQ, RDB_OPCODE_FUNCTION2, RDB_OPCODE_IDLE,
-    RDB_OPCODE_MODULE_AUX, RDB_OPCODE_RESIZEDB, RDB_OPCODE_SELECTDB, RDB_OPCODE_SLOT_IMPORT,
-    RDB_OPCODE_SLOT_INFO, RDB_TYPE_BLOOM_NATIVE, RDB_TYPE_HASH, RDB_TYPE_HASH_2,
-    RDB_TYPE_HASH_LISTPACK, RDB_TYPE_HASH_ZIPLIST, RDB_TYPE_JSON_NATIVE, RDB_TYPE_LIST,
-    RDB_TYPE_LIST_QUICKLIST, RDB_TYPE_LIST_QUICKLIST_2, RDB_TYPE_LIST_ZIPLIST, RDB_TYPE_SET,
-    RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK, RDB_TYPE_STREAM_LISTPACKS,
+    read_magic, read_rdb_string, RDB_DUMP_VERSION, RDB_OPCODE_AUX, RDB_OPCODE_EOF,
+    RDB_OPCODE_EXPIRETIME, RDB_OPCODE_EXPIRETIME_MS, RDB_OPCODE_FREQ, RDB_OPCODE_FUNCTION2,
+    RDB_OPCODE_IDLE, RDB_OPCODE_MODULE_AUX, RDB_OPCODE_RESIZEDB, RDB_OPCODE_SELECTDB,
+    RDB_OPCODE_SLOT_IMPORT, RDB_OPCODE_SLOT_INFO, RDB_TYPE_BLOOM_NATIVE, RDB_TYPE_HASH,
+    RDB_TYPE_HASH_2, RDB_TYPE_HASH_LISTPACK, RDB_TYPE_HASH_ZIPLIST, RDB_TYPE_JSON_NATIVE,
+    RDB_TYPE_LIST, RDB_TYPE_LIST_QUICKLIST, RDB_TYPE_LIST_QUICKLIST_2, RDB_TYPE_LIST_ZIPLIST,
+    RDB_TYPE_SET, RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK, RDB_TYPE_STREAM_LISTPACKS,
     RDB_TYPE_STREAM_LISTPACKS_2, RDB_TYPE_STREAM_LISTPACKS_3, RDB_TYPE_STRING, RDB_TYPE_ZSET,
-    RDB_DUMP_VERSION, RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK, RDB_TYPE_ZSET_ZIPLIST, RDB_VERSION,
+    RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK, RDB_TYPE_ZSET_ZIPLIST, RDB_VERSION,
 };
 use super::list::{load_list_object, load_quicklist2_object};
 use super::set::load_set_object;
@@ -37,6 +37,29 @@ use super::stream::{load_stream_object_2, load_stream_object_3};
 use super::string::load_string_object;
 use super::varint::load_len;
 use super::zset::load_zset_object;
+
+/// Options controlling whole-RDB load behavior.
+///
+/// `allow_dup` and `aof_preamble` are represented now so command paths can
+/// carry the same intent as upstream even though the current HashMap-backed
+/// loader naturally overwrites duplicate keys and the RDB preamble path uses
+/// the same whole-file framing as ordinary RDB loads.
+#[derive(Debug, Clone, Copy)]
+pub struct RdbLoadOptions {
+    pub allow_dup: bool,
+    pub skip_expired: bool,
+    pub aof_preamble: bool,
+}
+
+impl Default for RdbLoadOptions {
+    fn default() -> Self {
+        Self {
+            allow_dup: false,
+            skip_expired: true,
+            aof_preamble: false,
+        }
+    }
+}
 
 /// Read exactly one byte from `reader`.
 fn read_byte(reader: &mut impl Read) -> io::Result<u8> {
@@ -99,6 +122,15 @@ pub fn load_into(db: &mut RedisDb, path: &Path) -> io::Result<String> {
 /// into `server.db[]`. The caller owns the DB vector; this helper does not
 /// touch `global_databases()`.
 pub fn load_into_dbs(dbs: &mut [RedisDb], path: &Path) -> io::Result<String> {
+    load_into_dbs_with_options(dbs, path, RdbLoadOptions::default())
+}
+
+/// Load an RDB file at `path` with explicit load options.
+pub fn load_into_dbs_with_options(
+    dbs: &mut [RedisDb],
+    path: &Path,
+    options: RdbLoadOptions,
+) -> io::Result<String> {
     if dbs.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -212,7 +244,7 @@ pub fn load_into_dbs(dbs: &mut [RedisDb], path: &Path) -> io::Result<String> {
                 let expire = pending_expire;
                 pending_expire = EXPIRY_NONE;
 
-                if expire != EXPIRY_NONE && expire < now_ms {
+                if options.skip_expired && expire != EXPIRY_NONE && expire < now_ms {
                     continue;
                 }
 

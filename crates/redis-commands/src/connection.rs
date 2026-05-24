@@ -16,7 +16,7 @@ use redis_core::client_info::client_info_registry;
 use redis_core::live_config::{LiveConfig, MaxmemoryPolicyCode};
 use redis_core::metrics::server_metrics;
 use redis_core::notify::keyspace_events_string_to_flags;
-use redis_core::CommandContext;
+use redis_core::{CommandContext, PersistenceStatus, RedisDb};
 use redis_protocol::frame::RespFrame;
 use redis_types::{RedisError, RedisResult, RedisString};
 use serde_json::Value;
@@ -46,6 +46,19 @@ pub fn set_max_clients(n: u64) {
 /// wrong-arity error.
 pub fn ping_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     match ctx.arg_count() {
+        1 if ctx.client_ref().in_pubsub_mode() && ctx.client_ref().resp_proto == 2 => {
+            ctx.reply_frame(&RespFrame::array(vec![
+                RespFrame::bulk(RedisString::from_static(b"pong")),
+                RespFrame::bulk(RedisString::from_static(b"")),
+            ]))
+        }
+        2 if ctx.client_ref().in_pubsub_mode() && ctx.client_ref().resp_proto == 2 => {
+            let msg = ctx.arg_owned(1usize)?;
+            ctx.reply_frame(&RespFrame::array(vec![
+                RespFrame::bulk(RedisString::from_static(b"pong")),
+                RespFrame::bulk(msg),
+            ]))
+        }
         1 => ctx.reply_simple_string(b"PONG"),
         2 => {
             let msg = ctx.arg_owned(1usize)?;
@@ -85,9 +98,7 @@ pub fn select_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 
 /// `FUNCTION <subcommand> [args]`.
 ///
-/// Routes library-mutating subcommands into the Lua function registry in
-/// `eval.rs`. Listing and stats remain telemetry-only placeholders until the
-/// full Valkey functions API lands.
+/// Routes library subcommands into the Lua function registry in `eval.rs`.
 pub fn function_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ctx.arg_count() < 2 {
         return Err(RedisError::wrong_number_of_args(b"function"));
@@ -107,16 +118,19 @@ pub fn function_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         return crate::eval::function_kill_command(ctx);
     }
     if ascii_eq_ignore_case(sub_bytes, b"RESTORE") {
-        return ctx.reply_simple_string(b"OK");
+        return crate::eval::function_restore_command(ctx);
     }
-    if ascii_eq_ignore_case(sub_bytes, b"LIST") || ascii_eq_ignore_case(sub_bytes, b"DUMP") {
-        return ctx.reply_frame(&RespFrame::array(Vec::new()));
+    if ascii_eq_ignore_case(sub_bytes, b"LIST") {
+        return crate::eval::function_list_command(ctx);
+    }
+    if ascii_eq_ignore_case(sub_bytes, b"DUMP") {
+        return crate::eval::function_dump_command(ctx);
     }
     if ascii_eq_ignore_case(sub_bytes, b"STATS") {
-        return ctx.reply_frame(&RespFrame::array(Vec::new()));
+        return crate::eval::function_stats_command(ctx);
     }
-    let mut msg = Vec::with_capacity(b"ERR Unknown FUNCTION subcommand: ".len() + sub_bytes.len());
-    msg.extend_from_slice(b"ERR Unknown FUNCTION subcommand: ");
+    let mut msg = Vec::with_capacity(b"ERR unknown subcommand: ".len() + sub_bytes.len());
+    msg.extend_from_slice(b"ERR unknown subcommand: ");
     msg.extend_from_slice(sub_bytes);
     Err(RedisError::runtime(msg))
 }
@@ -172,7 +186,7 @@ pub fn config_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             } else {
                 Vec::new()
             };
-            apply_config_set(&live_config, key.as_bytes(), &value_bytes);
+            apply_config_set_for_context(ctx, &live_config, key.as_bytes(), &value_bytes)?;
             i += 2;
         }
         return ctx.reply_simple_string(b"OK");
@@ -205,9 +219,16 @@ fn default_config_pairs() -> &'static [(&'static str, &'static str)] {
         ("appendonly", "no"),
         ("appendfsync", "everysec"),
         ("appendfilename", "appendonly.aof"),
+        ("appenddirname", "appendonlydir"),
+        ("aof-load-truncated", "yes"),
+        ("aof-use-rdb-preamble", "yes"),
+        ("auto-aof-rewrite-percentage", "100"),
+        ("auto-aof-rewrite-min-size", "67108864"),
         ("save", ""),
         ("dir", "./"),
         ("dbfilename", "dump.rdb"),
+        ("availability-zone", ""),
+        ("import-mode", "no"),
         ("rdb-version-check", "strict"),
         ("tcp-backlog", "511"),
         ("tcp-keepalive", "300"),
@@ -296,6 +317,8 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
     let live_hll_sparse_max_bytes = cfg.hll_sparse_max_bytes().to_string();
     let live_dir = cfg.rdb_dir();
     let live_dbfilename = cfg.rdb_filename();
+    let live_availability_zone = cfg.availability_zone();
+    let live_import_mode = yes_no(cfg.import_mode()).to_string();
     let live_lfu_log_factor = cfg.lfu_log_factor().to_string();
     let live_lfu_decay_time = cfg.lfu_decay_time().to_string();
     let live_tls_port = cfg.tls_port().to_string();
@@ -323,6 +346,11 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
     };
     let live_appendfsync = crate::aof::fsync_policy_str(cfg.appendfsync()).to_string();
     let live_appendfilename = cfg.appendfilename();
+    let live_appenddirname = cfg.appenddirname();
+    let live_aof_load_truncated = yes_no(cfg.aof_load_truncated()).to_string();
+    let live_aof_use_rdb_preamble = yes_no(cfg.aof_use_rdb_preamble()).to_string();
+    let live_auto_aof_rewrite_percentage = cfg.auto_aof_rewrite_percentage().to_string();
+    let live_auto_aof_rewrite_min_size = cfg.auto_aof_rewrite_min_size().to_string();
     let live_repl_backlog_size = cfg.repl_backlog_size().to_string();
     let live_repl_timeout = cfg.repl_timeout().to_string();
     let live_repl_disable_nodelay = if cfg.repl_disable_tcp_nodelay() {
@@ -373,6 +401,8 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
             "hll-sparse-max-bytes" => Some(live_hll_sparse_max_bytes.clone()),
             "dir" => Some(live_dir.clone()),
             "dbfilename" => Some(live_dbfilename.clone()),
+            "availability-zone" => Some(live_availability_zone.clone()),
+            "import-mode" => Some(live_import_mode.clone()),
             "lfu-log-factor" => Some(live_lfu_log_factor.clone()),
             "lfu-decay-time" => Some(live_lfu_decay_time.clone()),
             "tls-port" => Some(live_tls_port.clone()),
@@ -383,6 +413,11 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
             "appendonly" => Some(live_appendonly.clone()),
             "appendfsync" => Some(live_appendfsync.clone()),
             "appendfilename" => Some(live_appendfilename.clone()),
+            "appenddirname" => Some(live_appenddirname.clone()),
+            "aof-load-truncated" => Some(live_aof_load_truncated.clone()),
+            "aof-use-rdb-preamble" => Some(live_aof_use_rdb_preamble.clone()),
+            "auto-aof-rewrite-percentage" => Some(live_auto_aof_rewrite_percentage.clone()),
+            "auto-aof-rewrite-min-size" => Some(live_auto_aof_rewrite_min_size.clone()),
             "repl-backlog-size" => Some(live_repl_backlog_size.clone()),
             "repl-timeout" => Some(live_repl_timeout.clone()),
             "repl-disable-tcp-nodelay" => Some(live_repl_disable_nodelay.clone()),
@@ -517,6 +552,18 @@ fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
                 cfg.set_rdb_filename(s.to_string());
             }
         }
+        b"availability-zone" => {
+            if let Ok(s) = std::str::from_utf8(value) {
+                cfg.set_availability_zone(s.to_string());
+            }
+        }
+        b"import-mode" => {
+            if ascii_eq_ignore_case(value, b"yes") {
+                cfg.set_import_mode(true);
+            } else if ascii_eq_ignore_case(value, b"no") {
+                cfg.set_import_mode(false);
+            }
+        }
         b"lfu-log-factor" => {
             if let Some(n) = parse_usize_strict(value) {
                 cfg.set_lfu_log_factor(n.min(u32::MAX as usize) as u32);
@@ -590,6 +637,11 @@ fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
                 cfg.set_appendfilename(s.to_string());
             }
         }
+        b"appenddirname" => {
+            if let Ok(s) = std::str::from_utf8(value) {
+                cfg.set_appenddirname(s.to_string());
+            }
+        }
         b"appendfsync" => {
             if let Some(policy) = crate::aof::parse_fsync_policy(value) {
                 cfg.set_appendfsync(policy);
@@ -597,6 +649,30 @@ fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
                     w.fsync_policy
                         .store(policy, std::sync::atomic::Ordering::Relaxed);
                 }
+            }
+        }
+        b"aof-load-truncated" => {
+            if ascii_eq_ignore_case(value, b"yes") {
+                cfg.set_aof_load_truncated(true);
+            } else if ascii_eq_ignore_case(value, b"no") {
+                cfg.set_aof_load_truncated(false);
+            }
+        }
+        b"aof-use-rdb-preamble" => {
+            if ascii_eq_ignore_case(value, b"yes") {
+                cfg.set_aof_use_rdb_preamble(true);
+            } else if ascii_eq_ignore_case(value, b"no") {
+                cfg.set_aof_use_rdb_preamble(false);
+            }
+        }
+        b"auto-aof-rewrite-percentage" => {
+            if let Some(n) = parse_usize_strict(value) {
+                cfg.set_auto_aof_rewrite_percentage(n as u64);
+            }
+        }
+        b"auto-aof-rewrite-min-size" => {
+            if let Some(n) = parse_memsize(value) {
+                cfg.set_auto_aof_rewrite_min_size(n);
             }
         }
         b"repl-backlog-size" => {
@@ -668,6 +744,62 @@ fn parse_usize_strict(bytes: &[u8]) -> Option<usize> {
         return None;
     }
     Some(n as usize)
+}
+
+fn apply_config_set_for_context(
+    ctx: &mut CommandContext<'_>,
+    cfg: &Arc<LiveConfig>,
+    key: &[u8],
+    value: &[u8],
+) -> RedisResult<()> {
+    if ascii_eq_ignore_case(key, b"appendonly") {
+        return apply_appendonly_config_set(ctx, cfg, value);
+    }
+    apply_config_set(cfg, key, value);
+    Ok(())
+}
+
+fn apply_appendonly_config_set(
+    ctx: &mut CommandContext<'_>,
+    cfg: &Arc<LiveConfig>,
+    value: &[u8],
+) -> RedisResult<()> {
+    let enabled = ascii_eq_ignore_case(value, b"yes");
+    let was_enabled = cfg.appendonly();
+    if enabled {
+        if !was_enabled {
+            let snapshot = ctx.snapshot_all_dbs()?;
+            let dbs = snapshots_to_dbs(&snapshot);
+            let dir = cfg.rdb_dir();
+            let filename = cfg.appendfilename();
+            let dirname = cfg.appenddirname();
+            let policy = cfg.appendfsync();
+            let (writer, size) = crate::aof::open_manifest_current_incr_writer(
+                std::path::Path::new(&dir),
+                &filename,
+                &dirname,
+                &dbs,
+                policy,
+            )
+            .map_err(|e| {
+                RedisError::runtime(format!("ERR CONFIG SET appendonly failed: {}", e).into_bytes())
+            })?;
+            crate::aof::install_aof_writer(std::sync::Arc::new(writer));
+            ctx.server().persistence.set_aof_current_size(size);
+            ctx.server().set_aof_state(redis_core::AofState::On);
+        }
+        cfg.set_appendonly(true);
+    } else {
+        if was_enabled {
+            if let Some(w) = crate::aof::aof_writer() {
+                let _ = w.flush();
+            }
+            crate::aof::remove_aof_writer();
+            ctx.server().set_aof_state(redis_core::AofState::Off);
+        }
+        cfg.set_appendonly(false);
+    }
+    Ok(())
 }
 
 /// Glob-style ASCII matcher used by CONFIG GET. Supports `*` and `?` only;
@@ -912,10 +1044,10 @@ pub fn debug_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         return ctx.reply_simple_string(b"OK");
     }
     if ascii_eq_ignore_case(sub.as_bytes(), b"RELOAD") {
-        return ctx.reply_simple_string(b"OK");
+        return debug_reload_command(ctx);
     }
     if ascii_eq_ignore_case(sub.as_bytes(), b"LOADAOF") {
-        return ctx.reply_simple_string(b"OK");
+        return debug_loadaof_command(ctx);
     }
     if ascii_eq_ignore_case(sub.as_bytes(), b"FLUSHALL") {
         ctx.db_mut().clear();
@@ -940,6 +1072,136 @@ pub fn debug_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     Err(RedisError::runtime(msg))
 }
 
+fn debug_reload_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
+    let mut nosave = false;
+    let mut noflush = false;
+    let mut merge = false;
+
+    for i in 2..ctx.arg_count() {
+        let opt = ctx.arg_owned(i)?;
+        let bytes = opt.as_bytes();
+        if ascii_eq_ignore_case(bytes, b"NOSAVE") {
+            nosave = true;
+        } else if ascii_eq_ignore_case(bytes, b"NOFLUSH") {
+            noflush = true;
+        } else if ascii_eq_ignore_case(bytes, b"MERGE") {
+            merge = true;
+            noflush = true;
+        } else {
+            return Err(RedisError::syntax(b"syntax error"));
+        }
+    }
+
+    let cfg = Arc::clone(&ctx.server().live_config);
+    let path = redis_core::rdb::rdb_path(&cfg.rdb_dir(), &cfg.rdb_filename());
+    if !nosave {
+        let snapshot = ctx.snapshot_all_dbs()?;
+        let snapshot_dbs = snapshots_to_dbs(&snapshot);
+        redis_core::rdb::save_rdb_databases(&snapshot_dbs, &path).map_err(|e| {
+            ctx.server()
+                .persistence
+                .set_rdb_last_bgsave_status(PersistenceStatus::Err);
+            RedisError::runtime(format!("ERR DEBUG RELOAD SAVE failed: {}", e).into_bytes())
+        })?;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        cfg.set_last_save_unix(now);
+        ctx.server()
+            .persistence
+            .set_rdb_last_bgsave_status(PersistenceStatus::Ok);
+    }
+
+    let mut loaded: Vec<RedisDb> = (0..ctx.database_count() as u32).map(RedisDb::new).collect();
+    redis_core::rdb::load_into_dbs_with_options(
+        &mut loaded,
+        &path,
+        redis_core::rdb::RdbLoadOptions {
+            allow_dup: merge,
+            skip_expired: true,
+            aof_preamble: false,
+        },
+    )
+    .map_err(|e| RedisError::runtime(format!("ERR DEBUG RELOAD failed: {}", e).into_bytes()))?;
+
+    replace_or_merge_dbs(ctx, loaded, noflush, merge)?;
+    ctx.reply_simple_string(b"OK")
+}
+
+fn debug_loadaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
+    if ctx.arg_count() != 2 {
+        return Err(RedisError::wrong_number_of_args(b"debug loadaof"));
+    }
+
+    let cfg = Arc::clone(&ctx.server().live_config);
+    let dir = cfg.rdb_dir();
+    let filename = cfg.appendfilename();
+    let dirname = cfg.appenddirname();
+    let mut loaded: Vec<RedisDb> = (0..ctx.database_count() as u32).map(RedisDb::new).collect();
+    crate::aof::load_append_only_files(
+        std::path::Path::new(&dir),
+        &filename,
+        &dirname,
+        &mut loaded,
+        crate::aof::AofLoadOptions {
+            load_truncated: cfg.aof_load_truncated(),
+            allow_rdb_preamble: cfg.aof_use_rdb_preamble(),
+        },
+    )
+    .map_err(|e| RedisError::runtime(format!("ERR DEBUG LOADAOF failed: {}", e).into_bytes()))?;
+    replace_or_merge_dbs(ctx, loaded, false, true)?;
+    ctx.reply_simple_string(b"OK")
+}
+
+fn replace_or_merge_dbs(
+    ctx: &mut CommandContext<'_>,
+    loaded: Vec<RedisDb>,
+    noflush: bool,
+    merge: bool,
+) -> RedisResult<()> {
+    if noflush {
+        for loaded_db in loaded.iter() {
+            let db_id = loaded_db.id;
+            ctx.with_db_index(db_id, |live| {
+                for (key, obj) in loaded_db.iter_for_eviction() {
+                    if !merge && live.exists_raw(key) {
+                        return Err(RedisError::runtime(
+                            b"ERR DEBUG RELOAD found duplicate key; use MERGE",
+                        ));
+                    }
+                    live.insert(key.clone(), obj.clone());
+                }
+                Ok(())
+            })??;
+        }
+    } else {
+        for loaded_db in loaded {
+            let db_id = loaded_db.id;
+            ctx.with_db_index(db_id, move |live| {
+                *live = loaded_db;
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn snapshots_to_dbs(
+    snapshot: &[(
+        u32,
+        Vec<(redis_types::RedisString, redis_core::RedisObject)>,
+    )],
+) -> Vec<RedisDb> {
+    snapshot
+        .iter()
+        .map(|(id, entries)| {
+            let mut db = RedisDb::from_snapshot(entries.clone());
+            db.id = *id;
+            db
+        })
+        .collect()
+}
+
 /// `HELLO [protover] [AUTH user pass] [SETNAME name]`.
 ///
 /// Pilot-shape reply: a flat RESP2 multi-bulk of `[key, value]` pairs
@@ -949,7 +1211,7 @@ pub fn debug_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 /// SETNAME option does set the client name when present.
 pub fn hello_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     let argc = ctx.arg_count();
-    let mut proto: i32 = 2;
+    let mut proto: i32 = ctx.client_ref().resp_proto;
     let mut i = 1usize;
     if argc > 1 {
         let first = ctx.arg_owned(1usize)?;
@@ -1004,7 +1266,7 @@ pub fn hello_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         }
     }
     let id_bytes = format_u64_decimal(id);
-    let pairs: Vec<(RespFrame, RespFrame)> = vec![
+    let mut pairs: Vec<(RespFrame, RespFrame)> = vec![
         (
             RespFrame::bulk(RedisString::from_bytes(b"server")),
             RespFrame::bulk(RedisString::from_bytes(b"redis")),
@@ -1034,7 +1296,323 @@ pub fn hello_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             RespFrame::array(Vec::new()),
         ),
     ];
+    let availability_zone = ctx.server().live_config.availability_zone();
+    if !availability_zone.is_empty() {
+        pairs.push((
+            RespFrame::bulk(RedisString::from_bytes(b"availability_zone")),
+            RespFrame::bulk(RedisString::from_bytes(availability_zone.as_bytes())),
+        ));
+    }
     ctx.reply_frame(&RespFrame::Map(pairs))
+}
+
+#[derive(Default)]
+struct ClientListFilters {
+    ids: Vec<u64>,
+    addr: Option<String>,
+    laddr: Option<String>,
+    name: Option<String>,
+    flags: Option<String>,
+    user: Option<String>,
+    skipme: Option<bool>,
+}
+
+fn client_user_name(client: &redis_core::client::Client) -> String {
+    client
+        .authenticated_user
+        .as_ref()
+        .map(|u| String::from_utf8_lossy(u.as_bytes()).into_owned())
+        .unwrap_or_else(|| "default".to_string())
+}
+
+fn client_name_string(client: &redis_core::client::Client) -> String {
+    client
+        .name
+        .as_ref()
+        .map(|n| String::from_utf8_lossy(n.as_bytes()).into_owned())
+        .unwrap_or_default()
+}
+
+fn client_flags_string(client: &redis_core::client::Client) -> String {
+    let mut out = String::new();
+    if client.import_source {
+        out.push('I');
+    }
+    if client.tracking.enabled {
+        out.push('t');
+    }
+    if client.tracking.bcast {
+        out.push('B');
+    }
+    if client.tracking.broken_redirect {
+        out.push('R');
+    }
+    if client.blocked_on_keys || client.flag_blocked() {
+        out.push('b');
+    }
+    if out.is_empty() {
+        out.push('N');
+    }
+    out
+}
+
+fn watched_key_count_for_client(client_id: u64) -> usize {
+    let idx = redis_core::db::watched_keys_index();
+    let guard = match idx.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    guard
+        .watched
+        .values()
+        .filter(|watchers| watchers.contains(&client_id))
+        .count()
+}
+
+fn client_tracking_redir(client: &redis_core::client::Client) -> i64 {
+    if client.tracking.enabled {
+        client.tracking.redirect
+    } else {
+        -1
+    }
+}
+
+fn format_current_client_info_line(
+    client: &redis_core::client::Client,
+    command_name: &str,
+) -> String {
+    let addr = client
+        .addr
+        .clone()
+        .unwrap_or_else(|| "127.0.0.1:0".to_string());
+    let laddr = "127.0.0.1:0";
+    let flags = client_flags_string(client);
+    let name = client_name_string(client);
+    let user = client_user_name(client);
+    let multi = if client.flag_multi() {
+        client.queued_argvs.len() as i64
+    } else {
+        -1
+    };
+    let watch = watched_key_count_for_client(client.id);
+    format!(
+        "id={} addr={} laddr={} fd=0 name={} age=0 idle=0 flags={} capa= db={} sub={} psub={} ssub=0 multi={} watch={} qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 rbs=0 rbp=0 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd={} user={} redir={} resp={} lib-name= lib-ver= tot-net-in=0 tot-net-out=0 tot-cmds=0\r\n",
+        client.id,
+        addr,
+        laddr,
+        name,
+        flags,
+        client.db_index,
+        client.subscribed_channels.len(),
+        client.subscribed_patterns.len(),
+        multi,
+        watch,
+        command_name,
+        user,
+        client_tracking_redir(client),
+        client.resp_proto,
+    )
+}
+
+fn format_snapshot_client_info_line(
+    snap: &redis_core::client_info::ClientSnapshot,
+    command_name: &str,
+) -> String {
+    let flags = if snap.blocked { "b" } else { "N" };
+    format!(
+        "id={} addr={} laddr=127.0.0.1:0 fd=0 name= age=0 idle=0 flags={} capa= db={} sub=0 psub=0 ssub=0 multi=-1 watch=0 qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 rbs=0 rbp=0 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd={} user=default redir=-1 resp=2 lib-name= lib-ver= tot-net-in=0 tot-net-out=0 tot-cmds=0\r\n",
+        snap.id,
+        snap.addr,
+        flags,
+        snap.db_index,
+        command_name,
+    )
+}
+
+fn parse_client_list_filters(ctx: &CommandContext<'_>) -> RedisResult<ClientListFilters> {
+    let mut filters = ClientListFilters::default();
+    let mut idx = 2usize;
+    while idx < ctx.arg_count() {
+        let opt = ctx.arg(idx)?;
+        let opt_bytes = opt.as_bytes();
+        if opt_bytes.eq_ignore_ascii_case(b"ID") {
+            idx += 1;
+            let mut saw_id = false;
+            while idx < ctx.arg_count() {
+                let raw = ctx.arg(idx)?;
+                if parse_i64_strict(raw.as_bytes()).is_none() {
+                    break;
+                }
+                let id = parse_i64_strict(raw.as_bytes()).unwrap();
+                if id < 0 {
+                    return Err(RedisError::runtime(
+                        b"ERR value is not an integer or out of range",
+                    ));
+                }
+                filters.ids.push(id as u64);
+                saw_id = true;
+                idx += 1;
+            }
+            if !saw_id {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+        } else if opt_bytes.eq_ignore_ascii_case(b"ADDR") {
+            if idx + 1 >= ctx.arg_count() {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            filters.addr = Some(String::from_utf8_lossy(ctx.arg(idx + 1)?.as_bytes()).into_owned());
+            idx += 2;
+        } else if opt_bytes.eq_ignore_ascii_case(b"LADDR") {
+            if idx + 1 >= ctx.arg_count() {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            filters.laddr = Some(String::from_utf8_lossy(ctx.arg(idx + 1)?.as_bytes()).into_owned());
+            idx += 2;
+        } else if opt_bytes.eq_ignore_ascii_case(b"TYPE") {
+            if idx + 1 >= ctx.arg_count() {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            let ty = ctx.arg(idx + 1)?;
+            if !ty.as_bytes().eq_ignore_ascii_case(b"normal") {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            idx += 2;
+        } else if opt_bytes.eq_ignore_ascii_case(b"USER") {
+            if idx + 1 >= ctx.arg_count() {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            let user = String::from_utf8_lossy(ctx.arg(idx + 1)?.as_bytes()).into_owned();
+            if user != "default" {
+                return Err(RedisError::runtime(
+                    format!("ERR No such user '{}'", user).into_bytes(),
+                ));
+            }
+            filters.user = Some(user);
+            idx += 2;
+        } else if opt_bytes.eq_ignore_ascii_case(b"NAME") {
+            if idx + 1 >= ctx.arg_count() {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            filters.name = Some(String::from_utf8_lossy(ctx.arg(idx + 1)?.as_bytes()).into_owned());
+            idx += 2;
+        } else if opt_bytes.eq_ignore_ascii_case(b"FLAGS") {
+            if idx + 1 >= ctx.arg_count() {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            let flags = String::from_utf8_lossy(ctx.arg(idx + 1)?.as_bytes()).into_owned();
+            if flags.chars().any(|c| !matches!(c, 'N' | 'b' | 't' | 'B' | 'R' | 'I')) {
+                return Err(RedisError::runtime(
+                    format!("ERR Unknown flags found in the provided filter: {}", flags)
+                        .into_bytes(),
+                ));
+            }
+            filters.flags = Some(flags);
+            idx += 2;
+        } else if opt_bytes.eq_ignore_ascii_case(b"SKIPME") {
+            if idx + 1 >= ctx.arg_count() {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            let v = ctx.arg(idx + 1)?;
+            if v.as_bytes().eq_ignore_ascii_case(b"yes") {
+                filters.skipme = Some(true);
+            } else if v.as_bytes().eq_ignore_ascii_case(b"no") {
+                filters.skipme = Some(false);
+            } else {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            idx += 2;
+        } else if opt_bytes.eq_ignore_ascii_case(b"MAXAGE") {
+            if idx + 1 >= ctx.arg_count() {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            if parse_i64_strict(ctx.arg(idx + 1)?.as_bytes()).is_none() {
+                return Err(RedisError::runtime(b"ERR maxage is not an integer"));
+            }
+            idx += 2;
+        } else {
+            return Err(RedisError::syntax(b"syntax error"));
+        }
+    }
+    Ok(filters)
+}
+
+fn current_client_matches_filters(
+    client: &redis_core::client::Client,
+    filters: &ClientListFilters,
+) -> bool {
+    if filters.skipme == Some(true) {
+        return false;
+    }
+    if !filters.ids.is_empty() && !filters.ids.contains(&client.id) {
+        return false;
+    }
+    let addr = client
+        .addr
+        .as_deref()
+        .unwrap_or("127.0.0.1:0");
+    if let Some(expected) = &filters.addr {
+        if expected != addr {
+            return false;
+        }
+    }
+    if let Some(expected) = &filters.laddr {
+        if expected != "127.0.0.1:0" {
+            return false;
+        }
+    }
+    if let Some(expected) = &filters.name {
+        if expected != &client_name_string(client) {
+            return false;
+        }
+    }
+    if let Some(expected) = &filters.user {
+        if expected != &client_user_name(client) {
+            return false;
+        }
+    }
+    if let Some(expected) = &filters.flags {
+        let actual = client_flags_string(client);
+        if !expected.chars().all(|c| actual.contains(c)) {
+            return false;
+        }
+    }
+    true
+}
+
+fn snapshot_matches_filters(
+    snap: &redis_core::client_info::ClientSnapshot,
+    filters: &ClientListFilters,
+) -> bool {
+    if !filters.ids.is_empty() && !filters.ids.contains(&snap.id) {
+        return false;
+    }
+    if let Some(expected) = &filters.addr {
+        if expected != &snap.addr {
+            return false;
+        }
+    }
+    if let Some(expected) = &filters.laddr {
+        if expected != "127.0.0.1:0" {
+            return false;
+        }
+    }
+    if let Some(expected) = &filters.user {
+        if expected != "default" {
+            return false;
+        }
+    }
+    if let Some(expected) = &filters.name {
+        if !expected.is_empty() {
+            return false;
+        }
+    }
+    if let Some(expected) = &filters.flags {
+        let actual = if snap.blocked { "b" } else { "N" };
+        if !expected.chars().all(|c| actual.contains(c)) {
+            return false;
+        }
+    }
+    true
 }
 
 /// `CLIENT <subcommand> [args]`.
@@ -1102,19 +1680,15 @@ pub fn client_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         }
         return ctx.reply_simple_string(b"OK");
     }
+    if ascii_eq_ignore_case(sub_bytes, b"INFO") {
+        if ctx.arg_count() != 2 {
+            return Err(RedisError::wrong_number_of_args(b"client|info"));
+        }
+        let line = format_current_client_info_line(ctx.client_ref(), "client|info");
+        return ctx.reply_bulk_string(RedisString::from_vec(line.into_bytes()));
+    }
     if ascii_eq_ignore_case(sub_bytes, b"LIST") {
-        let filter_id: Option<u64> = if ctx.arg_count() >= 4 {
-            let opt = ctx.arg(2).ok().map(|a| a.clone());
-            let val = ctx.arg(3).ok().map(|a| a.clone());
-            match (opt, val) {
-                (Some(o), Some(v)) if o.as_bytes().eq_ignore_ascii_case(b"ID") => {
-                    parse_i64_strict(v.as_bytes()).map(|n| n as u64)
-                }
-                _ => None,
-            }
-        } else {
-            None
-        };
+        let filters = parse_client_list_filters(ctx)?;
         let snapshots = {
             let guard = match client_info_registry().lock() {
                 Ok(g) => g,
@@ -1122,25 +1696,63 @@ pub fn client_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             };
             guard.all()
         };
-        let mut out: Vec<u8> = Vec::new();
-        for snap in &snapshots {
-            if let Some(id) = filter_id {
-                if snap.id != id {
-                    continue;
-                }
-            }
-            let flags = if snap.blocked { "b" } else { "N" };
-            let _ = write!(
-                out,
-                "id={} addr={} laddr= fd=0 name= age=0 idle=0 flags={} capa= db={} sub=0 psub=0 ssub=0 multi=-1 watch=0 qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 rbs=0 rbp=0 obl=0 oll=0 omem=0 tot-mem=0 events= cmd={} user=default redir=-1 resp=2 lib-name= lib-ver=\r\n",
-                snap.id,
-                snap.addr,
-                flags,
-                snap.db_index,
-                if snap.cmd.is_empty() { "NULL" } else { &snap.cmd },
-            );
+        let mut out = String::new();
+        if current_client_matches_filters(ctx.client_ref(), &filters) {
+            out.push_str(&format_current_client_info_line(ctx.client_ref(), "client|list"));
         }
-        return ctx.reply_bulk_string(RedisString::from_vec(out));
+        for snap in &snapshots {
+            if snap.id == ctx.client_ref().id {
+                continue;
+            }
+            if !snapshot_matches_filters(snap, &filters) {
+                continue;
+            }
+            let cmd = if snap.cmd.is_empty() { "NULL" } else { snap.cmd.as_str() };
+            out.push_str(&format_snapshot_client_info_line(snap, cmd));
+        }
+        return ctx.reply_bulk_string(RedisString::from_vec(out.into_bytes()));
+    }
+    if ascii_eq_ignore_case(sub_bytes, b"TRACKING") {
+        return client_tracking_command(ctx);
+    }
+    if ascii_eq_ignore_case(sub_bytes, b"CACHING") {
+        return client_caching_command(ctx);
+    }
+    if ascii_eq_ignore_case(sub_bytes, b"GETREDIR") {
+        if ctx.arg_count() != 2 {
+            return Err(RedisError::wrong_number_of_args(b"client|getredir"));
+        }
+        return ctx.reply_integer(client_tracking_redir(ctx.client_ref()));
+    }
+    if ascii_eq_ignore_case(sub_bytes, b"TRACKINGINFO") {
+        return client_trackinginfo_command(ctx);
+    }
+    if ascii_eq_ignore_case(sub_bytes, b"IMPORT-SOURCE") {
+        return client_import_source_command(ctx);
+    }
+    if ascii_eq_ignore_case(sub_bytes, b"REPLY") {
+        if ctx.arg_count() != 3 {
+            return Err(RedisError::wrong_number_of_args(b"client|reply"));
+        }
+        let mode = ctx.arg_owned(2usize)?;
+        let flags = &mut ctx.client_mut().flags;
+        if ascii_eq_ignore_case(mode.as_bytes(), b"ON") {
+            flags.reply_skip = false;
+            flags.reply_skip_next = false;
+            flags.reply_off = false;
+            return ctx.reply_simple_string(b"OK");
+        }
+        if ascii_eq_ignore_case(mode.as_bytes(), b"OFF") {
+            flags.reply_off = true;
+            return Ok(());
+        }
+        if ascii_eq_ignore_case(mode.as_bytes(), b"SKIP") {
+            if !flags.reply_off {
+                flags.reply_skip_next = true;
+            }
+            return Ok(());
+        }
+        return Err(RedisError::syntax(b""));
     }
     if ascii_eq_ignore_case(sub_bytes, b"UNBLOCK") {
         if ctx.arg_count() < 3 || ctx.arg_count() > 4 {
@@ -1163,7 +1775,6 @@ pub fn client_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         return ctx.reply_integer(0);
     }
     if ascii_eq_ignore_case(sub_bytes, b"PAUSE")
-        || ascii_eq_ignore_case(sub_bytes, b"REPLY")
         || ascii_eq_ignore_case(sub_bytes, b"KILL")
     {
         return ctx.reply_simple_string(b"OK");
@@ -1172,6 +1783,221 @@ pub fn client_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     msg.extend_from_slice(b"ERR Unknown CLIENT subcommand: ");
     msg.extend_from_slice(sub_bytes);
     Err(RedisError::runtime(msg))
+}
+
+fn client_id_exists(id: u64) -> bool {
+    let guard = match client_info_registry().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    guard.all().iter().any(|snap| snap.id == id)
+}
+
+fn client_tracking_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
+    if ctx.arg_count() < 3 {
+        return Err(RedisError::wrong_number_of_args(b"client|tracking"));
+    }
+    let mode = ctx.arg_owned(2usize)?;
+    let mut redirect: i64 = 0;
+    let mut bcast = false;
+    let mut optin = false;
+    let mut optout = false;
+    let mut noloop = false;
+    let mut prefixes: Vec<RedisString> = Vec::new();
+
+    let mut idx = 3usize;
+    while idx < ctx.arg_count() {
+        let opt = ctx.arg_owned(idx)?;
+        if ascii_eq_ignore_case(opt.as_bytes(), b"REDIRECT") {
+            if idx + 1 >= ctx.arg_count() {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            let id = parse_i64_strict(ctx.arg(idx + 1)?.as_bytes())
+                .ok_or_else(|| RedisError::runtime(b"ERR value is not an integer or out of range"))?;
+            if id < 0 {
+                return Err(RedisError::runtime(
+                    b"ERR value is not an integer or out of range",
+                ));
+            }
+            if !client_id_exists(id as u64) && id as u64 != ctx.client_ref().id {
+                return Err(RedisError::runtime(
+                    b"ERR The client ID you want redirect to does not exist",
+                ));
+            }
+            redirect = id;
+            idx += 2;
+        } else if ascii_eq_ignore_case(opt.as_bytes(), b"BCAST") {
+            bcast = true;
+            idx += 1;
+        } else if ascii_eq_ignore_case(opt.as_bytes(), b"OPTIN") {
+            optin = true;
+            idx += 1;
+        } else if ascii_eq_ignore_case(opt.as_bytes(), b"OPTOUT") {
+            optout = true;
+            idx += 1;
+        } else if ascii_eq_ignore_case(opt.as_bytes(), b"NOLOOP") {
+            noloop = true;
+            idx += 1;
+        } else if ascii_eq_ignore_case(opt.as_bytes(), b"PREFIX") {
+            if idx + 1 >= ctx.arg_count() {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            prefixes.push(ctx.arg_owned(idx + 1)?);
+            idx += 2;
+        } else {
+            return Err(RedisError::syntax(b"syntax error"));
+        }
+    }
+
+    if ascii_eq_ignore_case(mode.as_bytes(), b"OFF") {
+        ctx.client_mut().tracking = redis_core::client::ClientTrackingState::default();
+        return ctx.reply_simple_string(b"OK");
+    }
+    if !ascii_eq_ignore_case(mode.as_bytes(), b"ON") {
+        return Err(RedisError::syntax(b"syntax error"));
+    }
+    if !bcast && !prefixes.is_empty() {
+        return Err(RedisError::runtime(
+            b"ERR PREFIX option requires BCAST mode to be enabled",
+        ));
+    }
+    if bcast && (optin || optout) {
+        return Err(RedisError::runtime(
+            b"ERR OPTIN and OPTOUT are not compatible with BCAST",
+        ));
+    }
+    if optin && optout {
+        return Err(RedisError::runtime(
+            b"ERR You can't specify both OPTIN mode and OPTOUT mode",
+        ));
+    }
+    let client = ctx.client_mut();
+    if client.tracking.enabled && client.tracking.bcast != bcast {
+        return Err(RedisError::runtime(
+            b"ERR You can't switch BCAST mode on/off before disabling tracking for this client",
+        ));
+    }
+    if client.tracking.enabled
+        && ((optin && client.tracking.optout) || (optout && client.tracking.optin))
+    {
+        return Err(RedisError::runtime(
+            b"ERR You can't switch OPTIN/OPTOUT mode before disabling tracking for this client",
+        ));
+    }
+    client.tracking.enabled = true;
+    client.tracking.bcast = bcast;
+    client.tracking.optin = optin;
+    client.tracking.optout = optout;
+    client.tracking.noloop = noloop;
+    client.tracking.caching = false;
+    client.tracking.broken_redirect = false;
+    client.tracking.redirect = redirect;
+    client.tracking.prefixes = prefixes;
+    ctx.reply_simple_string(b"OK")
+}
+
+fn client_caching_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
+    if ctx.arg_count() != 3 {
+        return Err(RedisError::wrong_number_of_args(b"client|caching"));
+    }
+    let opt = ctx.arg_owned(2usize)?;
+    if !ascii_eq_ignore_case(opt.as_bytes(), b"YES")
+        && !ascii_eq_ignore_case(opt.as_bytes(), b"NO")
+    {
+        return Err(RedisError::syntax(b"syntax error"));
+    }
+    let tracking = &mut ctx.client_mut().tracking;
+    if !tracking.enabled || (!tracking.optin && !tracking.optout) {
+        return Err(RedisError::runtime(
+            b"ERR CLIENT CACHING can be called only when the client is in tracking mode with OPTIN or OPTOUT mode enabled",
+        ));
+    }
+    if ascii_eq_ignore_case(opt.as_bytes(), b"YES") {
+        if !tracking.optin {
+            return Err(RedisError::runtime(
+                b"ERR CLIENT CACHING YES is only valid when tracking is enabled in OPTIN mode.",
+            ));
+        }
+        tracking.caching = true;
+    } else {
+        if !tracking.optout {
+            return Err(RedisError::runtime(
+                b"ERR CLIENT CACHING NO is only valid when tracking is enabled in OPTOUT mode.",
+            ));
+        }
+        tracking.caching = true;
+    }
+    ctx.reply_simple_string(b"OK")
+}
+
+fn client_trackinginfo_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
+    if ctx.arg_count() != 2 {
+        return Err(RedisError::wrong_number_of_args(b"client|trackinginfo"));
+    }
+    let tracking = &ctx.client_ref().tracking;
+    let mut flags = Vec::new();
+    let state_flag: &[u8] = if tracking.enabled { b"on" } else { b"off" };
+    flags.push(RespFrame::bulk(RedisString::from_bytes(state_flag)));
+    if tracking.bcast {
+        flags.push(RespFrame::bulk(RedisString::from_bytes(b"bcast")));
+    }
+    if tracking.optin {
+        flags.push(RespFrame::bulk(RedisString::from_bytes(b"optin")));
+        if tracking.caching {
+            flags.push(RespFrame::bulk(RedisString::from_bytes(b"caching-yes")));
+        }
+    }
+    if tracking.optout {
+        flags.push(RespFrame::bulk(RedisString::from_bytes(b"optout")));
+        if tracking.caching {
+            flags.push(RespFrame::bulk(RedisString::from_bytes(b"caching-no")));
+        }
+    }
+    if tracking.noloop {
+        flags.push(RespFrame::bulk(RedisString::from_bytes(b"noloop")));
+    }
+    if tracking.broken_redirect {
+        flags.push(RespFrame::bulk(RedisString::from_bytes(b"broken_redirect")));
+    }
+    let prefixes = tracking
+        .prefixes
+        .iter()
+        .cloned()
+        .map(RespFrame::bulk)
+        .collect();
+    ctx.reply_frame(&RespFrame::Map(vec![
+        (
+            RespFrame::bulk(RedisString::from_bytes(b"flags")),
+            RespFrame::array(flags),
+        ),
+        (
+            RespFrame::bulk(RedisString::from_bytes(b"redirect")),
+            RespFrame::Integer(client_tracking_redir(ctx.client_ref())),
+        ),
+        (
+            RespFrame::bulk(RedisString::from_bytes(b"prefixes")),
+            RespFrame::array(prefixes),
+        ),
+    ]))
+}
+
+fn client_import_source_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
+    if ctx.arg_count() != 3 {
+        return Err(RedisError::wrong_number_of_args(b"client|import-source"));
+    }
+    let value = ctx.arg_owned(2usize)?;
+    if ascii_eq_ignore_case(value.as_bytes(), b"ON") {
+        if !ctx.server().live_config.import_mode() {
+            return Err(RedisError::runtime(b"ERR Server is not in import mode"));
+        }
+        ctx.client_mut().import_source = true;
+        return ctx.reply_simple_string(b"OK");
+    }
+    if ascii_eq_ignore_case(value.as_bytes(), b"OFF") {
+        ctx.client_mut().import_source = false;
+        return ctx.reply_simple_string(b"OK");
+    }
+    Err(RedisError::syntax(b"syntax error"))
 }
 
 /// `COMMAND` / `COMMAND COUNT` / `COMMAND GETKEYS`.
@@ -2038,6 +2864,14 @@ fn ascii_eq_ignore_case(a: &[u8], b: &[u8]) -> bool {
     a.iter()
         .zip(b.iter())
         .all(|(x, y)| ascii_lower(*x) == ascii_lower(*y))
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value {
+        "yes"
+    } else {
+        "no"
+    }
 }
 
 fn ascii_lower(b: u8) -> u8 {

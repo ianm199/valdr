@@ -18,15 +18,7 @@ use crate::client::ClientId;
 use crate::db::RedisDb;
 use crate::evict::{eviction_pool_alloc, EvictionPool};
 use crate::live_config::LiveConfig;
-
-/// Stub AOF state. TODO(architect): real type lives in `aof.rs` when ported
-/// (Phase 6+). Until then this is an i32 discriminant matching the C
-/// `AOF_OFF`/`AOF_ON`/`AOF_WAIT_REWRITE` constants.
-pub type AofState = i32;
-
-pub const AOF_OFF: AofState = 0;
-pub const AOF_ON: AofState = 1;
-pub const AOF_WAIT_REWRITE: AofState = 2;
+use crate::persistence::{AofState, PersistenceState};
 
 /// Stub command table handle.
 ///
@@ -63,8 +55,8 @@ pub struct RedisServer {
     pub eviction_pool: Mutex<EvictionPool>,
     /// Command-table handle. TODO(architect): real type later.
     pub commands_table: CommandTableHandle,
-    /// AOF state. TODO(architect): real `AofState` enum later.
-    pub aof_state: AofState,
+    /// Persistence runtime state reported by INFO and updated by reapers.
+    pub persistence: PersistenceState,
     /// Cached command-time snapshot in milliseconds since epoch.
     pub cmd_time_snapshot: AtomicI64,
     /// Active TCP listeners.
@@ -123,7 +115,7 @@ impl RedisServer {
             live_config: Arc::new(LiveConfig::new()),
             eviction_pool: Mutex::new(eviction_pool_alloc()),
             commands_table: CommandTableHandle,
-            aof_state: AOF_OFF,
+            persistence: PersistenceState::new(),
             cmd_time_snapshot: AtomicI64::new(0),
             listeners: Vec::new(),
             watching_clients: AtomicU64::new(0),
@@ -238,6 +230,14 @@ impl RedisServer {
     /// Store the PID of the newly-forked BGSAVE child.
     pub fn set_rdb_child_pid(&self, pid: i32) {
         self.rdb_child_pid.store(pid, Ordering::SeqCst);
+    }
+
+    pub fn aof_state(&self) -> AofState {
+        self.persistence.aof_state()
+    }
+
+    pub fn set_aof_state(&self, state: AofState) {
+        self.persistence.set_aof_state(state);
     }
 
     /// Stub random number used by lolwut. Centralised here so command handlers

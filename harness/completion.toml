@@ -470,3 +470,55 @@ kind = "runner_latest_pass"
 required = true
 packet = "tcl-core-expanded-survey-v2"
 runner = "tcl-survey-core"
+
+[[criterion]]
+id = "persistence-overnight-frontier-v1-packets"
+kind = "packets_completed"
+required = false
+packets = [
+  "persistence-frontier-baseline-v1",
+  "persistence-current-rdb-cycle-v1",
+  "persistence-current-aof-cycle-v1",
+  "persistence-current-aof-rewrite-cycle-v1",
+  "persistence-debug-reload-loadaof-v1",
+  "persistence-post-debug-frontier-v1",
+  "persistence-aof-load-strict-truncated-v1",
+  "persistence-post-strict-frontier-v1",
+  "persistence-aof-propagation-v1",
+  "persistence-post-propagation-frontier-v1",
+  "persistence-aof-rewrite-digest-v1",
+  "persistence-post-rewrite-frontier-v1",
+  "persistence-aof-manifest-architecture-v1",
+  "persistence-aof-manifest-frontier-scenarios-v1",
+  "persistence-aof-manifest-frontier-baseline-v1",
+  "persistence-aof-manifest-load-v1",
+  "persistence-post-manifest-load-frontier-v1",
+  "persistence-aof-manifest-current-incr-v1",
+  "persistence-post-manifest-current-incr-frontier-v1",
+  "persistence-aof-manifest-rewrite-finalize-v1",
+  "persistence-post-manifest-rewrite-cycle-v1",
+  "persistence-post-manifest-rewrite-frontier-v1",
+  "persistence-focused-tcl-v1",
+  "persistence-post-oracle-fix-frontier-v1",
+]
+
+[[criterion]]
+id = "persistence-overnight-frontier-final"
+kind = "runner_latest_pass"
+required = false
+packet = "persistence-post-oracle-fix-frontier-v1"
+runner = "persistence-frontier"
+
+[[criterion]]
+id = "persistence-aof-manifest-rewrite-cycle-final"
+kind = "runner_latest_pass"
+required = false
+packet = "persistence-post-manifest-rewrite-cycle-v1"
+runner = "persistence-aof-rewrite-cycle"
+
+[[criterion]]
+id = "persistence-focused-tcl-final"
+kind = "runner_latest_pass"
+required = false
+packet = "persistence-focused-tcl-v1"
+runner = "tcl-persistence-focused"

@@ -1,0 +1,109 @@
+{
+  "captured_ts": "2026-05-24T14:31:12.422629Z",
+  "gate_results": {
+    "cargo_check_redis-commands": {
+      "detail": "cargo check -p redis-commands: clean",
+      "ok": true
+    },
+    "cargo_check_workspace": {
+      "detail": "cargo check --workspace: clean",
+      "ok": true
+    },
+    "cargo_test_redis-commands_dispatch": {
+      "detail": "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.00s",
+      "ok": true
+    },
+    "no_out_of_scope_changes": {
+      "detail": "no changed files outside packet targets or allowed scope; same-batch sibling collateral: crates/redis-commands/src/zset.rs",
+      "ok": true
+    },
+    "oracle_reference_only": {
+      "detail": "no harness/oracle/run-smoke.sh present",
+      "ok": true
+    },
+    "target_files_modified": {
+      "detail": "test-fixer touched 3/3 candidate target(s)",
+      "ok": true
+    },
+    "trailer_present": {
+      "detail": "all touched Rust targets carry PORT STATUS trailers",
+      "ok": true
+    }
+  },
+  "harness_context": {
+    "commit": "a93a2ad",
+    "git_dirty": true,
+    "git_status_short": [
+      " M crates/redis-commands/src/aof.rs",
+      " M crates/redis-commands/src/connection.rs",
+      " M crates/redis-commands/src/dispatch.rs",
+      " M crates/redis-commands/src/hash.rs",
+      " M crates/redis-commands/src/info.rs",
+      " M crates/redis-commands/src/list.rs",
+      " M crates/redis-commands/src/persist.rs",
+      " M crates/redis-commands/src/string.rs",
+      " M crates/redis-commands/src/zset.rs",
+      " M crates/redis-core/src/client.rs",
+      " M crates/redis-core/src/db.rs",
+      " M crates/redis-core/src/lib.rs",
+      " M crates/redis-core/src/live_config.rs",
+      " M crates/redis-core/src/rdb/load.rs",
+      " M crates/redis-core/src/rdb/mod.rs",
+      " M crates/redis-core/src/server.rs",
+      " M crates/redis-server/src/main.rs",
+      " M docs/CONFORMANCE.md",
+      " M docs/TCL_FULL_SUITE_GOAL_20260523.md",
+      " M harness/completion.toml",
+      " M harness/evidence/ledger.jsonl",
+      " M harness/history.jsonl",
+      " M harness/oracle/tcl-survey.py",
+      " M harness/runners.toml",
+      " M harness/work-packets.jsonl",
+      "?? crates/redis-core/src/persistence.rs",
+      "?? docs/LOOP_OBSERVATIONS_20260523.md",
+      "?? docs/PERSISTENCE_BORING_SPEC_20260523.md",
+      "?? docs/SINGLE_NODE_CORE_V1_DASHBOARD.md",
+      "?? docs/TCL_BREADTH_OVERNIGHT_20260524.md",
+      "?? harness/evidence/runs/20260523T193242Z-a93a2ad-runner-persistence-frontier-baseline-v1.json",
+      "?? harness/evidence/runs/20260523T193243Z-a93a2ad-runner-persistence-current-rdb-cycle-v1.json",
+      "?? harness/evidence/runs/20260523T193244Z-a93a2ad-runner-persistence-current-aof-cycle-v1.json",
+      "?? harness/evidence/runs/20260523T193245Z-a93a2ad-runner-persistence-current-aof-rewrite-cycle-v1.json",
+      "?? harness/evidence/runs/20260523T193839Z-a93a2ad-test-fixer-persistence-aof-propagation-v1.json",
+      "?? harness/evidence/runs/20260523T195221Z-a93a2ad-runner-persistence-post-propagation-frontier-v1.json",
+      "?? harness/evidence/runs/20260523T195353Z-a93a2ad-architect-persistence-aof-manifest-architecture-v1.json",
+      "?? harness/evidence/runs/20260523T200221Z-a93a2ad-translator-persistence-aof-manifest-frontier-scenarios-v1.json",
+      "?? harness/evidence/runs/20260523T201159Z-a93a2ad-runner-persistence-aof-manifest-frontier-baseline-v1.json",
+      "?? harness/evidence/runs/20260523T201230Z-a93a2ad-test-fixer-persistence-aof-manifest-load-v1.json",
+      "?? harness/evidence/runs/20260523T202439Z-a93a2ad-runner-persistence-post-manifest-load-frontier-v1.json",
+      "?? harness/evidence/runs/20260523T202441Z-a93a2ad-test-fixer-persistence-aof-manifest-current-incr-v1.json",
+      "?? harness/evidence/runs/20260523T203149Z-a93a2ad-runner-persistence-post-manifest-current-incr-frontier-v1.json",
+      "?? harness/evidence/runs/20260523T203151Z-a93a2ad-test-fixer-persistence-aof-manifest-rewrite-finalize-v1.json",
+      "?? harness/evidence/runs/20260523T203850Z-a93a2ad-runner-persistence-post-manifest-rewrite-cycle-v1.json",
+      "?? harness/evidence/runs/20260523T203851Z-a93a2ad-runner-persistence-post-manifest-rewrite-frontier-v1.json",
+      "?? harness/evidence/runs/20260523T203853Z-a93a2ad-runner-persistence-focused-tcl-v1.json",
+      "?? harness/evidence/runs/20260523T204256Z-a93a2ad-runner-persistence-post-oracle-fix-frontier-v1.json",
+      "?? harness/evidence/runs/20260524T035900Z-a93a2ad-runner-tcl-breadth-current-red-baseline-v1.json",
+      "?? harness/evidence/runs/20260524T040713Z-a93a2ad-runner-tcl-breadth-unswept-scout-v1.json",
+      "?? harness/evidence/runs/20260524T040724Z-a93a2ad-test-fixer-tcl-hash-hgetdel-v1.json",
+      "?? harness/evidence/runs/20260524T125902Z-a93a2ad-test-fixer-tcl-zset-unified-range-bylex-v1.json",
+      "?? harness/evidence/runs/20260524T141148Z-a93a2ad-test-fixer-tcl-client-protocol-info-v1.json",
+      "?? harness/launch-tcl-breadth-overnight.sh",
+      "?? harness/oracle/persistence-cycle.py",
+      "?? harness/oracle/persistence-frontier.py",
+      "?? harness/oracle/single-node-core-dashboard.py",
+      "?? harness/oracle/tcl-suite-inventory.py",
+      "?? harness/run-tcl-breadth-overnight.sh",
+      "?? harness/watch-tcl-breadth.sh"
+    ],
+    "run_id": "loop-a63c0c4cd06ff02a",
+    "target_commit": "a93a2ad1af8ca90e1e6e0e2b6c37569c1f48f30b",
+    "tree_hash": "b72b0edb129ba57e40f0197729bbb439c53044d8d72afeec7894fda9ae8b10fa"
+  },
+  "kind": "agent_transcript",
+  "packet": "tcl-hash-hgetdel-v1",
+  "prompt_hash": "00a49469bda911cb",
+  "role": "test-fixer",
+  "transcript_bytes": 1628895,
+  "transcript_preview": " = {\\n+        let map = match as_hash_mut(ctx.db_mut().lookup_key_write(&key))? {\\n+            None => return reply_hgetdel_values(ctx, vec![None; field_count]),\\n+            Some(h) => h,\\n+        };\\n+        let mut values = Vec::with_capacity(field_count);\\n+        for field in &fields {\\n+            match map.remove(field) {\\n+                Some(value) => {\\n+                    removed += 1;\\n+                    values.push(Some(value));\\n+                }\\n+                None => values.push(None),\\n+            }\\n+        }\\n+        key_removed = removed > 0 && map.is_empty();\\n+        values\\n+    };\\n+\\n+    if key_removed {\\n+        ctx.db_mut().sync_delete(&key);\\n+    }\\n+    if removed > 0 {\\n+        ctx.notify_keyspace_event(NOTIFY_HASH, b\\\"hdel\\\", &key);\\n+        if key_removed {\\n+            ctx.notify_keyspace_event(NOTIFY_GENERIC, b\\\"del\\\", &key);\\n+        }\\n+    }\\n+\\n+    reply_hgetdel_values(ctx, values)\\n+}\\n+\\n+fn reply_hgetdel_values(\\n+    ctx: &mut CommandContext,\\n+    values: Vec<Option<RedisString>>,\\n+) -> RedisResult<()> {\\n+    ctx.reply_array_header(values.len())?;\\n+    for value in values {\\n+        match value {\\n+            Some(s) => ctx.reply_bulk_string(s)?,\\n+            None => ctx.reply_null_bulk()?,\\n+        }\\n+    }\\n+    Ok(())\\n+}\\n+\\n /// HEXISTS key field\\n ///\\n /// Replies `:1\\\\r\\\\n` if the field is present, `:0\\\\r\\\\n` otherwise.\\n@@ -813,6 +886,135 @@ fn parse_u64_cursor(bytes: &[u8]) -> Result<u64, RedisError> {\\n     Ok(n)\\n }\\n \\n+#[cfg(test)]\\n+mod tests {\\n+    use super::*;\\n+    use redis_core::client::Client;\\n+    use redis_core::db::RedisDb;\\n+\\n+    fn rs(bytes: &[u8]) -> RedisString {\\n+        RedisString::from_bytes(bytes)\\n+    }\\n+\\n+    fn hash_obj(pairs: &[(&[u8], &[u8])]) -> RedisObject {\\n+        let mut obj = RedisObject::new_hash();\\n+        {\\n+            let map = obj.hash_mut().expect(\\\"new_hash constructs a hash\\\");\\n+            for (field, value) in pairs {\\n+                map.insert(rs(field), rs(value));\\n+            }\\n+        }\\n+        obj\\n+    }\\n+\\n+    fn run_hgetdel(args: &[&[u8]], db: &mut RedisDb) -> (RedisResult<()>, Vec<u8>) {\\n+        let mut client = Client::new(1);\\n+        client.set_args(args.iter().map(|arg| rs(arg)).collect());\\n+        let result = {\\n+            let mut ctx = CommandContext::with_db(&mut client, db);\\n+            hgetdel_command(&mut ctx)\\n+        };\\n+        let reply = client.drain_reply();\\n+        (result, reply)\\n+    }\\n+\\n+    #[test]\\n+    fn hgetdel_returns_values_and_deletes_empty_hash() {\\n+        let key = rs(b\\\"myhash\\\");\\n+        let mut db = RedisDb::new(0);\\n+        db.set_key(\\n+            key.clone(),\\n+            hash_obj(&[\\n+                (b\\\"a\\\".as_slice(), b\\\"1\\\".as_slice()),\\n+                (b\\\"b\\\".as_slice(), b\\\"2\\\".as_slice()),\\n+            ]),\\n+            0,\\n+        );\\n+\\n+        let (result, reply) = run_hgetdel(\\n+            &[\\n+                b\\\"HGETDEL\\\".as_slice(),\\n+                b\\\"myhash\\\".as_slice(),\\n+                b\\\"FIELDS\\\".as_slice(),\\n+                b\\\"3\\\".as_slice(),\\n+                b\\\"a\\\".as_slice(),\\n+                b\\\"missing\\\".as_slice(),\\n+                b\\\"b\\\".as_slice(),\\n+            ],\\n+            &mut db,\\n+        );\\n+\\n+        assert!(result.is_ok(), \\\"unexpected error: {:?}\\\", result);\\n+        assert_eq!(reply, b\\\"*3\\\\r\\\\n$1\\\\r\\\\n1\\\\r\\\\n$-1\\\\r\\\\n$1\\\\r\\\\n2\\\\r\\\\n\\\");\\n+        assert!(db.lookup_key_read(&key).is_none());\\n+    }\\n+\\n+    #[test]\\n+    fn hgetdel_missing_key_returns_nil_array() {\\n+        let mut db = RedisDb::new(0);\\n+\\n+        let (result, reply) = run_hgetdel(\\n+            &[\\n+                b\\\"HGETDEL\\\".as_slice(),\\n+                b\\\"missing\\\".as_slice(),\\n+                b\\\"FIELDS\\\".as_slice(),\\n+                b\\\"2\\\".as_slice(),\\n+                b\\\"a\\\".as_slice(),\\n+                b\\\"b\\\".as_slice(),\\n+            ],\\n+            &mut db,\\n+        );\\n+\\n+        assert!(result.is_ok(), \\\"unexpected error: {:?}\\\", result);\\n+        assert_eq!(reply, b\\\"*2\\\\r\\\\n$-1\\\\r\\\\n$-1\\\\r\\\\n\\\");\\n+    }\\n+\\n+    #[test]\\n+    fn hgetdel_rejects_wrong_type_before_reply() {\\n+        let key = rs(b\\\"wrongtype\\\");\\n+        let mut db = RedisDb::new(0);\\n+        db.set_key(key, RedisObject::new_raw_string(b\\\"value\\\"), 0);\\n+\\n+        let (result, reply) = run_hgetdel(\\n+            &[\\n+                b\\\"HGETDEL\\\".as_slice(),\\n+                b\\\"wrongtype\\\".as_slice(),\\n+                b\\\"FIELDS\\\".as_slice(),\\n+                b\\\"1\\\".as_slice(),\\n+                b\\\"a\\\".as_slice(),\\n+            ],\\n+            &mut db,\\n+        );\\n+\\n+        assert!(matches!(result, Err(RedisError::WrongType)));\\n+        assert!(reply.is_empty());\\n+    }\\n+\\n+    #[test]\\n+    fn hgetdel_rejects_numfields_mismatch() {\\n+        let mut db = RedisDb::new(0);\\n+\\n+        let (result, reply) = run_hgetdel(\\n+            &[\\n+                b\\\"HGETDEL\\\".as_slice(),\\n+                b\\\"myhash\\\".as_slice(),\\n+                b\\\"FIELDS\\\".as_slice(),\\n+                b\\\"2\\\".as_slice(),\\n+                b\\\"a\\\".as_slice(),\\n+            ],\\n+            &mut db,\\n+        );\\n+\\n+        assert_eq!(\\n+            result.unwrap_err(),\\n+            RedisError::runtime(\\n+                b\\\"ERR numfields should be greater than 0 and match the provided number of fields\\\",\\n+            )\\n+        );\\n+        assert!(reply.is_empty());\\n+    }\\n+}\\n+\\n // \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\\n // PORT STATUS\\n //   source:        src/t_hash.c\\n@@ -822,8 +1024,8 @@ fn parse_u64_cursor(bytes: &[u8]) -> Result<u64, RedisError> {\\n //   port_notes:    0\\n //   unsafe_blocks: 0\\n //   notes:         Round 3 byte-exact implementations for HSET, HSETNX,\\n-//                  HGET, HDEL, HEXISTS, HLEN, HSTRLEN, HGETALL, HKEYS,\\n-//                  HVALS, HMGET, HMSET, HINCRBY, HINCRBYFLOAT, and\\n+//                  HGET, HGETDEL, HDEL, HEXISTS, HLEN, HSTRLEN, HGETALL,\\n+//                  HKEYS, HVALS, HMGET, HMSET, HINCRBY, HINCRBYFLOAT, and\\n //                  HRANDFIELD backed by the pragmatic HashEncoding::Inline\\n //                  encoding from redis-core::object. HSCAN, HEXPIRE\\n //                  family, true HRANDFIELD randomness, and long-double\\n\",\"exit_code\":0,\"status\":\"completed\"}}\n{\"type\":\"item.started\",\"item\":{\"id\":\"item_84\",\"type\":\"command_execution\",\"command\":\"/bin/zsh -lc 'git status --short -- crates/redis-commands/src/hash.rs crates/redis-commands/src/dispatch.rs docs/TCL_BREADTH_OVERNIGHT_20260524.md harness/evidence/runs/20260524T040724Z-a93a2ad-test-fixer-tcl-hash-hgetdel-v1.json harness/evidence/ledger.jsonl'\",\"aggregated_output\":\"\",\"exit_code\":null,\"status\":\"in_progress\"}}\n{\"type\":\"item.completed\",\"item\":{\"id\":\"item_84\",\"type\":\"command_execution\",\"command\":\"/bin/zsh -lc 'git status --short -- crates/redis-commands/src/hash.rs crates/redis-commands/src/dispatch.rs docs/TCL_BREADTH_OVERNIGHT_20260524.md harness/evidence/runs/20260524T040724Z-a93a2ad-test-fixer-tcl-hash-hgetdel-v1.json harness/evidence/ledger.jsonl'\",\"aggregated_output\":\" M crates/redis-commands/src/dispatch.rs\\n M crates/redis-commands/src/hash.rs\\n M harness/evidence/ledger.jsonl\\n?? docs/TCL_BREADTH_OVERNIGHT_20260524.md\\n\",\"exit_code\":0,\"status\":\"completed\"}}\n{\"type\":\"item.started\",\"item\":{\"id\":\"item_85\",\"type\":\"command_execution\",\"command\":\"/bin/zsh -lc 'ls -l harness/evidence/runs/20260524T040724Z-a93a2ad-test-fixer-tcl-hash-hgetdel-v1.json'\",\"aggregated_output\":\"\",\"exit_code\":null,\"status\":\"in_progress\"}}\n{\"type\":\"item.completed\",\"item\":{\"id\":\"item_85\",\"type\":\"command_execution\",\"command\":\"/bin/zsh -lc 'ls -l harness/evidence/runs/20260524T040724Z-a93a2ad-test-fixer-tcl-hash-hgetdel-v1.json'\",\"aggregated_output\":\"ls: harness/evidence/runs/20260524T040724Z-a93a2ad-test-fixer-tcl-hash-hgetdel-v1.json: No such file or directory\\n\",\"exit_code\":1,\"status\":\"failed\"}}\n",
+  "transcript_src": "harness/loop/state/transcripts/20260524T040724Z-codex-test-fixer-tcl-hash-hgetdel-v1.jsonl"
+}

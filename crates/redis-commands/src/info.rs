@@ -178,17 +178,61 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let _ = writeln!(buf, "\r");
     }
     if want(b"persistence") {
+        let persistence = &ctx.server().persistence;
+        let last_save = ctx.server().live_config.last_save_unix();
+        let last_save = if last_save == 0 {
+            server_start_time() as i64
+        } else {
+            last_save
+        };
+        let aof_current_size = crate::aof::aof_writer()
+            .and_then(|w| w.path.metadata().ok().map(|m| m.len()))
+            .unwrap_or_else(|| persistence.aof_current_size());
         let _ = writeln!(buf, "# Persistence\r");
-        let _ = writeln!(buf, "loading:0\r");
+        let _ = writeln!(buf, "loading:{}\r", persistence.loading() as u8);
         let _ = writeln!(
             buf,
             "rdb_changes_since_last_save:{}\r",
             ctx.server().dirty()
         );
-        let _ = writeln!(buf, "rdb_bgsave_in_progress:0\r");
-        let _ = writeln!(buf, "rdb_last_save_time:{}\r", server_start_time());
-        let _ = writeln!(buf, "rdb_last_bgsave_status:ok\r");
-        let _ = writeln!(buf, "aof_enabled:0\r");
+        let _ = writeln!(
+            buf,
+            "rdb_bgsave_in_progress:{}\r",
+            (ctx.server().rdb_child_pid() != 0) as u8
+        );
+        let _ = writeln!(buf, "rdb_last_save_time:{}\r", last_save);
+        let _ = writeln!(
+            buf,
+            "rdb_last_bgsave_status:{}\r",
+            persistence.rdb_last_bgsave_status().as_info_str()
+        );
+        let _ = writeln!(
+            buf,
+            "aof_enabled:{}\r",
+            ctx.live_config().appendonly() as u8
+        );
+        let _ = writeln!(
+            buf,
+            "aof_rewrite_in_progress:{}\r",
+            persistence.aof_rewrite_in_progress() as u8
+        );
+        let _ = writeln!(
+            buf,
+            "aof_rewrite_scheduled:{}\r",
+            persistence.aof_rewrite_scheduled() as u8
+        );
+        let _ = writeln!(
+            buf,
+            "aof_last_bgrewrite_status:{}\r",
+            persistence.aof_last_bgrewrite_status().as_info_str()
+        );
+        let _ = writeln!(
+            buf,
+            "aof_last_write_status:{}\r",
+            persistence.aof_last_write_status().as_info_str()
+        );
+        let _ = writeln!(buf, "aof_current_size:{}\r", aof_current_size);
+        let _ = writeln!(buf, "aof_base_size:{}\r", persistence.aof_base_size());
         let _ = writeln!(buf, "\r");
     }
     if want(b"stats") {

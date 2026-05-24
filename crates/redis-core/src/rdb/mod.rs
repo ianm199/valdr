@@ -25,7 +25,8 @@ pub mod varint;
 pub mod zset;
 
 pub use load::{
-    load_dump_payload, load_into, load_into_dbs, load_value_payload, verify_dump_payload,
+    load_dump_payload, load_into, load_into_dbs, load_into_dbs_with_options, load_value_payload,
+    verify_dump_payload, RdbLoadOptions,
 };
 pub use save::{
     create_dump_payload, rdb_type_for_object, save_object_payload, save_rdb, save_rdb_databases,

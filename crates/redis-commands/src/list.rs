@@ -245,17 +245,59 @@ pub fn wake_blocked_for_key(db: &mut RedisDb, key: &RedisString) {
         if !value_present {
             return;
         }
-        let waiter = {
-            let mut idx = match blocked_keys_index().lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            match idx.take_waiter(key) {
-                Some(w) => w,
-                None => return,
-            }
+        let waiter = match take_list_waiter(key) {
+            Some(w) => w,
+            None => return,
         };
         deliver_to_waiter(db, key, waiter);
+    }
+}
+
+fn take_list_waiter(key: &RedisString) -> Option<BlockedWaiter> {
+    let mut idx = match blocked_keys_index().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let mut skipped = Vec::new();
+    let selected = loop {
+        match idx.take_waiter(key) {
+            Some(waiter)
+                if matches!(
+                    waiter.action,
+                    BlockedAction::Pop { .. } | BlockedAction::Move { .. }
+                ) =>
+            {
+                break Some(waiter);
+            }
+            Some(waiter) => skipped.push(waiter),
+            None => break None,
+        }
+    };
+    for waiter in skipped {
+        idx.add(waiter);
+    }
+    selected
+}
+
+/// Rescan all globally blocked key names and wake list waiters whose key is
+/// ready in `db`.
+///
+/// This covers commands such as RENAME and SORT ... STORE, where a non-list
+/// command can make a list key ready without going through the LPUSH/RPUSH
+/// command-local wake hook.
+pub fn wake_ready_list_keys(db: &mut RedisDb) {
+    if !redis_core::blocked_keys::blocked_keys_any() {
+        return;
+    }
+    let keys = {
+        let idx = match blocked_keys_index().lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        idx.all_blocked_keys()
+    };
+    for key in &keys {
+        wake_blocked_for_key(db, key);
     }
 }
 

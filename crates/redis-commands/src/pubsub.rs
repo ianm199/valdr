@@ -120,7 +120,7 @@ pub fn subscribe_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         } else {
             RespFrame::array(items)
         };
-        ctx.client.write_frame(&frame);
+        ctx.reply_push_frame(&frame)?;
     }
     Ok(())
 }
@@ -149,7 +149,7 @@ pub fn unsubscribe_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         } else {
             RespFrame::array(items)
         };
-        ctx.client.write_frame(&frame);
+        ctx.reply_push_frame(&frame)?;
         return Ok(());
     }
     for channel in targets {
@@ -173,7 +173,7 @@ pub fn unsubscribe_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         } else {
             RespFrame::array(items)
         };
-        ctx.client.write_frame(&frame);
+        ctx.reply_push_frame(&frame)?;
     }
     Ok(())
 }
@@ -207,7 +207,7 @@ pub fn psubscribe_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         } else {
             RespFrame::array(items)
         };
-        ctx.client.write_frame(&frame);
+        ctx.reply_push_frame(&frame)?;
     }
     Ok(())
 }
@@ -236,7 +236,7 @@ pub fn punsubscribe_command(ctx: &mut CommandContext) -> Result<(), RedisError> 
         } else {
             RespFrame::array(items)
         };
-        ctx.client.write_frame(&frame);
+        ctx.reply_push_frame(&frame)?;
         return Ok(());
     }
     for pattern in targets {
@@ -260,7 +260,7 @@ pub fn punsubscribe_command(ctx: &mut CommandContext) -> Result<(), RedisError> 
         } else {
             RespFrame::array(items)
         };
-        ctx.client.write_frame(&frame);
+        ctx.reply_push_frame(&frame)?;
     }
     Ok(())
 }
@@ -549,6 +549,6 @@ mod tests {
 //   notes:         SUBSCRIBE / UNSUBSCRIBE / PSUBSCRIBE / PUNSUBSCRIBE /
 //                  PUBLISH / PUBSUB CHANNELS|NUMSUB|NUMPAT all live and
 //                  byte-exact against real Redis. Sharded variants stubbed.
-//                  RESP3 push frames TODO. Cluster propagation TODO.
-//                  Keyspace notifications TODO.
+//                  RESP3 push frames and CLIENT REPLY push bypass wired.
+//                  Cluster propagation TODO.
 // ──────────────────────────────────────────────────────────────────────────

@@ -1,0 +1,199 @@
+{
+  "captured_ts": "2026-05-23T19:32:44.841474Z",
+  "harness_context": {
+    "claim_level": "internal-regression-gate",
+    "commit": "a93a2ad",
+    "git_dirty": true,
+    "git_status_short": [
+      " M crates/redis-commands/src/aof.rs",
+      " M crates/redis-commands/src/connection.rs",
+      " M crates/redis-commands/src/info.rs",
+      " M crates/redis-commands/src/persist.rs",
+      " M crates/redis-core/src/db.rs",
+      " M crates/redis-core/src/lib.rs",
+      " M crates/redis-core/src/live_config.rs",
+      " M crates/redis-core/src/rdb/load.rs",
+      " M crates/redis-core/src/rdb/mod.rs",
+      " M crates/redis-core/src/server.rs",
+      " M crates/redis-server/src/main.rs",
+      " M docs/CONFORMANCE.md",
+      " M docs/TCL_FULL_SUITE_GOAL_20260523.md",
+      " M harness/completion.toml",
+      " M harness/evidence/ledger.jsonl",
+      " M harness/history.jsonl",
+      " M harness/oracle/tcl-survey.py",
+      " M harness/runners.toml",
+      " M harness/work-packets.jsonl",
+      "?? crates/redis-core/src/persistence.rs",
+      "?? docs/PERSISTENCE_BORING_SPEC_20260523.md",
+      "?? docs/SINGLE_NODE_CORE_V1_DASHBOARD.md",
+      "?? harness/evidence/runs/20260523T193242Z-a93a2ad-runner-persistence-frontier-baseline-v1.json",
+      "?? harness/evidence/runs/20260523T193243Z-a93a2ad-runner-persistence-current-rdb-cycle-v1.json",
+      "?? harness/oracle/persistence-cycle.py",
+      "?? harness/oracle/persistence-frontier.py",
+      "?? harness/oracle/single-node-core-dashboard.py",
+      "?? harness/oracle/tcl-suite-inventory.py"
+    ],
+    "resources": [
+      "cargo-target",
+      "oracle-results",
+      "port-range:21111-29111"
+    ],
+    "run_id": "loop-b1b2e8915ad0b59a",
+    "target_commit": "a93a2ad1af8ca90e1e6e0e2b6c37569c1f48f30b",
+    "tree_hash": "8dee92a624e228f2dd0dfd832e6d716fab01ef4a4db6b32819113004c1c9ac36"
+  },
+  "kind": "runner_result",
+  "packet": "persistence-current-aof-cycle-v1",
+  "result": {
+    "artifacts": [],
+    "claim_level": "internal-regression-gate",
+    "evidence": {
+      "commit": "a93a2ad",
+      "detail": {
+        "after": {
+          "counter": "5",
+          "hash": [
+            "f1",
+            "f2",
+            "v1",
+            "v2"
+          ],
+          "list": [
+            "a",
+            "b",
+            "c"
+          ],
+          "m1": "one",
+          "m2": "two",
+          "s": "value",
+          "set": [
+            "x",
+            "y",
+            "z"
+          ],
+          "volatile_exists": 1,
+          "volatile_ttl_positive": true,
+          "zset": [
+            "a",
+            "1",
+            "b",
+            "2"
+          ]
+        },
+        "before": {
+          "counter": "5",
+          "hash": [
+            "f1",
+            "f2",
+            "v1",
+            "v2"
+          ],
+          "list": [
+            "a",
+            "b",
+            "c"
+          ],
+          "m1": "one",
+          "m2": "two",
+          "s": "value",
+          "set": [
+            "x",
+            "y",
+            "z"
+          ],
+          "volatile_exists": 1,
+          "volatile_ttl_positive": true,
+          "zset": [
+            "a",
+            "1",
+            "b",
+            "2"
+          ]
+        },
+        "passed": true
+      },
+      "elapsed_s": 0.346,
+      "error": null,
+      "harness_context": {
+        "claim_level": "internal-regression-gate",
+        "commit": "a93a2ad",
+        "git_dirty": true,
+        "git_status_short": [
+          " M crates/redis-commands/src/aof.rs",
+          " M crates/redis-commands/src/connection.rs",
+          " M crates/redis-commands/src/info.rs",
+          " M crates/redis-commands/src/persist.rs",
+          " M crates/redis-core/src/db.rs",
+          " M crates/redis-core/src/lib.rs",
+          " M crates/redis-core/src/live_config.rs",
+          " M crates/redis-core/src/rdb/load.rs",
+          " M crates/redis-core/src/rdb/mod.rs",
+          " M crates/redis-core/src/server.rs",
+          " M crates/redis-server/src/main.rs",
+          " M docs/CONFORMANCE.md",
+          " M docs/TCL_FULL_SUITE_GOAL_20260523.md",
+          " M harness/completion.toml",
+          " M harness/evidence/ledger.jsonl",
+          " M harness/history.jsonl",
+          " M harness/oracle/tcl-survey.py",
+          " M harness/runners.toml",
+          " M harness/work-packets.jsonl",
+          "?? crates/redis-core/src/persistence.rs",
+          "?? docs/PERSISTENCE_BORING_SPEC_20260523.md",
+          "?? docs/SINGLE_NODE_CORE_V1_DASHBOARD.md",
+          "?? harness/evidence/runs/20260523T193242Z-a93a2ad-runner-persistence-frontier-baseline-v1.json",
+          "?? harness/evidence/runs/20260523T193243Z-a93a2ad-runner-persistence-current-rdb-cycle-v1.json",
+          "?? harness/oracle/persistence-cycle.py",
+          "?? harness/oracle/persistence-frontier.py",
+          "?? harness/oracle/single-node-core-dashboard.py",
+          "?? harness/oracle/tcl-suite-inventory.py"
+        ],
+        "resources": [
+          "cargo-target",
+          "oracle-results",
+          "port-range:21111-29111"
+        ],
+        "run_id": "loop-b1b2e8915ad0b59a",
+        "target_commit": "a93a2ad1af8ca90e1e6e0e2b6c37569c1f48f30b",
+        "tree_hash": "8dee92a624e228f2dd0dfd832e6d716fab01ef4a4db6b32819113004c1c9ac36"
+      },
+      "json_command": {
+        "command": [
+          "python3",
+          "harness/oracle/persistence-cycle.py",
+          "--mode",
+          "aof"
+        ],
+        "cwd": ".",
+        "resources": [
+          "oracle-results",
+          "cargo-target",
+          "port-range:21111-29111"
+        ],
+        "stderr": "disError> {\n    |                            ^^^ help: if this is intentional, prefix it with an underscore: `_obj`\n\nwarning: unused variable: `ctx`\n   --> crates/redis-commands/src/string.rs:226:5\n    |\n226 |     ctx: &mut CommandContext,\n    |     ^^^ help: if this is intentional, prefix it with an underscore: `_ctx`\n\nwarning: unused variable: `flags`\n   --> crates/redis-commands/src/string.rs:227:5\n    |\n227 |     flags: u32,\n    |     ^^^^^ help: if this is intentional, prefix it with an underscore: `_flags`\n\nwarning: unused variable: `key`\n   --> crates/redis-commands/src/string.rs:228:5\n    |\n228 |     key: &RedisString,\n    |     ^^^ help: if this is intentional, prefix it with an underscore: `_key`\n\nwarning: unused variable: `val`\n   --> crates/redis-commands/src/string.rs:229:5\n    |\n229 |     val: RedisString,\n    |     ^^^ help: if this is intentional, prefix it with an underscore: `_val`\n\nwarning: unused variable: `expire_val`\n   --> crates/redis-commands/src/string.rs:230:5\n    |\n230 |     expire_val: Option<&RedisString>,\n    |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_expire_val`\n\nwarning: unused variable: `unit`\n   --> crates/redis-commands/src/string.rs:231:5\n    |\n231 |     unit: Unit,\n    |     ^^^^ help: if this is intentional, prefix it with an underscore: `_unit`\n\nwarning: unused variable: `ok_reply`\n   --> crates/redis-commands/src/string.rs:232:5\n    |\n232 |     ok_reply: Option<&[u8]>,\n    |     ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_ok_reply`\n\nwarning: unused variable: `abort_reply`\n   --> crates/redis-commands/src/string.rs:233:5\n    |\n233 |     abort_reply: Option<&[u8]>,\n    |     ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_abort_reply`\n\nwarning: unused variable: `comparison`\n   --> crates/redis-commands/src/string.rs:234:5\n    |\n234 |     comparison: Option<&RedisString>,\n    |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_comparison`\n\nwarning: unused variable: `ctx`\n   --> crates/redis-commands/src/string.rs:242:25\n    |\n242 | fn mset_generic_command(ctx: &mut CommandContext, nx: bool) -> Result<(), RedisError> {\n    |                         ^^^ help: if this is intentional, prefix it with an underscore: `_ctx`\n\nwarning: unused variable: `nx`\n   --> crates/redis-commands/src/string.rs:242:51\n    |\n242 | fn mset_generic_command(ctx: &mut CommandContext, nx: bool) -> Result<(), RedisError> {\n    |                                                   ^^ help: if this is intentional, prefix it with an underscore: `_nx`\n\nwarning: unused variable: `ctx`\n   --> crates/redis-commands/src/string.rs:249:22\n    |\n249 | fn incr_decr_command(ctx: &mut CommandContext, incr: i64) -> Result<(), RedisError> {\n    |                      ^^^ help: if this is intentional, prefix it with an underscore: `_ctx`\n\nwarning: unused variable: `incr`\n   --> crates/redis-commands/src/string.rs:249:48\n    |\n249 | fn incr_decr_command(ctx: &mut CommandContext, incr: i64) -> Result<(), RedisError> {\n    |                                                ^^^^ help: if this is intentional, prefix it with an underscore: `_incr`\n\nwarning: unused variable: `ctx`\n   --> crates/redis-commands/src/string.rs:260:35\n    |\n260 | pub(crate) fn get_generic_command(ctx: &mut CommandContext) -> Result<(), RedisError> {\n    |                                   ^^^ help: if this is intentional, prefix it with an underscore: `_ctx`\n\nwarning: function `get_bloom_mut` is never used\n   --> crates/redis-commands/src/bloom.rs:114:4\n    |\n114 | fn get_bloom_mut<'a>(\n    |    ^^^^^^^^^^^^^\n    |\n    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default\n\nwarning: function `build_client_list_line` is never used\n    --> crates/redis-commands/src/connection.rs:2188:4\n     |\n2188 | fn build_client_list_line(ctx: &CommandContext<'_>) -> Vec<u8> {\n     |    ^^^^^^^^^^^^^^^^^^^^^^\n\nwarning: function `query_path` is never used\n   --> crates/redis-commands/src/json.rs:214:4\n    |\n214 | fn query_path<'a>(root: &'a Value, path: &str) -> Result<Vec<&'a Value>, RedisError> {\n    |    ^^^^^^^^^^\n\nwarning: function `require_hll_object` is never used\n    --> crates/redis-commands/src/hyperloglog.rs:1062:4\n     |\n1062 | fn require_hll_object(obj: &RedisObject) -> Result<&[u8], RedisError> {\n     |    ^^^^^^^^^^^^^^^^^^\n\nwarning: function `dialer_loop` is never used\n  --> crates/redis-commands/src/replica_dialer.rs:74:4\n   |\n74 | fn dialer_loop(\n   |    ^^^^^^^^^^^\n\nwarning: function `run_handshake` is never used\n   --> crates/redis-commands/src/replica_dialer.rs:163:4\n    |\n163 | fn run_handshake(stream: &TcpStream, repl: &ReplicationState, our_port: u16) -> io::Result<i64> {\n    |    ^^^^^^^^^^^^^\n\nwarning: function `parse_psync_reply` is never used\n   --> crates/redis-commands/src/replica_dialer.rs:219:4\n    |\n219 | fn parse_psync_reply(line: &[u8]) -> io::Result<i64> {\n    |    ^^^^^^^^^^^^^^^^^\n\nwarning: function `read_fullresync_rdb` is never used\n   --> crates/redis-commands/src/replica_dialer.rs:247:4\n    |\n247 | fn read_fullresync_rdb(stream: &TcpStream) -> io::Result<Vec<u8>> {\n    |    ^^^^^^^^^^^^^^^^^^^\n\nwarning: function `ingest_rdb` is never used\n   --> crates/redis-commands/src/replica_dialer.rs:269:4\n    |\n269 | fn ingest_rdb(rdb_bytes: &[u8], rdb_dir: &str, db: &Arc<Mutex<RedisDb>>) -> io::Result<()> {\n    |    ^^^^^^^^^^\n\nwarning: function `run_command_apply_loop` is never used\n   --> crates/redis-commands/src/replica_dialer.rs:297:4\n    |\n297 | fn run_command_apply_loop(\n    |    ^^^^^^^^^^^^^^^^^^^^^^\n\nwarning: function `is_getack` is never used\n   --> crates/redis-commands/src/replica_dialer.rs:346:4\n    |\n346 | fn is_getack(argv: &[RedisString]) -> bool {\n    |    ^^^^^^^^^\n\nwarning: function `apply_command_locally` is never used\n   --> crates/redis-commands/src/replica_dialer.rs:357:4\n    |\n357 | fn apply_command_locally(argv: &[RedisString], db: &Arc<Mutex<RedisDb>>, server: &Arc<RedisServer>) {\n    |    ^^^^^^^^^^^^^^^^^^^^^\n\nwarning: function `periodic_ack_loop` is never used\n   --> crates/redis-commands/src/replica_dialer.rs:401:4\n    |\n401 | fn periodic_ack_loop(mut stream: TcpStream, repl: Arc<ReplicationState>) {\n    |    ^^^^^^^^^^^^^^^^^\n\nwarning: function `build_replconf_ack` is never used\n   --> crates/redis-commands/src/replica_dialer.rs:421:4\n    |\n421 | fn build_replconf_ack(offset: i64) -> Vec<u8> {\n    |    ^^^^^^^^^^^^^^^^^^\n\nwarning: function `send_multibulk` is never used\n   --> crates/redis-commands/src/replica_dialer.rs:427:4\n    |\n427 | fn send_multibulk(stream: &TcpStream, parts: &[&[u8]]) -> io::Result<()> {\n    |    ^^^^^^^^^^^^^^\n\nwarning: function `build_multibulk` is never used\n   --> crates/redis-commands/src/replica_dialer.rs:433:4\n    |\n433 | fn build_multibulk(parts: &[&[u8]]) -> Vec<u8> {\n    |    ^^^^^^^^^^^^^^^\n\nwarning: function `read_line` is never used\n   --> crates/redis-commands/src/replica_dialer.rs:449:4\n    |\n449 | fn read_line(stream: &TcpStream) -> io::Result<Vec<u8>> {\n    |    ^^^^^^^^^\n\nwarning: function `read_exact_from_stream` is never used\n   --> crates/redis-commands/src/replica_dialer.rs:470:4\n    |\n470 | fn read_exact_from_stream(stream: &TcpStream, buf: &mut [u8]) -> io::Result<()> {\n    |    ^^^^^^^^^^^^^^^^^^^^^^\n\nwarning: function `lock_db` is never used\n   --> crates/redis-commands/src/replica_dialer.rs:482:4\n    |\n482 | fn lock_db(db: &Arc<Mutex<RedisDb>>) -> io::Result<std::sync::MutexGuard<'_, RedisDb>> {\n    |    ^^^^^^^\n\nwarning: function `stream_write` is never used\n   --> crates/redis-commands/src/replica_dialer.rs:486:4\n    |\n486 | fn stream_write(stream: &TcpStream, data: &[u8]) -> io::Result<()> {\n    |    ^^^^^^^^^^^^\n\nwarning: function `stream_read` is never used\n   --> crates/redis-commands/src/replica_dialer.rs:493:4\n    |\n493 | fn stream_read(stream: &TcpStream, buf: &mut [u8]) -> io::Result<usize> {\n    |    ^^^^^^^^^^^\n\nwarning: function `stream_read_exact` is never used\n   --> crates/redis-commands/src/replica_dialer.rs:500:4\n    |\n500 | fn stream_read_exact(stream: &TcpStream, buf: &mut [u8]) -> io::Result<()> {\n    |    ^^^^^^^^^^^^^^^^^\n\nwarning: function `stream_read_slice` is never used\n   --> crates/redis-commands/src/replica_dialer.rs:507:4\n    |\n507 | fn stream_read_slice(stream: &TcpStream, buf: &mut [u8]) -> io::Result<usize> {\n    |    ^^^^^^^^^^^^^^^^^\n\nwarning: function `check_string_length` is never used\n   --> crates/redis-commands/src/string.rs:120:4\n    |\n120 | fn check_string_length(\n    |    ^^^^^^^^^^^^^^^^^^^\n\nwarning: function `get_expire_milliseconds` is never used\n   --> crates/redis-commands/src/string.rs:132:4\n    |\n132 | fn get_expire_milliseconds(\n    |    ^^^^^^^^^^^^^^^^^^^^^^^\n\nwarning: function `parse_extended_command_args` is never used\n   --> crates/redis-commands/src/string.rs:147:4\n    |\n147 | fn parse_extended_command_args(\n    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\nwarning: function `parse_integer` is never used\n   --> crates/redis-commands/src/string.rs:163:4\n    |\n163 | fn parse_integer(s: &RedisString) -> Result<i64, RedisError> {\n    |    ^^^^^^^^^^^^^\n\nwarning: function `parse_integer_from_object` is never used\n   --> crates/redis-commands/src/string.rs:170:4\n    |\n170 | fn parse_integer_from_object(obj: &RedisObject) -> Result<i64, RedisError> {\n    |    ^^^^^^^^^^^^^^^^^^^^^^^^^\n\nwarning: function `parse_float_from_object` is never used\n   --> crates/redis-commands/src/string.rs:179:4\n    |\n179 | fn parse_float_from_object(obj: &RedisObject) -> Result<f64, RedisError> {\n    |    ^^^^^^^^^^^^^^^^^^^^^^^\n\nwarning: function `object_as_bytes` is never used\n   --> crates/redis-commands/src/string.rs:186:4\n    |\n186 | fn object_as_bytes(obj: &RedisObject) -> Option<&[u8]> {\n    |    ^^^^^^^^^^^^^^^\n\nwarning: function `string_object_len` is never used\n   --> crates/redis-commands/src/string.rs:193:4\n    |\n193 | fn string_object_len(obj: &RedisObject) -> usize {\n    |    ^^^^^^^^^^^^^^^^^\n\nwarning: function `long_long_to_bytes` is never used\n   --> crates/redis-commands/src/string.rs:200:4\n    |\n200 | fn long_long_to_bytes(n: i64) -> Vec<u8> {\n    |    ^^^^^^^^^^^^^^^^^^\n\nwarning: function `double_to_bytes` is never used\n   --> crates/redis-commands/src/string.rs:212:4\n    |\n212 | fn double_to_bytes(v: f64) -> Vec<u8> {\n    |    ^^^^^^^^^^^^^^^\n\nwarning: function `mset_generic_command` is never used\n   --> crates/redis-commands/src/string.rs:242:4\n    |\n242 | fn mset_generic_command(ctx: &mut CommandContext, nx: bool) -> Result<(), RedisError> {\n    |    ^^^^^^^^^^^^^^^^^^^^\n\nwarning: function `incr_decr_command` is never used\n   --> crates/redis-commands/src/string.rs:249:4\n    |\n249 | fn incr_decr_command(ctx: &mut CommandContext, incr: i64) -> Result<(), RedisError> {\n    |    ^^^^^^^^^^^^^^^^^\n\nwarning: function `get_generic_command` is never used\n   --> crates/redis-commands/src/string.rs:260:15\n    |\n260 | pub(crate) fn get_generic_command(ctx: &mut CommandContext) -> Result<(), RedisError> {\n    |               ^^^^^^^^^^^^^^^^^^^\n\nwarning: `redis-commands` (lib) generated 67 warnings (run `cargo fix --lib -p redis-commands` to apply 31 suggestions)\nwarning: function `serve` is never used\n   --> crates/redis-server/src/main.rs:802:4\n    |\n802 | fn serve(\n    |    ^^^^^\n    |\n    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default\n\nwarning: function `serve_tls` is never used\n   --> crates/redis-server/src/main.rs:874:4\n    |\n874 | fn serve_tls(\n    |    ^^^^^^^^^\n\nwarning: function `spawn_writer` is never used\n   --> crates/redis-server/src/main.rs:945:4\n    |\n945 | fn spawn_writer(mut writer: TcpStream, peer: String) -> Sender<Vec<u8>> {\n    |    ^^^^^^^^^^^^\n\nwarning: function `handle_connection` is never used\n   --> crates/redis-server/src/main.rs:965:4\n    |\n965 | fn handle_connection(\n    |    ^^^^^^^^^^^^^^^^^\n\nwarning: function `handle_connection_tls` is never used\n    --> crates/redis-server/src/main.rs:1006:4\n     |\n1006 | fn handle_connection_tls(\n     |    ^^^^^^^^^^^^^^^^^^^^^\n\nwarning: function `run_client_loop` is never used\n    --> crates/redis-server/src/main.rs:1045:4\n     |\n1045 | fn run_client_loop(\n     |    ^^^^^^^^^^^^^^^\n\nwarning: function `run_client_loop_tls` is never used\n    --> crates/redis-server/src/main.rs:1176:4\n     |\n1176 | fn run_client_loop_tls(\n     |    ^^^^^^^^^^^^^^^^^^^\n\nwarning: function `process_current_command` is never used\n    --> crates/redis-server/src/main.rs:1324:4\n     |\n1324 | fn process_current_command(\n     |    ^^^^^^^^^^^^^^^^^^^^^^^\n\nwarning: function `process_current_command_with_db` is never used\n    --> crates/redis-server/src/main.rs:1341:4\n     |\n1341 | fn process_current_command_with_db(\n     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\nwarning: function `lock_redis_db` is never used\n    --> crates/redis-server/src/main.rs:1426:4\n     |\n1426 | fn lock_redis_db(db: &Arc<Mutex<RedisDb>>) -> MutexGuard<'_, RedisDb> {\n     |    ^^^^^^^^^^^^^\n\nwarning: function `flush_reply` is never used\n    --> crates/redis-server/src/main.rs:1450:4\n     |\n1450 | fn flush_reply(client: &mut Client, outbound: &Sender<Vec<u8>>) -> bool {\n     |    ^^^^^^^^^^^\n\nwarning: function `flush_reply_fast` is never used\n    --> crates/redis-server/src/main.rs:1464:4\n     |\n1464 | fn flush_reply_fast(client: &mut Client, outbound: &Sender<Vec<u8>>) -> bool {\n     |    ^^^^^^^^^^^^^^^^\n\nwarning: associated items `new` and `as_u32` are never used\n  --> crates/redis-server/src/runtime_owner.rs:47:18\n   |\n46 | impl SlotId {\n   | ----------- associated items in this implementation\n47 |     pub const fn new(raw: u32) -> Self {\n   |                  ^^^\n...\n51 |     pub const fn as_u32(self) -> u32 {\n   |                  ^^^^^^\n\nwarning: methods `is_installed` and `epoch` are never used\n  --> crates/redis-server/src/runtime_owner.rs:90:18\n   |\n75 | impl PollDriverHandle {\n   | --------------------- methods in this implementation\n...\n90 |     pub const fn is_installed(self) -> bool {\n   |                  ^^^^^^^^^^^^\n...\n94 |     pub const fn epoch(self) -> u64 {\n   |                  ^^^^^\n\nwarning: methods `enabled`, `database_count`, `max_pending_events`, and `with_max_pending_events` are never used\n   --> crates/redis-server/src/runtime_owner.rs:119:18\n    |\n110 | impl RuntimeOwnerConfig {\n    | ----------------------- methods in this implementation\n...\n119 |     pub const fn enabled(self) -> bool {\n    |                  ^^^^^^^\n...\n123 |     pub const fn database_count(self) -> u32 {\n    |                  ^^^^^^^^^^^^^^\n...\n127 |     pub const fn max_pending_events(self) -> usize {\n    |                  ^^^^^^^^^^^^^^^^^^\n...\n141 |     pub const fn with_max_pending_events(mut self, max_pending_events: usize) -> Self {\n    |                  ^^^^^^^^^^^^^^^^^^^^^^^\n\nwarning: methods `append` and `take` are never used\n   --> crates/redis-server/src/runtime_owner.rs:168:12\n    |\n160 | impl ClientWriteBuffer {\n    | ---------------------- methods in this implementation\n...\n168 |     pub fn append(&mut self, bytes: &[u8]) {\n    |            ^^^^^^\n...\n197 |     pub fn take(&mut self) -> Vec<u8> {\n    |            ^^^^\n\nwarning: multiple associated items are never used\n   --> crates/redis-server/src/runtime_owner.rs:238:12\n    |\n237 | impl ClientSlot {\n    | --------------- associated items in this implementation\n238 |     pub fn new(id: SlotId, client: Client) -> Self {\n    |            ^^^\n...\n273 |     pub fn client(&self) -> &Client {\n    |            ^^^^^^\n...\n277 |     pub fn client_mut(&mut self) -> &mut Client {\n    |            ^^^^^^^^^^\n...\n285 |     pub fn query_buffer(&self) -> &[u8] {\n    |            ^^^^^^^^^^^^\n...\n289 |     pub fn clear_query_buffer(&mut self) {\n    |            ^^^^^^^^^^^^^^^^^^\n...\n293 |     pub fn stage_argv(&mut self, argv: Vec<RedisString>) {\n    |            ^^^^^^^^^^\n...\n297 |     pub fn argv(&self) -> &[RedisString] {\n    |            ^^^^\n...\n301 |     pub fn queue_write(&mut self, bytes: &[u8]) {\n    |            ^^^^^^^^^^^\n...\n309 |     pub fn pending_write_len(&self) -> usize {\n    |            ^^^^^^^^^^^^^^^^^\n...\n313 |     pub fn take_pending_write(&mut self) -> Vec<u8> {\n    |            ^^^^^^^^^^^^^^^^^^\n...\n325 |     pub fn is_closed(&self) -> bool {\n    |            ^^^^^^^^^\n...\n329 |     pub fn into_client(self) -> Client {\n    |            ^^^^^^^^^^^\n\nwarning: multiple variants are never constructed\n   --> crates/redis-server/src/runtime_owner.rs:337:5\n    |\n336 | pub enum RuntimeEvent {\n    |          ------------ variants in this enum\n337 |     Publish {\n    |     ^^^^^^^\n...\n341 |     WakeBlocked {\n    |     ^^^^^^^^^^^\n...\n345 |     Expire {\n    |     ^^^^^^\n...\n349 |     ReplicaAck {\n    |     ^^^^^^^^^^\n...\n352 |     AofFlushRequested,\n    |     ^^^^^^^^^^^^^^^^^\n353 |     BackgroundChildDone {\n    |     ^^^^^^^^^^^^^^^^^^^\n...\n357 |     ShutdownRequested,\n    |     ^^^^^^^^^^^^^^^^^\n    |\n    = note: `RuntimeEvent` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis\n\nwarning: enum `OwnerCommandResult` is never used\n   --> crates/redis-server/src/runtime_owner.rs:362:10\n    |\n362 | pub enum OwnerCommandResult {\n    |          ^^^^^^^^^^^^^^^^^^\n\nwarning: methods `slot_id` and `is_terminal` are never used\n   --> crates/redis-server/src/runtime_owner.rs:370:12\n    |\n369 | impl OwnerCommandResult {\n    | ----------------------- methods in this implementation\n370 |     pub fn slot_id(self) -> SlotId {\n    |            ^^^^^^^\n...\n379 |     pub fn is_terminal(self) -> bool {\n    |            ^^^^^^^^^^^\n\nwarning: fields `config` and `events` are never read\n   --> crates/redis-server/src/runtime_owner.rs:393:5\n    |\n392 | pub struct RuntimeOwner {\n    |            ------------ fields in this struct\n393 |     config: RuntimeOwnerConfig,\n    |     ^^^^^^\n...\n402 |     events: VecDeque<RuntimeEvent>,\n    |     ^^^^^^\n\nwarning: multiple associated items are never used\n   --> crates/redis-server/src/runtime_owner.rs:406:12\n    |\n405 | impl RuntimeOwner {\n    | ----------------- associated items in this implementation\n406 |     pub fn new(config: RuntimeOwnerConfig) -> Self {\n    |            ^^^\n...\n432 |     pub fn disabled() -> Self {\n    |            ^^^^^^^^\n...\n436 |     pub fn config(&self) -> RuntimeOwnerConfig {\n    |            ^^^^^^\n...\n440 |     pub fn poll_driver(&self) -> PollDriverHandle {\n    |            ^^^^^^^^^^^\n...\n444 |     pub fn database_count(&self) -> usize {\n    |            ^^^^^^^^^^^^^^\n...\n448 |     pub fn dbs(&self) -> &[RedisDb] {\n    |            ^^^\n...\n452 |     pub fn dbs_mut(&mut self) -> &mut [RedisDb] {\n    |            ^^^^^^^\n...\n456 |     pub fn active_slot_count(&self) -> usize {\n    |            ^^^^^^^^^^^^^^^^^\n...\n460 |     pub fn event_queue_len(&self) -> usize {\n    |            ^^^^^^^^^^^^^^^\n...\n464 |     pub fn is_event_queue_empty(&self) -> bool {\n    |            ^^^^^^^^^^^^^^^^^^^^\n...\n468 |     pub fn queue_event(&mut self, event: RuntimeEvent) -> Result<(), RuntimeEvent> {\n    |            ^^^^^^^^^^^\n...\n476 |     pub fn pop_event(&mut self) -> Option<RuntimeEvent> {\n    |            ^^^^^^^^^\n...\n480 |     pub fn insert_client(&mut self, client: Client) -> Option<SlotId> {\n    |            ^^^^^^^^^^^^^\n...\n715 |     pub fn slot(&self, slot_id: SlotId) -> Option<&ClientSlot> {\n    |            ^^^^\n...\n723 |     pub fn queue_write(&mut self, slot_id: SlotId, bytes: &[u8]) -> bool {\n    |            ^^^^^^^^^^^\n...\n732 |     pub fn take_pending_write(&mut self, slot_id: SlotId) -> Option<Vec<u8>> {\n    |            ^^^^^^^^^^^^^^^^^^\n\nwarning: function `create_databases` is never used\n    --> crates/redis-server/src/runtime_owner.rs:1152:4\n     |\n1152 | fn create_databases(count: u32) -> Vec<RedisDb> {\n     |    ^^^^^^^^^^^^^^^^\n\nwarning: `redis-server` (bin \"redis-server\") generated 23 warnings\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.02s\n"
+      },
+      "kind": "persistence_cycle",
+      "mode": "aof",
+      "timestamp": "20260523T193244Z"
+    },
+    "measurements": [
+      {
+        "capability": "persistence-aof",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "persistence_cycle_pass",
+        "name": "aof",
+        "numerator": 1,
+        "target": "rust"
+      }
+    ],
+    "method": "json-command",
+    "runner_id": "persistence-aof-cycle",
+    "schema_version": 1,
+    "status": "pass",
+    "summary": "persistence aof cycle: pass",
+    "surface": "correctness"
+  },
+  "role": "runner"
+}

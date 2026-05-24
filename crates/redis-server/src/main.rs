@@ -18,7 +18,7 @@ use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -37,6 +37,7 @@ use redis_core::expire::active_expire_config;
 use redis_core::lru_clock::spawn_lru_clock_thread;
 use redis_core::metrics::server_metrics;
 use redis_core::pubsub_registry::PubSubRegistry;
+use redis_core::PersistenceStatus;
 use redis_core::{Client, Connection};
 use redis_protocol::frame::{encode_resp2, RespFrame};
 use redis_protocol::parse_inline_or_multibulk_into;
@@ -48,6 +49,49 @@ const DEFAULT_PORT: u16 = 6379;
 const DEFAULT_BIND: &str = "127.0.0.1";
 const ACTIVE_TIME_SAMPLE_INTERVAL: u64 = 1024;
 
+static RENAMED_READY_KEYS: OnceLock<Mutex<Vec<(u32, RedisString)>>> = OnceLock::new();
+
+fn renamed_ready_keys() -> &'static Mutex<Vec<(u32, RedisString)>> {
+    RENAMED_READY_KEYS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn install_deferred_rename_ready_hook() {
+    redis_core::db::install_stream_rename_hook(Box::new(|dst_key, db_id| {
+        let mut guard = match renamed_ready_keys().lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard.push((db_id, dst_key.clone()));
+    }));
+}
+
+fn take_renamed_ready_keys(db_id: u32) -> Vec<RedisString> {
+    let mut guard = match renamed_ready_keys().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let mut out = Vec::new();
+    let mut idx = 0usize;
+    while idx < guard.len() {
+        if guard[idx].0 == db_id {
+            let (_, key) = guard.swap_remove(idx);
+            out.push(key);
+        } else {
+            idx += 1;
+        }
+    }
+    out
+}
+
+fn wake_ready_after_command(db: &mut RedisDb) {
+    let db_id = db.id() as u32;
+    for key in take_renamed_ready_keys(db_id) {
+        redis_commands::stream::wake_xreadgroup_after_rename(db, &key);
+        redis_commands::list::wake_blocked_for_key(db, &key);
+    }
+    redis_commands::list::wake_ready_list_keys(db);
+}
+
 /// Parsed command-line arguments.
 struct CliArgs {
     port: u16,
@@ -58,7 +102,12 @@ struct CliArgs {
     dbfilename: String,
     appendonly: bool,
     appendfilename: String,
+    appenddirname: String,
     appendfsync: u8,
+    aof_load_truncated: bool,
+    aof_use_rdb_preamble: bool,
+    auto_aof_rewrite_percentage: u64,
+    auto_aof_rewrite_min_size: u64,
     set_max_intset_entries: usize,
     set_max_listpack_entries: usize,
     set_max_listpack_value: usize,
@@ -75,7 +124,13 @@ impl Default for CliArgs {
             dbfilename: redis_core::live_config::DEFAULT_RDB_FILENAME.to_string(),
             appendonly: false,
             appendfilename: redis_core::live_config::DEFAULT_AOF_FILENAME.to_string(),
+            appenddirname: redis_core::live_config::DEFAULT_AOF_DIRNAME.to_string(),
             appendfsync: redis_commands::aof::FSYNC_EVERYSEC,
+            aof_load_truncated: redis_core::live_config::DEFAULT_AOF_LOAD_TRUNCATED,
+            aof_use_rdb_preamble: redis_core::live_config::DEFAULT_AOF_USE_RDB_PREAMBLE,
+            auto_aof_rewrite_percentage:
+                redis_core::live_config::DEFAULT_AUTO_AOF_REWRITE_PERCENTAGE,
+            auto_aof_rewrite_min_size: redis_core::live_config::DEFAULT_AUTO_AOF_REWRITE_MIN_SIZE,
             set_max_intset_entries: redis_core::live_config::DEFAULT_SET_MAX_INTSET_ENTRIES,
             set_max_listpack_entries: redis_core::live_config::DEFAULT_SET_MAX_LISTPACK_ENTRIES,
             set_max_listpack_value: redis_core::live_config::DEFAULT_SET_MAX_LISTPACK_VALUE,
@@ -117,17 +172,35 @@ fn parse_args(argv: Vec<String>) -> Result<CliArgs, String> {
             "--rdb-disabled" => {
                 out.rdb_disabled = true;
             }
+            "--dir" => {
+                let v = it
+                    .next()
+                    .ok_or_else(|| "--dir requires a value".to_string())?;
+                out.dir = v;
+            }
+            "--dbfilename" => {
+                let v = it
+                    .next()
+                    .ok_or_else(|| "--dbfilename requires a value".to_string())?;
+                out.dbfilename = v;
+            }
             "--appendonly" => {
                 let v = it
                     .next()
                     .ok_or_else(|| "--appendonly requires yes/no".to_string())?;
-                out.appendonly = v == "yes";
+                out.appendonly = v.eq_ignore_ascii_case("yes");
             }
             "--appendfilename" => {
                 let v = it
                     .next()
                     .ok_or_else(|| "--appendfilename requires a value".to_string())?;
                 out.appendfilename = v;
+            }
+            "--appenddirname" => {
+                let v = it
+                    .next()
+                    .ok_or_else(|| "--appenddirname requires a value".to_string())?;
+                out.appenddirname = v;
             }
             "--appendfsync" => {
                 let v = it
@@ -136,6 +209,33 @@ fn parse_args(argv: Vec<String>) -> Result<CliArgs, String> {
                 if let Some(p) = redis_commands::aof::parse_fsync_policy(v.as_bytes()) {
                     out.appendfsync = p;
                 }
+            }
+            "--aof-load-truncated" => {
+                let v = it
+                    .next()
+                    .ok_or_else(|| "--aof-load-truncated requires yes/no".to_string())?;
+                out.aof_load_truncated = v.eq_ignore_ascii_case("yes");
+            }
+            "--aof-use-rdb-preamble" => {
+                let v = it
+                    .next()
+                    .ok_or_else(|| "--aof-use-rdb-preamble requires yes/no".to_string())?;
+                out.aof_use_rdb_preamble = v.eq_ignore_ascii_case("yes");
+            }
+            "--auto-aof-rewrite-percentage" => {
+                let v = it
+                    .next()
+                    .ok_or_else(|| "--auto-aof-rewrite-percentage requires a value".to_string())?;
+                out.auto_aof_rewrite_percentage = v
+                    .parse()
+                    .map_err(|_| format!("invalid auto-aof-rewrite-percentage: {}", v))?;
+            }
+            "--auto-aof-rewrite-min-size" => {
+                let v = it
+                    .next()
+                    .ok_or_else(|| "--auto-aof-rewrite-min-size requires a value".to_string())?;
+                out.auto_aof_rewrite_min_size = parse_memsize_config(v.as_bytes())
+                    .ok_or_else(|| format!("invalid auto-aof-rewrite-min-size: {}", v))?;
             }
             "--help" | "-h" => {
                 println!(
@@ -204,9 +304,30 @@ fn apply_config_file(args: &mut CliArgs, path: &Path) -> Result<(), String> {
                     args.appendfilename = value.to_string();
                 }
             }
+            "appenddirname" => {
+                if !value.is_empty() {
+                    args.appenddirname = value.to_string();
+                }
+            }
             "appendfsync" => {
                 if let Some(p) = redis_commands::aof::parse_fsync_policy(value.as_bytes()) {
                     args.appendfsync = p;
+                }
+            }
+            "aof-load-truncated" => {
+                args.aof_load_truncated = value.eq_ignore_ascii_case("yes");
+            }
+            "aof-use-rdb-preamble" => {
+                args.aof_use_rdb_preamble = value.eq_ignore_ascii_case("yes");
+            }
+            "auto-aof-rewrite-percentage" => {
+                if let Ok(v) = value.parse::<u64>() {
+                    args.auto_aof_rewrite_percentage = v;
+                }
+            }
+            "auto-aof-rewrite-min-size" => {
+                if let Some(v) = parse_memsize_config(value.as_bytes()) {
+                    args.auto_aof_rewrite_min_size = v;
                 }
             }
             "set-max-intset-entries" => {
@@ -228,6 +349,29 @@ fn apply_config_file(args: &mut CliArgs, path: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn parse_memsize_config(bytes: &[u8]) -> Option<u64> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let mut end = bytes.len();
+    while end > 0 && !bytes[end - 1].is_ascii_digit() {
+        end -= 1;
+    }
+    let digits = std::str::from_utf8(&bytes[..end]).ok()?;
+    let suffix: Vec<u8> = bytes[end..]
+        .iter()
+        .map(|b| b.to_ascii_lowercase())
+        .collect();
+    let multiplier = match suffix.as_slice() {
+        b"" | b"b" => 1,
+        b"k" | b"kb" => 1024,
+        b"m" | b"mb" => 1024 * 1024,
+        b"g" | b"gb" => 1024 * 1024 * 1024,
+        _ => return None,
+    };
+    digits.parse::<u64>().ok()?.checked_mul(multiplier)
 }
 
 /// Emit the startup-log sentinels the Valkey TCL harness greps for.
@@ -298,7 +442,12 @@ fn main() {
     live_config.set_rdb_filename(args.dbfilename.clone());
     live_config.set_appendonly(args.appendonly);
     live_config.set_appendfilename(args.appendfilename.clone());
+    live_config.set_appenddirname(args.appenddirname.clone());
     live_config.set_appendfsync(args.appendfsync);
+    live_config.set_aof_load_truncated(args.aof_load_truncated);
+    live_config.set_aof_use_rdb_preamble(args.aof_use_rdb_preamble);
+    live_config.set_auto_aof_rewrite_percentage(args.auto_aof_rewrite_percentage);
+    live_config.set_auto_aof_rewrite_min_size(args.auto_aof_rewrite_min_size);
     live_config.store_set_max_intset_entries(args.set_max_intset_entries);
     live_config.store_set_max_listpack_entries(args.set_max_listpack_entries);
     live_config.store_set_max_listpack_value(args.set_max_listpack_value);
@@ -326,43 +475,70 @@ fn main() {
         .map(RedisDb::new)
         .collect();
 
-    if !args.rdb_disabled {
+    server.persistence.set_loading(true);
+    if args.appendonly {
+        let load_options = redis_commands::aof::AofLoadOptions {
+            load_truncated: args.aof_load_truncated,
+            allow_rdb_preamble: args.aof_use_rdb_preamble,
+        };
+        let loaded_aof_size = match redis_commands::aof::load_append_only_files(
+            Path::new(&args.dir),
+            &args.appendfilename,
+            &args.appenddirname,
+            &mut owner_dbs,
+            load_options,
+        ) {
+            Ok(Some((n, size))) => {
+                eprintln!("redis-server: AOF replay: {} commands", n);
+                Some(size)
+            }
+            Ok(None) => None,
+            Err(e) => {
+                eprintln!("redis-server: AOF replay failed: {}", e);
+                std::process::exit(1);
+            }
+        };
+        match redis_commands::aof::open_manifest_current_incr_writer(
+            Path::new(&args.dir),
+            &args.appendfilename,
+            &args.appenddirname,
+            &owner_dbs,
+            args.appendfsync,
+        ) {
+            Ok((w, incr_size)) => {
+                let size = loaded_aof_size.unwrap_or(incr_size);
+                server.persistence.set_aof_current_size(size);
+                server.set_aof_state(redis_core::AofState::On);
+                redis_commands::aof::install_aof_writer(Arc::new(w));
+            }
+            Err(e) => {
+                eprintln!(
+                    "redis-server: failed to open AOF manifest layout {}: {}",
+                    Path::new(&args.dir).join(&args.appenddirname).display(),
+                    e
+                );
+                std::process::exit(1);
+            }
+        }
+        redis_commands::aof::spawn_fsync_thread();
+    } else if !args.rdb_disabled {
         let rdb_path =
             redis_core::rdb::rdb_path(&live_config.rdb_dir(), &live_config.rdb_filename());
         if rdb_path.exists() {
             match redis_core::rdb::load_into_dbs(&mut owner_dbs, &rdb_path) {
                 Ok(msg) => eprintln!("redis-server: {}", msg),
-                Err(e) => eprintln!(
-                    "redis-server: RDB load failed ({}): {}",
-                    rdb_path.display(),
-                    e
-                ),
+                Err(e) => {
+                    eprintln!(
+                        "redis-server: RDB load failed ({}): {}",
+                        rdb_path.display(),
+                        e
+                    );
+                    std::process::exit(1);
+                }
             }
         }
     }
-
-    if args.appendonly {
-        let aof_path = std::path::Path::new(&args.dir).join(&args.appendfilename);
-        if aof_path.exists() {
-            match redis_commands::aof::replay_aof_databases(&aof_path, &mut owner_dbs) {
-                Ok(n) => eprintln!("redis-server: AOF replay: {} commands", n),
-                Err(e) => eprintln!(
-                    "redis-server: AOF replay failed ({}): {}",
-                    aof_path.display(),
-                    e
-                ),
-            }
-        }
-        match redis_commands::aof::AofWriter::open(&aof_path, args.appendfsync) {
-            Ok(w) => redis_commands::aof::install_aof_writer(Arc::new(w)),
-            Err(e) => eprintln!(
-                "redis-server: failed to open AOF {}: {}",
-                aof_path.display(),
-                e
-            ),
-        }
-        redis_commands::aof::spawn_fsync_thread();
-    }
+    server.persistence.set_loading(false);
 
     let next_client_id = Arc::new(AtomicU64::new(1));
     let registry = Arc::new(Mutex::new(PubSubRegistry::new()));
@@ -370,6 +546,7 @@ fn main() {
     redis_core::db::install_swapdb_wake_hook(Box::new(|other_db_id| {
         redis_commands::wake_blocked_after_swapdb(other_db_id, other_db_id);
     }));
+    install_deferred_rename_ready_hook();
     redis_commands::stream::install_stream_hooks();
     spawn_blocked_timeout_thread(Arc::clone(&shutdown));
     let active_expire_cfg = Arc::clone(active_expire_config());
@@ -436,6 +613,9 @@ fn spawn_bgsave_reaper(
             if ret < 0 {
                 eprintln!("redis-server: waitpid({}) failed: errno={}", child_pid, ret);
                 server.set_rdb_child_pid(0);
+                server
+                    .persistence
+                    .set_rdb_last_bgsave_status(PersistenceStatus::Err);
                 server_metrics()
                     .rdb_saves_failed
                     .fetch_add(1, Ordering::Relaxed);
@@ -448,6 +628,9 @@ fn spawn_bgsave_reaper(
                     .map(|d| d.as_secs() as i64)
                     .unwrap_or(0);
                 live_config.set_last_save_unix(now);
+                server
+                    .persistence
+                    .set_rdb_last_bgsave_status(PersistenceStatus::Ok);
                 server_metrics()
                     .rdb_saves_succeeded
                     .fetch_add(1, Ordering::Relaxed);
@@ -459,6 +642,9 @@ fn spawn_bgsave_reaper(
                 server_metrics()
                     .rdb_saves_failed
                     .fetch_add(1, Ordering::Relaxed);
+                server
+                    .persistence
+                    .set_rdb_last_bgsave_status(PersistenceStatus::Err);
             }
             server.set_rdb_child_pid(0);
         });
@@ -1208,14 +1394,14 @@ fn process_current_command_with_db(
     server: &Arc<redis_core::RedisServer>,
 ) {
     client.clear_blocked_on_keys();
+    let reply_start = client.reply_buf.len();
 
     let metrics = server_metrics();
     let command_number = metrics
         .total_commands_processed
         .fetch_add(1, Ordering::Relaxed)
         + 1;
-    let active_time_sample =
-        (command_number % ACTIVE_TIME_SAMPLE_INTERVAL == 0).then(Instant::now);
+    let active_time_sample = (command_number % ACTIVE_TIME_SAMPLE_INTERVAL == 0).then(Instant::now);
     let result = {
         let mut ctx =
             CommandContext::with_server(client, db, Arc::clone(server), Arc::clone(registry));
@@ -1224,6 +1410,7 @@ fn process_current_command_with_db(
         for key in &deferred {
             redis_commands::list::wake_blocked_for_key(db, key);
         }
+        wake_ready_after_command(db);
         r
     };
     if let Some(t0) = active_time_sample {
@@ -1237,6 +1424,7 @@ fn process_current_command_with_db(
         let payload = err.to_resp_payload();
         encode_resp2(&RespFrame::Error(payload), &mut client.reply_buf);
     }
+    client.finish_command_reply(reply_start);
     client.reset_args();
 }
 
@@ -1249,6 +1437,7 @@ fn process_current_command_with_db_list(
     server: &Arc<redis_core::RedisServer>,
 ) {
     client.clear_blocked_on_keys();
+    let reply_start = client.reply_buf.len();
 
     let metrics = server_metrics();
     let command_number = metrics
@@ -1256,8 +1445,7 @@ fn process_current_command_with_db_list(
         .fetch_add(1, Ordering::Relaxed)
         + 1;
     let dispatch_db = client.db_index;
-    let active_time_sample =
-        (command_number % ACTIVE_TIME_SAMPLE_INTERVAL == 0).then(Instant::now);
+    let active_time_sample = (command_number % ACTIVE_TIME_SAMPLE_INTERVAL == 0).then(Instant::now);
     let result = {
         let mut ctx = CommandContext::with_server_and_db_list(
             client,
@@ -1272,6 +1460,9 @@ fn process_current_command_with_db_list(
                 redis_commands::list::wake_blocked_for_key(db, key);
             });
         }
+        let _ = ctx.with_db_index(dispatch_db, |db| {
+            wake_ready_after_command(db);
+        });
         r
     };
     if let Some(t0) = active_time_sample {
@@ -1285,6 +1476,7 @@ fn process_current_command_with_db_list(
         let payload = err.to_resp_payload();
         encode_resp2(&RespFrame::Error(payload), &mut client.reply_buf);
     }
+    client.finish_command_reply(reply_start);
     client.reset_args();
 }
 

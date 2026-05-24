@@ -163,6 +163,11 @@ pub struct ConsumerGroup {
 /// binary-searchable. `last_id` is the largest id ever inserted; this
 /// is what auto-id generation (`*`) compares against and is preserved
 /// across delete/trim operations to match real Redis semantics.
+///
+/// Approximate trim behavior is implemented above this storage layer by the
+/// command crate. The inline store deliberately exposes only ordered entries
+/// plus stream counters; it does not pretend to model upstream radix-tree
+/// listpack node boundaries.
 #[derive(Clone, Debug, Default)]
 pub struct InlineStream {
     pub entries: Vec<StreamEntry>,

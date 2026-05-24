@@ -74,6 +74,8 @@ workload = "unswept-tcl-unit-files"
 command = [
   "python3",
   "harness/oracle/tcl-survey.py",
+  "--runner-id",
+  "tcl-survey-unswept",
   "--skip-build",
   "--timeout-s",
   "90",
@@ -94,6 +96,8 @@ workload = "single-node-core-tcl-files"
 command = [
   "python3",
   "harness/oracle/tcl-survey.py",
+  "--runner-id",
+  "tcl-survey-core",
   "--skip-build",
   "--timeout-s",
   "150",
@@ -104,6 +108,159 @@ timeout_s = 3600
 resources = ["oracle-results", "cargo-target", "port-range:21111-29111"]
 claim_level = "telemetry"
 capabilities = ["official-tcl-coverage", "single-node-core"]
+
+[[runner]]
+id = "tcl-suite-inventory"
+kind = "json_command"
+surface = "correctness"
+method = "official-suite-accounting"
+workload = "full-upstream-tcl-inventory"
+command = ["python3", "harness/oracle/tcl-suite-inventory.py"]
+timeout_s = 120
+resources = ["oracle-results"]
+claim_level = "telemetry"
+capabilities = ["official-tcl-coverage", "full-suite-accounting"]
+
+[[runner]]
+id = "persistence-rdb-cycle"
+kind = "json_command"
+surface = "correctness"
+method = "json-command"
+workload = "rdb-save-restart"
+command = ["python3", "harness/oracle/persistence-cycle.py", "--mode", "rdb"]
+timeout_s = 900
+resources = ["oracle-results", "cargo-target", "port-range:21111-29111"]
+claim_level = "internal-regression-gate"
+capabilities = ["persistence-rdb"]
+
+[[runner]]
+id = "persistence-aof-cycle"
+kind = "json_command"
+surface = "correctness"
+method = "json-command"
+workload = "aof-restart"
+command = ["python3", "harness/oracle/persistence-cycle.py", "--mode", "aof"]
+timeout_s = 900
+resources = ["oracle-results", "cargo-target", "port-range:21111-29111"]
+claim_level = "internal-regression-gate"
+capabilities = ["persistence-aof"]
+
+[[runner]]
+id = "persistence-aof-rewrite-cycle"
+kind = "json_command"
+surface = "correctness"
+method = "json-command"
+workload = "aof-rewrite-under-write-load"
+command = ["python3", "harness/oracle/persistence-cycle.py", "--mode", "aof-rewrite"]
+timeout_s = 1500
+resources = ["oracle-results", "cargo-target", "port-range:21111-29111"]
+claim_level = "internal-regression-gate"
+capabilities = ["persistence-aof-rewrite"]
+
+[[runner]]
+id = "persistence-frontier"
+kind = "json_command"
+surface = "correctness"
+method = "official-suite"
+workload = "source-shaped-persistence-frontier"
+command = ["python3", "harness/oracle/persistence-frontier.py", "--skip-build"]
+timeout_s = 1500
+resources = ["oracle-results", "cargo-target", "port-range:21111-29111"]
+claim_level = "telemetry"
+capabilities = ["persistence-frontier"]
+
+[[runner]]
+id = "tcl-persistence-focused"
+kind = "json_command"
+surface = "correctness"
+method = "official-suite"
+workload = "upstream-persistence-tcl-files"
+command = [
+  "python3",
+  "harness/oracle/tcl-survey.py",
+  "--runner-id",
+  "tcl-persistence-focused",
+  "--skip-build",
+  "--timeout-s",
+  "180",
+  "--no-default-deny-tags",
+  "--deny-tag",
+  "needs:repl",
+  "--deny-tag",
+  "cluster",
+  "--files",
+  "unit/other,unit/aofrw,integration/aof,integration/rdb",
+]
+timeout_s = 2400
+resources = ["oracle-results", "cargo-target", "port-range:21111-29111"]
+claim_level = "telemetry"
+capabilities = ["official-tcl-coverage", "persistence-frontier"]
+
+[[runner]]
+id = "tcl-breadth-current-red"
+kind = "json_command"
+surface = "correctness"
+method = "official-suite"
+workload = "current-red-and-timeout-tcl-files"
+command = [
+  "python3",
+  "harness/oracle/tcl-survey.py",
+  "--runner-id",
+  "tcl-breadth-current-red",
+  "--skip-build",
+  "--timeout-s",
+  "150",
+  "--files",
+  "unit/scripting,unit/type/zset,unit/type/list,unit/type/string,unit/functions,unit/type/stream,unit/expire,unit/type/hash,unit/multi,unit/type/stream-cgroups,unit/other,unit/pubsub,unit/protocol,unit/aofrw",
+]
+timeout_s = 3600
+resources = ["oracle-results", "cargo-target", "port-range:21111-29111"]
+claim_level = "telemetry"
+capabilities = ["official-tcl-coverage", "single-node-core", "breadth-frontier"]
+
+[[runner]]
+id = "tcl-breadth-unswept-scout"
+kind = "json_command"
+surface = "correctness"
+method = "official-suite"
+workload = "unswept-single-node-tcl-scout"
+command = [
+  "python3",
+  "harness/oracle/tcl-survey.py",
+  "--runner-id",
+  "tcl-breadth-unswept-scout",
+  "--skip-build",
+  "--timeout-s",
+  "120",
+  "--files",
+  "unit/hashexpire,unit/introspection,unit/introspection-2,unit/acl,unit/acl-v2,unit/tracking,unit/wait,unit/maxmemory,unit/auth,unit/pubsubshard,unit/pause,unit/commandlog,unit/latency-monitor,unit/networking,unit/shutdown,unit/obuf-limits",
+]
+timeout_s = 3000
+resources = ["oracle-results", "cargo-target", "port-range:21111-29111"]
+claim_level = "telemetry"
+capabilities = ["official-tcl-coverage", "single-node-core", "breadth-scout"]
+
+[[runner]]
+id = "tcl-breadth-expanded-core"
+kind = "json_command"
+surface = "correctness"
+method = "official-suite"
+workload = "expanded-single-node-core-tcl-files"
+command = [
+  "python3",
+  "harness/oracle/tcl-survey.py",
+  "--runner-id",
+  "tcl-breadth-expanded-core",
+  "--skip-build",
+  "--timeout-s",
+  "180",
+  "--files",
+  "unit/scripting,unit/type/zset,unit/type/hash,unit/hashexpire,unit/functions,unit/protocol,unit/multi,unit/pubsub,unit/type/stream,unit/type/stream-cgroups,unit/type/list,unit/type/string,unit/expire,unit/other,unit/introspection,unit/introspection-2,unit/acl,unit/acl-v2,unit/tracking,unit/wait,unit/maxmemory,unit/auth,unit/pubsubshard,unit/pause,unit/commandlog,unit/latency-monitor,unit/networking,unit/shutdown,unit/obuf-limits,unit/keyspace,unit/sort,unit/scan,unit/dump,unit/info,unit/slowlog,unit/bitops,unit/bitfield,unit/geo,unit/hyperloglog",
+]
+timeout_s = 7200
+resources = ["oracle-results", "cargo-target", "port-range:21111-29111"]
+claim_level = "telemetry"
+capabilities = ["official-tcl-coverage", "single-node-core", "breadth-frontier"]
 
 [[runner]]
 id = "regress-core-p100-ping"

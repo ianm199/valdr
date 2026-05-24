@@ -181,6 +181,11 @@ def setup_runner(args: argparse.Namespace) -> dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--runner-id",
+        default="tcl-survey-unswept",
+        help="Runner id to report in RunnerResult JSON. Defaults to the legacy unswept runner id.",
+    )
     parser.add_argument("--files", help="Comma-separated TCL file list; default is the unswept survey set.")
     parser.add_argument("--timeout-s", type=int, default=90, help="Per-file timeout.")
     parser.add_argument("--setup-timeout-s", type=int, default=300, help="Build/symlink setup timeout.")
@@ -190,11 +195,25 @@ def main() -> int:
     parser.add_argument(
         "--deny-tag",
         action="append",
-        dest="deny_tags",
-        default=list(DEFAULT_DENY_TAGS),
-        help="TCL tag to deny. Repeatable. Defaults skip repl/debug/external-skip.",
+        dest="extra_deny_tags",
+        default=[],
+        help="Additional TCL tag to deny. Repeatable.",
+    )
+    parser.add_argument(
+        "--deny-tags",
+        help="Comma-separated extra TCL tags to deny.",
+    )
+    parser.add_argument(
+        "--no-default-deny-tags",
+        action="store_true",
+        help="Do not apply the default needs:repl/needs:debug/external:skip deny policy.",
     )
     args = parser.parse_args()
+    deny_tags = [] if args.no_default_deny_tags else list(DEFAULT_DENY_TAGS)
+    deny_tags.extend(args.extra_deny_tags)
+    if args.deny_tags:
+        deny_tags.extend(tag.strip() for tag in args.deny_tags.split(",") if tag.strip())
+    args.deny_tags = deny_tags
 
     files = parse_files(args.files)
     if not files:
@@ -209,7 +228,7 @@ def main() -> int:
     if setup["returncode"] != 0 or setup["timed_out"]:
         result = {
             "schema_version": 1,
-            "runner_id": "tcl-survey-unswept",
+            "runner_id": args.runner_id,
             "status": "error",
             "surface": "correctness",
             "method": "official-suite",
@@ -334,7 +353,7 @@ def main() -> int:
 
     result = {
         "schema_version": 1,
-        "runner_id": "tcl-survey-unswept",
+        "runner_id": args.runner_id,
         "status": "pass",
         "surface": "correctness",
         "method": "official-suite",

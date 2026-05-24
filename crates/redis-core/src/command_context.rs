@@ -381,6 +381,12 @@ impl<'a> CommandContext<'a> {
         Ok(())
     }
 
+    /// Reply with a push frame that bypasses CLIENT REPLY OFF/SKIP.
+    pub fn reply_push_frame(&mut self, frame: &RespFrame) -> RedisResult<()> {
+        self.client.write_push_frame(frame);
+        Ok(())
+    }
+
     /// Reply with an error. Equivalent of C's addReplyError* family.
     ///
     /// Accepts either a `&RedisError` (preferred) or raw `&[u8]` bytes; both
@@ -941,9 +947,8 @@ impl<'a> CommandContext<'a> {
 /// subscriber that matches `channel` (exact or pattern). Used by the
 /// `notify_keyspace_event` helper.
 ///
-/// RESP3 subscribers receive a `>` push frame prefixed with the `pubsub`
-/// discriminator. RESP2 subscribers receive the legacy `*3` / `*4` array
-/// emission unchanged.
+/// RESP3 subscribers receive a native `>` push frame. RESP2 subscribers
+/// receive the legacy `*3` / `*4` array emission unchanged.
 fn publish_keyspace_message(
     registry: &Arc<Mutex<PubSubRegistry>>,
     channel: &RedisString,
@@ -1033,12 +1038,11 @@ pub fn encode_pubsub_message_resp2(channel: &RedisString, message: &RedisString)
     buf
 }
 
-/// Encode a RESP3 `>4 pubsub message channel payload` push frame.
+/// Encode a RESP3 `>3 message channel payload` push frame.
 pub fn encode_pubsub_message_resp3(channel: &RedisString, message: &RedisString) -> Vec<u8> {
     let mut buf = Vec::with_capacity(48 + channel.as_bytes().len() + message.as_bytes().len());
     redis_protocol::encode_resp3(
         &RespFrame::Push(vec![
-            RespFrame::bulk(RedisString::from_static(b"pubsub")),
             RespFrame::bulk(RedisString::from_static(b"message")),
             RespFrame::bulk(channel.clone()),
             RespFrame::bulk(message.clone()),
@@ -1069,7 +1073,7 @@ pub fn encode_pubsub_pmessage_resp2(
     buf
 }
 
-/// Encode a RESP3 `>5 pubsub pmessage pattern channel payload` push frame.
+/// Encode a RESP3 `>4 pmessage pattern channel payload` push frame.
 pub fn encode_pubsub_pmessage_resp3(
     pattern: &RedisString,
     channel: &RedisString,
@@ -1080,7 +1084,6 @@ pub fn encode_pubsub_pmessage_resp3(
     );
     redis_protocol::encode_resp3(
         &RespFrame::Push(vec![
-            RespFrame::bulk(RedisString::from_static(b"pubsub")),
             RespFrame::bulk(RedisString::from_static(b"pmessage")),
             RespFrame::bulk(pattern.clone()),
             RespFrame::bulk(channel.clone()),

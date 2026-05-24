@@ -149,8 +149,18 @@ pub struct LiveConfig {
     pub appendonly: AtomicBool,
     /// AOF filename relative to `rdb_dir` (`appendfilename` config key).
     pub appendfilename: Mutex<String>,
+    /// AOF multi-part directory name (`appenddirname` config key).
+    pub appenddirname: Mutex<String>,
     /// fsync policy: 0=no, 1=everysec, 2=always (`appendfsync` config key).
     pub appendfsync: AtomicU8,
+    /// Whether startup accepts an otherwise-valid AOF truncated at EOF.
+    pub aof_load_truncated: AtomicBool,
+    /// Whether AOF rewrite may emit an RDB preamble.
+    pub aof_use_rdb_preamble: AtomicBool,
+    /// Auto AOF rewrite threshold percentage.
+    pub auto_aof_rewrite_percentage: AtomicU64,
+    /// Auto AOF rewrite minimum size in bytes.
+    pub auto_aof_rewrite_min_size: AtomicU64,
     /// Size of the replication backlog circular buffer
     /// (`repl-backlog-size` config key). Default 1 MiB. Reducing it does
     /// not shrink the live buffer until the next `ReplicationState` is
@@ -166,6 +176,10 @@ pub struct LiveConfig {
     /// Replicas may serve read commands (`slave-read-only`/`replica-read-only`).
     /// Default `true`; matches real Redis.
     pub slave_read_only: AtomicBool,
+    /// Whether the primary is in import mode (`import-mode` config key).
+    pub import_mode: AtomicBool,
+    /// Optional availability-zone string surfaced by HELLO.
+    pub availability_zone: Mutex<String>,
     /// Send the RDB snapshot diskless during full resync
     /// (`repl-diskless-sync`). Default `true`. No-op until Wave B wires the
     /// actual snapshot transfer.
@@ -251,6 +265,16 @@ pub const DEFAULT_HLL_SPARSE_MAX_BYTES: usize = 3000;
 
 /// Default AOF filename.
 pub const DEFAULT_AOF_FILENAME: &str = "appendonly.aof";
+/// Default AOF multi-part directory name.
+pub const DEFAULT_AOF_DIRNAME: &str = "appendonlydir";
+/// Default `aof-load-truncated` setting.
+pub const DEFAULT_AOF_LOAD_TRUNCATED: bool = true;
+/// Default `aof-use-rdb-preamble` setting.
+pub const DEFAULT_AOF_USE_RDB_PREAMBLE: bool = true;
+/// Default auto AOF rewrite percentage.
+pub const DEFAULT_AUTO_AOF_REWRITE_PERCENTAGE: u64 = 100;
+/// Default auto AOF rewrite minimum size (64 MiB).
+pub const DEFAULT_AUTO_AOF_REWRITE_MIN_SIZE: u64 = 64 * 1024 * 1024;
 
 /// Default `repl-backlog-size` (1 MiB).
 pub const DEFAULT_REPL_BACKLOG_SIZE: u64 = 1024 * 1024;
@@ -292,11 +316,18 @@ impl Default for LiveConfig {
             tls_auth_clients: AtomicU8::new(0),
             appendonly: AtomicBool::new(false),
             appendfilename: Mutex::new(DEFAULT_AOF_FILENAME.to_string()),
+            appenddirname: Mutex::new(DEFAULT_AOF_DIRNAME.to_string()),
             appendfsync: AtomicU8::new(1),
+            aof_load_truncated: AtomicBool::new(DEFAULT_AOF_LOAD_TRUNCATED),
+            aof_use_rdb_preamble: AtomicBool::new(DEFAULT_AOF_USE_RDB_PREAMBLE),
+            auto_aof_rewrite_percentage: AtomicU64::new(DEFAULT_AUTO_AOF_REWRITE_PERCENTAGE),
+            auto_aof_rewrite_min_size: AtomicU64::new(DEFAULT_AUTO_AOF_REWRITE_MIN_SIZE),
             repl_backlog_size: AtomicU64::new(DEFAULT_REPL_BACKLOG_SIZE),
             repl_timeout: AtomicU64::new(DEFAULT_REPL_TIMEOUT),
             repl_disable_tcp_nodelay: AtomicBool::new(false),
             slave_read_only: AtomicBool::new(true),
+            import_mode: AtomicBool::new(false),
+            availability_zone: Mutex::new(String::new()),
             repl_diskless_sync: AtomicBool::new(true),
             rdb_version_check_relaxed: AtomicBool::new(false),
         }
@@ -644,6 +675,22 @@ impl LiveConfig {
         }
     }
 
+    /// Return the current AOF directory name.
+    pub fn appenddirname(&self) -> String {
+        match self.appenddirname.lock() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
+        }
+    }
+
+    /// Update the AOF directory name.
+    pub fn set_appenddirname(&self, name: String) {
+        match self.appenddirname.lock() {
+            Ok(mut g) => *g = name,
+            Err(p) => *p.into_inner() = name,
+        }
+    }
+
     /// Return the fsync policy code (0=no, 1=everysec, 2=always).
     pub fn appendfsync(&self) -> u8 {
         self.appendfsync.load(Ordering::Relaxed)
@@ -652,6 +699,40 @@ impl LiveConfig {
     /// Update the fsync policy.
     pub fn set_appendfsync(&self, policy: u8) {
         self.appendfsync.store(policy, Ordering::Relaxed);
+    }
+
+    pub fn aof_load_truncated(&self) -> bool {
+        self.aof_load_truncated.load(Ordering::Relaxed)
+    }
+
+    pub fn set_aof_load_truncated(&self, enabled: bool) {
+        self.aof_load_truncated.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn aof_use_rdb_preamble(&self) -> bool {
+        self.aof_use_rdb_preamble.load(Ordering::Relaxed)
+    }
+
+    pub fn set_aof_use_rdb_preamble(&self, enabled: bool) {
+        self.aof_use_rdb_preamble.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn auto_aof_rewrite_percentage(&self) -> u64 {
+        self.auto_aof_rewrite_percentage.load(Ordering::Relaxed)
+    }
+
+    pub fn set_auto_aof_rewrite_percentage(&self, value: u64) {
+        self.auto_aof_rewrite_percentage
+            .store(value, Ordering::Relaxed);
+    }
+
+    pub fn auto_aof_rewrite_min_size(&self) -> u64 {
+        self.auto_aof_rewrite_min_size.load(Ordering::Relaxed)
+    }
+
+    pub fn set_auto_aof_rewrite_min_size(&self, value: u64) {
+        self.auto_aof_rewrite_min_size
+            .store(value, Ordering::Relaxed);
     }
 
     /// Configured replication backlog size in bytes (`repl-backlog-size`).
@@ -696,6 +777,28 @@ impl LiveConfig {
     /// Update the slave-read-only flag.
     pub fn set_slave_read_only(&self, v: bool) {
         self.slave_read_only.store(v, Ordering::Relaxed);
+    }
+
+    pub fn import_mode(&self) -> bool {
+        self.import_mode.load(Ordering::Relaxed)
+    }
+
+    pub fn set_import_mode(&self, v: bool) {
+        self.import_mode.store(v, Ordering::Relaxed);
+    }
+
+    pub fn availability_zone(&self) -> String {
+        match self.availability_zone.lock() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
+        }
+    }
+
+    pub fn set_availability_zone(&self, zone: String) {
+        match self.availability_zone.lock() {
+            Ok(mut g) => *g = zone,
+            Err(p) => *p.into_inner() = zone,
+        }
     }
 
     /// Whether full-resync RDB transfer uses the diskless path

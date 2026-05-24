@@ -19,8 +19,9 @@
 //! Cross-DB commands use that route instead of naming the transitional global
 //! database store directly.
 //!
-//! PORT NOTE: C stringmatchlen (util.c) is replaced by the local `glob_match` helper,
-//! which handles `*` and `?` but not `[...]` character classes yet.
+//! PORT NOTE: C stringmatchlen (util.c) is exposed through the local
+//! `glob_match` wrapper so db.c call sites stay source-shaped while sharing
+//! the faithful util.c implementation.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1001,10 +1002,18 @@ impl RedisDb {
     /// PERF(port): O(n) HashMap walk — replace with fair random kvstore entry in Phase 4.
     pub fn random_key(&self) -> Option<RedisString> {
         // TODO(port): kvstoreGetFairRandomHashtableIndex / kvstoreHashtableFairRandomEntry
-        // TODO(port): use a proper random source (server.random or `rand` crate)
         let now = Self::now_ms();
+        if self.dict.is_empty() {
+            return None;
+        }
+        let mut seed = [0u8; 8];
+        crate::util::get_random_bytes(&mut seed);
+        let start = (u64::from_le_bytes(seed) as usize) % self.dict.len();
         self.dict
             .iter()
+            .cycle()
+            .skip(start)
+            .take(self.dict.len())
             .find(|(_, obj)| obj.expire == EXPIRY_NONE || obj.expire >= now)
             .map(|(k, _)| k.clone())
     }
@@ -1879,35 +1888,9 @@ fn parse_i64_from_bytes(b: &[u8]) -> Option<i64> {
 
 /// Case-sensitive glob match over byte slices.
 ///
-/// Supports `*` (any sequence of bytes) and `?` (any single byte).
-/// TODO(port): implement `[abc]` / `[a-z]` character-class matching
-///             once util.c (redis-core/src/util.rs) is ported.
+/// C: util.c `stringmatchlen(pattern, plen, string, slen, 0)`.
 pub fn glob_match(pattern: &[u8], text: &[u8]) -> bool {
-    let mut pi = 0usize;
-    let mut ti = 0usize;
-    let mut star_pi = usize::MAX;
-    let mut star_ti = 0usize;
-
-    while ti < text.len() {
-        if pi < pattern.len() && (pattern[pi] == b'?' || pattern[pi] == text[ti]) {
-            pi += 1;
-            ti += 1;
-        } else if pi < pattern.len() && pattern[pi] == b'*' {
-            star_pi = pi;
-            star_ti = ti;
-            pi += 1;
-        } else if star_pi != usize::MAX {
-            star_ti += 1;
-            ti = star_ti;
-            pi = star_pi + 1;
-        } else {
-            return false;
-        }
-    }
-    while pi < pattern.len() && pattern[pi] == b'*' {
-        pi += 1;
-    }
-    pi == pattern.len()
+    crate::util::string_match_len(pattern, text, false)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2040,7 +2023,7 @@ mod tests {
     #[test]
     fn glob_match_basic() {
         assert!(glob_match(b"*", b"anything"));
-        assert!(glob_match(b"*", b""));
+        assert!(!glob_match(b"*", b""));
         assert!(glob_match(b"foo*", b"foobar"));
         assert!(!glob_match(b"foo*", b"barfoo"));
         assert!(glob_match(b"f?o", b"foo"));
@@ -2050,6 +2033,40 @@ mod tests {
         assert!(glob_match(b"h?llo", b"hello"));
         assert!(glob_match(b"h*llo", b"hllo"));
         assert!(glob_match(b"h*llo", b"heeeello"));
+        assert!(glob_match(b"h[ae]llo", b"hello"));
+        assert!(glob_match(b"h[a-z]llo", b"hello"));
+        assert!(!glob_match(b"h[^e]llo", b"hello"));
+        assert!(!glob_match(
+            b"a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*b",
+            b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ));
+    }
+
+    #[test]
+    fn glob_match_rejects_abusive_nested_patterns_like_valkey() {
+        let mut pattern = Vec::with_capacity(100_000);
+        for _ in 0..50_000 {
+            pattern.extend_from_slice(b"*?");
+        }
+        let text = vec![b'a'; 50_000];
+        assert!(!glob_match(&pattern, &text));
+    }
+
+    #[test]
+    fn random_key_does_not_pin_to_first_hashmap_entry() {
+        let mut db = RedisDb::new(0);
+        db.add(k(b"foo"), make_str_obj(b"x"));
+        db.add(k(b"bar"), make_str_obj(b"y"));
+
+        let mut seen = HashSet::new();
+        for _ in 0..100 {
+            if let Some(key) = db.random_key() {
+                seen.insert(key);
+            }
+        }
+
+        assert!(seen.contains(&k(b"foo")));
+        assert!(seen.contains(&k(b"bar")));
     }
 
     #[test]

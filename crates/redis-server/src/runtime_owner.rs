@@ -1006,6 +1006,8 @@ impl RuntimeOwner {
             }
         }
 
+        // Command dispatch has already applied CLIENT REPLY OFF/SKIP while
+        // retaining Pub/Sub push bytes in the shared reply buffer.
         let reply = slot.client.drain_reply();
         let queued_write = !reply.is_empty();
         if !reply.is_empty() {

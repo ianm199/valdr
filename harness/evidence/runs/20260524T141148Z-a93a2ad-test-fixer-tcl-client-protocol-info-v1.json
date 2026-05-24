@@ -1,0 +1,107 @@
+{
+  "captured_ts": "2026-05-24T14:23:47.599912Z",
+  "gate_results": {
+    "cargo_check_redis-commands": {
+      "detail": "cargo check -p redis-commands: clean",
+      "ok": true
+    },
+    "cargo_check_workspace": {
+      "detail": "cargo check --workspace: clean",
+      "ok": true
+    },
+    "cargo_test_redis-commands_connection": {
+      "detail": "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 49 filtered out; finished in 0.00s",
+      "ok": true
+    },
+    "no_out_of_scope_changes": {
+      "detail": "no out-of-scope changes since dispatch; ignored pre-existing dirty files: crates/redis-commands/src/aof.rs, crates/redis-commands/src/dispatch.rs, crates/redis-commands/src/hash.rs, crates/redis-commands/src/info.rs, crates/redis-commands/src/persist.rs, crates/redis-commands/src/string.rs, crates/redis-commands/src/zset.rs, crates/redis-core/src/db.rs, ... +44 more",
+      "ok": true
+    },
+    "oracle_reference_only": {
+      "detail": "no harness/oracle/run-smoke.sh present",
+      "ok": true
+    },
+    "target_files_modified": {
+      "detail": "test-fixer touched 3/4 candidate target(s)",
+      "ok": true
+    },
+    "trailer_present": {
+      "detail": "all touched Rust targets carry PORT STATUS trailers",
+      "ok": true
+    }
+  },
+  "harness_context": {
+    "commit": "a93a2ad",
+    "git_dirty": true,
+    "git_status_short": [
+      " M crates/redis-commands/src/aof.rs",
+      " M crates/redis-commands/src/connection.rs",
+      " M crates/redis-commands/src/dispatch.rs",
+      " M crates/redis-commands/src/hash.rs",
+      " M crates/redis-commands/src/info.rs",
+      " M crates/redis-commands/src/persist.rs",
+      " M crates/redis-commands/src/string.rs",
+      " M crates/redis-commands/src/zset.rs",
+      " M crates/redis-core/src/client.rs",
+      " M crates/redis-core/src/db.rs",
+      " M crates/redis-core/src/lib.rs",
+      " M crates/redis-core/src/live_config.rs",
+      " M crates/redis-core/src/rdb/load.rs",
+      " M crates/redis-core/src/rdb/mod.rs",
+      " M crates/redis-core/src/server.rs",
+      " M crates/redis-server/src/main.rs",
+      " M docs/CONFORMANCE.md",
+      " M docs/TCL_FULL_SUITE_GOAL_20260523.md",
+      " M harness/completion.toml",
+      " M harness/evidence/ledger.jsonl",
+      " M harness/history.jsonl",
+      " M harness/oracle/tcl-survey.py",
+      " M harness/runners.toml",
+      " M harness/work-packets.jsonl",
+      "?? crates/redis-core/src/persistence.rs",
+      "?? docs/LOOP_OBSERVATIONS_20260523.md",
+      "?? docs/PERSISTENCE_BORING_SPEC_20260523.md",
+      "?? docs/SINGLE_NODE_CORE_V1_DASHBOARD.md",
+      "?? docs/TCL_BREADTH_OVERNIGHT_20260524.md",
+      "?? harness/evidence/runs/20260523T193242Z-a93a2ad-runner-persistence-frontier-baseline-v1.json",
+      "?? harness/evidence/runs/20260523T193243Z-a93a2ad-runner-persistence-current-rdb-cycle-v1.json",
+      "?? harness/evidence/runs/20260523T193244Z-a93a2ad-runner-persistence-current-aof-cycle-v1.json",
+      "?? harness/evidence/runs/20260523T193245Z-a93a2ad-runner-persistence-current-aof-rewrite-cycle-v1.json",
+      "?? harness/evidence/runs/20260523T193839Z-a93a2ad-test-fixer-persistence-aof-propagation-v1.json",
+      "?? harness/evidence/runs/20260523T195221Z-a93a2ad-runner-persistence-post-propagation-frontier-v1.json",
+      "?? harness/evidence/runs/20260523T195353Z-a93a2ad-architect-persistence-aof-manifest-architecture-v1.json",
+      "?? harness/evidence/runs/20260523T200221Z-a93a2ad-translator-persistence-aof-manifest-frontier-scenarios-v1.json",
+      "?? harness/evidence/runs/20260523T201159Z-a93a2ad-runner-persistence-aof-manifest-frontier-baseline-v1.json",
+      "?? harness/evidence/runs/20260523T201230Z-a93a2ad-test-fixer-persistence-aof-manifest-load-v1.json",
+      "?? harness/evidence/runs/20260523T202439Z-a93a2ad-runner-persistence-post-manifest-load-frontier-v1.json",
+      "?? harness/evidence/runs/20260523T202441Z-a93a2ad-test-fixer-persistence-aof-manifest-current-incr-v1.json",
+      "?? harness/evidence/runs/20260523T203149Z-a93a2ad-runner-persistence-post-manifest-current-incr-frontier-v1.json",
+      "?? harness/evidence/runs/20260523T203151Z-a93a2ad-test-fixer-persistence-aof-manifest-rewrite-finalize-v1.json",
+      "?? harness/evidence/runs/20260523T203850Z-a93a2ad-runner-persistence-post-manifest-rewrite-cycle-v1.json",
+      "?? harness/evidence/runs/20260523T203851Z-a93a2ad-runner-persistence-post-manifest-rewrite-frontier-v1.json",
+      "?? harness/evidence/runs/20260523T203853Z-a93a2ad-runner-persistence-focused-tcl-v1.json",
+      "?? harness/evidence/runs/20260523T204256Z-a93a2ad-runner-persistence-post-oracle-fix-frontier-v1.json",
+      "?? harness/evidence/runs/20260524T035900Z-a93a2ad-runner-tcl-breadth-current-red-baseline-v1.json",
+      "?? harness/evidence/runs/20260524T040713Z-a93a2ad-runner-tcl-breadth-unswept-scout-v1.json",
+      "?? harness/evidence/runs/20260524T040724Z-a93a2ad-test-fixer-tcl-hash-hgetdel-v1.json",
+      "?? harness/evidence/runs/20260524T125902Z-a93a2ad-test-fixer-tcl-zset-unified-range-bylex-v1.json",
+      "?? harness/launch-tcl-breadth-overnight.sh",
+      "?? harness/oracle/persistence-cycle.py",
+      "?? harness/oracle/persistence-frontier.py",
+      "?? harness/oracle/single-node-core-dashboard.py",
+      "?? harness/oracle/tcl-suite-inventory.py",
+      "?? harness/run-tcl-breadth-overnight.sh",
+      "?? harness/watch-tcl-breadth.sh"
+    ],
+    "run_id": "loop-a63c0c4cd06ff02a",
+    "target_commit": "a93a2ad1af8ca90e1e6e0e2b6c37569c1f48f30b",
+    "tree_hash": "bb7420a8951bc2a93755e61e0ca7092bda94f67ea7b476065f4d1ec3269eb1ce"
+  },
+  "kind": "agent_transcript",
+  "packet": "tcl-client-protocol-info-v1",
+  "prompt_hash": "d953826c06edbf86",
+  "role": "test-fixer",
+  "transcript_bytes": 36720,
+  "transcript_preview": "0.0.1 - - [24/May/2026 08:59:04] \"GET /history.json?check=1779627544556 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 08:59:05] \"GET /history.json?check=1779627545556 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 08:59:05] \"GET /history.json?check=1779627545555 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 09:02:16] \"GET /history.json?check=1779627736109 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 09:02:16] \"GET /history.json?check=1779627736107 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 09:02:17] \"GET /history.json?check=1779627737109 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 09:02:17] \"GET /history.json?check=1779627737108 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:01:31] \"GET /history.json?check=1779631291535 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:01:31] \"GET /history.json?check=1779631291535 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:01:32] \"GET /history.json?check=1779631292534 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:01:32] \"GET /history.json?check=1779631292534 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:04:50] \"GET /history.json?check=1779631490523 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:04:50] \"GET /history.json?check=1779631490523 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:04:51] \"GET /history.json?check=1779631491523 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:04:51] \"GET /history.json?check=1779631491523 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:05:51] \"GET /history.json?check=1779631551522 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:05:51] \"GET /history.json?check=1779631551522 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:05:52] \"GET /history.json?check=1779631552523 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:05:52] \"GET /history.json?check=1779631552523 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:06:52] \"GET /history.json?check=1779631612522 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:06:52] \"GET /history.json?check=1779631612523 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:06:53] \"GET /history.json?check=1779631613522 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:06:53] \"GET /history.json?check=1779631613522 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:07:53] \"GET /history.json?check=1779631673521 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:07:53] \"GET /history.json?check=1779631673524 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:07:54] \"GET /history.json?check=1779631674522 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:07:54] \"GET /history.json?check=1779631674522 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:08:54] \"GET /history.json?check=1779631734521 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:08:54] \"GET /history.json?check=1779631734521 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:08:55] \"GET /history.json?check=1779631735521 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:08:55] \"GET /history.json?check=1779631735521 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:09:55] \"GET /history.json?check=1779631795520 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:09:55] \"GET /history.json?check=1779631795521 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:09:56] \"GET /history.json?check=1779631796520 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:09:56] \"GET /history.json?check=1779631796521 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:10:56] \"GET /history.json?check=1779631856520 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:10:56] \"GET /history.json?check=1779631856521 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:10:57] \"GET /history.json?check=1779631857520 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:10:57] \"GET /history.json?check=1779631857521 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:11:57] \"GET /history.json?check=1779631917519 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:11:57] \"GET /history.json?check=1779631917519 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:11:58] \"GET /history.json?check=1779631918520 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:11:58] \"GET /history.json?check=1779631918520 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:12:58] \"GET /history.json?check=1779631978518 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:12:58] \"GET /history.json?check=1779631978519 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:12:59] \"GET /history.json?check=1779631979520 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:12:59] \"GET /history.json?check=1779631979519 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:13:59] \"GET /history.json?check=1779632039519 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:13:59] \"GET /history.json?check=1779632039519 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:14:00] \"GET /history.json?check=1779632040519 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:14:00] \"GET /history.json?check=1779632040519 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:15:00] \"GET /history.json?check=1779632100519 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:15:00] \"GET /history.json?check=1779632100518 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:15:01] \"GET /history.json?check=1779632101518 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:15:01] \"GET /history.json?check=1779632101519 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:16:01] \"GET /history.json?check=1779632161519 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:16:01] \"GET /history.json?check=1779632161521 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:16:02] \"GET /history.json?check=1779632162519 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:16:02] \"GET /history.json?check=1779632162518 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:17:02] \"GET /history.json?check=1779632222518 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:17:02] \"GET /history.json?check=1779632222518 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:17:03] \"GET /history.json?check=1779632223518 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:17:03] \"GET /history.json?check=1779632223518 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:18:03] \"GET /history.json?check=1779632283517 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:18:03] \"GET /history.json?check=1779632283518 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:18:04] \"GET /history.json?check=1779632284517 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:18:04] \"GET /history.json?check=1779632284518 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:19:04] \"GET /history.json?check=1779632344517 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:19:04] \"GET /history.json?check=1779632344517 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:19:05] \"GET /history.json?check=1779632345516 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:19:05] \"GET /history.json?check=1779632345516 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:20:05] \"GET /history.json?check=1779632405516 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:20:05] \"GET /history.json?check=1779632405516 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:20:06] \"GET /history.json?check=1779632406516 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:20:06] \"GET /history.json?check=1779632406516 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:21:06] \"GET /history.json?check=1779632466517 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:21:06] \"GET /history.json?check=1779632466516 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:21:07] \"GET /history.json?check=1779632467517 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:21:07] \"GET /history.json?check=1779632467518 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:22:07] \"GET /history.json?check=1779632527516 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:22:07] \"GET /history.json?check=1779632527516 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:22:08] \"GET /history.json?check=1779632528520 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:22:08] \"GET /history.json?check=1779632528523 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:23:08] \"GET /history.json?check=1779632588523 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:23:08] \"GET /history.json?check=1779632588521 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:23:08] \"GET /history.json?check=1779632588524 HTTP/1.1\" 200 -\n127.0.0.1 - - [24/May/2026 10:23:08] \"GET /history.json?check=1779632588529 HTTP/1.1\" 200 -\n",
+  "transcript_src": "/tmp/claude-502/-Users-ianmclaughlin-PycharmProjects-rustExperiments-lua-rs-port/50e182f9-a105-4242-851f-cffef806d317/tasks/b4plab231.output"
+}

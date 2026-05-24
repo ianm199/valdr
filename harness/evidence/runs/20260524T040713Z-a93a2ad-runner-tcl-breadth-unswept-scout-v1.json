@@ -1,0 +1,1253 @@
+{
+  "captured_ts": "2026-05-24T04:07:24.701826Z",
+  "harness_context": {
+    "claim_level": "telemetry",
+    "commit": "a93a2ad",
+    "git_dirty": true,
+    "git_status_short": [
+      " M crates/redis-commands/src/aof.rs",
+      " M crates/redis-commands/src/connection.rs",
+      " M crates/redis-commands/src/dispatch.rs",
+      " M crates/redis-commands/src/info.rs",
+      " M crates/redis-commands/src/persist.rs",
+      " M crates/redis-commands/src/string.rs",
+      " M crates/redis-core/src/db.rs",
+      " M crates/redis-core/src/lib.rs",
+      " M crates/redis-core/src/live_config.rs",
+      " M crates/redis-core/src/rdb/load.rs",
+      " M crates/redis-core/src/rdb/mod.rs",
+      " M crates/redis-core/src/server.rs",
+      " M crates/redis-server/src/main.rs",
+      " M docs/CONFORMANCE.md",
+      " M docs/TCL_FULL_SUITE_GOAL_20260523.md",
+      " M harness/completion.toml",
+      " M harness/evidence/ledger.jsonl",
+      " M harness/history.jsonl",
+      " M harness/oracle/tcl-survey.py",
+      " M harness/runners.toml",
+      " M harness/work-packets.jsonl",
+      "?? crates/redis-core/src/persistence.rs",
+      "?? docs/LOOP_OBSERVATIONS_20260523.md",
+      "?? docs/PERSISTENCE_BORING_SPEC_20260523.md",
+      "?? docs/SINGLE_NODE_CORE_V1_DASHBOARD.md",
+      "?? docs/TCL_BREADTH_OVERNIGHT_20260524.md",
+      "?? harness/evidence/runs/20260523T193242Z-a93a2ad-runner-persistence-frontier-baseline-v1.json",
+      "?? harness/evidence/runs/20260523T193243Z-a93a2ad-runner-persistence-current-rdb-cycle-v1.json",
+      "?? harness/evidence/runs/20260523T193244Z-a93a2ad-runner-persistence-current-aof-cycle-v1.json",
+      "?? harness/evidence/runs/20260523T193245Z-a93a2ad-runner-persistence-current-aof-rewrite-cycle-v1.json",
+      "?? harness/evidence/runs/20260523T193839Z-a93a2ad-test-fixer-persistence-aof-propagation-v1.json",
+      "?? harness/evidence/runs/20260523T195221Z-a93a2ad-runner-persistence-post-propagation-frontier-v1.json",
+      "?? harness/evidence/runs/20260523T195353Z-a93a2ad-architect-persistence-aof-manifest-architecture-v1.json",
+      "?? harness/evidence/runs/20260523T200221Z-a93a2ad-translator-persistence-aof-manifest-frontier-scenarios-v1.json",
+      "?? harness/evidence/runs/20260523T201159Z-a93a2ad-runner-persistence-aof-manifest-frontier-baseline-v1.json",
+      "?? harness/evidence/runs/20260523T201230Z-a93a2ad-test-fixer-persistence-aof-manifest-load-v1.json",
+      "?? harness/evidence/runs/20260523T202439Z-a93a2ad-runner-persistence-post-manifest-load-frontier-v1.json",
+      "?? harness/evidence/runs/20260523T202441Z-a93a2ad-test-fixer-persistence-aof-manifest-current-incr-v1.json",
+      "?? harness/evidence/runs/20260523T203149Z-a93a2ad-runner-persistence-post-manifest-current-incr-frontier-v1.json",
+      "?? harness/evidence/runs/20260523T203151Z-a93a2ad-test-fixer-persistence-aof-manifest-rewrite-finalize-v1.json",
+      "?? harness/evidence/runs/20260523T203850Z-a93a2ad-runner-persistence-post-manifest-rewrite-cycle-v1.json",
+      "?? harness/evidence/runs/20260523T203851Z-a93a2ad-runner-persistence-post-manifest-rewrite-frontier-v1.json",
+      "?? harness/evidence/runs/20260523T203853Z-a93a2ad-runner-persistence-focused-tcl-v1.json",
+      "?? harness/evidence/runs/20260523T204256Z-a93a2ad-runner-persistence-post-oracle-fix-frontier-v1.json",
+      "?? harness/evidence/runs/20260524T035900Z-a93a2ad-runner-tcl-breadth-current-red-baseline-v1.json",
+      "?? harness/launch-tcl-breadth-overnight.sh",
+      "?? harness/oracle/persistence-cycle.py",
+      "?? harness/oracle/persistence-frontier.py",
+      "?? harness/oracle/single-node-core-dashboard.py",
+      "?? harness/oracle/tcl-suite-inventory.py",
+      "?? harness/run-tcl-breadth-overnight.sh",
+      "?? harness/watch-tcl-breadth.sh"
+    ],
+    "resources": [
+      "cargo-target",
+      "oracle-results",
+      "port-range:21111-29111"
+    ],
+    "run_id": "loop-a63c0c4cd06ff02a",
+    "target_commit": "a93a2ad1af8ca90e1e6e0e2b6c37569c1f48f30b",
+    "tree_hash": "e74bf09906a4aa4ce445877860aa5323ee010c46449bca75acd8fd1dac3e9d85"
+  },
+  "kind": "runner_result",
+  "packet": "tcl-breadth-unswept-scout-v1",
+  "result": {
+    "artifacts": [
+      {
+        "kind": "tcl-survey-log",
+        "path": "harness/oracle/results/tcl-survey/20260524T040713Z/setup.json"
+      },
+      {
+        "kind": "tcl-survey-log",
+        "path": "harness/oracle/results/tcl-survey/20260524T040713Z/unit__hashexpire.json",
+        "test": "unit/hashexpire"
+      },
+      {
+        "kind": "tcl-survey-log",
+        "path": "harness/oracle/results/tcl-survey/20260524T040713Z/unit__introspection.json",
+        "test": "unit/introspection"
+      },
+      {
+        "kind": "tcl-survey-log",
+        "path": "harness/oracle/results/tcl-survey/20260524T040713Z/unit__introspection-2.json",
+        "test": "unit/introspection-2"
+      },
+      {
+        "kind": "tcl-survey-log",
+        "path": "harness/oracle/results/tcl-survey/20260524T040713Z/unit__acl.json",
+        "test": "unit/acl"
+      },
+      {
+        "kind": "tcl-survey-log",
+        "path": "harness/oracle/results/tcl-survey/20260524T040713Z/unit__acl-v2.json",
+        "test": "unit/acl-v2"
+      },
+      {
+        "kind": "tcl-survey-log",
+        "path": "harness/oracle/results/tcl-survey/20260524T040713Z/unit__tracking.json",
+        "test": "unit/tracking"
+      },
+      {
+        "kind": "tcl-survey-log",
+        "path": "harness/oracle/results/tcl-survey/20260524T040713Z/unit__wait.json",
+        "test": "unit/wait"
+      },
+      {
+        "kind": "tcl-survey-log",
+        "path": "harness/oracle/results/tcl-survey/20260524T040713Z/unit__maxmemory.json",
+        "test": "unit/maxmemory"
+      },
+      {
+        "kind": "tcl-survey-log",
+        "path": "harness/oracle/results/tcl-survey/20260524T040713Z/unit__auth.json",
+        "test": "unit/auth"
+      },
+      {
+        "kind": "tcl-survey-log",
+        "path": "harness/oracle/results/tcl-survey/20260524T040713Z/unit__pubsubshard.json",
+        "test": "unit/pubsubshard"
+      },
+      {
+        "kind": "tcl-survey-log",
+        "path": "harness/oracle/results/tcl-survey/20260524T040713Z/unit__pause.json",
+        "test": "unit/pause"
+      },
+      {
+        "kind": "tcl-survey-log",
+        "path": "harness/oracle/results/tcl-survey/20260524T040713Z/unit__commandlog.json",
+        "test": "unit/commandlog"
+      },
+      {
+        "kind": "tcl-survey-log",
+        "path": "harness/oracle/results/tcl-survey/20260524T040713Z/unit__latency-monitor.json",
+        "test": "unit/latency-monitor"
+      },
+      {
+        "kind": "tcl-survey-log",
+        "path": "harness/oracle/results/tcl-survey/20260524T040713Z/unit__networking.json",
+        "test": "unit/networking"
+      },
+      {
+        "kind": "tcl-survey-log",
+        "path": "harness/oracle/results/tcl-survey/20260524T040713Z/unit__shutdown.json",
+        "test": "unit/shutdown"
+      },
+      {
+        "kind": "tcl-survey-log",
+        "path": "harness/oracle/results/tcl-survey/20260524T040713Z/unit__obuf-limits.json",
+        "test": "unit/obuf-limits"
+      }
+    ],
+    "claim_level": "telemetry",
+    "evidence": {
+      "clients": 1,
+      "deny_tags": [
+        "needs:repl",
+        "needs:debug",
+        "external:skip"
+      ],
+      "files": [
+        {
+          "abort_test": "HGETEX $command with mix of existing and non-existing fields",
+          "elapsed_s": 0.21687450000172248,
+          "exception": "ERR unknown command 'HGETEX'.",
+          "failed": null,
+          "failures": [],
+          "log": "harness/oracle/results/tcl-survey/20260524T040713Z/unit__hashexpire.json",
+          "passed": null,
+          "returncode": 1,
+          "test": "unit/hashexpire",
+          "timed_out": false,
+          "total": 0
+        },
+        {
+          "abort_test": "CLIENT INFO",
+          "elapsed_s": 0.2166937500005588,
+          "exception": "ERR Unknown CLIENT subcommand: info.",
+          "failed": null,
+          "failures": [
+            "CLIENT LIST in tests/unit/introspection.tcl",
+            "CLIENT LIST with IDs in tests/unit/introspection.tcl"
+          ],
+          "log": "harness/oracle/results/tcl-survey/20260524T040713Z/unit__introspection.json",
+          "passed": null,
+          "returncode": 1,
+          "test": "unit/introspection",
+          "timed_out": false,
+          "total": 0
+        },
+        {
+          "abort_test": "COMMAND GETKEYS GET",
+          "elapsed_s": 9.23939754100138,
+          "exception": "ERR Invalid number of arguments specified for command.",
+          "failed": null,
+          "failures": [
+            "TTL, TYPE and EXISTS do not alter the last access time of a key in tests/unit/introspection-2.tcl",
+            "TOUCH alters the last access time of a key in tests/unit/introspection-2.tcl",
+            "TOUCH alters the last access time of a key in no-touch mode in tests/unit/introspection-2.tcl",
+            "command stats for GEOADD in tests/unit/introspection-2.tcl",
+            "errors stats for GEOADD in tests/unit/introspection-2.tcl",
+            "command stats for EXPIRE in tests/unit/introspection-2.tcl",
+            "command stats for BRPOP in tests/unit/introspection-2.tcl",
+            "command stats for MULTI in tests/unit/introspection-2.tcl",
+            "command stats for scripts in tests/unit/introspection-2.tcl"
+          ],
+          "log": "harness/oracle/results/tcl-survey/20260524T040713Z/unit__introspection-2.json",
+          "passed": null,
+          "returncode": 1,
+          "test": "unit/introspection-2",
+          "timed_out": false,
+          "total": 0
+        },
+        {
+          "abort_test": null,
+          "elapsed_s": 0.0837086250030552,
+          "exception": null,
+          "failed": 0,
+          "failures": [],
+          "log": "harness/oracle/results/tcl-survey/20260524T040713Z/unit__acl.json",
+          "passed": 0,
+          "returncode": 0,
+          "test": "unit/acl",
+          "timed_out": false,
+          "total": 0
+        },
+        {
+          "abort_test": null,
+          "elapsed_s": 0.06940279099944746,
+          "exception": null,
+          "failed": 0,
+          "failures": [],
+          "log": "harness/oracle/results/tcl-survey/20260524T040713Z/unit__acl-v2.json",
+          "passed": 0,
+          "returncode": 0,
+          "test": "unit/acl-v2",
+          "timed_out": false,
+          "total": 0
+        },
+        {
+          "abort_test": "Client tracking prefixes memory overhead",
+          "elapsed_s": 0.21294987500004936,
+          "exception": "ERR Unknown CLIENT subcommand: TRACKING.",
+          "failed": null,
+          "failures": [],
+          "log": "harness/oracle/results/tcl-survey/20260524T040713Z/unit__tracking.json",
+          "passed": null,
+          "returncode": 1,
+          "test": "unit/tracking",
+          "timed_out": false,
+          "total": 0
+        },
+        {
+          "abort_test": null,
+          "elapsed_s": 0.0659870410017902,
+          "exception": null,
+          "failed": 0,
+          "failures": [],
+          "log": "harness/oracle/results/tcl-survey/20260524T040713Z/unit__wait.json",
+          "passed": 0,
+          "returncode": 0,
+          "test": "unit/wait",
+          "timed_out": false,
+          "total": 0
+        },
+        {
+          "abort_test": null,
+          "elapsed_s": 0.06478533300105482,
+          "exception": null,
+          "failed": 0,
+          "failures": [],
+          "log": "harness/oracle/results/tcl-survey/20260524T040713Z/unit__maxmemory.json",
+          "passed": 0,
+          "returncode": 0,
+          "test": "unit/maxmemory",
+          "timed_out": false,
+          "total": 0
+        },
+        {
+          "abort_test": null,
+          "elapsed_s": 0.06412237499898765,
+          "exception": null,
+          "failed": 0,
+          "failures": [],
+          "log": "harness/oracle/results/tcl-survey/20260524T040713Z/unit__auth.json",
+          "passed": 0,
+          "returncode": 0,
+          "test": "unit/auth",
+          "timed_out": false,
+          "total": 0
+        },
+        {
+          "abort_test": null,
+          "elapsed_s": 0.07036358299956191,
+          "exception": null,
+          "failed": 0,
+          "failures": [],
+          "log": "harness/oracle/results/tcl-survey/20260524T040713Z/unit__pubsubshard.json",
+          "passed": 0,
+          "returncode": 0,
+          "test": "unit/pubsubshard",
+          "timed_out": false,
+          "total": 0
+        },
+        {
+          "abort_test": "Test read commands are not blocked by client pause",
+          "elapsed_s": 0.2150914170051692,
+          "exception": "ERR Unknown CLIENT subcommand: unpause.",
+          "failed": null,
+          "failures": [
+            "Test check paused info in info clients in tests/unit/pause.tcl"
+          ],
+          "log": "harness/oracle/results/tcl-survey/20260524T040713Z/unit__pause.json",
+          "passed": null,
+          "returncode": 1,
+          "test": "unit/pause",
+          "timed_out": false,
+          "total": 0
+        },
+        {
+          "abort_test": "COMMANDLOG - check that it starts with an empty log",
+          "elapsed_s": 0.2132944580007461,
+          "exception": "ERR unknown command 'commandlog'.",
+          "failed": null,
+          "failures": [],
+          "log": "harness/oracle/results/tcl-survey/20260524T040713Z/unit__commandlog.json",
+          "passed": null,
+          "returncode": 1,
+          "test": "unit/commandlog",
+          "timed_out": false,
+          "total": 0
+        },
+        {
+          "abort_test": "LATENCY HISTOGRAM with empty histogram",
+          "elapsed_s": 0.2148209160004626,
+          "exception": "ERR unknown subcommand or wrong number of arguments for 'histogram'.",
+          "failed": null,
+          "failures": [],
+          "log": "harness/oracle/results/tcl-survey/20260524T040713Z/unit__latency-monitor.json",
+          "passed": null,
+          "returncode": 1,
+          "test": "unit/latency-monitor",
+          "timed_out": false,
+          "total": 0
+        },
+        {
+          "abort_test": null,
+          "elapsed_s": 0.06775120800011791,
+          "exception": null,
+          "failed": 0,
+          "failures": [],
+          "log": "harness/oracle/results/tcl-survey/20260524T040713Z/unit__networking.json",
+          "passed": 0,
+          "returncode": 0,
+          "test": "unit/networking",
+          "timed_out": false,
+          "total": 0
+        },
+        {
+          "abort_test": null,
+          "elapsed_s": 0.0694928750017425,
+          "exception": null,
+          "failed": 0,
+          "failures": [],
+          "log": "harness/oracle/results/tcl-survey/20260524T040713Z/unit__shutdown.json",
+          "passed": 0,
+          "returncode": 0,
+          "test": "unit/shutdown",
+          "timed_out": false,
+          "total": 0
+        },
+        {
+          "abort_test": null,
+          "elapsed_s": 0.068253375000495,
+          "exception": null,
+          "failed": 0,
+          "failures": [],
+          "log": "harness/oracle/results/tcl-survey/20260524T040713Z/unit__obuf-limits.json",
+          "passed": 0,
+          "returncode": 0,
+          "test": "unit/obuf-limits",
+          "timed_out": false,
+          "total": 0
+        }
+      ],
+      "harness_context": {
+        "claim_level": "telemetry",
+        "commit": "a93a2ad",
+        "git_dirty": true,
+        "git_status_short": [
+          " M crates/redis-commands/src/aof.rs",
+          " M crates/redis-commands/src/connection.rs",
+          " M crates/redis-commands/src/dispatch.rs",
+          " M crates/redis-commands/src/info.rs",
+          " M crates/redis-commands/src/persist.rs",
+          " M crates/redis-commands/src/string.rs",
+          " M crates/redis-core/src/db.rs",
+          " M crates/redis-core/src/lib.rs",
+          " M crates/redis-core/src/live_config.rs",
+          " M crates/redis-core/src/rdb/load.rs",
+          " M crates/redis-core/src/rdb/mod.rs",
+          " M crates/redis-core/src/server.rs",
+          " M crates/redis-server/src/main.rs",
+          " M docs/CONFORMANCE.md",
+          " M docs/TCL_FULL_SUITE_GOAL_20260523.md",
+          " M harness/completion.toml",
+          " M harness/evidence/ledger.jsonl",
+          " M harness/history.jsonl",
+          " M harness/oracle/tcl-survey.py",
+          " M harness/runners.toml",
+          " M harness/work-packets.jsonl",
+          "?? crates/redis-core/src/persistence.rs",
+          "?? docs/LOOP_OBSERVATIONS_20260523.md",
+          "?? docs/PERSISTENCE_BORING_SPEC_20260523.md",
+          "?? docs/SINGLE_NODE_CORE_V1_DASHBOARD.md",
+          "?? docs/TCL_BREADTH_OVERNIGHT_20260524.md",
+          "?? harness/evidence/runs/20260523T193242Z-a93a2ad-runner-persistence-frontier-baseline-v1.json",
+          "?? harness/evidence/runs/20260523T193243Z-a93a2ad-runner-persistence-current-rdb-cycle-v1.json",
+          "?? harness/evidence/runs/20260523T193244Z-a93a2ad-runner-persistence-current-aof-cycle-v1.json",
+          "?? harness/evidence/runs/20260523T193245Z-a93a2ad-runner-persistence-current-aof-rewrite-cycle-v1.json",
+          "?? harness/evidence/runs/20260523T193839Z-a93a2ad-test-fixer-persistence-aof-propagation-v1.json",
+          "?? harness/evidence/runs/20260523T195221Z-a93a2ad-runner-persistence-post-propagation-frontier-v1.json",
+          "?? harness/evidence/runs/20260523T195353Z-a93a2ad-architect-persistence-aof-manifest-architecture-v1.json",
+          "?? harness/evidence/runs/20260523T200221Z-a93a2ad-translator-persistence-aof-manifest-frontier-scenarios-v1.json",
+          "?? harness/evidence/runs/20260523T201159Z-a93a2ad-runner-persistence-aof-manifest-frontier-baseline-v1.json",
+          "?? harness/evidence/runs/20260523T201230Z-a93a2ad-test-fixer-persistence-aof-manifest-load-v1.json",
+          "?? harness/evidence/runs/20260523T202439Z-a93a2ad-runner-persistence-post-manifest-load-frontier-v1.json",
+          "?? harness/evidence/runs/20260523T202441Z-a93a2ad-test-fixer-persistence-aof-manifest-current-incr-v1.json",
+          "?? harness/evidence/runs/20260523T203149Z-a93a2ad-runner-persistence-post-manifest-current-incr-frontier-v1.json",
+          "?? harness/evidence/runs/20260523T203151Z-a93a2ad-test-fixer-persistence-aof-manifest-rewrite-finalize-v1.json",
+          "?? harness/evidence/runs/20260523T203850Z-a93a2ad-runner-persistence-post-manifest-rewrite-cycle-v1.json",
+          "?? harness/evidence/runs/20260523T203851Z-a93a2ad-runner-persistence-post-manifest-rewrite-frontier-v1.json",
+          "?? harness/evidence/runs/20260523T203853Z-a93a2ad-runner-persistence-focused-tcl-v1.json",
+          "?? harness/evidence/runs/20260523T204256Z-a93a2ad-runner-persistence-post-oracle-fix-frontier-v1.json",
+          "?? harness/evidence/runs/20260524T035900Z-a93a2ad-runner-tcl-breadth-current-red-baseline-v1.json",
+          "?? harness/launch-tcl-breadth-overnight.sh",
+          "?? harness/oracle/persistence-cycle.py",
+          "?? harness/oracle/persistence-frontier.py",
+          "?? harness/oracle/single-node-core-dashboard.py",
+          "?? harness/oracle/tcl-suite-inventory.py",
+          "?? harness/run-tcl-breadth-overnight.sh",
+          "?? harness/watch-tcl-breadth.sh"
+        ],
+        "resources": [
+          "cargo-target",
+          "oracle-results",
+          "port-range:21111-29111"
+        ],
+        "run_id": "loop-a63c0c4cd06ff02a",
+        "target_commit": "a93a2ad1af8ca90e1e6e0e2b6c37569c1f48f30b",
+        "tree_hash": "e74bf09906a4aa4ce445877860aa5323ee010c46449bca75acd8fd1dac3e9d85"
+      },
+      "json_command": {
+        "command": [
+          "python3",
+          "harness/oracle/tcl-survey.py",
+          "--runner-id",
+          "tcl-breadth-unswept-scout",
+          "--skip-build",
+          "--timeout-s",
+          "120",
+          "--files",
+          "unit/hashexpire,unit/introspection,unit/introspection-2,unit/acl,unit/acl-v2,unit/tracking,unit/wait,unit/maxmemory,unit/auth,unit/pubsubshard,unit/pause,unit/commandlog,unit/latency-monitor,unit/networking,unit/shutdown,unit/obuf-limits"
+        ],
+        "cwd": ".",
+        "resources": [
+          "oracle-results",
+          "cargo-target",
+          "port-range:21111-29111"
+        ],
+        "stderr": ""
+      },
+      "kind": "tcl_survey",
+      "run_id": "20260524T040713Z",
+      "setup": {
+        "cmd": [
+          "bash",
+          "harness/oracle/setup_tcl_runner.sh",
+          "--skip-build"
+        ],
+        "elapsed_s": 0.008570749996579252,
+        "returncode": 0,
+        "timed_out": false
+      },
+      "timeout_s": 120
+    },
+    "measurements": [
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_completed",
+        "name": "unit/hashexpire",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/hashexpire"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_timeout",
+        "name": "unit/hashexpire",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/hashexpire"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_no_summary",
+        "name": "unit/hashexpire",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/hashexpire"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_completed",
+        "name": "unit/introspection",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/introspection"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_timeout",
+        "name": "unit/introspection",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/introspection"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_no_summary",
+        "name": "unit/introspection",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/introspection"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_completed",
+        "name": "unit/introspection-2",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/introspection-2"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_timeout",
+        "name": "unit/introspection-2",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/introspection-2"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_no_summary",
+        "name": "unit/introspection-2",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/introspection-2"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_completed",
+        "name": "unit/acl",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/acl"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_timeout",
+        "name": "unit/acl",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/acl"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_no_summary",
+        "name": "unit/acl",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/acl"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_pass_count",
+        "name": "unit/acl",
+        "target": "rust-vs-reference",
+        "test": "unit/acl",
+        "unit": "tests",
+        "value": 0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_fail_count",
+        "name": "unit/acl",
+        "target": "rust-vs-reference",
+        "test": "unit/acl",
+        "unit": "tests",
+        "value": 0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_total_count",
+        "name": "unit/acl",
+        "target": "rust-vs-reference",
+        "test": "unit/acl",
+        "unit": "tests",
+        "value": 0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_completed",
+        "name": "unit/acl-v2",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/acl-v2"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_timeout",
+        "name": "unit/acl-v2",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/acl-v2"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_no_summary",
+        "name": "unit/acl-v2",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/acl-v2"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_pass_count",
+        "name": "unit/acl-v2",
+        "target": "rust-vs-reference",
+        "test": "unit/acl-v2",
+        "unit": "tests",
+        "value": 0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_fail_count",
+        "name": "unit/acl-v2",
+        "target": "rust-vs-reference",
+        "test": "unit/acl-v2",
+        "unit": "tests",
+        "value": 0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_total_count",
+        "name": "unit/acl-v2",
+        "target": "rust-vs-reference",
+        "test": "unit/acl-v2",
+        "unit": "tests",
+        "value": 0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_completed",
+        "name": "unit/tracking",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/tracking"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_timeout",
+        "name": "unit/tracking",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/tracking"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_no_summary",
+        "name": "unit/tracking",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/tracking"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_completed",
+        "name": "unit/wait",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/wait"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_timeout",
+        "name": "unit/wait",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/wait"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_no_summary",
+        "name": "unit/wait",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/wait"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_pass_count",
+        "name": "unit/wait",
+        "target": "rust-vs-reference",
+        "test": "unit/wait",
+        "unit": "tests",
+        "value": 0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_fail_count",
+        "name": "unit/wait",
+        "target": "rust-vs-reference",
+        "test": "unit/wait",
+        "unit": "tests",
+        "value": 0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_total_count",
+        "name": "unit/wait",
+        "target": "rust-vs-reference",
+        "test": "unit/wait",
+        "unit": "tests",
+        "value": 0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_completed",
+        "name": "unit/maxmemory",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/maxmemory"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_timeout",
+        "name": "unit/maxmemory",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/maxmemory"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_no_summary",
+        "name": "unit/maxmemory",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/maxmemory"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_pass_count",
+        "name": "unit/maxmemory",
+        "target": "rust-vs-reference",
+        "test": "unit/maxmemory",
+        "unit": "tests",
+        "value": 0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_fail_count",
+        "name": "unit/maxmemory",
+        "target": "rust-vs-reference",
+        "test": "unit/maxmemory",
+        "unit": "tests",
+        "value": 0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_total_count",
+        "name": "unit/maxmemory",
+        "target": "rust-vs-reference",
+        "test": "unit/maxmemory",
+        "unit": "tests",
+        "value": 0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_completed",
+        "name": "unit/auth",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/auth"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_timeout",
+        "name": "unit/auth",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/auth"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_no_summary",
+        "name": "unit/auth",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/auth"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_pass_count",
+        "name": "unit/auth",
+        "target": "rust-vs-reference",
+        "test": "unit/auth",
+        "unit": "tests",
+        "value": 0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_fail_count",
+        "name": "unit/auth",
+        "target": "rust-vs-reference",
+        "test": "unit/auth",
+        "unit": "tests",
+        "value": 0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_total_count",
+        "name": "unit/auth",
+        "target": "rust-vs-reference",
+        "test": "unit/auth",
+        "unit": "tests",
+        "value": 0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_completed",
+        "name": "unit/pubsubshard",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/pubsubshard"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_timeout",
+        "name": "unit/pubsubshard",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/pubsubshard"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_no_summary",
+        "name": "unit/pubsubshard",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/pubsubshard"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_pass_count",
+        "name": "unit/pubsubshard",
+        "target": "rust-vs-reference",
+        "test": "unit/pubsubshard",
+        "unit": "tests",
+        "value": 0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_fail_count",
+        "name": "unit/pubsubshard",
+        "target": "rust-vs-reference",
+        "test": "unit/pubsubshard",
+        "unit": "tests",
+        "value": 0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_total_count",
+        "name": "unit/pubsubshard",
+        "target": "rust-vs-reference",
+        "test": "unit/pubsubshard",
+        "unit": "tests",
+        "value": 0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_completed",
+        "name": "unit/pause",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/pause"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_timeout",
+        "name": "unit/pause",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/pause"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_no_summary",
+        "name": "unit/pause",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/pause"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_completed",
+        "name": "unit/commandlog",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/commandlog"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_timeout",
+        "name": "unit/commandlog",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/commandlog"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_no_summary",
+        "name": "unit/commandlog",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/commandlog"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_completed",
+        "name": "unit/latency-monitor",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/latency-monitor"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_timeout",
+        "name": "unit/latency-monitor",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/latency-monitor"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_no_summary",
+        "name": "unit/latency-monitor",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/latency-monitor"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_completed",
+        "name": "unit/networking",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/networking"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_timeout",
+        "name": "unit/networking",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/networking"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_no_summary",
+        "name": "unit/networking",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/networking"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_pass_count",
+        "name": "unit/networking",
+        "target": "rust-vs-reference",
+        "test": "unit/networking",
+        "unit": "tests",
+        "value": 0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_fail_count",
+        "name": "unit/networking",
+        "target": "rust-vs-reference",
+        "test": "unit/networking",
+        "unit": "tests",
+        "value": 0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_total_count",
+        "name": "unit/networking",
+        "target": "rust-vs-reference",
+        "test": "unit/networking",
+        "unit": "tests",
+        "value": 0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_completed",
+        "name": "unit/shutdown",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/shutdown"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_timeout",
+        "name": "unit/shutdown",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/shutdown"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_no_summary",
+        "name": "unit/shutdown",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/shutdown"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_pass_count",
+        "name": "unit/shutdown",
+        "target": "rust-vs-reference",
+        "test": "unit/shutdown",
+        "unit": "tests",
+        "value": 0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_fail_count",
+        "name": "unit/shutdown",
+        "target": "rust-vs-reference",
+        "test": "unit/shutdown",
+        "unit": "tests",
+        "value": 0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_total_count",
+        "name": "unit/shutdown",
+        "target": "rust-vs-reference",
+        "test": "unit/shutdown",
+        "unit": "tests",
+        "value": 0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_completed",
+        "name": "unit/obuf-limits",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "unit/obuf-limits"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_timeout",
+        "name": "unit/obuf-limits",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/obuf-limits"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "tcl_file_no_summary",
+        "name": "unit/obuf-limits",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "unit/obuf-limits"
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_pass_count",
+        "name": "unit/obuf-limits",
+        "target": "rust-vs-reference",
+        "test": "unit/obuf-limits",
+        "unit": "tests",
+        "value": 0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_fail_count",
+        "name": "unit/obuf-limits",
+        "target": "rust-vs-reference",
+        "test": "unit/obuf-limits",
+        "unit": "tests",
+        "value": 0
+      },
+      {
+        "capability": "official-tcl-coverage",
+        "kind": "official",
+        "metric": "tcl_total_count",
+        "name": "unit/obuf-limits",
+        "target": "rust-vs-reference",
+        "test": "unit/obuf-limits",
+        "unit": "tests",
+        "value": 0
+      }
+    ],
+    "method": "official-suite",
+    "runner_id": "tcl-breadth-unswept-scout",
+    "schema_version": 1,
+    "status": "pass",
+    "summary": "TCL survey: 16 files, 0 passed tests, 0 failed tests, 0 timed out, 7 without summary",
+    "surface": "correctness"
+  },
+  "role": "runner"
+}

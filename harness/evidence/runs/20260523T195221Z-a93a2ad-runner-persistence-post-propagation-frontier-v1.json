@@ -1,0 +1,651 @@
+{
+  "captured_ts": "2026-05-23T19:52:22.724838Z",
+  "harness_context": {
+    "claim_level": "telemetry",
+    "commit": "a93a2ad",
+    "git_dirty": true,
+    "git_status_short": [
+      " M crates/redis-commands/src/aof.rs",
+      " M crates/redis-commands/src/connection.rs",
+      " M crates/redis-commands/src/dispatch.rs",
+      " M crates/redis-commands/src/info.rs",
+      " M crates/redis-commands/src/persist.rs",
+      " M crates/redis-commands/src/string.rs",
+      " M crates/redis-core/src/db.rs",
+      " M crates/redis-core/src/lib.rs",
+      " M crates/redis-core/src/live_config.rs",
+      " M crates/redis-core/src/rdb/load.rs",
+      " M crates/redis-core/src/rdb/mod.rs",
+      " M crates/redis-core/src/server.rs",
+      " M crates/redis-server/src/main.rs",
+      " M docs/CONFORMANCE.md",
+      " M docs/TCL_FULL_SUITE_GOAL_20260523.md",
+      " M harness/completion.toml",
+      " M harness/evidence/ledger.jsonl",
+      " M harness/history.jsonl",
+      " M harness/oracle/tcl-survey.py",
+      " M harness/runners.toml",
+      " M harness/work-packets.jsonl",
+      "?? crates/redis-core/src/persistence.rs",
+      "?? docs/LOOP_OBSERVATIONS_20260523.md",
+      "?? docs/PERSISTENCE_BORING_SPEC_20260523.md",
+      "?? docs/SINGLE_NODE_CORE_V1_DASHBOARD.md",
+      "?? harness/evidence/runs/20260523T193242Z-a93a2ad-runner-persistence-frontier-baseline-v1.json",
+      "?? harness/evidence/runs/20260523T193243Z-a93a2ad-runner-persistence-current-rdb-cycle-v1.json",
+      "?? harness/evidence/runs/20260523T193244Z-a93a2ad-runner-persistence-current-aof-cycle-v1.json",
+      "?? harness/evidence/runs/20260523T193245Z-a93a2ad-runner-persistence-current-aof-rewrite-cycle-v1.json",
+      "?? harness/evidence/runs/20260523T193839Z-a93a2ad-test-fixer-persistence-aof-propagation-v1.json",
+      "?? harness/oracle/persistence-cycle.py",
+      "?? harness/oracle/persistence-frontier.py",
+      "?? harness/oracle/single-node-core-dashboard.py",
+      "?? harness/oracle/tcl-suite-inventory.py"
+    ],
+    "resources": [
+      "cargo-target",
+      "oracle-results",
+      "port-range:21111-29111"
+    ],
+    "run_id": "loop-b1b2e8915ad0b59a",
+    "target_commit": "a93a2ad1af8ca90e1e6e0e2b6c37569c1f48f30b",
+    "tree_hash": "e2664e5e9275afb9baaf7ebfd02e900a938ab34b6a14b0b6ffaf8b64cb913b08"
+  },
+  "kind": "runner_result",
+  "packet": "persistence-post-propagation-frontier-v1",
+  "result": {
+    "artifacts": [
+      {
+        "kind": "persistence-frontier-scenario",
+        "path": "harness/oracle/results/persistence-frontier/20260523T195221Z/rdb-debug-reload-complex-dataset.json",
+        "test": "rdb-debug-reload-complex-dataset"
+      },
+      {
+        "kind": "persistence-frontier-scenario",
+        "path": "harness/oracle/results/persistence-frontier/20260523T195221Z/aof-debug-loadaof-complex-dataset.json",
+        "test": "aof-debug-loadaof-complex-dataset"
+      },
+      {
+        "kind": "persistence-frontier-scenario",
+        "path": "harness/oracle/results/persistence-frontier/20260523T195221Z/expires-after-rdb-reload.json",
+        "test": "expires-after-rdb-reload"
+      },
+      {
+        "kind": "persistence-frontier-scenario",
+        "path": "harness/oracle/results/persistence-frontier/20260523T195221Z/expires-after-aof-loadaof.json",
+        "test": "expires-after-aof-loadaof"
+      },
+      {
+        "kind": "persistence-frontier-scenario",
+        "path": "harness/oracle/results/persistence-frontier/20260523T195221Z/aof-load-truncated-yes-short-read.json",
+        "test": "aof-load-truncated-yes-short-read"
+      },
+      {
+        "kind": "persistence-frontier-scenario",
+        "path": "harness/oracle/results/persistence-frontier/20260523T195221Z/aof-load-truncated-no-fails.json",
+        "test": "aof-load-truncated-no-fails"
+      },
+      {
+        "kind": "persistence-frontier-scenario",
+        "path": "harness/oracle/results/persistence-frontier/20260523T195221Z/aof-unknown-command-fails-startup.json",
+        "test": "aof-unknown-command-fails-startup"
+      },
+      {
+        "kind": "persistence-frontier-scenario",
+        "path": "harness/oracle/results/persistence-frontier/20260523T195221Z/getex-does-not-append-to-aof.json",
+        "test": "getex-does-not-append-to-aof"
+      },
+      {
+        "kind": "persistence-frontier-scenario",
+        "path": "harness/oracle/results/persistence-frontier/20260523T195221Z/aof-spop-count-replay.json",
+        "test": "aof-spop-count-replay"
+      },
+      {
+        "kind": "persistence-frontier-scenario",
+        "path": "harness/oracle/results/persistence-frontier/20260523T195221Z/aof-lmpop-zmpop-replay.json",
+        "test": "aof-lmpop-zmpop-replay"
+      },
+      {
+        "kind": "persistence-frontier-scenario",
+        "path": "harness/oracle/results/persistence-frontier/20260523T195221Z/aof-rewrite-collections-digest.json",
+        "test": "aof-rewrite-collections-digest"
+      },
+      {
+        "kind": "persistence-frontier-scenario",
+        "path": "harness/oracle/results/persistence-frontier/20260523T195221Z/multipart-aof-manifest-basic-load.json",
+        "test": "multipart-aof-manifest-basic-load"
+      }
+    ],
+    "claim_level": "telemetry",
+    "evidence": {
+      "commit": "a93a2ad",
+      "elapsed_s": 0.912,
+      "harness_context": {
+        "claim_level": "telemetry",
+        "commit": "a93a2ad",
+        "git_dirty": true,
+        "git_status_short": [
+          " M crates/redis-commands/src/aof.rs",
+          " M crates/redis-commands/src/connection.rs",
+          " M crates/redis-commands/src/dispatch.rs",
+          " M crates/redis-commands/src/info.rs",
+          " M crates/redis-commands/src/persist.rs",
+          " M crates/redis-commands/src/string.rs",
+          " M crates/redis-core/src/db.rs",
+          " M crates/redis-core/src/lib.rs",
+          " M crates/redis-core/src/live_config.rs",
+          " M crates/redis-core/src/rdb/load.rs",
+          " M crates/redis-core/src/rdb/mod.rs",
+          " M crates/redis-core/src/server.rs",
+          " M crates/redis-server/src/main.rs",
+          " M docs/CONFORMANCE.md",
+          " M docs/TCL_FULL_SUITE_GOAL_20260523.md",
+          " M harness/completion.toml",
+          " M harness/evidence/ledger.jsonl",
+          " M harness/history.jsonl",
+          " M harness/oracle/tcl-survey.py",
+          " M harness/runners.toml",
+          " M harness/work-packets.jsonl",
+          "?? crates/redis-core/src/persistence.rs",
+          "?? docs/LOOP_OBSERVATIONS_20260523.md",
+          "?? docs/PERSISTENCE_BORING_SPEC_20260523.md",
+          "?? docs/SINGLE_NODE_CORE_V1_DASHBOARD.md",
+          "?? harness/evidence/runs/20260523T193242Z-a93a2ad-runner-persistence-frontier-baseline-v1.json",
+          "?? harness/evidence/runs/20260523T193243Z-a93a2ad-runner-persistence-current-rdb-cycle-v1.json",
+          "?? harness/evidence/runs/20260523T193244Z-a93a2ad-runner-persistence-current-aof-cycle-v1.json",
+          "?? harness/evidence/runs/20260523T193245Z-a93a2ad-runner-persistence-current-aof-rewrite-cycle-v1.json",
+          "?? harness/evidence/runs/20260523T193839Z-a93a2ad-test-fixer-persistence-aof-propagation-v1.json",
+          "?? harness/oracle/persistence-cycle.py",
+          "?? harness/oracle/persistence-frontier.py",
+          "?? harness/oracle/single-node-core-dashboard.py",
+          "?? harness/oracle/tcl-suite-inventory.py"
+        ],
+        "resources": [
+          "cargo-target",
+          "oracle-results",
+          "port-range:21111-29111"
+        ],
+        "run_id": "loop-b1b2e8915ad0b59a",
+        "target_commit": "a93a2ad1af8ca90e1e6e0e2b6c37569c1f48f30b",
+        "tree_hash": "e2664e5e9275afb9baaf7ebfd02e900a938ab34b6a14b0b6ffaf8b64cb913b08"
+      },
+      "json_command": {
+        "command": [
+          "python3",
+          "harness/oracle/persistence-frontier.py",
+          "--skip-build"
+        ],
+        "cwd": ".",
+        "resources": [
+          "oracle-results",
+          "cargo-target",
+          "port-range:21111-29111"
+        ],
+        "stderr": ""
+      },
+      "kind": "persistence_frontier",
+      "run_id": "20260523T195221Z",
+      "scenarios": [
+        {
+          "capability": "persistence-rdb",
+          "detail": {
+            "after": {
+              "counter": "42",
+              "hash": [
+                "f1",
+                "f2",
+                "v1",
+                "v2"
+              ],
+              "list": [
+                "a",
+                "b",
+                "c"
+              ],
+              "m1": "one",
+              "m2": "two",
+              "s": "value",
+              "set": [
+                "x",
+                "y",
+                "z"
+              ],
+              "zset": [
+                "a",
+                "1",
+                "b",
+                "2"
+              ]
+            },
+            "before": {
+              "counter": "42",
+              "hash": [
+                "f1",
+                "f2",
+                "v1",
+                "v2"
+              ],
+              "list": [
+                "a",
+                "b",
+                "c"
+              ],
+              "m1": "one",
+              "m2": "two",
+              "s": "value",
+              "set": [
+                "x",
+                "y",
+                "z"
+              ],
+              "zset": [
+                "a",
+                "1",
+                "b",
+                "2"
+              ]
+            },
+            "passed": true
+          },
+          "elapsed_s": 0.061,
+          "error": null,
+          "name": "rdb-debug-reload-complex-dataset",
+          "passed": true
+        },
+        {
+          "capability": "persistence-aof",
+          "detail": {
+            "after": {
+              "counter": "42",
+              "hash": [
+                "f1",
+                "f2",
+                "v1",
+                "v2"
+              ],
+              "list": [
+                "a",
+                "b",
+                "c"
+              ],
+              "m1": "one",
+              "m2": "two",
+              "s": "value",
+              "set": [
+                "x",
+                "y",
+                "z"
+              ],
+              "zset": [
+                "a",
+                "1",
+                "b",
+                "2"
+              ]
+            },
+            "before": {
+              "counter": "42",
+              "hash": [
+                "f1",
+                "f2",
+                "v1",
+                "v2"
+              ],
+              "list": [
+                "a",
+                "b",
+                "c"
+              ],
+              "m1": "one",
+              "m2": "two",
+              "s": "value",
+              "set": [
+                "x",
+                "y",
+                "z"
+              ],
+              "zset": [
+                "a",
+                "1",
+                "b",
+                "2"
+              ]
+            },
+            "passed": true
+          },
+          "elapsed_s": 0.111,
+          "error": null,
+          "name": "aof-debug-loadaof-complex-dataset",
+          "passed": true
+        },
+        {
+          "capability": "persistence-rdb",
+          "detail": {
+            "passed": true,
+            "pttl": 999999,
+            "ttl": 1000
+          },
+          "elapsed_s": 0.063,
+          "error": null,
+          "name": "expires-after-rdb-reload",
+          "passed": true
+        },
+        {
+          "capability": "persistence-aof",
+          "detail": {
+            "passed": true,
+            "pttl": 999999,
+            "ttl": 1000
+          },
+          "elapsed_s": 0.08,
+          "error": null,
+          "name": "expires-after-aof-loadaof",
+          "passed": true
+        },
+        {
+          "capability": "persistence-aof",
+          "detail": {
+            "foo": "5",
+            "passed": true
+          },
+          "elapsed_s": 0.061,
+          "error": null,
+          "name": "aof-load-truncated-yes-short-read",
+          "passed": true
+        },
+        {
+          "capability": "persistence-aof",
+          "detail": {
+            "output": "redis-server: listening on 127.0.0.1:65215\n31098:M 1779565942 * PID: 31098\n31098:M 1779565942 * Server initialized\n31098:M 1779565942 * Ready to accept connections tcp\nredis-server: AOF replay failed (/var/folders/hw/ff2wn1wn34z0rz8lrg9w0sjc0000gp/T/redis-rs-aof-load-truncated-no-fails-ny0tulkc/appendonly.aof): AOF ended with an incomplete command\n",
+            "passed": true,
+            "returncode": 1
+          },
+          "elapsed_s": 0.058,
+          "error": null,
+          "name": "aof-load-truncated-no-fails",
+          "passed": true
+        },
+        {
+          "capability": "persistence-aof",
+          "detail": {
+            "output": "redis-server: listening on 127.0.0.1:65216\n31099:M 1779565942 * PID: 31099\n31099:M 1779565942 * Server initialized\n31099:M 1779565942 * Ready to accept connections tcp\nredis-server: AOF replay failed (/var/folders/hw/ff2wn1wn34z0rz8lrg9w0sjc0000gp/T/redis-rs-aof-unknown-command-fails-startup-kzrz_eto/appendonly.aof): AOF command \"BLA\" failed: ERR unknown command 'BLA'\n",
+            "passed": true,
+            "returncode": 1
+          },
+          "elapsed_s": 0.059,
+          "error": null,
+          "name": "aof-unknown-command-fails-startup",
+          "passed": true
+        },
+        {
+          "capability": "persistence-aof-propagation",
+          "detail": {
+            "passed": true,
+            "size_after": 54,
+            "size_before": 54
+          },
+          "elapsed_s": 0.12,
+          "error": null,
+          "name": "getex-does-not-append-to-aof",
+          "passed": true
+        },
+        {
+          "capability": "persistence-aof-propagation",
+          "detail": {
+            "passed": true,
+            "scard": 1
+          },
+          "elapsed_s": 0.058,
+          "error": null,
+          "name": "aof-spop-count-replay",
+          "passed": true
+        },
+        {
+          "capability": "persistence-aof-propagation",
+          "detail": {
+            "llen": 1,
+            "passed": true,
+            "zcard": 1
+          },
+          "elapsed_s": 0.058,
+          "error": null,
+          "name": "aof-lmpop-zmpop-replay",
+          "passed": true
+        },
+        {
+          "capability": "persistence-aof-rewrite",
+          "detail": {
+            "after": {
+              "counter": "42",
+              "hash": [
+                "f1",
+                "f2",
+                "v1",
+                "v2"
+              ],
+              "list": [
+                "a",
+                "b",
+                "c"
+              ],
+              "m1": "one",
+              "m2": "two",
+              "s": "value",
+              "set": [
+                "x",
+                "y",
+                "z"
+              ],
+              "zset": [
+                "a",
+                "1",
+                "b",
+                "2"
+              ]
+            },
+            "before": {
+              "counter": "42",
+              "hash": [
+                "f1",
+                "f2",
+                "v1",
+                "v2"
+              ],
+              "list": [
+                "a",
+                "b",
+                "c"
+              ],
+              "m1": "one",
+              "m2": "two",
+              "s": "value",
+              "set": [
+                "x",
+                "y",
+                "z"
+              ],
+              "zset": [
+                "a",
+                "1",
+                "b",
+                "2"
+              ]
+            },
+            "passed": true
+          },
+          "elapsed_s": 0.103,
+          "error": null,
+          "name": "aof-rewrite-collections-digest",
+          "passed": true
+        },
+        {
+          "capability": "persistence-aof-manifest",
+          "detail": {
+            "mp": null,
+            "passed": false
+          },
+          "elapsed_s": 0.061,
+          "error": null,
+          "name": "multipart-aof-manifest-basic-load",
+          "passed": false
+        }
+      ]
+    },
+    "measurements": [
+      {
+        "capability": "persistence-rdb",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "persistence_frontier_pass",
+        "name": "rdb-debug-reload-complex-dataset",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "rdb-debug-reload-complex-dataset"
+      },
+      {
+        "capability": "persistence-aof",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "persistence_frontier_pass",
+        "name": "aof-debug-loadaof-complex-dataset",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "aof-debug-loadaof-complex-dataset"
+      },
+      {
+        "capability": "persistence-rdb",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "persistence_frontier_pass",
+        "name": "expires-after-rdb-reload",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "expires-after-rdb-reload"
+      },
+      {
+        "capability": "persistence-aof",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "persistence_frontier_pass",
+        "name": "expires-after-aof-loadaof",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "expires-after-aof-loadaof"
+      },
+      {
+        "capability": "persistence-aof",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "persistence_frontier_pass",
+        "name": "aof-load-truncated-yes-short-read",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "aof-load-truncated-yes-short-read"
+      },
+      {
+        "capability": "persistence-aof",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "persistence_frontier_pass",
+        "name": "aof-load-truncated-no-fails",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "aof-load-truncated-no-fails"
+      },
+      {
+        "capability": "persistence-aof",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "persistence_frontier_pass",
+        "name": "aof-unknown-command-fails-startup",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "aof-unknown-command-fails-startup"
+      },
+      {
+        "capability": "persistence-aof-propagation",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "persistence_frontier_pass",
+        "name": "getex-does-not-append-to-aof",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "getex-does-not-append-to-aof"
+      },
+      {
+        "capability": "persistence-aof-propagation",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "persistence_frontier_pass",
+        "name": "aof-spop-count-replay",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "aof-spop-count-replay"
+      },
+      {
+        "capability": "persistence-aof-propagation",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "persistence_frontier_pass",
+        "name": "aof-lmpop-zmpop-replay",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "aof-lmpop-zmpop-replay"
+      },
+      {
+        "capability": "persistence-aof-rewrite",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "persistence_frontier_pass",
+        "name": "aof-rewrite-collections-digest",
+        "numerator": 1,
+        "target": "rust-vs-reference",
+        "test": "aof-rewrite-collections-digest"
+      },
+      {
+        "capability": "persistence-aof-manifest",
+        "denominator": 1,
+        "kind": "official",
+        "metric": "persistence_frontier_pass",
+        "name": "multipart-aof-manifest-basic-load",
+        "numerator": 0,
+        "target": "rust-vs-reference",
+        "test": "multipart-aof-manifest-basic-load"
+      },
+      {
+        "capability": "persistence-frontier",
+        "kind": "official",
+        "metric": "persistence_frontier_pass_count",
+        "name": "persistence-frontier",
+        "target": "rust-vs-reference",
+        "unit": "scenarios",
+        "value": 11
+      },
+      {
+        "capability": "persistence-frontier",
+        "kind": "official",
+        "metric": "persistence_frontier_fail_count",
+        "name": "persistence-frontier",
+        "target": "rust-vs-reference",
+        "unit": "scenarios",
+        "value": 1
+      },
+      {
+        "capability": "persistence-frontier",
+        "denominator": 12,
+        "kind": "official",
+        "metric": "persistence_frontier_pass_ratio",
+        "name": "persistence-frontier",
+        "numerator": 11,
+        "target": "rust-vs-reference",
+        "unit": "pass/total",
+        "value": 0.9166666666666666
+      }
+    ],
+    "method": "official-suite",
+    "runner_id": "persistence-frontier",
+    "schema_version": 1,
+    "status": "pass",
+    "summary": "persistence frontier: 11/12 scenarios passing",
+    "surface": "correctness"
+  },
+  "role": "runner"
+}

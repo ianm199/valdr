@@ -29,7 +29,7 @@ is to report against that denominator. The current numbers are scoped:
 | View | Status |
 |---|---|
 | Historical core unit survey | ~877 pass / ~73 fail, cleanup-wave baseline |
-| Latest focused frontier telemetry | 266 counted pass / 0 counted fail, 1 file without summary |
+| Latest generated full-suite inventory | 487 counted pass / 2 counted fail, 3 timeout files, 9 no-summary files, 219 skipped-by-policy files |
 | `tcl-survey-core` file inventory | 15 selected single-node files, 1,160 source test blocks |
 | Full upstream inventory | 245 files, 4,299 test blocks |
 

@@ -118,6 +118,9 @@ pub struct Client {
     pub argv: Vec<RedisString>,
     /// Pending reply bytes, drained by the I/O layer.
     pub reply_buf: Vec<u8>,
+    /// Ranges in `reply_buf` that are Pub/Sub push replies from the current
+    /// command and must bypass CLIENT REPLY OFF/SKIP.
+    push_reply_segments: Vec<(usize, usize)>,
     /// Selected database index (Phase 3 with RedisDb).
     pub db_index: u32,
     /// MULTI/EXEC transaction state (lazily initialised; `None` when the client
@@ -172,6 +175,14 @@ pub struct Client {
     /// Defaults to 2 (the version implied by every legacy RESP2 client).
     /// RESP3 upgrade path is a TODO.
     pub resp_proto: i32,
+    /// CLIENT TRACKING visible state.
+    ///
+    /// This intentionally records only the per-client flags needed by CLIENT
+    /// subcommands and diagnostics. The global invalidation table remains a
+    /// separate architectural packet.
+    pub tracking: ClientTrackingState,
+    /// True after `CLIENT IMPORT-SOURCE ON`.
+    pub import_source: bool,
     /// The ACL username this client is authenticated as.
     ///
     /// `None` means the client has not yet authenticated (pre-AUTH state).
@@ -228,6 +239,22 @@ pub struct ClientFlags {
     pub deny_blocking: bool,
     pub blocked: bool,
     pub aof_client: bool,
+    pub reply_off: bool,
+    pub reply_skip_next: bool,
+    pub reply_skip: bool,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct ClientTrackingState {
+    pub enabled: bool,
+    pub bcast: bool,
+    pub optin: bool,
+    pub optout: bool,
+    pub caching: bool,
+    pub noloop: bool,
+    pub broken_redirect: bool,
+    pub redirect: i64,
+    pub prefixes: Vec<RedisString>,
 }
 
 /// Determine the initial `authenticated_user` for a new `Client`.
@@ -256,6 +283,7 @@ impl Client {
             id,
             argv: Vec::new(),
             reply_buf: Vec::new(),
+            push_reply_segments: Vec::new(),
             db_index: 0,
             mstate: None,
             queued_argvs: Vec::new(),
@@ -267,6 +295,8 @@ impl Client {
             should_close: false,
             addr: None,
             resp_proto: 2,
+            tracking: ClientTrackingState::default(),
+            import_source: false,
             subscribed_channels: HashSet::new(),
             subscribed_patterns: HashSet::new(),
             blocked_on_keys: false,
@@ -312,9 +342,12 @@ impl Client {
         self.mstate = None;
         self.queued_argvs.clear();
         self.reply_buf.clear();
+        self.push_reply_segments.clear();
         self.db_index = 0;
         self.flags = ClientFlags::default();
         self.resp_proto = 2;
+        self.tracking = ClientTrackingState::default();
+        self.import_source = false;
         self.subscribed_channels.clear();
         self.subscribed_patterns.clear();
         self.pending_wakes.clear();
@@ -356,6 +389,68 @@ impl Client {
     /// identical regardless of `resp_proto`.
     pub fn write_frame(&mut self, frame: &RespFrame) {
         redis_protocol::encode_for_proto(frame, self.resp_proto, &mut self.reply_buf);
+    }
+
+    /// Append a Pub/Sub-style push frame.
+    ///
+    /// Valkey marks these writes with CLIENT_PUSHING, so reply silencing
+    /// suppresses ordinary command replies without hiding notifications.
+    pub fn write_push_frame(&mut self, frame: &RespFrame) {
+        let start = self.reply_buf.len();
+        redis_protocol::encode_for_proto(frame, self.resp_proto, &mut self.reply_buf);
+        let end = self.reply_buf.len();
+        if end > start {
+            self.push_reply_segments.push((start, end));
+        }
+    }
+
+    /// Finish one command's reply lifecycle, applying CLIENT REPLY OFF/SKIP.
+    pub fn finish_command_reply(&mut self, reply_start: usize) {
+        if self.flags.reply_off || self.flags.reply_skip {
+            self.suppress_non_push_reply_since(reply_start);
+        } else {
+            self.push_reply_segments.clear();
+        }
+
+        self.flags.reply_skip = false;
+        if self.flags.reply_skip_next {
+            self.flags.reply_skip = true;
+            self.flags.reply_skip_next = false;
+        }
+    }
+
+    fn suppress_non_push_reply_since(&mut self, reply_start: usize) {
+        if reply_start >= self.reply_buf.len() {
+            self.push_reply_segments.clear();
+            return;
+        }
+
+        let segments: Vec<(usize, usize)> = self
+            .push_reply_segments
+            .iter()
+            .copied()
+            .filter(|(start, end)| *start >= reply_start && *end <= self.reply_buf.len())
+            .collect();
+
+        if segments.is_empty() {
+            self.reply_buf.truncate(reply_start);
+            self.push_reply_segments.clear();
+            return;
+        }
+
+        let mut kept = Vec::with_capacity(
+            reply_start
+                + segments
+                    .iter()
+                    .map(|(start, end)| end.saturating_sub(*start))
+                    .sum::<usize>(),
+        );
+        kept.extend_from_slice(&self.reply_buf[..reply_start]);
+        for (start, end) in segments {
+            kept.extend_from_slice(&self.reply_buf[start..end]);
+        }
+        self.reply_buf = kept;
+        self.push_reply_segments.clear();
     }
 
     fn append_prefixed_line(&mut self, prefix: u8, bytes: &[u8]) {
@@ -638,6 +733,42 @@ mod tests {
         let bytes = c.drain_reply();
         assert_eq!(bytes, b"+OK\r\n:42\r\n");
         assert!(c.drain_reply().is_empty());
+    }
+
+    #[test]
+    fn client_reply_off_keeps_push_frames() {
+        let mut c = Client::new(1);
+        c.flags.reply_off = true;
+        c.write_simple_string(b"OK");
+        c.write_push_frame(&RespFrame::array(vec![
+            RespFrame::bulk(RedisString::from_static(b"message")),
+            RespFrame::bulk(RedisString::from_static(b"chan")),
+            RespFrame::bulk(RedisString::from_static(b"payload")),
+        ]));
+        c.finish_command_reply(0);
+        assert_eq!(
+            c.drain_reply(),
+            b"*3\r\n$7\r\nmessage\r\n$4\r\nchan\r\n$7\r\npayload\r\n"
+        );
+    }
+
+    #[test]
+    fn client_reply_skip_suppresses_one_command() {
+        let mut c = Client::new(1);
+        c.flags.reply_skip_next = true;
+        c.finish_command_reply(0);
+        assert!(c.flags.reply_skip);
+
+        let start = c.reply_buf.len();
+        c.write_simple_string(b"OK");
+        c.finish_command_reply(start);
+        assert!(c.drain_reply().is_empty());
+        assert!(!c.flags.reply_skip);
+
+        let start = c.reply_buf.len();
+        c.write_simple_string(b"OK");
+        c.finish_command_reply(start);
+        assert_eq!(c.drain_reply(), b"+OK\r\n");
     }
 
     #[test]
