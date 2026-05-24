@@ -102,6 +102,13 @@ Source anchors:
 Scope cap: early single-node library semantics only. Replication, long-running
 kill, and complete engine ABI are out of scope.
 
+Result 2026-05-24: implemented source-shaped FUNCTION metadata parsing,
+named-argument descriptions, case-insensitive library/function lookup, Valkey
+metadata error strings, and FUNCTION STATS/LIST compatibility in
+`crates/redis-commands/src/eval.rs`. Focused TCL proof selected the metadata,
+FCALL/FCALL_RO, LIST, and STATS rows from `unit/functions.tcl`; full-file
+coverage still reaches the known long-running kill non-goal.
+
 ### 5. CLIENT LIST filters and command introspection
 
 Packet: `tcl-client-introspection-filters-v1`.
