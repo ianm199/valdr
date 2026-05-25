@@ -1819,21 +1819,83 @@ pub fn client_list_command(ctx: &mut CommandContext) -> RedisResult<()> {
 /// CLIENT PAUSE <timeout> [WRITE|ALL]
 ///
 /// C: networking.c:5466 `clientPauseCommand`
+///
+/// `CLIENT PAUSE <timeout-ms> [WRITE|ALL]` (default ALL). Sets the
+/// `ByClientCommand` pause event; `pause_clients_by_client` keeps the most
+/// restrictive action and the longest end time across overlapping calls.
 pub fn client_pause_command(ctx: &mut CommandContext) -> RedisResult<()> {
-    let timeout_rs = ctx.arg(2)?;
-    let _timeout = parse_i64(timeout_rs.as_bytes()).ok_or_else(|| RedisError::not_integer())?;
-    // TODO(port): getTimeoutFromObjectOrReply, pauseClientsByClient.
+    let timeout = match parse_i64(ctx.arg(2)?.as_bytes()) {
+        Some(t) if t >= 0 => t,
+        _ => {
+            add_reply_error(ctx.client, b"ERR timeout is not an integer or out of range");
+            return Ok(());
+        }
+    };
+    let pause_all = if ctx.arg_count() > 3 {
+        let mode = ctx.arg(3)?;
+        if mode.as_bytes().eq_ignore_ascii_case(b"write") {
+            false
+        } else if mode.as_bytes().eq_ignore_ascii_case(b"all") {
+            true
+        } else {
+            add_reply_error(ctx.client, b"ERR syntax error");
+            return Ok(());
+        }
+    } else {
+        true
+    };
+    let end = crate::util::mstime().saturating_add(timeout);
+    {
+        let mut events = ctx
+            .server()
+            .pause_events
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        pause_clients_by_client(&mut events, end, pause_all);
+    }
     add_reply_status(ctx.client, b"OK");
     Ok(())
 }
 
 /// CLIENT UNPAUSE
 ///
-/// C: networking.c:5460 `clientUnpauseCommand`
+/// C: networking.c:5460 `clientUnpauseCommand` — clears the client-command
+/// pause and (via the gate) resumes any postponed clients.
 pub fn client_unpause_command(ctx: &mut CommandContext) -> RedisResult<()> {
-    // TODO(port): unpauseActions(PAUSE_BY_CLIENT_COMMAND);
+    {
+        let mut events = ctx
+            .server()
+            .pause_events
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unpause_actions(&mut events, PausePurpose::ByClientCommand);
+    }
     add_reply_status(ctx.client, b"OK");
     Ok(())
+}
+
+/// Human-readable pause summary for `INFO clients`: returns
+/// `(paused_reason, paused_actions, paused_timeout_milliseconds)`. Reports
+/// `("none", "none", 0)` when nothing is paused.
+pub fn pause_info(events: &[PauseEvent; 4], now: i64) -> (&'static str, &'static str, i64) {
+    let paused = update_paused_actions(events, now);
+    if paused == 0 {
+        return ("none", "none", 0);
+    }
+    let (timeout, purpose) = get_paused_action_timeout(events, PAUSE_ACTION_CLIENT_WRITE, now);
+    let reason = match purpose {
+        PausePurpose::ByClientCommand => "client_pause",
+        PausePurpose::DuringShutdown => "shutdown",
+        PausePurpose::DuringFailover => "failover",
+        PausePurpose::DuringSlotMigration => "slot_migration",
+        PausePurpose::NumPausePurposes => "none",
+    };
+    let actions = if paused & PAUSE_ACTION_CLIENT_ALL != 0 {
+        "all"
+    } else {
+        "write"
+    };
+    (reason, actions, timeout.max(0))
 }
 
 /// CLIENT TRACKING ON|OFF [REDIRECT <id>] [BCAST] [PREFIX <p>…] [OPTIN] [OPTOUT] [NOLOOP]

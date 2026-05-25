@@ -179,6 +179,17 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let _ = writeln!(buf, "watching_clients:0\r");
         let _ = writeln!(buf, "client_recent_max_input_buffer:0\r");
         let _ = writeln!(buf, "cluster_connections:0\r");
+        let (pause_reason, pause_actions, pause_timeout) = {
+            let events = ctx
+                .server()
+                .pause_events
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            redis_core::networking::pause_info(&events, redis_core::util::mstime())
+        };
+        let _ = writeln!(buf, "paused_reason:{}\r", pause_reason);
+        let _ = writeln!(buf, "paused_actions:{}\r", pause_actions);
+        let _ = writeln!(buf, "paused_timeout_milliseconds:{}\r", pause_timeout);
         let _ = writeln!(buf, "\r");
     }
     if want(b"memory") {

@@ -69,6 +69,10 @@ pub struct RedisServer {
     pub in_exec: AtomicBool,
     /// Whether the server is paused (CLIENT PAUSE / failover).
     pub pause_cron: AtomicBool,
+    /// Client-pause state, one `PauseEvent` per `PausePurpose`. Written by
+    /// CLIENT PAUSE/UNPAUSE and read by the command gate, INFO, and the
+    /// eviction/active-expire paths. Mirrors `server.client_pause_*` in C.
+    pub pause_events: Mutex<[crate::networking::PauseEvent; 4]>,
     /// Maximum size of a bulk reply payload in bytes.
     pub proto_max_bulk_len: AtomicI64,
     /// Server start time (Unix milliseconds).
@@ -122,6 +126,7 @@ impl RedisServer {
             dirty: AtomicI64::new(0),
             in_exec: AtomicBool::new(false),
             pause_cron: AtomicBool::new(false),
+            pause_events: Mutex::new(<[crate::networking::PauseEvent; 4]>::default()),
             proto_max_bulk_len: AtomicI64::new(PROTO_MAX_BULK_LEN_DEFAULT),
             start_time_ms: 0,
             shutdown_asap: AtomicBool::new(false),

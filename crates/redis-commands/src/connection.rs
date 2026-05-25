@@ -3054,10 +3054,13 @@ pub fn client_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         ];
         return reply_help(ctx, lines);
     }
-    if ascii_eq_ignore_case(sub_bytes, b"PAUSE")
-        || ascii_eq_ignore_case(sub_bytes, b"UNPAUSE")
-        || ascii_eq_ignore_case(sub_bytes, b"KILL")
-    {
+    if ascii_eq_ignore_case(sub_bytes, b"PAUSE") {
+        return redis_core::networking::client_pause_command(ctx);
+    }
+    if ascii_eq_ignore_case(sub_bytes, b"UNPAUSE") {
+        return redis_core::networking::client_unpause_command(ctx);
+    }
+    if ascii_eq_ignore_case(sub_bytes, b"KILL") {
         return ctx.reply_simple_string(b"OK");
     }
     let mut msg = Vec::with_capacity(b"ERR Unknown CLIENT subcommand: ".len() + sub_bytes.len());
