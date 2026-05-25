@@ -95,7 +95,7 @@ fn wake_ready_after_command(db: &mut RedisDb) {
 /// Parsed command-line arguments.
 struct CliArgs {
     port: u16,
-    bind: String,
+    bind: Vec<String>,
     maxclients: u64,
     rdb_disabled: bool,
     dir: String,
@@ -117,7 +117,7 @@ impl Default for CliArgs {
     fn default() -> Self {
         Self {
             port: DEFAULT_PORT,
-            bind: DEFAULT_BIND.to_string(),
+            bind: vec![DEFAULT_BIND.to_string()],
             maxclients: get_max_clients(),
             rdb_disabled: false,
             dir: redis_core::live_config::DEFAULT_RDB_DIR.to_string(),
@@ -167,7 +167,10 @@ fn parse_args(argv: Vec<String>) -> Result<CliArgs, String> {
                 let v = it
                     .next()
                     .ok_or_else(|| "--bind requires a value".to_string())?;
-                out.bind = v;
+                out.bind = v.split_whitespace().map(str::to_string).collect();
+                if out.bind.is_empty() {
+                    out.bind.push(DEFAULT_BIND.to_string());
+                }
             }
             "--rdb-disabled" => {
                 out.rdb_disabled = true;
@@ -276,9 +279,9 @@ fn apply_config_file(args: &mut CliArgs, path: &Path) -> Result<(), String> {
                 args.port = v;
             }
             "bind" => {
-                let first_addr = value.split_whitespace().next().unwrap_or("");
-                if !first_addr.is_empty() {
-                    args.bind = first_addr.to_string();
+                let addrs: Vec<String> = value.split_whitespace().map(str::to_string).collect();
+                if !addrs.is_empty() {
+                    args.bind = addrs;
                 }
             }
             "maxclients" => {
@@ -404,33 +407,39 @@ fn main() {
         }
     };
 
-    let bind_ip: IpAddr = match args.bind.parse() {
-        Ok(ip) => ip,
-        Err(_) => {
-            eprintln!(
-                "redis-server: --bind expects an IP literal (got '{}'); hostnames not yet supported",
-                args.bind
-            );
-            std::process::exit(1);
+    let mut listeners: Vec<TcpListener> = Vec::with_capacity(args.bind.len());
+    for bind in &args.bind {
+        let bind_ip: IpAddr = match bind.parse() {
+            Ok(ip) => ip,
+            Err(_) => {
+                eprintln!(
+                    "redis-server: --bind expects IP literals (got '{}'); hostnames not yet supported",
+                    bind
+                );
+                std::process::exit(1);
+            }
+        };
+        let addr = SocketAddr::new(bind_ip, args.port);
+        let listener = match TcpListener::bind(addr) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("redis-server: bind {} failed: {}", addr, e);
+                std::process::exit(1);
+            }
+        };
+        if let Err(e) = listener.set_nonblocking(true) {
+            eprintln!("redis-server: set_nonblocking(true) failed: {}", e);
         }
-    };
-    let addr = SocketAddr::new(bind_ip, args.port);
-
-    let listener = match TcpListener::bind(addr) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("redis-server: bind {} failed: {}", addr, e);
-            std::process::exit(1);
-        }
-    };
+        eprintln!("redis-server: listening on {}", addr);
+        listeners.push(listener);
+    }
+    if listeners.is_empty() {
+        eprintln!("redis-server: no TCP bind addresses configured");
+        std::process::exit(1);
+    }
 
     let shutdown = Arc::new(AtomicBool::new(false));
     install_shutdown_handler(Arc::clone(&shutdown));
-
-    if let Err(e) = listener.set_nonblocking(true) {
-        eprintln!("redis-server: set_nonblocking(true) failed: {}", e);
-    }
-    eprintln!("redis-server: listening on {}", addr);
     emit_startup_log();
 
     server_metrics().set_tcp_port(args.port);
@@ -571,7 +580,7 @@ fn main() {
     }));
 
     runtime_owner::RuntimeOwner::run_plain_tcp(
-        listener,
+        listeners,
         shutdown,
         next_client_id,
         registry,

@@ -245,6 +245,7 @@ pub struct ClientFlags {
     pub deny_blocking: bool,
     pub blocked: bool,
     pub monitor: bool,
+    pub readonly: bool,
     pub aof_client: bool,
     pub reply_off: bool,
     pub reply_skip_next: bool,

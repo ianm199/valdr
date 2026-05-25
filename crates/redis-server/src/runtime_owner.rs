@@ -34,8 +34,8 @@ pub const DEFAULT_DATABASE_COUNT: u32 = 16;
 const DEFAULT_EVENT_CAPACITY: usize = 1024;
 const READ_BUFFER_SIZE: usize = 16 * 1024;
 const MAX_COMMANDS_PER_SLOT_TICK: usize = 128;
-const LISTENER_TOKEN: Token = Token(0);
-const SLOT_TOKEN_BASE: usize = 1;
+const MAX_LISTENER_TOKENS: usize = 16;
+const SLOT_TOKEN_BASE: usize = MAX_LISTENER_TOKENS;
 const POLL_TIMEOUT: Duration = Duration::from_millis(2);
 const ACTIVE_EXPIRE_FALLBACK_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -514,7 +514,7 @@ impl RuntimeOwner {
     }
 
     pub fn run_plain_tcp(
-        listener: StdTcpListener,
+        listeners: Vec<StdTcpListener>,
         shutdown: Arc<AtomicBool>,
         next_client_id: Arc<AtomicU64>,
         registry: Arc<Mutex<PubSubRegistry>>,
@@ -523,11 +523,22 @@ impl RuntimeOwner {
         initial_dbs: Vec<RedisDb>,
     ) {
         let _ = tcp_port;
-        if let Err(e) = listener.set_nonblocking(true) {
-            eprintln!("redis-server: set_nonblocking(true) failed: {}", e);
+        let mut listeners: Vec<MioTcpListener> = listeners
+            .into_iter()
+            .map(MioTcpListener::from_std)
+            .collect();
+        if listeners.is_empty() {
+            eprintln!("redis-server: no plain TCP listeners installed");
+            return;
         }
-
-        let mut listener = MioTcpListener::from_std(listener);
+        if listeners.len() > MAX_LISTENER_TOKENS {
+            eprintln!(
+                "redis-server: {} TCP listeners exceeds supported maximum {}",
+                listeners.len(),
+                MAX_LISTENER_TOKENS
+            );
+            return;
+        }
         let mut poll = match Poll::new() {
             Ok(poll) => poll,
             Err(e) => {
@@ -535,12 +546,14 @@ impl RuntimeOwner {
                 return;
             }
         };
-        if let Err(e) = poll
-            .registry()
-            .register(&mut listener, LISTENER_TOKEN, Interest::READABLE)
-        {
-            eprintln!("redis-server: mio listener registration failed: {}", e);
-            return;
+        for (idx, listener) in listeners.iter_mut().enumerate() {
+            if let Err(e) = poll
+                .registry()
+                .register(listener, Token(idx), Interest::READABLE)
+            {
+                eprintln!("redis-server: mio listener registration failed: {}", e);
+                return;
+            }
         }
         let mut events = Events::with_capacity(DEFAULT_EVENT_CAPACITY);
         let config = RuntimeOwnerConfig::disabled()
@@ -572,7 +585,7 @@ impl RuntimeOwner {
 
             progressed |= owner.handle_poll_events(
                 &events,
-                &listener,
+                &listeners,
                 poll.registry(),
                 &next_client_id,
                 &registry,
@@ -752,7 +765,7 @@ impl RuntimeOwner {
     fn handle_poll_events(
         &mut self,
         events: &Events,
-        listener: &MioTcpListener,
+        listeners: &[MioTcpListener],
         poll_registry: &MioRegistry,
         next_client_id: &Arc<AtomicU64>,
         registry: &Arc<Mutex<PubSubRegistry>>,
@@ -762,10 +775,14 @@ impl RuntimeOwner {
         let mut read_buf = [0u8; READ_BUFFER_SIZE];
 
         for event in events.iter() {
-            if event.token() == LISTENER_TOKEN {
+            if event.token().0 < listeners.len() {
                 if event.is_readable() {
-                    progressed |=
-                        self.accept_ready(listener, poll_registry, next_client_id, registry);
+                    progressed |= self.accept_ready(
+                        &listeners[event.token().0],
+                        poll_registry,
+                        next_client_id,
+                        registry,
+                    );
                 }
                 continue;
             }

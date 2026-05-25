@@ -912,6 +912,14 @@ pub static HANDLERS: &[DispatchEntry] = &[
         handler: crate::connection::reset_command,
     },
     DispatchEntry {
+        name: b"READONLY",
+        handler: crate::connection::readonly_command,
+    },
+    DispatchEntry {
+        name: b"READWRITE",
+        handler: crate::connection::readwrite_command,
+    },
+    DispatchEntry {
         name: b"AUTH",
         handler: crate::connection::auth_command,
     },

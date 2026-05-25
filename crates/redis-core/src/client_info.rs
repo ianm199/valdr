@@ -37,6 +37,7 @@ pub struct ClientSnapshot {
     pub tracking_broken_redirect: bool,
     pub import_source: bool,
     pub capa_redirect: bool,
+    pub readonly: bool,
     pub lib_name: Option<RedisString>,
     pub lib_ver: Option<RedisString>,
     pub subscribed_channels: usize,
@@ -57,26 +58,30 @@ impl ClientInfoRegistry {
 
     /// Register a freshly accepted connection.
     pub fn register(&mut self, id: ClientId, addr: String) {
-        self.entries.insert(id, ClientSnapshot {
+        self.entries.insert(
             id,
-            addr,
-            db_index: 0,
-            cmd: String::new(),
-            blocked: false,
-            name: None,
-            user: Some(RedisString::from_static(b"default")),
-            resp_proto: 2,
-            tracking: false,
-            tracking_bcast: false,
-            tracking_broken_redirect: false,
-            import_source: false,
-            capa_redirect: false,
-            lib_name: None,
-            lib_ver: None,
-            subscribed_channels: 0,
-            subscribed_patterns: 0,
-            queued_multi_count: None,
-        });
+            ClientSnapshot {
+                id,
+                addr,
+                db_index: 0,
+                cmd: String::new(),
+                blocked: false,
+                name: None,
+                user: Some(RedisString::from_static(b"default")),
+                resp_proto: 2,
+                tracking: false,
+                tracking_bcast: false,
+                tracking_broken_redirect: false,
+                import_source: false,
+                capa_redirect: false,
+                readonly: false,
+                lib_name: None,
+                lib_ver: None,
+                subscribed_channels: 0,
+                subscribed_patterns: 0,
+                queued_multi_count: None,
+            },
+        );
     }
 
     /// Update the externally visible command/db/blocking snapshot for `id`.
@@ -87,10 +92,7 @@ impl ClientInfoRegistry {
     /// avoids pushing a global mutex into every GET/SET hot path.
     pub fn update_snapshot(&mut self, id: ClientId, cmd: &[u8], db_index: u32, blocked: bool) {
         if let Some(e) = self.entries.get_mut(&id) {
-            e.cmd = cmd
-                .iter()
-                .map(|b| b.to_ascii_lowercase() as char)
-                .collect();
+            e.cmd = cmd.iter().map(|b| b.to_ascii_lowercase() as char).collect();
             e.db_index = db_index;
             e.blocked = blocked;
         }
@@ -110,14 +112,12 @@ impl ClientInfoRegistry {
             e.tracking_broken_redirect = client.tracking.broken_redirect;
             e.import_source = client.import_source;
             e.capa_redirect = client.capa_redirect;
+            e.readonly = client.flags.readonly;
             e.lib_name = client.lib_name.clone();
             e.lib_ver = client.lib_ver.clone();
             e.subscribed_channels = client.subscribed_channels.len();
             e.subscribed_patterns = client.subscribed_patterns.len();
-            e.queued_multi_count = client
-                .flags
-                .multi
-                .then_some(client.queued_argvs.len());
+            e.queued_multi_count = client.flags.multi.then_some(client.queued_argvs.len());
         }
     }
 

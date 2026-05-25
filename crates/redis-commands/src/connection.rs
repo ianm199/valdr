@@ -1085,6 +1085,31 @@ pub fn reset_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     ctx.reply_simple_string(b"RESET")
 }
 
+/// `READONLY`.
+///
+/// C: `readonlyCommand(client *c)` in `cluster.c` sets a per-client bit and
+/// replies OK. The bit is observable as `flags=r` in CLIENT LIST.
+pub fn readonly_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
+    if ctx.arg_count() != 1 {
+        return Err(RedisError::wrong_number_of_args(b"readonly"));
+    }
+    ctx.client_mut().flags.readonly = true;
+    refresh_client_info_registry(ctx.client_ref());
+    ctx.reply_simple_string(b"OK")
+}
+
+/// `READWRITE`.
+///
+/// C: `readwriteCommand(client *c)` clears the per-client readonly bit.
+pub fn readwrite_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
+    if ctx.arg_count() != 1 {
+        return Err(RedisError::wrong_number_of_args(b"readwrite"));
+    }
+    ctx.client_mut().flags.readonly = false;
+    refresh_client_info_registry(ctx.client_ref());
+    ctx.reply_simple_string(b"OK")
+}
+
 /// `MONITOR`.
 ///
 /// Registers the connection for best-effort command stream messages. The full
@@ -1611,6 +1636,9 @@ fn client_flags_vec(client: &redis_core::client::Client) -> Vec<u8> {
     if client.flags.monitor {
         out.push(b'O');
     }
+    if client.flags.readonly {
+        out.push(b'r');
+    }
     if client.flags.dirty_cas {
         out.push(b'd');
     }
@@ -1671,6 +1699,9 @@ fn snapshot_flags_vec(snap: &redis_core::client_info::ClientSnapshot) -> Vec<u8>
     }
     if snap.tracking_broken_redirect {
         out.push(b'R');
+    }
+    if snap.readonly {
+        out.push(b'r');
     }
     if out.is_empty() {
         out.push(b'N');

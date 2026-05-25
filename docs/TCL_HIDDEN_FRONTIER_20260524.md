@@ -1,6 +1,6 @@
 # TCL Hidden Frontier - 2026-05-24
 
-Generated: `2026-05-25T01:54:30.217849+00:00`
+Generated: `2026-05-25T02:04:48.887578+00:00`
 
 This is an illumination artifact, not a conformance claim. It maps the
 timeout/no-summary bucket into concrete subsystem packets so broad
@@ -9,14 +9,15 @@ implementation work can start from evidence instead of guessing.
 ## Accounting Snapshot
 
 - Full upstream TCL denominator: **4299** source test blocks
-- Counted runner result: **1389 pass / 0 fail / 1389 counted**
-- Conservative full-suite proof: **32.3%** counted-pass / full denominator
+- Counted runner result: **1442 pass / 40 fail / 1482 counted**
+- Conservative full-suite proof: **33.5%** counted-pass / full denominator
 - Non-skipped denominator: **2568** source test blocks
-- Hidden timeout/no-summary bucket: **1007** source tests (**39.2%** of non-skipped)
+- Hidden timeout/no-summary bucket: **890** source tests (**34.7%** of non-skipped)
 
 | Status | Source tests |
 |---|---:|
-| `no-summary` | 567 |
+| `fail` | 117 |
+| `no-summary` | 450 |
 | `pass` | 1169 |
 | `skipped-by-policy` | 1731 |
 | `timeout` | 440 |
@@ -32,7 +33,7 @@ implementation work can start from evidence instead of guessing.
 | `unit/pubsub.tcl` | 34 | `timeout` | timeout after visible failures | Keyspace notifications: stream events test | Pub/Sub keyspace notification ordering and client reply behavior | `tcl-pubsub-keyspace-notify-order-v1` |
 | `unit/type/stream.tcl` | 82 | `timeout` | timeout after visible failures | XREAD + multiple XADD inside transaction | Stream XREAD/XADD transaction wake behavior | `tcl-stream-transaction-xread-wake-v1` |
 | `unit/type/stream-cgroups.tcl` | 65 | `no-summary` | no-summary abort at named test | Consumer seen-time and active-time | Consumer group PEL metadata and XREADGROUP blocking edge cases | `tcl-stream-cgroups-pel-idle-seen-time-v1` |
-| `unit/introspection.tcl` | 117 | `no-summary` | no-summary abort at named test | CLIENT LIST with IPv6 filter | Harness tmp-dir/server lifecycle first; then CLIENT/COMMAND/CONFIG/INFO introspection | `tcl-introspection-runner-isolation-v1` |
+| `unit/introspection.tcl` | 117 | `fail` | counted failures | CLIENT KILL with IP filter | Harness tmp-dir/server lifecycle first; then CLIENT/COMMAND/CONFIG/INFO introspection | `tcl-introspection-runner-isolation-v1` |
 | `unit/keyspace.tcl` | 65 | `pass` | passes |  | Harness tmp-dir/server lifecycle first; then keyspace/expire/SCAN semantics | `none-currently-passing-regression-guard` |
 | `unit/geo.tcl` | 70 | `pass` | passes |  | Harness tmp-dir/server lifecycle first; then GEO command edge semantics | `none-currently-passing-regression-guard` |
 | `integration/aof.tcl` | 45 | `zero-count` | 0/0 summary; runner selected no tests under current tag policy |  | AOF durability, check utility compatibility, truncation/corruption repair semantics | `tcl-aof-check-utility-and-corruption-frontier-v1` |
@@ -43,8 +44,8 @@ implementation work can start from evidence instead of guessing.
 | Rank | Packet | File | Tests | Value | Risk | Why next |
 |---:|---|---|---:|---|---|---|
 | 1 | `tcl-scripting-acl-globals-frontier-v1` | `unit/scripting.tcl` | 186 | high | high | Split into two passes: first make the no-summary ACL/FUNCTION abort diagnostic and correct, then address the revealed global-protection and Redis namespace failures. Keep all work inside the scripting/ACL lane. |
-| 2 | `tcl-introspection-runner-isolation-v1` | `unit/introspection.tcl` | 117 | medium | medium | Treat the current cat/stdout exception as runner isolation until reproduced otherwise. Give this file a dedicated tmp dir and only then cut CLIENT/COMMAND/INFO implementation packets. |
-| 3 | `tcl-functions-timeout-scout-then-library-v1` | `unit/functions.tcl` | 112 | high | high | Do not start with a broad function rewrite. First add a single-test bisect/scout runner for the timeout, then port only the first library lifecycle semantic that blocks summary output. |
+| 2 | `tcl-functions-timeout-scout-then-library-v1` | `unit/functions.tcl` | 112 | high | high | Do not start with a broad function rewrite. First add a single-test bisect/scout runner for the timeout, then port only the first library lifecycle semantic that blocks summary output. |
+| 3 | `tcl-introspection-runner-isolation-v1` | `unit/introspection.tcl` | 117 | medium | medium | Treat the current cat/stdout exception as runner isolation until reproduced otherwise. Give this file a dedicated tmp dir and only then cut CLIENT/COMMAND/INFO implementation packets. |
 | 4 | `tcl-stream-transaction-xread-wake-v1` | `unit/type/stream.tcl` | 82 | high | high | Port the upstream blocked stream client wake semantics around XADD inside MULTI before touching consumer-group metadata. |
 | 5 | `tcl-multi-watch-dirty-queue-v1` | `unit/multi.tcl` | 70 | high | medium | Port the upstream transaction error-state lifecycle. This is smaller than scripting/functions and likely converts a timeout file into a counted fail/pass file quickly. |
 | 6 | `tcl-stream-cgroups-pel-idle-seen-time-v1` | `unit/type/stream-cgroups.tcl` | 65 | high | high | Implement the missing `idle`/seen-time dictionary shape and keep the blocking XREADGROUP failures as separate follow-up packets. |
@@ -187,12 +188,12 @@ implementation work can start from evidence instead of guessing.
 ### `unit/introspection.tcl`
 
 - Source tests hidden/covered by this file: **117**
-- Latest status: `no-summary` (no-summary abort at named test)
-- First visible failing test: `CLIENT LIST with IPv6 filter`
+- Latest status: `fail` (counted failures)
+- First visible failing test: `CLIENT KILL with IP filter`
 - Recommended packet: `tcl-introspection-runner-isolation-v1`
 - Recommended action: Treat the current cat/stdout exception as runner isolation until reproduced otherwise. Give this file a dedicated tmp dir and only then cut CLIENT/COMMAND/INFO implementation packets.
 - Likely root subsystem: Harness tmp-dir/server lifecycle first; then CLIENT/COMMAND/CONFIG/INFO introspection
-- Latest log: `harness/oracle/results/tcl-survey/20260525T014712Z/unit__introspection.json`
+- Latest log: `harness/oracle/results/tcl-survey/20260525T020414Z/unit__introspection.json`
 - Local source files:
   - `harness/oracle/tcl-survey.py`
   - `crates/redis-commands/src/connection.rs`
@@ -202,7 +203,12 @@ implementation work can start from evidence instead of guessing.
   - `reference/valkey/src/networking.c`
   - `reference/valkey/src/server.c`
   - `reference/valkey/tests/unit/introspection.tcl`
-- Parsed exception: `couldn't open socket: connection refused.`
+- First parsed failures:
+  - CLIENT KILL with IP filter in tests/unit/introspection.tcl
+  - CLIENT KILL with IPv6 filter in tests/unit/introspection.tcl
+  - CLIENT KILL with CAPA filter in tests/unit/introspection.tcl
+  - CLIENT KILL with NAME filter in tests/unit/introspection.tcl
+  - CLIENT KILL with FLAGS filter in tests/unit/introspection.tcl
 
 ### `unit/keyspace.tcl`
 
