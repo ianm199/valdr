@@ -198,10 +198,13 @@ pub fn read_rdb_string(reader: &mut impl Read) -> io::Result<Vec<u8>> {
                 reader.read_exact(&mut b)?;
                 Ok(i32::from_le_bytes(b).to_string().into_bytes())
             }
-            super::varint::RDB_ENC_LZF => Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "LZF-compressed strings not supported in Round 18",
-            )),
+            super::varint::RDB_ENC_LZF => {
+                let (clen, _) = super::varint::load_len(reader)?;
+                let (ulen, _) = super::varint::load_len(reader)?;
+                let mut compressed = vec![0u8; clen as usize];
+                reader.read_exact(&mut compressed)?;
+                super::lzf::lzf_decompress(&compressed, ulen as usize)
+            }
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "unknown RDB string encoding",

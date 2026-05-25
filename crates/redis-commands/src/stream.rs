@@ -32,6 +32,7 @@ use redis_core::object::RedisObject;
 use redis_core::util::mstime;
 use redis_ds::stream::{
     parse_stream_id, Consumer, ConsumerGroup, InlineStream, PelEntry, StreamEntry, StreamId,
+    SCG_INVALID_ENTRIES_READ,
 };
 use redis_types::{RedisError, RedisResult, RedisString};
 
@@ -752,13 +753,16 @@ pub fn wake_blocked_xreadgroup_for_key(db: &mut RedisDb, key: &RedisString, new_
                     encode_nogroup_error(key.as_bytes(), group.as_bytes())
                 } else {
                     let now = now_ms_clamped();
+                    let view = stream.lag_view();
                     let g = stream.groups.get_mut(&group).expect("group checked above");
                     touch_or_create_consumer(g, &consumer, now);
                     if let Some(c) = g.consumers.get_mut(&consumer) {
                         c.active_time_ms = now;
                     }
-                    g.last_delivered_id = new_entry.id;
-                    g.entries_read = g.entries_read.saturating_add(1);
+                    let (read, last) =
+                        view.advance_read_counter(g.entries_read, g.last_delivered_id, &[new_entry.id]);
+                    g.entries_read = read;
+                    g.last_delivered_id = last;
                     if !noack {
                         pel_add(
                             g,
@@ -869,14 +873,21 @@ pub fn wake_xreadgroup_after_rename(db: &mut RedisDb, dst_key: &RedisString) {
                     } else {
                         let to_deliver: Vec<StreamEntry> =
                             stream.entries[start_idx..start_idx + max].to_vec();
-                        let new_last = to_deliver.last().map(|e| e.id).expect("max > 0");
+                        let delivered_ids: Vec<StreamId> =
+                            to_deliver.iter().map(|e| e.id).collect();
+                        let view = stream.lag_view();
                         let g = stream.groups.get_mut(&group).expect("group checked above");
                         touch_or_create_consumer(g, &consumer, now);
                         if let Some(c) = g.consumers.get_mut(&consumer) {
                             c.active_time_ms = now;
                         }
-                        g.last_delivered_id = new_last;
-                        g.entries_read = g.entries_read.saturating_add(max as u64);
+                        let (read, last) = view.advance_read_counter(
+                            g.entries_read,
+                            g.last_delivered_id,
+                            &delivered_ids,
+                        );
+                        g.entries_read = read;
+                        g.last_delivered_id = last;
                         if !noack {
                             for entry in &to_deliver {
                                 pel_add(
@@ -1654,10 +1665,10 @@ pub fn xgroup_command(ctx: &mut CommandContext) -> RedisResult<()> {
 fn parse_entries_read_suffix(
     ctx: &CommandContext,
     start: usize,
-) -> Result<(bool, u64), RedisError> {
+) -> Result<(bool, i64), RedisError> {
     let argc = ctx.arg_count();
     if start >= argc {
-        return Ok((false, 0));
+        return Ok((false, SCG_INVALID_ENTRIES_READ));
     }
     if !ctx.arg(start)?.as_bytes().eq_ignore_ascii_case(b"ENTRIESREAD") {
         return Err(RedisError::syntax(b"syntax error"));
@@ -1667,14 +1678,13 @@ fn parse_entries_read_suffix(
     }
     let n = parse_strict_i64(ctx.arg(start + 1)?.as_bytes())
         .map_err(|_| RedisError::runtime(b"ERR value for ENTRIESREAD must be positive or -1"))?;
-    if n < -1 {
+    if n < 0 && n != SCG_INVALID_ENTRIES_READ {
         return Err(RedisError::runtime(b"ERR value for ENTRIESREAD must be positive or -1"));
     }
     if start + 2 != argc {
         return Err(RedisError::syntax(b"syntax error"));
     }
-    let read_val = if n == -1 { 0u64 } else { n as u64 };
-    Ok((true, read_val))
+    Ok((true, n))
 }
 
 fn xgroup_create(ctx: &mut CommandContext) -> RedisResult<()> {
@@ -1952,10 +1962,8 @@ pub fn xreadgroup_command(ctx: &mut CommandContext) -> RedisResult<()> {
                 }
                 let to_deliver: Vec<StreamEntry> =
                     stream.entries[start_idx..start_idx + max].to_vec();
-                let new_last = to_deliver
-                    .last()
-                    .map(|e| e.id)
-                    .expect("max > 0 implies entries");
+                let delivered_ids: Vec<StreamId> = to_deliver.iter().map(|e| e.id).collect();
+                let view = stream.lag_view();
                 let group = stream
                     .groups
                     .get_mut(&group_name)
@@ -1964,8 +1972,13 @@ pub fn xreadgroup_command(ctx: &mut CommandContext) -> RedisResult<()> {
                 if let Some(consumer) = group.consumers.get_mut(&consumer_name) {
                     consumer.active_time_ms = now;
                 }
-                group.last_delivered_id = new_last;
-                group.entries_read = group.entries_read.saturating_add(max as u64);
+                let (read, last) = view.advance_read_counter(
+                    group.entries_read,
+                    group.last_delivered_id,
+                    &delivered_ids,
+                );
+                group.entries_read = read;
+                group.last_delivered_id = last;
                 if !noack {
                     for entry in &to_deliver {
                         let next_count = group
@@ -2782,20 +2795,28 @@ fn xinfo_groups(ctx: &mut CommandContext) -> RedisResult<()> {
         None => return Err(RedisError::runtime(b"ERR no such key")),
         Some(s) => s,
     };
-    let mut group_views: Vec<(RedisString, usize, usize, StreamId, u64, u64)> = stream
-        .groups
-        .iter()
-        .map(|(name, g)| {
-            (
-                name.clone(),
-                g.consumers.len(),
-                g.pel.len(),
-                g.last_delivered_id,
-                g.entries_read,
-                stream.entries_added.saturating_sub(g.entries_read),
-            )
-        })
-        .collect();
+    let view = stream.lag_view();
+    let mut group_views: Vec<(RedisString, usize, usize, StreamId, Option<i64>, Option<i64>)> =
+        stream
+            .groups
+            .iter()
+            .map(|(name, g)| {
+                let entries_read = if g.entries_read == SCG_INVALID_ENTRIES_READ {
+                    None
+                } else {
+                    Some(g.entries_read)
+                };
+                let lag = view.group_lag(g.entries_read, g.last_delivered_id);
+                (
+                    name.clone(),
+                    g.consumers.len(),
+                    g.pel.len(),
+                    g.last_delivered_id,
+                    entries_read,
+                    lag,
+                )
+            })
+            .collect();
     group_views.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
     ctx.reply_array_header(group_views.len())?;
     for (name, consumers, pending, last_id, entries_read, lag) in &group_views {
@@ -2809,9 +2830,15 @@ fn xinfo_groups(ctx: &mut CommandContext) -> RedisResult<()> {
         ctx.reply_bulk(b"last-delivered-id")?;
         ctx.reply_bulk_string(RedisString::from_vec(last_id.to_display_bytes()))?;
         ctx.reply_bulk(b"entries-read")?;
-        ctx.reply_integer(*entries_read as i64)?;
+        match entries_read {
+            Some(n) => ctx.reply_integer(*n)?,
+            None => ctx.reply_null_bulk()?,
+        }
         ctx.reply_bulk(b"lag")?;
-        ctx.reply_integer(*lag as i64)?;
+        match lag {
+            Some(n) => ctx.reply_integer(*n)?,
+            None => ctx.reply_null_bulk()?,
+        }
     }
     Ok(())
 }
@@ -2836,8 +2863,8 @@ fn xinfo_stream_full(ctx: &mut CommandContext, key: &RedisString, count: i64) ->
     struct GroupSnap {
         name: RedisString,
         last_delivered: StreamId,
-        entries_read: i64,
-        lag: i64,
+        entries_read: Option<i64>,
+        lag: Option<i64>,
         pel_total: usize,
         pel: Vec<(StreamId, RedisString, i64, u64)>,
         consumers: Vec<ConsumerSnap>,
@@ -2857,6 +2884,7 @@ fn xinfo_stream_full(ctx: &mut CommandContext, key: &RedisString, count: i64) ->
             Some(s) => s,
         };
         let entries: Vec<StreamEntry> = stream.entries.iter().take(limit).cloned().collect();
+        let lag_view = stream.lag_view();
         let first_id = stream
             .entries
             .first()
@@ -2897,11 +2925,16 @@ fn xinfo_stream_full(ctx: &mut CommandContext, key: &RedisString, count: i64) ->
                         .collect(),
                 });
             }
-            let lag = (stream.entries_added as i64).saturating_sub(g.entries_read as i64);
+            let entries_read = if g.entries_read == SCG_INVALID_ENTRIES_READ {
+                None
+            } else {
+                Some(g.entries_read)
+            };
+            let lag = lag_view.group_lag(g.entries_read, g.last_delivered_id);
             groups.push(GroupSnap {
                 name: g.name.clone(),
                 last_delivered: g.last_delivered_id,
-                entries_read: g.entries_read as i64,
+                entries_read,
                 lag,
                 pel_total: g.pel.len(),
                 pel: gpel,
@@ -2950,9 +2983,15 @@ fn xinfo_stream_full(ctx: &mut CommandContext, key: &RedisString, count: i64) ->
         ctx.reply_bulk(b"last-delivered-id")?;
         ctx.reply_bulk_string(id_str(g.last_delivered))?;
         ctx.reply_bulk(b"entries-read")?;
-        ctx.reply_integer(g.entries_read)?;
+        match g.entries_read {
+            Some(n) => ctx.reply_integer(n)?,
+            None => ctx.reply_null_bulk()?,
+        }
         ctx.reply_bulk(b"lag")?;
-        ctx.reply_integer(g.lag)?;
+        match g.lag {
+            Some(n) => ctx.reply_integer(n)?,
+            None => ctx.reply_null_bulk()?,
+        }
         ctx.reply_bulk(b"pel-count")?;
         ctx.reply_integer(g.pel_total as i64)?;
         ctx.reply_bulk(b"pending")?;

@@ -121,7 +121,7 @@ pub fn save_stream_object(w: &mut impl Write, obj: &RedisObject) -> io::Result<(
         write_rdb_string(w, name.as_bytes())?;
         write_len(w, group.last_delivered_id.ms)?;
         write_len(w, group.last_delivered_id.seq)?;
-        write_len(w, group.entries_read)?;
+        write_len(w, group.entries_read as u64)?;
 
         write_len(w, group.pel.len() as u64)?;
         for entry in &group.pel {
@@ -147,7 +147,15 @@ pub fn save_stream_object(w: &mut impl Write, obj: &RedisObject) -> io::Result<(
 
 /// Load `RDB_TYPE_STREAM_LISTPACKS_3` (consumer `active_time` present).
 pub fn load_stream_object_3(r: &mut impl Read) -> io::Result<RedisObject> {
-    load_stream_inner(r, true)
+    load_stream_inner(r, true, true)
+}
+
+/// Load `RDB_TYPE_STREAM_LISTPACKS` (legacy Redis <= 6.2, rdb_ver < 10): no
+/// first_id / max_deleted_id / entries_added, no per-group entries_read, and
+/// no per-consumer active_time. Reuses the same listpack node decoder; the
+/// absent metadata is defaulted (see `load_stream_inner`).
+pub fn load_stream_object_legacy(r: &mut impl Read) -> io::Result<RedisObject> {
+    load_stream_inner(r, false, false)
 }
 
 /// Load `RDB_TYPE_STREAM_LISTPACKS_2` (no consumer `active_time`).
@@ -155,10 +163,14 @@ pub fn load_stream_object_3(r: &mut impl Read) -> io::Result<RedisObject> {
 /// `active_time` is initialised from `seen_time` on each consumer to match
 /// the fallback `rdbLoadObject` performs at rdb.c:2828.
 pub fn load_stream_object_2(r: &mut impl Read) -> io::Result<RedisObject> {
-    load_stream_inner(r, false)
+    load_stream_inner(r, true, false)
 }
 
-fn load_stream_inner(r: &mut impl Read, has_active_time: bool) -> io::Result<RedisObject> {
+fn load_stream_inner(
+    r: &mut impl Read,
+    has_v2_fields: bool,
+    has_active_time: bool,
+) -> io::Result<RedisObject> {
     let mut stream = InlineStream::new();
 
     let (listpacks_count, _) = load_len(r)?;
@@ -195,15 +207,24 @@ fn load_stream_inner(r: &mut impl Read, has_active_time: bool) -> io::Result<Red
     let (last_seq, _) = load_len(r)?;
     stream.last_id = StreamId::new(last_ms, last_seq);
 
-    let (_first_ms, _) = load_len(r)?;
-    let (_first_seq, _) = load_len(r)?;
+    if has_v2_fields {
+        let (_first_ms, _) = load_len(r)?;
+        let (_first_seq, _) = load_len(r)?;
 
-    let (max_del_ms, _) = load_len(r)?;
-    let (max_del_seq, _) = load_len(r)?;
-    stream.max_deleted_id = StreamId::new(max_del_ms, max_del_seq);
+        let (max_del_ms, _) = load_len(r)?;
+        let (max_del_seq, _) = load_len(r)?;
+        stream.max_deleted_id = StreamId::new(max_del_ms, max_del_seq);
 
-    let (entries_added, _) = load_len(r)?;
-    stream.entries_added = entries_added;
+        let (entries_added, _) = load_len(r)?;
+        stream.entries_added = entries_added;
+    } else {
+        // Legacy RDB_TYPE_STREAM_LISTPACKS (Redis <= 6.2, rdb_ver < 10) has no
+        // first_id / max_deleted_id / entries_added. Default the tombstone to
+        // 0-0 and seed entries_added from the current length, matching the
+        // legacy path in C `rdbLoadObject`.
+        stream.max_deleted_id = StreamId::new(0, 0);
+        stream.entries_added = stream.entries.len() as u64;
+    }
 
     let (num_groups, _) = load_len(r)?;
     for _ in 0..num_groups {
@@ -211,7 +232,13 @@ fn load_stream_inner(r: &mut impl Read, has_active_time: bool) -> io::Result<Red
         let group_name = RedisString::from_vec(group_name_bytes);
         let (cg_ms, _) = load_len(r)?;
         let (cg_seq, _) = load_len(r)?;
-        let (entries_read, _) = load_len(r)?;
+        let entries_read = if has_v2_fields {
+            load_len(r)?.0 as i64
+        } else {
+            stream
+                .lag_view()
+                .estimate_entries_read(StreamId::new(cg_ms, cg_seq))
+        };
 
         let mut group = ConsumerGroup::new(group_name.clone(), StreamId::new(cg_ms, cg_seq));
         group.entries_read = entries_read;
@@ -317,7 +344,7 @@ fn decode_entries_from_listpack(blob: &[u8], node_id: &StreamId) -> io::Result<V
     }
 
     let mut cursor = 0usize;
-    let count = parse_int(&raw, &mut cursor, "master count")?;
+    let _count = parse_int(&raw, &mut cursor, "master count")?;
     let _deleted = parse_int(&raw, &mut cursor, "master deleted")?;
     let master_num_fields = parse_int(&raw, &mut cursor, "master num-fields")?;
     if master_num_fields < 0 {
@@ -343,8 +370,8 @@ fn decode_entries_from_listpack(blob: &[u8], node_id: &StreamId) -> io::Result<V
         ));
     }
 
-    let mut out: Vec<StreamEntry> = Vec::with_capacity(count as usize);
-    for _ in 0..count {
+    let mut out: Vec<StreamEntry> = Vec::new();
+    while cursor < raw.len() {
         let flags = parse_int(&raw, &mut cursor, "entry flags")?;
         let ms_delta = parse_int(&raw, &mut cursor, "entry ms-delta")?;
         let seq_delta = parse_int(&raw, &mut cursor, "entry seq-delta")?;
@@ -352,8 +379,12 @@ fn decode_entries_from_listpack(blob: &[u8], node_id: &StreamId) -> io::Result<V
         let is_samefields = (flags & STREAM_ITEM_FLAG_SAMEFIELDS) != 0;
         let is_deleted = (flags & STREAM_ITEM_FLAG_DELETED) != 0;
 
-        let (fields, values_only) = if is_samefields {
-            (master_fields.clone(), true)
+        let mut paired: Vec<(RedisString, RedisString)> = Vec::new();
+        if is_samefields {
+            for field in &master_fields {
+                let v = take_bytes(&raw, &mut cursor, "entry value")?;
+                paired.push((field.clone(), RedisString::from_vec(v)));
+            }
         } else {
             let nf = parse_int(&raw, &mut cursor, "entry num-fields")?;
             if nf < 0 {
@@ -362,24 +393,13 @@ fn decode_entries_from_listpack(blob: &[u8], node_id: &StreamId) -> io::Result<V
                     "negative entry num-fields",
                 ));
             }
-            let mut names = Vec::with_capacity(nf as usize);
             for _ in 0..nf {
-                let _f = take_bytes(&raw, &mut cursor, "entry field name")?;
-                names.push(RedisString::from_vec(_f));
-            }
-            (names, false)
-        };
-
-        let mut paired: Vec<(RedisString, RedisString)> = Vec::with_capacity(fields.len());
-        if values_only {
-            for field in &fields {
-                let v = take_bytes(&raw, &mut cursor, "entry value")?;
-                paired.push((field.clone(), RedisString::from_vec(v)));
-            }
-        } else {
-            for field in &fields {
-                let v = take_bytes(&raw, &mut cursor, "entry value")?;
-                paired.push((field.clone(), RedisString::from_vec(v)));
+                let field = take_bytes(&raw, &mut cursor, "entry field name")?;
+                let value = take_bytes(&raw, &mut cursor, "entry value")?;
+                paired.push((
+                    RedisString::from_vec(field),
+                    RedisString::from_vec(value),
+                ));
             }
         }
 

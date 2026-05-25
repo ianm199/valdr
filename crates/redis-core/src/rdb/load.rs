@@ -33,7 +33,7 @@ use super::header::{
 };
 use super::list::{load_list_object, load_quicklist2_object};
 use super::set::load_set_object;
-use super::stream::{load_stream_object_2, load_stream_object_3};
+use super::stream::{load_stream_object_2, load_stream_object_3, load_stream_object_legacy};
 use super::string::load_string_object;
 use super::varint::load_len;
 use super::zset::load_zset_object;
@@ -314,10 +314,7 @@ pub fn load_value_payload(
         )),
         RDB_TYPE_STREAM_LISTPACKS_3 => load_stream_object_3(reader),
         RDB_TYPE_STREAM_LISTPACKS_2 => load_stream_object_2(reader),
-        RDB_TYPE_STREAM_LISTPACKS => Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "RDB_TYPE_STREAM_LISTPACKS (15) is a pre-Redis-7 legacy format without first_id / max_deleted_id / entries_added metadata; not supported on load — use Redis 7+ which writes RDB_TYPE_STREAM_LISTPACKS_2 (19) or _3 (21)",
-        )),
+        RDB_TYPE_STREAM_LISTPACKS => load_stream_object_legacy(reader),
         RDB_TYPE_JSON_NATIVE => load_json_object(reader),
         RDB_TYPE_BLOOM_NATIVE => load_bloom_object(reader),
         _ => Err(io::Error::new(
