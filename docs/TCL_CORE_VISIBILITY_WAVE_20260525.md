@@ -1237,6 +1237,37 @@ the 81 scripting failures; it is converting the remaining large no-summary
 files (`unit/introspection`, `unit/functions`) to counted files while the
 visibility wave is active.
 
+## Profile Pull: `unit/introspection`
+
+Result:
+
+```text
+unit/introspection with default deny profile: 53 pass / 40 fail / 93 counted
+dashboard after inventory: 2584 pass / 226 fail / 2810 counted
+```
+
+Evidence:
+
+- `harness/oracle/results/tcl-survey/20260525T104650225433Z/unit__introspection.json`
+- `harness/oracle/results/single-node-core-v1/latest.txt`
+
+Details:
+
+- Running `unit/introspection` with `external:skip` allowed moves past the
+  previous `DEBUG CONFIG-REWRITE-FORCE-ALL` abort but then times out in the
+  untagged `tot-net-out for replica client` section after the external
+  CONFIG/command-line tests. Evidence:
+  `harness/oracle/results/tcl-survey/20260525T104149470907Z/unit__introspection.json`.
+- Running the same file under the default profile (`needs:repl`,
+  `needs:debug`, `external:skip` denied) gives a clean counted result in under
+  five seconds.
+
+Interpretation: for the Agent-1 visibility dashboard, default-profile
+`unit/introspection` is the right counted evidence. The external tail is not a
+small DEBUG hook problem; it includes restart, command-line, and replica-client
+behavior and should be represented as a separate admin/replication architecture
+packet if we decide to claim those cases.
+
 ## Operating Rules For Continuation
 
 - Keep using isolated `--baseport` and `--portcount`; use
