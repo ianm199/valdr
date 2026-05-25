@@ -2546,8 +2546,11 @@ pub fn xautoclaim_command(ctx: &mut CommandContext) -> RedisResult<()> {
                     return Err(RedisError::syntax(b"syntax error"));
                 }
                 let n = parse_strict_i64(ctx.arg(idx + 1)?.as_bytes())?;
-                if n <= 0 {
-                    return Err(RedisError::syntax(b"COUNT must be > 0"));
+                // C: t_stream.c:3358 — COUNT is bounded by LONG_MAX/16 so the
+                // internal `count * attempts_factor` scan budget cannot overflow.
+                const MAX_COUNT: i64 = i64::MAX / 16;
+                if n <= 0 || n > MAX_COUNT {
+                    return Err(RedisError::runtime(b"ERR COUNT must be > 0"));
                 }
                 count_limit = n as usize;
                 idx += 2;
