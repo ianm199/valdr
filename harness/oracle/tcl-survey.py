@@ -41,6 +41,19 @@ DEFAULT_DENY_TAGS = [
     "needs:debug",
     "external:skip",
 ]
+DENY_TAG_PROFILES = {
+    "default": DEFAULT_DENY_TAGS,
+    # Many upstream unit files are tagged external:skip because they spawn or
+    # reconfigure local servers. For single-node coverage expansion, keep
+    # replication/debug/cluster out while allowing those local-server tests to
+    # illuminate real behavior.
+    "single-node-external": [
+        "needs:repl",
+        "needs:debug",
+        "cluster",
+        "needs:cluster",
+    ],
+}
 
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -199,6 +212,12 @@ def main() -> int:
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--quiet", action="store_true", default=True)
     parser.add_argument(
+        "--profile",
+        choices=sorted(DENY_TAG_PROFILES),
+        default="default",
+        help="Named deny-tag profile. default preserves legacy behavior; single-node-external allows external:skip local-server tests while denying repl/debug/cluster.",
+    )
+    parser.add_argument(
         "--deny-tag",
         action="append",
         dest="extra_deny_tags",
@@ -215,7 +234,7 @@ def main() -> int:
         help="Do not apply the default needs:repl/needs:debug/external:skip deny policy.",
     )
     args = parser.parse_args()
-    deny_tags = [] if args.no_default_deny_tags else list(DEFAULT_DENY_TAGS)
+    deny_tags = [] if args.no_default_deny_tags else list(DENY_TAG_PROFILES[args.profile])
     deny_tags.extend(args.extra_deny_tags)
     if args.deny_tags:
         deny_tags.extend(tag.strip() for tag in args.deny_tags.split(",") if tag.strip())
@@ -254,6 +273,7 @@ def main() -> int:
             "evidence": {
                 "kind": "tcl_survey",
                 "run_id": run_id,
+                "profile": args.profile,
                 "setup": {key: setup[key] for key in ("cmd", "returncode", "timed_out", "elapsed_s")},
             },
         }
@@ -370,6 +390,7 @@ def main() -> int:
         "evidence": {
             "kind": "tcl_survey",
             "run_id": run_id,
+            "profile": args.profile,
             "files": file_results,
             "deny_tags": args.deny_tags,
             "clients": args.clients,

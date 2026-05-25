@@ -210,10 +210,33 @@ Result:
 | `unit/maxmemory` | no-summary | Aborts in client-eviction maxmemory path. |
 | `unit/shutdown` | no-summary | Aborts in shutdown/RDB-temp-file behavior. |
 
-Recommendation: split the survey profiles. Keep the default conservative profile
-for public claims, but add a `single-node-external` profile that allows
-`external:skip` while still denying repl/debug/cluster. That immediately makes
-`unit/pubsubshard` counted and gives honest blocker telemetry for the rest.
+Follow-up landed: `harness/oracle/tcl-survey.py` now has
+`--profile single-node-external`, which allows `external:skip` while denying
+repl/debug/cluster.
+
+Verification:
+
+```bash
+python3 -m py_compile harness/oracle/tcl-survey.py
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-profile-single-node-external-smoke \
+  --profile single-node-external \
+  --skip-build \
+  --timeout-s 60 \
+  --baseport 53111 \
+  --portcount 8000 \
+  --files unit/pubsubshard
+```
+
+Evidence:
+
+`harness/oracle/results/tcl-survey/20260525T044207Z/unit__pubsubshard.json`
+
+Result:
+
+```text
+unit/pubsubshard: 11 pass / 0 fail / 11 counted
+```
 
 ## Latency Monitor Scout
 
