@@ -302,6 +302,16 @@ fn runtime_dispatch_index() -> &'static RuntimeDispatchIndex {
 /// WATCH / UNWATCH / RESET) is appended to `client.queued_argvs` and the
 /// client receives `+QUEUED\r\n` instead of executing immediately.
 pub fn dispatch(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
+    // Refresh per-command import-expiry state before the command runs (C: the
+    // dispatcher does this each command). A primary in import-mode keeps expired
+    // keys instead of lazily deleting them, and a client in import-source state
+    // sees their values rather than treating them as expired.
+    {
+        let import_mode = ctx.server().live_config.import_mode();
+        let import_source = ctx.client_ref().import_source;
+        ctx.db_mut()
+            .set_import_expire_state(import_source && import_mode, import_mode);
+    }
     let command_name = match ctx.client_ref().arg(0) {
         Some(s) => StackCommandName::from_slice(s.as_bytes()),
         None => return Err(RedisError::runtime(b"ERR empty command")),
