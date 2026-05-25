@@ -2012,7 +2012,7 @@ pub fn xreadgroup_command(ctx: &mut CommandContext) -> RedisResult<()> {
                 touch_or_create_consumer(group, &consumer_name, now);
                 let pending_ids: Vec<StreamId> = match group.consumers.get(&consumer_name) {
                     Some(c) => {
-                        let start = c.pel_lower_bound(from_id);
+                        let start = c.pel.partition_point(|p| p.entry_id <= *from_id);
                         let take = match count {
                             None => c.pel.len() - start,
                             Some(n) => (n as usize).min(c.pel.len() - start),
