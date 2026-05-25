@@ -32,36 +32,57 @@ unit/acl-v2   47/25
 cargo build --bin redis-server
 
 python3 harness/oracle/tcl-survey.py \
-  --runner-id tcl-aclv2-final-v1 \
+  --runner-id tcl-acl-v2-integrated-agent1 \
+  --isolated-tests-copy \
   --skip-build \
   --timeout-s 240 \
-  --baseport 49111 \
+  --baseport 54411 \
   --portcount 5000 \
   --no-default-deny-tags \
   --deny-tag needs:repl \
   --deny-tag needs:debug \
   --deny-tag cluster \
   --deny-tag needs:cluster \
-  --files unit/acl-v2
+  --files unit/acl,unit/acl-v2,unit/auth
 
 python3 harness/oracle/tcl-survey.py \
-  --runner-id tcl-acl-final-v2 \
+  --runner-id tcl-acl-v2-integration-noregression-v1 \
+  --isolated-tests-copy \
   --skip-build \
-  --timeout-s 180 \
-  --baseport 51111 \
+  --timeout-s 240 \
+  --baseport 54511 \
   --portcount 5000 \
   --no-default-deny-tags \
   --deny-tag needs:repl \
   --deny-tag needs:debug \
   --deny-tag cluster \
   --deny-tag needs:cluster \
-  --files unit/acl
+  --files unit/acl,unit/acl-v2,unit/auth,unit/dump,unit/pubsub,unit/latency-monitor
 ```
 
 Artifacts:
 
-- `harness/oracle/results/tcl-survey/20260525T075323Z/unit__acl-v2.json`
-- `harness/oracle/results/tcl-survey/20260525T075334Z/unit__acl.json`
+- `harness/oracle/results/tcl-survey/20260525T085733912059Z/`
+- `harness/oracle/results/tcl-survey/20260525T085820633967Z/`
+
+Integrated Agent-1 gate:
+
+```text
+unit/acl            114/0
+unit/acl-v2          47/25
+unit/auth            14/2
+```
+
+No-regression bundle after integration:
+
+```text
+unit/acl            114/0
+unit/acl-v2          47/25
+unit/auth            14/2
+unit/dump            27/0
+unit/pubsub          35/0
+unit/latency-monitor 12/0
+```
 
 ## What landed
 

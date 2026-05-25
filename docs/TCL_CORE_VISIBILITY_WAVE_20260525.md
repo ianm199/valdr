@@ -912,20 +912,98 @@ unit/latency-monitor: +12 counted
 Total visible gain:  +236 counted, from ~2154 to ~2390 counted
 ```
 
+## ACL Selector Pull: `unit/acl-v2`
+
+Patch: integrated the selector parser and ACL-v2 semantics unlock from the
+`redis-rs-port-acl-unlock` side branch into Agent-1 after resolving the
+`dispatch.rs` conflict with the pre-AUTH reply-limit work.
+
+Why this was selected:
+
+- `unit/acl-v2` was the biggest remaining Agent-1-compatible hidden file.
+- The side branch had already proven the visibility unlock, so the highest
+  leverage move was integration plus a regression gate instead of rediscovering
+  the parser work.
+- This turns ACL-v2 from an abort/no-summary file into counted-red coverage.
+
+Verification:
+
+```bash
+cargo build --bin redis-server
+
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-acl-v2-integrated-agent1 \
+  --isolated-tests-copy \
+  --skip-build \
+  --timeout-s 240 \
+  --baseport 54411 \
+  --portcount 5000 \
+  --no-default-deny-tags \
+  --deny-tag needs:repl \
+  --deny-tag needs:debug \
+  --deny-tag cluster \
+  --deny-tag needs:cluster \
+  --files unit/acl,unit/acl-v2,unit/auth
+
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-acl-v2-integration-noregression-v1 \
+  --isolated-tests-copy \
+  --skip-build \
+  --timeout-s 240 \
+  --baseport 54511 \
+  --portcount 5000 \
+  --no-default-deny-tags \
+  --deny-tag needs:repl \
+  --deny-tag needs:debug \
+  --deny-tag cluster \
+  --deny-tag needs:cluster \
+  --files unit/acl,unit/acl-v2,unit/auth,unit/dump,unit/pubsub,unit/latency-monitor
+```
+
+Evidence:
+
+- `harness/oracle/results/tcl-survey/20260525T085733912059Z/`
+- `harness/oracle/results/tcl-survey/20260525T085820633967Z/`
+
+Result:
+
+```text
+unit/acl:            114 pass / 0 fail / 114 counted
+unit/acl-v2:          47 pass / 25 fail / 72 counted
+unit/auth:            14 pass / 2 fail / 16 counted
+unit/dump:            no regression, 27 pass / 0 fail
+unit/pubsub:          no regression, 35 pass / 0 fail
+unit/latency-monitor: no regression, 12 pass / 0 fail
+```
+
+Agent-1 counted-coverage movement from this pull:
+
+```text
+unit/acl-v2: +72 counted, +47 passing
+```
+
+Current Agent-1 visible counted movement:
+
+```text
+Previous Agent-1 gain: +236 counted
+unit/acl-v2:           +72 counted
+Total visible gain:   +308 counted, from ~2154 to ~2462 counted
+```
+
 ## Next Overnight Targets
 
-1. ACL selector lane: `unit/acl-v2` (72 source tests) is the biggest remaining
-   Agent-1-compatible counted-coverage lever, but it is claimed by
-   `redis-rs-port-acl-unlock` and depends on that branch's selector parser.
-   Coordinate before editing.
-2. Runtime/client cleanup lane: `unit/pause`, `unit/obuf-limits`, and
+1. Runtime/client cleanup lane: `unit/pause`, `unit/obuf-limits`, and
    `unit/networking` are already counted. They improve quality/pass count, not
    counted visibility. They are good follow-ups once the hidden files are
    exhausted.
-3. Replication-adjacent runtime lane: `unit/wait`, `unit/maxmemory`, and
+2. Replication-adjacent runtime lane: `unit/wait`, `unit/maxmemory`, and
    `unit/auth`'s remaining primaryauth failures are replication/WAITAOF and
    replica-buffer/accounting work. Treat these as architecture packets, not
    small admin fixes.
+3. ACL-v2 counted-red cleanup: the remaining 25 failures are mostly
+   key-spec/database selector semantics, scripts/functions database checks, and
+   exact `ACL LIST` selector rendering. Good pass-rate work after hidden files
+   are exhausted.
 4. `unit/introspection-2` cleanup: 3 known failures around object idle-time
    mutation. Good small follow-up if no larger dark file is safe to touch.
 
