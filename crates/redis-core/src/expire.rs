@@ -862,23 +862,18 @@ pub fn expire_generic_command(
     let current_expire = ctx.db().get_expire(&key);
     let key_exists = ctx.db_mut().lookup_key_write(&key).is_some();
     if !key_exists {
+        ctx.client_mut().set_prevent_propagation();
         return ctx.reply_integer(0);
     }
 
     let has_expire = current_expire != crate::object::EXPIRY_NONE;
-    if flag & EXPIRE_NX != 0 && has_expire {
-        return ctx.reply_integer(0);
-    }
-    if flag & EXPIRE_XX != 0 && !has_expire {
-        return ctx.reply_integer(0);
-    }
-    if flag & EXPIRE_GT != 0 && !has_expire {
-        return ctx.reply_integer(0);
-    }
-    if flag & EXPIRE_GT != 0 && has_expire && when <= current_expire {
-        return ctx.reply_integer(0);
-    }
-    if flag & EXPIRE_LT != 0 && has_expire && when >= current_expire {
+    if (flag & EXPIRE_NX != 0 && has_expire)
+        || (flag & EXPIRE_XX != 0 && !has_expire)
+        || (flag & EXPIRE_GT != 0 && !has_expire)
+        || (flag & EXPIRE_GT != 0 && has_expire && when <= current_expire)
+        || (flag & EXPIRE_LT != 0 && has_expire && when >= current_expire)
+    {
+        ctx.client_mut().set_prevent_propagation();
         return ctx.reply_integer(0);
     }
 
@@ -888,13 +883,38 @@ pub fn expire_generic_command(
             .expired_keys
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         ctx.notify_keyspace_event(NOTIFY_EXPIRED, b"expired", &key);
+        rewrite_expire_propagation_unlink(ctx, &key);
         return ctx.reply_integer(1);
     }
 
     ctx.db_mut().set_expire(&key, when);
     ctx.db().signal_modified(&key);
     ctx.notify_keyspace_event(NOTIFY_GENERIC, b"expire", &key);
+    rewrite_expire_propagation_pexpireat(ctx, &key, when);
     ctx.reply_integer(1)
+}
+
+/// Rewrite the client's argv so the EXPIRE-family command propagates as the
+/// canonical `PEXPIREAT key <absolute-ms>`.
+///
+/// Replicas and the AOF always receive an absolute millisecond timestamp so a
+/// key never outlives the primary's intent due to replication lag, and so the
+/// representation matches the RDB form. Mirrors `expireGenericCommand`'s
+/// `rewriteClientCommandVector` in `expire.c`.
+fn rewrite_expire_propagation_pexpireat(ctx: &mut CommandContext, key: &RedisString, when: MsTime) {
+    ctx.client_mut().set_args(vec![
+        RedisString::from_bytes(b"PEXPIREAT"),
+        key.clone(),
+        RedisString::from_bytes(when.to_string().as_bytes()),
+    ]);
+}
+
+/// Rewrite the client's argv so an EXPIRE-family command whose timestamp is
+/// already in the past propagates as `UNLINK key` (the key is deleted rather
+/// than given a TTL). Matches the default `lazyfree-lazy-expire yes` behavior.
+fn rewrite_expire_propagation_unlink(ctx: &mut CommandContext, key: &RedisString) {
+    ctx.client_mut()
+        .set_args(vec![RedisString::from_bytes(b"UNLINK"), key.clone()]);
 }
 
 /// EXPIRE key seconds [ NX | XX | GT | LT ]

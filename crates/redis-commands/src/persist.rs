@@ -229,7 +229,37 @@ pub fn restore_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     ctx.db_mut()
         .set_key_with_known_expire(key, obj, expire_at, 0);
     ctx.server().add_dirty(1);
+    rewrite_restore_propagation_absttl(ctx, ttl, absttl, expire_at);
     ctx.reply_simple_string(b"OK")
+}
+
+/// Rewrite the propagated RESTORE so a relative TTL becomes an absolute
+/// millisecond timestamp with the `ABSTTL` flag appended.
+///
+/// Replicas and the AOF must receive an absolute expire so a restored key does
+/// not outlive the primary's intent due to replication lag. A RESTORE that was
+/// already `ABSTTL` (or had no TTL) is propagated verbatim. Mirrors
+/// `restoreCommand`'s argument rewrite in `cluster.c`.
+fn rewrite_restore_propagation_absttl(
+    ctx: &mut CommandContext<'_>,
+    ttl: i64,
+    absttl: bool,
+    expire_at: i64,
+) {
+    if ttl == 0 || absttl {
+        return;
+    }
+    let argc = ctx.arg_count();
+    let mut new_argv: Vec<RedisString> = Vec::with_capacity(argc + 1);
+    for k in 0..argc {
+        match ctx.arg_owned(k) {
+            Ok(arg) => new_argv.push(arg),
+            Err(_) => return,
+        }
+    }
+    new_argv[2] = RedisString::from_bytes(expire_at.to_string().as_bytes());
+    new_argv.push(RedisString::from_bytes(b"ABSTTL"));
+    ctx.client_mut().set_args(new_argv);
 }
 
 /// Cluster-internal RESTORE variant. Cluster asking state is out of scope for

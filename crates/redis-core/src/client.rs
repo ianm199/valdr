@@ -197,6 +197,14 @@ pub struct Client {
     pub tracking: ClientTrackingState,
     /// True after `CLIENT IMPORT-SOURCE ON`.
     pub import_source: bool,
+    /// Set by a command handler when the current command had no effect on the
+    /// dataset and must therefore not be propagated to replicas or the AOF.
+    ///
+    /// Mirrors C's `CLIENT_PREVENT_PROP`. Reset at the top of `dispatch` for
+    /// every command. A no-op write (e.g. `EXPIRE` on a missing key, `SET NX`
+    /// that did not store) sets this so it does not leak into the replication
+    /// stream, which `assert_replication_stream` asserts on exactly.
+    pub prevent_propagation: bool,
     /// The ACL username this client is authenticated as.
     ///
     /// `None` means the client has not yet authenticated (pre-AUTH state).
@@ -331,6 +339,7 @@ impl Client {
             resp_proto: 2,
             tracking: ClientTrackingState::default(),
             import_source: false,
+            prevent_propagation: false,
             subscribed_channels: HashSet::new(),
             subscribed_patterns: HashSet::new(),
             subscribed_shard_channels: HashSet::new(),
@@ -369,6 +378,16 @@ impl Client {
 
     pub fn set_args(&mut self, args: Vec<RedisString>) {
         self.argv = args;
+    }
+
+    /// Mark the current command as a no-op so it is not propagated to replicas
+    /// or the AOF. See `prevent_propagation`.
+    pub fn set_prevent_propagation(&mut self) {
+        self.prevent_propagation = true;
+    }
+
+    pub fn prevent_propagation(&self) -> bool {
+        self.prevent_propagation
     }
 
     pub fn set_authenticated_user(&mut self, user: Option<RedisString>) {

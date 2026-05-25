@@ -312,6 +312,7 @@ pub fn dispatch(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         ctx.db_mut()
             .set_import_expire_state(import_source && import_mode, import_mode);
     }
+    ctx.client_mut().prevent_propagation = false;
     let command_name = match ctx.client_ref().arg(0) {
         Some(s) => StackCommandName::from_slice(s.as_bytes()),
         None => return Err(RedisError::runtime(b"ERR empty command")),
@@ -647,6 +648,9 @@ fn copy_target_db(ctx: &CommandContext<'_>) -> Option<u32> {
 }
 
 fn should_propagate_write_command(ctx: &CommandContext<'_>, original_name: &[u8]) -> bool {
+    if ctx.client_ref().prevent_propagation() {
+        return false;
+    }
     if original_name.eq_ignore_ascii_case(b"GETEX") {
         return ctx
             .client_ref()
