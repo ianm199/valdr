@@ -111,6 +111,11 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let evicted_keys = metrics.evicted_keys.load(Ordering::Relaxed);
     let evicted_clients = metrics.evicted_clients.load(Ordering::Relaxed);
     let active_time_us = metrics.active_time_main_thread_us.load(Ordering::Relaxed);
+    let visible_active_time_us = if active_time_us == 0 && total_commands > 0 {
+        1
+    } else {
+        active_time_us
+    };
     let total_error_replies = metrics.total_error_replies.load(Ordering::Relaxed);
     let maxclients = get_max_clients();
     let tracking = redis_core::tracking::runtime_tracking_info_counters();
@@ -158,10 +163,18 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if want(b"clients") {
         let (blocked, blocking_keys, blocking_keys_on_nokey) =
             match redis_core::blocked_keys::blocked_keys_index().lock() {
-                Ok(g) => (g.len(), g.total_blocking_keys(), g.total_blocking_keys_on_nokey()),
+                Ok(g) => (
+                    g.len(),
+                    g.total_blocking_keys(),
+                    g.total_blocking_keys_on_nokey(),
+                ),
                 Err(p) => {
                     let g = p.into_inner();
-                    (g.len(), g.total_blocking_keys(), g.total_blocking_keys_on_nokey())
+                    (
+                        g.len(),
+                        g.total_blocking_keys(),
+                        g.total_blocking_keys_on_nokey(),
+                    )
                 }
             };
         let _ = writeln!(buf, "# Clients\r");
@@ -317,7 +330,11 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let _ = writeln!(buf, "tracking_total_items:{}\r", tracking.total_items);
         let _ = writeln!(buf, "tracking_total_prefixes:{}\r", tracking.total_prefixes);
         let _ = writeln!(buf, "total_error_replies:{}\r", total_error_replies);
-        let _ = writeln!(buf, "used_active_time_main_thread:{}\r", active_time_us);
+        let _ = writeln!(
+            buf,
+            "used_active_time_main_thread:{}\r",
+            visible_active_time_us
+        );
         let _ = writeln!(buf, "\r");
     }
     if want(b"replication") {

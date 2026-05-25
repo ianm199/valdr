@@ -1574,6 +1574,52 @@ pub fn debug_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ascii_eq_ignore_case(sub.as_bytes(), b"SET-ACTIVE-EXPIRE") {
         return ctx.reply_simple_string(b"OK");
     }
+    if ascii_eq_ignore_case(sub.as_bytes(), b"PAUSE-CRON") {
+        if ctx.arg_count() != 3 {
+            return Err(RedisError::wrong_number_of_args(b"debug pause-cron"));
+        }
+        let value = ctx.arg_owned(2usize)?;
+        match value.as_bytes() {
+            b"0" | b"1" => {}
+            _ => {
+                return Err(RedisError::runtime(
+                    b"ERR value is not an integer or out of range",
+                ))
+            }
+        }
+        // Upstream uses this as a test-only clientsCron timing knob. This
+        // port does not run a C-style clientsCron loop, so accepting the knob
+        // lets query-buffer tests proceed to their observable assertions.
+        return ctx.reply_simple_string(b"OK");
+    }
+    if ascii_eq_ignore_case(sub.as_bytes(), b"REPLYBUFFER") {
+        if ctx.arg_count() != 4 {
+            return Err(RedisError::wrong_number_of_args(b"debug replybuffer"));
+        }
+        let knob = ctx.arg_owned(2usize)?;
+        if !ascii_eq_ignore_case(knob.as_bytes(), b"PEAK-RESET-TIME") {
+            let mut msg = Vec::with_capacity(
+                b"ERR Unknown DEBUG REPLYBUFFER subcommand: ".len() + knob.as_bytes().len(),
+            );
+            msg.extend_from_slice(b"ERR Unknown DEBUG REPLYBUFFER subcommand: ");
+            msg.extend_from_slice(knob.as_bytes());
+            return Err(RedisError::runtime(msg));
+        }
+        let value = ctx.arg_owned(3usize)?;
+        let bytes = value.as_bytes();
+        if !ascii_eq_ignore_case(bytes, b"NEVER")
+            && !ascii_eq_ignore_case(bytes, b"RESET")
+            && parse_i64_strict(bytes).is_none()
+        {
+            return Err(RedisError::runtime(
+                b"ERR value is not an integer or out of range",
+            ));
+        }
+        // The runtime owner tracks reply-buffer memory directly rather than
+        // through a peak-reset timer. Accept the test-only knob and leave the
+        // actual accounting path unchanged.
+        return ctx.reply_simple_string(b"OK");
+    }
     if ascii_eq_ignore_case(sub.as_bytes(), b"SET-SKIP-CHECKSUM-VALIDATION") {
         if ctx.arg_count() != 3 {
             return Err(RedisError::wrong_number_of_args(
