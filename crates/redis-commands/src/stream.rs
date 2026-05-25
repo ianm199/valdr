@@ -422,7 +422,7 @@ fn apply_approx_maxlen_trim(
         if len <= target {
             break;
         }
-        let chunk = approx_trim_chunk_len(len, limit);
+        let chunk = approx_maxlen_trim_chunk_len(len, target, limit);
         if chunk == 0 || chunk > remaining_limit || len.saturating_sub(chunk) < target {
             break;
         }
@@ -430,6 +430,17 @@ fn apply_approx_maxlen_trim(
         remaining_limit = remaining_limit.saturating_sub(chunk);
     }
     evicted
+}
+
+fn approx_maxlen_trim_chunk_len(len: usize, target: usize, limit: Option<usize>) -> usize {
+    if limit.is_some() || target <= APPROX_STREAM_NODE_ENTRIES {
+        return approx_trim_chunk_len(len, limit);
+    }
+    let head_len = len % APPROX_STREAM_NODE_ENTRIES;
+    if head_len > 0 && len.saturating_sub(head_len) >= target {
+        return head_len;
+    }
+    approx_trim_chunk_len(len, limit)
 }
 
 fn apply_approx_count_trim(
@@ -586,13 +597,15 @@ pub fn xadd_command(ctx: &mut CommandContext) -> RedisResult<()> {
         new_id
     };
 
-    let new_entry = StreamEntry {
-        id: new_id,
-        fields: fields_for_wake,
-    };
-    if !ctx.client_ref().flag_deny_blocking() {
-        wake_blocked_for_stream(ctx.db(), &key_for_wake, &new_entry);
-        wake_blocked_xreadgroup_for_key(ctx.db_mut(), &key_for_wake, &new_entry);
+    if ctx.client_ref().flag_deny_blocking() {
+        ctx.client_mut().pending_wakes.push(key_for_wake.clone());
+    } else {
+        let new_entry = StreamEntry {
+            id: new_id,
+            fields: fields_for_wake,
+        };
+        wake_blocked_for_stream_entry(&key_for_wake, &new_entry);
+        wake_blocked_xreadgroup_for_key(ctx.db_mut(), &key_for_wake);
     }
 
     ctx.notify_keyspace_event(NOTIFY_STREAM, b"xadd", &key_for_wake);
@@ -603,13 +616,8 @@ pub fn xadd_command(ctx: &mut CommandContext) -> RedisResult<()> {
 // XREAD BLOCK wake hook
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Encode an XREAD reply for a single stream key carrying one entry.
-///
-/// Wire shape: `*1\r\n*2\r\n$<klen>\r\n<key>\r\n*1\r\n*2\r\n$<ilen>\r\n<id>\r\n*<2n>\r\n<f1><v1>...`
-fn encode_xread_single_entry(key: &RedisString, entry: &StreamEntry) -> Vec<u8> {
-    let id_bytes = entry.id.to_display_bytes();
-    let fields_count = entry.fields.len() * 2;
-
+/// Encode an XREAD reply for a single stream key carrying one or more entries.
+fn encode_xread_entries(key: &RedisString, entries: &[StreamEntry]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(256);
 
     let write_bulk = |buf: &mut Vec<u8>, bytes: &[u8]| {
@@ -629,25 +637,21 @@ fn encode_xread_single_entry(key: &RedisString, entry: &StreamEntry) -> Vec<u8> 
     write_array(&mut buf, 1);
     write_array(&mut buf, 2);
     write_bulk(&mut buf, key.as_bytes());
-    write_array(&mut buf, 1);
-    write_array(&mut buf, 2);
-    write_bulk(&mut buf, &id_bytes);
-    write_array(&mut buf, fields_count);
-    for (f, v) in &entry.fields {
-        write_bulk(&mut buf, f.as_bytes());
-        write_bulk(&mut buf, v.as_bytes());
+    write_array(&mut buf, entries.len());
+    for entry in entries {
+        let id_bytes = entry.id.to_display_bytes();
+        write_array(&mut buf, 2);
+        write_bulk(&mut buf, &id_bytes);
+        write_array(&mut buf, entry.fields.len() * 2);
+        for (f, v) in &entry.fields {
+            write_bulk(&mut buf, f.as_bytes());
+            write_bulk(&mut buf, v.as_bytes());
+        }
     }
     buf
 }
 
-/// Wake all XREAD BLOCK waiters on `key` whose `id_after` is strictly less
-/// than `new_entry.id`.
-///
-/// Unlike the list pop wake (FIFO, one pop per waiter), streams use broadcast
-/// semantics: every waiting reader receives a copy of the new entry. This
-/// mirrors real Redis's `signalKeyAsReady` / `serveClientsBlockedOnListOrZset`
-/// pattern for streams.
-pub fn wake_blocked_for_stream(db: &RedisDb, key: &RedisString, new_entry: &StreamEntry) {
+fn wake_blocked_for_stream_entry(key: &RedisString, new_entry: &StreamEntry) {
     let waiters = {
         let mut idx = match blocked_keys_index().lock() {
             Ok(g) => g,
@@ -658,9 +662,50 @@ pub fn wake_blocked_for_stream(db: &RedisDb, key: &RedisString, new_entry: &Stre
     if waiters.is_empty() {
         return;
     }
-    let reply = encode_xread_single_entry(key, new_entry);
+    let reply = encode_xread_entries(key, std::slice::from_ref(new_entry));
     for waiter in waiters {
         let _ = waiter.sender.send(reply.clone());
+    }
+}
+
+/// Wake all XREAD BLOCK waiters on `key` whose `id_after` is behind the
+/// stream's current tail.
+///
+/// Unlike the list pop wake (FIFO, one pop per waiter), streams use broadcast
+/// semantics: every waiting reader receives a copy of the new entry. This
+/// mirrors real Redis's `signalKeyAsReady` / `serveClientsBlockedOnListOrZset`
+/// pattern for streams.
+pub fn wake_blocked_for_stream(db: &RedisDb, key: &RedisString) {
+    let latest_id = match as_stream_ref(db.lookup_key_read(key)) {
+        Ok(Some(stream)) => stream.last_id,
+        _ => return,
+    };
+    let waiters = {
+        let mut idx = match blocked_keys_index().lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        idx.take_stream_waiters_for(key, latest_id)
+    };
+    if waiters.is_empty() {
+        return;
+    }
+    for waiter in waiters {
+        let id_after = match &waiter.action {
+            BlockedAction::Stream { id_after } => *id_after,
+            _ => continue,
+        };
+        let entries: Vec<StreamEntry> = match as_stream_ref(db.lookup_key_read(key)) {
+            Ok(Some(stream)) => {
+                let start_idx = stream.upper_bound(&id_after);
+                stream.entries[start_idx..].to_vec()
+            }
+            _ => Vec::new(),
+        };
+        if entries.is_empty() {
+            continue;
+        }
+        let _ = waiter.sender.send(encode_xread_entries(key, &entries));
     }
 }
 
@@ -684,61 +729,25 @@ fn encode_wrongtype_error() -> Vec<u8> {
     b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n".to_vec()
 }
 
-/// Encode an XREADGROUP reply for one key carrying one newly-delivered entry.
-///
-/// Wire shape matches xreadgroup_command's normal output for a single entry:
-/// `*1 [key, *1 [*2 [id, *<2n> [f1,v1,...]]]]`
-fn encode_xreadgroup_single_entry(key: &RedisString, entry: &StreamEntry) -> Vec<u8> {
-    let id_bytes = entry.id.to_display_bytes();
-    let fields_count = entry.fields.len() * 2;
-    let mut buf = Vec::with_capacity(256);
-
-    let write_bulk = |buf: &mut Vec<u8>, bytes: &[u8]| {
-        buf.push(b'$');
-        buf.extend_from_slice(bytes.len().to_string().as_bytes());
-        buf.extend_from_slice(b"\r\n");
-        buf.extend_from_slice(bytes);
-        buf.extend_from_slice(b"\r\n");
-    };
-    let write_array = |buf: &mut Vec<u8>, n: usize| {
-        buf.push(b'*');
-        buf.extend_from_slice(n.to_string().as_bytes());
-        buf.extend_from_slice(b"\r\n");
-    };
-
-    write_array(&mut buf, 1);
-    write_array(&mut buf, 2);
-    write_bulk(&mut buf, key.as_bytes());
-    write_array(&mut buf, 1);
-    write_array(&mut buf, 2);
-    write_bulk(&mut buf, &id_bytes);
-    write_array(&mut buf, fields_count);
-    for (f, v) in &entry.fields {
-        write_bulk(&mut buf, f.as_bytes());
-        write_bulk(&mut buf, v.as_bytes());
-    }
-    buf
-}
-
 /// Wake all blocked XREADGROUP clients on `key` whose cursor is behind
-/// `new_entry.id` and whose consumer group still exists in the stream.
+/// the stream's current tail and whose consumer group still exists.
 ///
 /// For each waiter:
 /// - If the key is gone or not a stream → send WRONGTYPE or NOGROUP error.
 /// - If the group is gone → send NOGROUP error.
 /// - Otherwise → deliver the entry through the XREADGROUP state machine
 ///   (advance `last_delivered_id`, add PEL entry unless NOACK, send reply).
-pub fn wake_blocked_xreadgroup_for_key(
-    db: &mut RedisDb,
-    key: &RedisString,
-    new_entry: &StreamEntry,
-) {
+pub fn wake_blocked_xreadgroup_for_key(db: &mut RedisDb, key: &RedisString) {
+    let latest_id = match as_stream_ref(db.lookup_key_read(key)) {
+        Ok(Some(stream)) => stream.last_id,
+        _ => return,
+    };
     let waiters = {
         let mut idx = match blocked_keys_index().lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
-        idx.take_stream_group_waiters_for(key, new_entry.id)
+        idx.take_stream_group_waiters_for(key, latest_id)
     };
     if waiters.is_empty() {
         return;
@@ -751,13 +760,15 @@ pub fn wake_blocked_xreadgroup_for_key(
     // upstream "reprocessing" semantics in handleClientsBlockedOnKey).
     let mut to_reblock: Vec<BlockedWaiter> = Vec::new();
     for waiter in waiters {
-        let (group, consumer, noack) = match &waiter.action {
+        let (group, consumer, id_after, count, noack) = match &waiter.action {
             BlockedAction::StreamGroup {
                 group,
                 consumer,
+                id_after,
+                count,
                 noack,
                 ..
-            } => (group.clone(), consumer.clone(), *noack),
+            } => (group.clone(), consumer.clone(), *id_after, *count, *noack),
             _ => continue,
         };
         let reply = match as_stream_mut(db.lookup_key_write(key)) {
@@ -766,11 +777,28 @@ pub fn wake_blocked_xreadgroup_for_key(
             Ok(Some(stream)) => {
                 if !stream.groups.contains_key(&group) {
                     encode_nogroup_error(key.as_bytes(), group.as_bytes())
-                } else if new_entry.id <= stream.groups[&group].last_delivered_id {
-                    to_reblock.push(waiter);
-                    continue;
                 } else {
                     let now = now_ms_clamped();
+                    let after = stream
+                        .groups
+                        .get(&group)
+                        .map(|g| g.last_delivered_id)
+                        .unwrap_or(id_after)
+                        .max(id_after);
+                    let start_idx = stream.upper_bound(&after);
+                    let slice_len = stream.entries.len() - start_idx;
+                    let max = match count {
+                        None => slice_len,
+                        Some(n) => (n as usize).min(slice_len),
+                    };
+                    if max == 0 {
+                        to_reblock.push(waiter);
+                        continue;
+                    }
+                    let to_deliver: Vec<StreamEntry> =
+                        stream.entries[start_idx..start_idx + max].to_vec();
+                    let delivered_ids: Vec<StreamId> =
+                        to_deliver.iter().map(|entry| entry.id).collect();
                     let view = stream.lag_view();
                     let g = stream.groups.get_mut(&group).expect("group checked above");
                     touch_or_create_consumer(g, &consumer, now);
@@ -780,22 +808,24 @@ pub fn wake_blocked_xreadgroup_for_key(
                     let (read, last) = view.advance_read_counter(
                         g.entries_read,
                         g.last_delivered_id,
-                        &[new_entry.id],
+                        &delivered_ids,
                     );
                     g.entries_read = read;
                     g.last_delivered_id = last;
                     if !noack {
-                        pel_add(
-                            g,
-                            &consumer,
-                            PelEntry {
-                                entry_id: new_entry.id,
-                                delivery_time_ms: now,
-                                delivery_count: 1,
-                            },
-                        );
+                        for entry in &to_deliver {
+                            pel_add(
+                                g,
+                                &consumer,
+                                PelEntry {
+                                    entry_id: entry.id,
+                                    delivery_time_ms: now,
+                                    delivery_count: 1,
+                                },
+                            );
+                        }
                     }
-                    encode_xreadgroup_single_entry(key, new_entry)
+                    encode_xreadgroup_multi_entries(key, &to_deliver)
                 }
             }
         };

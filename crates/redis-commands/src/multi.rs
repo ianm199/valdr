@@ -294,6 +294,8 @@ fn wake_blocked_for_db(ctx: &mut CommandContext, db_id: u32, key: &RedisString) 
     let _ = ctx.with_db_index(db_id, |db| {
         wake_blocked_for_key(db, key);
         wake_blocked_zset_for_key(db, key);
+        crate::stream::wake_blocked_for_stream(db, key);
+        crate::stream::wake_blocked_xreadgroup_for_key(db, key);
     });
 }
 
