@@ -1136,6 +1136,107 @@ architecture-shaped around `RuntimeOwner` client memory accounting,
 `INFO memory`'s `mem_clients_slaves` / `mem_not_counted_for_evict`, and replica
 writer-buffer accounting. A command-local patch is unlikely to move this file.
 
+## Current Blocker Scout: `unit/shutdown`
+
+Fresh current-state probe after a small RDB-temp lifecycle experiment:
+
+```bash
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-shutdown-rdb-temp-lifecycle-v4 \
+  --isolated-tests-copy \
+  --skip-build \
+  --timeout-s 90 \
+  --baseport 50111 \
+  --portcount 4000 \
+  --no-default-deny-tags \
+  --deny-tag needs:repl \
+  --deny-tag needs:debug \
+  --deny-tag cluster \
+  --deny-tag needs:cluster \
+  --files unit/shutdown
+```
+
+Evidence:
+
+- `harness/oracle/results/tcl-survey/20260525T101404838874Z/unit__shutdown.json`
+
+Result:
+
+```text
+unit/shutdown: still no-summary
+abort_test: SHUTDOWN ABORT can cancel SIGTERM
+exception: I/O error reading reply.
+```
+
+Interpretation: `unit/shutdown` is not a quick +9 counted unlock. The first
+RDB-temp/BGSAVE lifecycle blocker can be moved, but the file then hits
+SIGTERM/`SHUTDOWN ABORT` lifecycle behavior. A safe fix needs an
+architecture-shaped server signal/shutdown policy, not an isolated command shim.
+For the Agent-1 coverage wave, defer this file and spend compute on broader
+visibility targets.
+
+## Big Pull: `unit/scripting`
+
+Patch:
+
+- Added Lua Redis replication constants (`REPL_NONE`, `REPL_AOF`,
+  `REPL_SLAVE`/`REPL_REPLICA`, `REPL_ALL`) to both EVAL and FUNCTION Lua
+  environments.
+- Added a bounded `redis.set_repl(flags)` compatibility hook. This records the
+  requested replication mode in the Lua registry so scripts expecting the API
+  can run; replication routing remains outside the single-node visibility
+  claim.
+- Added `SCRIPT DEBUG YES|SYNC|NO [LUA]` as a no-op compatibility command so
+  the upstream scripting debug smoke test can proceed without requiring an
+  interactive Lua debugger.
+
+Why this was selected:
+
+- The broad dashboard showed `unit/scripting.tcl` as a large no-summary file
+  (`186` source tests) and the current abort was exact:
+  `attempt to call field 'set_repl'`.
+- Unlike `unit/maxmemory` and `unit/shutdown`, this was a command/API surface
+  gap rather than a runtime architecture blocker.
+- The payoff was large: because the upstream TCL file expands many cases across
+  variants, converting it to counted status produced `448` runtime test
+  outcomes, not just the `186` static source-test estimate.
+
+Verification:
+
+```bash
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-scripting-script-debug-counted-v2 \
+  --isolated-tests-copy \
+  --skip-build \
+  --timeout-s 300 \
+  --baseport 25111 \
+  --portcount 6000 \
+  --no-default-deny-tags \
+  --deny-tag needs:repl \
+  --deny-tag needs:debug \
+  --deny-tag cluster \
+  --deny-tag needs:cluster \
+  --files unit/scripting
+```
+
+Evidence:
+
+- `harness/oracle/results/tcl-survey/20260525T103928416841Z/unit__scripting.json`
+
+Result:
+
+```text
+unit/scripting: no-summary -> 367 pass / 81 fail / 448 counted
+dashboard after inventory: 2531 pass / 186 fail / 2717 counted
+```
+
+Interpretation: this crossed both the 2500 stretch target and the 2650 moonshot
+for the Agent-1 visibility wave. The next best movement is still not polishing
+the 81 scripting failures; it is converting the remaining large no-summary
+files (`unit/introspection`, `unit/functions`) to counted files while the
+visibility wave is active.
+
 ## Operating Rules For Continuation
 
 - Keep using isolated `--baseport` and `--portcount`; use

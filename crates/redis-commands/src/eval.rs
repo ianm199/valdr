@@ -2995,7 +2995,24 @@ fn function_load_lua_error(err: LuaError) -> RedisError {
 fn install_redis_api_constants(redis_tbl: &LuaTable) -> mlua::Result<()> {
     redis_tbl.raw_set("REDIS_VERSION", LUA_REDIS_VERSION)?;
     redis_tbl.raw_set("REDIS_VERSION_NUM", LUA_REDIS_VERSION_NUM)?;
+    redis_tbl.raw_set("REPL_NONE", 0)?;
+    redis_tbl.raw_set("REPL_AOF", 1)?;
+    redis_tbl.raw_set("REPL_SLAVE", 2)?;
+    redis_tbl.raw_set("REPL_REPLICA", 2)?;
+    redis_tbl.raw_set("REPL_ALL", 3)?;
     Ok(())
+}
+
+fn create_set_repl_function(lua: &Lua) -> mlua::Result<LuaFunction> {
+    lua.create_function(|lua_inner, flags: i64| -> mlua::Result<()> {
+        if !(0..=3).contains(&flags) {
+            return Err(LuaError::RuntimeError(
+                "Invalid replication flags".to_string(),
+            ));
+        }
+        lua_inner.set_named_registry_value("__redis_repl_flags", flags)?;
+        Ok(())
+    })
 }
 
 fn acl_check_cmd_allowed(ctx: &CommandContext<'_>, args: &[Vec<u8>]) -> mlua::Result<bool> {
@@ -3206,6 +3223,7 @@ fn run_loaded_function(
 
         let replicate_fn =
             lua.create_function(|_lua, _: MultiValue| -> mlua::Result<bool> { Ok(true) })?;
+        let set_repl_fn = create_set_repl_function(&lua)?;
 
         let acl_check_fn = {
             let cell = &ctx_cell;
@@ -3242,6 +3260,7 @@ fn run_loaded_function(
         redis_tbl.raw_set("status_reply", status_reply_fn)?;
         redis_tbl.raw_set("sha1hex", sha1hex_fn)?;
         redis_tbl.raw_set("replicate_commands", replicate_fn)?;
+        redis_tbl.raw_set("set_repl", set_repl_fn)?;
         redis_tbl.raw_set("acl_check_cmd", acl_check_fn)?;
         let setresp_fn = lua.create_function(|lua_inner, n: i64| -> mlua::Result<()> {
             if n != 2 && n != 3 {
@@ -3635,6 +3654,7 @@ fn run_script(
 
         let replicate_fn =
             lua.create_function(|_lua, _: MultiValue| -> mlua::Result<bool> { Ok(true) })?;
+        let set_repl_fn = create_set_repl_function(&lua)?;
 
         let acl_check_fn = {
             let cell = &ctx_cell;
@@ -3653,6 +3673,7 @@ fn run_script(
         redis_tbl.raw_set("status_reply", status_reply_fn)?;
         redis_tbl.raw_set("sha1hex", sha1hex_fn)?;
         redis_tbl.raw_set("replicate_commands", replicate_fn)?;
+        redis_tbl.raw_set("set_repl", set_repl_fn)?;
         redis_tbl.raw_set("acl_check_cmd", acl_check_fn)?;
         let setresp_fn = lua.create_function(|lua_inner, n: i64| -> mlua::Result<()> {
             if n != 2 && n != 3 {
@@ -3809,6 +3830,9 @@ pub fn script_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ascii_eq_ci(sub_bytes, b"KILL") {
         return script_kill(ctx);
     }
+    if ascii_eq_ci(sub_bytes, b"DEBUG") {
+        return script_debug(ctx);
+    }
     if ascii_eq_ci(sub_bytes, b"HELP") {
         return script_help(ctx);
     }
@@ -3833,6 +3857,30 @@ fn script_kill(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             ctx.reply_simple_string(b"OK")
         }
     }
+}
+
+fn script_debug(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
+    if ctx.arg_count() != 3 && ctx.arg_count() != 4 {
+        return Err(RedisError::wrong_number_of_args(b"script|debug"));
+    }
+    if ctx.arg_count() == 4 {
+        let engine = ctx.arg_owned(3usize)?;
+        if !ascii_eq_ci(engine.as_bytes(), b"LUA") {
+            return Err(RedisError::runtime(
+                format!(
+                    "ERR No scripting engine found with name '{}'",
+                    String::from_utf8_lossy(engine.as_bytes())
+                )
+                .into_bytes(),
+            ));
+        }
+    }
+    let mode = ctx.arg_owned(2usize)?;
+    let mode = mode.as_bytes();
+    if ascii_eq_ci(mode, b"NO") || ascii_eq_ci(mode, b"YES") || ascii_eq_ci(mode, b"SYNC") {
+        return ctx.reply_simple_string(b"OK");
+    }
+    Err(RedisError::runtime(b"ERR Use SCRIPT DEBUG YES/SYNC/NO"))
 }
 
 fn script_load(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
@@ -3913,6 +3961,8 @@ fn script_help(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         b"    Flush the Lua scripts cache. Very dangerous on replicas.",
         b"SCRIPT LOAD <script>",
         b"    Load a script into the scripts cache without executing it.",
+        b"SCRIPT DEBUG YES|SYNC|NO",
+        b"    Set the debug mode for subsequent scripts executed by the Lua engine.",
         b"HELP",
         b"    Prints this help.",
     ];
