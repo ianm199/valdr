@@ -2402,6 +2402,7 @@ fn park_zset_blocked_client(
         action: BlockedAction::ZSetPop { reverse, count },
         deadline_ms: deadline_from_timeout_secs(timeout_secs),
         resp_proto: ctx.client_ref().resp_proto,
+        username: ctx.client_ref().authenticated_user.clone(),
     };
     {
         let mut idx = match blocked_keys_index().lock() {

@@ -887,6 +887,11 @@ impl RuntimeOwner {
                 };
                 match recv_result {
                     Ok(payload) => {
+                        if payload.is_empty() {
+                            slot.mark_closed();
+                            progressed = true;
+                            break;
+                        }
                         if slot.client.blocked_on_keys {
                             slot.client.blocked_on_keys = false;
                             if let Ok(mut guard) = client_info_registry().lock() {

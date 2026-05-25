@@ -12,16 +12,21 @@
 //!    a Rust function. Commands with no handler yet are intentionally absent;
 //!    callers receive an `unknown command` error.
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
-use redis_core::acl::{category as acl_category, global_acl_state};
+use redis_core::acl::{category as acl_category, global_acl_state, record_acl_log_entry, AclUser};
 use redis_core::eviction::{oom_error_reply, try_evict_to_fit, EvictionOutcome};
 use redis_core::memory::approximate_memory_used;
-use redis_core::metrics::record_command_stat;
+use redis_core::metrics::{
+    record_acl_access_denied_channel, record_acl_access_denied_cmd, record_acl_access_denied_key,
+    record_command_stat,
+};
 use redis_core::monotonic::{elapsed_start, elapsed_us};
 use redis_core::CommandContext;
 use redis_types::{RedisError, RedisResult, RedisString};
+use serde_json::Value;
 
 use crate::generated::{CommandFlag, GeneratedCommandSpec, COMMANDS};
 
@@ -74,6 +79,108 @@ struct RuntimeDispatchIndex {
 static COMMAND_METADATA_TABLE: OnceLock<Vec<(&'static [u8], CommandMetadata)>> = OnceLock::new();
 static RUNTIME_DISPATCH_INDEX: OnceLock<RuntimeDispatchIndex> = OnceLock::new();
 static HOT_RUNTIME_DISPATCH: OnceLock<HotRuntimeDispatch> = OnceLock::new();
+static COMMAND_RENAME_STATE: OnceLock<RwLock<CommandRenameState>> = OnceLock::new();
+
+#[derive(Default)]
+struct CommandRenameState {
+    aliases: Vec<CommandRename>,
+    hidden: Vec<Vec<u8>>,
+}
+
+struct CommandRename {
+    external: Vec<u8>,
+    canonical: Vec<u8>,
+}
+
+/// Apply a Valkey `rename-command <current-name> <new-name>` directive.
+///
+/// The directive renames the currently visible external command name while ACL
+/// rules and dispatch metadata continue to use the original canonical command.
+pub fn apply_command_rename(current_name: &[u8], new_name: &[u8]) -> Result<(), Vec<u8>> {
+    let current = lower_command_name(current_name);
+    if current.is_empty() {
+        return Err(b"ERR rename-command requires a command name".to_vec());
+    }
+    let new_external = lower_command_name(new_name);
+    let mut state = match command_rename_state().write() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let canonical = if let Some(idx) = state
+        .aliases
+        .iter()
+        .position(|rename| rename.external == current)
+    {
+        state.aliases.remove(idx).canonical
+    } else if state.hidden.iter().any(|hidden| hidden == &current) {
+        let mut msg = b"ERR no such command '".to_vec();
+        msg.extend_from_slice(current_name);
+        msg.push(b'\'');
+        return Err(msg);
+    } else if lookup_runtime_command_indexed(current_name).is_some() {
+        current.clone()
+    } else {
+        let mut msg = b"ERR no such command '".to_vec();
+        msg.extend_from_slice(current_name);
+        msg.push(b'\'');
+        return Err(msg);
+    };
+    hide_external_command_name(&mut state, current);
+    if !new_external.is_empty() {
+        state
+            .aliases
+            .retain(|rename| rename.external != new_external);
+        state.hidden.retain(|hidden| hidden != &new_external);
+        state.aliases.push(CommandRename {
+            external: new_external,
+            canonical,
+        });
+    }
+    Ok(())
+}
+
+pub fn is_dispatchable_command(name: &[u8]) -> bool {
+    let Some(resolved) = resolve_command_name(name) else {
+        return false;
+    };
+    lookup_runtime_command(&resolved).is_some()
+}
+
+fn command_rename_state() -> &'static RwLock<CommandRenameState> {
+    COMMAND_RENAME_STATE.get_or_init(|| RwLock::new(CommandRenameState::default()))
+}
+
+fn hide_external_command_name(state: &mut CommandRenameState, name: Vec<u8>) {
+    if !state.hidden.iter().any(|hidden| hidden == &name) {
+        state.hidden.push(name);
+    }
+}
+
+fn resolve_command_name(name: &[u8]) -> Option<Cow<'_, [u8]>> {
+    let Some(lock) = COMMAND_RENAME_STATE.get() else {
+        return Some(Cow::Borrowed(name));
+    };
+    let needle = lower_command_name(name);
+    let state = match lock.read() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    if let Some(rename) = state
+        .aliases
+        .iter()
+        .find(|rename| rename.external == needle)
+    {
+        return Some(Cow::Owned(rename.canonical.clone()));
+    }
+    if state.hidden.iter().any(|hidden| hidden == &needle) {
+        return None;
+    }
+    Some(Cow::Borrowed(name))
+}
+
+fn lower_command_name(name: &[u8]) -> Vec<u8> {
+    name.iter().map(|byte| byte.to_ascii_lowercase()).collect()
+}
 
 /// Look up the handler for `name` (case-insensitive ASCII).
 ///
@@ -198,22 +305,39 @@ pub fn dispatch(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ctx.client_ref().is_replica() && !is_replica_allowed_command(name) {
         return Ok(());
     }
+    let resolved_name = resolve_command_name(name);
+    let dispatch_name = resolved_name.as_deref().unwrap_or(name);
     if ctx.client_ref().flag_multi() {
-        if crate::multi::is_no_multi_command(name) {
-            if crate::multi::is_multi_command(name) {
+        if crate::multi::is_no_multi_command(dispatch_name) {
+            if crate::multi::is_multi_command(dispatch_name) {
                 crate::multi::flag_transaction_dirty_exec(ctx.client_mut());
             }
-            return Err(crate::multi::reject_no_multi_command(name));
+            return Err(crate::multi::reject_no_multi_command(dispatch_name));
         }
-        if !crate::multi::is_tx_control_command(name) {
+        if !crate::multi::is_tx_control_command(dispatch_name) {
+            if let Some(runtime_entry) = lookup_runtime_command(dispatch_name) {
+                let metadata = runtime_entry.metadata;
+                if !metadata.no_auth {
+                    let acl_categories =
+                        acl_categories_for_context(ctx, dispatch_name, metadata.acl_categories);
+                    if let Some(noauth_reply) =
+                        enforce_acl_gate(ctx, dispatch_name, acl_categories)
+                    {
+                        crate::multi::flag_transaction_dirty_exec(ctx.client_mut());
+                        ctx.client_mut().reply_buf.extend_from_slice(&noauth_reply);
+                        return Ok(());
+                    }
+                }
+            }
             return crate::multi::queue_current_command(ctx);
         }
     }
     if ctx.client_ref().in_pubsub_mode()
-        && !name.eq_ignore_ascii_case(b"HELLO")
-        && !crate::pubsub::is_allowed_in_subscribe_mode(name)
+        && ctx.client_ref().resp_proto == 2
+        && !dispatch_name.eq_ignore_ascii_case(b"HELLO")
+        && !crate::pubsub::is_allowed_in_subscribe_mode(dispatch_name)
     {
-        return Err(crate::pubsub::subscribe_mode_error(name));
+        return Err(crate::pubsub::subscribe_mode_error(dispatch_name));
     }
     dispatch_command_name(ctx, name)
 }
@@ -252,15 +376,21 @@ impl StackCommandName {
 /// the live slowlog gate can consume a duration, and records an entry when the
 /// measured duration meets the threshold.
 pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> RedisResult<()> {
-    let runtime_entry = match lookup_runtime_command(name) {
+    let resolved_name = match resolve_command_name(name) {
+        Some(name) => name,
+        None => return Err(unknown_command_error(name)),
+    };
+    let runtime_entry = match lookup_runtime_command(&resolved_name) {
         Some(e) => e,
         None => return Err(unknown_command_error(name)),
     };
     let entry = runtime_entry.entry;
     let metadata = runtime_entry.metadata;
+    let name = entry.name;
 
     if !metadata.no_auth {
-        if let Some(noauth_reply) = enforce_acl_gate(ctx, name, metadata.acl_categories) {
+        let acl_categories = acl_categories_for_context(ctx, name, metadata.acl_categories);
+        if let Some(noauth_reply) = enforce_acl_gate(ctx, name, acl_categories) {
             ctx.client_mut().reply_buf.extend_from_slice(&noauth_reply);
             return Ok(());
         }
@@ -619,10 +749,6 @@ fn enforce_acl_gate(ctx: &CommandContext<'_>, name: &[u8], cmd_categories: u64) 
         }
     };
 
-    if !user.flags.enabled {
-        return Some(b"-NOAUTH Authentication required.\r\n".to_vec());
-    }
-
     if ctx.client_ref().authenticated_user.is_none() {
         return Some(b"-NOAUTH Authentication required.\r\n".to_vec());
     }
@@ -631,17 +757,341 @@ fn enforce_acl_gate(ctx: &CommandContext<'_>, name: &[u8], cmd_categories: u64) 
         return None;
     }
 
-    if user.can_execute_command(name, cmd_categories) {
-        return None;
+    let first_arg = ctx.client_ref().arg(1).map(|arg| arg.as_bytes());
+    if !user.can_execute_command_with_arg(name, first_arg, cmd_categories) {
+        let object = RedisString::from_vec(acl_command_error_name(ctx, name, user));
+        let mut msg: Vec<u8> = Vec::new();
+        msg.extend_from_slice(b"-NOPERM This user has no permissions to run the '");
+        msg.extend_from_slice(object.as_bytes());
+        msg.extend_from_slice(b"' command\r\n");
+        let client_info = acl_log_client_info(ctx, name);
+        drop(guard);
+        record_acl_access_denied_cmd();
+        record_acl_log_entry(b"command", acl_log_context(ctx), object, user_name, client_info);
+        return Some(msg);
     }
 
-    let mut msg: Vec<u8> = Vec::new();
-    msg.extend_from_slice(b"-NOPERM This user has no permissions to run the '");
-    for b in name.iter().map(|c| c.to_ascii_lowercase()) {
-        msg.push(b);
+    if let Some(object) = enforce_acl_key_gate(ctx, name, user) {
+        let client_info = acl_log_client_info(ctx, name);
+        drop(guard);
+        record_acl_access_denied_key();
+        record_acl_log_entry(b"key", acl_log_context(ctx), object, user_name, client_info);
+        return Some(b"-NOPERM No permissions to access a key\r\n".to_vec());
     }
-    msg.extend_from_slice(b"' command\r\n");
-    Some(msg)
+    if let Some(object) = enforce_acl_channel_gate(ctx, name, user) {
+        let client_info = acl_log_client_info(ctx, name);
+        drop(guard);
+        record_acl_access_denied_channel();
+        record_acl_log_entry(b"channel", acl_log_context(ctx), object, user_name, client_info);
+        return Some(b"-NOPERM No permissions to access a channel\r\n".to_vec());
+    }
+    if let Some(object) = enforce_acl_database_gate(ctx, name, user) {
+        let client_info = acl_log_client_info(ctx, name);
+        drop(guard);
+        record_acl_log_entry(
+            b"database",
+            acl_log_context(ctx),
+            object,
+            user_name,
+            client_info,
+        );
+        return Some(b"-NOPERM No permissions to access a database\r\n".to_vec());
+    }
+
+    None
+}
+
+fn acl_categories_for_context(
+    ctx: &CommandContext<'_>,
+    name: &[u8],
+    base_categories: u64,
+) -> u64 {
+    if ascii_eq_ignore_case(name, b"XINFO") {
+        return base_categories | acl_category::STREAM | acl_category::READ;
+    }
+    if ascii_eq_ignore_case(name, b"XGROUP") {
+        return base_categories | acl_category::STREAM | acl_category::WRITE;
+    }
+    if ascii_eq_ignore_case(name, b"COMMAND") && ctx.arg_count() > 1 {
+        return base_categories | acl_category::CONNECTION;
+    }
+    base_categories
+}
+
+fn enforce_acl_key_gate(
+    ctx: &CommandContext<'_>,
+    name: &[u8],
+    user: &AclUser,
+) -> Option<RedisString> {
+    if user.flags.allkeys {
+        return None;
+    }
+    let argc = ctx.arg_count();
+    for spec in COMMANDS
+        .iter()
+        .filter(|spec| ascii_eq_ignore_case(spec.name.as_bytes(), name))
+    {
+        let Ok(Value::Array(items)) = serde_json::from_str::<Value>(spec.key_specs_json) else {
+            continue;
+        };
+        for item in items {
+            if key_spec_has_flag(&item, "NOT_KEY") {
+                continue;
+            }
+            let begin = item
+                .pointer("/begin_search/index/pos")
+                .and_then(Value::as_u64)
+                .map(|v| v as usize);
+            let Some(begin) = begin else {
+                continue;
+            };
+            if let Some(range) = item.pointer("/find_keys/range") {
+                let step = range
+                    .get("step")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(1)
+                    .max(1) as usize;
+                let lastkey = range.get("lastkey").and_then(Value::as_i64).unwrap_or(0);
+                let end = acl_range_end(argc, begin, lastkey)?;
+                let mut idx = begin;
+                while idx <= end {
+                    if let Some(key) = ctx.client_ref().arg(idx) {
+                        if !user.can_access_key(key.as_bytes()) {
+                            return Some(key.clone());
+                        }
+                    }
+                    idx = match idx.checked_add(step) {
+                        Some(next) => next,
+                        None => break,
+                    };
+                }
+            } else if let Some(keynum) = item.pointer("/find_keys/keynum") {
+                let keynumidx = keynum
+                    .get("keynumidx")
+                    .and_then(Value::as_u64)
+                    .map(|v| v as usize)?;
+                let firstkey = keynum
+                    .get("firstkey")
+                    .and_then(Value::as_u64)
+                    .map(|v| v as usize)?;
+                let step = keynum
+                    .get("step")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(1)
+                    .max(1) as usize;
+                let raw_count = ctx.client_ref().arg(keynumidx)?;
+                let Ok(raw_count) = std::str::from_utf8(raw_count.as_bytes()) else {
+                    continue;
+                };
+                let Ok(count) = raw_count.parse::<usize>() else {
+                    continue;
+                };
+                for n in 0..count {
+                    let idx = firstkey + n * step;
+                    if let Some(key) = ctx.client_ref().arg(idx) {
+                        if !user.can_access_key(key.as_bytes()) {
+                            return Some(key.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn acl_range_end(argc: usize, begin: usize, lastkey: i64) -> Option<usize> {
+    if argc == 0 || begin >= argc {
+        return None;
+    }
+    let end = match lastkey {
+        0 => begin,
+        -1 => argc.saturating_sub(1),
+        -2 => argc.saturating_sub(2),
+        n if n > 0 => n as usize,
+        _ => return None,
+    };
+    Some(end.min(argc.saturating_sub(1)))
+}
+
+fn key_spec_has_flag(spec: &Value, flag: &str) -> bool {
+    spec.get("flags")
+        .and_then(Value::as_array)
+        .is_some_and(|flags| flags.iter().any(|item| item.as_str() == Some(flag)))
+}
+
+fn enforce_acl_channel_gate(
+    ctx: &CommandContext<'_>,
+    name: &[u8],
+    user: &AclUser,
+) -> Option<RedisString> {
+    if user.flags.allchannels {
+        return None;
+    }
+    let lower = ascii_lower_vec(name);
+    let (start, end, pattern) = match lower.as_slice() {
+        b"publish" | b"spublish" => (1, 2.min(ctx.arg_count()), false),
+        b"subscribe" | b"ssubscribe" => (1, ctx.arg_count(), false),
+        b"psubscribe" => (1, ctx.arg_count(), true),
+        _ => return None,
+    };
+    for idx in start..end {
+        if let Some(channel) = ctx.client_ref().arg(idx) {
+            let allowed = if pattern {
+                user.can_access_channel_pattern(channel.as_bytes())
+            } else {
+                user.can_access_channel(channel.as_bytes())
+            };
+            if !allowed {
+                return Some(channel.clone());
+            }
+        }
+    }
+    None
+}
+
+fn enforce_acl_database_gate(
+    ctx: &CommandContext<'_>,
+    name: &[u8],
+    user: &AclUser,
+) -> Option<RedisString> {
+    if user.flags.alldbs {
+        return None;
+    }
+    let lower = ascii_lower_vec(name);
+    match lower.as_slice() {
+        b"select" => {
+            let db = ctx.client_ref().arg(1)?;
+            let parsed = parse_acl_db_arg(db.as_bytes())?;
+            if user.can_access_db(parsed) {
+                None
+            } else {
+                Some(db.clone())
+            }
+        }
+        b"swapdb" => {
+            for idx in 1..=2 {
+                let db = ctx.client_ref().arg(idx)?;
+                let parsed = parse_acl_db_arg(db.as_bytes())?;
+                if !user.can_access_db(parsed) {
+                    return Some(db.clone());
+                }
+            }
+            None
+        }
+        b"flushall" => Some(RedisString::from_static(b"flushall")),
+        b"flushdb" => {
+            let db = ctx.selected_db_id();
+            if user.can_access_db(db) {
+                None
+            } else {
+                Some(RedisString::from_vec(db.to_string().into_bytes()))
+            }
+        }
+        _ => None,
+    }
+}
+
+fn parse_acl_db_arg(bytes: &[u8]) -> Option<u32> {
+    let s = core::str::from_utf8(bytes).ok()?;
+    let parsed: i64 = s.parse().ok()?;
+    if parsed < 0 || parsed > u32::MAX as i64 {
+        return None;
+    }
+    Some(parsed as u32)
+}
+
+fn acl_log_context(ctx: &CommandContext<'_>) -> &'static [u8] {
+    if ctx.client_ref().flag_lua() {
+        b"lua"
+    } else if ctx.client_ref().flag_multi() || ctx.client_ref().flag_deny_blocking() {
+        b"multi"
+    } else {
+        b"toplevel"
+    }
+}
+
+fn acl_log_client_info(ctx: &CommandContext<'_>, name: &[u8]) -> RedisString {
+    let command = if ctx.client_ref().flag_lua() {
+        b"eval".to_vec()
+    } else if ctx.client_ref().flag_deny_blocking() {
+        b"exec".to_vec()
+    } else {
+        ascii_lower_vec(name)
+    };
+    let command = String::from_utf8_lossy(&command);
+    let username = ctx
+        .client_ref()
+        .authenticated_user
+        .as_ref()
+        .map(|user| String::from_utf8_lossy(user.as_bytes()).into_owned())
+        .unwrap_or_else(|| "default".to_string());
+    RedisString::from_vec(
+        format!(
+            "id={} db={} cmd={} user={}",
+            ctx.client_ref().id(),
+            ctx.selected_db_id(),
+            command,
+            username
+        )
+        .into_bytes(),
+    )
+}
+
+fn acl_command_error_name(
+    ctx: &CommandContext<'_>,
+    name: &[u8],
+    user: &AclUser,
+) -> Vec<u8> {
+    let lower = ascii_lower_vec(name);
+    let lower_rs = RedisString::from_bytes(&lower);
+    if let Some(first_arg) = ctx.client_ref().arg(1) {
+        let mut full = Vec::with_capacity(lower.len() + 1 + first_arg.as_bytes().len());
+        full.extend_from_slice(&lower);
+        full.push(b'|');
+        full.extend(first_arg.as_bytes().iter().map(|b| b.to_ascii_lowercase()));
+        let full_rs = RedisString::from_bytes(&full);
+        if user.denied_commands.iter().any(|cmd| cmd == &full_rs) {
+            return full;
+        }
+        if acl_known_container_subcommand(&lower, first_arg.as_bytes()) {
+            return full;
+        }
+        if user.denied_commands.iter().any(|cmd| cmd == &lower_rs) {
+            return lower;
+        }
+    }
+    lower
+}
+
+fn acl_known_container_subcommand(parent: &[u8], sub: &[u8]) -> bool {
+    let sub_lower = ascii_lower_vec(sub);
+    let candidates: &[&[u8]] = match parent {
+        b"client" => &[
+            b"caching",
+            b"getname",
+            b"id",
+            b"info",
+            b"kill",
+            b"list",
+            b"no-evict",
+            b"no-touch",
+            b"pause",
+            b"reply",
+            b"setname",
+            b"tracking",
+            b"trackinginfo",
+            b"unblock",
+        ],
+        b"config" => &[b"get", b"resetstat", b"rewrite", b"set"],
+        b"script" => &[b"debug", b"exists", b"flush", b"help", b"kill", b"load"],
+        b"memory" => &[b"doctor", b"malloc-stats", b"purge", b"stats", b"usage"],
+        b"xinfo" => &[b"consumers", b"groups", b"help", b"stream"],
+        _ => return false,
+    };
+    candidates
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(&sub_lower))
 }
 
 /// Return `true` for commands that any authenticated user may run regardless of
@@ -835,6 +1285,10 @@ fn ascii_lower(b: u8) -> u8 {
     } else {
         b
     }
+}
+
+fn ascii_lower_vec(bytes: &[u8]) -> Vec<u8> {
+    bytes.iter().map(|b| ascii_lower(*b)).collect()
 }
 
 /// Wave A placeholder handler that returns `Err(RedisError::runtime(b"ERR …"))`.
@@ -1640,6 +2094,18 @@ pub static HANDLERS: &[DispatchEntry] = &[
         handler: crate::pubsub::publish_command,
     },
     DispatchEntry {
+        name: b"SPUBLISH",
+        handler: crate::pubsub::spublish_command,
+    },
+    DispatchEntry {
+        name: b"SSUBSCRIBE",
+        handler: crate::pubsub::ssubscribe_command,
+    },
+    DispatchEntry {
+        name: b"SUNSUBSCRIBE",
+        handler: crate::pubsub::sunsubscribe_command,
+    },
+    DispatchEntry {
         name: b"PUBSUB",
         handler: crate::connection::pubsub_command,
     },
@@ -1860,6 +2326,10 @@ pub static HANDLERS: &[DispatchEntry] = &[
     DispatchEntry {
         name: b"REPLCONF",
         handler: crate::replication::replconf_command,
+    },
+    DispatchEntry {
+        name: b"ROLE",
+        handler: crate::replication::role_command,
     },
     DispatchEntry {
         name: b"WAIT",

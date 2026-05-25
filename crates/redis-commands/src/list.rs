@@ -29,9 +29,11 @@
 
 use std::collections::VecDeque;
 
+use redis_core::acl::global_acl_state;
 use redis_core::blocked_keys::{
     blocked_keys_index, deadline_from_timeout_secs, BlockedAction, BlockedSide, BlockedWaiter,
 };
+use redis_core::client_info::client_info_registry;
 use redis_core::command_context::CommandContext;
 use redis_core::db::RedisDb;
 use redis_core::notify::{NOTIFY_GENERIC, NOTIFY_LIST};
@@ -342,6 +344,15 @@ fn add_dirty_if_nonzero(ctx: &CommandContext, delta: i64) {
 /// WRONGTYPE error. Returning the value to the source keeps the FIFO order
 /// invariant intact for the next waiter.
 fn deliver_to_waiter(db: &mut RedisDb, key: &RedisString, waiter: BlockedWaiter) {
+    if let Some(reply) = blocked_waiter_acl_error(key, &waiter) {
+        if waiter.sender.send(reply).is_ok() {
+            redis_core::metrics::record_blocked_command_rejected(blocked_waiter_command_name(
+                &waiter.action,
+            ));
+        }
+        return;
+    }
+
     match &waiter.action {
         BlockedAction::Pop { side, count } => {
             let side = *side;
@@ -430,6 +441,55 @@ fn deliver_to_waiter(db: &mut RedisDb, key: &RedisString, waiter: BlockedWaiter)
         BlockedAction::StreamGroup { .. } => {}
         BlockedAction::Wait { .. } => {}
     }
+}
+
+fn blocked_waiter_command_name(action: &BlockedAction) -> &'static [u8] {
+    match action {
+        BlockedAction::Pop {
+            side: BlockedSide::Head,
+            count: 0,
+        } => b"blpop",
+        BlockedAction::Pop {
+            side: BlockedSide::Tail,
+            count: 0,
+        } => b"brpop",
+        BlockedAction::Pop { .. } => b"blmpop",
+        BlockedAction::Move { .. } => b"blmove",
+        _ => b"",
+    }
+}
+
+fn blocked_waiter_acl_error(key: &RedisString, waiter: &BlockedWaiter) -> Option<Vec<u8>> {
+    let username = waiter.username.clone().or_else(|| {
+        let registry = client_info_registry();
+        let guard = match registry.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard
+            .all()
+            .into_iter()
+            .find(|snap| snap.id == waiter.client_id)
+            .and_then(|snap| snap.user)
+    });
+    let username = username?;
+
+    let acl = global_acl_state();
+    let guard = match acl.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let user = guard.users.get(&username)?;
+
+    if !user.can_access_key(key.as_bytes()) {
+        return Some(b"-NOPERM No permissions to access a key\r\n".to_vec());
+    }
+    if let BlockedAction::Move { dst_key, .. } = &waiter.action {
+        if !user.can_access_key(dst_key.as_bytes()) {
+            return Some(b"-NOPERM No permissions to access a key\r\n".to_vec());
+        }
+    }
+    None
 }
 
 /// Implementation shared by LPUSH / RPUSH / LPUSHX / RPUSHX.
@@ -1392,6 +1452,7 @@ fn park_blocked_client(
         action,
         deadline_ms: deadline_from_timeout_secs(timeout_secs),
         resp_proto: ctx.client_ref().resp_proto,
+        username: ctx.client_ref().authenticated_user.clone(),
     };
     {
         let mut idx = match blocked_keys_index().lock() {

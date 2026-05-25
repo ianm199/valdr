@@ -3,6 +3,7 @@
 //! Two-layer mapping plus a per-client outbound channel:
 //!   * `channels`  — channel name → set of subscriber client ids.
 //!   * `patterns`  — glob pattern → set of subscriber client ids.
+//!   * `shard_channels` — shard channel name → set of subscriber client ids.
 //!   * `senders`   — client id → mpsc::Sender used to push frames to that
 //!     client's writer thread.
 //!
@@ -21,6 +22,7 @@ use crate::client::ClientId;
 pub struct PubSubRegistry {
     channels: HashMap<RedisString, HashSet<ClientId>>,
     patterns: HashMap<RedisString, HashSet<ClientId>>,
+    shard_channels: HashMap<RedisString, HashSet<ClientId>>,
     senders: HashMap<ClientId, Sender<Vec<u8>>>,
     /// Per-client RESP protocol version negotiated by `HELLO` (2 or 3).
     /// Looked up by PUBLISH / keyspace-notify paths so message frames can be
@@ -41,6 +43,7 @@ impl PubSubRegistry {
         Self {
             channels: HashMap::new(),
             patterns: HashMap::new(),
+            shard_channels: HashMap::new(),
             senders: HashMap::new(),
             resp_protos: HashMap::new(),
         }
@@ -56,13 +59,19 @@ impl PubSubRegistry {
     /// Drop the outbound sender and remove every subscription tied to
     /// `client_id`. Called when a connection closes.
     pub fn drop_client(&mut self, client_id: ClientId) {
-        self.senders.remove(&client_id);
+        if let Some(sender) = self.senders.remove(&client_id) {
+            let _ = sender.send(Vec::new());
+        }
         self.resp_protos.remove(&client_id);
         self.channels.retain(|_, subs| {
             subs.remove(&client_id);
             !subs.is_empty()
         });
         self.patterns.retain(|_, subs| {
+            subs.remove(&client_id);
+            !subs.is_empty()
+        });
+        self.shard_channels.retain(|_, subs| {
             subs.remove(&client_id);
             !subs.is_empty()
         });
@@ -126,9 +135,47 @@ impl PubSubRegistry {
         removed
     }
 
+    /// Add `client_id` to the subscriber set for shard `channel`.
+    pub fn subscribe_shard_channel(
+        &mut self,
+        channel: RedisString,
+        client_id: ClientId,
+    ) -> bool {
+        self.shard_channels
+            .entry(channel)
+            .or_default()
+            .insert(client_id)
+    }
+
+    /// Remove `client_id` from shard `channel`'s subscriber set.
+    pub fn unsubscribe_shard_channel(
+        &mut self,
+        channel: &RedisString,
+        client_id: ClientId,
+    ) -> bool {
+        let mut removed = false;
+        let mut now_empty = false;
+        if let Some(set) = self.shard_channels.get_mut(channel) {
+            removed = set.remove(&client_id);
+            now_empty = set.is_empty();
+        }
+        if now_empty {
+            self.shard_channels.remove(channel);
+        }
+        removed
+    }
+
     /// Snapshot the subscriber ids for an exact channel match.
     pub fn channel_subscribers(&self, channel: &RedisString) -> Vec<ClientId> {
         self.channels
+            .get(channel)
+            .map(|s| s.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// Snapshot the subscriber ids for an exact shard channel match.
+    pub fn shard_channel_subscribers(&self, channel: &RedisString) -> Vec<ClientId> {
+        self.shard_channels
             .get(channel)
             .map(|s| s.iter().copied().collect())
             .unwrap_or_default()
@@ -184,9 +231,34 @@ impl PubSubRegistry {
             .collect()
     }
 
+    /// Iterate every currently-active shard channel, optionally filtered by a
+    /// glob pattern. Returns owned clones; intended for PUBSUB SHARDCHANNELS.
+    pub fn list_shard_channels(
+        &self,
+        pattern: Option<&[u8]>,
+        matcher: impl Fn(&[u8], &[u8]) -> bool,
+    ) -> Vec<RedisString> {
+        self.shard_channels
+            .keys()
+            .filter(|ch| match pattern {
+                Some(pat) => matcher(pat, ch.as_bytes()),
+                None => true,
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Subscriber count for an exact channel.
     pub fn num_sub(&self, channel: &RedisString) -> i64 {
         self.channels
+            .get(channel)
+            .map(|s| s.len() as i64)
+            .unwrap_or(0)
+    }
+
+    /// Subscriber count for an exact shard channel.
+    pub fn num_shard_sub(&self, channel: &RedisString) -> i64 {
+        self.shard_channels
             .get(channel)
             .map(|s| s.len() as i64)
             .unwrap_or(0)

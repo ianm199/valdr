@@ -1,6 +1,6 @@
 # TCL Hidden Frontier - 2026-05-24
 
-Generated: `2026-05-25T02:04:48.887578+00:00`
+Generated: `2026-05-25T03:28:25.866544+00:00`
 
 This is an illumination artifact, not a conformance claim. It maps the
 timeout/no-summary bucket into concrete subsystem packets so broad
@@ -9,27 +9,27 @@ implementation work can start from evidence instead of guessing.
 ## Accounting Snapshot
 
 - Full upstream TCL denominator: **4299** source test blocks
-- Counted runner result: **1442 pass / 40 fail / 1482 counted**
-- Conservative full-suite proof: **33.5%** counted-pass / full denominator
+- Counted runner result: **1682 pass / 52 fail / 1734 counted**
+- Conservative full-suite proof: **39.1%** counted-pass / full denominator
 - Non-skipped denominator: **2568** source test blocks
-- Hidden timeout/no-summary bucket: **890** source tests (**34.7%** of non-skipped)
+- Hidden timeout/no-summary bucket: **708** source tests (**27.6%** of non-skipped)
 
 | Status | Source tests |
 |---|---:|
-| `fail` | 117 |
+| `fail` | 229 |
 | `no-summary` | 450 |
-| `pass` | 1169 |
+| `pass` | 1353 |
 | `skipped-by-policy` | 1731 |
-| `timeout` | 440 |
-| `zero-count` | 392 |
+| `timeout` | 258 |
+| `zero-count` | 278 |
 
 ## Focus Files
 
 | File | Tests | Status | Failure mode | First visible failing test / exception | Likely root | Next packet |
 |---|---:|---|---|---|---|---|
-| `unit/scripting.tcl` | 186 | `no-summary` | no-summary abort at named test | Script ACL check | Lua scripting sandbox, redis.call reply conversion, ACL/category exposure | `tcl-scripting-acl-globals-frontier-v1` |
-| `unit/functions.tcl` | 112 | `timeout` | timeout with no visible failure |  | Function library engine, Lua function registry, async/blocking test interaction | `tcl-functions-timeout-scout-then-library-v1` |
-| `unit/multi.tcl` | 70 | `timeout` | timeout after visible failures | WATCH inside MULTI is not allowed | Transaction state machine: WATCH-in-MULTI, dirty flag, queueing errors, DISCARD/UNWATCH | `tcl-multi-watch-dirty-queue-v1` |
+| `unit/scripting.tcl` | 186 | `no-summary` | no-summary abort at named test | EVAL - is Lua able to call Redis API? | Lua scripting sandbox, redis.call reply conversion, ACL/category exposure | `tcl-scripting-acl-globals-frontier-v1` |
+| `unit/functions.tcl` | 112 | `fail` | counted failures | FUNCTION - test function flush will re-create the lua engine | Function library engine, Lua function registry, async/blocking test interaction | `tcl-functions-timeout-scout-then-library-v1` |
+| `unit/multi.tcl` | 70 | `pass` | passes |  | Transaction state machine: WATCH-in-MULTI, dirty flag, queueing errors, DISCARD/UNWATCH | `none-currently-passing-regression-guard` |
 | `unit/pubsub.tcl` | 34 | `timeout` | timeout after visible failures | Keyspace notifications: stream events test | Pub/Sub keyspace notification ordering and client reply behavior | `tcl-pubsub-keyspace-notify-order-v1` |
 | `unit/type/stream.tcl` | 82 | `timeout` | timeout after visible failures | XREAD + multiple XADD inside transaction | Stream XREAD/XADD transaction wake behavior | `tcl-stream-transaction-xread-wake-v1` |
 | `unit/type/stream-cgroups.tcl` | 65 | `no-summary` | no-summary abort at named test | Consumer seen-time and active-time | Consumer group PEL metadata and XREADGROUP blocking edge cases | `tcl-stream-cgroups-pel-idle-seen-time-v1` |
@@ -44,15 +44,15 @@ implementation work can start from evidence instead of guessing.
 | Rank | Packet | File | Tests | Value | Risk | Why next |
 |---:|---|---|---:|---|---|---|
 | 1 | `tcl-scripting-acl-globals-frontier-v1` | `unit/scripting.tcl` | 186 | high | high | Split into two passes: first make the no-summary ACL/FUNCTION abort diagnostic and correct, then address the revealed global-protection and Redis namespace failures. Keep all work inside the scripting/ACL lane. |
-| 2 | `tcl-functions-timeout-scout-then-library-v1` | `unit/functions.tcl` | 112 | high | high | Do not start with a broad function rewrite. First add a single-test bisect/scout runner for the timeout, then port only the first library lifecycle semantic that blocks summary output. |
-| 3 | `tcl-introspection-runner-isolation-v1` | `unit/introspection.tcl` | 117 | medium | medium | Treat the current cat/stdout exception as runner isolation until reproduced otherwise. Give this file a dedicated tmp dir and only then cut CLIENT/COMMAND/INFO implementation packets. |
+| 2 | `tcl-introspection-runner-isolation-v1` | `unit/introspection.tcl` | 117 | medium | medium | Treat the current cat/stdout exception as runner isolation until reproduced otherwise. Give this file a dedicated tmp dir and only then cut CLIENT/COMMAND/INFO implementation packets. |
+| 3 | `tcl-functions-timeout-scout-then-library-v1` | `unit/functions.tcl` | 112 | high | high | Do not start with a broad function rewrite. First add a single-test bisect/scout runner for the timeout, then port only the first library lifecycle semantic that blocks summary output. |
 | 4 | `tcl-stream-transaction-xread-wake-v1` | `unit/type/stream.tcl` | 82 | high | high | Port the upstream blocked stream client wake semantics around XADD inside MULTI before touching consumer-group metadata. |
-| 5 | `tcl-multi-watch-dirty-queue-v1` | `unit/multi.tcl` | 70 | high | medium | Port the upstream transaction error-state lifecycle. This is smaller than scripting/functions and likely converts a timeout file into a counted fail/pass file quickly. |
-| 6 | `tcl-stream-cgroups-pel-idle-seen-time-v1` | `unit/type/stream-cgroups.tcl` | 65 | high | high | Implement the missing `idle`/seen-time dictionary shape and keep the blocking XREADGROUP failures as separate follow-up packets. |
-| 7 | `tcl-client-tracking-info-counters-v1` | `unit/tracking.tcl` | 61 | medium | medium | Fix the current no-summary variable gap around tracking info counters, then decide whether invalidation routing belongs in this wave. |
-| 8 | `tcl-sort-runner-launch-then-by-get-v1` | `unit/sort.tcl` | 43 | medium | medium | The current timeout says the harness cannot start the server. Fix that visibility issue before changing SORT internals. |
-| 9 | `tcl-pubsub-keyspace-notify-order-v1` | `unit/pubsub.tcl` | 34 | medium | medium | Start from the stream event notification mismatch. Verify exact xgroup/xadd ordering and CLIENT REPLY behavior, then rerun the file with a short timeout to see if the hang collapses. |
-| 10 | `tcl-bitops-runner-isolation-then-edge-fails-v1` | `unit/bitops.tcl` | 46 | medium | low | Current evidence is a tmp/stdout runner artifact. Isolate the run before spending implementation time. |
+| 5 | `tcl-stream-cgroups-pel-idle-seen-time-v1` | `unit/type/stream-cgroups.tcl` | 65 | high | high | Implement the missing `idle`/seen-time dictionary shape and keep the blocking XREADGROUP failures as separate follow-up packets. |
+| 6 | `tcl-client-tracking-info-counters-v1` | `unit/tracking.tcl` | 61 | medium | medium | Fix the current no-summary variable gap around tracking info counters, then decide whether invalidation routing belongs in this wave. |
+| 7 | `tcl-sort-runner-launch-then-by-get-v1` | `unit/sort.tcl` | 43 | medium | medium | The current timeout says the harness cannot start the server. Fix that visibility issue before changing SORT internals. |
+| 8 | `tcl-pubsub-keyspace-notify-order-v1` | `unit/pubsub.tcl` | 34 | medium | medium | Start from the stream event notification mismatch. Verify exact xgroup/xadd ordering and CLIENT REPLY behavior, then rerun the file with a short timeout to see if the hang collapses. |
+| 9 | `tcl-bitops-runner-isolation-then-edge-fails-v1` | `unit/bitops.tcl` | 46 | medium | low | Current evidence is a tmp/stdout runner artifact. Isolate the run before spending implementation time. |
+| 10 | `tcl-command-list-filterby-v1` | `unit/introspection-2.tcl` | 33 | medium | medium | Implement the missing COMMAND LIST/FILTERBY subcommand path from the generated registry before broader introspection polish. |
 
 ## Per-File Notes
 
@@ -60,11 +60,11 @@ implementation work can start from evidence instead of guessing.
 
 - Source tests hidden/covered by this file: **186**
 - Latest status: `no-summary` (no-summary abort at named test)
-- First visible failing test: `Script ACL check`
+- First visible failing test: `EVAL - is Lua able to call Redis API?`
 - Recommended packet: `tcl-scripting-acl-globals-frontier-v1`
 - Recommended action: Split into two passes: first make the no-summary ACL/FUNCTION abort diagnostic and correct, then address the revealed global-protection and Redis namespace failures. Keep all work inside the scripting/ACL lane.
 - Likely root subsystem: Lua scripting sandbox, redis.call reply conversion, ACL/category exposure
-- Latest log: `harness/oracle/results/tcl-survey/20260524T233238Z/unit__scripting.json`
+- Latest log: `harness/oracle/results/tcl-survey/20260525T032652Z/unit__scripting.json`
 - Local source files:
   - `crates/redis-commands/src/eval.rs`
   - `crates/redis-commands/src/dispatch.rs`
@@ -79,17 +79,17 @@ implementation work can start from evidence instead of guessing.
   - Scripts can handle commands with incorrect arity in tests/unit/scripting.tcl
   - Functions in the Redis namespace are able to report errors in tests/unit/scripting.tcl
   - CLUSTER RESET can not be invoke from within a script in tests/unit/scripting.tcl
-- Parsed exception: `NOPERM This user has no permissions to run the 'function' command.`
+- Parsed exception: `OOM command not allowed when used memory > 'maxmemory'..`
 
 ### `unit/functions.tcl`
 
 - Source tests hidden/covered by this file: **112**
-- Latest status: `timeout` (timeout with no visible failure)
-- First visible failing test: `None`
+- Latest status: `fail` (counted failures)
+- First visible failing test: `FUNCTION - test function flush will re-create the lua engine`
 - Recommended packet: `tcl-functions-timeout-scout-then-library-v1`
 - Recommended action: Do not start with a broad function rewrite. First add a single-test bisect/scout runner for the timeout, then port only the first library lifecycle semantic that blocks summary output.
 - Likely root subsystem: Function library engine, Lua function registry, async/blocking test interaction
-- Latest log: `harness/oracle/results/tcl-survey/20260524T233238Z/unit__functions.json`
+- Latest log: `harness/oracle/results/tcl-survey/20260525T030959Z/unit__functions.json`
 - Local source files:
   - `crates/redis-commands/src/eval.rs`
   - `crates/redis-commands/src/connection.rs`
@@ -98,16 +98,22 @@ implementation work can start from evidence instead of guessing.
   - `reference/valkey/src/functions.c`
   - `reference/valkey/src/modules/lua/function_lua.c`
   - `reference/valkey/tests/unit/functions.tcl`
+- First parsed failures:
+  - FUNCTION - test function flush will re-create the lua engine in tests/unit/functions.tcl
+  - LIBRARIES - math.random from function load in tests/unit/functions.tcl
+  - LIBRARIES - redis.call from function load in tests/unit/functions.tcl
+  - LIBRARIES - redis.setresp from function load in tests/unit/functions.tcl
+  - LIBRARIES - redis.set_repl from function load in tests/unit/functions.tcl
 
 ### `unit/multi.tcl`
 
 - Source tests hidden/covered by this file: **70**
-- Latest status: `timeout` (timeout after visible failures)
-- First visible failing test: `WATCH inside MULTI is not allowed`
-- Recommended packet: `tcl-multi-watch-dirty-queue-v1`
-- Recommended action: Port the upstream transaction error-state lifecycle. This is smaller than scripting/functions and likely converts a timeout file into a counted fail/pass file quickly.
+- Latest status: `pass` (passes)
+- First visible failing test: `None`
+- Recommended packet: `none-currently-passing-regression-guard`
+- Recommended action: Fresh focused scout reaches a clean summary for this file. Do not spend implementation time here now; keep it in the regression inventory.
 - Likely root subsystem: Transaction state machine: WATCH-in-MULTI, dirty flag, queueing errors, DISCARD/UNWATCH
-- Latest log: `harness/oracle/results/tcl-survey/20260524T233238Z/unit__multi.json`
+- Latest log: `harness/oracle/results/tcl-survey/20260525T024710Z/unit__multi.json`
 - Local source files:
   - `crates/redis-commands/src/multi.rs`
   - `crates/redis-core/src/client.rs`
@@ -115,12 +121,6 @@ implementation work can start from evidence instead of guessing.
 - Upstream source anchors:
   - `reference/valkey/src/multi.c`
   - `reference/valkey/tests/unit/multi.tcl`
-- First parsed failures:
-  - WATCH inside MULTI is not allowed in tests/unit/multi.tcl
-  - EXEC fails if there are errors while queueing commands #2 in tests/unit/multi.tcl
-  - DISCARD should clear the WATCH dirty flag on the client in tests/unit/multi.tcl
-  - DISCARD should UNWATCH all the keys in tests/unit/multi.tcl
-  - DISCARD should not fail during OOM in tests/unit/multi.tcl
 
 ### `unit/pubsub.tcl`
 
@@ -193,7 +193,7 @@ implementation work can start from evidence instead of guessing.
 - Recommended packet: `tcl-introspection-runner-isolation-v1`
 - Recommended action: Treat the current cat/stdout exception as runner isolation until reproduced otherwise. Give this file a dedicated tmp dir and only then cut CLIENT/COMMAND/INFO implementation packets.
 - Likely root subsystem: Harness tmp-dir/server lifecycle first; then CLIENT/COMMAND/CONFIG/INFO introspection
-- Latest log: `harness/oracle/results/tcl-survey/20260525T020414Z/unit__introspection.json`
+- Latest log: `harness/oracle/results/tcl-survey/20260525T020615Z/unit__introspection.json`
 - Local source files:
   - `harness/oracle/tcl-survey.py`
   - `crates/redis-commands/src/connection.rs`

@@ -35,7 +35,7 @@ use redis_types::{RedisError, RedisResult, RedisString};
 use crate::list::wake_blocked_for_key;
 use crate::zset::wake_blocked_zset_for_key;
 
-use crate::dispatch::{dispatch_command_name, lookup_command};
+use crate::dispatch::{dispatch_command_name, is_dispatchable_command};
 
 const NAME_RESET: &[u8] = b"RESET";
 const NAME_MULTI: &[u8] = b"MULTI";
@@ -130,7 +130,7 @@ pub fn queue_current_command(ctx: &mut CommandContext) -> RedisResult<()> {
         Some(n) => n.clone(),
         None => return Err(RedisError::runtime(b"ERR empty command")),
     };
-    if lookup_command(name.as_bytes()).is_none() {
+    if !is_dispatchable_command(name.as_bytes()) {
         ctx.client_mut().set_flag_dirty_exec(true);
         let mut msg =
             Vec::with_capacity(b"ERR unknown command '".len() + name.as_bytes().len() + 1);

@@ -89,6 +89,12 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let hits = metrics.keyspace_hits.load(Ordering::Relaxed);
     let misses = metrics.keyspace_misses.load(Ordering::Relaxed);
     let rejected = metrics.rejected_connections.load(Ordering::Relaxed);
+    let acl_denied_auth = metrics.acl_access_denied_auth.load(Ordering::Relaxed);
+    let acl_denied_cmd = metrics.acl_access_denied_cmd.load(Ordering::Relaxed);
+    let acl_denied_key = metrics.acl_access_denied_key.load(Ordering::Relaxed);
+    let acl_denied_channel = metrics
+        .acl_access_denied_channel
+        .load(Ordering::Relaxed);
     let expired_keys = metrics.expired_keys.load(Ordering::Relaxed);
     let evicted_keys = metrics.evicted_keys.load(Ordering::Relaxed);
     let active_time_us = metrics.active_time_main_thread_us.load(Ordering::Relaxed);
@@ -253,6 +259,14 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let _ = writeln!(buf, "evicted_keys:{}\r", evicted_keys);
         let _ = writeln!(buf, "keyspace_hits:{}\r", hits);
         let _ = writeln!(buf, "keyspace_misses:{}\r", misses);
+        let _ = writeln!(buf, "acl_access_denied_auth:{}\r", acl_denied_auth);
+        let _ = writeln!(buf, "acl_access_denied_cmd:{}\r", acl_denied_cmd);
+        let _ = writeln!(buf, "acl_access_denied_key:{}\r", acl_denied_key);
+        let _ = writeln!(
+            buf,
+            "acl_access_denied_channel:{}\r",
+            acl_denied_channel
+        );
         let _ = writeln!(buf, "migrate_cached_sockets:0\r");
         let _ = writeln!(buf, "pubsub_channels:0\r");
         let _ = writeln!(buf, "pubsub_patterns:0\r");
@@ -276,6 +290,16 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
             .unwrap_or(0);
         let _ = writeln!(buf, "# Replication\r");
         let _ = writeln!(buf, "role:{}\r", role);
+        if let Some((host, port)) = repl.replica_of_target() {
+            let _ = writeln!(
+                buf,
+                "master_host:{}\r",
+                String::from_utf8_lossy(host.as_bytes())
+            );
+            let _ = writeln!(buf, "master_port:{}\r", port);
+            let _ = writeln!(buf, "master_link_status:up\r");
+            let _ = writeln!(buf, "master_sync_in_progress:0\r");
+        }
         let _ = writeln!(buf, "connected_slaves:{}\r", connected);
         for (idx, (_cid, state, port, offset, last_ack_ms)) in replicas.iter().enumerate() {
             let lag = if *last_ack_ms == 0 {

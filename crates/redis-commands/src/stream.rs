@@ -1194,6 +1194,7 @@ fn park_xread_block(
                 action: BlockedAction::Stream { id_after: *id_after },
                 deadline_ms,
                 resp_proto: ctx.client_ref().resp_proto,
+                username: ctx.client_ref().authenticated_user.clone(),
             };
             idx.add(waiter);
         }
@@ -2049,6 +2050,7 @@ pub fn xreadgroup_command(ctx: &mut CommandContext) -> RedisResult<()> {
                                 },
                                 deadline_ms,
                                 resp_proto: ctx.client_ref().resp_proto,
+                                username: ctx.client_ref().authenticated_user.clone(),
                             };
                             idx.add(waiter);
                         }

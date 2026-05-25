@@ -10,10 +10,9 @@
 //! caller's `client.reply_buf` (when delivering to the active client) or into
 //! a `Vec<u8>` that gets shipped to a foreign subscriber via its mpsc sender.
 //!
-//! Sharded pub/sub (SPUBLISH / SSUBSCRIBE / SUNSUBSCRIBE) and cluster
-//! propagation are deferred. RESP3 push-frame headers are also deferred —
-//! every reply uses the RESP2 array shape, which real Redis accepts as the
-//! pub/sub message envelope on RESP2 clients.
+//! Cluster propagation is deferred. RESP3 push-frame headers are used for
+//! clients that negotiated RESP3; RESP2 clients receive the classic array
+//! envelope.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -22,6 +21,7 @@ use redis_core::command_context::{
     encode_pubsub_message_resp2, encode_pubsub_message_resp3, encode_pubsub_pmessage_resp2,
     encode_pubsub_pmessage_resp3, CommandContext,
 };
+use redis_core::client_info::client_info_registry;
 use redis_core::pubsub_registry::PubSubRegistry;
 use redis_core::util::string_match_len;
 use redis_protocol::RespFrame;
@@ -88,6 +88,12 @@ fn registry_handle(ctx: &CommandContext) -> Result<Arc<Mutex<PubSubRegistry>>, R
     }
 }
 
+fn refresh_client_info(client: &redis_core::client::Client) {
+    if let Ok(mut guard) = client_info_registry().lock() {
+        guard.update_client_metadata(client);
+    }
+}
+
 /// SUBSCRIBE channel [channel ...]
 pub fn subscribe_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     if ctx.argc() < 2 {
@@ -119,6 +125,7 @@ pub fn subscribe_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         };
         ctx.reply_push_frame(&frame)?;
     }
+    refresh_client_info(ctx.client);
     Ok(())
 }
 
@@ -172,6 +179,7 @@ pub fn unsubscribe_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         };
         ctx.reply_push_frame(&frame)?;
     }
+    refresh_client_info(ctx.client);
     Ok(())
 }
 
@@ -206,6 +214,7 @@ pub fn psubscribe_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         };
         ctx.reply_push_frame(&frame)?;
     }
+    refresh_client_info(ctx.client);
     Ok(())
 }
 
@@ -259,6 +268,7 @@ pub fn punsubscribe_command(ctx: &mut CommandContext) -> Result<(), RedisError> 
         };
         ctx.reply_push_frame(&frame)?;
     }
+    refresh_client_info(ctx.client);
     Ok(())
 }
 
@@ -370,9 +380,41 @@ pub fn pubsub_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
             };
             ctx.reply_integer(count)
         }
-        b"shardchannels" | b"shardnumsub" => Err(RedisError::runtime(
-            b"ERR sharded pub/sub not yet implemented in this port",
-        )),
+        b"shardchannels" if argc == 2 || argc == 3 => {
+            let pattern: Option<Vec<u8>> = if argc == 3 {
+                Some(ctx.arg(2)?.to_vec())
+            } else {
+                None
+            };
+            let names = {
+                let guard = registry
+                    .lock()
+                    .map_err(|_| RedisError::runtime(b"ERR pubsub mutex poisoned"))?;
+                guard.list_shard_channels(pattern.as_deref(), |pat, ch| {
+                    string_match_len(pat, ch, false)
+                })
+            };
+            ctx.reply_array_header(names.len() as i64)?;
+            for name in names {
+                ctx.reply_bulk(name.as_bytes())?;
+            }
+            Ok(())
+        }
+        b"shardnumsub" => {
+            ctx.reply_array_header(((argc - 2) * 2) as i64)?;
+            for i in 2..argc {
+                let ch = ctx.arg_owned(i)?;
+                let count = {
+                    let guard = registry
+                        .lock()
+                        .map_err(|_| RedisError::runtime(b"ERR pubsub mutex poisoned"))?;
+                    guard.num_shard_sub(&ch)
+                };
+                ctx.reply_bulk(ch.as_bytes())?;
+                ctx.reply_integer(count)?;
+            }
+            Ok(())
+        }
         b"help" if argc == 2 => {
             let help_lines: &[&[u8]] = &[
                 b"CHANNELS [<pattern>]",
@@ -446,25 +488,158 @@ pub fn drop_client_from_registry(
     Ok(())
 }
 
-/// SPUBLISH stub — sharded pub/sub deferred.
-pub fn spublish_command(_ctx: &mut CommandContext) -> Result<(), RedisError> {
-    Err(RedisError::runtime(
-        b"ERR sharded pub/sub not yet implemented in this port",
-    ))
+fn encode_shard_message_resp2(channel: &RedisString, message: &RedisString) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(32 + channel.as_bytes().len() + message.as_bytes().len());
+    redis_protocol::encode_resp2(
+        &RespFrame::array(vec![
+            RespFrame::bulk(RedisString::from_static(b"smessage")),
+            RespFrame::bulk(channel.clone()),
+            RespFrame::bulk(message.clone()),
+        ]),
+        &mut buf,
+    );
+    buf
 }
 
-/// SSUBSCRIBE stub — sharded pub/sub deferred.
-pub fn ssubscribe_command(_ctx: &mut CommandContext) -> Result<(), RedisError> {
-    Err(RedisError::runtime(
-        b"ERR sharded pub/sub not yet implemented in this port",
-    ))
+fn encode_shard_message_resp3(channel: &RedisString, message: &RedisString) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(48 + channel.as_bytes().len() + message.as_bytes().len());
+    redis_protocol::encode_resp3(
+        &RespFrame::Push(vec![
+            RespFrame::bulk(RedisString::from_static(b"smessage")),
+            RespFrame::bulk(channel.clone()),
+            RespFrame::bulk(message.clone()),
+        ]),
+        &mut buf,
+    );
+    buf
 }
 
-/// SUNSUBSCRIBE stub — sharded pub/sub deferred.
-pub fn sunsubscribe_command(_ctx: &mut CommandContext) -> Result<(), RedisError> {
-    Err(RedisError::runtime(
-        b"ERR sharded pub/sub not yet implemented in this port",
-    ))
+/// SPUBLISH shardchannel message
+pub fn spublish_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
+    if ctx.argc() != 3 {
+        return Err(RedisError::wrong_number_of_args(b"spublish"));
+    }
+    let channel = ctx.arg_owned(1)?;
+    let message = ctx.arg_owned(2)?;
+    let registry = registry_handle(ctx)?;
+    let subscribers = {
+        let guard = registry
+            .lock()
+            .map_err(|_| RedisError::runtime(b"ERR pubsub mutex poisoned"))?;
+        guard.shard_channel_subscribers(&channel)
+    };
+
+    let resp2_message = encode_shard_message_resp2(&channel, &message);
+    let resp3_message = encode_shard_message_resp3(&channel, &message);
+    let guard = registry
+        .lock()
+        .map_err(|_| RedisError::runtime(b"ERR pubsub mutex poisoned"))?;
+    let mut receivers: i64 = 0;
+    for sub in subscribers {
+        let bytes = if guard.resp_proto(sub) == 3 {
+            resp3_message.clone()
+        } else {
+            resp2_message.clone()
+        };
+        if guard.send_to(sub, bytes) {
+            receivers += 1;
+        }
+    }
+    drop(guard);
+
+    ctx.reply_integer(receivers)
+}
+
+/// SSUBSCRIBE shardchannel [shardchannel ...]
+pub fn ssubscribe_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
+    if ctx.argc() < 2 {
+        return Err(RedisError::wrong_number_of_args(b"ssubscribe"));
+    }
+    let registry = registry_handle(ctx)?;
+    let argc = ctx.argc();
+    for i in 1..argc {
+        let channel = ctx.arg_owned(i)?;
+        let newly = {
+            let mut guard = registry
+                .lock()
+                .map_err(|_| RedisError::runtime(b"ERR pubsub mutex poisoned"))?;
+            guard.subscribe_shard_channel(channel.clone(), ctx.client.id)
+        };
+        if newly {
+            ctx.client.subscribed_shard_channels.insert(channel.clone());
+        }
+        let count = ctx.client.pubsub_subscription_count() as i64;
+        let items = vec![
+            RespFrame::bulk(RedisString::from_static(b"ssubscribe")),
+            RespFrame::bulk(channel),
+            RespFrame::Integer(count),
+        ];
+        let frame = if ctx.client.resp_proto == 3 {
+            RespFrame::Push(items)
+        } else {
+            RespFrame::array(items)
+        };
+        ctx.reply_push_frame(&frame)?;
+    }
+    refresh_client_info(ctx.client);
+    Ok(())
+}
+
+/// SUNSUBSCRIBE [shardchannel [shardchannel ...]]
+pub fn sunsubscribe_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
+    let registry = registry_handle(ctx)?;
+    let targets: Vec<RedisString> = if ctx.argc() == 1 {
+        ctx.client
+            .subscribed_shard_channels
+            .iter()
+            .cloned()
+            .collect()
+    } else {
+        let mut v = Vec::with_capacity(ctx.argc() - 1);
+        for i in 1..ctx.argc() {
+            v.push(ctx.arg_owned(i)?);
+        }
+        v
+    };
+    if targets.is_empty() {
+        let count = ctx.client.pubsub_subscription_count() as i64;
+        let items = vec![
+            RespFrame::bulk(RedisString::from_static(b"sunsubscribe")),
+            RespFrame::Bulk(None),
+            RespFrame::Integer(count),
+        ];
+        let frame = if ctx.client.resp_proto == 3 {
+            RespFrame::Push(items)
+        } else {
+            RespFrame::array(items)
+        };
+        ctx.reply_push_frame(&frame)?;
+        return Ok(());
+    }
+    for channel in targets {
+        let removed = {
+            let mut guard = registry
+                .lock()
+                .map_err(|_| RedisError::runtime(b"ERR pubsub mutex poisoned"))?;
+            guard.unsubscribe_shard_channel(&channel, ctx.client.id)
+        };
+        if removed {
+            ctx.client.subscribed_shard_channels.remove(&channel);
+        }
+        let count = ctx.client.pubsub_subscription_count() as i64;
+        let items = vec![
+            RespFrame::bulk(RedisString::from_static(b"sunsubscribe")),
+            RespFrame::bulk(channel),
+            RespFrame::Integer(count),
+        ];
+        let frame = if ctx.client.resp_proto == 3 {
+            RespFrame::Push(items)
+        } else {
+            RespFrame::array(items)
+        };
+        ctx.reply_push_frame(&frame)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

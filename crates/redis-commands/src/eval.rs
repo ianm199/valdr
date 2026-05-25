@@ -1764,11 +1764,14 @@ fn run_inner_command(
     ctx.client_mut().set_args(new_argv);
 
     let old_deny_blocking = ctx.client_ref().flag_deny_blocking();
+    let old_lua = ctx.client_ref().flag_lua();
     ctx.client_mut().set_flag_deny_blocking(true);
+    ctx.client_mut().set_flag_lua(true);
 
     let name_bytes = args[0].clone();
     let dispatch_result = dispatch_command_name(ctx, &name_bytes);
     ctx.client_mut().set_flag_deny_blocking(old_deny_blocking);
+    ctx.client_mut().set_flag_lua(old_lua);
 
     let raw_reply: Vec<u8> = {
         let buf = &mut ctx.client_mut().reply_buf;

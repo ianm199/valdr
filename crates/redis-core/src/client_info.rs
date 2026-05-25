@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use redis_types::RedisString;
 
+use crate::acl::AclUser;
 use crate::client::Client;
 use crate::client::ClientId;
 
@@ -42,6 +43,10 @@ pub struct ClientSnapshot {
     pub lib_ver: Option<RedisString>,
     pub subscribed_channels: usize,
     pub subscribed_patterns: usize,
+    pub subscribed_shard_channels: usize,
+    pub channel_names: Vec<RedisString>,
+    pub pattern_names: Vec<RedisString>,
+    pub shard_channel_names: Vec<RedisString>,
     pub queued_multi_count: Option<usize>,
 }
 
@@ -79,6 +84,10 @@ impl ClientInfoRegistry {
                 lib_ver: None,
                 subscribed_channels: 0,
                 subscribed_patterns: 0,
+                subscribed_shard_channels: 0,
+                channel_names: Vec::new(),
+                pattern_names: Vec::new(),
+                shard_channel_names: Vec::new(),
                 queued_multi_count: None,
             },
         );
@@ -117,6 +126,10 @@ impl ClientInfoRegistry {
             e.lib_ver = client.lib_ver.clone();
             e.subscribed_channels = client.subscribed_channels.len();
             e.subscribed_patterns = client.subscribed_patterns.len();
+            e.subscribed_shard_channels = client.subscribed_shard_channels.len();
+            e.channel_names = client.subscribed_channels.iter().cloned().collect();
+            e.pattern_names = client.subscribed_patterns.iter().cloned().collect();
+            e.shard_channel_names = client.subscribed_shard_channels.iter().cloned().collect();
             e.queued_multi_count = client.flags.multi.then_some(client.queued_argvs.len());
         }
     }
@@ -140,10 +153,44 @@ impl ClientInfoRegistry {
         self.entries.remove(&id);
     }
 
+    /// Remove pub/sub clients authenticated as `username` whose active
+    /// subscriptions are no longer allowed by `updated_user`.
+    pub fn deregister_revoked_pubsub_clients(
+        &mut self,
+        username: &RedisString,
+        updated_user: &AclUser,
+    ) -> Vec<ClientId> {
+        let revoked: Vec<ClientId> = self
+            .entries
+            .values()
+            .filter(|snap| snap.user.as_ref() == Some(username))
+            .filter(|snap| snapshot_has_revoked_channel(snap, updated_user))
+            .map(|snap| snap.id)
+            .collect();
+        for id in &revoked {
+            self.entries.remove(id);
+        }
+        revoked
+    }
+
     /// Snapshot of all currently registered clients.
     pub fn all(&self) -> Vec<ClientSnapshot> {
         self.entries.values().cloned().collect()
     }
+}
+
+fn snapshot_has_revoked_channel(snap: &ClientSnapshot, user: &AclUser) -> bool {
+    snap.channel_names
+        .iter()
+        .any(|channel| !user.can_access_channel(channel.as_bytes()))
+        || snap
+            .shard_channel_names
+            .iter()
+            .any(|channel| !user.can_access_channel(channel.as_bytes()))
+        || snap
+            .pattern_names
+            .iter()
+            .any(|pattern| !user.can_access_channel_pattern(pattern.as_bytes()))
 }
 
 static CLIENT_INFO_REGISTRY: OnceLock<Arc<Mutex<ClientInfoRegistry>>> = OnceLock::new();

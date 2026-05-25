@@ -111,6 +111,10 @@ struct CliArgs {
     set_max_intset_entries: usize,
     set_max_listpack_entries: usize,
     set_max_listpack_value: usize,
+    acl_pubsub_default_allchannels: bool,
+    aclfile: Option<String>,
+    acl_user_lines: Vec<String>,
+    command_renames: Vec<(String, String)>,
 }
 
 impl Default for CliArgs {
@@ -134,6 +138,10 @@ impl Default for CliArgs {
             set_max_intset_entries: redis_core::live_config::DEFAULT_SET_MAX_INTSET_ENTRIES,
             set_max_listpack_entries: redis_core::live_config::DEFAULT_SET_MAX_LISTPACK_ENTRIES,
             set_max_listpack_value: redis_core::live_config::DEFAULT_SET_MAX_LISTPACK_VALUE,
+            acl_pubsub_default_allchannels: false,
+            aclfile: None,
+            acl_user_lines: Vec::new(),
+            command_renames: Vec::new(),
         }
     }
 }
@@ -239,6 +247,18 @@ fn parse_args(argv: Vec<String>) -> Result<CliArgs, String> {
                     .ok_or_else(|| "--auto-aof-rewrite-min-size requires a value".to_string())?;
                 out.auto_aof_rewrite_min_size = parse_memsize_config(v.as_bytes())
                     .ok_or_else(|| format!("invalid auto-aof-rewrite-min-size: {}", v))?;
+            }
+            "--acl-pubsub-default" => {
+                let v = it
+                    .next()
+                    .ok_or_else(|| "--acl-pubsub-default requires a value".to_string())?;
+                out.acl_pubsub_default_allchannels = v.eq_ignore_ascii_case("allchannels");
+            }
+            "--user" => {
+                let v = it
+                    .next()
+                    .ok_or_else(|| "--user requires a value".to_string())?;
+                out.acl_user_lines.push(v);
             }
             "--help" | "-h" => {
                 println!(
@@ -348,10 +368,35 @@ fn apply_config_file(args: &mut CliArgs, path: &Path) -> Result<(), String> {
                     args.set_max_listpack_value = v;
                 }
             }
+            "acl-pubsub-default" => {
+                args.acl_pubsub_default_allchannels = value.eq_ignore_ascii_case("allchannels");
+            }
+            "aclfile" => {
+                args.aclfile = (!value.is_empty()).then(|| value.to_string());
+            }
+            "user" => {
+                if !value.is_empty() {
+                    args.acl_user_lines.push(value.to_string());
+                }
+            }
+            "rename-command" => {
+                let mut parts = value.split_whitespace();
+                if let (Some(from), Some(to)) = (parts.next(), parts.next()) {
+                    args.command_renames
+                        .push((from.to_string(), unquote_config_token(to).to_string()));
+                }
+            }
             _ => {}
         }
     }
     Ok(())
+}
+
+fn unquote_config_token(value: &str) -> &str {
+    value
+        .strip_prefix('"')
+        .and_then(|v| v.strip_suffix('"'))
+        .unwrap_or(value)
 }
 
 fn parse_memsize_config(bytes: &[u8]) -> Option<u64> {
@@ -460,9 +505,28 @@ fn main() {
     live_config.store_set_max_intset_entries(args.set_max_intset_entries);
     live_config.store_set_max_listpack_entries(args.set_max_listpack_entries);
     live_config.store_set_max_listpack_value(args.set_max_listpack_value);
+    if args.acl_pubsub_default_allchannels {
+        redis_core::acl::set_acl_pubsub_default(b"allchannels");
+    } else {
+        redis_core::acl::set_acl_pubsub_default(b"resetchannels");
+    }
     redis_core::object::install_live_config(Arc::clone(&live_config));
     redis_commands::install_live_config_handle(Arc::clone(&live_config));
     redis_core::acl::install_acl_state();
+    for (from, to) in &args.command_renames {
+        if let Err(e) = redis_commands::dispatch::apply_command_rename(from.as_bytes(), to.as_bytes()) {
+            eprintln!("{}", String::from_utf8_lossy(&e));
+            std::process::exit(1);
+        }
+    }
+    if let Err(e) = redis_commands::connection::load_acl_startup_config(
+        &args.acl_user_lines,
+        &args.dir,
+        args.aclfile.as_deref(),
+    ) {
+        eprintln!("{}", String::from_utf8_lossy(&e));
+        std::process::exit(1);
+    }
     let repl_state = Arc::new(redis_core::replication::ReplicationState::new(
         redis_core::replication::generate_runid(),
         live_config.repl_backlog_size() as usize,
@@ -1006,6 +1070,9 @@ fn spawn_writer(mut writer: TcpStream, peer: String) -> Sender<Vec<u8>> {
         .name(format!("writer-{}", peer))
         .spawn(move || {
             for payload in rx {
+                if payload.is_empty() {
+                    break;
+                }
                 if writer.write_all(&payload).is_err() {
                     break;
                 }

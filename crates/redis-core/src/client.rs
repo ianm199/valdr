@@ -200,6 +200,8 @@ pub struct Client {
     pub subscribed_channels: HashSet<RedisString>,
     /// Glob patterns this client is subscribed to.
     pub subscribed_patterns: HashSet<RedisString>,
+    /// Shard channels this client is subscribed to.
+    pub subscribed_shard_channels: HashSet<RedisString>,
     /// True while the client is parked inside the global `BlockedKeysIndex`
     /// from a BLPOP / BRPOP / BLMOVE / BRPOPLPUSH / BLMPOP call.
     ///
@@ -243,6 +245,7 @@ pub struct ClientFlags {
     pub dirty_cas: bool,
     pub dirty_exec: bool,
     pub deny_blocking: bool,
+    pub lua: bool,
     pub blocked: bool,
     pub monitor: bool,
     pub readonly: bool,
@@ -307,6 +310,7 @@ impl Client {
             import_source: false,
             subscribed_channels: HashSet::new(),
             subscribed_patterns: HashSet::new(),
+            subscribed_shard_channels: HashSet::new(),
             blocked_on_keys: false,
             pending_wakes: Vec::new(),
             authenticated_user: initial_authenticated_user(),
@@ -362,8 +366,9 @@ impl Client {
         self.import_source = false;
         self.authenticated_user = initial_authenticated_user();
         self.capa_redirect = false;
-        self.subscribed_channels.clear();
-        self.subscribed_patterns.clear();
+            self.subscribed_channels.clear();
+            self.subscribed_patterns.clear();
+            self.subscribed_shard_channels.clear();
         self.pending_wakes.clear();
         crate::db::watched_keys_index_remove_client(self.id);
         let _ = crate::db::watched_keys_take_dirty(self.id);
@@ -386,7 +391,9 @@ impl Client {
 
     /// Total per-client pub/sub subscriptions across channels and patterns.
     pub fn pubsub_subscription_count(&self) -> usize {
-        self.subscribed_channels.len() + self.subscribed_patterns.len()
+        self.subscribed_channels.len()
+            + self.subscribed_patterns.len()
+            + self.subscribed_shard_channels.len()
     }
 
     /// Whether this client is currently in pub/sub subscribe mode.
@@ -691,6 +698,9 @@ impl Client {
     pub fn flag_deny_blocking(&self) -> bool {
         self.flags.deny_blocking
     }
+    pub fn flag_lua(&self) -> bool {
+        self.flags.lua
+    }
     pub fn flag_blocked(&self) -> bool {
         self.flags.blocked
     }
@@ -709,6 +719,9 @@ impl Client {
     }
     pub fn set_flag_deny_blocking(&mut self, v: bool) {
         self.flags.deny_blocking = v;
+    }
+    pub fn set_flag_lua(&mut self, v: bool) {
+        self.flags.lua = v;
     }
 
     /// Install commands[index].argv/argc/argv_len/cmd as the client's current

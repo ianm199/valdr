@@ -50,8 +50,7 @@ fn command_stats_handle() -> &'static Arc<Mutex<HashMap<Vec<u8>, CommandStat>>> 
 }
 
 pub fn record_command_stat(name: &[u8], elapsed_us: u64, rejected_call: bool, failed_call: bool) {
-    let mut key = name.to_ascii_lowercase();
-    key.retain(|b| *b != b'\r' && *b != b'\n');
+    let key = command_stats_key(name);
     if key.is_empty() {
         return;
     }
@@ -68,6 +67,26 @@ pub fn record_command_stat(name: &[u8], elapsed_us: u64, rejected_call: bool, fa
     if failed_call {
         row.failed_calls = row.failed_calls.saturating_add(1);
     }
+}
+
+pub fn record_blocked_command_rejected(name: &[u8]) {
+    let key = command_stats_key(name);
+    if key.is_empty() {
+        return;
+    }
+    let mut stats = match command_stats_handle().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let row = stats.entry(key).or_default();
+    row.calls = row.calls.saturating_sub(1);
+    row.rejected_calls = row.rejected_calls.saturating_add(1);
+}
+
+fn command_stats_key(name: &[u8]) -> Vec<u8> {
+    let mut key = name.to_ascii_lowercase();
+    key.retain(|b| *b != b'\r' && *b != b'\n');
+    key
 }
 
 pub fn command_stats_snapshot() -> Vec<CommandStatSnapshot> {
@@ -117,6 +136,14 @@ pub struct ServerMetrics {
     pub keyspace_misses: AtomicU64,
     /// Connections rejected because connected_clients >= maxclients.
     pub rejected_connections: AtomicU64,
+    /// ACL authentication denials.
+    pub acl_access_denied_auth: AtomicU64,
+    /// ACL command denials.
+    pub acl_access_denied_cmd: AtomicU64,
+    /// ACL key access denials.
+    pub acl_access_denied_key: AtomicU64,
+    /// ACL channel access denials.
+    pub acl_access_denied_channel: AtomicU64,
     /// Keys removed by lazy or active expiration.
     pub expired_keys: AtomicU64,
     /// Keys removed by the maxmemory eviction policy.
@@ -141,6 +168,10 @@ impl ServerMetrics {
             keyspace_hits: AtomicU64::new(0),
             keyspace_misses: AtomicU64::new(0),
             rejected_connections: AtomicU64::new(0),
+            acl_access_denied_auth: AtomicU64::new(0),
+            acl_access_denied_cmd: AtomicU64::new(0),
+            acl_access_denied_key: AtomicU64::new(0),
+            acl_access_denied_channel: AtomicU64::new(0),
             expired_keys: AtomicU64::new(0),
             evicted_keys: AtomicU64::new(0),
             active_time_main_thread_us: AtomicU64::new(0),
@@ -190,6 +221,10 @@ impl ServerMetrics {
         self.keyspace_hits.store(0, Ordering::Relaxed);
         self.keyspace_misses.store(0, Ordering::Relaxed);
         self.rejected_connections.store(0, Ordering::Relaxed);
+        self.acl_access_denied_auth.store(0, Ordering::Relaxed);
+        self.acl_access_denied_cmd.store(0, Ordering::Relaxed);
+        self.acl_access_denied_key.store(0, Ordering::Relaxed);
+        self.acl_access_denied_channel.store(0, Ordering::Relaxed);
         self.expired_keys.store(0, Ordering::Relaxed);
         self.evicted_keys.store(0, Ordering::Relaxed);
         self.active_time_main_thread_us.store(0, Ordering::Relaxed);
@@ -197,6 +232,30 @@ impl ServerMetrics {
         self.rdb_saves_failed.store(0, Ordering::Relaxed);
         reset_command_stats();
     }
+}
+
+pub fn record_acl_access_denied_auth() {
+    server_metrics()
+        .acl_access_denied_auth
+        .fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn record_acl_access_denied_cmd() {
+    server_metrics()
+        .acl_access_denied_cmd
+        .fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn record_acl_access_denied_key() {
+    server_metrics()
+        .acl_access_denied_key
+        .fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn record_acl_access_denied_channel() {
+    server_metrics()
+        .acl_access_denied_channel
+        .fetch_add(1, Ordering::Relaxed);
 }
 
 /// Return the resident set size of this process in bytes, or `None` if the

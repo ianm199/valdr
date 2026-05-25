@@ -7,15 +7,16 @@
 //!   - ACL state lives in a process-global `OnceLock<Arc<Mutex<AclState>>>`.
 //!
 //! TODOs:
-//!   - Per-key pattern enforcement at the per-command level (currently tracked in
-//!     `AclUser::key_patterns` but not checked during dispatch).
 //!   - ACL persistence to aclfile / `users` config section.
-//!   - ACL LOG real implementation (currently stub: empty array / +OK).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use redis_types::RedisString;
+
+use crate::util::string_match_len;
 
 /// SHA-256 hash of a password (32 bytes).
 pub type PasswordHash = [u8; 32];
@@ -153,12 +154,16 @@ pub struct AclUserFlags {
     pub enabled: bool,
     /// No password required; any password (or none) is accepted.
     pub nopass: bool,
+    /// RESTORE payloads are sanitized by default.
+    pub sanitize_payload: bool,
     /// Allow all commands regardless of `allowed_categories`.
     pub allcommands: bool,
     /// Allow all keys (`~*`).
     pub allkeys: bool,
     /// Allow all channels (`&*`).
     pub allchannels: bool,
+    /// Allow every logical database (`alldbs`).
+    pub alldbs: bool,
 }
 
 /// ACL category bitmask constants (aligned with Valkey acl.c).
@@ -264,6 +269,55 @@ pub const ALL_CATEGORY_NAMES: &[&[u8]] = &[
     b"write",
 ];
 
+pub const DEFAULT_ACLLOG_MAX_LEN: usize = 128;
+
+static ACL_PUBSUB_DEFAULT_ALLCHANNELS: AtomicBool = AtomicBool::new(false);
+
+pub fn acl_pubsub_default_allchannels() -> bool {
+    ACL_PUBSUB_DEFAULT_ALLCHANNELS.load(Ordering::Relaxed)
+}
+
+pub fn acl_pubsub_default_config_value() -> &'static str {
+    if acl_pubsub_default_allchannels() {
+        "allchannels"
+    } else {
+        "resetchannels"
+    }
+}
+
+pub fn set_acl_pubsub_default(value: &[u8]) -> bool {
+    if value.eq_ignore_ascii_case(b"allchannels") {
+        ACL_PUBSUB_DEFAULT_ALLCHANNELS.store(true, Ordering::Relaxed);
+        true
+    } else if value.eq_ignore_ascii_case(b"resetchannels") {
+        ACL_PUBSUB_DEFAULT_ALLCHANNELS.store(false, Ordering::Relaxed);
+        true
+    } else {
+        false
+    }
+}
+
+pub fn apply_acl_pubsub_default_to_user(user: &mut AclUser) {
+    if acl_pubsub_default_allchannels() {
+        user.flags.allchannels = true;
+        user.channel_patterns = vec![RedisString::from_bytes(b"*")];
+    }
+}
+
+/// One entry in the ACL access-denied log.
+#[derive(Debug, Clone)]
+pub struct AclLogEntry {
+    pub count: u64,
+    pub reason: RedisString,
+    pub context: RedisString,
+    pub object: RedisString,
+    pub username: RedisString,
+    pub client_info: RedisString,
+    pub entry_id: u64,
+    pub timestamp_created: i64,
+    pub timestamp_last_updated: i64,
+}
+
 /// A single ACL user entry.
 #[derive(Debug, Clone)]
 pub struct AclUser {
@@ -273,14 +327,20 @@ pub struct AclUser {
     pub passwords: Vec<PasswordHash>,
     /// Bitmask of allowed ACL categories.
     pub allowed_categories: u64,
+    /// Bitmask of explicitly denied ACL categories.
+    pub denied_categories: u64,
     /// Explicitly allowed individual command names (lowercase).
     pub allowed_commands: Vec<RedisString>,
     /// Explicitly denied individual command names (lowercase).
     pub denied_commands: Vec<RedisString>,
+    /// Lossless command/category rule order for ACL GETUSER/LIST rendering.
+    pub command_rules: Vec<RedisString>,
     /// Key glob patterns allowed (`~pattern`).
     pub key_patterns: Vec<RedisString>,
     /// Channel glob patterns allowed (`&pattern`).
     pub channel_patterns: Vec<RedisString>,
+    /// Logical database ids allowed by `db=N` rules.
+    pub allowed_dbs: Vec<u32>,
 }
 
 impl AclUser {
@@ -291,16 +351,21 @@ impl AclUser {
             flags: AclUserFlags {
                 enabled: false,
                 nopass: false,
+                sanitize_payload: true,
                 allcommands: false,
                 allkeys: false,
                 allchannels: false,
+                alldbs: true,
             },
             passwords: Vec::new(),
             allowed_categories: 0,
+            denied_categories: 0,
             allowed_commands: Vec::new(),
             denied_commands: Vec::new(),
+            command_rules: Vec::new(),
             key_patterns: Vec::new(),
             channel_patterns: Vec::new(),
+            allowed_dbs: Vec::new(),
         }
     }
 
@@ -311,43 +376,102 @@ impl AclUser {
             flags: AclUserFlags {
                 enabled: true,
                 nopass: true,
+                sanitize_payload: true,
                 allcommands: true,
                 allkeys: true,
                 allchannels: true,
+                alldbs: true,
             },
             passwords: Vec::new(),
             allowed_categories: category::ALL,
+            denied_categories: 0,
             allowed_commands: Vec::new(),
             denied_commands: Vec::new(),
+            command_rules: Vec::new(),
             key_patterns: vec![RedisString::from_bytes(b"*")],
             channel_patterns: vec![RedisString::from_bytes(b"*")],
+            allowed_dbs: Vec::new(),
         }
     }
 
     /// Check whether this user can execute the given command name.
-    ///
-    /// Checks (in order):
-    ///   1. If user is disabled → deny.
-    ///   2. If `allcommands` flag is set → allow.
-    ///   3. If command is in `denied_commands` → deny.
-    ///   4. If command is in `allowed_commands` → allow.
-    ///   5. Check `allowed_categories` against the command's ACL categories.
     pub fn can_execute_command(&self, cmd_name: &[u8], cmd_categories: u64) -> bool {
-        if !self.flags.enabled {
-            return false;
-        }
-        if self.flags.allcommands {
-            return true;
-        }
+        self.can_execute_command_with_arg(cmd_name, None, cmd_categories)
+    }
+
+    /// Check whether this user can execute `cmd_name`, considering
+    /// first-argument ACL subcommand rules such as `+client|id`.
+    pub fn can_execute_command_with_arg(
+        &self,
+        cmd_name: &[u8],
+        first_arg: Option<&[u8]>,
+        cmd_categories: u64,
+    ) -> bool {
         let lower: Vec<u8> = cmd_name.iter().map(|b| b.to_ascii_lowercase()).collect();
         let lower_rs = RedisString::from_bytes(&lower);
+        let subcommand = first_arg.map(|arg| {
+            let mut full = Vec::with_capacity(lower.len() + 1 + arg.len());
+            full.extend_from_slice(&lower);
+            full.push(b'|');
+            full.extend(arg.iter().map(|b| b.to_ascii_lowercase()));
+            RedisString::from_vec(full)
+        });
+        if let Some(full) = &subcommand {
+            if self.denied_commands.iter().any(|c| c == full) {
+                return false;
+            }
+            if self.allowed_commands.iter().any(|c| c == full) {
+                return true;
+            }
+        }
         if self.denied_commands.iter().any(|c| c == &lower_rs) {
             return false;
         }
         if self.allowed_commands.iter().any(|c| c == &lower_rs) {
             return true;
         }
+        if self.flags.allcommands {
+            return self.denied_categories & cmd_categories == 0;
+        }
         self.allowed_categories & cmd_categories != 0
+    }
+
+    /// Check whether this user may access `key`.
+    pub fn can_access_key(&self, key: &[u8]) -> bool {
+        if self.flags.allkeys {
+            return true;
+        }
+        self.key_patterns
+            .iter()
+            .any(|pat| string_match_len(pat.as_bytes(), key, false))
+    }
+
+    /// Check whether this user may access `channel`.
+    pub fn can_access_channel(&self, channel: &[u8]) -> bool {
+        if self.flags.allchannels {
+            return true;
+        }
+        self.channel_patterns
+            .iter()
+            .any(|pat| string_match_len(pat.as_bytes(), channel, false))
+    }
+
+    /// Check whether this user may subscribe to channel pattern `pattern`.
+    ///
+    /// Valkey matches PSUBSCRIBE patterns literally against ACL channel
+    /// patterns; normal channels use glob matching.
+    pub fn can_access_channel_pattern(&self, pattern: &[u8]) -> bool {
+        if self.flags.allchannels {
+            return true;
+        }
+        self.channel_patterns
+            .iter()
+            .any(|pat| pat.as_bytes() == pattern)
+    }
+
+    /// Check whether this user may access logical database `db`.
+    pub fn can_access_db(&self, db: u32) -> bool {
+        self.flags.alldbs || self.allowed_dbs.contains(&db)
     }
 
     /// Check whether this user's password list contains the given cleartext password.
@@ -373,6 +497,11 @@ impl AclUser {
         if self.flags.nopass {
             out.extend_from_slice(b" nopass");
         }
+        if self.flags.sanitize_payload {
+            out.extend_from_slice(b" sanitize-payload");
+        } else {
+            out.extend_from_slice(b" skip-sanitize-payload");
+        }
         for hash in &self.passwords {
             out.extend_from_slice(b" #");
             out.extend_from_slice(&hash_to_hex(hash));
@@ -389,61 +518,30 @@ impl AclUser {
         if self.flags.allchannels {
             out.extend_from_slice(b" &*");
         } else {
+            out.extend_from_slice(b" resetchannels");
             for pat in &self.channel_patterns {
                 out.push(b' ');
                 out.push(b'&');
                 out.extend_from_slice(pat.as_bytes());
             }
         }
-        if self.flags.allcommands {
-            out.extend_from_slice(b" +@all");
-        } else {
-            for cat_name in ALL_CATEGORY_NAMES {
-                let bit = category_name_to_bit(cat_name).unwrap_or(0);
-                if self.allowed_categories & bit != 0 {
-                    out.extend_from_slice(b" +@");
-                    out.extend_from_slice(cat_name);
-                }
-            }
-            for cmd in &self.allowed_commands {
-                out.push(b' ');
-                out.push(b'+');
-                out.extend_from_slice(cmd.as_bytes());
-            }
-            for cmd in &self.denied_commands {
-                out.push(b' ');
-                out.push(b'-');
-                out.extend_from_slice(cmd.as_bytes());
-            }
-        }
+        out.push(b' ');
+        out.extend_from_slice(&self.databases_summary());
+        out.push(b' ');
+        out.extend_from_slice(&self.commands_summary());
         out
     }
 
     /// Return a string describing the commands permission state for GETUSER.
     pub fn commands_summary(&self) -> Vec<u8> {
-        if self.flags.allcommands {
-            return b"+@all".to_vec();
-        }
-        if self.allowed_categories == 0 && self.allowed_commands.is_empty() {
-            return b"-@all".to_vec();
-        }
-        let mut out: Vec<u8> = Vec::new();
-        for cat_name in ALL_CATEGORY_NAMES {
-            let bit = category_name_to_bit(cat_name).unwrap_or(0);
-            if self.allowed_categories & bit != 0 {
-                if !out.is_empty() {
-                    out.push(b' ');
-                }
-                out.extend_from_slice(b"+@");
-                out.extend_from_slice(cat_name);
-            }
-        }
-        for cmd in &self.allowed_commands {
-            if !out.is_empty() {
-                out.push(b' ');
-            }
-            out.push(b'+');
-            out.extend_from_slice(cmd.as_bytes());
+        let mut out = if self.flags.allcommands {
+            b"+@all".to_vec()
+        } else {
+            b"-@all".to_vec()
+        };
+        for rule in &self.command_rules {
+            out.push(b' ');
+            out.extend_from_slice(rule.as_bytes());
         }
         out
     }
@@ -485,11 +583,30 @@ impl AclUser {
         }
         out
     }
+
+    /// Render database selectors for GETUSER/LIST.
+    pub fn databases_summary(&self) -> Vec<u8> {
+        if self.flags.alldbs {
+            return b"alldbs".to_vec();
+        }
+        let mut out = Vec::new();
+        for db in &self.allowed_dbs {
+            if !out.is_empty() {
+                out.push(b' ');
+            }
+            out.extend_from_slice(b"db=");
+            out.extend_from_slice(db.to_string().as_bytes());
+        }
+        out
+    }
 }
 
-/// Process-wide ACL state: map of username → `AclUser`.
+/// Process-wide ACL state: map of username → `AclUser` plus ACL LOG ring.
 pub struct AclState {
     pub users: HashMap<RedisString, AclUser>,
+    log: VecDeque<AclLogEntry>,
+    log_next_entry_id: u64,
+    log_max_len: usize,
 }
 
 impl AclState {
@@ -498,7 +615,74 @@ impl AclState {
         let mut users = HashMap::new();
         let default_user = AclUser::new_default();
         users.insert(default_user.name.clone(), default_user);
-        AclState { users }
+        AclState {
+            users,
+            log: VecDeque::new(),
+            log_next_entry_id: 0,
+            log_max_len: DEFAULT_ACLLOG_MAX_LEN,
+        }
+    }
+
+    pub fn clear_log(&mut self) {
+        self.log.clear();
+    }
+
+    pub fn log_max_len(&self) -> usize {
+        self.log_max_len
+    }
+
+    pub fn set_log_max_len(&mut self, max_len: usize) {
+        self.log_max_len = max_len;
+    }
+
+    pub fn log_entries(&self, limit: Option<usize>) -> Vec<AclLogEntry> {
+        let limit = limit.unwrap_or(self.log.len());
+        self.log.iter().take(limit).cloned().collect()
+    }
+
+    pub fn record_log_entry(
+        &mut self,
+        reason: RedisString,
+        context: RedisString,
+        object: RedisString,
+        username: RedisString,
+        client_info: RedisString,
+    ) {
+        if self.log_max_len == 0 {
+            return;
+        }
+        let now = acl_log_now_millis();
+        if let Some(pos) = self.log.iter().position(|entry| {
+            entry.reason == reason
+                && entry.context == context
+                && entry.object == object
+                && entry.username == username
+        }) {
+            if let Some(mut entry) = self.log.remove(pos) {
+                entry.count = entry.count.saturating_add(1);
+                entry.timestamp_last_updated = now;
+                entry.client_info = client_info;
+                self.log.push_front(entry);
+            }
+            return;
+        }
+
+        let entry = AclLogEntry {
+            count: 1,
+            reason,
+            context,
+            object,
+            username,
+            client_info,
+            entry_id: self.log_next_entry_id,
+            timestamp_created: now,
+            timestamp_last_updated: now,
+        };
+        self.log_next_entry_id = self.log_next_entry_id.saturating_add(1);
+        self.log.push_front(entry);
+        while self.log.len() > self.log_max_len {
+            self.log.pop_back();
+        }
     }
 }
 
@@ -520,6 +704,70 @@ pub fn global_acl_state() -> Arc<Mutex<AclState>> {
     GLOBAL_ACL_STATE
         .get_or_init(|| Arc::new(Mutex::new(AclState::new())))
         .clone()
+}
+
+pub fn record_acl_log_entry(
+    reason: &[u8],
+    context: &[u8],
+    object: RedisString,
+    username: RedisString,
+    client_info: RedisString,
+) {
+    let acl = global_acl_state();
+    let mut guard = match acl.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    guard.record_log_entry(
+        RedisString::from_bytes(reason),
+        RedisString::from_bytes(context),
+        object,
+        username,
+        client_info,
+    );
+}
+
+pub fn clear_acl_log() {
+    let acl = global_acl_state();
+    let mut guard = match acl.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    guard.clear_log();
+}
+
+pub fn acl_log_entries(limit: Option<usize>) -> Vec<AclLogEntry> {
+    let acl = global_acl_state();
+    let guard = match acl.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    guard.log_entries(limit)
+}
+
+pub fn set_acl_log_max_len(max_len: usize) {
+    let acl = global_acl_state();
+    let mut guard = match acl.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    guard.set_log_max_len(max_len);
+}
+
+pub fn acl_log_max_len() -> usize {
+    let acl = global_acl_state();
+    let guard = match acl.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    guard.log_max_len()
+}
+
+pub fn acl_log_now_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

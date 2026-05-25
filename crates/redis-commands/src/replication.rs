@@ -24,7 +24,8 @@ use redis_core::replication::{
     ReplicationState,
 };
 use redis_core::CommandContext;
-use redis_types::{RedisError, RedisResult};
+use redis_protocol::frame::RespFrame;
+use redis_types::{RedisError, RedisResult, RedisString};
 
 /// `REPLICAOF host port` / `REPLICAOF NO ONE` (alias: `SLAVEOF`).
 ///
@@ -73,6 +74,40 @@ pub fn replicaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         }
     }
     ctx.reply_simple_string(b"OK")
+}
+
+/// `ROLE` — return this node's replication role.
+pub fn role_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
+    if ctx.arg_count() != 1 {
+        return Err(RedisError::wrong_number_of_args(b"role"));
+    }
+    let repl = global_replication_state();
+    if let Some((host, port)) = repl.replica_of_target() {
+        return ctx.reply_frame(&RespFrame::array(vec![
+            RespFrame::bulk(b"slave".as_slice()),
+            RespFrame::bulk(host),
+            RespFrame::Integer(port as i64),
+            RespFrame::bulk(b"connected".as_slice()),
+            RespFrame::Integer(repl.master_offset()),
+        ]));
+    }
+
+    let replicas = repl
+        .replicas_snapshot()
+        .into_iter()
+        .map(|(_cid, _state, port, offset, _last_ack_ms)| {
+            RespFrame::array(vec![
+                RespFrame::bulk(RedisString::from_static(b"?")),
+                RespFrame::bulk(RedisString::from_vec(port.to_string().into_bytes())),
+                RespFrame::bulk(RedisString::from_vec(offset.to_string().into_bytes())),
+            ])
+        })
+        .collect();
+    ctx.reply_frame(&RespFrame::array(vec![
+        RespFrame::bulk(b"master".as_slice()),
+        RespFrame::Integer(repl.master_offset()),
+        RespFrame::array(replicas),
+    ]))
 }
 
 /// True when both arguments spell `NO` and `ONE` case-insensitively.
@@ -276,6 +311,7 @@ pub fn wait_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         },
         deadline_ms: deadline_from_timeout_secs(timeout_secs),
         resp_proto: ctx.client_ref().resp_proto,
+        username: ctx.client_ref().authenticated_user.clone(),
     };
     {
         let mut idx = match blocked_keys_index().lock() {

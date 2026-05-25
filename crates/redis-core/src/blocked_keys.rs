@@ -134,6 +134,7 @@ pub struct BlockedWaiter {
     pub action: BlockedAction,
     pub deadline_ms: i64,
     pub resp_proto: i32,
+    pub username: Option<RedisString>,
 }
 
 /// Server-wide blocked-keys index.
@@ -499,6 +500,7 @@ mod tests {
             },
             deadline_ms: deadline,
             resp_proto: 2,
+            username: None,
         }
     }
 
