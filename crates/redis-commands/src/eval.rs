@@ -583,6 +583,21 @@ fn lua_script_command_error_payload(err: &RedisError) -> Vec<u8> {
     lua_script_command_reply_error_payload(err.to_resp_payload().as_bytes())
 }
 
+fn lua_script_command_call_error_payload(err: &RedisError) -> Vec<u8> {
+    lua_script_call_error_payload(lua_script_command_error_payload(err))
+}
+
+fn lua_script_command_reply_call_error_payload(bytes: &[u8]) -> Vec<u8> {
+    lua_script_call_error_payload(lua_script_command_reply_error_payload(bytes))
+}
+
+fn lua_script_call_error_payload(mut payload: Vec<u8>) -> Vec<u8> {
+    if !byte_windows_contains(&payload, b" script: ") {
+        payload.extend_from_slice(b" script: unknown");
+    }
+    payload
+}
+
 fn lua_script_command_reply_error_payload(bytes: &[u8]) -> Vec<u8> {
     let payload = bytes.strip_prefix(b"-").unwrap_or(bytes);
     let first_line = payload
@@ -2485,6 +2500,14 @@ fn stale_replica_scripts_blocked(ctx: &CommandContext<'_>) -> bool {
         && !ctx.live_config().replica_serve_stale_data()
 }
 
+fn replica_readonly_script_blocked(ctx: &CommandContext<'_>) -> bool {
+    redis_core::replication::global_replication_state().is_replica() && !ctx.client_ref().is_replica
+}
+
+fn replica_readonly_error() -> RedisError {
+    RedisError::runtime(b"READONLY You can't write against a read only replica.")
+}
+
 fn good_replicas_status(ctx: &CommandContext<'_>) -> bool {
     let min_replicas = ctx.live_config().repl_min_replicas_to_write();
     let max_lag_secs = ctx.live_config().repl_min_replicas_max_lag();
@@ -2899,6 +2922,9 @@ fn fcall_command_generic(ctx: &mut CommandContext<'_>, ro: bool) -> RedisResult<
     }
     if stale_replica_scripts_blocked(ctx) && !definition.allow_stale {
         return Err(stale_replica_masterdown_error());
+    }
+    if !ro && !definition.no_writes && replica_readonly_script_blocked(ctx) {
+        return Err(replica_readonly_error());
     }
 
     let numkeys = numkeys as usize;
@@ -3437,6 +3463,41 @@ fn parse_eval_shebang(script_bytes: &[u8]) -> RedisResult<(EvalScriptFlags, &[u8
         }
     }
     Ok((flags, body))
+}
+
+pub(crate) fn queued_script_declares_write(argv: &[RedisString]) -> bool {
+    let Some(name) = argv.first().map(|s| s.as_bytes()) else {
+        return false;
+    };
+    if ascii_eq_ci(name, b"EVAL") {
+        return argv
+            .get(1)
+            .and_then(|script| parse_eval_shebang(script.as_bytes()).ok().map(|(f, _)| f))
+            .is_some_and(|flags| flags.has_shebang && !flags.no_writes);
+    }
+    if ascii_eq_ci(name, b"EVALSHA") {
+        let Some(sha) = argv.get(1).and_then(|raw| normalise_sha(raw.as_bytes())) else {
+            return false;
+        };
+        let script = {
+            let guard = match script_cache().lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            guard.entries.get(&sha).map(|entry| entry.body.clone())
+        };
+        return script
+            .as_deref()
+            .and_then(|body| parse_eval_shebang(body).ok().map(|(f, _)| f))
+            .is_some_and(|flags| flags.has_shebang && !flags.no_writes);
+    }
+    if ascii_eq_ci(name, b"FCALL") {
+        return argv
+            .get(1)
+            .and_then(|function_name| find_loaded_function(function_name.as_bytes()))
+            .is_some_and(|(_, definition)| !definition.no_writes);
+    }
+    false
 }
 
 fn function_source_eval_flags(code: &[u8]) -> EvalScriptFlags {
@@ -4106,6 +4167,15 @@ fn run_script(
 ) -> RedisResult<()> {
     let (script_flags, script_body) = parse_eval_shebang(script_bytes)?;
     let read_only = read_only || script_flags.no_writes;
+    if stale_replica_scripts_blocked(ctx) && !script_flags.allow_stale {
+        return Err(stale_replica_masterdown_error());
+    }
+    if replica_readonly_script_blocked(ctx)
+        && !read_only
+        && (!ctx.client_ref().flag_deny_blocking() || script_flags.has_shebang)
+    {
+        return Err(replica_readonly_error());
+    }
     if script_flags.has_shebang
         && !script_flags.allow_oom
         && !read_only
@@ -4147,9 +4217,6 @@ fn run_script(
     } else {
         None
     };
-    if stale_replica_scripts_blocked(ctx) && !script_flags.allow_stale {
-        return Err(stale_replica_masterdown_error());
-    }
     let stale_replica_blocked = stale_replica_scripts_blocked(ctx);
     let script_allow_stale = script_flags.allow_stale;
     let insecure_api_enabled = ctx.live_config().lua_enable_insecure_api();
@@ -4250,9 +4317,9 @@ fn run_script(
                         if let ReplyValue::Error(msg) = &reply {
                             error_recorded.set(true);
                             return Err(LuaError::RuntimeError(
-                                String::from_utf8_lossy(&lua_script_command_reply_error_payload(
-                                    msg,
-                                ))
+                                String::from_utf8_lossy(
+                                    &lua_script_command_reply_call_error_payload(msg),
+                                )
                                 .into_owned(),
                             ));
                         }
@@ -4261,7 +4328,7 @@ fn run_script(
                     Err(e) => {
                         error_recorded.set(true);
                         Err(LuaError::RuntimeError(
-                            String::from_utf8_lossy(&lua_script_command_error_payload(&e))
+                            String::from_utf8_lossy(&lua_script_command_call_error_payload(&e))
                                 .into_owned(),
                         ))
                     }

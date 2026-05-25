@@ -202,6 +202,15 @@ pub fn exec_command(ctx: &mut CommandContext) -> RedisResult<()> {
             return Ok(());
         }
     }
+    if queued_has_declared_write_script_on_replica(&ctx.client_ref().queued_argvs) {
+        reset_multi_state(ctx.client_mut());
+        ctx.client_mut()
+            .reply_buf
+            .extend_from_slice(&execabort_from_error_reply(
+                b"-READONLY You can't write against a read only replica.\r\n",
+            ));
+        return Ok(());
+    }
 
     let queued: Vec<Vec<RedisString>> = std::mem::take(&mut ctx.client_mut().queued_argvs);
     ctx.client_mut().set_flag_multi(false);
@@ -234,6 +243,15 @@ fn queued_has_denyoom_command(queued: &[Vec<RedisString>]) -> bool {
             .map(|name| command_is_denyoom(name.as_bytes()))
             .unwrap_or(false)
     })
+}
+
+fn queued_has_declared_write_script_on_replica(queued: &[Vec<RedisString>]) -> bool {
+    if !redis_core::replication::global_replication_state().is_replica() {
+        return false;
+    }
+    queued
+        .iter()
+        .any(|argv| crate::eval::queued_script_declares_write(argv))
 }
 
 /// Run a single queued argv as if the client had just sent it directly.

@@ -1377,7 +1377,7 @@ fn is_always_allowed_for_authenticated(ctx: &CommandContext<'_>, name: &[u8]) ->
 }
 
 /// Reject write commands from regular clients when we are operating as a
-/// replica (`repl_state == REPLICA_ONLINE`).
+/// replica (`repl_state != MASTER`).
 ///
 /// Commands that arrive on the master-to-replica stream are applied via
 /// `apply_command_locally` in the dialer thread, which sets `client.is_replica
@@ -1392,22 +1392,31 @@ fn enforce_replica_readonly_gate(
     name: &[u8],
     is_write_command: bool,
 ) -> Option<Vec<u8>> {
-    use redis_core::replication::{global_replication_state, repl_state_code};
+    use redis_core::replication::global_replication_state;
     let repl = global_replication_state();
-    if repl.repl_state.load(std::sync::atomic::Ordering::Relaxed) != repl_state_code::REPLICA_ONLINE
-    {
+    if !repl.is_replica() {
         return None;
     }
     if ctx.client_ref().is_replica {
         return None;
     }
-    if ascii_eq_ignore_case(name, b"REPLICAOF") || ascii_eq_ignore_case(name, b"SLAVEOF") {
+    if ascii_eq_ignore_case(name, b"REPLICAOF")
+        || ascii_eq_ignore_case(name, b"SLAVEOF")
+        || ascii_eq_ignore_case(name, b"EXEC")
+        || script_command_has_runtime_readonly_flags(name)
+    {
         return None;
     }
     if !is_write_command {
         return None;
     }
     Some(b"-READONLY You can't write against a read only replica.\r\n".to_vec())
+}
+
+fn script_command_has_runtime_readonly_flags(name: &[u8]) -> bool {
+    ascii_eq_ignore_case(name, b"EVAL")
+        || ascii_eq_ignore_case(name, b"EVALSHA")
+        || ascii_eq_ignore_case(name, b"FCALL")
 }
 
 /// Pre-handler maxmemory enforcement.
