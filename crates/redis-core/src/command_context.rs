@@ -609,14 +609,10 @@ impl<'a> CommandContext<'a> {
 
     /// Whether this command is executing inside Lua/script context.
     ///
-    /// The current Lua bridge dispatches inner commands through the same client
-    /// without a dedicated script flag, so this remains false until that state
-    /// is represented on `Client`.
-    ///
-    /// TODO(architect): add a canonical script-context bit to `Client` or the
-    /// dispatch route before commands depend on script-specific semantics.
+    /// The Lua bridge sets `ClientFlags::lua` while dispatching inner
+    /// `redis.call`/`redis.pcall` commands, matching C's `CLIENT_SCRIPT` flag.
     pub fn is_script_context(&self) -> bool {
-        false
+        self.client.flag_lua()
     }
 
     /// Number of logical databases visible to this command context.
