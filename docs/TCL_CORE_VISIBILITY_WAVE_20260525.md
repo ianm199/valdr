@@ -491,8 +491,92 @@ unit/pubsubshard:     +11 counted
 unit/networking:       +5 counted
 unit/obuf-limits:     +13 counted
 unit/pubsub:          +35 counted
-Total visible gain:  +167 counted, from ~2154 to ~2321 counted
+unit/client-eviction: +14 counted
+Total visible gain:  +181 counted, from ~2154 to ~2335 counted
 ```
+
+## Runtime Client-Memory Pull: `unit/client-eviction`
+
+Patch:
+
+- Added live `CONFIG SET/GET maxmemory-clients`, including absolute byte values
+  and percentage-of-`maxmemory` values.
+- Implemented `CLIENT NO-EVICT ON|OFF` as a real client flag.
+- Added runtime-owner client memory accounting for query buffers, current argv,
+  MULTI queues, WATCH registrations, pub/sub subscriptions, tracking prefixes,
+  output buffers, and staged write buffers.
+- Exposed `qbuf`, `argv-mem`, `multi-mem`, `omem`, and `tot-mem` through
+  `CLIENT LIST` snapshots instead of hardcoded zeroes.
+- Added `INFO stats` `evicted_clients` plus `INFO memory` client-memory fields
+  used by maxmemory tests.
+- Added a minimal `DEBUG HTSTATS` response so maxmemory/rehash tests can keep
+  running instead of aborting on an unknown debug subcommand.
+
+Verification:
+
+```bash
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-client-eviction-runtime-memory-v4 \
+  --profile single-node-external \
+  --skip-build \
+  --timeout-s 120 \
+  --baseport 48111 \
+  --portcount 4000 \
+  --files unit/client-eviction
+
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-client-memory-noregression-v2 \
+  --profile single-node-external \
+  --skip-build \
+  --timeout-s 180 \
+  --baseport 55111 \
+  --portcount 5000 \
+  --files unit/client-eviction,unit/pubsub,unit/obuf-limits,unit/tracking,unit/commandlog
+```
+
+Evidence:
+
+- `harness/oracle/results/tcl-survey/20260525T065019Z/unit__client-eviction.json`
+- `harness/oracle/results/tcl-survey/20260525T065344Z/`
+
+Result:
+
+```text
+unit/client-eviction: timeout/no-summary -> 14 pass / 0 fail / 14 counted
+unit/pubsub:          no regression, 35 pass / 0 fail
+unit/tracking:        no regression, 59 pass / 0 fail
+unit/commandlog:      no regression, 14 pass / 0 fail
+unit/obuf-limits:     unchanged counted-red, 12 pass / 1 fail
+```
+
+Follow-up maxmemory probe:
+
+```bash
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-maxmemory-debug-htstats-v1 \
+  --profile single-node-external \
+  --skip-build \
+  --timeout-s 300 \
+  --baseport 27111 \
+  --portcount 6000 \
+  --files unit/maxmemory
+```
+
+Evidence:
+
+- `harness/oracle/results/tcl-survey/20260525T070443Z/unit__maxmemory.json`
+
+Result:
+
+```text
+unit/maxmemory: still timeout/no-summary.
+```
+
+Interpretation: client eviction itself is now a clean counted file. The
+maxmemory file moved past the earlier client-memory and `DEBUG HTSTATS` aborts,
+but now times out later after the replica-buffer checks. That is a replication
+buffer accounting/liveness lane, not the same bounded client-eviction packet.
 
 ## Next Overnight Targets
 

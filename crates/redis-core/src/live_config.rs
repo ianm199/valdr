@@ -103,6 +103,9 @@ impl MaxmemoryPolicyCode {
 pub struct LiveConfig {
     pub maxmemory: AtomicU64,
     pub maxmemory_policy: AtomicU8,
+    /// Client-memory eviction limit (`maxmemory-clients`). Positive values are
+    /// absolute bytes; negative values are percentages of `maxmemory`.
+    pub maxmemory_clients: AtomicI64,
     pub maxclients: AtomicU64,
     pub requirepass: Mutex<Option<RedisString>>,
     pub notify_keyspace_events_flags: AtomicU32,
@@ -287,6 +290,7 @@ impl Default for LiveConfig {
         Self {
             maxmemory: AtomicU64::new(0),
             maxmemory_policy: AtomicU8::new(MaxmemoryPolicyCode::NoEviction as u8),
+            maxmemory_clients: AtomicI64::new(0),
             maxclients: AtomicU64::new(DEFAULT_MAX_CLIENTS),
             requirepass: Mutex::new(None),
             notify_keyspace_events_flags: AtomicU32::new(0),
@@ -353,6 +357,15 @@ impl LiveConfig {
 
     pub fn set_maxmemory_policy(&self, policy: MaxmemoryPolicyCode) {
         self.maxmemory_policy.store(policy as u8, Ordering::Relaxed);
+    }
+
+    pub fn maxmemory_clients(&self) -> i64 {
+        self.maxmemory_clients.load(Ordering::Relaxed)
+    }
+
+    pub fn set_maxmemory_clients(&self, bytes_or_negative_percent: i64) {
+        self.maxmemory_clients
+            .store(bytes_or_negative_percent, Ordering::Relaxed);
     }
 
     pub fn maxclients(&self) -> u64 {

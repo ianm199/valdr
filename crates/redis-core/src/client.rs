@@ -252,6 +252,7 @@ pub struct ClientFlags {
     pub blocked: bool,
     pub monitor: bool,
     pub readonly: bool,
+    pub no_evict: bool,
     pub aof_client: bool,
     pub reply_off: bool,
     pub reply_skip_next: bool,

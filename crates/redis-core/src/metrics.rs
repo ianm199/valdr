@@ -215,6 +215,8 @@ pub struct ServerMetrics {
     pub expired_keys: AtomicU64,
     /// Keys removed by the maxmemory eviction policy.
     pub evicted_keys: AtomicU64,
+    /// Clients disconnected by maxmemory-clients eviction.
+    pub evicted_clients: AtomicU64,
     /// Cumulative microseconds spent inside command dispatch on the main thread.
     pub active_time_main_thread_us: AtomicU64,
     /// Total error replies emitted since the last `CONFIG RESETSTAT`.
@@ -243,6 +245,7 @@ impl ServerMetrics {
             acl_access_denied_channel: AtomicU64::new(0),
             expired_keys: AtomicU64::new(0),
             evicted_keys: AtomicU64::new(0),
+            evicted_clients: AtomicU64::new(0),
             active_time_main_thread_us: AtomicU64::new(0),
             total_error_replies: AtomicU64::new(0),
             rdb_saves_succeeded: AtomicU64::new(0),
@@ -297,6 +300,7 @@ impl ServerMetrics {
         self.acl_access_denied_channel.store(0, Ordering::Relaxed);
         self.expired_keys.store(0, Ordering::Relaxed);
         self.evicted_keys.store(0, Ordering::Relaxed);
+        self.evicted_clients.store(0, Ordering::Relaxed);
         self.active_time_main_thread_us.store(0, Ordering::Relaxed);
         self.total_error_replies.store(0, Ordering::Relaxed);
         self.rdb_saves_succeeded.store(0, Ordering::Relaxed);

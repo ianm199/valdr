@@ -14,6 +14,7 @@ use std::sync::atomic::Ordering;
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use redis_core::client_info::client_info_registry;
 use redis_core::memory::approximate_memory_used;
 use redis_core::metrics::{error_stats_snapshot, rss_bytes, server_metrics};
 use redis_core::CommandContext;
@@ -56,6 +57,19 @@ fn format_human_bytes(bytes: u64) -> String {
     }
 }
 
+fn client_memory_info_totals() -> (usize, usize) {
+    let guard = match client_info_registry().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let normal = guard
+        .all()
+        .into_iter()
+        .map(|snap| snap.total_memory_bytes)
+        .sum();
+    (normal, 0)
+}
+
 /// `INFO [section]`.
 ///
 /// Returns the canonical Redis multi-section text blob as a bulk string.
@@ -95,6 +109,7 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let acl_denied_channel = metrics.acl_access_denied_channel.load(Ordering::Relaxed);
     let expired_keys = metrics.expired_keys.load(Ordering::Relaxed);
     let evicted_keys = metrics.evicted_keys.load(Ordering::Relaxed);
+    let evicted_clients = metrics.evicted_clients.load(Ordering::Relaxed);
     let active_time_us = metrics.active_time_main_thread_us.load(Ordering::Relaxed);
     let total_error_replies = metrics.total_error_replies.load(Ordering::Relaxed);
     let maxclients = get_max_clients();
@@ -179,6 +194,9 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let _ = writeln!(buf, "used_memory_estimated:true\r");
         let _ = writeln!(buf, "total_system_memory:0\r");
         let _ = writeln!(buf, "mem_not_counted_for_evict:0\r");
+        let (mem_clients_normal, mem_clients_slaves) = client_memory_info_totals();
+        let _ = writeln!(buf, "mem_clients_normal:{}\r", mem_clients_normal);
+        let _ = writeln!(buf, "mem_clients_slaves:{}\r", mem_clients_slaves);
         let live_maxmemory = ctx.live_config().maxmemory();
         let live_policy = ctx.live_config().maxmemory_policy();
         let _ = writeln!(buf, "maxmemory:{}\r", live_maxmemory);
@@ -271,7 +289,7 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
             crate::hash::expired_fields_count()
         );
         let _ = writeln!(buf, "evicted_keys:{}\r", evicted_keys);
-        let _ = writeln!(buf, "evicted_clients:0\r");
+        let _ = writeln!(buf, "evicted_clients:{}\r", evicted_clients);
         let _ = writeln!(buf, "keyspace_hits:{}\r", hits);
         let _ = writeln!(buf, "keyspace_misses:{}\r", misses);
         let _ = writeln!(buf, "acl_access_denied_auth:{}\r", acl_denied_auth);

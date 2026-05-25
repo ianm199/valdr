@@ -400,6 +400,7 @@ fn default_config_pairs() -> &'static [(&'static str, &'static str)] {
     &[
         ("maxmemory", "0"),
         ("maxmemory-policy", "noeviction"),
+        ("maxmemory-clients", "0"),
         ("maxmemory-samples", "5"),
         ("maxclients", "10000"),
         ("acllog-max-len", "128"),
@@ -483,6 +484,7 @@ fn default_config_pairs() -> &'static [(&'static str, &'static str)] {
 fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
     let live_maxmemory = cfg.maxmemory().to_string();
     let live_maxmemory_policy = cfg.maxmemory_policy().as_config_str().to_string();
+    let live_maxmemory_clients = render_maxmemory_clients(cfg.maxmemory_clients());
     let live_maxclients = cfg.maxclients().to_string();
     let live_acllog_max_len = acl_log_max_len().to_string();
     let live_acl_pubsub_default = acl_pubsub_default_config_value().to_string();
@@ -574,6 +576,7 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
         let dynamic = match name {
             "maxmemory" => Some(live_maxmemory.clone()),
             "maxmemory-policy" => Some(live_maxmemory_policy.clone()),
+            "maxmemory-clients" => Some(live_maxmemory_clients.clone()),
             "maxclients" => Some(live_maxclients.clone()),
             "acllog-max-len" => Some(live_acllog_max_len.clone()),
             "acl-pubsub-default" => Some(live_acl_pubsub_default.clone()),
@@ -650,6 +653,11 @@ fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
         b"maxmemory-policy" => {
             if let Some(policy) = MaxmemoryPolicyCode::parse(value) {
                 cfg.set_maxmemory_policy(policy);
+            }
+        }
+        b"maxmemory-clients" => {
+            if let Some(n) = parse_maxmemory_clients(value) {
+                cfg.set_maxmemory_clients(n);
             }
         }
         b"maxclients" => {
@@ -966,6 +974,22 @@ fn parse_memsize(bytes: &[u8]) -> Option<u64> {
     let digits_str = std::str::from_utf8(digits).ok()?;
     let base: u64 = digits_str.parse().ok()?;
     base.checked_mul(multiplier)
+}
+
+fn parse_maxmemory_clients(bytes: &[u8]) -> Option<i64> {
+    if let Some(raw) = bytes.strip_suffix(b"%") {
+        let pct = parse_usize_strict(raw)?;
+        return Some(-(pct as i64));
+    }
+    parse_memsize(bytes).and_then(|n| i64::try_from(n).ok())
+}
+
+fn render_maxmemory_clients(value: i64) -> String {
+    if value < 0 {
+        format!("{}%", value.saturating_abs())
+    } else {
+        value.to_string()
+    }
 }
 
 /// Parses a non-negative integer from ASCII decimal bytes. Returns `None` if
@@ -1567,6 +1591,14 @@ pub fn debug_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ascii_eq_ignore_case(sub.as_bytes(), b"OBJECT") {
         return ctx.reply_simple_string(b"Value at:0x0 refcount:1 encoding:raw serializedlength:1 lru:0 lru_seconds:0 type:string");
     }
+    if ascii_eq_ignore_case(sub.as_bytes(), b"HTSTATS") {
+        let entries = ctx.db().len();
+        let payload = format!(
+            "[Dictionary HT]\nHash table 0 stats (main hash table):\n table size: 4096\n number of entries: {}\n rehashing index: -1\n",
+            entries
+        );
+        return ctx.reply_bulk_string(redis_types::RedisString::from_bytes(payload.as_bytes()));
+    }
     if ascii_eq_ignore_case(sub.as_bytes(), b"QUICKLIST-PACKED-THRESHOLD") {
         return ctx.reply_simple_string(b"OK");
     }
@@ -2103,13 +2135,17 @@ fn format_snapshot_client_info_line(
     line.extend_from_slice(capa);
     let _ = write!(
         line,
-        " db={} sub={} psub={} ssub={} multi={} watch=0 qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 rbs=0 rbp=0 obl=0 oll=0 omem={} tot-mem=0 events=r cmd=",
+        " db={} sub={} psub={} ssub={} multi={} watch=0 qbuf={} qbuf-free=0 argv-mem={} multi-mem={} rbs=0 rbp=0 obl=0 oll=0 omem={} tot-mem={} events=r cmd=",
         snap.db_index,
         snap.subscribed_channels,
         snap.subscribed_patterns,
         snap.subscribed_shard_channels,
         multi,
+        snap.query_buffer_bytes,
+        snap.argv_memory_bytes,
+        snap.multi_memory_bytes,
         snap.output_buffer_bytes,
+        snap.total_memory_bytes,
     );
     line.extend_from_slice(command_name);
     line.extend_from_slice(b" user=");
@@ -2745,6 +2781,8 @@ pub fn client_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         {
             return Err(RedisError::syntax(b""));
         }
+        ctx.client_mut().flags.no_evict = ascii_eq_ignore_case(flag.as_bytes(), b"ON");
+        refresh_client_info_registry(ctx.client_ref());
         return ctx.reply_simple_string(b"OK");
     }
     if ascii_eq_ignore_case(sub_bytes, b"NO-TOUCH") {

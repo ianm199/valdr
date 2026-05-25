@@ -23,8 +23,11 @@ use mio::net::{TcpListener as MioTcpListener, TcpStream as MioTcpStream};
 use mio::{Events, Interest, Poll, Registry as MioRegistry, Token};
 use redis_core::client_info::client_info_registry;
 use redis_core::db::RedisDb;
+use redis_core::eviction::{try_evict_to_fit, EvictionOutcome};
 use redis_core::expire::run_active_expire_tick_on_db;
+use redis_core::memory::approximate_memory_used;
 use redis_core::metrics::server_metrics;
+use redis_core::networking::get_client_eviction_limit;
 use redis_core::pubsub_registry::PubSubRegistry;
 use redis_core::{Client, Connection};
 use redis_protocol::parse_inline_or_multibulk_into;
@@ -337,6 +340,7 @@ impl ClientSlot {
         if let Ok(mut guard) = client_info_registry().lock() {
             guard.set_output_buffer_memory(self.client.id, pending);
         }
+        self.refresh_client_memory_snapshot();
         let limit =
             redis_commands::connection::client_output_buffer_limit(self.client.in_pubsub_mode());
         if limit.hard > 0 && pending > limit.hard {
@@ -366,6 +370,125 @@ impl ClientSlot {
 
     pub fn is_closed(&self) -> bool {
         self.closed
+    }
+
+    fn client_memory_usage(&self) -> usize {
+        self.client_memory_usage_with_query_len(self.client.query_buf.len())
+    }
+
+    fn client_memory_usage_with_query_len(&self, query_len: usize) -> usize {
+        let argv_mem = self.current_argv_memory_usage();
+        let multi_mem = self.multi_memory_usage();
+        self.output_accounted_bytes
+            .saturating_add(self.write_buffer.len())
+            .saturating_add(query_len)
+            .saturating_add(argv_mem)
+            .saturating_add(multi_mem)
+            .saturating_add(self.subscription_memory_usage())
+            .saturating_add(self.tracking_memory_usage())
+            .saturating_add(self.watched_key_memory_usage())
+            .saturating_add(self.name_memory_usage())
+    }
+
+    fn refresh_client_memory_snapshot(&self) {
+        if let Ok(mut guard) = client_info_registry().lock() {
+            guard.set_memory_usage(
+                self.client.id,
+                visible_query_buffer_len(&self.client.query_buf),
+                self.current_argv_memory_usage(),
+                self.multi_memory_usage(),
+                self.client_memory_usage(),
+            );
+        }
+    }
+
+    fn current_argv_memory_usage(&self) -> usize {
+        self.client.argv.iter().map(|s| s.as_bytes().len()).sum()
+    }
+
+    fn queued_argv_memory_usage(&self) -> usize {
+        self.client
+            .queued_argvs
+            .iter()
+            .flat_map(|argv| argv.iter())
+            .map(|s| s.as_bytes().len())
+            .sum()
+    }
+
+    fn multi_memory_usage(&self) -> usize {
+        const WATCH_OVERHEAD: usize = 64;
+
+        self.queued_argv_memory_usage()
+            .saturating_add(
+                self.client
+                    .mstate
+                    .as_ref()
+                    .map(|m| {
+                        m.argv_len_sums
+                            + m.watched_keys.len() * WATCH_OVERHEAD
+                            + m.watched_keys
+                                .iter()
+                                .map(|w| w.key.string_bytes().len())
+                                .sum::<usize>()
+                    })
+                    .unwrap_or(0),
+            )
+    }
+
+    fn subscription_memory_usage(&self) -> usize {
+        const SUBSCRIPTION_OVERHEAD: usize = 64;
+        let subscription_count = self.client.subscribed_channels.len()
+            + self.client.subscribed_patterns.len()
+            + self.client.subscribed_shard_channels.len();
+        subscription_count * SUBSCRIPTION_OVERHEAD
+            + self
+                .client
+                .subscribed_channels
+                .iter()
+                .chain(self.client.subscribed_patterns.iter())
+                .chain(self.client.subscribed_shard_channels.iter())
+                .map(|s| s.as_bytes().len())
+                .sum::<usize>()
+    }
+
+    fn tracking_memory_usage(&self) -> usize {
+        const TRACKING_PREFIX_OVERHEAD: usize = 64;
+        self.client.tracking.prefixes.len() * TRACKING_PREFIX_OVERHEAD
+            + self
+                .client
+                .tracking
+                .prefixes
+                .iter()
+                .map(|s| s.as_bytes().len())
+                .sum::<usize>()
+    }
+
+    fn name_memory_usage(&self) -> usize {
+        self.client.name.as_ref().map(|s| s.as_bytes().len()).unwrap_or(0)
+    }
+
+    fn watched_key_memory_usage(&self) -> usize {
+        const WATCH_OVERHEAD: usize = 64;
+        let idx = redis_core::db::watched_keys_index();
+        let guard = match idx.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard
+            .watched
+            .iter()
+            .filter(|(_, watchers)| watchers.contains(&self.client.id))
+            .map(|((_, key), _)| WATCH_OVERHEAD + key.as_bytes().len())
+            .sum()
+    }
+
+    fn client_memory_usage_after_parsed_command(&self, consumed_total: usize) -> usize {
+        let remaining_query = self.client.query_buf.len().saturating_sub(consumed_total);
+        self.client_memory_usage_with_query_len(remaining_query)
+    }
+
+    fn can_be_evicted_for_memory(&self) -> bool {
+        !self.closed && !self.close_after_flush && !self.client.flags.no_evict
     }
 
     pub fn into_client(self) -> Client {
@@ -639,6 +762,7 @@ impl RuntimeOwner {
             progressed |= owner.dispatch_scheduled_commands(poll.registry(), &registry, &server);
             progressed |= owner.install_pending_dynamic_listeners(&mut listeners, poll.registry());
             owner.sweep_output_buffer_limits();
+            progressed |= owner.enforce_client_memory_limits(&server);
             progressed |= owner.cleanup_closed_clients(poll.registry(), &registry);
 
             let _ = progressed;
@@ -1035,6 +1159,7 @@ impl RuntimeOwner {
                 }
             };
             slot.ingest(&read_buf[..n]);
+            slot.refresh_client_memory_snapshot();
             progressed = true;
         }
         progressed
@@ -1078,6 +1203,13 @@ impl RuntimeOwner {
                     }
                     if super::is_client_info_observer(&last_cmd_name) {
                         super::update_client_info_snapshot(&slot.client, &last_cmd_name);
+                    }
+                    if client_exceeds_own_memory_limit_after_parse(slot, server, consumed_total) {
+                        slot.mark_closed();
+                        server_metrics()
+                            .evicted_clients
+                            .fetch_add(1, Ordering::Relaxed);
+                        break;
                     }
 
                     if (slot.client.db_index as usize) >= self.dbs.len() {
@@ -1128,6 +1260,7 @@ impl RuntimeOwner {
         if !reply.is_empty() {
             slot.queue_write_owned(reply);
         }
+        slot.refresh_client_memory_snapshot();
 
         if saw_command {
             super::update_client_info_snapshot(&slot.client, &last_cmd_name);
@@ -1168,6 +1301,103 @@ impl RuntimeOwner {
         for slot in self.slots.iter_mut().flatten() {
             slot.refresh_output_buffer_state_at(now);
         }
+    }
+
+    fn enforce_client_memory_limits(&mut self, server: &redis_core::RedisServer) -> bool {
+        let client_memory = self.total_client_memory();
+        let maxmemory_clients = server.live_config.maxmemory_clients();
+        let client_limit =
+            get_client_eviction_limit(maxmemory_clients, server.live_config.maxmemory());
+        if client_limit > 0 {
+            return self.evict_clients_to_limit(client_limit, client_memory);
+        }
+
+        let maxmemory = server.live_config.maxmemory();
+        if maxmemory == 0 {
+            return false;
+        }
+        if maxmemory_clients == 0 && client_memory < 1024 * 1024 {
+            return false;
+        }
+        let key_memory: u64 = self.dbs.iter().map(approximate_memory_used).sum();
+        if key_memory.saturating_add(client_memory as u64) <= maxmemory {
+            return false;
+        }
+        let target_key_memory = maxmemory.saturating_sub(client_memory as u64);
+        self.evict_keys_to_total(target_key_memory, server)
+    }
+
+    fn total_client_memory(&self) -> usize {
+        self.slots
+            .iter()
+            .flatten()
+            .filter(|slot| !slot.closed && !slot.close_after_flush)
+            .map(ClientSlot::client_memory_usage)
+            .sum()
+    }
+
+    fn evict_clients_to_limit(&mut self, limit: usize, mut total: usize) -> bool {
+        let mut progressed = false;
+        while total > limit {
+            let victim = self
+                .slots
+                .iter()
+                .flatten()
+                .filter(|slot| slot.can_be_evicted_for_memory())
+                .max_by_key(|slot| slot.client_memory_usage())
+                .map(|slot| (slot.id(), slot.client_memory_usage()));
+            let Some((slot_id, usage)) = victim else {
+                break;
+            };
+            if usage == 0 {
+                break;
+            }
+            if let Some(slot) = self.slot_mut(slot_id) {
+                slot.mark_closed();
+                server_metrics()
+                    .evicted_clients
+                    .fetch_add(1, Ordering::Relaxed);
+                progressed = true;
+            }
+            total = total.saturating_sub(usage);
+        }
+        progressed
+    }
+
+    fn evict_keys_to_total(
+        &mut self,
+        target_key_memory: u64,
+        server: &redis_core::RedisServer,
+    ) -> bool {
+        let policy = server.live_config.maxmemory_policy();
+        let log_factor = server.live_config.lfu_log_factor();
+        let decay_time = server.live_config.lfu_decay_time();
+        let mut total: u64 = self.dbs.iter().map(approximate_memory_used).sum();
+        if total <= target_key_memory {
+            return false;
+        }
+        let mut progressed = false;
+        for db in &mut self.dbs {
+            if total <= target_key_memory {
+                break;
+            }
+            let before = approximate_memory_used(db);
+            if before == 0 {
+                continue;
+            }
+            let outcome = try_evict_to_fit(db, 0, policy, log_factor, decay_time);
+            let evicted_any = matches!(
+                outcome,
+                EvictionOutcome::Evicted(ref keys) | EvictionOutcome::StillOver(ref keys)
+                    if !keys.is_empty()
+            );
+            if evicted_any {
+                progressed = true;
+            }
+            let after = approximate_memory_used(db);
+            total = total.saturating_sub(before.saturating_sub(after));
+        }
+        progressed
     }
 
     fn flush_slot_pending_write(&mut self, idx: usize, poll_registry: &MioRegistry) -> bool {
@@ -1304,6 +1534,48 @@ fn has_complete_command(bytes: &[u8]) -> bool {
         parse_inline_or_multibulk_into(bytes, &mut argv),
         Ok(Some(_))
     )
+}
+
+fn visible_query_buffer_len(bytes: &[u8]) -> usize {
+    incomplete_multibulk_first_payload_start(bytes)
+        .map(|start| bytes.len().saturating_sub(start))
+        .unwrap_or(bytes.len())
+}
+
+fn incomplete_multibulk_first_payload_start(bytes: &[u8]) -> Option<usize> {
+    if !bytes.starts_with(b"*") {
+        return None;
+    }
+    let array_line_end = find_crlf(bytes, 1)?;
+    let bulk_prefix = array_line_end + 2;
+    if bytes.get(bulk_prefix) != Some(&b'$') {
+        return None;
+    }
+    let bulk_line_end = find_crlf(bytes, bulk_prefix + 1)?;
+    Some(bulk_line_end + 2)
+}
+
+fn find_crlf(bytes: &[u8], start: usize) -> Option<usize> {
+    bytes
+        .get(start..)?
+        .windows(2)
+        .position(|w| w == b"\r\n")
+        .map(|pos| start + pos)
+}
+
+fn client_exceeds_own_memory_limit_after_parse(
+    slot: &ClientSlot,
+    server: &redis_core::RedisServer,
+    consumed_total: usize,
+) -> bool {
+    if !slot.can_be_evicted_for_memory() {
+        return false;
+    }
+    let limit = get_client_eviction_limit(
+        server.live_config.maxmemory_clients(),
+        server.live_config.maxmemory(),
+    );
+    limit > 0 && slot.client_memory_usage_after_parsed_command(consumed_total) > limit
 }
 
 fn cleanup_slot(mut slot: ClientSlot, registry: &Arc<Mutex<PubSubRegistry>>) {

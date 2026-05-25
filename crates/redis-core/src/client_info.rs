@@ -49,6 +49,10 @@ pub struct ClientSnapshot {
     pub shard_channel_names: Vec<RedisString>,
     pub queued_multi_count: Option<usize>,
     pub output_buffer_bytes: usize,
+    pub query_buffer_bytes: usize,
+    pub argv_memory_bytes: usize,
+    pub multi_memory_bytes: usize,
+    pub total_memory_bytes: usize,
 }
 
 /// Server-wide client info table.
@@ -91,6 +95,10 @@ impl ClientInfoRegistry {
                 shard_channel_names: Vec::new(),
                 queued_multi_count: None,
                 output_buffer_bytes: 0,
+                query_buffer_bytes: 0,
+                argv_memory_bytes: 0,
+                multi_memory_bytes: 0,
+                total_memory_bytes: 0,
             },
         );
     }
@@ -139,6 +147,22 @@ impl ClientInfoRegistry {
     pub fn set_output_buffer_memory(&mut self, id: ClientId, bytes: usize) {
         if let Some(e) = self.entries.get_mut(&id) {
             e.output_buffer_bytes = bytes;
+        }
+    }
+
+    pub fn set_memory_usage(
+        &mut self,
+        id: ClientId,
+        query_buffer_bytes: usize,
+        argv_memory_bytes: usize,
+        multi_memory_bytes: usize,
+        total_memory_bytes: usize,
+    ) {
+        if let Some(e) = self.entries.get_mut(&id) {
+            e.query_buffer_bytes = query_buffer_bytes;
+            e.argv_memory_bytes = argv_memory_bytes;
+            e.multi_memory_bytes = multi_memory_bytes;
+            e.total_memory_bytes = total_memory_bytes;
         }
     }
 
