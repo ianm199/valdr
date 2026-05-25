@@ -172,6 +172,13 @@ pub struct LiveConfig {
     /// Replica idle-link timeout in seconds (`repl-timeout`). Default 60.
     /// Consumed by Wave B's replica-health watchdog; readback only here.
     pub repl_timeout: AtomicU64,
+    /// Minimum number of good replicas required before accepting writes
+    /// (`min-replicas-to-write` / `min-slaves-to-write`). Default 0 disables
+    /// the check.
+    pub repl_min_replicas_to_write: AtomicU64,
+    /// Maximum acceptable replica lag in seconds for the min-replicas write
+    /// gate (`min-replicas-max-lag` / `min-slaves-max-lag`). Default 10.
+    pub repl_min_replicas_max_lag: AtomicU64,
     /// Disable per-write TCP_NODELAY on the replication link
     /// (`repl-disable-tcp-nodelay`). Default `false`. Wave B/C may consume
     /// this once the master-link socket is owned.
@@ -334,6 +341,8 @@ impl Default for LiveConfig {
             auto_aof_rewrite_min_size: AtomicU64::new(DEFAULT_AUTO_AOF_REWRITE_MIN_SIZE),
             repl_backlog_size: AtomicU64::new(DEFAULT_REPL_BACKLOG_SIZE),
             repl_timeout: AtomicU64::new(DEFAULT_REPL_TIMEOUT),
+            repl_min_replicas_to_write: AtomicU64::new(0),
+            repl_min_replicas_max_lag: AtomicU64::new(10),
             repl_disable_tcp_nodelay: AtomicBool::new(false),
             slave_read_only: AtomicBool::new(true),
             replica_serve_stale_data: AtomicBool::new(true),
@@ -776,6 +785,22 @@ impl LiveConfig {
     /// Update the replica idle-link timeout.
     pub fn set_repl_timeout(&self, n: u64) {
         self.repl_timeout.store(n, Ordering::Relaxed);
+    }
+
+    pub fn repl_min_replicas_to_write(&self) -> u64 {
+        self.repl_min_replicas_to_write.load(Ordering::Relaxed)
+    }
+
+    pub fn set_repl_min_replicas_to_write(&self, n: u64) {
+        self.repl_min_replicas_to_write.store(n, Ordering::Relaxed);
+    }
+
+    pub fn repl_min_replicas_max_lag(&self) -> u64 {
+        self.repl_min_replicas_max_lag.load(Ordering::Relaxed)
+    }
+
+    pub fn set_repl_min_replicas_max_lag(&self, n: u64) {
+        self.repl_min_replicas_max_lag.store(n, Ordering::Relaxed);
     }
 
     /// Whether the replication link disables per-write TCP_NODELAY

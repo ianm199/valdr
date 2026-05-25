@@ -481,6 +481,29 @@ impl ReplicationState {
         }
     }
 
+    /// Count online replicas whose last ACK lag is within `max_lag_secs`.
+    pub fn good_replicas_count(&self, max_lag_secs: u64) -> usize {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let max_lag_ms = (max_lag_secs as i64).saturating_mul(1000);
+        let guard = match self.replicas.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard
+            .values()
+            .filter(|replica| {
+                if replica.state() != ReplicaState::Online {
+                    return false;
+                }
+                let last_ack = replica.last_ack_time_ms.load(Ordering::Relaxed);
+                last_ack > 0 && now_ms.saturating_sub(last_ack) <= max_lag_ms
+            })
+            .count()
+    }
+
     /// Register `replica` under its `client_id`. Replaces any prior entry for
     /// the same id (clients can only PSYNC once per connection so this
     /// should not race in practice).

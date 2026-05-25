@@ -2484,6 +2484,36 @@ fn stale_replica_scripts_blocked(ctx: &CommandContext<'_>) -> bool {
         && !ctx.live_config().replica_serve_stale_data()
 }
 
+fn good_replicas_status(ctx: &CommandContext<'_>) -> bool {
+    let min_replicas = ctx.live_config().repl_min_replicas_to_write();
+    let max_lag_secs = ctx.live_config().repl_min_replicas_max_lag();
+    if min_replicas == 0 || max_lag_secs == 0 {
+        return true;
+    }
+    let repl = redis_core::replication::global_replication_state();
+    if repl.is_replica() {
+        return true;
+    }
+    repl.good_replicas_count(max_lag_secs) as u64 >= min_replicas
+}
+
+const NOREPLICAS_ERROR: &str = "NOREPLICAS Not enough good replicas to write.";
+
+fn noreplicas_error() -> RedisError {
+    RedisError::runtime(NOREPLICAS_ERROR.as_bytes())
+}
+
+fn noreplicas_lua_error() -> LuaError {
+    LuaError::RuntimeError(NOREPLICAS_ERROR.to_string())
+}
+
+fn noreplicas_lua_table(lua: &Lua) -> mlua::Result<LuaValue> {
+    let t = lua.create_table()?;
+    t.raw_set("err", lua.create_string(NOREPLICAS_ERROR)?)?;
+    t.raw_set(LUA_ERROR_ALREADY_RECORDED_FIELD, true)?;
+    Ok(LuaValue::Table(t))
+}
+
 fn stale_replica_masterdown_error() -> RedisError {
     RedisError::runtime(
         b"MASTERDOWN Link with MASTER is down and replica-serve-stale-data is set to 'no'.",
@@ -3554,6 +3584,11 @@ fn run_loaded_function(
         return Err(unpack_range_overflow_error());
     }
 
+    let read_only = ro || definition.no_writes;
+    if !read_only && !good_replicas_status(ctx) {
+        return Err(noreplicas_error());
+    }
+
     let original_db = ctx.selected_db_index();
     let original_maxmemory = if definition.allow_oom {
         let maxmemory = ctx.live_config().maxmemory();
@@ -3562,7 +3597,6 @@ fn run_loaded_function(
     } else {
         None
     };
-    let read_only = ro || definition.no_writes;
     let stale_replica_blocked = stale_replica_scripts_blocked(ctx);
     let function_allow_stale = definition.allow_stale;
     let (_, library_body) = parse_function_library_header(&library.code)?;
@@ -3634,6 +3668,11 @@ fn run_loaded_function(
                         ));
                     }
                     let mut borrow = cell.borrow_mut();
+                    if call_is_write_command(&arg_bytes) && !good_replicas_status(&**borrow) {
+                        record_script_rejected_command(&arg_bytes, NOREPLICAS_ERROR.as_bytes());
+                        error_recorded.set(true);
+                        return Err(noreplicas_lua_error());
+                    }
                     match run_inner_command(&mut **borrow, &arg_bytes, Some(dirty.as_ref())) {
                         Ok(reply) => {
                             if let ReplyValue::Error(msg) = &reply {
@@ -3702,6 +3741,10 @@ fn run_loaded_function(
                         return Ok(LuaValue::Table(t));
                     }
                     let mut borrow = cell.borrow_mut();
+                    if call_is_write_command(&arg_bytes) && !good_replicas_status(&**borrow) {
+                        record_script_rejected_command(&arg_bytes, NOREPLICAS_ERROR.as_bytes());
+                        return noreplicas_lua_table(lua_inner);
+                    }
                     match run_inner_command(&mut **borrow, &arg_bytes, Some(dirty.as_ref())) {
                         Ok(reply) => reply_to_lua(lua_inner, &reply, script_resp_view(lua_inner)),
                         Err(e) => {
@@ -4065,6 +4108,9 @@ fn run_script(
     {
         return Err(function_oom_error());
     }
+    if script_flags.has_shebang && !read_only && !good_replicas_status(ctx) {
+        return Err(noreplicas_error());
+    }
 
     if script_is_synthetic_infinite_loop(script_body) {
         set_busy_script(BusyScriptState {
@@ -4188,6 +4234,11 @@ fn run_script(
                     ));
                 }
                 let mut borrow = cell.borrow_mut();
+                if call_is_write_command(&arg_bytes) && !good_replicas_status(&**borrow) {
+                    record_script_rejected_command(&arg_bytes, NOREPLICAS_ERROR.as_bytes());
+                    error_recorded.set(true);
+                    return Err(noreplicas_lua_error());
+                }
                 match run_inner_command(&mut **borrow, &arg_bytes, Some(dirty.as_ref())) {
                     Ok(reply) => {
                         if let ReplyValue::Error(msg) = &reply {
@@ -4255,6 +4306,10 @@ fn run_script(
                         return Ok(LuaValue::Table(t));
                     }
                     let mut borrow = cell.borrow_mut();
+                    if call_is_write_command(&arg_bytes) && !good_replicas_status(&**borrow) {
+                        record_script_rejected_command(&arg_bytes, NOREPLICAS_ERROR.as_bytes());
+                        return noreplicas_lua_table(lua_inner);
+                    }
                     match run_inner_command(&mut **borrow, &arg_bytes, Some(dirty.as_ref())) {
                         Ok(reply) => reply_to_lua(lua_inner, &reply, script_resp_view(lua_inner)),
                         Err(e) => {

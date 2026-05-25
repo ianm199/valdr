@@ -474,6 +474,10 @@ fn default_config_pairs() -> &'static [(&'static str, &'static str)] {
         ("tls-auth-clients", "no"),
         ("repl-backlog-size", "1048576"),
         ("repl-timeout", "60"),
+        ("min-replicas-to-write", "0"),
+        ("min-slaves-to-write", "0"),
+        ("min-replicas-max-lag", "10"),
+        ("min-slaves-max-lag", "10"),
         ("repl-disable-tcp-nodelay", "no"),
         ("slave-read-only", "yes"),
         ("replica-read-only", "yes"),
@@ -557,6 +561,8 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
     let live_auto_aof_rewrite_min_size = cfg.auto_aof_rewrite_min_size().to_string();
     let live_repl_backlog_size = cfg.repl_backlog_size().to_string();
     let live_repl_timeout = cfg.repl_timeout().to_string();
+    let live_min_replicas_to_write = cfg.repl_min_replicas_to_write().to_string();
+    let live_min_replicas_max_lag = cfg.repl_min_replicas_max_lag().to_string();
     let live_repl_disable_nodelay = if cfg.repl_disable_tcp_nodelay() {
         "yes".to_string()
     } else {
@@ -641,6 +647,12 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
             "auto-aof-rewrite-min-size" => Some(live_auto_aof_rewrite_min_size.clone()),
             "repl-backlog-size" => Some(live_repl_backlog_size.clone()),
             "repl-timeout" => Some(live_repl_timeout.clone()),
+            "min-replicas-to-write" | "min-slaves-to-write" => {
+                Some(live_min_replicas_to_write.clone())
+            }
+            "min-replicas-max-lag" | "min-slaves-max-lag" => {
+                Some(live_min_replicas_max_lag.clone())
+            }
             "repl-disable-tcp-nodelay" => Some(live_repl_disable_nodelay.clone()),
             "slave-read-only" | "replica-read-only" => Some(live_slave_read_only.clone()),
             "slave-serve-stale-data" | "replica-serve-stale-data" => {
@@ -955,6 +967,16 @@ fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
                 if n > 0 {
                     cfg.set_repl_timeout(n as u64);
                 }
+            }
+        }
+        b"min-replicas-to-write" | b"min-slaves-to-write" => {
+            if let Some(n) = parse_usize_strict(value) {
+                cfg.set_repl_min_replicas_to_write(n as u64);
+            }
+        }
+        b"min-replicas-max-lag" | b"min-slaves-max-lag" => {
+            if let Some(n) = parse_usize_strict(value) {
+                cfg.set_repl_min_replicas_max_lag(n as u64);
             }
         }
         b"repl-disable-tcp-nodelay" => {
