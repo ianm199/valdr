@@ -396,10 +396,7 @@ fn decode_entries_from_listpack(blob: &[u8], node_id: &StreamId) -> io::Result<V
             for _ in 0..nf {
                 let field = take_bytes(&raw, &mut cursor, "entry field name")?;
                 let value = take_bytes(&raw, &mut cursor, "entry value")?;
-                paired.push((
-                    RedisString::from_vec(field),
-                    RedisString::from_vec(value),
-                ));
+                paired.push((RedisString::from_vec(field), RedisString::from_vec(value)));
             }
         }
 

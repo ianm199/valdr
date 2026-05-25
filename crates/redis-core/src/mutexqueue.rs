@@ -197,7 +197,10 @@ impl<T> MutexQueue<T> {
         if blocking {
             // C: while (mutexQueueLengthInternal(mq) == 0) { pthread_cond_wait(...) }
             while guard.is_empty() {
-                guard = self.notify_cv.wait(guard).unwrap_or_else(|e| e.into_inner());
+                guard = self
+                    .notify_cv
+                    .wait(guard)
+                    .unwrap_or_else(|e| e.into_inner());
             }
         }
 
@@ -232,7 +235,10 @@ impl<T> MutexQueue<T> {
         if blocking {
             // C: while (mutexQueueLengthInternal(mq) == 0) { pthread_cond_wait(...) }
             while guard.is_empty() {
-                guard = self.notify_cv.wait(guard).unwrap_or_else(|e| e.into_inner());
+                guard = self
+                    .notify_cv
+                    .wait(guard)
+                    .unwrap_or_else(|e| e.into_inner());
             }
         }
 
@@ -271,7 +277,10 @@ impl<T> MutexQueue<T> {
     /// ```
     pub fn release(self) {
         // C: assert(mutexQueueLength(theQueue) == 0);
-        debug_assert!(self.is_empty(), "mutexQueueRelease: queue must be empty before release");
+        debug_assert!(
+            self.is_empty(),
+            "mutexQueueRelease: queue must be empty before release"
+        );
         // C: pthread_cond_broadcast — wake any threads still blocking on wait.
         // In Rust this is a best-effort courtesy signal; if no threads are waiting
         // it is a harmless no-op.  The Condvar is cleaned up by Drop.

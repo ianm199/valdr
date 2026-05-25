@@ -26,8 +26,8 @@ use redis_core::commandlog::{
     CommandLog, CommandLogEntry, CommandLogType, COMMANDLOG_ENTRY_MAX_ARGC,
     COMMANDLOG_ENTRY_MAX_STRING,
 };
-use redis_core::monotonic::{elapsed_us, MonoTime};
 use redis_core::latency::{LatencyMonitor, LatencyReportConfig};
+use redis_core::monotonic::{elapsed_us, MonoTime};
 use redis_core::CommandContext;
 use redis_types::{RedisResult, RedisString};
 
@@ -147,8 +147,7 @@ pub fn record_slowlog_entry(
             let arg = &argv[j];
             if arg.len() > COMMANDLOG_ENTRY_MAX_STRING {
                 let extra = arg.len() - COMMANDLOG_ENTRY_MAX_STRING;
-                let mut truncated: Vec<u8> =
-                    arg.as_bytes()[..COMMANDLOG_ENTRY_MAX_STRING].to_vec();
+                let mut truncated: Vec<u8> = arg.as_bytes()[..COMMANDLOG_ENTRY_MAX_STRING].to_vec();
                 let suffix = format!("... ({} more bytes)", extra);
                 truncated.extend_from_slice(suffix.as_bytes());
                 stored_argv.push(RedisString::from_vec(truncated));
@@ -290,8 +289,7 @@ fn commandlog_stored_argv(argv: &[RedisString]) -> Vec<RedisString> {
             let arg = &argv[j];
             if arg.len() > COMMANDLOG_ENTRY_MAX_STRING {
                 let extra = arg.len() - COMMANDLOG_ENTRY_MAX_STRING;
-                let mut truncated: Vec<u8> =
-                    arg.as_bytes()[..COMMANDLOG_ENTRY_MAX_STRING].to_vec();
+                let mut truncated: Vec<u8> = arg.as_bytes()[..COMMANDLOG_ENTRY_MAX_STRING].to_vec();
                 let suffix = format!("... ({} more bytes)", extra);
                 truncated.extend_from_slice(suffix.as_bytes());
                 stored_argv.push(RedisString::from_vec(truncated));
@@ -402,7 +400,9 @@ pub fn slowlog_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
     if sub_bytes.eq_ignore_ascii_case(b"len") {
         if argc != 2 {
-            return Err(redis_types::RedisError::wrong_number_of_args(b"slowlog|len"));
+            return Err(redis_types::RedisError::wrong_number_of_args(
+                b"slowlog|len",
+            ));
         }
         let handle = global_slowlog();
         let log = match handle.lock() {
@@ -414,7 +414,9 @@ pub fn slowlog_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
     if sub_bytes.eq_ignore_ascii_case(b"reset") {
         if argc != 2 {
-            return Err(redis_types::RedisError::wrong_number_of_args(b"slowlog|reset"));
+            return Err(redis_types::RedisError::wrong_number_of_args(
+                b"slowlog|reset",
+            ));
         }
         let handle = global_slowlog();
         let mut log = match handle.lock() {
@@ -427,7 +429,9 @@ pub fn slowlog_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
     if sub_bytes.eq_ignore_ascii_case(b"get") {
         if argc > 3 {
-            return Err(redis_types::RedisError::wrong_number_of_args(b"slowlog|get"));
+            return Err(redis_types::RedisError::wrong_number_of_args(
+                b"slowlog|get",
+            ));
         }
         let default_count: i64 = 10;
         let requested: i64 = if argc == 3 {
@@ -483,9 +487,7 @@ pub fn slowlog_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
 
     let mut msg = Vec::with_capacity(
-        b"ERR unknown subcommand or wrong number of arguments for '".len()
-            + sub_bytes.len()
-            + 2,
+        b"ERR unknown subcommand or wrong number of arguments for '".len() + sub_bytes.len() + 2,
     );
     msg.extend_from_slice(b"ERR unknown subcommand or wrong number of arguments for '");
     msg.extend_from_slice(sub_bytes);
@@ -506,7 +508,9 @@ pub fn commandlog_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
     if sub_bytes.eq_ignore_ascii_case(b"help") {
         if argc != 2 {
-            return Err(redis_types::RedisError::wrong_number_of_args(b"commandlog|help"));
+            return Err(redis_types::RedisError::wrong_number_of_args(
+                b"commandlog|help",
+            ));
         }
         let lines: &[&[u8]] = &[
             b"COMMANDLOG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
@@ -528,7 +532,9 @@ pub fn commandlog_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
     if sub_bytes.eq_ignore_ascii_case(b"len") {
         if argc != 3 {
-            return Err(redis_types::RedisError::wrong_number_of_args(b"commandlog|len"));
+            return Err(redis_types::RedisError::wrong_number_of_args(
+                b"commandlog|len",
+            ));
         }
         let log_type = parse_commandlog_type(ctx.arg_owned(2usize)?.as_bytes())?;
         let handle = commandlog_handle(log_type);
@@ -541,7 +547,9 @@ pub fn commandlog_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
     if sub_bytes.eq_ignore_ascii_case(b"reset") {
         if argc != 3 {
-            return Err(redis_types::RedisError::wrong_number_of_args(b"commandlog|reset"));
+            return Err(redis_types::RedisError::wrong_number_of_args(
+                b"commandlog|reset",
+            ));
         }
         let log_type = parse_commandlog_type(ctx.arg_owned(2usize)?.as_bytes())?;
         let handle = commandlog_handle(log_type);
@@ -555,7 +563,9 @@ pub fn commandlog_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
     if sub_bytes.eq_ignore_ascii_case(b"get") {
         if argc != 4 {
-            return Err(redis_types::RedisError::wrong_number_of_args(b"commandlog|get"));
+            return Err(redis_types::RedisError::wrong_number_of_args(
+                b"commandlog|get",
+            ));
         }
         let requested = parse_count(ctx.arg_owned(2usize)?.as_bytes())?;
         let log_type = parse_commandlog_type(ctx.arg_owned(3usize)?.as_bytes())?;
@@ -568,9 +578,7 @@ pub fn commandlog_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
 
     let mut msg = Vec::with_capacity(
-        b"ERR unknown subcommand or wrong number of arguments for '".len()
-            + sub_bytes.len()
-            + 2,
+        b"ERR unknown subcommand or wrong number of arguments for '".len() + sub_bytes.len() + 2,
     );
     msg.extend_from_slice(b"ERR unknown subcommand or wrong number of arguments for '");
     msg.extend_from_slice(sub_bytes);
@@ -736,7 +744,9 @@ pub fn latency_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
     if sub_bytes.eq_ignore_ascii_case(b"latest") {
         if argc != 2 {
-            return Err(redis_types::RedisError::wrong_number_of_args(b"latency|latest"));
+            return Err(redis_types::RedisError::wrong_number_of_args(
+                b"latency|latest",
+            ));
         }
         let handle = global_latency();
         let monitor = match handle.lock() {
@@ -748,7 +758,9 @@ pub fn latency_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
     if sub_bytes.eq_ignore_ascii_case(b"history") {
         if argc != 3 {
-            return Err(redis_types::RedisError::wrong_number_of_args(b"latency|history"));
+            return Err(redis_types::RedisError::wrong_number_of_args(
+                b"latency|history",
+            ));
         }
         let event = ctx.arg_owned(2usize)?;
         let handle = global_latency();
@@ -786,14 +798,18 @@ pub fn latency_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
     if sub_bytes.eq_ignore_ascii_case(b"graph") {
         if argc != 3 {
-            return Err(redis_types::RedisError::wrong_number_of_args(b"latency|graph"));
+            return Err(redis_types::RedisError::wrong_number_of_args(
+                b"latency|graph",
+            ));
         }
         return ctx.reply_bulk(b"(no data)\n");
     }
 
     if sub_bytes.eq_ignore_ascii_case(b"doctor") {
         if argc != 2 {
-            return Err(redis_types::RedisError::wrong_number_of_args(b"latency|doctor"));
+            return Err(redis_types::RedisError::wrong_number_of_args(
+                b"latency|doctor",
+            ));
         }
         let handle = global_latency();
         let monitor = match handle.lock() {
@@ -828,7 +844,9 @@ pub fn latency_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
     if sub_bytes.eq_ignore_ascii_case(b"help") {
         if argc != 2 {
-            return Err(redis_types::RedisError::wrong_number_of_args(b"latency|help"));
+            return Err(redis_types::RedisError::wrong_number_of_args(
+                b"latency|help",
+            ));
         }
         let lines: &[&[u8]] = &[
             b"LATENCY <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
@@ -854,9 +872,7 @@ pub fn latency_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
 
     let mut msg = Vec::with_capacity(
-        b"ERR unknown subcommand or wrong number of arguments for '".len()
-            + sub_bytes.len()
-            + 2,
+        b"ERR unknown subcommand or wrong number of arguments for '".len() + sub_bytes.len() + 2,
     );
     msg.extend_from_slice(b"ERR unknown subcommand or wrong number of arguments for '");
     msg.extend_from_slice(sub_bytes);
@@ -947,10 +963,7 @@ fn append_selected_latency_histogram(
     }
 }
 
-fn reply_latency_latest(
-    ctx: &mut CommandContext,
-    monitor: &LatencyMonitor,
-) -> RedisResult<()> {
+fn reply_latency_latest(ctx: &mut CommandContext, monitor: &LatencyMonitor) -> RedisResult<()> {
     use redis_core::latency::LATENCY_TS_LEN;
     let count = monitor.len();
     ctx.reply_array_header(count)?;

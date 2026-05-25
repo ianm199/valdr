@@ -93,7 +93,6 @@ struct SptState {
     ///
     /// C: `int error;`
     error: i32,
-
     // TODO(architect): unsafe needed — raw pointer fields:
     //
     //   base: *mut u8  — start of the writable title region (= original argv[0])

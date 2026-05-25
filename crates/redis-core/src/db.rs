@@ -1006,7 +1006,9 @@ impl RedisDb {
         let now = Self::now_ms();
         self.dict
             .iter()
-            .filter(|(_, obj)| self.import_source_active || obj.expire == EXPIRY_NONE || obj.expire >= now)
+            .filter(|(_, obj)| {
+                self.import_source_active || obj.expire == EXPIRY_NONE || obj.expire >= now
+            })
             .filter(|(k, _)| all || glob_match(pattern, k.as_bytes()))
             .map(|(k, _)| k.clone())
             .collect()
@@ -1025,7 +1027,9 @@ impl RedisDb {
         let now = Self::now_ms();
         self.dict
             .iter()
-            .filter(|(_, obj)| self.import_source_active || obj.expire == EXPIRY_NONE || obj.expire >= now)
+            .filter(|(_, obj)| {
+                self.import_source_active || obj.expire == EXPIRY_NONE || obj.expire >= now
+            })
             .map(|(k, obj)| (k.clone(), object_kind_name(&obj.kind)))
             .collect()
     }
@@ -1048,7 +1052,9 @@ impl RedisDb {
             .cycle()
             .skip(start)
             .take(self.dict.len())
-            .find(|(_, obj)| self.import_source_active || obj.expire == EXPIRY_NONE || obj.expire >= now)
+            .find(|(_, obj)| {
+                self.import_source_active || obj.expire == EXPIRY_NONE || obj.expire >= now
+            })
             .map(|(k, _)| k.clone())
     }
 
@@ -1989,7 +1995,10 @@ mod tests {
         db.set_import_expire_state(true, true);
         assert!(!db.is_expired(&key));
         assert!(db.lookup_key_read_with_flags(&key, LOOKUP_NONE).is_some());
-        assert!(db.exists_raw(&key), "import-source lookup must not delete the key");
+        assert!(
+            db.exists_raw(&key),
+            "import-source lookup must not delete the key"
+        );
         assert_eq!(db.random_key(), Some(key.clone()));
         assert_eq!(db.matching_keys(b"*"), vec![key.clone()]);
 
@@ -2004,7 +2013,10 @@ mod tests {
         db.set_import_expire_state(false, false);
         assert!(db.is_expired(&key));
         assert!(db.lookup_key_read_with_flags(&key, LOOKUP_NONE).is_none());
-        assert!(!db.exists_raw(&key), "without import mode the key is lazily deleted");
+        assert!(
+            !db.exists_raw(&key),
+            "without import mode the key is lazily deleted"
+        );
     }
 
     #[test]

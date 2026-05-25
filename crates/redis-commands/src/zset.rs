@@ -92,9 +92,8 @@ fn parse_score_range(bytes: &[u8]) -> Result<(f64, bool), RedisError> {
         Some(b'(') => (true, &bytes[1..]),
         _ => (false, bytes),
     };
-    let score = parse_score(rest).map_err(|_| {
-        RedisError::runtime(b"ERR min or max is not a float")
-    })?;
+    let score =
+        parse_score(rest).map_err(|_| RedisError::runtime(b"ERR min or max is not a float"))?;
     Ok((score, excl))
 }
 
@@ -131,9 +130,7 @@ fn format_score(score: f64) -> Vec<u8> {
 
 /// Borrow the inner `InlineZSet` of a zset-encoded `RedisObject`,
 /// raising `WRONGTYPE` if `obj` is any other kind.
-fn as_zset_ref(
-    obj: Option<&RedisObject>,
-) -> Result<Option<&InlineZSet>, RedisError> {
+fn as_zset_ref(obj: Option<&RedisObject>) -> Result<Option<&InlineZSet>, RedisError> {
     match obj {
         None => Ok(None),
         Some(o) => o.zset().map(Some).ok_or_else(RedisError::wrong_type),
@@ -141,9 +138,7 @@ fn as_zset_ref(
 }
 
 /// Mutable counterpart of `as_zset_ref`.
-fn as_zset_mut(
-    obj: Option<&mut RedisObject>,
-) -> Result<Option<&mut InlineZSet>, RedisError> {
+fn as_zset_mut(obj: Option<&mut RedisObject>) -> Result<Option<&mut InlineZSet>, RedisError> {
     match obj {
         None => Ok(None),
         Some(o) => {
@@ -165,7 +160,11 @@ fn clamp_rank_range(start: i64, stop: i64, len: i64) -> Option<(usize, usize)> {
     if len == 0 {
         return None;
     }
-    let s = if start < 0 { (len + start).max(0) } else { start };
+    let s = if start < 0 {
+        (len + start).max(0)
+    } else {
+        start
+    };
     let e = if stop < 0 { len + stop } else { stop };
     if s >= len || e < s {
         return None;
@@ -433,7 +432,8 @@ pub fn zincrby_command(ctx: &mut CommandContext) -> RedisResult<()> {
         }
     }
     if ctx.db().lookup_key_read(&key).is_none() {
-        ctx.db_mut().set_key(key.clone(), RedisObject::new_zset(), 0);
+        ctx.db_mut()
+            .set_key(key.clone(), RedisObject::new_zset(), 0);
     }
     let zset = ctx
         .db_mut()
@@ -895,7 +895,11 @@ fn popminmax_inner(ctx: &mut CommandContext, reverse: bool, cmd: &[u8]) -> Redis
     delete_if_empty(ctx, &key);
 
     if !popped.is_empty() {
-        let event = if reverse { b"zpopmax" as &[u8] } else { b"zpopmin" as &[u8] };
+        let event = if reverse {
+            b"zpopmax" as &[u8]
+        } else {
+            b"zpopmin" as &[u8]
+        };
         ctx.notify_keyspace_event(NOTIFY_ZSET, event, &key);
         let now_empty = ctx.db().lookup_key_read(&key).is_none();
         if now_empty {
@@ -911,10 +915,7 @@ fn popminmax_inner(ctx: &mut CommandContext, reverse: bool, cmd: &[u8]) -> Redis
                 return Ok(());
             }
             ctx.reply_array_header(2usize)?;
-            let (score, member) = popped
-                .into_iter()
-                .next()
-                .expect("popped non-empty");
+            let (score, member) = popped.into_iter().next().expect("popped non-empty");
             ctx.reply_bulk_string(member)?;
             ctx.reply_double(score)
         }
@@ -1040,12 +1041,16 @@ enum LexBound {
 /// Parse one side of a lex range.
 fn parse_lex_bound(bytes: &[u8]) -> Result<LexBound, RedisError> {
     match bytes.first() {
-        None => Err(RedisError::runtime(b"ERR min or max not valid string range item")),
+        None => Err(RedisError::runtime(
+            b"ERR min or max not valid string range item",
+        )),
         Some(b'-') if bytes.len() == 1 => Ok(LexBound::Min),
         Some(b'+') if bytes.len() == 1 => Ok(LexBound::Max),
         Some(b'[') => Ok(LexBound::Inclusive(bytes[1..].to_vec())),
         Some(b'(') => Ok(LexBound::Exclusive(bytes[1..].to_vec())),
-        _ => Err(RedisError::runtime(b"ERR min or max not valid string range item")),
+        _ => Err(RedisError::runtime(
+            b"ERR min or max not valid string range item",
+        )),
     }
 }
 
@@ -1070,11 +1075,7 @@ fn lex_below_max(member: &[u8], max: &LexBound) -> bool {
 }
 
 /// Apply LIMIT offset/count to an iterator of `(score, member)` pairs.
-fn apply_limit(
-    items: Vec<(f64, RedisString)>,
-    offset: i64,
-    count: i64,
-) -> Vec<(f64, RedisString)> {
+fn apply_limit(items: Vec<(f64, RedisString)>, offset: i64, count: i64) -> Vec<(f64, RedisString)> {
     let skipped: Box<dyn Iterator<Item = (f64, RedisString)>> = if offset > 0 {
         Box::new(items.into_iter().skip(offset as usize))
     } else {
@@ -1115,9 +1116,15 @@ fn rangebylex_inner(ctx: &mut CommandContext, reverse: bool, cmd: &[u8]) -> Redi
     }
 
     let (min, max) = if reverse {
-        (parse_lex_bound(arg_b.as_bytes())?, parse_lex_bound(arg_a.as_bytes())?)
+        (
+            parse_lex_bound(arg_b.as_bytes())?,
+            parse_lex_bound(arg_a.as_bytes())?,
+        )
     } else {
-        (parse_lex_bound(arg_a.as_bytes())?, parse_lex_bound(arg_b.as_bytes())?)
+        (
+            parse_lex_bound(arg_a.as_bytes())?,
+            parse_lex_bound(arg_b.as_bytes())?,
+        )
     };
     rangebylex_inner_with_bounds(ctx, &key, min, max, reverse, offset, count)
 }
@@ -1309,7 +1316,11 @@ fn parse_zalgebra_opts(
             return Err(RedisError::syntax(b"syntax error"));
         }
     }
-    Ok(ZAlgebraOpts { weights, aggregate, withscores })
+    Ok(ZAlgebraOpts {
+        weights,
+        aggregate,
+        withscores,
+    })
 }
 
 /// Combine two scores per the requested aggregation mode.
@@ -1320,7 +1331,11 @@ fn combine_scores(existing: f64, new: f64, mode: Aggregate) -> f64 {
     match mode {
         Aggregate::Sum => {
             let r = existing + new;
-            if r.is_nan() { 0.0 } else { r }
+            if r.is_nan() {
+                0.0
+            } else {
+                r
+            }
         }
         Aggregate::Min => existing.min(new),
         Aggregate::Max => existing.max(new),
@@ -1346,7 +1361,8 @@ fn zunion_inner(
     }
     let mut out: Vec<(RedisString, f64)> = acc.into_iter().collect();
     out.sort_by(|a, b| {
-        a.1.total_cmp(&b.1).then_with(|| a.0.as_bytes().cmp(b.0.as_bytes()))
+        a.1.total_cmp(&b.1)
+            .then_with(|| a.0.as_bytes().cmp(b.0.as_bytes()))
     });
     out
 }
@@ -1389,7 +1405,8 @@ fn zinter_inner(
     }
     let mut out: Vec<(RedisString, f64)> = acc.into_iter().collect();
     out.sort_by(|a, b| {
-        a.1.total_cmp(&b.1).then_with(|| a.0.as_bytes().cmp(b.0.as_bytes()))
+        a.1.total_cmp(&b.1)
+            .then_with(|| a.0.as_bytes().cmp(b.0.as_bytes()))
     });
     out
 }
@@ -1409,7 +1426,8 @@ fn zdiff_inner(sources: Vec<HashMap<RedisString, f64>>) -> Vec<(RedisString, f64
     }
     let mut out: Vec<(RedisString, f64)> = acc.into_iter().collect();
     out.sort_by(|a, b| {
-        a.1.total_cmp(&b.1).then_with(|| a.0.as_bytes().cmp(b.0.as_bytes()))
+        a.1.total_cmp(&b.1)
+            .then_with(|| a.0.as_bytes().cmp(b.0.as_bytes()))
     });
     out
 }
@@ -1430,11 +1448,7 @@ fn collect_zalgebra_sources(
 
 /// Replace `dst` with a new zset built from `entries`. Deletes `dst` when
 /// `entries` is empty, matching real Redis's `*STORE` semantics.
-fn store_zset(
-    ctx: &mut CommandContext,
-    dst: RedisString,
-    entries: Vec<(RedisString, f64)>,
-) -> i64 {
+fn store_zset(ctx: &mut CommandContext, dst: RedisString, entries: Vec<(RedisString, f64)>) -> i64 {
     if entries.is_empty() {
         ctx.db_mut().sync_delete(&dst);
         return 0;
@@ -1470,7 +1484,11 @@ fn emit_zalgebra_reply(
             ctx.reply_double(s)?;
         }
     } else {
-        let header = if withscores { entries.len() * 2 } else { entries.len() };
+        let header = if withscores {
+            entries.len() * 2
+        } else {
+            entries.len()
+        };
         ctx.reply_array_header(header)?;
         for (m, s) in entries {
             ctx.reply_bulk_string(m)?;
@@ -1483,11 +1501,7 @@ fn emit_zalgebra_reply(
 }
 
 /// Shared body for ZUNIONSTORE / ZINTERSTORE.
-fn algebra_store_inner(
-    ctx: &mut CommandContext,
-    cmd: &[u8],
-    op: AlgebraOp,
-) -> RedisResult<()> {
+fn algebra_store_inner(ctx: &mut CommandContext, cmd: &[u8], op: AlgebraOp) -> RedisResult<()> {
     let argc = ctx.arg_count();
     if argc < 4 {
         return Err(RedisError::wrong_number_of_args(cmd));
@@ -1495,8 +1509,13 @@ fn algebra_store_inner(
     let dst = ctx.arg_owned(1usize)?;
     let numkeys = parse_strict_i64(ctx.arg(2)?.as_bytes())?;
     if numkeys <= 0 {
-        let cmd_lower = core::str::from_utf8(cmd).unwrap_or("cmd").to_ascii_lowercase();
-        let msg = format!("ERR at least 1 input key is needed for '{}' command", cmd_lower);
+        let cmd_lower = core::str::from_utf8(cmd)
+            .unwrap_or("cmd")
+            .to_ascii_lowercase();
+        let msg = format!(
+            "ERR at least 1 input key is needed for '{}' command",
+            cmd_lower
+        );
         return Err(RedisError::runtime(msg.as_bytes()));
     }
     let numkeys = numkeys as usize;
@@ -1519,19 +1538,20 @@ fn algebra_store_inner(
 }
 
 /// Shared body for ZUNION / ZINTER.
-fn algebra_inner(
-    ctx: &mut CommandContext,
-    cmd: &[u8],
-    op: AlgebraOp,
-) -> RedisResult<()> {
+fn algebra_inner(ctx: &mut CommandContext, cmd: &[u8], op: AlgebraOp) -> RedisResult<()> {
     let argc = ctx.arg_count();
     if argc < 3 {
         return Err(RedisError::wrong_number_of_args(cmd));
     }
     let numkeys = parse_strict_i64(ctx.arg(1)?.as_bytes())?;
     if numkeys <= 0 {
-        let cmd_lower = core::str::from_utf8(cmd).unwrap_or("cmd").to_ascii_lowercase();
-        let msg = format!("ERR at least 1 input key is needed for '{}' command", cmd_lower);
+        let cmd_lower = core::str::from_utf8(cmd)
+            .unwrap_or("cmd")
+            .to_ascii_lowercase();
+        let msg = format!(
+            "ERR at least 1 input key is needed for '{}' command",
+            cmd_lower
+        );
         return Err(RedisError::runtime(msg.as_bytes()));
     }
     let numkeys = numkeys as usize;
@@ -1573,7 +1593,9 @@ pub fn zdiffstore_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let dst = ctx.arg_owned(1usize)?;
     let numkeys = parse_strict_i64(ctx.arg(2)?.as_bytes())?;
     if numkeys <= 0 {
-        return Err(RedisError::runtime(b"ERR at least 1 input key is needed for 'zdiffstore' command"));
+        return Err(RedisError::runtime(
+            b"ERR at least 1 input key is needed for 'zdiffstore' command",
+        ));
     }
     let numkeys = numkeys as usize;
     if argc != 3 + numkeys {
@@ -1604,7 +1626,9 @@ pub fn zdiff_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
     let numkeys = parse_strict_i64(ctx.arg(1)?.as_bytes())?;
     if numkeys <= 0 {
-        return Err(RedisError::runtime(b"ERR at least 1 input key is needed for 'zdiff' command"));
+        return Err(RedisError::runtime(
+            b"ERR at least 1 input key is needed for 'zdiff' command",
+        ));
     }
     let numkeys = numkeys as usize;
     if argc < 2 + numkeys {
@@ -1613,7 +1637,11 @@ pub fn zdiff_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let mut withscores = false;
     let trailing = argc - (2 + numkeys);
     if trailing == 1 {
-        if !ctx.arg(2 + numkeys)?.as_bytes().eq_ignore_ascii_case(b"WITHSCORES") {
+        if !ctx
+            .arg(2 + numkeys)?
+            .as_bytes()
+            .eq_ignore_ascii_case(b"WITHSCORES")
+        {
             return Err(RedisError::syntax(b"syntax error"));
         }
         withscores = true;
@@ -1633,7 +1661,9 @@ pub fn zintercard_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
     let numkeys = parse_strict_i64(ctx.arg(1)?.as_bytes())?;
     if numkeys <= 0 {
-        return Err(RedisError::runtime(b"ERR at least 1 input key is needed for 'zintercard' command"));
+        return Err(RedisError::runtime(
+            b"ERR at least 1 input key is needed for 'zintercard' command",
+        ));
     }
     let numkeys = numkeys as usize;
     if argc < 2 + numkeys {
@@ -1725,9 +1755,15 @@ pub fn zrangestore_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
     let entries: Vec<(RedisString, f64)> = if by_lex {
         let (min, max) = if reverse {
-            (parse_lex_bound(stop_bytes.as_bytes())?, parse_lex_bound(start_bytes.as_bytes())?)
+            (
+                parse_lex_bound(stop_bytes.as_bytes())?,
+                parse_lex_bound(start_bytes.as_bytes())?,
+            )
         } else {
-            (parse_lex_bound(start_bytes.as_bytes())?, parse_lex_bound(stop_bytes.as_bytes())?)
+            (
+                parse_lex_bound(start_bytes.as_bytes())?,
+                parse_lex_bound(stop_bytes.as_bytes())?,
+            )
         };
         let mut items: Vec<(f64, RedisString)> = match as_zset_ref(ctx.db().lookup_key_read(&src))?
         {
@@ -1948,8 +1984,9 @@ pub fn zmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
         if !opt.as_bytes().eq_ignore_ascii_case(b"COUNT") {
             return Err(RedisError::syntax(b"syntax error"));
         }
-        let n = parse_strict_i64(ctx.arg(trailing_start + 1)?.as_bytes())
-            .map_err(|_| RedisError::runtime(b"ERR count value is not an integer or out of range"))?;
+        let n = parse_strict_i64(ctx.arg(trailing_start + 1)?.as_bytes()).map_err(|_| {
+            RedisError::runtime(b"ERR count value is not an integer or out of range")
+        })?;
         if n < 1 {
             return Err(RedisError::runtime(b"ERR count should be greater than 0"));
         }
@@ -2084,7 +2121,11 @@ pub fn zscan_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
     ctx.reply_array_header(2usize)?;
     ctx.reply_bulk(next_cursor.to_string().as_bytes())?;
-    let header = if no_scores { matched.len() } else { matched.len() * 2 };
+    let header = if no_scores {
+        matched.len()
+    } else {
+        matched.len() * 2
+    };
     ctx.reply_array_header(header)?;
     for (s, m) in matched {
         ctx.reply_bulk_string(m)?;
@@ -2119,20 +2160,14 @@ fn parse_u64_cursor(bytes: &[u8]) -> Result<u64, RedisError> {
 /// or the highest-scored member when `reverse` is true (BZPOPMAX). Returns
 /// `None` when the key is absent or holds an empty zset. Deletes the key when
 /// the pop leaves it empty.
-fn zset_pop_one(
-    db: &mut RedisDb,
-    key: &RedisString,
-    reverse: bool,
-) -> Option<(RedisString, f64)> {
+fn zset_pop_one(db: &mut RedisDb, key: &RedisString, reverse: bool) -> Option<(RedisString, f64)> {
     let zset = db.lookup_key_write(key)?.zset_mut()?;
     let target: (f64, RedisString) = if reverse {
         zset.iter_ascending()
             .next_back()
             .map(|(s, m)| (s, m.clone()))?
     } else {
-        zset.iter_ascending()
-            .next()
-            .map(|(s, m)| (s, m.clone()))?
+        zset.iter_ascending().next().map(|(s, m)| (s, m.clone()))?
     };
     let (score, member) = target;
     zset.remove(&member);
@@ -2174,8 +2209,7 @@ fn zset_pop_many(
     for (_, m) in &targets {
         zset.remove(m);
     }
-    let out: Vec<(RedisString, f64)> =
-        targets.into_iter().map(|(s, m)| (m, s)).collect();
+    let out: Vec<(RedisString, f64)> = targets.into_iter().map(|(s, m)| (m, s)).collect();
     let empty = matches!(
         db.lookup_key_read(key),
         Some(o) if o.zset().map(|z| z.is_empty()).unwrap_or(false)
@@ -2206,7 +2240,12 @@ fn append_score_frame(buf: &mut Vec<u8>, score: f64, resp_proto: i32) {
 }
 
 /// Encode a `*3 [key, member, score]` BZPOPMIN/BZPOPMAX reply.
-fn encode_bzpop_reply(key: &RedisString, member: &RedisString, score: f64, resp_proto: i32) -> Vec<u8> {
+fn encode_bzpop_reply(
+    key: &RedisString,
+    member: &RedisString,
+    score: f64,
+    resp_proto: i32,
+) -> Vec<u8> {
     let mut buf = Vec::with_capacity(64 + key.len() + member.len());
     buf.extend_from_slice(b"*3\r\n$");
     buf.extend_from_slice(key.len().to_string().as_bytes());
@@ -2222,7 +2261,11 @@ fn encode_bzpop_reply(key: &RedisString, member: &RedisString, score: f64, resp_
 }
 
 /// Encode a `*2 [key, *N [[m1,s1],[m2,s2],...]]` BZMPOP wake reply.
-fn encode_bzmpop_reply(key: &RedisString, pairs: &[(RedisString, f64)], resp_proto: i32) -> Vec<u8> {
+fn encode_bzmpop_reply(
+    key: &RedisString,
+    pairs: &[(RedisString, f64)],
+    resp_proto: i32,
+) -> Vec<u8> {
     let mut buf: Vec<u8> = Vec::with_capacity(64);
     buf.extend_from_slice(b"*2\r\n$");
     buf.extend_from_slice(key.len().to_string().as_bytes());
@@ -2341,17 +2384,16 @@ pub fn wake_blocked_zset_for_key(db: &mut RedisDb, key: &RedisString) {
 /// Accepts integer and floating-point. Rejects negative values and
 /// non-numeric input with the canonical Redis error messages.
 fn parse_blocking_timeout_zset(bytes: &[u8]) -> Result<f64, RedisError> {
-    let s = core::str::from_utf8(bytes).map_err(|_| {
-        RedisError::runtime(b"ERR timeout is not a float or out of range")
-    })?;
+    let s = core::str::from_utf8(bytes)
+        .map_err(|_| RedisError::runtime(b"ERR timeout is not a float or out of range"))?;
     if s.starts_with(char::is_whitespace) || s.ends_with(char::is_whitespace) {
         return Err(RedisError::runtime(
             b"ERR timeout is not a float or out of range",
         ));
     }
-    let parsed = s.parse::<f64>().map_err(|_| {
-        RedisError::runtime(b"ERR timeout is not a float or out of range")
-    })?;
+    let parsed = s
+        .parse::<f64>()
+        .map_err(|_| RedisError::runtime(b"ERR timeout is not a float or out of range"))?;
     if !parsed.is_finite() {
         return Err(RedisError::runtime(
             b"ERR timeout is not a float or out of range",
@@ -2450,7 +2492,11 @@ fn bzpop_generic(ctx: &mut CommandContext, reverse: bool) -> RedisResult<()> {
             None => continue,
         };
         let empty_after = ctx.db().lookup_key_read(key).is_none();
-        let event = if reverse { b"zpopmax" as &[u8] } else { b"zpopmin" as &[u8] };
+        let event = if reverse {
+            b"zpopmax" as &[u8]
+        } else {
+            b"zpopmin" as &[u8]
+        };
         ctx.notify_keyspace_event(NOTIFY_ZSET, event, key);
         if empty_after {
             ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", key);
@@ -2546,7 +2592,11 @@ pub fn bzmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
             continue;
         }
         let empty_after = ctx.db().lookup_key_read(key).is_none();
-        let event = if reverse { b"zpopmax" as &[u8] } else { b"zpopmin" as &[u8] };
+        let event = if reverse {
+            b"zpopmax" as &[u8]
+        } else {
+            b"zpopmin" as &[u8]
+        };
         ctx.notify_keyspace_event(NOTIFY_ZSET, event, key);
         if empty_after {
             ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", key);

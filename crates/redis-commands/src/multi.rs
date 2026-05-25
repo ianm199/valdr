@@ -367,7 +367,10 @@ mod tests {
         let mut c = Client::new(5);
         c.set_flag_multi(true);
         c.queued_argvs.push(vec![RedisString::from_bytes(b"SET")]);
-        c.set_args(vec![RedisString::from_bytes(b"WATCH"), RedisString::from_bytes(b"x")]);
+        c.set_args(vec![
+            RedisString::from_bytes(b"WATCH"),
+            RedisString::from_bytes(b"x"),
+        ]);
         let mut ctx = CommandContext::new(&mut c);
 
         let err = crate::dispatch::dispatch(&mut ctx).unwrap_err();

@@ -161,16 +161,14 @@ impl RandState {
         //
         // All old values of x[] are read here, before any x[] assignment below.
         let carry_p1_r0 = carry(p[1], r[0]);
-        let new_x2 = low(
-            carry0
-                .wrapping_add(carry1)
-                .wrapping_add(carry_p1_r0)
-                .wrapping_add(q[1])
-                .wrapping_add(r[1])
-                .wrapping_add(self.a[0].wrapping_mul(self.x[2]))
-                .wrapping_add(self.a[1].wrapping_mul(self.x[1]))
-                .wrapping_add(self.a[2].wrapping_mul(self.x[0])),
-        );
+        let new_x2 = low(carry0
+            .wrapping_add(carry1)
+            .wrapping_add(carry_p1_r0)
+            .wrapping_add(q[1])
+            .wrapping_add(r[1])
+            .wrapping_add(self.a[0].wrapping_mul(self.x[2]))
+            .wrapping_add(self.a[1].wrapping_mul(self.x[1]))
+            .wrapping_add(self.a[2].wrapping_mul(self.x[0])));
 
         // C: x[1] = LOW(p[1] + r[0]);
         let new_x1 = low(p[1].wrapping_add(r[0]));

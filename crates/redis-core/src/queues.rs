@@ -639,7 +639,8 @@ impl<T> SpscQueue<T> {
         }
 
         // C: atomic_store_explicit(&q->head, curr_head + count, memory_order_release)
-        self.head.store(curr_head.wrapping_add(count), Ordering::Release);
+        self.head
+            .store(curr_head.wrapping_add(count), Ordering::Release);
         count
     }
 

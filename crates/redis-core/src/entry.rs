@@ -437,7 +437,11 @@ impl Entry {
 /// `value: None` = no value (field-only entry; C passes `NULL` sds).
 ///
 /// C: `entryCreate(field, value, expiry)` — `entry.c:350–357`
-pub fn entry_create(field: RedisString, value: Option<RedisString>, expiry: Option<MsTime>) -> Entry {
+pub fn entry_create(
+    field: RedisString,
+    value: Option<RedisString>,
+    expiry: Option<MsTime>,
+) -> Entry {
     Entry::create(field, value, expiry)
 }
 

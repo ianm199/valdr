@@ -107,16 +107,19 @@ impl Mt19937_64 {
         let mut j: usize = 0;
 
         // C: k = (NN > key_length ? NN : key_length);
-        let mut k: u64 = if NN as u64 > key_length { NN as u64 } else { key_length };
+        let mut k: u64 = if NN as u64 > key_length {
+            NN as u64
+        } else {
+            key_length
+        };
 
         while k > 0 {
             let prev = self.mt[i - 1];
             // C: mt[i] = (mt[i] ^ ((mt[i-1] ^ (mt[i-1] >> 62)) * 3935559000370003845ULL))
             //              + init_key[j] + j;   /* non linear */
-            self.mt[i] = (self.mt[i]
-                ^ (prev ^ (prev >> 62)).wrapping_mul(3935559000370003845_u64))
-            .wrapping_add(init_key[j])
-            .wrapping_add(j as u64);
+            self.mt[i] = (self.mt[i] ^ (prev ^ (prev >> 62)).wrapping_mul(3935559000370003845_u64))
+                .wrapping_add(init_key[j])
+                .wrapping_add(j as u64);
 
             i += 1;
             j += 1;
@@ -136,9 +139,8 @@ impl Mt19937_64 {
             let prev = self.mt[i - 1];
             // C: mt[i] = (mt[i] ^ ((mt[i-1] ^ (mt[i-1] >> 62)) * 2862933555777941757ULL))
             //              - i;   /* non linear */
-            self.mt[i] = (self.mt[i]
-                ^ (prev ^ (prev >> 62)).wrapping_mul(2862933555777941757_u64))
-            .wrapping_sub(i as u64);
+            self.mt[i] = (self.mt[i] ^ (prev ^ (prev >> 62)).wrapping_mul(2862933555777941757_u64))
+                .wrapping_sub(i as u64);
 
             i += 1;
             if i >= NN {

@@ -1442,8 +1442,9 @@ pub fn lcs_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
             withmatchlen = true;
         } else if opt.eq_ignore_ascii_case(b"MINMATCHLEN") && moreargs > 0 {
             let raw = ctx.arg_owned(j + 1)?;
-            minmatchlen = parse_strict_i64(raw.as_bytes())
-                .ok_or_else(|| RedisError::runtime(b"ERR value is not an integer or out of range"))?;
+            minmatchlen = parse_strict_i64(raw.as_bytes()).ok_or_else(|| {
+                RedisError::runtime(b"ERR value is not an integer or out of range")
+            })?;
             if minmatchlen < 0 {
                 minmatchlen = 0;
             }

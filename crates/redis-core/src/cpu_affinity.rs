@@ -28,7 +28,10 @@ use redis_types::error::RedisError;
 /// C: `static const char *next_token(const char *q, int sep)`,
 /// `setcpuaffinity.c:50-57`
 fn next_token(input: &[u8], sep: u8) -> Option<&[u8]> {
-    input.iter().position(|&b| b == sep).map(|i| &input[i + 1..])
+    input
+        .iter()
+        .position(|&b| b == sep)
+        .map(|i| &input[i + 1..])
 }
 
 /// Parse a decimal integer from the start of `input`. Returns
@@ -50,11 +53,9 @@ fn next_num(input: &[u8]) -> Result<(i32, &[u8]), ()> {
     // TODO(port): C uses `unsigned long` (64-bit on Linux); very large numbers
     // saturate to i32::MAX here which is still an invalid CPU index and will
     // produce a benign out-of-range error from the OS call.
-    let n: u64 = input[..end]
-        .iter()
-        .fold(0u64, |acc, &b| {
-            acc.saturating_mul(10).saturating_add(u64::from(b - b'0'))
-        });
+    let n: u64 = input[..end].iter().fold(0u64, |acc, &b| {
+        acc.saturating_mul(10).saturating_add(u64::from(b - b'0'))
+    });
     Ok((n.min(i32::MAX as u64) as i32, &input[end..]))
 }
 
@@ -218,8 +219,8 @@ pub fn set_cpu_affinity(cpulist: &[u8]) -> Result<(), RedisError> {
     if cpulist.is_empty() {
         return Ok(());
     }
-    let cpus = parse_cpulist(cpulist)
-        .map_err(|()| RedisError::runtime(b"invalid cpu affinity list"))?;
+    let cpus =
+        parse_cpulist(cpulist).map_err(|()| RedisError::runtime(b"invalid cpu affinity list"))?;
     apply_affinity(&cpus)
 }
 

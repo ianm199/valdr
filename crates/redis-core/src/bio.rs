@@ -144,9 +144,7 @@ pub(crate) enum BioJob {
         need_reclaim_cache: bool,
     },
     /// C: `free_args` variant.
-    LazyFree {
-        free_fn: LazyFreeFn,
-    },
+    LazyFree { free_fn: LazyFreeFn },
     /// C: `save_to_disk_args` variant.
     RdbSave {
         /// Connection to download the RDB from.
@@ -263,30 +261,54 @@ fn bio_submit_job(job_type: BioJobType, job: BioJob) -> Result<(), RedisError> {
 /// Submit a deferred `close(2)` job.
 ///
 /// C: `bioCreateCloseJob` in `bio.c` (lines 208-215).
-pub fn bio_create_close_job(fd: i32, need_fsync: bool, need_reclaim_cache: bool) -> Result<(), RedisError> {
+pub fn bio_create_close_job(
+    fd: i32,
+    need_fsync: bool,
+    need_reclaim_cache: bool,
+) -> Result<(), RedisError> {
     bio_submit_job(
         BioJobType::CloseFile,
-        BioJob::CloseFile { fd, need_fsync, need_reclaim_cache },
+        BioJob::CloseFile {
+            fd,
+            need_fsync,
+            need_reclaim_cache,
+        },
     )
 }
 
 /// Submit a deferred AOF-close job (includes an `fsync` before closing).
 ///
 /// C: `bioCreateCloseAofJob` in `bio.c` (lines 217-225).
-pub fn bio_create_close_aof_job(fd: i32, offset: i64, need_reclaim_cache: bool) -> Result<(), RedisError> {
+pub fn bio_create_close_aof_job(
+    fd: i32,
+    offset: i64,
+    need_reclaim_cache: bool,
+) -> Result<(), RedisError> {
     bio_submit_job(
         BioJobType::CloseAof,
-        BioJob::CloseAof { fd, offset, need_reclaim_cache },
+        BioJob::CloseAof {
+            fd,
+            offset,
+            need_reclaim_cache,
+        },
     )
 }
 
 /// Submit a deferred AOF `fsync` job.
 ///
 /// C: `bioCreateFsyncJob` in `bio.c` (lines 227-234).
-pub fn bio_create_fsync_job(fd: i32, offset: i64, need_reclaim_cache: bool) -> Result<(), RedisError> {
+pub fn bio_create_fsync_job(
+    fd: i32,
+    offset: i64,
+    need_reclaim_cache: bool,
+) -> Result<(), RedisError> {
     bio_submit_job(
         BioJobType::AofFsync,
-        BioJob::AofFsync { fd, offset, need_reclaim_cache },
+        BioJob::AofFsync {
+            fd,
+            offset,
+            need_reclaim_cache,
+        },
     )
 }
 
@@ -307,10 +329,16 @@ pub fn bio_create_lazy_free_job(free_fn: LazyFreeFn) -> Result<(), RedisError> {
 /// Submit a deferred RDB-to-disk save job.
 ///
 /// C: `bioCreateSaveRDBToDiskJob` in `bio.c` (lines 236-241).
-pub fn bio_create_save_rdb_to_disk_job(conn: Connection, is_dual_channel: bool) -> Result<(), RedisError> {
+pub fn bio_create_save_rdb_to_disk_job(
+    conn: Connection,
+    is_dual_channel: bool,
+) -> Result<(), RedisError> {
     bio_submit_job(
         BioJobType::RdbSave,
-        BioJob::RdbSave { conn, is_dual_channel },
+        BioJob::RdbSave {
+            conn,
+            is_dual_channel,
+        },
     )
 }
 
@@ -366,7 +394,11 @@ fn bio_process_background_jobs(receiver: Receiver<BioJob>, title: &'static str, 
 /// C: the large if-else chain inside `bioProcessBackgroundJobs` (lines 273-320).
 fn dispatch_job(job: BioJob) -> usize {
     match job {
-        BioJob::CloseFile { fd, need_fsync, need_reclaim_cache } => {
+        BioJob::CloseFile {
+            fd,
+            need_fsync,
+            need_reclaim_cache,
+        } => {
             if need_fsync {
                 // TODO(architect): safe `fsync` wrapper needed (raw syscall
                 // cannot be called without unsafe; consider the `nix` crate or
@@ -385,7 +417,11 @@ fn dispatch_job(job: BioJob) -> usize {
             BioJobType::CloseFile as usize
         }
 
-        BioJob::AofFsync { fd, offset, need_reclaim_cache } => {
+        BioJob::AofFsync {
+            fd,
+            offset,
+            need_reclaim_cache,
+        } => {
             // TODO(architect): safe fsync wrapper.
             // On success: update server.aof_bio_fsync_status = C_OK and
             //   server.fsynced_reploff_pending = offset.
@@ -400,7 +436,11 @@ fn dispatch_job(job: BioJob) -> usize {
             BioJobType::AofFsync as usize
         }
 
-        BioJob::CloseAof { fd, offset, need_reclaim_cache } => {
+        BioJob::CloseAof {
+            fd,
+            offset,
+            need_reclaim_cache,
+        } => {
             // Same fsync + status-update logic as AofFsync, then close the fd.
             // TODO(architect): safe fsync + close wrappers.
             // C: bio.c lines 284-306 (same branch as BIO_AOF_FSYNC, with
@@ -419,7 +459,10 @@ fn dispatch_job(job: BioJob) -> usize {
             BioJobType::LazyFree as usize
         }
 
-        BioJob::RdbSave { conn, is_dual_channel } => {
+        BioJob::RdbSave {
+            conn,
+            is_dual_channel,
+        } => {
             // TODO(port): call `replication::replica_receive_rdb_from_primary_to_disk`.
             // The replication module is deferred to a later phase; this is a
             // placeholder.

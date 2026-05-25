@@ -22,9 +22,7 @@
 //! identically to `=` exact trimming for the inline encoding (no
 //! listpack-boundary quirks to honour).
 
-use redis_core::blocked_keys::{
-    blocked_keys_index, current_time_ms, BlockedAction, BlockedWaiter,
-};
+use redis_core::blocked_keys::{blocked_keys_index, current_time_ms, BlockedAction, BlockedWaiter};
 use redis_core::command_context::CommandContext;
 use redis_core::db::RedisDb;
 use redis_core::notify::NOTIFY_STREAM;
@@ -84,7 +82,9 @@ fn parse_range_bound(arg: &[u8], side: BoundSide) -> Result<Bound, RedisError> {
         match side {
             BoundSide::Start => match id.checked_succ() {
                 Some(next) => Ok(Bound::Inclusive(next)),
-                None => Err(RedisError::runtime(b"ERR invalid start ID for the interval")),
+                None => Err(RedisError::runtime(
+                    b"ERR invalid start ID for the interval",
+                )),
             },
             BoundSide::End => match id.checked_pred() {
                 Some(prev) => Ok(Bound::Inclusive(prev)),
@@ -117,11 +117,15 @@ fn parse_xadd_id_spec(arg: &[u8]) -> Result<Option<XaddIdSpec>, RedisError> {
     if let Some(dash) = s.find('-') {
         let ms_part = &s[..dash];
         let seq_part = &s[dash + 1..];
-        let ms = ms_part.parse::<u64>().map_err(|_| invalid_stream_id_err())?;
+        let ms = ms_part
+            .parse::<u64>()
+            .map_err(|_| invalid_stream_id_err())?;
         if seq_part == "*" {
             return Ok(Some(XaddIdSpec::Partial { ms }));
         }
-        let seq = seq_part.parse::<u64>().map_err(|_| invalid_stream_id_err())?;
+        let seq = seq_part
+            .parse::<u64>()
+            .map_err(|_| invalid_stream_id_err())?;
         Ok(Some(XaddIdSpec::Explicit(StreamId { ms, seq })))
     } else {
         let ms = s.parse::<u64>().map_err(|_| invalid_stream_id_err())?;
@@ -148,11 +152,7 @@ fn invalid_stream_id_err() -> RedisError {
 ///
 /// Returns `None` if the requested range is empty (start > end after
 /// resolution, or the slice is empty).
-fn resolve_range(
-    stream: &InlineStream,
-    start: Bound,
-    end: Bound,
-) -> Option<(usize, usize)> {
+fn resolve_range(stream: &InlineStream, start: Bound, end: Bound) -> Option<(usize, usize)> {
     let entries = &stream.entries;
     if entries.is_empty() {
         return None;
@@ -183,9 +183,7 @@ fn as_stream_ref(obj: Option<&RedisObject>) -> Result<Option<&InlineStream>, Red
 }
 
 /// Mutable variant of `as_stream_ref`.
-fn as_stream_mut(
-    obj: Option<&mut RedisObject>,
-) -> Result<Option<&mut InlineStream>, RedisError> {
+fn as_stream_mut(obj: Option<&mut RedisObject>) -> Result<Option<&mut InlineStream>, RedisError> {
     match obj {
         None => Ok(None),
         Some(o) => {
@@ -286,9 +284,7 @@ fn parse_add_options(ctx: &CommandContext) -> Result<(AddOptions, usize), RedisE
             let parsed_trim = if is_maxlen {
                 let n = parse_strict_i64(peek)?;
                 if n < 0 {
-                    return Err(RedisError::syntax(
-                        b"MAXLEN argument must be >= 0",
-                    ));
+                    return Err(RedisError::syntax(b"MAXLEN argument must be >= 0"));
                 }
                 TrimStrategy::MaxLen {
                     target: n as usize,
@@ -392,9 +388,7 @@ impl TrimStrategy {
                 limit,
             },
             TrimStrategy::MinId {
-                min,
-                approximate,
-                ..
+                min, approximate, ..
             } => TrimStrategy::MinId {
                 min,
                 approximate,
@@ -572,7 +566,11 @@ pub fn xadd_command(ctx: &mut CommandContext) -> RedisResult<()> {
                         b"ERR The ID specified in XADD must be greater than 0-0",
                     ));
                 }
-                if id <= stream.last_id && !(stream.entries_added == 0 && id == StreamId::ZERO && stream.last_id == StreamId::ZERO) {
+                if id <= stream.last_id
+                    && !(stream.entries_added == 0
+                        && id == StreamId::ZERO
+                        && stream.last_id == StreamId::ZERO)
+                {
                     return Err(RedisError::runtime(
                         b"ERR The ID specified in XADD is equal or smaller than the target stream top item",
                     ));
@@ -588,7 +586,10 @@ pub fn xadd_command(ctx: &mut CommandContext) -> RedisResult<()> {
         new_id
     };
 
-    let new_entry = StreamEntry { id: new_id, fields: fields_for_wake };
+    let new_entry = StreamEntry {
+        id: new_id,
+        fields: fields_for_wake,
+    };
     if !ctx.client_ref().flag_deny_blocking() {
         wake_blocked_for_stream(ctx.db(), &key_for_wake, &new_entry);
         wake_blocked_xreadgroup_for_key(ctx.db_mut(), &key_for_wake, &new_entry);
@@ -727,7 +728,11 @@ fn encode_xreadgroup_single_entry(key: &RedisString, entry: &StreamEntry) -> Vec
 /// - If the group is gone → send NOGROUP error.
 /// - Otherwise → deliver the entry through the XREADGROUP state machine
 ///   (advance `last_delivered_id`, add PEL entry unless NOACK, send reply).
-pub fn wake_blocked_xreadgroup_for_key(db: &mut RedisDb, key: &RedisString, new_entry: &StreamEntry) {
+pub fn wake_blocked_xreadgroup_for_key(
+    db: &mut RedisDb,
+    key: &RedisString,
+    new_entry: &StreamEntry,
+) {
     let waiters = {
         let mut idx = match blocked_keys_index().lock() {
             Ok(g) => g,
@@ -740,9 +745,12 @@ pub fn wake_blocked_xreadgroup_for_key(db: &mut RedisDb, key: &RedisString, new_
     }
     for waiter in waiters {
         let (group, consumer, noack) = match &waiter.action {
-            BlockedAction::StreamGroup { group, consumer, noack, .. } => {
-                (group.clone(), consumer.clone(), *noack)
-            }
+            BlockedAction::StreamGroup {
+                group,
+                consumer,
+                noack,
+                ..
+            } => (group.clone(), consumer.clone(), *noack),
             _ => continue,
         };
         let reply = match as_stream_mut(db.lookup_key_write(key)) {
@@ -759,8 +767,11 @@ pub fn wake_blocked_xreadgroup_for_key(db: &mut RedisDb, key: &RedisString, new_
                     if let Some(c) = g.consumers.get_mut(&consumer) {
                         c.active_time_ms = now;
                     }
-                    let (read, last) =
-                        view.advance_read_counter(g.entries_read, g.last_delivered_id, &[new_entry.id]);
+                    let (read, last) = view.advance_read_counter(
+                        g.entries_read,
+                        g.last_delivered_id,
+                        &[new_entry.id],
+                    );
                     g.entries_read = read;
                     g.last_delivered_id = last;
                     if !noack {
@@ -843,9 +854,13 @@ pub fn wake_xreadgroup_after_rename(db: &mut RedisDb, dst_key: &RedisString) {
     };
     for waiter in waiters {
         let (group, consumer, id_after, count, noack) = match &waiter.action {
-            BlockedAction::StreamGroup { group, consumer, id_after, count, noack } => {
-                (group.clone(), consumer.clone(), *id_after, *count, *noack)
-            }
+            BlockedAction::StreamGroup {
+                group,
+                consumer,
+                id_after,
+                count,
+                noack,
+            } => (group.clone(), consumer.clone(), *id_after, *count, *noack),
             _ => continue,
         };
         let reply = match as_stream_mut(db.lookup_key_write(dst_key)) {
@@ -979,9 +994,7 @@ fn parse_optional_count(ctx: &CommandContext, base_argc: usize) -> Result<Option
     }
     let n = parse_strict_i64(ctx.arg(base_argc + 1)?.as_bytes())?;
     if n < 0 {
-        return Err(RedisError::syntax(
-            b"COUNT must be a positive integer",
-        ));
+        return Err(RedisError::syntax(b"COUNT must be a positive integer"));
     }
     Ok(Some(n))
 }
@@ -996,9 +1009,15 @@ fn xrange_generic(ctx: &mut CommandContext, rev: bool) -> RedisResult<()> {
     }
     let key = ctx.arg_owned(1usize)?;
     let (lo_arg, hi_arg) = if rev {
-        (ctx.arg(3)?.as_bytes().to_vec(), ctx.arg(2)?.as_bytes().to_vec())
+        (
+            ctx.arg(3)?.as_bytes().to_vec(),
+            ctx.arg(2)?.as_bytes().to_vec(),
+        )
     } else {
-        (ctx.arg(2)?.as_bytes().to_vec(), ctx.arg(3)?.as_bytes().to_vec())
+        (
+            ctx.arg(2)?.as_bytes().to_vec(),
+            ctx.arg(3)?.as_bytes().to_vec(),
+        )
     };
     let start = parse_range_bound(&lo_arg, BoundSide::Start)?;
     let end = parse_range_bound(&hi_arg, BoundSide::End)?;
@@ -1217,7 +1236,9 @@ fn park_xread_block(
                 client_id: ctx.client_ref().id,
                 sender: sender.clone(),
                 keys: vec![key.clone()],
-                action: BlockedAction::Stream { id_after: *id_after },
+                action: BlockedAction::Stream {
+                    id_after: *id_after,
+                },
                 deadline_ms,
                 resp_proto: ctx.client_ref().resp_proto,
                 username: ctx.client_ref().authenticated_user.clone(),
@@ -1456,9 +1477,7 @@ pub fn xinfo_command(ctx: &mut CommandContext) -> RedisResult<()> {
         }
         b"GROUPS" => xinfo_groups(ctx),
         b"CONSUMERS" => xinfo_consumers(ctx),
-        _ => Err(RedisError::syntax(
-            b"syntax error, try XINFO HELP",
-        )),
+        _ => Err(RedisError::syntax(b"syntax error, try XINFO HELP")),
     }
 }
 
@@ -1519,11 +1538,7 @@ fn now_ms_clamped() -> i64 {
 
 /// Lookup or create a consumer inside the given group. Returns a bool
 /// indicating whether the consumer was created.
-fn touch_or_create_consumer(
-    group: &mut ConsumerGroup,
-    name: &RedisString,
-    now_ms: i64,
-) -> bool {
+fn touch_or_create_consumer(group: &mut ConsumerGroup, name: &RedisString, now_ms: i64) -> bool {
     let exists = group.consumers.contains_key(name);
     if !exists {
         let mut consumer = Consumer::new(name.clone(), now_ms);
@@ -1671,7 +1686,11 @@ fn parse_entries_read_suffix(
     if start >= argc {
         return Ok((false, SCG_INVALID_ENTRIES_READ));
     }
-    if !ctx.arg(start)?.as_bytes().eq_ignore_ascii_case(b"ENTRIESREAD") {
+    if !ctx
+        .arg(start)?
+        .as_bytes()
+        .eq_ignore_ascii_case(b"ENTRIESREAD")
+    {
         return Err(RedisError::syntax(b"syntax error"));
     }
     if start + 1 >= argc {
@@ -1680,7 +1699,9 @@ fn parse_entries_read_suffix(
     let n = parse_strict_i64(ctx.arg(start + 1)?.as_bytes())
         .map_err(|_| RedisError::runtime(b"ERR value for ENTRIESREAD must be positive or -1"))?;
     if n < 0 && n != SCG_INVALID_ENTRIES_READ {
-        return Err(RedisError::runtime(b"ERR value for ENTRIESREAD must be positive or -1"));
+        return Err(RedisError::runtime(
+            b"ERR value for ENTRIESREAD must be positive or -1",
+        ));
     }
     if start + 2 != argc {
         return Err(RedisError::syntax(b"syntax error"));
@@ -1715,7 +1736,8 @@ fn xgroup_create(ctx: &mut CommandContext) -> RedisResult<()> {
                 b"ERR The XGROUP subcommand requires the key to exist. Note that for CREATE you may want to use the MKSTREAM option to create an empty stream automatically.",
             ));
         }
-        ctx.db_mut().set_key(key.clone(), RedisObject::new_stream(), 0);
+        ctx.db_mut()
+            .set_key(key.clone(), RedisObject::new_stream(), 0);
     }
     let stream = match stream_for_write(ctx.db_mut(), &key)? {
         Some(s) => s,
@@ -1723,7 +1745,9 @@ fn xgroup_create(ctx: &mut CommandContext) -> RedisResult<()> {
     };
     let new_id = parse_id_or_dollar(&id_arg, stream)?;
     if stream.groups.contains_key(&group_name) {
-        return Err(RedisError::runtime(b"BUSYGROUP Consumer Group name already exists"));
+        return Err(RedisError::runtime(
+            b"BUSYGROUP Consumer Group name already exists",
+        ));
     }
     let mut group = ConsumerGroup::new(group_name.clone(), new_id);
     if had_entries_read {
@@ -1745,12 +1769,22 @@ fn xgroup_setid(ctx: &mut CommandContext) -> RedisResult<()> {
 
     let stream = match stream_for_write(ctx.db_mut(), &key)? {
         Some(s) => s,
-        None => return Err(no_such_key_or_group_short(key.as_bytes(), group_name.as_bytes())),
+        None => {
+            return Err(no_such_key_or_group_short(
+                key.as_bytes(),
+                group_name.as_bytes(),
+            ))
+        }
     };
     let new_id = parse_id_or_dollar(&id_arg, stream)?;
     let group = match stream.groups.get_mut(&group_name) {
         Some(g) => g,
-        None => return Err(no_such_key_or_group_short(key.as_bytes(), group_name.as_bytes())),
+        None => {
+            return Err(no_such_key_or_group_short(
+                key.as_bytes(),
+                group_name.as_bytes(),
+            ))
+        }
     };
     group.last_delivered_id = new_id;
     if had_entries_read {
@@ -1786,11 +1820,21 @@ fn xgroup_createconsumer(ctx: &mut CommandContext) -> RedisResult<()> {
     let now = now_ms_clamped();
     let stream = match stream_for_write(ctx.db_mut(), &key)? {
         Some(s) => s,
-        None => return Err(no_such_key_or_group_short(key.as_bytes(), group_name.as_bytes())),
+        None => {
+            return Err(no_such_key_or_group_short(
+                key.as_bytes(),
+                group_name.as_bytes(),
+            ))
+        }
     };
     let group = match stream.groups.get_mut(&group_name) {
         Some(g) => g,
-        None => return Err(no_such_key_or_group_short(key.as_bytes(), group_name.as_bytes())),
+        None => {
+            return Err(no_such_key_or_group_short(
+                key.as_bytes(),
+                group_name.as_bytes(),
+            ))
+        }
     };
     let created = touch_or_create_consumer(group, &consumer_name, now);
     ctx.reply_integer(if created { 1 } else { 0 })
@@ -1805,11 +1849,21 @@ fn xgroup_delconsumer(ctx: &mut CommandContext) -> RedisResult<()> {
     let consumer_name = ctx.arg_owned(4usize)?;
     let stream = match stream_for_write(ctx.db_mut(), &key)? {
         Some(s) => s,
-        None => return Err(no_such_key_or_group_short(key.as_bytes(), group_name.as_bytes())),
+        None => {
+            return Err(no_such_key_or_group_short(
+                key.as_bytes(),
+                group_name.as_bytes(),
+            ))
+        }
     };
     let group = match stream.groups.get_mut(&group_name) {
         Some(g) => g,
-        None => return Err(no_such_key_or_group_short(key.as_bytes(), group_name.as_bytes())),
+        None => {
+            return Err(no_such_key_or_group_short(
+                key.as_bytes(),
+                group_name.as_bytes(),
+            ))
+        }
     };
     let consumer = match group.consumers.remove(&consumer_name) {
         Some(c) => c,
@@ -1842,9 +1896,7 @@ pub fn xreadgroup_command(ctx: &mut CommandContext) -> RedisResult<()> {
         return Err(RedisError::wrong_number_of_args(b"xreadgroup"));
     }
     if !ctx.arg(1)?.as_bytes().eq_ignore_ascii_case(b"GROUP") {
-        return Err(RedisError::syntax(
-            b"Missing GROUP option for XREADGROUP",
-        ));
+        return Err(RedisError::syntax(b"Missing GROUP option for XREADGROUP"));
     }
     let group_name = ctx.arg_owned(2usize)?;
     let consumer_name = ctx.arg_owned(3usize)?;
@@ -2219,9 +2271,19 @@ pub fn xpending_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let group_name = ctx.arg_owned(2usize)?;
 
     let group_owned: ConsumerGroup = match as_stream_ref(ctx.db().lookup_key_read(&key))? {
-        None => return Err(no_such_key_or_group_short(key.as_bytes(), group_name.as_bytes())),
+        None => {
+            return Err(no_such_key_or_group_short(
+                key.as_bytes(),
+                group_name.as_bytes(),
+            ))
+        }
         Some(s) => match s.groups.get(&group_name) {
-            None => return Err(no_such_key_or_group_short(key.as_bytes(), group_name.as_bytes())),
+            None => {
+                return Err(no_such_key_or_group_short(
+                    key.as_bytes(),
+                    group_name.as_bytes(),
+                ))
+            }
             Some(g) => g.clone(),
         },
     };
@@ -2461,17 +2523,22 @@ pub fn xclaim_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
     let stream = match stream_for_write(ctx.db_mut(), &key)? {
         Some(s) => s,
-        None => return Err(no_such_key_or_group_short(key.as_bytes(), group_name.as_bytes())),
+        None => {
+            return Err(no_such_key_or_group_short(
+                key.as_bytes(),
+                group_name.as_bytes(),
+            ))
+        }
     };
     if !stream.groups.contains_key(&group_name) {
-        return Err(no_such_key_or_group_short(key.as_bytes(), group_name.as_bytes()));
+        return Err(no_such_key_or_group_short(
+            key.as_bytes(),
+            group_name.as_bytes(),
+        ));
     }
 
-    let entries_index: std::collections::HashMap<StreamId, StreamEntry> = stream
-        .entries
-        .iter()
-        .map(|e| (e.id, e.clone()))
-        .collect();
+    let entries_index: std::collections::HashMap<StreamId, StreamEntry> =
+        stream.entries.iter().map(|e| (e.id, e.clone())).collect();
 
     let group = stream
         .groups
@@ -2602,16 +2669,21 @@ pub fn xautoclaim_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let now = now_ms_clamped();
     let stream = match stream_for_write(ctx.db_mut(), &key)? {
         Some(s) => s,
-        None => return Err(no_such_key_or_group_short(key.as_bytes(), group_name.as_bytes())),
+        None => {
+            return Err(no_such_key_or_group_short(
+                key.as_bytes(),
+                group_name.as_bytes(),
+            ))
+        }
     };
     if !stream.groups.contains_key(&group_name) {
-        return Err(no_such_key_or_group_short(key.as_bytes(), group_name.as_bytes()));
+        return Err(no_such_key_or_group_short(
+            key.as_bytes(),
+            group_name.as_bytes(),
+        ));
     }
-    let entries_index: std::collections::HashMap<StreamId, StreamEntry> = stream
-        .entries
-        .iter()
-        .map(|e| (e.id, e.clone()))
-        .collect();
+    let entries_index: std::collections::HashMap<StreamId, StreamEntry> =
+        stream.entries.iter().map(|e| (e.id, e.clone())).collect();
     let group = stream
         .groups
         .get_mut(&group_name)
@@ -2622,10 +2694,7 @@ pub fn xautoclaim_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
 
     let start_pos = group.pel_lower_bound(&start_id);
-    let candidates: Vec<StreamId> = group.pel[start_pos..]
-        .iter()
-        .map(|p| p.entry_id)
-        .collect();
+    let candidates: Vec<StreamId> = group.pel[start_pos..].iter().map(|p| p.entry_id).collect();
 
     let mut claimed: Vec<(StreamId, Option<StreamEntry>)> = Vec::new();
     let mut deleted_ids: Vec<StreamId> = Vec::new();
@@ -2798,27 +2867,33 @@ fn xinfo_groups(ctx: &mut CommandContext) -> RedisResult<()> {
         Some(s) => s,
     };
     let view = stream.lag_view();
-    let mut group_views: Vec<(RedisString, usize, usize, StreamId, Option<i64>, Option<i64>)> =
-        stream
-            .groups
-            .iter()
-            .map(|(name, g)| {
-                let entries_read = if g.entries_read == SCG_INVALID_ENTRIES_READ {
-                    None
-                } else {
-                    Some(g.entries_read)
-                };
-                let lag = view.group_lag(g.entries_read, g.last_delivered_id);
-                (
-                    name.clone(),
-                    g.consumers.len(),
-                    g.pel.len(),
-                    g.last_delivered_id,
-                    entries_read,
-                    lag,
-                )
-            })
-            .collect();
+    let mut group_views: Vec<(
+        RedisString,
+        usize,
+        usize,
+        StreamId,
+        Option<i64>,
+        Option<i64>,
+    )> = stream
+        .groups
+        .iter()
+        .map(|(name, g)| {
+            let entries_read = if g.entries_read == SCG_INVALID_ENTRIES_READ {
+                None
+            } else {
+                Some(g.entries_read)
+            };
+            let lag = view.group_lag(g.entries_read, g.last_delivered_id);
+            (
+                name.clone(),
+                g.consumers.len(),
+                g.pel.len(),
+                g.last_delivered_id,
+                entries_read,
+                lag,
+            )
+        })
+        .collect();
     group_views.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
     ctx.reply_array_header(group_views.len())?;
     for (name, consumers, pending, last_id, entries_read, lag) in &group_views {
@@ -2853,7 +2928,11 @@ fn xinfo_groups(ctx: &mut CommandContext) -> RedisResult<()> {
 /// `count` limits the `entries` and pending arrays (0 = unlimited; the XINFO
 /// default is 10). `pel-count` reports the true total, not the limited view.
 fn xinfo_stream_full(ctx: &mut CommandContext, key: &RedisString, count: i64) -> RedisResult<()> {
-    let limit = if count <= 0 { usize::MAX } else { count as usize };
+    let limit = if count <= 0 {
+        usize::MAX
+    } else {
+        count as usize
+    };
 
     struct ConsumerSnap {
         name: RedisString,
@@ -3038,17 +3117,34 @@ fn xinfo_consumers(ctx: &mut CommandContext) -> RedisResult<()> {
     let group_name = ctx.arg_owned(3usize)?;
     let mut snapshot: Vec<(RedisString, usize, i64, i64)> = {
         let stream = match as_stream_ref(ctx.db().lookup_key_read(&key))? {
-            None => return Err(no_such_key_or_group_short(key.as_bytes(), group_name.as_bytes())),
+            None => {
+                return Err(no_such_key_or_group_short(
+                    key.as_bytes(),
+                    group_name.as_bytes(),
+                ))
+            }
             Some(s) => s,
         };
         let group = match stream.groups.get(&group_name) {
-            None => return Err(no_such_key_or_group_short(key.as_bytes(), group_name.as_bytes())),
+            None => {
+                return Err(no_such_key_or_group_short(
+                    key.as_bytes(),
+                    group_name.as_bytes(),
+                ))
+            }
             Some(g) => g,
         };
         group
             .consumers
             .values()
-            .map(|c| (c.name.clone(), c.pel.len(), c.seen_time_ms, c.active_time_ms))
+            .map(|c| {
+                (
+                    c.name.clone(),
+                    c.pel.len(),
+                    c.seen_time_ms,
+                    c.active_time_ms,
+                )
+            })
             .collect()
     };
     snapshot.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));

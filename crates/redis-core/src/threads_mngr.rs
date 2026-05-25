@@ -130,8 +130,7 @@ mod imp {
     /// docstring for the replacement pattern).
     fn invoke_callback(_sig: i32) {
         // C: run_on_thread_cb callback = g_callback;
-        let callback: Option<RunOnThreadCallback> =
-            G_CALLBACK.lock().ok().and_then(|guard| *guard);
+        let callback: Option<RunOnThreadCallback> = G_CALLBACK.lock().ok().and_then(|guard| *guard);
 
         match callback {
             Some(cb) => {

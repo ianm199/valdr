@@ -595,10 +595,7 @@ pub fn get_string_object_len(s: &RedisString) -> usize {
 ///
 /// TODO(architect): Connection type is not yet defined; using `Option<()>` as
 /// placeholder for the connection handle.
-pub fn create_client(
-    server: &mut RedisServer,
-    conn: Option<()>,
-) -> Client {
+pub fn create_client(server: &mut RedisServer, conn: Option<()>) -> Client {
     let id = server.alloc_client_id();
     let mut c = Client::new(id);
     // TODO(port): initialise all client fields once Client is expanded to hold
@@ -963,7 +960,10 @@ pub fn add_reply_deferred_len(c: &mut Client) -> Option<DeferredLen> {
     let offset = c.reply_buf.len();
     // Reserve 16 bytes (enough for `*999999999\r\n`) filled with spaces.
     c.reply_buf.extend_from_slice(b"                ");
-    Some(DeferredLen { offset, reserved: 16 })
+    Some(DeferredLen {
+        offset,
+        reserved: 16,
+    })
 }
 
 /// Fill in a previously reserved aggregate-length slot.
@@ -1489,7 +1489,11 @@ pub fn process_input_buffer(
 
         let is_replicated = false; // TODO(port): check c->read_flags & READ_FLAGS_REPLICATED
         let auth_req = auth_required(c);
-        let mut read_flags = if is_replicated { READ_FLAGS_REPLICATED } else { 0 };
+        let mut read_flags = if is_replicated {
+            READ_FLAGS_REPLICATED
+        } else {
+            0
+        };
         if auth_req {
             read_flags |= READ_FLAGS_AUTH_REQUIRED;
         }
@@ -1512,7 +1516,8 @@ pub fn process_input_buffer(
             read_flags |= flags_addend;
             (argv, net_input)
         } else {
-            let (argv, net_bytes) = parse_inline_buffer(buf, &mut pos, &mut read_flags, is_replicated);
+            let (argv, net_bytes) =
+                parse_inline_buffer(buf, &mut pos, &mut read_flags, is_replicated);
             (argv, net_bytes)
         };
 
@@ -1816,8 +1821,7 @@ pub fn client_list_command(ctx: &mut CommandContext) -> RedisResult<()> {
 /// C: networking.c:5466 `clientPauseCommand`
 pub fn client_pause_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let timeout_rs = ctx.arg(2)?;
-    let _timeout = parse_i64(timeout_rs.as_bytes())
-        .ok_or_else(|| RedisError::not_integer())?;
+    let _timeout = parse_i64(timeout_rs.as_bytes()).ok_or_else(|| RedisError::not_integer())?;
     // TODO(port): getTimeoutFromObjectOrReply, pauseClientsByClient.
     add_reply_status(ctx.client, b"OK");
     Ok(())
@@ -1978,10 +1982,9 @@ pub fn hello_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let mut ver: i64 = 0;
     if ctx.arg_count() >= 2 {
         let ver_rs = ctx.arg(1)?;
-        ver = parse_i64(ver_rs.as_bytes())
-            .ok_or_else(|| {
-                RedisError::runtime(b"Protocol version is not an integer or out of range")
-            })?;
+        ver = parse_i64(ver_rs.as_bytes()).ok_or_else(|| {
+            RedisError::runtime(b"Protocol version is not an integer or out of range")
+        })?;
         if ver < 2 || ver > 3 {
             add_reply_error(ctx.client, b"-NOPROTO unsupported protocol version");
             return Ok(());
@@ -2070,7 +2073,11 @@ pub fn client_matches_ip_filter(peer_id: &[u8], ip_filter: &[u8]) -> bool {
         return false;
     }
     let rest = &peer[ip_filter.len()..];
-    let rest = if rest.first() == Some(&b']') { &rest[1..] } else { rest };
+    let rest = if rest.first() == Some(&b']') {
+        &rest[1..]
+    } else {
+        rest
+    };
     rest.first() == Some(&b':') && rest.get(1) != Some(&b'0')
 }
 
@@ -2114,7 +2121,12 @@ pub fn check_client_output_buffer_limits(
     soft_limit_reached_time: Option<Instant>,
     now: Instant,
 ) -> bool {
-    let _ = (client_type, soft_limit_seconds, soft_limit_reached_time, now);
+    let _ = (
+        client_type,
+        soft_limit_seconds,
+        soft_limit_reached_time,
+        now,
+    );
     if hard_limit > 0 && reply_bytes >= hard_limit {
         return true;
     }
@@ -2221,11 +2233,7 @@ pub fn update_paused_actions(events: &[PauseEvent; 4], mstime: i64) -> u32 {
 /// Set pause for `PAUSE_BY_CLIENT_COMMAND` (CLIENT PAUSE implementation).
 ///
 /// C: networking.c:6315 `pauseClientsByClient`
-pub fn pause_clients_by_client(
-    events: &mut [PauseEvent; 4],
-    end_time: i64,
-    pause_all: bool,
-) {
+pub fn pause_clients_by_client(events: &mut [PauseEvent; 4], end_time: i64, pause_all: bool) {
     let p = &mut events[PausePurpose::ByClientCommand as usize];
     let actions = if pause_all {
         PAUSE_ACTIONS_CLIENT_ALL_SET
@@ -2240,12 +2248,7 @@ pub fn pause_clients_by_client(
 /// Apply a pause for the given purpose, end-time and action bitmask.
 ///
 /// C: networking.c:6343 `pauseActions`
-pub fn pause_actions(
-    events: &mut [PauseEvent; 4],
-    purpose: PausePurpose,
-    end: i64,
-    actions: u32,
-) {
+pub fn pause_actions(events: &mut [PauseEvent; 4], purpose: PausePurpose, end: i64, actions: u32) {
     let p = &mut events[purpose as usize];
     p.paused_actions = actions;
     if p.end < end {
@@ -2347,10 +2350,7 @@ pub fn io_thread_read_query_from_client(
 /// C: networking.c:6605 `ioThreadWriteToClient`
 ///
 /// TODO(architect): see `io_thread_read_query_from_client`.
-pub fn io_thread_write_to_client(
-    _c: &mut Client,
-    _is_replica: bool,
-) {
+pub fn io_thread_write_to_client(_c: &mut Client, _is_replica: bool) {
     // TODO(port): _writeToClient(c) or writeToReplica(c);
     // set io_write_state = CLIENT_COMPLETED_IO;
     // sendToMainThread(c, JOB_RES_WRITE_CLIENT);
@@ -2382,7 +2382,10 @@ pub fn process_events_while_blocked() {
 /// Estimate the total output-buffer memory for a client.
 ///
 /// C: networking.c:6028 `getClientOutputBufferMemoryUsage`
-pub fn get_client_output_buffer_memory_usage(reply_buf_len: usize, reply_list_count: usize) -> usize {
+pub fn get_client_output_buffer_memory_usage(
+    reply_buf_len: usize,
+    reply_list_count: usize,
+) -> usize {
     const LIST_NODE_OVERHEAD: usize = 32; // sizeof(listNode) + sizeof(clientReplyBlock) approx.
     reply_buf_len + LIST_NODE_OVERHEAD * reply_list_count
 }

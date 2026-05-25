@@ -93,12 +93,11 @@ pub(crate) fn check_clocksource() -> CheckOutcome {
 #[cfg(target_os = "linux")]
 pub fn check_xen_clocksource() -> CheckOutcome {
     // C: syscheck.c:123-137
-    let curr = match read_sysfs_line(
-        "/sys/devices/system/clocksource/clocksource0/current_clocksource",
-    ) {
-        Some(v) => v,
-        None => return CheckOutcome::Skip,
-    };
+    let curr =
+        match read_sysfs_line("/sys/devices/system/clocksource/clocksource0/current_clocksource") {
+            Some(v) => v,
+            None => return CheckOutcome::Skip,
+        };
 
     if curr == b"xen" {
         CheckOutcome::Fail(
@@ -235,10 +234,7 @@ fn smaps_get_shared_dirty(addr: usize) -> Option<u32> {
             if let Some(dash_pos) = line.iter().position(|&b| b == b'-') {
                 let from_hex = parse_hex_usize(&line[..dash_pos]);
                 let rest = &line[dash_pos + 1..];
-                let to_end = rest
-                    .iter()
-                    .position(|&b| b == b' ')
-                    .unwrap_or(rest.len());
+                let to_end = rest.iter().position(|&b| b == b' ').unwrap_or(rest.len());
                 let to_hex = parse_hex_usize(&rest[..to_end]);
                 if let (Some(from), Some(to)) = (from_hex, to_hex) {
                     in_mapping = from <= addr && addr < to;

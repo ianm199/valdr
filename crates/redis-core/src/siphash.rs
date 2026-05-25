@@ -372,7 +372,10 @@ mod tests {
         let key = b"1234567812345678";
         let h1 = siphash(b"hello world", key);
         let h2 = siphash_nocase(b"hello world", key);
-        assert_eq!(h1, h2, "all-lowercase: siphash and siphash_nocase must agree");
+        assert_eq!(
+            h1, h2,
+            "all-lowercase: siphash and siphash_nocase must agree"
+        );
     }
 
     /// Case-insensitive variant: mixed-case input must hash the same as
@@ -384,7 +387,10 @@ mod tests {
         let key = b"1234567812345678";
         let h1 = siphash(b"hello world", key);
         let h2 = siphash_nocase(b"HELLO world", key);
-        assert_eq!(h1, h2, "nocase hash of 'HELLO world' must equal case-sensitive hash of 'hello world'");
+        assert_eq!(
+            h1, h2,
+            "nocase hash of 'HELLO world' must equal case-sensitive hash of 'hello world'"
+        );
     }
 
     /// Case-sensitive `siphash` must treat uppercase differently from lowercase.
@@ -395,7 +401,10 @@ mod tests {
         let key = b"1234567812345678";
         let h1 = siphash(b"HELLO world", key);
         let h2 = siphash_nocase(b"HELLO world", key);
-        assert_ne!(h1, h2, "case-sensitive and case-insensitive hashes of 'HELLO world' must differ");
+        assert_ne!(
+            h1, h2,
+            "case-sensitive and case-insensitive hashes of 'HELLO world' must differ"
+        );
     }
 
     /// `sip_to_lower` must fold A-Z only.

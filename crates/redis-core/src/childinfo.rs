@@ -244,8 +244,8 @@ pub fn open_child_info_pipe(channel: &mut ChildInfoChannel) -> Result<(), RedisE
 pub fn close_child_info_pipe(channel: &mut ChildInfoChannel) {
     // C: if (server.child_info_pipe[0] != -1 || server.child_info_pipe[1] != -1)
     if channel.reader.is_some() || channel.writer.is_some() {
-        channel.reader = None;  // drops PipeReader → closes fd
-        channel.writer = None;  // drops PipeWriter → closes fd
+        channel.reader = None; // drops PipeReader → closes fd
+        channel.writer = None; // drops PipeWriter → closes fd
         channel.nread = 0;
     }
 }

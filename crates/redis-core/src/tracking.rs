@@ -316,7 +316,10 @@ fn add_unique_key(keys: &mut Vec<RedisString>, key: &RedisString) {
     }
 }
 
-fn runtime_recipient_for(state: &ClientTrackingState, owner_id: ClientId) -> (ClientId, Option<ClientId>) {
+fn runtime_recipient_for(
+    state: &ClientTrackingState,
+    owner_id: ClientId,
+) -> (ClientId, Option<ClientId>) {
     if state.redirect > 0 {
         let redirect = state.redirect as ClientId;
         (redirect, Some(redirect))
@@ -646,13 +649,7 @@ pub fn runtime_invalidate_keys(
     }
     let deliveries = {
         let mut rt = lock_runtime_tracking();
-        runtime_collect_key_deliveries(
-            &mut rt,
-            source_id,
-            keys,
-            force_send_to_source,
-            defer_bcast,
-        )
+        runtime_collect_key_deliveries(&mut rt, source_id, keys, force_send_to_source, defer_bcast)
     };
     runtime_deliver_messages(current, pubsub, deliveries);
 }
@@ -694,10 +691,7 @@ pub fn runtime_limit_tracked_keys(
 }
 
 /// Send an "all keys invalidated" notification to every tracking client.
-pub fn runtime_invalidate_all(
-    current: &mut Client,
-    pubsub: Option<&Arc<Mutex<PubSubRegistry>>>,
-) {
+pub fn runtime_invalidate_all(current: &mut Client, pubsub: Option<&Arc<Mutex<PubSubRegistry>>>) {
     let deliveries = {
         let mut rt = lock_runtime_tracking();
         let deliveries = runtime_collect_all_deliveries(&rt);
@@ -1029,12 +1023,8 @@ pub fn tracking_build_broadcast_reply(
 /// in the same collection; use `split_at_mut` or a `RefCell<HashMap<ClientId, Client>>`.
 ///
 /// C: `void sendTrackingMessage(client *c, char *keyname, size_t keylen, int proto)`.
-pub fn send_tracking_message<C, F>(
-    c: &mut C,
-    keyname: &[u8],
-    proto: bool,
-    mut lookup_client: F,
-) where
+pub fn send_tracking_message<C, F>(c: &mut C, keyname: &[u8], proto: bool, mut lookup_client: F)
+where
     C: TrackingClient,
     F: FnMut(ClientId) -> Option<Box<dyn FnOnce(&mut dyn TrackingClient)>>,
 {
@@ -1178,8 +1168,7 @@ pub fn tracking_invalidate_key<F>(
     current_client_id: Option<ClientId>,
     executing_command: bool,
     mut send_or_defer: F,
-)
-where
+) where
     F: FnMut(ClientId, &[u8], bool),
 {
     if bcast && !tracking.prefix_table.is_empty() {
@@ -1236,8 +1225,7 @@ pub fn tracking_handle_pending_key_invalidations<F>(
     execution_nesting: u32,
     current_client_id: Option<ClientId>,
     mut send_msg: F,
-)
-where
+) where
     F: FnMut(&[u8], bool),
 {
     if pending_keys.is_empty() {
@@ -1291,8 +1279,7 @@ pub fn tracking_invalidate_keys_on_flush<F>(
     current_client_id: Option<ClientId>,
     async_free: bool,
     mut each_tracking_client: F,
-)
-where
+) where
     F: FnMut(ClientId, bool /* is_current_client */),
 {
     let _ = async_free; // PERF(port): async_free not yet wired; always clears synchronously.
@@ -1331,8 +1318,7 @@ pub fn tracking_limit_used_slots<F>(
     current_client_id: Option<ClientId>,
     executing_command: bool,
     mut send_or_defer: F,
-)
-where
+) where
     F: FnMut(ClientId, &[u8], bool),
 {
     if max_keys == 0 {
@@ -1401,8 +1387,7 @@ pub fn tracking_broadcast_invalidation_messages<L, S>(
     tracking_clients_count: u64,
     mut lookup_client_flags: L,
     mut send_msg: S,
-)
-where
+) where
     L: FnMut(ClientId) -> Option<ClientTrackingFlags>,
     S: FnMut(ClientId, &[u8]),
 {
