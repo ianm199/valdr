@@ -661,6 +661,19 @@ impl AclUser {
         out
     }
 
+    fn selector_channels_rule_summary(&self) -> Vec<u8> {
+        if self.flags.allchannels {
+            return b"&*".to_vec();
+        }
+        let channels = self.channels_summary();
+        if channels.is_empty() {
+            return channels;
+        }
+        let mut out = b"resetchannels ".to_vec();
+        out.extend_from_slice(&channels);
+        out
+    }
+
     /// Render database selectors for GETUSER/LIST.
     pub fn databases_summary(&self) -> Vec<u8> {
         if self.flags.alldbs {
@@ -687,7 +700,7 @@ impl AclUser {
         let mut parts: Vec<Vec<u8>> = Vec::new();
         parts.push(self.databases_summary());
         parts.push(self.commands_summary());
-        let channels = self.channels_summary();
+        let channels = self.selector_channels_rule_summary();
         if !channels.is_empty() {
             parts.push(channels);
         }

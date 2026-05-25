@@ -383,10 +383,17 @@ fn parse_args(argv: Vec<String>) -> Result<CliArgs, String> {
                 out.requirepass = (!v.is_empty()).then_some(v);
             }
             "--user" => {
-                let v = it
+                let first = it
                     .next()
                     .ok_or_else(|| "--user requires a value".to_string())?;
-                out.acl_user_lines.push(v);
+                let mut values = vec![first];
+                while let Some(next) = it.peek() {
+                    if next.starts_with("--") {
+                        break;
+                    }
+                    values.push(it.next().unwrap());
+                }
+                out.acl_user_lines.push(values.join(" "));
             }
             "--lua-enable-insecure-api" | "--lua-enable-deprecated-api" => {
                 let v = it

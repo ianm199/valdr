@@ -833,6 +833,21 @@ fn rewrite_config_file(cfg: &Arc<LiveConfig>) -> RedisResult<()> {
             lines.push(format!("{} {}\n", name, value));
         }
     }
+    if aclfile_config_name().is_none() {
+        let acl = global_acl_state();
+        let guard = match acl.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let mut users: Vec<&AclUser> = guard.users.values().collect();
+        users.sort_by(|left, right| left.name.as_bytes().cmp(right.name.as_bytes()));
+        for user in users {
+            lines.push(format!(
+                "{}\n",
+                String::from_utf8_lossy(&user.to_rule_string())
+            ));
+        }
+    }
     std::fs::write(&path, lines.concat())
         .map_err(|e| RedisError::runtime(format!("ERR CONFIG REWRITE failed: {}", e).into_bytes()))
 }
@@ -5244,7 +5259,7 @@ pub fn acl_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             return Err(RedisError::runtime(msg));
         };
         let dry_argc = ctx.arg_count().saturating_sub(3);
-        let Some(spec) = acl_dryrun_command_spec(command.as_bytes(), dry_argc) else {
+        let Some(spec) = acl_dryrun_command_spec(ctx, command.as_bytes(), dry_argc) else {
             let mut msg = b"ERR Command '".to_vec();
             msg.extend_from_slice(command.as_bytes());
             msg.extend_from_slice(b"' not found");
@@ -5262,7 +5277,13 @@ pub fn acl_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             .acl_categories
             .iter()
             .fold(0u64, |acc, cat| acc | generated_acl_category_bit(*cat));
-        match acl_dryrun_check(ctx, user, command.as_bytes(), categories) {
+        match acl_dryrun_check(
+            ctx,
+            user,
+            command.as_bytes(),
+            spec.name.as_bytes(),
+            categories,
+        ) {
             Ok(()) => return ctx.reply_simple_string(b"OK"),
             Err(AclDryrunDeny::Command) => {
                 let mut msg = b"This user has no permissions to run the '".to_vec();
@@ -5284,6 +5305,12 @@ pub fn acl_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
                 msg.extend_from_slice(b" has no permissions to access the '");
                 msg.extend_from_slice(channel.as_bytes());
                 msg.extend_from_slice(b"' channel");
+                return ctx.reply_bulk(&msg);
+            }
+            Err(AclDryrunDeny::Database) => {
+                let mut msg = b"User ".to_vec();
+                msg.extend_from_slice(username.as_bytes());
+                msg.extend_from_slice(b" has no permissions to access database");
                 return ctx.reply_bulk(&msg);
             }
         }
@@ -5575,9 +5602,24 @@ enum AclDryrunDeny {
     Command,
     Key(RedisString),
     Channel(RedisString),
+    Database,
 }
 
-fn acl_dryrun_command_spec(command: &[u8], argc: usize) -> Option<&'static GeneratedCommandSpec> {
+fn acl_dryrun_command_spec(
+    ctx: &CommandContext<'_>,
+    command: &[u8],
+    argc: usize,
+) -> Option<&'static GeneratedCommandSpec> {
+    if command.eq_ignore_ascii_case(b"MEMORY")
+        && ctx
+            .client_ref()
+            .arg(4)
+            .is_some_and(|arg| arg.as_bytes().eq_ignore_ascii_case(b"USAGE"))
+    {
+        return COMMANDS
+            .iter()
+            .find(|spec| spec.name.as_bytes().eq_ignore_ascii_case(b"USAGE"));
+    }
     let mut fallback = None;
     for spec in COMMANDS
         .iter()
@@ -5600,20 +5642,33 @@ fn acl_dryrun_check(
     ctx: &CommandContext<'_>,
     user: &AclUser,
     command: &[u8],
+    key_command: &[u8],
     categories: u64,
 ) -> Result<(), AclDryrunDeny> {
     let first_arg = ctx.client_ref().arg(4).map(|arg| arg.as_bytes());
     let mut key_denial = None;
     let mut channel_denial = None;
-    for candidate in std::iter::once(user).chain(user.selectors.iter()) {
+    let mut database_denial = None;
+    for (idx, candidate) in std::iter::once(user)
+        .chain(user.selectors.iter())
+        .enumerate()
+    {
         if !candidate.can_execute_command_with_arg(command, first_arg, categories) {
+            continue;
+        }
+        if let Some(_db) =
+            crate::dispatch::acl_database_denial_for_context(ctx, key_command, candidate, 3)
+        {
+            if idx == 0 {
+                database_denial.get_or_insert(());
+            }
             continue;
         }
         if let Some(channel) = acl_dryrun_channel_denial(ctx, command, candidate) {
             channel_denial.get_or_insert(channel);
             continue;
         }
-        let denied_key = crate::dispatch::acl_key_requirements(ctx, command, 3)
+        let denied_key = crate::dispatch::acl_key_requirements(ctx, key_command, 3)
             .into_iter()
             .find(|req| !candidate.can_access_key_for(req.key.as_bytes(), req.access))
             .map(|req| req.key);
@@ -5628,6 +5683,9 @@ fn acl_dryrun_check(
     }
     if let Some(channel) = channel_denial {
         return Err(AclDryrunDeny::Channel(channel));
+    }
+    if database_denial.is_some() {
+        return Err(AclDryrunDeny::Database);
     }
     Err(AclDryrunDeny::Command)
 }
@@ -5908,6 +5966,7 @@ fn apply_acl_rule(user: &mut AclUser, rule: &[u8]) -> Result<(), Vec<u8>> {
         let raw = &rule[3..];
         let dbs = parse_acl_db_list(raw)?;
         user.flags.alldbs = false;
+        user.allowed_dbs.clear();
         for db in dbs {
             if !user.allowed_dbs.contains(&db) {
                 user.allowed_dbs.push(db);

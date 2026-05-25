@@ -229,6 +229,8 @@ pub struct ServerMetrics {
     pub acl_access_denied_key: AtomicU64,
     /// ACL channel access denials.
     pub acl_access_denied_channel: AtomicU64,
+    /// ACL database access denials.
+    pub acl_access_denied_db: AtomicU64,
     /// Keys removed by lazy or active expiration.
     pub expired_keys: AtomicU64,
     /// Keys removed by the maxmemory eviction policy.
@@ -261,6 +263,7 @@ impl ServerMetrics {
             acl_access_denied_cmd: AtomicU64::new(0),
             acl_access_denied_key: AtomicU64::new(0),
             acl_access_denied_channel: AtomicU64::new(0),
+            acl_access_denied_db: AtomicU64::new(0),
             expired_keys: AtomicU64::new(0),
             evicted_keys: AtomicU64::new(0),
             evicted_clients: AtomicU64::new(0),
@@ -316,6 +319,7 @@ impl ServerMetrics {
         self.acl_access_denied_cmd.store(0, Ordering::Relaxed);
         self.acl_access_denied_key.store(0, Ordering::Relaxed);
         self.acl_access_denied_channel.store(0, Ordering::Relaxed);
+        self.acl_access_denied_db.store(0, Ordering::Relaxed);
         self.expired_keys.store(0, Ordering::Relaxed);
         self.evicted_keys.store(0, Ordering::Relaxed);
         self.evicted_clients.store(0, Ordering::Relaxed);
@@ -349,6 +353,12 @@ pub fn record_acl_access_denied_key() {
 pub fn record_acl_access_denied_channel() {
     server_metrics()
         .acl_access_denied_channel
+        .fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn record_acl_access_denied_db() {
+    server_metrics()
+        .acl_access_denied_db
         .fetch_add(1, Ordering::Relaxed);
 }
 

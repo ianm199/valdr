@@ -23,8 +23,8 @@ use redis_core::acl::{
 use redis_core::eviction::{oom_error_reply, try_evict_to_fit, EvictionOutcome};
 use redis_core::memory::approximate_memory_used;
 use redis_core::metrics::{
-    record_acl_access_denied_channel, record_acl_access_denied_cmd, record_acl_access_denied_key,
-    record_command_stat,
+    record_acl_access_denied_channel, record_acl_access_denied_cmd, record_acl_access_denied_db,
+    record_acl_access_denied_key, record_command_stat,
 };
 use redis_core::monotonic::{elapsed_start, elapsed_us};
 use redis_core::CommandContext;
@@ -341,7 +341,8 @@ pub fn dispatch(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
                 if !metadata.no_auth {
                     let acl_categories =
                         acl_categories_for_context(ctx, dispatch_name, metadata.acl_categories);
-                    if let Some(noauth_reply) = enforce_acl_gate(ctx, dispatch_name, acl_categories)
+                    if let Some(noauth_reply) =
+                        enforce_acl_gate_for_multi_queue(ctx, dispatch_name, acl_categories)
                     {
                         crate::multi::flag_transaction_dirty_exec(ctx.client_mut());
                         if close_unauthenticated_client_for_debug_reply_limit(ctx) {
@@ -375,6 +376,38 @@ pub fn dispatch(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         return Err(crate::pubsub::subscribe_mode_error(dispatch_name));
     }
     dispatch_command_name(ctx, name)
+}
+
+fn enforce_acl_gate_for_multi_queue(
+    ctx: &mut CommandContext<'_>,
+    name: &[u8],
+    acl_categories: u64,
+) -> Option<Vec<u8>> {
+    let selected_db = queued_transaction_db_index(ctx);
+    ctx.with_selected_db_index(selected_db, |selected_ctx| {
+        enforce_acl_gate(selected_ctx, name, acl_categories)
+    })
+    .ok()
+    .flatten()
+}
+
+fn queued_transaction_db_index(ctx: &CommandContext<'_>) -> u32 {
+    let mut selected = ctx.selected_db_id();
+    for argv in &ctx.client_ref().queued_argvs {
+        let Some(name) = argv.first() else {
+            continue;
+        };
+        if !name.as_bytes().eq_ignore_ascii_case(b"SELECT") {
+            continue;
+        }
+        let Some(db) = argv.get(1).and_then(|arg| parse_acl_db_arg(arg.as_bytes())) else {
+            continue;
+        };
+        if (db as usize) < ctx.database_count() {
+            selected = db;
+        }
+    }
+    selected
 }
 
 enum StackCommandName {
@@ -947,6 +980,7 @@ fn enforce_acl_gate(ctx: &CommandContext<'_>, name: &[u8], cmd_categories: u64) 
         Err(AclDeny::Database(object)) => {
             let client_info = acl_log_client_info(ctx, name);
             drop(guard);
+            record_acl_access_denied_db();
             record_acl_log_entry(
                 b"database",
                 acl_log_context(ctx),
@@ -995,7 +1029,7 @@ fn evaluate_acl_access(
         if !candidate.can_execute_command_with_arg(name, first_arg, cmd_categories) {
             continue;
         }
-        if let Some(object) = enforce_acl_database_gate(ctx, name, candidate) {
+        if let Some(object) = acl_database_denial_for_context(ctx, name, candidate, 0) {
             if idx == 0 {
                 database_denial.get_or_insert(object);
             }
@@ -1091,11 +1125,7 @@ pub(crate) fn acl_key_requirements(
             if key_spec_has_flag(&item, "NOT_KEY") {
                 continue;
             }
-            let begin = item
-                .pointer("/begin_search/index/pos")
-                .and_then(Value::as_u64)
-                .map(|v| v as usize);
-            let Some(begin) = begin else {
+            let Some(begin) = acl_key_spec_begin(ctx, &item, arg_offset, effective_argc) else {
                 continue;
             };
             if let Some(range) = item.pointer("/find_keys/range") {
@@ -1112,10 +1142,7 @@ pub(crate) fn acl_key_requirements(
                 let mut idx = begin;
                 while idx <= end {
                     if let Some(key) = ctx.client_ref().arg(idx + arg_offset) {
-                        out.push(AclKeyRequirement {
-                            key: key.clone(),
-                            access,
-                        });
+                        push_acl_key_requirement(&mut out, name, key, access);
                     }
                     idx = match idx.checked_add(step) {
                         Some(next) => next,
@@ -1131,6 +1158,7 @@ pub(crate) fn acl_key_requirements(
                 let Some(keynumidx) = keynumidx else {
                     continue;
                 };
+                let keynumidx = begin.saturating_add(keynumidx);
                 let firstkey = keynum
                     .get("firstkey")
                     .and_then(Value::as_u64)
@@ -1138,6 +1166,7 @@ pub(crate) fn acl_key_requirements(
                 let Some(firstkey) = firstkey else {
                     continue;
                 };
+                let firstkey = begin.saturating_add(firstkey);
                 let step = keynum
                     .get("step")
                     .and_then(Value::as_u64)
@@ -1152,19 +1181,96 @@ pub(crate) fn acl_key_requirements(
                 let Ok(count) = raw_count.parse::<usize>() else {
                     continue;
                 };
+                if count > 0 {
+                    let last_idx = firstkey.saturating_add((count - 1).saturating_mul(step));
+                    if last_idx >= effective_argc {
+                        continue;
+                    }
+                }
                 for n in 0..count {
                     let idx = firstkey + n * step;
                     if let Some(key) = ctx.client_ref().arg(idx + arg_offset) {
-                        out.push(AclKeyRequirement {
-                            key: key.clone(),
-                            access,
-                        });
+                        push_acl_key_requirement(&mut out, name, key, access);
                     }
                 }
             }
         }
     }
+    if ascii_eq_ignore_case(name, b"SORT") {
+        if let Some(store_key) = acl_option_value(ctx, arg_offset + 2, b"STORE") {
+            out.push(AclKeyRequirement {
+                key: store_key.clone(),
+                access: ACL_KEY_WRITE,
+            });
+        }
+    }
     out
+}
+
+fn acl_option_value(
+    ctx: &CommandContext<'_>,
+    start: usize,
+    option: &[u8],
+) -> Option<RedisString> {
+    let mut idx = start;
+    while idx + 1 < ctx.arg_count() {
+        let arg = ctx.client_ref().arg(idx)?;
+        if arg.as_bytes().eq_ignore_ascii_case(option) {
+            return ctx.client_ref().arg(idx + 1).cloned();
+        }
+        idx += 1;
+    }
+    None
+}
+
+fn acl_key_spec_begin(
+    ctx: &CommandContext<'_>,
+    item: &Value,
+    arg_offset: usize,
+    effective_argc: usize,
+) -> Option<usize> {
+    if let Some(pos) = item
+        .pointer("/begin_search/index/pos")
+        .and_then(Value::as_u64)
+        .map(|v| v as usize)
+    {
+        return Some(pos);
+    }
+    let keyword = item.pointer("/begin_search/keyword")?;
+    let needle = keyword.get("keyword")?.as_str()?.as_bytes();
+    let startfrom = keyword
+        .get("startfrom")
+        .and_then(Value::as_i64)
+        .unwrap_or(1);
+    let start = if startfrom < 0 {
+        effective_argc.saturating_sub(startfrom.unsigned_abs() as usize)
+    } else {
+        startfrom as usize
+    };
+    for idx in start..effective_argc {
+        let Some(arg) = ctx.client_ref().arg(arg_offset + idx) else {
+            continue;
+        };
+        if arg.as_bytes().eq_ignore_ascii_case(needle) {
+            return idx.checked_add(1);
+        }
+    }
+    None
+}
+
+fn push_acl_key_requirement(
+    out: &mut Vec<AclKeyRequirement>,
+    name: &[u8],
+    key: &RedisString,
+    access: u8,
+) {
+    if ascii_eq_ignore_case(name, b"MIGRATE") && key.as_bytes().is_empty() {
+        return;
+    }
+    out.push(AclKeyRequirement {
+        key: key.clone(),
+        access,
+    });
 }
 
 fn acl_key_access_for_spec_item(
@@ -1182,6 +1288,12 @@ fn acl_key_access_for_spec_item(
     }
     if ascii_eq_ignore_case(name, b"BITFIELD") {
         return acl_bitfield_access(ctx, arg_offset);
+    }
+    if ascii_eq_ignore_case(name, b"PFCOUNT") {
+        return ACL_KEY_READ;
+    }
+    if acl_key_accepts_any_permission(name) {
+        return ACL_KEY_ANY;
     }
     let flags = item.get("flags").and_then(Value::as_array);
     let has = |flag: &str| {
@@ -1205,6 +1317,22 @@ fn acl_key_access_for_spec_item(
         };
     }
     ACL_KEY_READ_WRITE
+}
+
+fn acl_key_accepts_any_permission(name: &[u8]) -> bool {
+    matches!(
+        ascii_lower_vec(name).as_slice(),
+        b"exists"
+            | b"type"
+            | b"touch"
+            | b"usage"
+            | b"strlen"
+            | b"hlen"
+            | b"llen"
+            | b"scard"
+            | b"zcard"
+            | b"xlen"
+    )
 }
 
 fn acl_command_args_contain_token(ctx: &CommandContext<'_>, start: usize, token: &[u8]) -> bool {
@@ -1285,10 +1413,11 @@ fn enforce_acl_channel_gate(
     None
 }
 
-fn enforce_acl_database_gate(
+pub(crate) fn acl_database_denial_for_context(
     ctx: &CommandContext<'_>,
     name: &[u8],
     user: &AclUser,
+    arg_offset: usize,
 ) -> Option<RedisString> {
     if user.flags.alldbs {
         return None;
@@ -1296,8 +1425,11 @@ fn enforce_acl_database_gate(
     let lower = ascii_lower_vec(name);
     match lower.as_slice() {
         b"select" => {
-            let db = ctx.client_ref().arg(1)?;
+            let db = ctx.client_ref().arg(arg_offset + 1)?;
             let parsed = parse_acl_db_arg(db.as_bytes())?;
+            if parsed as usize >= ctx.database_count() {
+                return None;
+            }
             if user.can_access_db(parsed) {
                 None
             } else {
@@ -1306,15 +1438,24 @@ fn enforce_acl_database_gate(
         }
         b"swapdb" => {
             for idx in 1..=2 {
-                let db = ctx.client_ref().arg(idx)?;
+                let db = ctx.client_ref().arg(arg_offset + idx)?;
                 let parsed = parse_acl_db_arg(db.as_bytes())?;
+                if parsed as usize >= ctx.database_count() {
+                    return None;
+                }
                 if !user.can_access_db(parsed) {
                     return Some(db.clone());
                 }
             }
             None
         }
-        b"flushall" => Some(RedisString::from_static(b"flushall")),
+        b"flushall" => {
+            if (0..ctx.database_count()).all(|db| user.can_access_db(db as u32)) {
+                None
+            } else {
+                Some(RedisString::from_static(b"flushall"))
+            }
+        }
         b"flushdb" => {
             let db = ctx.selected_db_id();
             if user.can_access_db(db) {
@@ -1323,8 +1464,81 @@ fn enforce_acl_database_gate(
                 Some(RedisString::from_vec(db.to_string().into_bytes()))
             }
         }
+        b"move" => {
+            if let Some(object) = acl_current_db_denial(ctx, user) {
+                return Some(object);
+            }
+            let db = ctx.client_ref().arg(arg_offset + 2)?;
+            let parsed = parse_acl_db_arg(db.as_bytes())?;
+            if parsed as usize >= ctx.database_count() {
+                return None;
+            }
+            if user.can_access_db(parsed) {
+                None
+            } else {
+                Some(db.clone())
+            }
+        }
+        b"copy" => {
+            if let Some(object) = acl_current_db_denial(ctx, user) {
+                return Some(object);
+            }
+            let mut idx = arg_offset + 3;
+            while idx < ctx.arg_count() {
+                let Some(arg) = ctx.client_ref().arg(idx) else {
+                    break;
+                };
+                if arg.as_bytes().eq_ignore_ascii_case(b"DB") {
+                    let db = ctx.client_ref().arg(idx + 1)?;
+                    let parsed = parse_acl_db_arg(db.as_bytes())?;
+                    if parsed as usize >= ctx.database_count() {
+                        return None;
+                    }
+                    return if user.can_access_db(parsed) {
+                        None
+                    } else {
+                        Some(db.clone())
+                    };
+                }
+                idx += 1;
+            }
+            None
+        }
+        _ if acl_command_touches_selected_db(ctx, name, arg_offset) => {
+            acl_current_db_denial(ctx, user)
+        }
         _ => None,
     }
+}
+
+fn acl_current_db_denial(ctx: &CommandContext<'_>, user: &AclUser) -> Option<RedisString> {
+    let db = ctx.selected_db_id();
+    if user.can_access_db(db) {
+        None
+    } else {
+        Some(RedisString::from_vec(db.to_string().into_bytes()))
+    }
+}
+
+fn acl_command_touches_selected_db(
+    ctx: &CommandContext<'_>,
+    name: &[u8],
+    arg_offset: usize,
+) -> bool {
+    if ascii_eq_ignore_case(name, b"WATCH") {
+        return true;
+    }
+    if acl_key_requirements(ctx, name, arg_offset)
+        .into_iter()
+        .next()
+        .is_some()
+    {
+        return true;
+    }
+    matches!(
+        ascii_lower_vec(name).as_slice(),
+        b"dbsize" | b"keys" | b"randomkey" | b"scan"
+    )
 }
 
 fn parse_acl_db_arg(bytes: &[u8]) -> Option<u32> {

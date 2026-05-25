@@ -26,6 +26,7 @@
 
 use std::collections::VecDeque;
 
+use redis_core::acl::{global_acl_state, AclUser, ACL_KEY_READ};
 use redis_core::command_context::CommandContext;
 use redis_core::notify::{NOTIFY_GENERIC, NOTIFY_LIST};
 use redis_core::object::RedisObject;
@@ -439,6 +440,39 @@ fn eq_ignore_ascii_case(left: &[u8], right: &[u8]) -> bool {
             .all(|(a, b)| a.eq_ignore_ascii_case(b))
 }
 
+fn acl_user_has_sort_pattern_access(ctx: &CommandContext<'_>, readonly: bool) -> bool {
+    let default_name = RedisString::from_bytes(b"default");
+    let user_name = ctx
+        .client_ref()
+        .authenticated_user
+        .as_ref()
+        .unwrap_or(&default_name);
+    let acl = global_acl_state();
+    let guard = match acl.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let Some(user) = guard.users.get(user_name) else {
+        return false;
+    };
+    let command: &[u8] = if readonly { b"SORT_RO" } else { b"SORT" };
+    let categories = crate::dispatch::command_acl_categories(command).unwrap_or(0);
+    std::iter::once(user)
+        .chain(user.selectors.iter())
+        .any(|candidate| acl_selector_has_sort_pattern_access(ctx, candidate, command, categories))
+}
+
+fn acl_selector_has_sort_pattern_access(
+    ctx: &CommandContext<'_>,
+    user: &AclUser,
+    command: &[u8],
+    categories: u64,
+) -> bool {
+    user.can_execute_command_with_arg(command, None, categories)
+        && user.can_access_db(ctx.selected_db_id())
+        && user.can_access_key_for(b"__redis_acl_unrestricted_sort_probe__", ACL_KEY_READ)
+}
+
 fn object_to_list_value(obj: &RedisObject) -> RedisString {
     let bytes = obj.string_bytes();
     RedisString::from_bytes(bytes.as_ref())
@@ -480,9 +514,7 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
     let mut operations: Vec<SortOperation> = Vec::new();
     let mut getop: usize = 0;
 
-    // TODO(architect): ACL check — `user_has_full_key_access`.
-    // C: sort.c:215-218.
-    let user_has_full_key_access = true; // TODO(port): always true until ACL layer exists.
+    let user_has_full_key_access = acl_user_has_sort_pattern_access(ctx, readonly);
 
     let mut j = 2usize;
     while j < argc {
@@ -515,7 +547,7 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
                 // C: sort.c:248-255.
                 if !user_has_full_key_access {
                     return Err(RedisError::runtime(
-                        b"BY option of SORT denied due to insufficient ACL permissions.",
+                        b"ERR BY option of SORT denied due to insufficient ACL permissions.",
                     ));
                 }
             }
@@ -528,7 +560,7 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
             // C: sort.c:268-274.
             if !is_return_subst_pattern(get_arg) && !user_has_full_key_access {
                 return Err(RedisError::runtime(
-                    b"GET option of SORT denied due to insufficient ACL permissions.",
+                    b"ERR GET option of SORT denied due to insufficient ACL permissions.",
                 ));
             }
             let pattern_obj = ctx.arg_object(j + 1)?.clone();

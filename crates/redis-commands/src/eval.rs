@@ -610,6 +610,16 @@ fn lua_script_command_reply_error_payload(bytes: &[u8]) -> Vec<u8> {
     {
         return b"ERR Wrong number of args calling command from script".to_vec();
     }
+    if first_line.starts_with(b"NOPERM ") {
+        let mut out = b"ERR ACL failure in script: ".to_vec();
+        let detail = &first_line[b"NOPERM ".len()..];
+        if detail == b"No permissions to access a database" {
+            out.extend_from_slice(b"No permissions to access database");
+        } else {
+            out.extend_from_slice(detail);
+        }
+        return out;
+    }
     first_line.to_vec()
 }
 

@@ -113,6 +113,7 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let acl_denied_cmd = metrics.acl_access_denied_cmd.load(Ordering::Relaxed);
     let acl_denied_key = metrics.acl_access_denied_key.load(Ordering::Relaxed);
     let acl_denied_channel = metrics.acl_access_denied_channel.load(Ordering::Relaxed);
+    let acl_denied_db = metrics.acl_access_denied_db.load(Ordering::Relaxed);
     let expired_keys = metrics.expired_keys.load(Ordering::Relaxed);
     let evicted_keys = metrics.evicted_keys.load(Ordering::Relaxed);
     let evicted_clients = metrics.evicted_clients.load(Ordering::Relaxed);
@@ -365,6 +366,7 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let _ = writeln!(buf, "acl_access_denied_cmd:{}\r", acl_denied_cmd);
         let _ = writeln!(buf, "acl_access_denied_key:{}\r", acl_denied_key);
         let _ = writeln!(buf, "acl_access_denied_channel:{}\r", acl_denied_channel);
+        let _ = writeln!(buf, "acl_access_denied_db:{}\r", acl_denied_db);
         let _ = writeln!(
             buf,
             "migrate_cached_sockets:{}\r",
