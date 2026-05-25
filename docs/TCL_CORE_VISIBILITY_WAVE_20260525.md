@@ -812,6 +812,90 @@ Agent-1 counted-coverage movement from this pull:
 unit/auth: +16 counted, +14 passing
 ```
 
+## Latency Pull: `unit/latency-monitor`
+
+Patch:
+
+- Replaced `SADD`'s per-insert full-set encoding scan with incremental sticky
+  encoding promotion. The previous path scanned the whole set after every
+  successful insert, so the upstream latency test's one-million-iteration Lua
+  `SADD` loop behaved O(n^2).
+- Added live `CONFIG SET/GET latency-monitor-threshold` state for latency event
+  hooks.
+- Added active-expire `expire-cycle` latency samples from the RuntimeOwner
+  expire step when expired keys are actually deleted.
+- Made RuntimeOwner scan up to 16 DBs per active-expire step, matching C
+  Redis' `CRON_DBS_PER_CALL` behavior. Scanning only one DB per 100ms tick left
+  DB 0 waiting roughly 1.6s in a 16-DB server, longer than the Tcl test's
+  expiry wait.
+- Implemented the minimal `LATENCY GRAPH <event>` high/low summary needed by
+  upstream while leaving full sparkline rendering explicitly deferred.
+
+Why this was selected:
+
+- `unit/latency-monitor` was still timeout/no-summary after the auth pull.
+- A direct microprobe showed the first real blocker was performance, not only
+  missing latency metadata: 10k Lua `SADD` calls took ~4.1s and 50k exceeded a
+  30s socket timeout before the set encoding fix.
+- The fix is not a test fake. It removes an O(n^2) set hot path, improves active
+  expiry scheduling, and wires the existing latency monitor to a real internal
+  event source.
+
+Verification:
+
+```bash
+cargo build --bin redis-server
+
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-latency-monitor-expire-cycle-v3 \
+  --isolated-tests-copy \
+  --profile single-node-external \
+  --skip-build \
+  --timeout-s 180 \
+  --baseport 54211 \
+  --portcount 3000 \
+  --files unit/latency-monitor
+
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-latency-set-expire-noregression-v1 \
+  --isolated-tests-copy \
+  --profile single-node-external \
+  --skip-build \
+  --timeout-s 240 \
+  --baseport 54311 \
+  --portcount 5000 \
+  --files unit/latency-monitor,unit/type/set,unit/expire,unit/commandlog,unit/pubsub,unit/dump
+```
+
+Evidence:
+
+- `harness/oracle/results/tcl-survey/20260525T085101896489Z/unit__latency-monitor.json`
+- `harness/oracle/results/tcl-survey/20260525T085119932579Z/`
+
+Result:
+
+```text
+unit/latency-monitor: timeout/no-summary -> 12 pass / 0 fail / 12 counted
+unit/type/set:        no regression, 114 pass / 0 fail
+unit/expire:          no regression, 65 pass / 0 fail
+unit/commandlog:      no regression, 14 pass / 0 fail
+unit/pubsub:          no regression, 35 pass / 0 fail
+unit/dump:            no regression, 27 pass / 0 fail
+```
+
+Microprobe movement for the latency test's Lua `SADD` setup:
+
+```text
+Before: 10k inserts ~4.1s; 50k inserts timed out at 30s.
+After:  10k inserts ~0.11s; 50k ~0.48s; 250k ~2.49s.
+```
+
+Agent-1 counted-coverage movement from this pull:
+
+```text
+unit/latency-monitor: +12 counted, +12 passing
+```
+
 Current Agent-1 visible counted movement:
 
 ```text
@@ -824,7 +908,8 @@ unit/pubsub:          +35 counted
 unit/client-eviction: +14 counted
 unit/dump:            +27 counted
 unit/auth:            +16 counted
-Total visible gain:  +224 counted, from ~2154 to ~2378 counted
+unit/latency-monitor: +12 counted
+Total visible gain:  +236 counted, from ~2154 to ~2390 counted
 ```
 
 ## Next Overnight Targets
@@ -841,11 +926,7 @@ Total visible gain:  +224 counted, from ~2154 to ~2378 counted
    `unit/auth`'s remaining primaryauth failures are replication/WAITAOF and
    replica-buffer/accounting work. Treat these as architecture packets, not
    small admin fixes.
-4. Latency lane: `unit/latency-monitor` can likely become counted if the
-   expire-cycle setup is made fast enough or latency expire-cycle semantics are
-   implemented without a pathological 1M-command Lua loop. Lower denominator
-   than ACL, but isolated and not currently claimed.
-5. `unit/introspection-2` cleanup: 3 known failures around object idle-time
+4. `unit/introspection-2` cleanup: 3 known failures around object idle-time
    mutation. Good small follow-up if no larger dark file is safe to touch.
 
 ## Operating Rules For Continuation

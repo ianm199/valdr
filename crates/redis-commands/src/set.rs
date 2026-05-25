@@ -71,6 +71,56 @@ fn update_sticky_encoding(s: &mut redis_core::object::InlineSet) {
     }
 }
 
+#[derive(Clone, Copy)]
+struct SetInsertEncodingDelta {
+    count: usize,
+    all_integer: bool,
+    max_len: usize,
+}
+
+impl SetInsertEncodingDelta {
+    const fn empty() -> Self {
+        Self {
+            count: 0,
+            all_integer: true,
+            max_len: 0,
+        }
+    }
+
+    fn record_parts(&mut self, len: usize, is_integer: bool) {
+        self.count += 1;
+        self.max_len = self.max_len.max(len);
+        self.all_integer &= is_integer;
+    }
+}
+
+/// Update a set's sticky encoding after successful insertions without scanning
+/// the full member set on every SADD. The full scan is only needed on rare
+/// promotion boundaries, such as an intset-shaped set receiving its first
+/// non-integer member.
+fn update_sticky_encoding_after_insert(
+    s: &mut redis_core::object::InlineSet,
+    delta: SetInsertEncodingDelta,
+) {
+    if delta.count == 0 || s.sticky == InlineSetEncoding::ForcedHashtable {
+        return;
+    }
+
+    let t = get_encoding_thresholds();
+    if s.sticky == InlineSetEncoding::ForcedListpack {
+        if s.data.len() <= t.set_max_listpack_entries && delta.max_len <= t.set_max_listpack_value {
+            return;
+        }
+        update_sticky_encoding(s);
+        return;
+    }
+
+    if delta.all_integer && s.data.len() <= t.set_max_intset_entries {
+        return;
+    }
+    update_sticky_encoding(s);
+}
+
 /// Return a seed derived from the current system time in nanoseconds.
 ///
 /// Used to bootstrap the xorshift64 PRNG in SRANDMEMBER and SPOP so that
@@ -177,12 +227,16 @@ pub fn sadd_command(ctx: &mut CommandContext) -> RedisResult<()> {
                 .inline_set_mut()
                 .expect("new_set constructs an Inline set");
             let mut count: i64 = 0;
+            let mut delta = SetInsertEncodingDelta::empty();
             for m in members {
+                let member_len = m.as_bytes().len();
+                let member_is_integer = is_canonical_i64_ascii(m.as_bytes());
                 if s.data.insert(m) {
+                    delta.record_parts(member_len, member_is_integer);
                     count += 1;
                 }
             }
-            update_sticky_encoding(s);
+            update_sticky_encoding_after_insert(s, delta);
             ctx.db_mut().set_key(key.clone(), obj, 0);
             count
         }
@@ -192,12 +246,16 @@ pub fn sadd_command(ctx: &mut CommandContext) -> RedisResult<()> {
             }
             let s = obj.inline_set_mut().expect("is_set confirms set encoding");
             let mut count: i64 = 0;
+            let mut delta = SetInsertEncodingDelta::empty();
             for m in members {
+                let member_len = m.as_bytes().len();
+                let member_is_integer = is_canonical_i64_ascii(m.as_bytes());
                 if s.data.insert(m) {
+                    delta.record_parts(member_len, member_is_integer);
                     count += 1;
                 }
             }
-            update_sticky_encoding(s);
+            update_sticky_encoding_after_insert(s, delta);
             count
         }
     };

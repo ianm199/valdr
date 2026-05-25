@@ -446,6 +446,7 @@ fn default_config_pairs() -> &'static [(&'static str, &'static str)] {
         ("stream-node-max-entries", "100"),
         ("activerehashing", "yes"),
         ("loglevel", "notice"),
+        ("latency-monitor-threshold", "0"),
         ("slowlog-log-slower-than", "10000"),
         ("slowlog-max-len", "128"),
         ("notify-keyspace-events", ""),
@@ -498,6 +499,8 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
     );
     let live_notify_str = String::from_utf8_lossy(live_notify.as_bytes()).into_owned();
     let live_slowlog_threshold = cfg.slowlog_threshold_micros().to_string();
+    let live_latency_monitor_threshold =
+        crate::slowlog_cmd::latency_monitor_threshold().to_string();
     let live_slowlog_max_len = cfg.slowlog_max_len().to_string();
     let live_effort_str = cfg.active_expire_effort().to_string();
     let live_hz_str = cfg.hz().to_string();
@@ -584,6 +587,7 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
             "requirepass" => Some(live_requirepass.clone()),
             "notify-keyspace-events" => Some(live_notify_str.clone()),
             "slowlog-log-slower-than" => Some(live_slowlog_threshold.clone()),
+            "latency-monitor-threshold" => Some(live_latency_monitor_threshold.clone()),
             "slowlog-max-len" => Some(live_slowlog_max_len.clone()),
             "active-expire-effort" => Some(live_effort_str.clone()),
             "hz" => Some(live_hz_str.clone()),
@@ -742,6 +746,11 @@ fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
             if let Some(n) = parse_i64_strict(value) {
                 cfg.set_slowlog_threshold_micros(n);
                 crate::slowlog_cmd::set_slowlog_threshold(n);
+            }
+        }
+        b"latency-monitor-threshold" => {
+            if let Some(n) = parse_i64_strict(value) {
+                crate::slowlog_cmd::set_latency_monitor_threshold(n);
             }
         }
         b"slowlog-max-len" | b"commandlog-slow-execution-max-len" => {

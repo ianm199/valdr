@@ -41,6 +41,7 @@ const MAX_LISTENER_TOKENS: usize = 16;
 const SLOT_TOKEN_BASE: usize = MAX_LISTENER_TOKENS;
 const POLL_TIMEOUT: Duration = Duration::from_millis(2);
 const ACTIVE_EXPIRE_FALLBACK_INTERVAL: Duration = Duration::from_millis(100);
+const ACTIVE_EXPIRE_DBS_PER_STEP: usize = 16;
 
 /// Typed key into the future RuntimeOwner client-slot table.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -1298,10 +1299,24 @@ impl RuntimeOwner {
             return false;
         }
         self.last_active_expire = Instant::now();
-        let idx = self.active_expire_cursor % self.dbs.len();
-        self.active_expire_cursor = (self.active_expire_cursor + 1) % self.dbs.len();
         let metrics = server_metrics();
-        run_active_expire_tick_on_db(&mut self.dbs[idx], effort, Some(metrics.as_ref())) > 0
+        let start = Instant::now();
+        let mut deleted_total = 0u64;
+        let dbs_to_scan = ACTIVE_EXPIRE_DBS_PER_STEP.min(self.dbs.len());
+        for _ in 0..dbs_to_scan {
+            let idx = self.active_expire_cursor % self.dbs.len();
+            self.active_expire_cursor = (self.active_expire_cursor + 1) % self.dbs.len();
+            deleted_total = deleted_total.saturating_add(run_active_expire_tick_on_db(
+                &mut self.dbs[idx],
+                effort,
+                Some(metrics.as_ref()),
+            ));
+        }
+        if deleted_total > 0 {
+            let elapsed_ms = start.elapsed().as_millis().max(1) as u64;
+            redis_commands::slowlog_cmd::report_latency_event(b"expire-cycle", elapsed_ms);
+        }
+        deleted_total > 0
     }
 
     fn sweep_output_buffer_limits(&mut self) {
