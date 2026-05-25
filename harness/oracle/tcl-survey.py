@@ -165,6 +165,10 @@ def tcl_command(test_file: str, args: argparse.Namespace) -> list[str]:
         str(args.clients),
         "--skip-leaks",
     ]
+    if args.baseport is not None:
+        cmd.extend(["--baseport", str(args.baseport)])
+    if args.portcount is not None:
+        cmd.extend(["--portcount", str(args.portcount)])
     if args.deny_tags:
         cmd.extend(["--tags", " ".join(f"-{tag}" for tag in args.deny_tags)])
     if args.quiet:
@@ -190,6 +194,8 @@ def main() -> int:
     parser.add_argument("--timeout-s", type=int, default=90, help="Per-file timeout.")
     parser.add_argument("--setup-timeout-s", type=int, default=300, help="Build/symlink setup timeout.")
     parser.add_argument("--clients", type=int, default=1)
+    parser.add_argument("--baseport", type=int, help="Initial port number for spawned Valkey servers.")
+    parser.add_argument("--portcount", type=int, help="Port range for spawned Valkey servers.")
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--quiet", action="store_true", default=True)
     parser.add_argument(
