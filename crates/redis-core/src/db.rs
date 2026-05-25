@@ -1300,7 +1300,11 @@ fn del_generic_command(ctx: &mut CommandContext, lazy: bool) -> Result<(), Redis
             // TODO(port): server.dirty++
             num_deleted += 1;
             if is_stream {
-                fire_stream_key_deleted_hook(&key);
+                if ctx.client_ref().flag_deny_blocking() {
+                    ctx.client_mut().pending_wakes.push(key.clone());
+                } else {
+                    fire_stream_key_deleted_hook(&key);
+                }
             }
         }
     }
@@ -1812,10 +1816,20 @@ pub fn swapdb_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         };
         idx.all_blocked_keys()
     };
-    for db_id in [id1u, id2u] {
+    let wake_order = if current_db_id == id1u {
+        [id1u, id2u]
+    } else if current_db_id == id2u {
+        [id2u, id1u]
+    } else {
+        [id1u, id2u]
+    };
+    for db_id in wake_order {
         if db_id == current_db_id {
             for key in &blocked_keys {
-                if ctx.db().find(key).is_some() {
+                if let Some(obj) = ctx.db().find(key) {
+                    if !obj.is_stream() {
+                        fire_stream_key_overwritten_hook(key);
+                    }
                     ctx.client_mut().pending_wakes.push(key.clone());
                 }
             }
