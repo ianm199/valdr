@@ -1095,6 +1095,47 @@ Total visible gain:   +347 counted, from ~2154 to ~2501 counted
 4. `unit/introspection-2` cleanup: 3 known failures around object idle-time
    mutation. Good small follow-up if no larger dark file is safe to touch.
 
+## Current Blocker Scout: `unit/maxmemory`
+
+Fresh current-state probe after the WAIT visibility commit:
+
+```bash
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-maxmemory-current-scout-v1 \
+  --isolated-tests-copy \
+  --skip-build \
+  --timeout-s 300 \
+  --baseport 51011 \
+  --portcount 4000 \
+  --no-default-deny-tags \
+  --deny-tag needs:repl \
+  --deny-tag needs:debug \
+  --deny-tag cluster \
+  --deny-tag needs:cluster \
+  --files unit/maxmemory
+```
+
+Evidence:
+
+- `harness/oracle/results/tcl-survey/20260525T094859129725Z/unit__maxmemory.json`
+
+Result:
+
+```text
+unit/maxmemory: timeout/no-summary after 300s
+visible failures before timeout:
+  - slave buffer are counted correctly
+  - replica buffer don't induce eviction
+```
+
+Interpretation: this is not a missing command-subcommand unlock. The upstream
+file is stuck in runtime memory-accounting behavior: replica output/query
+buffers report as zero, and the maxmemory loops wait for client/key eviction
+effects that never become visible. The next useful packet should be
+architecture-shaped around `RuntimeOwner` client memory accounting,
+`INFO memory`'s `mem_clients_slaves` / `mem_not_counted_for_evict`, and replica
+writer-buffer accounting. A command-local patch is unlikely to move this file.
+
 ## Operating Rules For Continuation
 
 - Keep using isolated `--baseport` and `--portcount`; use
