@@ -123,6 +123,14 @@ impl BlockedAction {
             BlockedAction::Wait { .. } => b":0\r\n",
         }
     }
+
+    /// Whether this waiter should be unblocked when the key it waits on is
+    /// deleted or otherwise stops existing. XREADGROUP must wake with a
+    /// NOGROUP error in that case; plain XREAD and the list/zset pops keep
+    /// waiting for data, so they are not "nokey" waiters.
+    pub fn unblock_on_nokey(&self) -> bool {
+        matches!(self, BlockedAction::StreamGroup { .. })
+    }
 }
 
 /// One blocked client's full wait spec.
@@ -395,6 +403,29 @@ impl BlockedKeysIndex {
     /// Whether the index is empty.
     pub fn is_empty(&self) -> bool {
         self.waiters.is_empty()
+    }
+
+    /// Number of distinct keys that have at least one blocked client.
+    /// Reported as `total_blocking_keys` in `INFO clients`.
+    pub fn total_blocking_keys(&self) -> usize {
+        self.keys.values().filter(|q| !q.is_empty()).count()
+    }
+
+    /// Number of distinct blocking keys that have at least one client which
+    /// should be unblocked even when the key does not exist (the "nokey"
+    /// condition — currently XREADGROUP, which must wake with NOGROUP on
+    /// delete/destroy). Reported as `total_blocking_keys_on_nokey`.
+    pub fn total_blocking_keys_on_nokey(&self) -> usize {
+        self.keys
+            .values()
+            .filter(|q| {
+                q.iter().any(|cid| {
+                    self.waiters
+                        .get(cid)
+                        .is_some_and(|w| w.action.unblock_on_nokey())
+                })
+            })
+            .count()
     }
 
     /// Drain all `Wait` waiters whose required replica count is now satisfied.
