@@ -462,11 +462,10 @@ fn drain_front(stream: &mut InlineStream, count: usize) -> usize {
         return 0;
     }
     let count = count.min(stream.entries.len());
-    for entry in stream.entries.drain(0..count) {
-        if entry.id > stream.max_deleted_id {
-            stream.max_deleted_id = entry.id;
-        }
-    }
+    // Trimming (XTRIM / XADD MAXLEN|MINID) removes entries from the front but,
+    // unlike XDEL, does NOT advance max_deleted_entry_id (C: streamTrim). Only
+    // XDEL and XSETID move the tombstone.
+    stream.entries.drain(0..count);
     count
 }
 
@@ -1370,6 +1369,9 @@ pub fn xinfo_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let sub = ctx.arg(1)?.as_bytes().to_ascii_uppercase();
     match sub.as_slice() {
         b"HELP" => {
+            if ctx.arg_count() != 2 {
+                return Err(RedisError::wrong_number_of_args(b"xinfo|help"));
+            }
             let lines: &[&[u8]] = &[
                 b"XINFO STREAM <key>",
                 b"    Show information about the stream.",
@@ -1622,6 +1624,9 @@ pub fn xgroup_command(ctx: &mut CommandContext) -> RedisResult<()> {
         b"CREATECONSUMER" => xgroup_createconsumer(ctx),
         b"DELCONSUMER" => xgroup_delconsumer(ctx),
         b"HELP" => {
+            if ctx.arg_count() != 2 {
+                return Err(RedisError::wrong_number_of_args(b"xgroup|help"));
+            }
             let lines: &[&[u8]] = &[
                 b"XGROUP CREATE <key> <groupname> <id|$> [MKSTREAM] [ENTRIESREAD entries-read]",
                 b"    Create a new consumer group.",
@@ -2705,7 +2710,7 @@ pub fn xsetid_command(ctx: &mut CommandContext) -> RedisResult<()> {
                 }
                 let n = parse_strict_i64(ctx.arg(i + 1)?.as_bytes())?;
                 if n < 0 {
-                    return Err(RedisError::syntax(b"ENTRIESADDED must be >= 0"));
+                    return Err(RedisError::runtime(b"ERR entries_added must be positive"));
                 }
                 entries_added = Some(n as u64);
                 i += 2;
@@ -2714,7 +2719,15 @@ pub fn xsetid_command(ctx: &mut CommandContext) -> RedisResult<()> {
                 if i + 1 >= argc {
                     return Err(RedisError::syntax(b"syntax error"));
                 }
-                max_deleted = Some(parse_explicit_id(ctx.arg(i + 1)?.as_bytes())?);
+                let m = parse_explicit_id(ctx.arg(i + 1)?.as_bytes())?;
+                // C: xsetidCommand — the new last-id cannot be below the
+                // provided max_deleted_entry_id.
+                if new_id < m {
+                    return Err(RedisError::runtime(
+                        b"ERR The ID specified in XSETID is smaller than the provided max_deleted_entry_id",
+                    ));
+                }
+                max_deleted = Some(m);
                 i += 2;
             }
             _ => return Err(RedisError::syntax(b"syntax error")),
@@ -2724,11 +2737,26 @@ pub fn xsetid_command(ctx: &mut CommandContext) -> RedisResult<()> {
         Some(s) => s,
         None => return Err(RedisError::runtime(b"ERR no such key")),
     };
+    // C: xsetidCommand — new last-id cannot be below the current
+    // max_deleted_entry_id.
+    if new_id < stream.max_deleted_id {
+        return Err(RedisError::runtime(
+            b"ERR The ID specified in XSETID is smaller than current max_deleted_entry_id",
+        ));
+    }
     if let Some(top) = stream.entries.last() {
         if new_id < top.id {
             return Err(RedisError::runtime(
                 b"ERR The ID specified in XSETID is smaller than the target stream top item",
             ));
+        }
+        // entries_added (if provided) cannot be lower than the stream length.
+        if let Some(ea) = entries_added {
+            if stream.entries.len() as u64 > ea {
+                return Err(RedisError::runtime(
+                    b"ERR The entries_added specified in XSETID is smaller than the target stream length",
+                ));
+            }
         }
     }
     stream.last_id = new_id;
