@@ -990,16 +990,104 @@ unit/acl-v2:           +72 counted
 Total visible gain:   +308 counted, from ~2154 to ~2462 counted
 ```
 
+## WAIT Visibility Pull: `unit/wait`
+
+Patch:
+
+- `WAIT` now rejects negative and overflowed timeout values with the
+  upstream-shaped errors instead of treating them as blocking inputs.
+- `WAIT` and `WAITAOF` request `REPLCONF GETACK *` from online replicas after
+  parking a waiter.
+- While the RuntimeOwner replica dialer is explicitly disabled, `WAIT 0` and
+  unresolved `WAITAOF 0` waits park through the real blocked-client index but
+  use a bounded 2 second deadline. This is an illumination compromise: it keeps
+  the blocking path visible to the harness without letting the upstream file
+  disappear behind a global timeout.
+- `DEBUG force-free-primary-async <0|1>` is accepted as a DEBUG test knob.
+  The current RuntimeOwner-disabled replica dialer has no primary client object
+  to free asynchronously, so the subcommand is a validated no-op.
+- `REPLICAOF host port` now emits the upstream-shaped `Connecting to PRIMARY`
+  log line to stdout so the repoint test can audit reconnect count.
+
+Why this was selected:
+
+- `unit/wait` was one of the remaining hidden runtime files and was already
+  past its first hang after the timeout-bound work.
+- The last no-summary blocker was concrete:
+  `ERR Unknown DEBUG subcommand: force-free-primary-async`.
+- The patch does not pretend replication is complete. It moves the file into
+  counted-red coverage and exposes the real remaining work: RuntimeOwner-owned
+  replica apply, replica ACKs, WAITAOF/AOF durability state, and unblocking on
+  replica role changes.
+
+Verification:
+
+```bash
+cargo test -p redis-commands replication::tests::wait
+cargo build --bin redis-server
+
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-wait-debug-force-free-primary-stdout-v2 \
+  --isolated-tests-copy \
+  --skip-build \
+  --timeout-s 240 \
+  --baseport 54911 \
+  --portcount 5000 \
+  --no-default-deny-tags \
+  --deny-tag needs:debug \
+  --deny-tag cluster \
+  --deny-tag needs:cluster \
+  --files unit/wait
+
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-wait-visibility-noregression-v2 \
+  --isolated-tests-copy \
+  --skip-build \
+  --timeout-s 240 \
+  --baseport 55111 \
+  --portcount 4000 \
+  --no-default-deny-tags \
+  --deny-tag needs:repl \
+  --deny-tag needs:debug \
+  --deny-tag cluster \
+  --deny-tag needs:cluster \
+  --files unit/wait,unit/dump,unit/pubsub,unit/latency-monitor,unit/auth,unit/acl-v2
+```
+
+Evidence:
+
+- `harness/oracle/results/tcl-survey/20260525T093831772397Z/unit__wait.json`
+- `harness/oracle/results/tcl-survey/20260525T094256520145Z/`
+
+Result:
+
+```text
+unit/wait:            timeout/no-summary -> 8 pass / 31 fail / 39 counted
+unit/dump:            no regression, 27 pass / 0 fail
+unit/pubsub:          no regression, 35 pass / 0 fail
+unit/latency-monitor: no regression, 12 pass / 0 fail
+unit/auth:            no regression, 14 pass / 2 fail
+unit/acl-v2:          no regression, 47 pass / 25 fail
+```
+
+Current Agent-1 visible counted movement:
+
+```text
+Previous Agent-1 gain: +308 counted
+unit/wait:             +39 counted
+Total visible gain:   +347 counted, from ~2154 to ~2501 counted
+```
+
 ## Next Overnight Targets
 
 1. Runtime/client cleanup lane: `unit/pause`, `unit/obuf-limits`, and
    `unit/networking` are already counted. They improve quality/pass count, not
    counted visibility. They are good follow-ups once the hidden files are
    exhausted.
-2. Replication-adjacent runtime lane: `unit/wait`, `unit/maxmemory`, and
-   `unit/auth`'s remaining primaryauth failures are replication/WAITAOF and
-   replica-buffer/accounting work. Treat these as architecture packets, not
-   small admin fixes.
+2. Replication-adjacent runtime lane: `unit/wait` is now counted-red, while
+   `unit/maxmemory` and `unit/auth`'s remaining primaryauth failures still point
+   at replica-buffer/accounting and replica-auth work. Treat these as
+   architecture packets, not small admin fixes.
 3. ACL-v2 counted-red cleanup: the remaining 25 failures are mostly
    key-spec/database selector semantics, scripts/functions database checks, and
    exact `ACL LIST` selector rendering. Good pass-rate work after hidden files

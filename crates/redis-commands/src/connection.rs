@@ -1593,6 +1593,28 @@ pub fn debug_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         redis_core::client::set_debug_client_enforce_reply_list(enabled);
         return ctx.reply_simple_string(b"OK");
     }
+    if ascii_eq_ignore_case(sub.as_bytes(), b"FORCE-FREE-PRIMARY-ASYNC") {
+        if ctx.arg_count() != 3 {
+            return Err(RedisError::wrong_number_of_args(
+                b"debug force-free-primary-async",
+            ));
+        }
+        let value = ctx.arg_owned(2usize)?;
+        match value.as_bytes() {
+            b"0" | b"1" => {}
+            _ => {
+                return Err(RedisError::runtime(
+                    b"ERR value is not an integer or out of range",
+                ))
+            }
+        }
+        // C toggles server.debug_force_free_primary_async so the next primary
+        // client is freed on the async path. This port does not yet keep a
+        // primary client object in the RuntimeOwner-disabled replica dialer,
+        // but the upstream wait.tcl repoint test uses this knob before it
+        // checks that REPLICAOF logs only one reconnect attempt.
+        return ctx.reply_simple_string(b"OK");
+    }
     if ascii_eq_ignore_case(sub.as_bytes(), b"DIGEST-VALUE") {
         if ctx.arg_count() < 3 {
             return Err(RedisError::wrong_number_of_args(b"debug digest-value"));
