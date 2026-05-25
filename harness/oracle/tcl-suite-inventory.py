@@ -181,6 +181,9 @@ def build_inventory() -> dict[str, Any]:
             reason = None
             passed = log["passed"]
             failed = log["failed"]
+            if passed == 0 and failed == 0 and source_tests > 0:
+                status = "zero-count"
+                reason = "runner emitted a 0/0 summary; tests were likely filtered by tag/policy and are not proven"
         else:
             status = "skipped-by-policy"
             reason = policy_reason(rel_file)
