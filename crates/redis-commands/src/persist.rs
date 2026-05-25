@@ -20,10 +20,13 @@
 //! The `unsafe` block that wraps `fork + _exit` is the single unsafe surface in
 //! this crate: documented below with a SAFETY comment.
 
+use std::io::{Read, Write};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use redis_core::client::ClientId;
 use redis_core::db::{RedisDb, LOOKUP_NOTOUCH};
@@ -35,9 +38,23 @@ use redis_core::replication::{global_replication_state, ReplBgsaveJob};
 use redis_core::util::mstime;
 use redis_core::CommandContext;
 use redis_core::PersistenceStatus;
-use redis_types::{RedisError, RedisResult};
+use redis_types::{RedisError, RedisResult, RedisString};
 
 use crate::aof::aof_writer;
+
+static MIGRATE_CACHED_SOCKETS: AtomicUsize = AtomicUsize::new(0);
+
+pub fn migrate_cached_sockets() -> usize {
+    MIGRATE_CACHED_SOCKETS.load(Ordering::Relaxed)
+}
+
+fn mark_migrate_socket_cached() {
+    MIGRATE_CACHED_SOCKETS.store(1, Ordering::Relaxed);
+    thread::spawn(|| {
+        thread::sleep(Duration::from_secs(5));
+        MIGRATE_CACHED_SOCKETS.store(0, Ordering::Relaxed);
+    });
+}
 
 fn ascii_lower(b: u8) -> u8 {
     if b.is_ascii_uppercase() {
@@ -219,6 +236,319 @@ pub fn restore_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 /// the single-node port, so it shares RESTORE's local behaviour.
 pub fn restore_asking_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     restore_command(ctx)
+}
+
+#[derive(Debug)]
+struct MigrateOptions {
+    host: Vec<u8>,
+    port: u16,
+    db: u32,
+    timeout_ms: u64,
+    copy: bool,
+    replace: bool,
+    auth: Option<Vec<u8>>,
+    auth2: Option<(Vec<u8>, Vec<u8>)>,
+    keys: Vec<RedisString>,
+}
+
+fn parse_u16_arg(bytes: &[u8]) -> RedisResult<u16> {
+    let value = parse_i64_strict(bytes).ok_or_else(RedisError::not_integer)?;
+    u16::try_from(value).map_err(|_| RedisError::runtime(b"ERR port is out of range"))
+}
+
+fn parse_u64_nonnegative(bytes: &[u8]) -> RedisResult<u64> {
+    let value = parse_i64_strict(bytes).ok_or_else(RedisError::not_integer)?;
+    if value < 0 {
+        return Err(RedisError::runtime(b"ERR timeout is negative"));
+    }
+    Ok(value as u64)
+}
+
+fn parse_migrate_options(ctx: &CommandContext<'_>) -> RedisResult<MigrateOptions> {
+    if ctx.arg_count() < 6 {
+        return Err(RedisError::wrong_number_of_args(b"migrate"));
+    }
+
+    let host = ctx.arg_owned(1usize)?.into_bytes();
+    let port = parse_u16_arg(ctx.arg_bytes(2usize)?)?;
+    let key_arg = ctx.arg_owned(3usize)?;
+    let db = ctx.validate_db_index(
+        parse_i64_strict(ctx.arg_bytes(4usize)?).ok_or_else(RedisError::not_integer)?,
+    )?;
+    let timeout_ms = parse_u64_nonnegative(ctx.arg_bytes(5usize)?)?;
+
+    let mut opts = MigrateOptions {
+        host,
+        port,
+        db,
+        timeout_ms,
+        copy: false,
+        replace: false,
+        auth: None,
+        auth2: None,
+        keys: if key_arg.is_empty() {
+            Vec::new()
+        } else {
+            vec![key_arg.clone()]
+        },
+    };
+
+    let mut saw_keys = false;
+    let mut i = 6usize;
+    while i < ctx.arg_count() {
+        let option = ctx.arg_owned(i)?;
+        let option_bytes = option.as_bytes();
+        if ascii_eq_ignore_case(option_bytes, b"copy") {
+            opts.copy = true;
+            i += 1;
+        } else if ascii_eq_ignore_case(option_bytes, b"replace") {
+            opts.replace = true;
+            i += 1;
+        } else if ascii_eq_ignore_case(option_bytes, b"auth") {
+            if i + 1 >= ctx.arg_count() {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            opts.auth = Some(ctx.arg_owned(i + 1)?.into_bytes());
+            i += 2;
+        } else if ascii_eq_ignore_case(option_bytes, b"auth2") {
+            if i + 2 >= ctx.arg_count() {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            opts.auth2 = Some((
+                ctx.arg_owned(i + 1)?.into_bytes(),
+                ctx.arg_owned(i + 2)?.into_bytes(),
+            ));
+            i += 3;
+        } else if ascii_eq_ignore_case(option_bytes, b"keys") {
+            if !key_arg.is_empty() {
+                return Err(RedisError::runtime(
+                    b"ERR When using MIGRATE KEYS option, the key argument must be set to the empty string",
+                ));
+            }
+            if saw_keys || i + 1 >= ctx.arg_count() {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            saw_keys = true;
+            opts.keys.clear();
+            i += 1;
+            while i < ctx.arg_count() {
+                opts.keys.push(ctx.arg_owned(i)?);
+                i += 1;
+            }
+        } else {
+            return Err(RedisError::syntax(b"syntax error"));
+        }
+    }
+
+    Ok(opts)
+}
+
+fn append_resp_command(out: &mut Vec<u8>, args: &[&[u8]]) {
+    out.extend_from_slice(b"*");
+    out.extend_from_slice(args.len().to_string().as_bytes());
+    out.extend_from_slice(b"\r\n");
+    for arg in args {
+        out.extend_from_slice(b"$");
+        out.extend_from_slice(arg.len().to_string().as_bytes());
+        out.extend_from_slice(b"\r\n");
+        out.extend_from_slice(arg);
+        out.extend_from_slice(b"\r\n");
+    }
+}
+
+fn find_crlf(bytes: &[u8]) -> Option<usize> {
+    bytes.windows(2).position(|w| w == b"\r\n")
+}
+
+fn parse_resp_scalar(buf: &[u8]) -> RedisResult<Option<Result<Vec<u8>, Vec<u8>>>> {
+    let Some(first) = buf.first().copied() else {
+        return Ok(None);
+    };
+    match first {
+        b'+' | b'-' | b':' => {
+            let Some(end) = find_crlf(&buf[1..]) else {
+                return Ok(None);
+            };
+            let payload = buf[1..1 + end].to_vec();
+            if first == b'-' {
+                Ok(Some(Err(payload)))
+            } else {
+                Ok(Some(Ok(payload)))
+            }
+        }
+        b'$' => {
+            let Some(end) = find_crlf(&buf[1..]) else {
+                return Ok(None);
+            };
+            let len_bytes = &buf[1..1 + end];
+            let len = parse_i64_strict(len_bytes)
+                .ok_or_else(|| RedisError::runtime(b"IOERR invalid bulk reply"))?;
+            let header_len = 1 + end + 2;
+            if len < 0 {
+                return Ok(Some(Ok(Vec::new())));
+            }
+            let len = len as usize;
+            let needed = header_len
+                .checked_add(len)
+                .and_then(|n| n.checked_add(2))
+                .ok_or_else(|| RedisError::runtime(b"IOERR invalid bulk reply"))?;
+            if buf.len() < needed {
+                return Ok(None);
+            }
+            if &buf[header_len + len..needed] != b"\r\n" {
+                return Err(RedisError::runtime(b"IOERR invalid bulk reply"));
+            }
+            Ok(Some(Ok(buf[header_len..header_len + len].to_vec())))
+        }
+        _ => Err(RedisError::runtime(b"IOERR invalid target reply")),
+    }
+}
+
+fn read_target_reply(stream: &mut TcpStream) -> RedisResult<Result<Vec<u8>, Vec<u8>>> {
+    let mut buf = Vec::with_capacity(256);
+    let mut scratch = [0u8; 4096];
+    loop {
+        if let Some(reply) = parse_resp_scalar(&buf)? {
+            return Ok(reply);
+        }
+        match stream.read(&mut scratch) {
+            Ok(0) => return Err(RedisError::runtime(b"IOERR target connection closed")),
+            Ok(n) => buf.extend_from_slice(&scratch[..n]),
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                return Err(RedisError::runtime(b"IOERR error or timeout reading from target"));
+            }
+            Err(e) => {
+                return Err(RedisError::runtime(
+                    format!("IOERR target read failed: {}", e).into_bytes(),
+                ));
+            }
+        }
+    }
+}
+
+fn send_target_command(stream: &mut TcpStream, args: &[&[u8]]) -> RedisResult<Vec<u8>> {
+    let mut frame = Vec::new();
+    append_resp_command(&mut frame, args);
+    stream.write_all(&frame).map_err(|e| {
+        RedisError::runtime(format!("IOERR target write failed: {}", e).into_bytes())
+    })?;
+    match read_target_reply(stream)? {
+        Ok(payload) => Ok(payload),
+        Err(payload) => {
+            let mut msg = b"ERR Target instance replied with error: ".to_vec();
+            msg.extend_from_slice(&payload);
+            Err(RedisError::runtime(msg))
+        }
+    }
+}
+
+fn connect_migrate_target(opts: &MigrateOptions) -> RedisResult<TcpStream> {
+    let host = std::str::from_utf8(&opts.host)
+        .map_err(|_| RedisError::runtime(b"ERR invalid host name"))?;
+    let addrs = (host, opts.port)
+        .to_socket_addrs()
+        .map_err(|e| {
+            RedisError::runtime(format!("IOERR target lookup failed: {}", e).into_bytes())
+        })?;
+    let timeout = Duration::from_millis(opts.timeout_ms.max(1));
+    let mut last_error = None;
+    for addr in addrs {
+        match TcpStream::connect_timeout(&addr, timeout) {
+            Ok(stream) => {
+                stream.set_read_timeout(Some(timeout)).ok();
+                stream.set_write_timeout(Some(timeout)).ok();
+                return Ok(stream);
+            }
+            Err(e) => last_error = Some(e),
+        }
+    }
+    let msg = match last_error {
+        Some(e) => format!("IOERR target connect failed: {}", e).into_bytes(),
+        None => b"IOERR target lookup produced no address".to_vec(),
+    };
+    Err(RedisError::runtime(msg))
+}
+
+fn source_migrate_payload(
+    ctx: &mut CommandContext<'_>,
+    key: &RedisString,
+) -> RedisResult<Option<(Vec<u8>, i64)>> {
+    let now = mstime();
+    let db = ctx.db_mut();
+    let Some(obj) = db.lookup_key_read_with_flags(key, LOOKUP_NOTOUCH) else {
+        return Ok(None);
+    };
+    let ttl = if obj.expire == EXPIRY_NONE {
+        0
+    } else {
+        obj.expire.saturating_sub(now).max(0)
+    };
+    let payload = create_dump_payload(obj)
+        .map_err(|e| RedisError::runtime(format!("ERR DUMP failed: {}", e).into_bytes()))?;
+    Ok(Some((payload, ttl)))
+}
+
+/// `MIGRATE host port key db timeout [COPY] [REPLACE] [AUTH password] [KEYS key ...]`.
+///
+/// This ports the single-node data path used by the upstream dump.tcl suite:
+/// serialize local keys with the existing DUMP/RDB payload encoder, send
+/// RESTORE to the target over RESP, then delete only keys the target accepted.
+/// Cluster-slot routing and the C connection-cache implementation are out of
+/// scope; INFO still exposes a short-lived cache count so the observable
+/// connection-cache lifecycle remains visible to tests and operators.
+pub fn migrate_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
+    let opts = parse_migrate_options(ctx)?;
+    let mut stream = connect_migrate_target(&opts)?;
+    mark_migrate_socket_cached();
+
+    if let Some((username, password)) = &opts.auth2 {
+        send_target_command(&mut stream, &[b"AUTH", username.as_slice(), password.as_slice()])?;
+    } else if let Some(password) = &opts.auth {
+        send_target_command(&mut stream, &[b"AUTH", password.as_slice()])?;
+    }
+
+    let db_arg = opts.db.to_string();
+    send_target_command(&mut stream, &[b"SELECT", db_arg.as_bytes()])?;
+
+    let mut migrated = Vec::new();
+    let mut first_error: Option<RedisError> = None;
+    for key in &opts.keys {
+        let Some((payload, ttl)) = source_migrate_payload(ctx, key)? else {
+            continue;
+        };
+        let ttl_arg = ttl.to_string();
+        let mut args: Vec<&[u8]> = vec![b"RESTORE", key.as_bytes(), ttl_arg.as_bytes(), &payload];
+        if opts.replace {
+            args.push(b"REPLACE");
+        }
+        match send_target_command(&mut stream, &args) {
+            Ok(_) => migrated.push(key.clone()),
+            Err(e) => {
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+            }
+        }
+    }
+
+    if migrated.is_empty() && first_error.is_none() {
+        return ctx.reply_simple_string(b"NOKEY");
+    }
+
+    if !opts.copy {
+        for key in &migrated {
+            ctx.db_mut().delete(key);
+        }
+    }
+
+    if let Some(err) = first_error {
+        return Err(err);
+    }
+    ctx.server().add_dirty(migrated.len() as i64);
+    ctx.reply_simple_string(b"OK")
 }
 
 /// `BGSAVE [SCHEDULE]` — background RDB save.

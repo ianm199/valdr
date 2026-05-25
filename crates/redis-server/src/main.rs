@@ -119,6 +119,7 @@ struct CliArgs {
     acl_pubsub_default_allchannels: bool,
     aclfile: Option<String>,
     acl_user_lines: Vec<String>,
+    requirepass: Option<String>,
     command_renames: Vec<(String, String)>,
 }
 
@@ -151,6 +152,7 @@ impl Default for CliArgs {
             acl_pubsub_default_allchannels: false,
             aclfile: None,
             acl_user_lines: Vec::new(),
+            requirepass: None,
             command_renames: Vec::new(),
         }
     }
@@ -263,6 +265,12 @@ fn parse_args(argv: Vec<String>) -> Result<CliArgs, String> {
                     .next()
                     .ok_or_else(|| "--acl-pubsub-default requires a value".to_string())?;
                 out.acl_pubsub_default_allchannels = v.eq_ignore_ascii_case("allchannels");
+            }
+            "--requirepass" => {
+                let v = it
+                    .next()
+                    .ok_or_else(|| "--requirepass requires a value".to_string())?;
+                out.requirepass = (!v.is_empty()).then_some(v);
             }
             "--user" => {
                 let v = it
@@ -409,6 +417,10 @@ fn apply_config_file(args: &mut CliArgs, path: &Path) -> Result<(), String> {
             "aclfile" => {
                 args.aclfile = (!value.is_empty()).then(|| value.to_string());
             }
+            "requirepass" => {
+                let value = unquote_config_token(value);
+                args.requirepass = (!value.is_empty()).then(|| value.to_string());
+            }
             "user" => {
                 if !value.is_empty() {
                     args.acl_user_lines.push(value.to_string());
@@ -546,6 +558,11 @@ fn main() {
     live_config.store_set_max_listpack_value(args.set_max_listpack_value);
     live_config.set_zset_max_listpack_entries(args.zset_max_listpack_entries);
     live_config.set_zset_max_listpack_value(args.zset_max_listpack_value);
+    if let Some(secret) = &args.requirepass {
+        live_config.set_requirepass(Some(redis_types::RedisString::from_bytes(
+            secret.as_bytes(),
+        )));
+    }
     if args.acl_pubsub_default_allchannels {
         redis_core::acl::set_acl_pubsub_default(b"allchannels");
     } else {
@@ -569,6 +586,9 @@ fn main() {
     ) {
         eprintln!("{}", String::from_utf8_lossy(&e));
         std::process::exit(1);
+    }
+    if let Some(secret) = args.requirepass.as_deref() {
+        redis_commands::connection::apply_requirepass_to_acl(Some(secret.as_bytes()));
     }
     let repl_state = Arc::new(redis_core::replication::ReplicationState::new(
         redis_core::replication::generate_runid(),

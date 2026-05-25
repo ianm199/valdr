@@ -658,6 +658,80 @@ Both completed cleanly:
 
 ## Next Overnight Targets
 
+## Dump/MIGRATE Pull
+
+Patch:
+
+- Added `MIGRATE` dispatch in `crates/redis-commands/src/dispatch.rs`.
+- Implemented single-node `MIGRATE` in `crates/redis-commands/src/persist.rs`:
+  parse `COPY`, `REPLACE`, `AUTH`, `AUTH2`, and `KEYS`; serialize source keys
+  through the existing DUMP/RDB payload path; send RESP `AUTH`/`SELECT`/`RESTORE`
+  to the target server; delete only keys the target accepted.
+- Added a short-lived `migrate_cached_sockets` INFO counter so the observable
+  connection-cache lifecycle in upstream `dump.tcl` is represented, while the
+  implementation still opens a fresh safe `TcpStream` per command.
+- Wired `requirepass` config-file parsing and runtime `CONFIG SET requirepass`
+  into the default ACL user so new connections actually enter NOAUTH state.
+
+Why this was selected:
+
+- In the isolated external profile, `unit/dump` was aborting at the first
+  MIGRATE test with `ERR unknown command 'migrate'`.
+- A source-shaped MIGRATE implementation unlocks a whole file and reuses the
+  RDB/DUMP machinery already proven by the persistence lane.
+- The AUTH pieces are shared with the larger `unit/auth` lane, but the raw
+  unauthenticated output-buffer tests still need separate networking work.
+
+Verification:
+
+```bash
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-dump-final \
+  --isolated-tests-copy \
+  --profile single-node-external \
+  --skip-build \
+  --timeout-s 240 \
+  --baseport 53311 \
+  --portcount 5000 \
+  --files unit/dump
+```
+
+Evidence:
+
+- `harness/oracle/results/tcl-survey/20260525T081725037480Z/unit__dump.json`
+
+Result:
+
+```text
+unit/dump: no-summary -> 27 pass / 0 fail / 27 counted
+```
+
+Adjacent evidence:
+
+- `unit/acl` remains green on this branch:
+  `harness/oracle/results/tcl-survey/20260525T081327964055Z/unit__acl.json`
+  (`114/0`).
+- `unit/auth` moved past the early visible AUTH failures but remains
+  timeout/no-summary at the raw unauthenticated-client/output-buffer section:
+  `harness/oracle/results/tcl-survey/20260525T081745198578Z/unit__auth.json`.
+- `unit/acl-v2` is not a valid regression signal in this worktree until the
+  separate ACL selector commit (`8af467d` from `redis-rs-port-acl-unlock`) is
+  merged or cherry-picked; this branch predates that selector parser work.
+
+Agent-1 counted-coverage movement from this pull:
+
+```text
+unit/dump: +27 counted, +27 passing
+```
+
+Next interpretation: `unit/auth` is no longer blocked by basic `requirepass`
+plumbing, but it is still dark because the harness exercises raw unauthenticated
+client I/O limits. Treat that as a networking/output-buffer packet, not a simple
+AUTH command packet.
+
+## Next Overnight Targets
+
 1. ACL/auth lane: `unit/acl` (114), `unit/acl-v2` (72), and `unit/auth` (13).
    This is the biggest remaining Agent-1-compatible counted-coverage lever, but
    it is claimed by `redis-rs-port-acl-unlock`; coordinate before editing.

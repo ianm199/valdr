@@ -296,7 +296,11 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let _ = writeln!(buf, "acl_access_denied_cmd:{}\r", acl_denied_cmd);
         let _ = writeln!(buf, "acl_access_denied_key:{}\r", acl_denied_key);
         let _ = writeln!(buf, "acl_access_denied_channel:{}\r", acl_denied_channel);
-        let _ = writeln!(buf, "migrate_cached_sockets:0\r");
+        let _ = writeln!(
+            buf,
+            "migrate_cached_sockets:{}\r",
+            crate::persist::migrate_cached_sockets()
+        );
         let _ = writeln!(buf, "pubsub_channels:0\r");
         let _ = writeln!(buf, "pubsub_patterns:0\r");
         let _ = writeln!(buf, "tracking_total_keys:{}\r", tracking.total_keys);

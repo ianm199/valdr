@@ -682,8 +682,10 @@ fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
         b"requirepass" => {
             if value.is_empty() {
                 cfg.set_requirepass(None);
+                apply_requirepass_to_acl(None);
             } else {
                 cfg.set_requirepass(Some(RedisString::from_bytes(value)));
+                apply_requirepass_to_acl(Some(value));
             }
         }
         b"notify-keyspace-events" => {
@@ -3979,7 +3981,7 @@ fn nonnegative_usize(n: i64) -> Option<usize> {
 pub fn auth_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     let argc = ctx.arg_count();
     if argc < 2 || argc > 3 {
-        return Err(RedisError::wrong_number_of_args(b"auth"));
+        return Err(RedisError::syntax(b"syntax error"));
     }
     let (username, password) = if argc == 2 {
         let pass = ctx.arg_owned(1)?;
@@ -3993,6 +3995,14 @@ pub fn auth_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         Some(u) => u.as_bytes(),
         None => b"default",
     };
+    if username.is_none()
+        && default_user_has_no_password()
+        && try_password_any_user(password.as_bytes()).is_none()
+    {
+        return Err(RedisError::runtime(
+            b"ERR AUTH <password> called without any password configured for the default user. Are you sure your configuration is correct?",
+        ));
+    }
     match authenticate_user(lookup_name, password.as_bytes()) {
         Some(uname) => {
             ctx.client_mut().authenticated_user = Some(uname);
@@ -4013,6 +4023,54 @@ pub fn auth_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             ctx.reply_error(b"WRONGPASS invalid username-password pair or user is disabled.")
         }
     }
+}
+
+pub fn apply_requirepass_to_acl(secret: Option<&[u8]>) {
+    let acl = global_acl_state();
+    let mut guard = match acl.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let default_key = RedisString::from_static(b"default");
+    if let Some(secret) = secret.filter(|s| !s.is_empty()) {
+        let user = guard
+            .users
+            .entry(default_key.clone())
+            .or_insert_with(AclUser::new_default);
+        user.flags.enabled = true;
+        user.flags.nopass = false;
+        user.flags.allcommands = true;
+        user.flags.allkeys = true;
+        user.flags.allchannels = true;
+        user.flags.alldbs = true;
+        user.allowed_categories = acl_category::ALL;
+        user.denied_categories = 0;
+        user.allowed_commands.clear();
+        user.denied_commands.clear();
+        user.command_rules.clear();
+        user.key_patterns = vec![RedisString::from_static(b"*")];
+        user.channel_patterns = vec![RedisString::from_static(b"*")];
+        user.allowed_dbs.clear();
+        user.passwords = vec![sha256_hash(secret)];
+    } else if let Some(user) = guard.users.get_mut(&default_key) {
+        *user = AclUser::new_default();
+    } else {
+        guard.users.insert(default_key, AclUser::new_default());
+    }
+}
+
+fn default_user_has_no_password() -> bool {
+    let acl = global_acl_state();
+    let guard = match acl.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let default_key = RedisString::from_static(b"default");
+    guard
+        .users
+        .get(&default_key)
+        .map(|user| user.flags.enabled && user.flags.nopass && user.passwords.is_empty())
+        .unwrap_or(true)
 }
 
 fn record_auth_failure_acl_log(ctx: &CommandContext<'_>, username: &[u8], command_name: &[u8]) {
@@ -4079,7 +4137,7 @@ fn try_password_any_user(cleartext: &[u8]) -> Option<RedisString> {
         Err(p) => p.into_inner(),
     };
     for user in guard.users.values() {
-        if user.flags.enabled && user.check_password(cleartext) {
+        if user.flags.enabled && !user.flags.nopass && user.check_password(cleartext) {
             return Some(user.name.clone());
         }
     }

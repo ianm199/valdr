@@ -2402,6 +2402,10 @@ pub static HANDLERS: &[DispatchEntry] = &[
         handler: crate::persist::restore_asking_command,
     },
     DispatchEntry {
+        name: b"MIGRATE",
+        handler: crate::persist::migrate_command,
+    },
+    DispatchEntry {
         name: b"SAVE",
         handler: crate::persist::save_command,
     },
