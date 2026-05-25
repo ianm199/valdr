@@ -156,7 +156,73 @@ unit/sort:            +54 counted (54 pass / 0 fail)
 Total visible gain:  +103 counted tests, from ~2154 to ~2257 counted
 ```
 
-## Next Overnight Targets
+## Pubsub Pull: Keyspace Notification Coverage
+
+Patch:
+
+- Added missing stream keyspace notifications for consumer-group commands:
+  `xgroup-create`, `xgroup-setid`, `xgroup-destroy`,
+  `xgroup-createconsumer`, `xgroup-delconsumer`, and `xsetid`.
+- Added `xgroup-createconsumer` notifications for implicit consumer creation in
+  `XREADGROUP`, `XCLAIM`, and `XAUTOCLAIM`.
+- Fixed immediate-expire semantics so `EXPIRE key -1` publishes
+  `expired` with `NOTIFY_EXPIRED`, not generic `del`.
+- Made runtime `CONFIG SET maxmemory`/policy/LFU knobs drive the existing
+  eviction helper and publish `evicted` notifications for keys it removes.
+- Added `NOTIFY_NEW` emission for `SET` only when the key did not already
+  exist.
+
+Why this was selected:
+
+- `unit/pubsub` was a timeout/no-summary file in the Agent-1 scout.
+- Verbose TCL showed a clean chain of missing notifications rather than a broad
+  pub/sub registry failure: stream group events, immediate-expire, evicted, then
+  new-key events.
+- The edits are user-visible compatibility hooks and also feed tracking/
+  maxmemory work. `unit/maxmemory` remains a separate client-eviction frontier.
+
+Verification:
+
+```bash
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-pubsub-notification-unlock-v1 \
+  --profile single-node-external \
+  --skip-build \
+  --timeout-s 120 \
+  --baseport 43111 \
+  --portcount 4000 \
+  --files unit/pubsub
+
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-pubsub-notification-noregression-v1 \
+  --profile single-node-external \
+  --skip-build \
+  --timeout-s 180 \
+  --baseport 44111 \
+  --portcount 4000 \
+  --files unit/type/string,unit/expire,unit/type/stream,unit/maxmemory
+```
+
+Evidence:
+
+- `harness/oracle/results/tcl-survey/20260525T061012Z/unit__pubsub.json`
+- `harness/oracle/results/tcl-survey/20260525T061026Z/`
+
+Result:
+
+```text
+unit/pubsub:      timeout/no-summary -> 35 pass / 0 fail / 35 counted
+unit/type/string: no regression, 104 pass / 0 fail
+unit/expire:      no regression, 65 pass / 0 fail
+unit/type/stream: no regression, 71 pass / 2 fail
+unit/maxmemory:   still timeout/no-summary at client eviction
+```
+
+Interpretation: this is a real hidden-to-green file flip, but it proves the
+packet-size concern too: `unit/pubsub` only adds +35 counted. The next overnight
+agent should use a broader runtime/client visibility goal (`tracking`, `wait`,
+`pause`, `client-eviction`, `maxmemory`) rather than another one-file prompt.
 
 ## Policy Scout: `external:skip` Is Hiding Single-Node Files
 
@@ -424,25 +490,21 @@ unit/sort:            +54 counted
 unit/pubsubshard:     +11 counted
 unit/networking:       +5 counted
 unit/obuf-limits:     +13 counted
-Total visible gain:  +132 counted, from ~2154 to ~2286 counted
+unit/pubsub:          +35 counted
+Total visible gain:  +167 counted, from ~2154 to ~2321 counted
 ```
 
 ## Next Overnight Targets
 
-1. Survey-profile change: add a `single-node-external` TCL profile that allows
-   `external:skip` while denying repl/debug/cluster. Immediate expected visible
-   gain: `unit/pubsubshard` 11/0, plus better blocker maps for auth/networking/
-   obuf/maxmemory/shutdown/wait.
-2. `unit/pubsub`: 34 source tests, currently timeout. First blocker is stream
-   keyspace notification ordering (`xgroup-create` arrives where upstream
-   expects `xadd`). This is likely `notify.rs` / stream command notification
-   ordering, but avoid active stream blocking files unless coordinated.
-3. `unit/auth`: 13 source tests. Under relaxed single-node policy, first
+1. Runtime/client visibility lane: `unit/tracking` (61), `unit/wait` (37),
+   `unit/pause` (23), `unit/maxmemory` (13), `unit/client-eviction` (15), and
+   the remaining output-buffer/client-close edge. This is the right larger
+   packet shape: shared client lifecycle, tracking invalidation, blocking wake,
+   and maxmemory client eviction semantics.
+2. `unit/auth`: 13 source tests. Under relaxed single-node policy, first
    blockers are startup `requirepass`/AUTH semantics plus output-buffer limits.
    Coordinate with the active ACL worktree before editing auth/ACL code.
-4. `unit/pause`: 20 counted tests with 15 failures. This is a product-semantic
-   packet, not illumination; useful after the bigger dark files are counted.
-5. `unit/introspection-2` cleanup: 3 known failures around object idle-time
+3. `unit/introspection-2` cleanup: 3 known failures around object idle-time
    mutation. Good small follow-up if no larger dark file is safe to touch.
 
 ## Operating Rules For Continuation

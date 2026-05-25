@@ -50,7 +50,7 @@
 
 use redis_core::command_context::CommandContext;
 use redis_core::db::LOOKUP_NONE;
-use redis_core::notify::{NOTIFY_GENERIC, NOTIFY_STRING};
+use redis_core::notify::{NOTIFY_GENERIC, NOTIFY_NEW, NOTIFY_STRING};
 use redis_core::object::{ObjectKind, RedisObject};
 use redis_protocol::frame::RespFrame;
 use redis_types::{RedisError, RedisString};
@@ -426,11 +426,15 @@ pub fn set_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     };
     let obj = RedisObject::new_string_try_encoded(value.as_bytes());
     let notify = ctx.keyspace_notifications_enabled(NOTIFY_STRING);
+    let notify_new = !key_exists && ctx.keyspace_notifications_enabled(NOTIFY_NEW);
     match expire_at_ms {
         Some(abs_ms) => {
             ctx.db_mut().set_key(key.clone(), obj, setkey_flags);
             if notify {
                 ctx.notify_keyspace_event(NOTIFY_STRING, b"set", &key);
+            }
+            if notify_new {
+                ctx.notify_keyspace_event(NOTIFY_NEW, b"new", &key);
             }
             let now_ms: i64 = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -445,6 +449,13 @@ pub fn set_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         None if notify => {
             ctx.db_mut().set_key(key.clone(), obj, setkey_flags);
             ctx.notify_keyspace_event(NOTIFY_STRING, b"set", &key);
+            if notify_new {
+                ctx.notify_keyspace_event(NOTIFY_NEW, b"new", &key);
+            }
+        }
+        None if notify_new => {
+            ctx.db_mut().set_key(key.clone(), obj, setkey_flags);
+            ctx.notify_keyspace_event(NOTIFY_NEW, b"new", &key);
         }
         None => {
             ctx.db_mut().set_key(key, obj, setkey_flags);

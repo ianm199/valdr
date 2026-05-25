@@ -21,7 +21,7 @@ use redis_types::{RedisError, RedisString};
 use crate::command_context::CommandContext;
 use crate::db::{RedisDb, LOOKUP_NOTOUCH};
 use crate::metrics::{server_metrics, ServerMetrics};
-use crate::notify::NOTIFY_GENERIC;
+use crate::notify::{NOTIFY_EXPIRED, NOTIFY_GENERIC};
 use crate::object::RedisObject;
 use crate::server::RedisServer;
 
@@ -887,7 +887,7 @@ pub fn expire_generic_command(
         server_metrics()
             .expired_keys
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", &key);
+        ctx.notify_keyspace_event(NOTIFY_EXPIRED, b"expired", &key);
         return ctx.reply_integer(1);
     }
 

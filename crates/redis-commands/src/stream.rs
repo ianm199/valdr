@@ -1730,6 +1730,7 @@ fn xgroup_create(ctx: &mut CommandContext) -> RedisResult<()> {
         group.entries_read = entries_read;
     }
     stream.groups.insert(group_name, group);
+    ctx.notify_keyspace_event(NOTIFY_STREAM, b"xgroup-create", &key);
     ctx.reply_simple_string(b"OK")
 }
 
@@ -1756,6 +1757,7 @@ fn xgroup_setid(ctx: &mut CommandContext) -> RedisResult<()> {
     if had_entries_read {
         group.entries_read = entries_read;
     }
+    ctx.notify_keyspace_event(NOTIFY_STREAM, b"xgroup-setid", &key);
     ctx.reply_simple_string(b"OK")
 }
 
@@ -1771,6 +1773,7 @@ fn xgroup_destroy(ctx: &mut CommandContext) -> RedisResult<()> {
     };
     let removed = stream.groups.remove(&group_name).is_some();
     if removed {
+        ctx.notify_keyspace_event(NOTIFY_STREAM, b"xgroup-destroy", &key);
         wake_xreadgroup_with_nogroup(&key);
     }
     ctx.reply_integer(if removed { 1 } else { 0 })
@@ -1793,6 +1796,9 @@ fn xgroup_createconsumer(ctx: &mut CommandContext) -> RedisResult<()> {
         None => return Err(no_such_key_or_group_short(key.as_bytes(), group_name.as_bytes())),
     };
     let created = touch_or_create_consumer(group, &consumer_name, now);
+    if created {
+        ctx.notify_keyspace_event(NOTIFY_STREAM, b"xgroup-createconsumer", &key);
+    }
     ctx.reply_integer(if created { 1 } else { 0 })
 }
 
@@ -1819,6 +1825,7 @@ fn xgroup_delconsumer(ctx: &mut CommandContext) -> RedisResult<()> {
     for entry in &consumer.pel {
         group.pel_remove(&entry.entry_id);
     }
+    ctx.notify_keyspace_event(NOTIFY_STREAM, b"xgroup-delconsumer", &key);
     ctx.reply_integer(pending)
 }
 
@@ -1918,6 +1925,7 @@ pub fn xreadgroup_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
     let now = now_ms_clamped();
     let mut results: Vec<(RedisString, Vec<(StreamEntry, bool)>)> = Vec::with_capacity(n_keys);
+    let mut created_consumers: Vec<RedisString> = Vec::new();
     for (key, start_id) in keys.iter().zip(ids.iter()) {
         let key_bytes = key.as_bytes().to_vec();
         let stream = match stream_for_write(ctx.db_mut(), key)? {
@@ -1956,7 +1964,9 @@ pub fn xreadgroup_command(ctx: &mut CommandContext) -> RedisResult<()> {
                         .groups
                         .get_mut(&group_name)
                         .expect("group existence checked above");
-                    touch_or_create_consumer(group, &consumer_name, now);
+                    if touch_or_create_consumer(group, &consumer_name, now) {
+                        created_consumers.push(key.clone());
+                    }
                 }
                 if max == 0 {
                     continue;
@@ -2010,7 +2020,9 @@ pub fn xreadgroup_command(ctx: &mut CommandContext) -> RedisResult<()> {
                     Some(g) => g,
                     None => continue,
                 };
-                touch_or_create_consumer(group, &consumer_name, now);
+                if touch_or_create_consumer(group, &consumer_name, now) {
+                    created_consumers.push(key.clone());
+                }
                 let pending_ids: Vec<StreamId> = match group.consumers.get(&consumer_name) {
                     Some(c) => {
                         let start = c.pel_lower_bound(from_id);
@@ -2065,6 +2077,10 @@ pub fn xreadgroup_command(ctx: &mut CommandContext) -> RedisResult<()> {
         results.iter().filter(|(_, v)| !v.is_empty()).collect();
 
     let all_new = ids.iter().all(|id| matches!(id, GroupReadStartId::New));
+
+    for key in &created_consumers {
+        ctx.notify_keyspace_event(NOTIFY_STREAM, b"xgroup-createconsumer", key);
+    }
 
     if non_empty.is_empty() {
         if let Some(ms) = block_ms {
@@ -2477,7 +2493,7 @@ pub fn xclaim_command(ctx: &mut CommandContext) -> RedisResult<()> {
         .groups
         .get_mut(&group_name)
         .expect("group existence checked above");
-    touch_or_create_consumer(group, &consumer_name, now);
+    let consumer_created = touch_or_create_consumer(group, &consumer_name, now);
     if let Some(c) = group.consumers.get_mut(&consumer_name) {
         c.active_time_ms = now;
     }
@@ -2524,6 +2540,9 @@ pub fn xclaim_command(ctx: &mut CommandContext) -> RedisResult<()> {
         claimed.push((*id, stream_entry, delivery_count));
     }
 
+    if consumer_created {
+        ctx.notify_keyspace_event(NOTIFY_STREAM, b"xgroup-createconsumer", &key);
+    }
     ctx.reply_array_header(claimed.len())?;
     for (id, entry_opt, _dc) in &claimed {
         if opts.justid {
@@ -2616,7 +2635,7 @@ pub fn xautoclaim_command(ctx: &mut CommandContext) -> RedisResult<()> {
         .groups
         .get_mut(&group_name)
         .expect("group existence checked above");
-    touch_or_create_consumer(group, &consumer_name, now);
+    let consumer_created = touch_or_create_consumer(group, &consumer_name, now);
     if let Some(c) = group.consumers.get_mut(&consumer_name) {
         c.active_time_ms = now;
     }
@@ -2671,6 +2690,9 @@ pub fn xautoclaim_command(ctx: &mut CommandContext) -> RedisResult<()> {
         next_cursor = StreamId::ZERO;
     }
 
+    if consumer_created {
+        ctx.notify_keyspace_event(NOTIFY_STREAM, b"xgroup-createconsumer", &key);
+    }
     ctx.reply_array_header(3usize)?;
     ctx.reply_bulk_string(RedisString::from_vec(next_cursor.to_display_bytes()))?;
     ctx.reply_array_header(claimed.len())?;
@@ -2781,6 +2803,7 @@ pub fn xsetid_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if let Some(m) = max_deleted {
         stream.max_deleted_id = m;
     }
+    ctx.notify_keyspace_event(NOTIFY_STREAM, b"xsetid", &key);
     ctx.reply_simple_string(b"OK")
 }
 

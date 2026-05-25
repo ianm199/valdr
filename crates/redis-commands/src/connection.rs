@@ -21,12 +21,13 @@ use redis_core::acl::{
 };
 use redis_core::blocked_keys::blocked_keys_index;
 use redis_core::client_info::client_info_registry;
+use redis_core::eviction::{try_evict_to_fit, EvictionOutcome};
 use redis_core::live_config::{LiveConfig, MaxmemoryPolicyCode};
 use redis_core::metrics::{record_acl_access_denied_auth, server_metrics};
 use redis_core::networking::{
     client_matches_ip_filter, validate_client_capa_filter, validate_client_flag_filter,
 };
-use redis_core::notify::keyspace_events_string_to_flags;
+use redis_core::notify::{keyspace_events_string_to_flags, NOTIFY_EVICTED};
 use redis_core::{CommandContext, PersistenceStatus, RedisDb};
 use redis_protocol::frame::RespFrame;
 use redis_types::{RedisError, RedisResult, RedisString};
@@ -1005,8 +1006,40 @@ fn apply_config_set_for_context(
             );
         }
     }
+    let enforce_maxmemory = ascii_eq_ignore_case(key, b"maxmemory")
+        || ascii_eq_ignore_case(key, b"maxmemory-policy")
+        || ascii_eq_ignore_case(key, b"lfu-log-factor")
+        || ascii_eq_ignore_case(key, b"lfu-decay-time");
     apply_config_set(cfg, key, value);
+    if enforce_maxmemory {
+        enforce_maxmemory_after_config_set(ctx);
+    }
     Ok(())
+}
+
+fn enforce_maxmemory_after_config_set(ctx: &mut CommandContext<'_>) {
+    let maxmemory = ctx.live_config().maxmemory();
+    if maxmemory == 0 {
+        return;
+    }
+
+    let policy = ctx.live_config().maxmemory_policy();
+    let lfu_log_factor = ctx.live_config().lfu_log_factor();
+    let lfu_decay_time = ctx.live_config().lfu_decay_time();
+    let outcome = try_evict_to_fit(
+        ctx.db_mut(),
+        maxmemory,
+        policy,
+        lfu_log_factor,
+        lfu_decay_time,
+    );
+    let evicted = match outcome {
+        EvictionOutcome::Evicted(keys) | EvictionOutcome::StillOver(keys) => keys,
+        EvictionOutcome::Sufficient => Vec::new(),
+    };
+    for key in evicted {
+        ctx.notify_keyspace_event(NOTIFY_EVICTED, b"evicted", &key);
+    }
 }
 
 fn apply_port_config_set(value: &[u8]) -> RedisResult<()> {
