@@ -1035,7 +1035,8 @@ fn create_cjson_table(lua: &Lua, cfg: Rc<RefCell<CjsonConfig>>) -> mlua::Result<
 
 fn install_cjson(lua: &Lua) -> mlua::Result<()> {
     let cjson = create_cjson_table(lua, Rc::new(RefCell::new(CjsonConfig::default())))?;
-    lua.globals().set("cjson", cjson)
+    lua.globals()
+        .set("cjson", readonly_table_proxy(lua, cjson)?)
 }
 
 const CMSGPACK_MAX_NESTING: usize = 16;
@@ -1620,6 +1621,52 @@ fn readonly_table_proxy(lua: &Lua, table: LuaTable) -> mlua::Result<LuaTable> {
     let proxy = lua.create_table()?;
     let metatable = lua.create_table()?;
     metatable.raw_set("__index", table)?;
+    metatable.raw_set(
+        "__newindex",
+        lua.create_function(|_, _: MultiValue| -> mlua::Result<()> {
+            Err(LuaError::RuntimeError(
+                "Attempt to modify a readonly table".to_string(),
+            ))
+        })?,
+    )?;
+    metatable.raw_set("__metatable", false)?;
+    proxy.set_metatable(Some(metatable));
+    Ok(proxy)
+}
+
+fn lua_key_name(key: &LuaValue) -> String {
+    match key {
+        LuaValue::String(s) => String::from_utf8_lossy(&s.as_bytes()).into_owned(),
+        LuaValue::Integer(n) => n.to_string(),
+        LuaValue::Number(n) => n.to_string(),
+        LuaValue::Boolean(v) => v.to_string(),
+        LuaValue::Nil => "nil".to_string(),
+        _ => key.type_name().to_string(),
+    }
+}
+
+fn readonly_table_proxy_with_missing_global_errors(
+    lua: &Lua,
+    table: LuaTable,
+) -> mlua::Result<LuaTable> {
+    let proxy = lua.create_table()?;
+    let metatable = lua.create_table()?;
+    let lookup = table.clone();
+    metatable.raw_set(
+        "__index",
+        lua.create_function(
+            move |_, (_table, key): (LuaValue, LuaValue)| -> mlua::Result<LuaValue> {
+                let value: LuaValue = lookup.raw_get(key.clone())?;
+                if matches!(value, LuaValue::Nil) {
+                    return Err(LuaError::RuntimeError(format!(
+                        "Script attempted to access nonexistent global variable '{}'",
+                        lua_key_name(&key)
+                    )));
+                }
+                Ok(value)
+            },
+        )?,
+    )?;
     metatable.raw_set(
         "__newindex",
         lua.create_function(|_, _: MultiValue| -> mlua::Result<()> {
@@ -2629,10 +2676,14 @@ fn compile_function_library(library_body: &[u8]) -> RedisResult<Vec<FunctionDefi
     })?;
     install_bit(&lua)
         .map_err(|e| RedisError::runtime(format!("ERR Lua bit install: {}", e).into_bytes()))?;
+    lua.globals()
+        .set("math", LuaValue::Nil)
+        .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
 
     let registered: RefCell<Vec<FunctionDefinition>> = RefCell::new(Vec::new());
     let load_result: Result<(), LuaError> = lua.scope(|scope| {
         let api = lua.create_table()?;
+        install_redis_api_constants(&api)?;
         let register_fn = {
             let registered = &registered;
             scope.create_function_mut(move |_lua, args: MultiValue| -> mlua::Result<()> {
@@ -2651,6 +2702,7 @@ fn compile_function_library(library_body: &[u8]) -> RedisResult<Vec<FunctionDefi
             })?
         };
         api.raw_set("register_function", register_fn)?;
+        let api = readonly_table_proxy_with_missing_global_errors(&lua, api)?;
         lua.globals().set("redis", api.clone())?;
         lua.globals().set("server", api)?;
         install_global_protection(&lua)?;
@@ -3129,6 +3181,7 @@ fn run_loaded_function(
     let ctx_cell: RefCell<&mut CommandContext<'_>> = RefCell::new(ctx);
     let script_dirty = Rc::new(Cell::new(false));
     let registrations: RefCell<Vec<RuntimeFunctionRegistration>> = RefCell::new(Vec::new());
+    let load_phase = Rc::new(Cell::new(true));
 
     let script_result: Result<LuaValue, LuaError> = lua.scope(|scope| {
         let redis_tbl = lua.create_table()?;
@@ -3238,7 +3291,14 @@ fn run_loaded_function(
 
         let register_fn = {
             let registrations = &registrations;
+            let load_phase = Rc::clone(&load_phase);
             scope.create_function_mut(move |lua_inner, args: MultiValue| -> mlua::Result<()> {
+                if !load_phase.get() {
+                    return Err(LuaError::RuntimeError(
+                        "server.register_function can only be called on FUNCTION LOAD command"
+                            .to_string(),
+                    ));
+                }
                 let registration = parse_runtime_register_function_args(lua_inner, args)?;
                 if registrations
                     .borrow()
@@ -3272,11 +3332,19 @@ fn run_loaded_function(
             Ok(())
         })?;
         redis_tbl.raw_set("setresp", setresp_fn)?;
-        redis_tbl.raw_set("register_function", register_fn)?;
-        lua.globals().set("redis", redis_tbl.clone())?;
-        lua.globals().set("server", redis_tbl)?;
+        let load_api = lua.create_table()?;
+        install_redis_api_constants(&load_api)?;
+        load_api.raw_set("register_function", register_fn)?;
+        let load_api = readonly_table_proxy_with_missing_global_errors(&lua, load_api)?;
+        lua.globals().set("redis", load_api.clone())?;
+        lua.globals().set("server", load_api)?;
         install_global_protection(&lua)?;
 
+        lua.load(library_body).set_name("function_library").exec()?;
+        load_phase.set(false);
+
+        lua.globals().set("redis", redis_tbl.clone())?;
+        lua.globals().set("server", redis_tbl.clone())?;
         lua.load(
             "local raw = redis.__raw_call\n\
              redis.call = function(...)\n\
@@ -3291,8 +3359,9 @@ fn run_loaded_function(
         )
         .set_name("redis_call_shim")
         .exec()?;
-
-        lua.load(library_body).set_name("function_library").exec()?;
+        let redis_api = readonly_table_proxy(&lua, redis_tbl)?;
+        lua.globals().set("redis", redis_api.clone())?;
+        lua.globals().set("server", redis_api)?;
 
         let callback: LuaFunction = {
             let registrations = registrations.borrow();
@@ -3686,8 +3755,7 @@ fn run_script(
         })?;
         redis_tbl.raw_set("setresp", setresp_fn)?;
         lua.globals().set("redis", redis_tbl.clone())?;
-        lua.globals().set("server", redis_tbl)?;
-        install_global_protection(&lua)?;
+        lua.globals().set("server", redis_tbl.clone())?;
 
         lua.load(
             "local raw = redis.__raw_call\n\
@@ -3703,6 +3771,10 @@ fn run_script(
         )
         .set_name("redis_call_shim")
         .exec()?;
+        let redis_api = readonly_table_proxy(&lua, redis_tbl)?;
+        lua.globals().set("redis", redis_api.clone())?;
+        lua.globals().set("server", redis_api)?;
+        install_global_protection(&lua)?;
 
         lua.load(script_body)
             .set_name("user_script")

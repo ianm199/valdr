@@ -51,6 +51,7 @@ DENY_TAG_PROFILES = {
     # illuminate real behavior.
     "single-node-external": [
         "needs:repl",
+        "repl",
         "needs:debug",
         "cluster",
         "needs:cluster",
