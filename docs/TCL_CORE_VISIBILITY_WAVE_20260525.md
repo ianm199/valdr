@@ -730,18 +730,117 @@ plumbing, but it is still dark because the harness exercises raw unauthenticated
 client I/O limits. Treat that as a networking/output-buffer packet, not a simple
 AUTH command packet.
 
+## Auth Pull: Pre-AUTH Client Limits
+
+Patch:
+
+- Added live parser caps for unauthenticated clients before the RESP parser
+  accepts a command: too many multibulk arguments now returns
+  `unauthenticated multibulk length`, and oversized first bulk payloads return
+  `unauthenticated bulk length`.
+- Added `DEBUG client-enforce-reply-list 0|1`, scoped to the test-visible
+  pre-AUTH output-buffer behavior.
+- Added a per-client `ever_authenticated` bit. This mirrors C Redis' rule that
+  a client that authenticated once is exempt from the tiny pre-AUTH
+  output-buffer close path even after `RESET` makes it unauthenticated again.
+- Applied the same checks to both the current `RuntimeOwner` loop and the older
+  threaded/TLS path so the behavior is not runtime-loop-specific.
+
+Why this was selected:
+
+- `unit/auth` had already moved past the basic `requirepass` failures from the
+  `unit/dump` MIGRATE work, but was still timing out in raw unauthenticated
+  client I/O tests.
+- The fix is shared infrastructure for `obuf-limits` and maxmemory
+  client-eviction behavior, so it is more valuable than the file's small source
+  denominator suggests.
+
+Verification:
+
+```bash
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-auth-unauth-limits-v1 \
+  --isolated-tests-copy \
+  --profile single-node-external \
+  --skip-build \
+  --timeout-s 180 \
+  --baseport 53511 \
+  --portcount 5000 \
+  --files unit/auth
+
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-auth-unauth-limits-noregression-v1 \
+  --isolated-tests-copy \
+  --profile single-node-external \
+  --skip-build \
+  --timeout-s 240 \
+  --baseport 53611 \
+  --portcount 5000 \
+  --files unit/auth,unit/dump,unit/acl,unit/obuf-limits,unit/pubsub
+```
+
+Evidence:
+
+- `harness/oracle/results/tcl-survey/20260525T082946113047Z/unit__auth.json`
+- `harness/oracle/results/tcl-survey/20260525T083027790354Z/`
+- `harness/oracle/results/tcl-survey/20260525T083305823864Z/unit__auth.json`
+- `harness/oracle/results/tcl-survey/20260525T083525437933Z/unit__auth.json`
+
+Result:
+
+```text
+unit/auth:        timeout/no-summary -> 14 pass / 2 fail / 16 counted
+unit/dump:        no regression, 27 pass / 0 fail
+unit/acl:         no regression, 114 pass / 0 fail
+unit/obuf-limits: no regression, unchanged counted-red, 12 pass / 1 fail
+unit/pubsub:      no regression, 35 pass / 0 fail
+```
+
+Remaining `unit/auth` failures:
+
+- `primaryauth test with binary password dualchannel = yes`
+- `primaryauth test with binary password dualchannel = no`
+
+Both are replication-primaryauth tests. The current branch intentionally parks
+the replica dialer after the RuntimeOwner-owned DB flip, so these should be
+handled in the replication lane rather than faked in the core visibility wave.
+
+Agent-1 counted-coverage movement from this pull:
+
+```text
+unit/auth: +16 counted, +14 passing
+```
+
+Current Agent-1 visible counted movement:
+
+```text
+unit/introspection-2: +49 counted
+unit/sort:            +54 counted
+unit/pubsubshard:     +11 counted
+unit/networking:       +5 counted
+unit/obuf-limits:     +13 counted
+unit/pubsub:          +35 counted
+unit/client-eviction: +14 counted
+unit/dump:            +27 counted
+unit/auth:            +16 counted
+Total visible gain:  +224 counted, from ~2154 to ~2378 counted
+```
+
 ## Next Overnight Targets
 
-1. ACL/auth lane: `unit/acl` (114), `unit/acl-v2` (72), and `unit/auth` (13).
-   This is the biggest remaining Agent-1-compatible counted-coverage lever, but
-   it is claimed by `redis-rs-port-acl-unlock`; coordinate before editing.
+1. ACL selector lane: `unit/acl-v2` (72 source tests) is the biggest remaining
+   Agent-1-compatible counted-coverage lever, but it is claimed by
+   `redis-rs-port-acl-unlock` and depends on that branch's selector parser.
+   Coordinate before editing.
 2. Runtime/client cleanup lane: `unit/pause`, `unit/obuf-limits`, and
    `unit/networking` are already counted. They improve quality/pass count, not
    counted visibility. They are good follow-ups once the hidden files are
    exhausted.
-3. Replication-adjacent runtime lane: `unit/wait` and `unit/maxmemory` are still
-   dark, but current blockers are replica/WAITAOF and replica-buffer accounting.
-   Treat these as architecture packets, not small admin fixes.
+3. Replication-adjacent runtime lane: `unit/wait`, `unit/maxmemory`, and
+   `unit/auth`'s remaining primaryauth failures are replication/WAITAOF and
+   replica-buffer/accounting work. Treat these as architecture packets, not
+   small admin fixes.
 4. Latency lane: `unit/latency-monitor` can likely become counted if the
    expire-cycle setup is made fast enough or latency expire-cycle semantics are
    implemented without a pathological 1M-command Lua loop. Lower denominator

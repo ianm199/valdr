@@ -1564,6 +1564,25 @@ pub fn debug_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ascii_eq_ignore_case(sub.as_bytes(), b"SET-ACTIVE-EXPIRE") {
         return ctx.reply_simple_string(b"OK");
     }
+    if ascii_eq_ignore_case(sub.as_bytes(), b"CLIENT-ENFORCE-REPLY-LIST") {
+        if ctx.arg_count() != 3 {
+            return Err(RedisError::wrong_number_of_args(
+                b"debug client-enforce-reply-list",
+            ));
+        }
+        let value = ctx.arg_owned(2usize)?;
+        let enabled = match value.as_bytes() {
+            b"0" => false,
+            b"1" => true,
+            _ => {
+                return Err(RedisError::runtime(
+                    b"ERR value is not an integer or out of range",
+                ))
+            }
+        };
+        redis_core::client::set_debug_client_enforce_reply_list(enabled);
+        return ctx.reply_simple_string(b"OK");
+    }
     if ascii_eq_ignore_case(sub.as_bytes(), b"DIGEST-VALUE") {
         if ctx.arg_count() < 3 {
             return Err(RedisError::wrong_number_of_args(b"debug digest-value"));
@@ -1818,7 +1837,7 @@ pub fn hello_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if let Some((hello_user, hello_pass)) = pending_auth.as_ref() {
         match authenticate_user(hello_user.as_bytes(), hello_pass.as_bytes()) {
             Some(uname) => {
-                ctx.client_mut().authenticated_user = Some(uname);
+                ctx.client_mut().set_authenticated_user(Some(uname));
             }
             None => {
                 record_auth_failure_acl_log(ctx, hello_user.as_bytes(), b"HELLO");
@@ -4005,7 +4024,7 @@ pub fn auth_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     }
     match authenticate_user(lookup_name, password.as_bytes()) {
         Some(uname) => {
-            ctx.client_mut().authenticated_user = Some(uname);
+            ctx.client_mut().set_authenticated_user(Some(uname));
             ctx.reply_simple_string(b"OK")
         }
         None => {
@@ -4013,7 +4032,7 @@ pub fn auth_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
                 let fallback = try_password_any_user(password.as_bytes());
                 match fallback {
                     Some(uname) => {
-                        ctx.client_mut().authenticated_user = Some(uname);
+                        ctx.client_mut().set_authenticated_user(Some(uname));
                         return ctx.reply_simple_string(b"OK");
                     }
                     None => {}

@@ -879,7 +879,7 @@ impl RuntimeOwner {
                     let mut client = Client::with_connection(Connection::Tcp(conn_stream));
                     client.id = id;
                     client.addr = Some(peer);
-                    client.authenticated_user = super::determine_initial_user();
+                    client.set_authenticated_user(super::determine_initial_user());
 
                     let slot_id = match self.insert_connected_client(client, mio_stream, rx) {
                         Some(slot_id) => slot_id,
@@ -1185,6 +1185,14 @@ impl RuntimeOwner {
         let mut last_cmd_name: Vec<u8> = Vec::new();
 
         while commands < MAX_COMMANDS_PER_SLOT_TICK {
+            if let Some(err) = super::unauthenticated_protocol_limit_error(
+                &slot.client,
+                &slot.client.query_buf[consumed_total..],
+            ) {
+                super::queue_error_reply(&mut slot.client, &err);
+                slot.mark_close_after_flush();
+                break;
+            }
             let parsed = parse_inline_or_multibulk_into(
                 &slot.client.query_buf[consumed_total..],
                 &mut slot.client.argv,

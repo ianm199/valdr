@@ -331,6 +331,9 @@ pub fn dispatch(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
                         enforce_acl_gate(ctx, dispatch_name, acl_categories)
                     {
                         crate::multi::flag_transaction_dirty_exec(ctx.client_mut());
+                        if close_unauthenticated_client_for_debug_reply_limit(ctx) {
+                            return Ok(());
+                        }
                         ctx.client_mut().reply_buf.extend_from_slice(&noauth_reply);
                         return Ok(());
                     }
@@ -410,6 +413,9 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
     if !metadata.no_auth {
         let acl_categories = acl_categories_for_context(ctx, name, metadata.acl_categories);
         if let Some(noauth_reply) = enforce_acl_gate(ctx, name, acl_categories) {
+            if close_unauthenticated_client_for_debug_reply_limit(ctx) {
+                return Ok(());
+            }
             ctx.client_mut().reply_buf.extend_from_slice(&noauth_reply);
             return Ok(());
         }
@@ -863,6 +869,17 @@ fn enforce_acl_gate(ctx: &CommandContext<'_>, name: &[u8], cmd_categories: u64) 
     }
 
     None
+}
+
+fn close_unauthenticated_client_for_debug_reply_limit(ctx: &mut CommandContext<'_>) -> bool {
+    if redis_core::client::debug_client_enforce_reply_list()
+        && ctx.client_ref().authenticated_user.is_none()
+        && !ctx.client_ref().ever_authenticated
+    {
+        ctx.client_mut().should_close = true;
+        return true;
+    }
+    false
 }
 
 fn acl_categories_for_context(

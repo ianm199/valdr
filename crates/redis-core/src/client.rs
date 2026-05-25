@@ -8,12 +8,23 @@
 use redis_protocol::RespFrame;
 use redis_types::RedisString;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::acl::global_acl_state;
 use crate::object::RedisObject;
 use crate::transport::Connection;
 
 pub type ClientId = u64;
+
+static DEBUG_CLIENT_ENFORCE_REPLY_LIST: AtomicBool = AtomicBool::new(false);
+
+pub fn set_debug_client_enforce_reply_list(enabled: bool) {
+    DEBUG_CLIENT_ENFORCE_REPLY_LIST.store(enabled, Ordering::Relaxed);
+}
+
+pub fn debug_client_enforce_reply_list() -> bool {
+    DEBUG_CLIENT_ENFORCE_REPLY_LIST.load(Ordering::Relaxed)
+}
 
 /// Placeholder for a reference into the server command table.
 ///
@@ -195,6 +206,11 @@ pub struct Client {
     /// `Some("default")` when the default user is enabled and has `nopass`.
     /// Authentication state persists across RESET (real Redis behaviour).
     pub authenticated_user: Option<RedisString>,
+    /// True after this connection has authenticated at least once.
+    ///
+    /// C Redis marks once-authenticated clients exempt from the tiny pre-AUTH
+    /// output-buffer cap even after RESET drops them back into NOAUTH state.
+    pub ever_authenticated: bool,
     /// Channels this client is subscribed to.
     ///
     /// Round 8a per-client pub/sub bookkeeping; mirrors the channel half of
@@ -294,6 +310,8 @@ fn initial_authenticated_user() -> Option<RedisString> {
 
 impl Client {
     pub fn new(id: ClientId) -> Self {
+        let authenticated_user = initial_authenticated_user();
+        let ever_authenticated = authenticated_user.is_some();
         Self {
             id,
             argv: Vec::new(),
@@ -318,7 +336,8 @@ impl Client {
             subscribed_shard_channels: HashSet::new(),
             blocked_on_keys: false,
             pending_wakes: Vec::new(),
-            authenticated_user: initial_authenticated_user(),
+            authenticated_user,
+            ever_authenticated,
             is_replica: false,
             capa_redirect: false,
             lib_name: None,
@@ -352,6 +371,13 @@ impl Client {
         self.argv = args;
     }
 
+    pub fn set_authenticated_user(&mut self, user: Option<RedisString>) {
+        if user.is_some() {
+            self.ever_authenticated = true;
+        }
+        self.authenticated_user = user;
+    }
+
     /// Reset transient connection state, mirroring real Redis `RESET`.
     ///
     /// Clears the client name, MULTI transaction state, queued reply bytes,
@@ -372,9 +398,9 @@ impl Client {
         self.import_source = false;
         self.authenticated_user = initial_authenticated_user();
         self.capa_redirect = false;
-            self.subscribed_channels.clear();
-            self.subscribed_patterns.clear();
-            self.subscribed_shard_channels.clear();
+        self.subscribed_channels.clear();
+        self.subscribed_patterns.clear();
+        self.subscribed_shard_channels.clear();
         self.pending_wakes.clear();
         crate::db::watched_keys_index_remove_client(self.id);
         let _ = crate::db::watched_keys_take_dirty(self.id);
