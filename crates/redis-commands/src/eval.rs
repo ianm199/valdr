@@ -569,6 +569,34 @@ fn lua_arg_to_bytes(v: &LuaValue) -> Result<Vec<u8>, LuaError> {
     }
 }
 
+fn lua_script_command_error_payload(err: &RedisError) -> Vec<u8> {
+    if matches!(err, RedisError::WrongNumberOfArgs(_)) {
+        return b"ERR Wrong number of args calling command from script".to_vec();
+    }
+    err.to_resp_payload().as_bytes().to_vec()
+}
+
+fn create_disabled_loadstring(lua: &Lua) -> mlua::Result<LuaFunction> {
+    lua.create_function(|_, _: MultiValue| -> mlua::Result<LuaValue> { Ok(LuaValue::Nil) })
+}
+
+fn create_sha1hex_function(lua: &Lua) -> mlua::Result<LuaFunction> {
+    lua.create_function(|_lua, args: MultiValue| -> mlua::Result<String> {
+        if args.len() != 1 {
+            return Err(LuaError::RuntimeError(
+                "wrong number of arguments to redis.sha1hex".to_string(),
+            ));
+        }
+        let Some(LuaValue::String(s)) = args.front() else {
+            return Err(LuaError::RuntimeError(
+                "bad argument #1 to redis.sha1hex".to_string(),
+            ));
+        };
+        let hex = sha1_hex(&s.as_bytes());
+        Ok(String::from_utf8(hex.to_vec()).unwrap_or_default())
+    })
+}
+
 /// Sandbox an `mlua::Lua` instance by removing globals that would let a
 /// user script reach the filesystem or the host process. Mirrors the
 /// real-Redis sandbox.
@@ -3468,6 +3496,16 @@ fn run_loaded_function(
         .map_err(|e| RedisError::runtime(format!("ERR Lua bit install: {}", e).into_bytes()))?;
     install_keys_argv(&lua, keys, argv)
         .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
+    lua.globals()
+        .raw_set(
+            "loadstring",
+            create_disabled_loadstring(&lua)
+                .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?,
+        )
+        .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
+    lua.globals()
+        .raw_set("getmetatable", builtin_getmetatable)
+        .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
 
     let ctx_cell: RefCell<&mut CommandContext<'_>> = RefCell::new(ctx);
     let script_dirty = Rc::new(Cell::new(false));
@@ -3484,6 +3522,11 @@ fn run_loaded_function(
             scope.create_function_mut(
                 move |lua_inner, args: MultiValue| -> mlua::Result<LuaValue> {
                     let arg_bytes = collect_call_args(args)?;
+                    if script_command_not_allowed(&arg_bytes) {
+                        return Err(LuaError::RuntimeError(
+                            "This Redis command is not allowed from script".to_string(),
+                        ));
+                    }
                     if stale_replica_blocked
                         && function_allow_stale
                         && !stale_replica_lua_call_allowed(&arg_bytes)
@@ -3510,7 +3553,8 @@ fn run_loaded_function(
                             reply_to_lua(lua_inner, &reply, script_resp_view(lua_inner))
                         }
                         Err(e) => Err(LuaError::RuntimeError(
-                            String::from_utf8_lossy(e.to_resp_payload().as_bytes()).into_owned(),
+                            String::from_utf8_lossy(&lua_script_command_error_payload(&e))
+                                .into_owned(),
                         )),
                     }
                 },
@@ -3523,6 +3567,15 @@ fn run_loaded_function(
             scope.create_function_mut(
                 move |lua_inner, args: MultiValue| -> mlua::Result<LuaValue> {
                     let arg_bytes = collect_call_args(args)?;
+                    if script_command_not_allowed(&arg_bytes) {
+                        let t = lua_inner.create_table()?;
+                        t.raw_set(
+                            "err",
+                            lua_inner
+                                .create_string("This Redis command is not allowed from script")?,
+                        )?;
+                        return Ok(LuaValue::Table(t));
+                    }
                     if stale_replica_blocked
                         && function_allow_stale
                         && !stale_replica_lua_call_allowed(&arg_bytes)
@@ -3554,8 +3607,8 @@ fn run_loaded_function(
                     match run_inner_command(&mut **borrow, &arg_bytes, Some(dirty.as_ref())) {
                         Ok(reply) => reply_to_lua(lua_inner, &reply, script_resp_view(lua_inner)),
                         Err(e) => {
-                            let msg = String::from_utf8_lossy(e.to_resp_payload().as_bytes())
-                                .into_owned();
+                            let payload = lua_script_command_error_payload(&e);
+                            let msg = String::from_utf8_lossy(&payload).into_owned();
                             let t = lua_inner.create_table()?;
                             t.raw_set("err", lua_inner.create_string(&msg)?)?;
                             t.raw_set(LUA_ERROR_ALREADY_RECORDED_FIELD, true)?;
@@ -3580,10 +3633,7 @@ fn run_loaded_function(
                 Ok(t)
             })?;
 
-        let sha1hex_fn = lua.create_function(|_lua, s: mlua::String| -> mlua::Result<String> {
-            let hex = sha1_hex(&s.as_bytes());
-            Ok(String::from_utf8(hex.to_vec()).unwrap_or_default())
-        })?;
+        let sha1hex_fn = create_sha1hex_function(&lua)?;
 
         let replicate_fn =
             lua.create_function(|_lua, _: MultiValue| -> mlua::Result<bool> { Ok(true) })?;
@@ -3649,13 +3699,15 @@ fn run_loaded_function(
         let load_api = readonly_table_proxy_with_missing_global_errors(&lua, load_api)?;
         lua.globals().set("redis", load_api.clone())?;
         lua.globals().set("server", load_api)?;
-        install_global_protection(&lua)?;
+        install_eval_global_protection(&lua)?;
 
-        lua.load(library_body).set_name("function_library").exec()?;
+        let function_env = create_script_environment(&lua)?;
+        lua.load(library_body)
+            .set_name("function_library")
+            .set_environment(function_env)
+            .exec()?;
         load_phase.set(false);
 
-        lua.globals()
-            .raw_set("getmetatable", builtin_getmetatable.clone())?;
         lua.globals().set("redis", redis_tbl.clone())?;
         lua.globals().set("server", redis_tbl.clone())?;
         lua.load(
@@ -3980,8 +4032,7 @@ fn run_script(
             .raw_set("loadstring", builtin_loadstring)
             .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
     } else {
-        let disabled_loadstring = lua
-            .create_function(|_, _: MultiValue| -> mlua::Result<LuaValue> { Ok(LuaValue::Nil) })
+        let disabled_loadstring = create_disabled_loadstring(&lua)
             .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
         lua.globals()
             .raw_set("loadstring", disabled_loadstring)
@@ -4118,20 +4169,7 @@ fn run_script(
                 Ok(t)
             })?;
 
-        let sha1hex_fn = lua.create_function(|_lua, args: MultiValue| -> mlua::Result<String> {
-            if args.len() != 1 {
-                return Err(LuaError::RuntimeError(
-                    "wrong number of arguments to redis.sha1hex".to_string(),
-                ));
-            }
-            let Some(LuaValue::String(s)) = args.front() else {
-                return Err(LuaError::RuntimeError(
-                    "bad argument #1 to redis.sha1hex".to_string(),
-                ));
-            };
-            let hex = sha1_hex(&s.as_bytes());
-            Ok(String::from_utf8(hex.to_vec()).unwrap_or_default())
-        })?;
+        let sha1hex_fn = create_sha1hex_function(&lua)?;
 
         let replicate_fn =
             lua.create_function(|_lua, _: MultiValue| -> mlua::Result<bool> { Ok(true) })?;
