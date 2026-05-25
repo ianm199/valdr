@@ -450,6 +450,24 @@ fn deliver_to_waiter(db: &mut RedisDb, key: &RedisString, waiter: BlockedWaiter)
                 );
                 let _ = waiter.sender.send(payload);
             }
+            let from_side = match side {
+                BlockedSide::Head => b"left" as &[u8],
+                BlockedSide::Tail => b"right" as &[u8],
+            };
+            let to_side = match dst_side {
+                BlockedSide::Head => b"left" as &[u8],
+                BlockedSide::Tail => b"right" as &[u8],
+            };
+            crate::dispatch::propagate_command_from_wake(
+                db.id,
+                &[
+                    RedisString::from_bytes(b"LMOVE"),
+                    key.clone(),
+                    dst_key.clone(),
+                    RedisString::from_bytes(from_side),
+                    RedisString::from_bytes(to_side),
+                ],
+            );
             wake_blocked_for_key(db, &dst_key);
         }
         BlockedAction::ZSetPop { .. } => {
