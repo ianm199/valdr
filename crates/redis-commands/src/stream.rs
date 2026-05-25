@@ -2467,6 +2467,13 @@ pub fn xclaim_command(ctx: &mut CommandContext) -> RedisResult<()> {
         if in_pel && prev_idle < min_idle {
             continue;
         }
+        // Entry was trimmed/deleted from the stream: drop the NACK from the
+        // group + owning-consumer PEL and skip it (no reassign, absent from the
+        // reply). C: streamClaimEntry discards claims for vanished entries.
+        if stream_entry.is_none() {
+            pel_remove(group, id);
+            continue;
+        }
         let delivery_count = match opts.retrycount {
             Some(n) => n,
             None => {
