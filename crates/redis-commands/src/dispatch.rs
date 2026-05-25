@@ -18,6 +18,7 @@ use std::sync::OnceLock;
 use redis_core::acl::{category as acl_category, global_acl_state};
 use redis_core::eviction::{oom_error_reply, try_evict_to_fit, EvictionOutcome};
 use redis_core::memory::approximate_memory_used;
+use redis_core::metrics::record_command_stat;
 use redis_core::monotonic::{elapsed_start, elapsed_us};
 use redis_core::CommandContext;
 use redis_types::{RedisError, RedisResult, RedisString};
@@ -295,6 +296,7 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
     } else {
         Some(elapsed_us(start))
     };
+    record_command_stat(name, elapsed_micros.unwrap_or(0), false, result.is_err());
     let reply_bytes = ctx
         .client_ref()
         .reply_buf

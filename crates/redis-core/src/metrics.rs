@@ -7,11 +7,30 @@
 //! `info.rs`, `db.rs`, and `main.rs` can all reach the same instance without
 //! threading the object through every call-site parameter list.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static METRICS: OnceLock<Arc<ServerMetrics>> = OnceLock::new();
+static COMMAND_STATS: OnceLock<Arc<Mutex<HashMap<Vec<u8>, CommandStat>>>> = OnceLock::new();
+
+#[derive(Clone, Debug, Default)]
+struct CommandStat {
+    calls: u64,
+    usec: u64,
+    rejected_calls: u64,
+    failed_calls: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CommandStatSnapshot {
+    pub name: Vec<u8>,
+    pub calls: u64,
+    pub usec: u64,
+    pub rejected_calls: u64,
+    pub failed_calls: u64,
+}
 
 /// Install the global metrics instance. Must be called once at server startup
 /// before any connection is accepted. Subsequent calls return the existing
@@ -24,6 +43,58 @@ pub fn server_metrics() -> &'static Arc<ServerMetrics> {
             .unwrap_or(0);
         Arc::new(ServerMetrics::new(start_ms))
     })
+}
+
+fn command_stats_handle() -> &'static Arc<Mutex<HashMap<Vec<u8>, CommandStat>>> {
+    COMMAND_STATS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+}
+
+pub fn record_command_stat(name: &[u8], elapsed_us: u64, rejected_call: bool, failed_call: bool) {
+    let mut key = name.to_ascii_lowercase();
+    key.retain(|b| *b != b'\r' && *b != b'\n');
+    if key.is_empty() {
+        return;
+    }
+    let mut stats = match command_stats_handle().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let row = stats.entry(key).or_default();
+    row.calls = row.calls.saturating_add(1);
+    row.usec = row.usec.saturating_add(elapsed_us);
+    if rejected_call {
+        row.rejected_calls = row.rejected_calls.saturating_add(1);
+    }
+    if failed_call {
+        row.failed_calls = row.failed_calls.saturating_add(1);
+    }
+}
+
+pub fn command_stats_snapshot() -> Vec<CommandStatSnapshot> {
+    let stats = match command_stats_handle().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let mut out: Vec<CommandStatSnapshot> = stats
+        .iter()
+        .map(|(name, stat)| CommandStatSnapshot {
+            name: name.clone(),
+            calls: stat.calls,
+            usec: stat.usec,
+            rejected_calls: stat.rejected_calls,
+            failed_calls: stat.failed_calls,
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+pub fn reset_command_stats() {
+    let mut stats = match command_stats_handle().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    stats.clear();
 }
 
 /// Atomically tracked server-wide counters.
@@ -124,6 +195,7 @@ impl ServerMetrics {
         self.active_time_main_thread_us.store(0, Ordering::Relaxed);
         self.rdb_saves_succeeded.store(0, Ordering::Relaxed);
         self.rdb_saves_failed.store(0, Ordering::Relaxed);
+        reset_command_stats();
     }
 }
 

@@ -1,6 +1,6 @@
 # TCL Hidden Frontier - 2026-05-24
 
-Generated: `2026-05-25T01:45:02.752572+00:00`
+Generated: `2026-05-25T01:54:30.217849+00:00`
 
 This is an illumination artifact, not a conformance claim. It maps the
 timeout/no-summary bucket into concrete subsystem packets so broad
@@ -9,16 +9,15 @@ implementation work can start from evidence instead of guessing.
 ## Accounting Snapshot
 
 - Full upstream TCL denominator: **4299** source test blocks
-- Counted runner result: **1386 pass / 3 fail / 1389 counted**
-- Conservative full-suite proof: **32.2%** counted-pass / full denominator
+- Counted runner result: **1389 pass / 0 fail / 1389 counted**
+- Conservative full-suite proof: **32.3%** counted-pass / full denominator
 - Non-skipped denominator: **2568** source test blocks
 - Hidden timeout/no-summary bucket: **1007** source tests (**39.2%** of non-skipped)
 
 | Status | Source tests |
 |---|---:|
-| `fail` | 148 |
 | `no-summary` | 567 |
-| `pass` | 1021 |
+| `pass` | 1169 |
 | `skipped-by-policy` | 1731 |
 | `timeout` | 440 |
 | `zero-count` | 392 |
@@ -44,15 +43,15 @@ implementation work can start from evidence instead of guessing.
 | Rank | Packet | File | Tests | Value | Risk | Why next |
 |---:|---|---|---:|---|---|---|
 | 1 | `tcl-scripting-acl-globals-frontier-v1` | `unit/scripting.tcl` | 186 | high | high | Split into two passes: first make the no-summary ACL/FUNCTION abort diagnostic and correct, then address the revealed global-protection and Redis namespace failures. Keep all work inside the scripting/ACL lane. |
-| 2 | `tcl-list-quicklist-encoding-frontier-v1` | `unit/type/list.tcl` | 148 | high | medium | This is already counted fail, not hidden. It is a good breadth packet because the first visible failures name quicklist/listpack conversion rather than a vague timeout. |
-| 3 | `tcl-introspection-runner-isolation-v1` | `unit/introspection.tcl` | 117 | medium | medium | Treat the current cat/stdout exception as runner isolation until reproduced otherwise. Give this file a dedicated tmp dir and only then cut CLIENT/COMMAND/INFO implementation packets. |
-| 4 | `tcl-functions-timeout-scout-then-library-v1` | `unit/functions.tcl` | 112 | high | high | Do not start with a broad function rewrite. First add a single-test bisect/scout runner for the timeout, then port only the first library lifecycle semantic that blocks summary output. |
-| 5 | `tcl-stream-transaction-xread-wake-v1` | `unit/type/stream.tcl` | 82 | high | high | Port the upstream blocked stream client wake semantics around XADD inside MULTI before touching consumer-group metadata. |
-| 6 | `tcl-multi-watch-dirty-queue-v1` | `unit/multi.tcl` | 70 | high | medium | Port the upstream transaction error-state lifecycle. This is smaller than scripting/functions and likely converts a timeout file into a counted fail/pass file quickly. |
-| 7 | `tcl-stream-cgroups-pel-idle-seen-time-v1` | `unit/type/stream-cgroups.tcl` | 65 | high | high | Implement the missing `idle`/seen-time dictionary shape and keep the blocking XREADGROUP failures as separate follow-up packets. |
-| 8 | `tcl-client-tracking-info-counters-v1` | `unit/tracking.tcl` | 61 | medium | medium | Fix the current no-summary variable gap around tracking info counters, then decide whether invalidation routing belongs in this wave. |
-| 9 | `tcl-sort-runner-launch-then-by-get-v1` | `unit/sort.tcl` | 43 | medium | medium | The current timeout says the harness cannot start the server. Fix that visibility issue before changing SORT internals. |
-| 10 | `tcl-pubsub-keyspace-notify-order-v1` | `unit/pubsub.tcl` | 34 | medium | medium | Start from the stream event notification mismatch. Verify exact xgroup/xadd ordering and CLIENT REPLY behavior, then rerun the file with a short timeout to see if the hang collapses. |
+| 2 | `tcl-introspection-runner-isolation-v1` | `unit/introspection.tcl` | 117 | medium | medium | Treat the current cat/stdout exception as runner isolation until reproduced otherwise. Give this file a dedicated tmp dir and only then cut CLIENT/COMMAND/INFO implementation packets. |
+| 3 | `tcl-functions-timeout-scout-then-library-v1` | `unit/functions.tcl` | 112 | high | high | Do not start with a broad function rewrite. First add a single-test bisect/scout runner for the timeout, then port only the first library lifecycle semantic that blocks summary output. |
+| 4 | `tcl-stream-transaction-xread-wake-v1` | `unit/type/stream.tcl` | 82 | high | high | Port the upstream blocked stream client wake semantics around XADD inside MULTI before touching consumer-group metadata. |
+| 5 | `tcl-multi-watch-dirty-queue-v1` | `unit/multi.tcl` | 70 | high | medium | Port the upstream transaction error-state lifecycle. This is smaller than scripting/functions and likely converts a timeout file into a counted fail/pass file quickly. |
+| 6 | `tcl-stream-cgroups-pel-idle-seen-time-v1` | `unit/type/stream-cgroups.tcl` | 65 | high | high | Implement the missing `idle`/seen-time dictionary shape and keep the blocking XREADGROUP failures as separate follow-up packets. |
+| 7 | `tcl-client-tracking-info-counters-v1` | `unit/tracking.tcl` | 61 | medium | medium | Fix the current no-summary variable gap around tracking info counters, then decide whether invalidation routing belongs in this wave. |
+| 8 | `tcl-sort-runner-launch-then-by-get-v1` | `unit/sort.tcl` | 43 | medium | medium | The current timeout says the harness cannot start the server. Fix that visibility issue before changing SORT internals. |
+| 9 | `tcl-pubsub-keyspace-notify-order-v1` | `unit/pubsub.tcl` | 34 | medium | medium | Start from the stream event notification mismatch. Verify exact xgroup/xadd ordering and CLIENT REPLY behavior, then rerun the file with a short timeout to see if the hang collapses. |
+| 10 | `tcl-bitops-runner-isolation-then-edge-fails-v1` | `unit/bitops.tcl` | 46 | medium | low | Current evidence is a tmp/stdout runner artifact. Isolate the run before spending implementation time. |
 
 ## Per-File Notes
 
@@ -193,7 +192,7 @@ implementation work can start from evidence instead of guessing.
 - Recommended packet: `tcl-introspection-runner-isolation-v1`
 - Recommended action: Treat the current cat/stdout exception as runner isolation until reproduced otherwise. Give this file a dedicated tmp dir and only then cut CLIENT/COMMAND/INFO implementation packets.
 - Likely root subsystem: Harness tmp-dir/server lifecycle first; then CLIENT/COMMAND/CONFIG/INFO introspection
-- Latest log: `harness/oracle/results/tcl-survey/20260524T233238Z/unit__introspection.json`
+- Latest log: `harness/oracle/results/tcl-survey/20260525T014712Z/unit__introspection.json`
 - Local source files:
   - `harness/oracle/tcl-survey.py`
   - `crates/redis-commands/src/connection.rs`

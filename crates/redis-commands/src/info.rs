@@ -245,7 +245,11 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let _ = writeln!(buf, "total_net_output_bytes:0\r");
         let _ = writeln!(buf, "rejected_connections:{}\r", rejected);
         let _ = writeln!(buf, "expired_keys:{}\r", expired_keys);
-        let _ = writeln!(buf, "expired_fields:{}\r", crate::hash::expired_fields_count());
+        let _ = writeln!(
+            buf,
+            "expired_fields:{}\r",
+            crate::hash::expired_fields_count()
+        );
         let _ = writeln!(buf, "evicted_keys:{}\r", evicted_keys);
         let _ = writeln!(buf, "keyspace_hits:{}\r", hits);
         let _ = writeln!(buf, "keyspace_misses:{}\r", misses);
@@ -305,14 +309,25 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let _ = writeln!(buf, "\r");
     }
     if want_commandstats {
-        // TODO(architect): replace stub with real per-command call/usec counters
-        // once dispatch.rs timing wrap (OV-2) accumulates into a shared HashMap.
         let _ = writeln!(buf, "# Commandstats\r");
-        let _ = writeln!(
-            buf,
-            "cmdstat_info:calls={},usec=0,usec_per_call=0.00,rejected_calls=0,failed_calls=0\r",
-            total_commands
-        );
+        for stat in redis_core::metrics::command_stats_snapshot() {
+            let name = String::from_utf8_lossy(&stat.name);
+            let usec_per_call = if stat.calls == 0 {
+                0.0
+            } else {
+                stat.usec as f64 / stat.calls as f64
+            };
+            let _ = writeln!(
+                buf,
+                "cmdstat_{}:calls={},usec={},usec_per_call={:.2},rejected_calls={},failed_calls={}\r",
+                name,
+                stat.calls,
+                stat.usec,
+                usec_per_call,
+                stat.rejected_calls,
+                stat.failed_calls
+            );
+        }
         let _ = writeln!(buf, "\r");
     }
     if want(b"cluster") {

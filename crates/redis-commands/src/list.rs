@@ -455,6 +455,7 @@ fn push_generic(ctx: &mut CommandContext, position: ListPosition, xx: bool) -> R
                 return ctx.reply_integer(0);
             }
             let mut obj = RedisObject::new_list();
+            obj.list_try_promote_for_append(&values);
             {
                 let deque = obj.list_mut().expect("new_list constructs an Inline list");
                 for v in values {
@@ -472,6 +473,7 @@ fn push_generic(ctx: &mut CommandContext, position: ListPosition, xx: bool) -> R
             if !obj.is_list() {
                 return Err(RedisError::wrong_type());
             }
+            obj.list_try_promote_for_append(&values);
             let deque = obj.list_mut().expect("is_list confirms list encoding");
             for v in values {
                 match position {
@@ -538,22 +540,26 @@ fn pop_generic(ctx: &mut CommandContext, position: ListPosition) -> RedisResult<
         match obj {
             None => None,
             Some(o) => {
-                let deque = o.list_mut().expect("is_list confirms list encoding");
-                let take = match count {
-                    None => 1,
-                    Some(n) => (n as usize).min(deque.len()),
-                };
-                let mut out = Vec::with_capacity(take);
-                for _ in 0..take {
-                    let next = match position {
-                        ListPosition::Head => deque.pop_front(),
-                        ListPosition::Tail => deque.pop_back(),
+                let out = {
+                    let deque = o.list_mut().expect("is_list confirms list encoding");
+                    let take = match count {
+                        None => 1,
+                        Some(n) => (n as usize).min(deque.len()),
                     };
-                    match next {
-                        Some(v) => out.push(v),
-                        None => break,
+                    let mut out = Vec::with_capacity(take);
+                    for _ in 0..take {
+                        let next = match position {
+                            ListPosition::Head => deque.pop_front(),
+                            ListPosition::Tail => deque.pop_back(),
+                        };
+                        match next {
+                            Some(v) => out.push(v),
+                            None => break,
+                        }
                     }
-                }
+                    out
+                };
+                o.list_try_demote_after_shrink();
                 Some(out)
             }
         }
@@ -699,17 +705,28 @@ pub fn lset_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let key = ctx.arg_owned(1usize)?;
     let index = parse_strict_i64(ctx.arg(2)?.as_bytes())?;
     let value = ctx.arg_owned(3usize)?;
-    let deque = match as_list_mut(ctx.db_mut().lookup_key_write(&key))? {
+    let obj = match ctx.db_mut().lookup_key_write(&key) {
         None => return Err(RedisError::runtime(b"ERR no such key")),
-        Some(d) => d,
+        Some(o) => {
+            if !o.is_list() {
+                return Err(RedisError::wrong_type());
+            }
+            o
+        }
     };
-    let resolved = resolve_read_index(index, deque.len());
+    obj.list_try_promote_for_append(std::slice::from_ref(&value));
+    let list_len = obj.list().expect("is_list confirms list encoding").len();
+    let resolved = resolve_read_index(index, list_len);
     match resolved {
         None => Err(RedisError::runtime(b"ERR index out of range")),
         Some(i) => {
-            if let Some(slot) = deque.get_mut(i) {
-                *slot = value;
+            {
+                let deque = obj.list_mut().expect("is_list confirms list encoding");
+                if let Some(slot) = deque.get_mut(i) {
+                    *slot = value;
+                }
             }
+            obj.list_try_demote_after_shrink();
             ctx.notify_keyspace_event(NOTIFY_LIST, b"lset", &key);
             ctx.server().add_dirty(1);
             ctx.reply_simple_string(b"OK")
@@ -729,38 +746,49 @@ pub fn lrem_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let count = parse_strict_i64(ctx.arg(2)?.as_bytes())?;
     let element = ctx.arg_owned(3usize)?;
     let removed = {
-        let deque = match as_list_mut(ctx.db_mut().lookup_key_write(&key))? {
+        let obj = match ctx.db_mut().lookup_key_write(&key) {
             None => return ctx.reply_integer(0),
-            Some(d) => d,
+            Some(o) => {
+                if !o.is_list() {
+                    return Err(RedisError::wrong_type());
+                }
+                o
+            }
         };
         let limit = count.unsigned_abs() as usize;
         let target = element.as_bytes();
         let mut removed: i64 = 0;
-        if count >= 0 {
-            let mut i = 0usize;
-            while i < deque.len() {
-                if deque[i].as_bytes() == target {
-                    deque.remove(i);
-                    removed += 1;
-                    if count > 0 && removed as usize >= limit {
-                        break;
-                    }
-                } else {
-                    i += 1;
-                }
-            }
-        } else {
-            let mut i = deque.len();
-            while i > 0 {
-                i -= 1;
-                if deque[i].as_bytes() == target {
-                    deque.remove(i);
-                    removed += 1;
-                    if removed as usize >= limit {
-                        break;
+        {
+            let deque = obj.list_mut().expect("is_list confirms list encoding");
+            if count >= 0 {
+                let mut i = 0usize;
+                while i < deque.len() {
+                    if deque[i].as_bytes() == target {
+                        deque.remove(i);
+                        removed += 1;
+                        if count > 0 && removed as usize >= limit {
+                            break;
+                        }
+                    } else {
+                        i += 1;
                     }
                 }
+            } else {
+                let mut i = deque.len();
+                while i > 0 {
+                    i -= 1;
+                    if deque[i].as_bytes() == target {
+                        deque.remove(i);
+                        removed += 1;
+                        if removed as usize >= limit {
+                            break;
+                        }
+                    }
+                }
             }
+        }
+        if removed > 0 {
+            obj.list_try_demote_after_shrink();
         }
         removed
     };
@@ -793,27 +821,39 @@ pub fn ltrim_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let start = parse_strict_i64(ctx.arg(2)?.as_bytes())?;
     let stop = parse_strict_i64(ctx.arg(3)?.as_bytes())?;
     let (key_empty, removed_count) = {
-        let deque = match as_list_mut(ctx.db_mut().lookup_key_write(&key))? {
+        let obj = match ctx.db_mut().lookup_key_write(&key) {
             None => return ctx.reply_simple_string(b"OK"),
-            Some(d) => d,
+            Some(o) => {
+                if !o.is_list() {
+                    return Err(RedisError::wrong_type());
+                }
+                o
+            }
         };
-        let len = deque.len();
-        match resolve_range(start, stop, len) {
-            None => {
-                deque.clear();
-                (true, len as i64)
-            }
-            Some((s, e)) => {
-                for _ in 0..s {
-                    deque.pop_front();
+        let (empty, removed) = {
+            let deque = obj.list_mut().expect("is_list confirms list encoding");
+            let len = deque.len();
+            match resolve_range(start, stop, len) {
+                None => {
+                    deque.clear();
+                    (true, len as i64)
                 }
-                let new_len = e - s + 1;
-                while deque.len() > new_len {
-                    deque.pop_back();
+                Some((s, e)) => {
+                    for _ in 0..s {
+                        deque.pop_front();
+                    }
+                    let new_len = e - s + 1;
+                    while deque.len() > new_len {
+                        deque.pop_back();
+                    }
+                    (deque.is_empty(), len.saturating_sub(new_len) as i64)
                 }
-                (deque.is_empty(), len.saturating_sub(new_len) as i64)
             }
+        };
+        if removed > 0 {
+            obj.list_try_demote_after_shrink();
         }
+        (empty, removed)
     };
     if key_empty {
         ctx.db_mut().sync_delete(&key);
@@ -846,10 +886,17 @@ pub fn linsert_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let pivot = ctx.arg_owned(3usize)?;
     let value = ctx.arg_owned(4usize)?;
     let outcome: i64 = {
-        let deque = match as_list_mut(ctx.db_mut().lookup_key_write(&key))? {
+        let obj = match ctx.db_mut().lookup_key_write(&key) {
             None => return ctx.reply_integer(0),
-            Some(d) => d,
+            Some(o) => {
+                if !o.is_list() {
+                    return Err(RedisError::wrong_type());
+                }
+                o
+            }
         };
+        obj.list_try_promote_for_append(std::slice::from_ref(&value));
+        let deque = obj.list_mut().expect("is_list confirms list encoding");
         let pivot_bytes = pivot.as_bytes();
         let mut found: Option<usize> = None;
         for (i, item) in deque.iter().enumerate() {
@@ -891,14 +938,29 @@ fn lmove_generic(
         }
     }
     let popped = {
-        let deque = match as_list_mut(ctx.db_mut().lookup_key_write(&src_key))? {
+        let obj = match ctx.db_mut().lookup_key_write(&src_key) {
             None => None,
-            Some(d) => match wherefrom {
-                ListPosition::Head => d.pop_front(),
-                ListPosition::Tail => d.pop_back(),
-            },
+            Some(o) => {
+                if !o.is_list() {
+                    return Err(RedisError::wrong_type());
+                }
+                Some(o)
+            }
         };
-        deque
+        match obj {
+            None => None,
+            Some(o) => {
+                let out = {
+                    let deque = o.list_mut().expect("is_list confirms list encoding");
+                    match wherefrom {
+                        ListPosition::Head => deque.pop_front(),
+                        ListPosition::Tail => deque.pop_back(),
+                    }
+                };
+                o.list_try_demote_after_shrink();
+                out
+            }
+        }
     };
     let value = match popped {
         None => return ctx.reply_null_bulk(),
@@ -915,6 +977,7 @@ fn lmove_generic(
 
     match ctx.db_mut().lookup_key_write(&dst_key) {
         Some(obj) => {
+            obj.list_try_promote_for_append(std::slice::from_ref(&value));
             let deque = obj
                 .list_mut()
                 .expect("WRONGTYPE pre-check confirmed list encoding");
@@ -925,6 +988,7 @@ fn lmove_generic(
         }
         None => {
             let mut obj = RedisObject::new_list();
+            obj.list_try_promote_for_append(std::slice::from_ref(&value));
             {
                 let deque = obj.list_mut().expect("new_list constructs an Inline list");
                 match whereto {

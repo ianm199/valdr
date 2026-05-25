@@ -202,11 +202,7 @@ impl InlineHash {
         out
     }
 
-    pub fn insert(
-        &mut self,
-        field: RedisString,
-        value: RedisString,
-    ) -> Option<RedisString> {
+    pub fn insert(&mut self, field: RedisString, value: RedisString) -> Option<RedisString> {
         if !self.data.contains_key(&field) {
             self.order.push(field.clone());
         }
@@ -702,6 +698,43 @@ impl RedisObject {
         match &mut self.kind {
             ObjectKind::List(ListEncoding::Inline(d) | ListEncoding::QuickList(d)) => Some(d),
             _ => None,
+        }
+    }
+
+    /// Promote an inline/listpack-shaped list to quicklist when a growing
+    /// operation would exceed Valkey's active `list-max-listpack-size`.
+    ///
+    /// This mirrors the `listTypeTryConversionAppend` call made by LPUSH/RPUSH,
+    /// LINSERT, LSET, and LMOVE before mutating a listpack. The payload still
+    /// lives in a `VecDeque`, but the explicit `QuickList` tag preserves the
+    /// same OBJECT ENCODING hysteresis as upstream.
+    pub fn list_try_promote_for_append(&mut self, values: &[RedisString]) {
+        let should_promote = match &self.kind {
+            ObjectKind::List(ListEncoding::Inline(d)) => listpack_growing_exceeds_limit(d, values),
+            _ => false,
+        };
+        if !should_promote {
+            return;
+        }
+        if let ObjectKind::List(ListEncoding::Inline(d)) = &mut self.kind {
+            let deque = std::mem::take(d);
+            self.kind = ObjectKind::List(ListEncoding::QuickList(deque));
+        }
+    }
+
+    /// Demote a quicklist-shaped list back to inline/listpack after a shrinking
+    /// operation drops below Valkey's half-limit conversion threshold.
+    pub fn list_try_demote_after_shrink(&mut self) {
+        let should_demote = match &self.kind {
+            ObjectKind::List(ListEncoding::QuickList(d)) => quicklist_fits_listpack_after_shrink(d),
+            _ => false,
+        };
+        if !should_demote {
+            return;
+        }
+        if let ObjectKind::List(ListEncoding::QuickList(d)) = &mut self.kind {
+            let deque = std::mem::take(d);
+            self.kind = ObjectKind::List(ListEncoding::Inline(deque));
         }
     }
 
@@ -1459,6 +1492,39 @@ fn listpack_encoded_len(d: &VecDeque<RedisString>) -> Option<usize> {
         }
     }
     Some(lp.bytes_len())
+}
+
+fn listpack_growing_exceeds_limit(d: &VecDeque<RedisString>, values: &[RedisString]) -> bool {
+    let t = get_encoding_thresholds();
+    let (size_limit, count_limit) = listpack_node_limit(t.list_max_listpack_size);
+    let Some(encoded_len) = listpack_encoded_len(d) else {
+        return true;
+    };
+    let added_bytes = values.iter().fold(0usize, |acc, value| {
+        acc.saturating_add(value.as_bytes().len())
+    });
+    let new_len = d.len().saturating_add(values.len());
+    let new_encoded_len = encoded_len.saturating_add(added_bytes);
+    if size_limit != usize::MAX {
+        new_encoded_len > size_limit
+    } else if new_encoded_len > LISTPACK_SIZE_SAFETY_LIMIT {
+        true
+    } else {
+        new_len > count_limit
+    }
+}
+
+fn quicklist_fits_listpack_after_shrink(d: &VecDeque<RedisString>) -> bool {
+    let t = get_encoding_thresholds();
+    let (size_limit, count_limit) = listpack_node_limit(t.list_max_listpack_size);
+    let Some(encoded_len) = listpack_encoded_len(d) else {
+        return false;
+    };
+    if size_limit != usize::MAX {
+        encoded_len <= (size_limit / 2)
+    } else {
+        d.len() <= (count_limit / 2)
+    }
 }
 
 /// Encoding name reported for an `Inline`-encoded list.
