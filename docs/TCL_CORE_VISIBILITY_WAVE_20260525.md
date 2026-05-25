@@ -106,20 +106,67 @@ Remaining failures:
 
 That is an object idle-time/LRU metadata lane, not a COMMAND introspection lane.
 
+## Second Pull: `unit/sort`
+
+Patch:
+
+- Apply Valkey-style startup config-file encoding overrides to `LiveConfig` for
+  hash/list/set/zset listpack/ziplist thresholds in
+  `crates/redis-server/src/main.rs`.
+- Store `SORT ... STORE` output through `RedisObject::new_list_from_vec` so
+  small stored lists report `listpack` while larger stored lists still report
+  `quicklist` through the existing observed-encoding threshold logic.
+
+Why this was next:
+
+- It was a no-summary file in the baseline scout.
+- The first blocker was exact: startup override
+  `list-max-ziplist-size 16` was not reaching the live encoding thresholds, so
+  the setup `assert_encoding quicklist tosort` aborted the file.
+- The touched files did not overlap active ACL or stream-blocking lanes.
+
+Verification:
+
+```bash
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-sort-startup-thresholds-store-encoding-v2 \
+  --skip-build \
+  --timeout-s 180 \
+  --baseport 55111 \
+  --portcount 3000 \
+  --files unit/sort
+```
+
+Evidence:
+
+`harness/oracle/results/tcl-survey/20260525T042947Z/unit__sort.json`
+
+Result:
+
+```text
+unit/sort: no-summary -> 54 pass / 0 fail / 54 counted
+```
+
+Agent-1 counted-coverage movement so far:
+
+```text
+unit/introspection-2: +49 counted (46 pass / 3 fail)
+unit/sort:            +54 counted (54 pass / 0 fail)
+Total visible gain:  +103 counted tests, from ~2154 to ~2257 counted
+```
+
 ## Next Overnight Targets
 
 1. `unit/pubsub`: 34 source tests, currently timeout. First blocker is stream
    keyspace notification ordering (`xgroup-create` arrives where upstream
    expects `xadd`). This is likely `notify.rs` / stream command notification
    ordering, but avoid active stream blocking files unless coordinated.
-2. `unit/sort`: 43 source tests, currently no-summary. First blocker is
-   listpack vs quicklist encoding assertion. This may overlap object/list
-   storage changes already dirty in the main worktree; inspect before editing.
-3. `unit/latency-monitor`: 17 source tests, timeout. Smaller denominator, but
+2. `unit/latency-monitor`: 17 source tests, timeout. Smaller denominator, but
    likely a contained latency/commandlog global-state issue.
-4. `unit/pause`: 20 counted tests with 15 failures. This is a product-semantic
+3. `unit/pause`: 20 counted tests with 15 failures. This is a product-semantic
    packet, not illumination; useful after the bigger dark files are counted.
-5. `unit/introspection-2` cleanup: 3 known failures around object idle-time
+4. `unit/introspection-2` cleanup: 3 known failures around object idle-time
    mutation. Good small follow-up if no larger dark file is safe to touch.
 
 ## Operating Rules For Continuation

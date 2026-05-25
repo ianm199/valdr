@@ -108,9 +108,14 @@ struct CliArgs {
     aof_use_rdb_preamble: bool,
     auto_aof_rewrite_percentage: u64,
     auto_aof_rewrite_min_size: u64,
+    hash_max_listpack_entries: usize,
+    hash_max_listpack_value: usize,
+    list_max_listpack_size: i64,
     set_max_intset_entries: usize,
     set_max_listpack_entries: usize,
     set_max_listpack_value: usize,
+    zset_max_listpack_entries: usize,
+    zset_max_listpack_value: usize,
     acl_pubsub_default_allchannels: bool,
     aclfile: Option<String>,
     acl_user_lines: Vec<String>,
@@ -135,9 +140,14 @@ impl Default for CliArgs {
             auto_aof_rewrite_percentage:
                 redis_core::live_config::DEFAULT_AUTO_AOF_REWRITE_PERCENTAGE,
             auto_aof_rewrite_min_size: redis_core::live_config::DEFAULT_AUTO_AOF_REWRITE_MIN_SIZE,
+            hash_max_listpack_entries: redis_core::live_config::DEFAULT_HASH_MAX_LISTPACK_ENTRIES,
+            hash_max_listpack_value: redis_core::live_config::DEFAULT_HASH_MAX_LISTPACK_VALUE,
+            list_max_listpack_size: redis_core::live_config::DEFAULT_LIST_MAX_LISTPACK_SIZE,
             set_max_intset_entries: redis_core::live_config::DEFAULT_SET_MAX_INTSET_ENTRIES,
             set_max_listpack_entries: redis_core::live_config::DEFAULT_SET_MAX_LISTPACK_ENTRIES,
             set_max_listpack_value: redis_core::live_config::DEFAULT_SET_MAX_LISTPACK_VALUE,
+            zset_max_listpack_entries: redis_core::live_config::DEFAULT_ZSET_MAX_LISTPACK_ENTRIES,
+            zset_max_listpack_value: redis_core::live_config::DEFAULT_ZSET_MAX_LISTPACK_VALUE,
             acl_pubsub_default_allchannels: false,
             aclfile: None,
             acl_user_lines: Vec::new(),
@@ -353,6 +363,21 @@ fn apply_config_file(args: &mut CliArgs, path: &Path) -> Result<(), String> {
                     args.auto_aof_rewrite_min_size = v;
                 }
             }
+            "hash-max-listpack-entries" | "hash-max-ziplist-entries" => {
+                if let Ok(v) = value.parse::<usize>() {
+                    args.hash_max_listpack_entries = v;
+                }
+            }
+            "hash-max-listpack-value" | "hash-max-ziplist-value" => {
+                if let Ok(v) = value.parse::<usize>() {
+                    args.hash_max_listpack_value = v;
+                }
+            }
+            "list-max-listpack-size" | "list-max-ziplist-size" => {
+                if let Ok(v) = value.parse::<i64>() {
+                    args.list_max_listpack_size = v;
+                }
+            }
             "set-max-intset-entries" => {
                 if let Ok(v) = value.parse::<usize>() {
                     args.set_max_intset_entries = v;
@@ -366,6 +391,16 @@ fn apply_config_file(args: &mut CliArgs, path: &Path) -> Result<(), String> {
             "set-max-listpack-value" => {
                 if let Ok(v) = value.parse::<usize>() {
                     args.set_max_listpack_value = v;
+                }
+            }
+            "zset-max-listpack-entries" | "zset-max-ziplist-entries" => {
+                if let Ok(v) = value.parse::<usize>() {
+                    args.zset_max_listpack_entries = v;
+                }
+            }
+            "zset-max-listpack-value" | "zset-max-ziplist-value" => {
+                if let Ok(v) = value.parse::<usize>() {
+                    args.zset_max_listpack_value = v;
                 }
             }
             "acl-pubsub-default" => {
@@ -502,9 +537,14 @@ fn main() {
     live_config.set_aof_use_rdb_preamble(args.aof_use_rdb_preamble);
     live_config.set_auto_aof_rewrite_percentage(args.auto_aof_rewrite_percentage);
     live_config.set_auto_aof_rewrite_min_size(args.auto_aof_rewrite_min_size);
+    live_config.set_hash_max_listpack_entries(args.hash_max_listpack_entries);
+    live_config.set_hash_max_listpack_value(args.hash_max_listpack_value);
+    live_config.set_list_max_listpack_size(args.list_max_listpack_size);
     live_config.store_set_max_intset_entries(args.set_max_intset_entries);
     live_config.store_set_max_listpack_entries(args.set_max_listpack_entries);
     live_config.store_set_max_listpack_value(args.set_max_listpack_value);
+    live_config.set_zset_max_listpack_entries(args.zset_max_listpack_entries);
+    live_config.set_zset_max_listpack_value(args.zset_max_listpack_value);
     if args.acl_pubsub_default_allchannels {
         redis_core::acl::set_acl_pubsub_default(b"allchannels");
     } else {
@@ -514,7 +554,9 @@ fn main() {
     redis_commands::install_live_config_handle(Arc::clone(&live_config));
     redis_core::acl::install_acl_state();
     for (from, to) in &args.command_renames {
-        if let Err(e) = redis_commands::dispatch::apply_command_rename(from.as_bytes(), to.as_bytes()) {
+        if let Err(e) =
+            redis_commands::dispatch::apply_command_rename(from.as_bytes(), to.as_bytes())
+        {
             eprintln!("{}", String::from_utf8_lossy(&e));
             std::process::exit(1);
         }
