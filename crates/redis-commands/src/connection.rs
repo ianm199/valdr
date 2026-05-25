@@ -3036,6 +3036,11 @@ pub fn module_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 /// (arity/flags/key-positions/etc.); `redis-cli` accepts a names-only reply.
 ///
 /// `COMMAND COUNT` replies with the integer length of the dispatch table.
+/// `COMMAND LIST` returns the generated command and subcommand names, including
+/// `parent|subcommand` full names for source-shaped upstream introspection
+/// tests.
+/// `COMMAND INFO` returns a compact command-info array; currently the
+/// load-bearing field is index 2, the flags list.
 /// `COMMAND GETKEYS` replies with keys derived from generated command metadata,
 /// with SORT/SORT_RO/SET matching their upstream variable key parsing.
 pub fn command_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
@@ -3053,6 +3058,10 @@ pub fn command_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             b"COMMAND <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
             b"COUNT",
             b"    Return the total number of commands in this server.",
+            b"LIST [FILTERBY MODULE|ACLCAT|PATTERN <arg>]",
+            b"    Return a list of command names.",
+            b"INFO [<command-name> ...]",
+            b"    Return command metadata.",
             b"GETKEYS <full-command>",
             b"    Return the keys from a full command.",
             b"GETKEYSANDFLAGS <full-command>",
@@ -3069,6 +3078,12 @@ pub fn command_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         let n = crate::dispatch::HANDLERS.len() as i64;
         return ctx.reply_integer(n);
     }
+    if ascii_eq_ignore_case(sub.as_bytes(), b"LIST") {
+        return command_list(ctx);
+    }
+    if ascii_eq_ignore_case(sub.as_bytes(), b"INFO") {
+        return command_info(ctx);
+    }
     if ascii_eq_ignore_case(sub.as_bytes(), b"GETKEYS") {
         return command_getkeys(ctx, false);
     }
@@ -3080,6 +3095,219 @@ pub fn command_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     msg.extend_from_slice(b"ERR Unknown COMMAND subcommand: ");
     msg.extend_from_slice(sub.as_bytes());
     Err(RedisError::runtime(msg))
+}
+
+enum CommandListFilter<'a> {
+    None,
+    Module,
+    AclCategory(Option<u64>),
+    Pattern(&'a [u8]),
+}
+
+fn command_list(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
+    let filter = match ctx.arg_count() {
+        2 => CommandListFilter::None,
+        5 => {
+            if !ascii_eq_ignore_case(ctx.arg(2)?.as_bytes(), b"FILTERBY") {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+            let filter_type = ctx.arg(3)?.as_bytes();
+            let filter_arg = ctx.arg(4)?.as_bytes();
+            if ascii_eq_ignore_case(filter_type, b"MODULE") {
+                CommandListFilter::Module
+            } else if ascii_eq_ignore_case(filter_type, b"ACLCAT") {
+                CommandListFilter::AclCategory(category_name_to_bit(filter_arg))
+            } else if ascii_eq_ignore_case(filter_type, b"PATTERN") {
+                CommandListFilter::Pattern(filter_arg)
+            } else {
+                return Err(RedisError::syntax(b"syntax error"));
+            }
+        }
+        _ => return Err(RedisError::syntax(b"syntax error")),
+    };
+
+    let mut names = command_list_names(&filter);
+    names.sort();
+    names.dedup();
+    let items = names
+        .into_iter()
+        .map(|name| RespFrame::bulk(RedisString::from_vec(name)))
+        .collect();
+    ctx.reply_frame(&RespFrame::array(items))
+}
+
+fn command_list_names(filter: &CommandListFilter<'_>) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    for spec in COMMANDS.iter() {
+        let name = command_full_name(spec);
+        if command_list_filter_allows(filter, spec, &name) {
+            out.push(name);
+        }
+    }
+    out
+}
+
+fn command_list_filter_allows(
+    filter: &CommandListFilter<'_>,
+    spec: &crate::generated::GeneratedCommandSpec,
+    full_name: &[u8],
+) -> bool {
+    match filter {
+        CommandListFilter::None => true,
+        CommandListFilter::Module => false,
+        CommandListFilter::AclCategory(Some(bit)) => spec.acl_categories.iter().any(|&cat| {
+            let cat_bit = generated_acl_category_bit(cat);
+            cat_bit & bit != 0
+        }),
+        CommandListFilter::AclCategory(None) => false,
+        CommandListFilter::Pattern(pattern) => glob_match_ascii_ci(pattern, full_name),
+    }
+}
+
+fn command_info(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
+    if ctx.arg_count() == 2 {
+        let mut items = Vec::new();
+        for spec in COMMANDS.iter() {
+            items.push(command_info_frame(spec));
+        }
+        return ctx.reply_frame(&RespFrame::array(items));
+    }
+
+    let mut items = Vec::with_capacity(ctx.arg_count().saturating_sub(2));
+    for i in 2..ctx.arg_count() {
+        let name = ctx.arg(i)?.as_bytes();
+        match lookup_command_info_spec(name) {
+            Some(spec) => items.push(command_info_frame(spec)),
+            None => items.push(RespFrame::null_bulk()),
+        }
+    }
+    ctx.reply_frame(&RespFrame::array(items))
+}
+
+fn lookup_command_info_spec(
+    name: &[u8],
+) -> Option<&'static crate::generated::GeneratedCommandSpec> {
+    COMMANDS
+        .iter()
+        .find(|spec| ascii_eq_ignore_case(&command_full_name(spec), name))
+}
+
+fn command_info_frame(spec: &crate::generated::GeneratedCommandSpec) -> RespFrame {
+    RespFrame::array(vec![
+        RespFrame::bulk(RedisString::from_vec(command_full_name(spec))),
+        RespFrame::integer(spec.arity as i64),
+        RespFrame::array(
+            command_info_flags(spec)
+                .into_iter()
+                .map(RespFrame::bulk)
+                .collect(),
+        ),
+        RespFrame::integer(0),
+        RespFrame::integer(0),
+        RespFrame::integer(0),
+        RespFrame::array(Vec::new()),
+    ])
+}
+
+fn command_info_flags(spec: &crate::generated::GeneratedCommandSpec) -> Vec<RedisString> {
+    let mut flags: Vec<RedisString> = spec
+        .flags
+        .iter()
+        .filter_map(|flag| command_flag_name(*flag))
+        .map(RedisString::from_bytes)
+        .collect();
+    let full_name = command_full_name(spec);
+    if command_has_movable_keys(&full_name) && !flags.iter().any(|f| f.as_bytes() == b"movablekeys")
+    {
+        flags.push(RedisString::from_bytes(b"movablekeys"));
+    }
+    flags
+}
+
+fn command_flag_name(flag: crate::generated::CommandFlag) -> Option<&'static [u8]> {
+    use crate::generated::CommandFlag;
+    match flag {
+        CommandFlag::ADMIN => Some(b"admin"),
+        CommandFlag::ALLOW_BUSY => Some(b"allow-busy"),
+        CommandFlag::ALL_DBS => Some(b"all-dbs"),
+        CommandFlag::ASKING => Some(b"asking"),
+        CommandFlag::BLOCKING => Some(b"blocking"),
+        CommandFlag::DENYOOM => Some(b"denyoom"),
+        CommandFlag::FAST => Some(b"fast"),
+        CommandFlag::LOADING => Some(b"loading"),
+        CommandFlag::MAY_REPLICATE => Some(b"may-replicate"),
+        CommandFlag::NOSCRIPT => Some(b"noscript"),
+        CommandFlag::NO_ASYNC_LOADING => Some(b"no-async-loading"),
+        CommandFlag::NO_AUTH => Some(b"no-auth"),
+        CommandFlag::NO_MANDATORY_KEYS => None,
+        CommandFlag::NO_MULTI => Some(b"no-multi"),
+        CommandFlag::ONLY_SENTINEL => Some(b"only-sentinel"),
+        CommandFlag::PROTECTED => Some(b"protected"),
+        CommandFlag::PUBSUB => Some(b"pubsub"),
+        CommandFlag::READONLY => Some(b"readonly"),
+        CommandFlag::SENTINEL => Some(b"sentinel"),
+        CommandFlag::SKIP_COMMANDLOG => Some(b"skip-commandlog"),
+        CommandFlag::SKIP_MONITOR => Some(b"skip-monitor"),
+        CommandFlag::STALE => Some(b"stale"),
+        CommandFlag::TOUCHES_ARBITRARY_KEYS => Some(b"movablekeys"),
+        CommandFlag::WRITE => Some(b"write"),
+    }
+}
+
+fn command_has_movable_keys(full_name: &[u8]) -> bool {
+    [
+        b"zunionstore".as_slice(),
+        b"xread".as_slice(),
+        b"eval".as_slice(),
+        b"sort".as_slice(),
+        b"sort_ro".as_slice(),
+        b"migrate".as_slice(),
+        b"georadius".as_slice(),
+    ]
+    .iter()
+    .any(|name| ascii_eq_ignore_case(full_name, name))
+}
+
+fn command_full_name(spec: &crate::generated::GeneratedCommandSpec) -> Vec<u8> {
+    let name = spec.name.as_bytes().to_ascii_lowercase();
+    if let Some(parent) = command_parent_for_spec(spec) {
+        if name.as_slice() != parent {
+            let mut full = Vec::with_capacity(parent.len() + 1 + name.len());
+            full.extend_from_slice(parent);
+            full.push(b'|');
+            full.extend_from_slice(&name);
+            return full;
+        }
+    }
+    name
+}
+
+fn command_parent_for_spec(spec: &crate::generated::GeneratedCommandSpec) -> Option<&'static [u8]> {
+    let function = spec.function.as_bytes();
+    for (prefix, parent) in [
+        (b"acl".as_slice(), b"acl".as_slice()),
+        (b"client".as_slice(), b"client".as_slice()),
+        (b"cluster".as_slice(), b"cluster".as_slice()),
+        (b"command".as_slice(), b"command".as_slice()),
+        (b"config".as_slice(), b"config".as_slice()),
+        (b"function".as_slice(), b"function".as_slice()),
+        (b"latency".as_slice(), b"latency".as_slice()),
+        (b"memory".as_slice(), b"memory".as_slice()),
+        (b"module".as_slice(), b"module".as_slice()),
+        (b"pubsub".as_slice(), b"pubsub".as_slice()),
+        (b"script".as_slice(), b"script".as_slice()),
+        (b"xgroup".as_slice(), b"xgroup".as_slice()),
+        (b"xinfo".as_slice(), b"xinfo".as_slice()),
+    ] {
+        if starts_with_ascii_ci(function, prefix) {
+            return Some(parent);
+        }
+    }
+    None
+}
+
+fn starts_with_ascii_ci(text: &[u8], prefix: &[u8]) -> bool {
+    text.len() >= prefix.len() && ascii_eq_ignore_case(&text[..prefix.len()], prefix)
 }
 
 #[derive(Clone)]
@@ -3629,9 +3857,7 @@ fn load_acl_users_from_path(path: &Path) -> Result<HashMap<RedisString, AclUser>
     )
 }
 
-fn build_acl_users_from_lines<'a, I>(
-    lines: I,
-) -> Result<HashMap<RedisString, AclUser>, Vec<u8>>
+fn build_acl_users_from_lines<'a, I>(lines: I) -> Result<HashMap<RedisString, AclUser>, Vec<u8>>
 where
     I: IntoIterator<Item = (usize, &'a str)>,
 {
@@ -4623,7 +4849,9 @@ fn build_getuser_reply(user: &AclUser) -> RespFrame {
         flag_items.push(RespFrame::bulk(RedisString::from_bytes(b"nopass")));
     }
     if user.flags.sanitize_payload {
-        flag_items.push(RespFrame::bulk(RedisString::from_bytes(b"sanitize-payload")));
+        flag_items.push(RespFrame::bulk(RedisString::from_bytes(
+            b"sanitize-payload",
+        )));
     } else {
         flag_items.push(RespFrame::bulk(RedisString::from_bytes(
             b"skip-sanitize-payload",
