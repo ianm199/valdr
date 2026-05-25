@@ -1193,15 +1193,26 @@ pub fn lmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
         if empty_after {
             ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", key);
         }
-        add_dirty_if_nonzero(ctx, popped.len() as i64);
+        let popped_len = popped.len();
+        add_dirty_if_nonzero(ctx, popped_len as i64);
         ctx.reply_array_header(2)?;
         ctx.reply_bulk_string(key.clone())?;
-        ctx.reply_array_header(popped.len())?;
+        ctx.reply_array_header(popped_len)?;
         for v in popped {
             ctx.reply_bulk_string(v)?;
         }
+        let prop_cmd = match position {
+            ListPosition::Head => b"LPOP" as &[u8],
+            ListPosition::Tail => b"RPOP" as &[u8],
+        };
+        ctx.client_mut().set_args(vec![
+            RedisString::from_bytes(prop_cmd),
+            key.clone(),
+            RedisString::from_bytes(popped_len.to_string().as_bytes()),
+        ]);
         return Ok(());
     }
+    ctx.client_mut().set_prevent_propagation();
     ctx.reply_null_array()
 }
 

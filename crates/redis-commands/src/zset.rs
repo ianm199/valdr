@@ -2034,16 +2034,28 @@ pub fn zmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
             continue;
         }
         delete_if_empty(ctx, &key);
+        let popped_len = popped.len();
         ctx.reply_array_header(2usize)?;
-        ctx.reply_bulk_string(key)?;
-        ctx.reply_array_header(popped.len())?;
+        ctx.reply_bulk_string(key.clone())?;
+        ctx.reply_array_header(popped_len)?;
         for (s, m) in popped {
             ctx.reply_array_header(2usize)?;
             ctx.reply_bulk_string(m)?;
             ctx.reply_double(s)?;
         }
+        let prop_cmd = if reverse {
+            b"ZPOPMAX" as &[u8]
+        } else {
+            b"ZPOPMIN" as &[u8]
+        };
+        ctx.client_mut().set_args(vec![
+            RedisString::from_bytes(prop_cmd),
+            key,
+            RedisString::from_bytes(popped_len.to_string().as_bytes()),
+        ]);
         return Ok(());
     }
+    ctx.client_mut().set_prevent_propagation();
     ctx.reply_null_array()
 }
 
