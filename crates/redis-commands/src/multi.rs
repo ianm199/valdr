@@ -35,22 +35,24 @@ use redis_types::{RedisError, RedisResult, RedisString};
 use crate::list::wake_blocked_for_key;
 use crate::zset::wake_blocked_zset_for_key;
 
-use crate::dispatch::{dispatch_command_name, lookup_command};
+use crate::dispatch::{
+    command_is_denyoom, command_is_no_multi, dispatch_command_name, enforce_maxmemory_gate,
+    execabort_from_error_reply, lookup_command,
+};
 
 const NAME_RESET: &[u8] = b"RESET";
 const NAME_MULTI: &[u8] = b"MULTI";
 const NAME_EXEC: &[u8] = b"EXEC";
 const NAME_DISCARD: &[u8] = b"DISCARD";
-const NAME_WATCH: &[u8] = b"WATCH";
 const NAME_UNWATCH: &[u8] = b"UNWATCH";
 
 /// True when `name` runs eagerly even inside a MULTI block.
 ///
 /// EXEC, DISCARD, UNWATCH, and RESET tear down or progress the transaction;
-/// they must not be queued. MULTI and WATCH carry `CMD_NO_MULTI` in the C
-/// command table and are rejected by [`reject_no_multi_command`] before
-/// reaching the queue path — they are listed here too so dispatch routes
-/// them through the rejection helper instead of the queue.
+/// they must not be queued. Commands carrying `CMD_NO_MULTI` in the Valkey
+/// command table are rejected by [`reject_no_multi_command`] before reaching
+/// the queue path — they are included here so dispatch routes them through
+/// the rejection helper instead of the queue.
 pub fn is_tx_control_command(name: &[u8]) -> bool {
     is_no_multi_command(name)
         || eq_ignore_ascii(name, NAME_EXEC)
@@ -61,12 +63,12 @@ pub fn is_tx_control_command(name: &[u8]) -> bool {
 
 /// True when `name` carries the C `CMD_NO_MULTI` flag.
 ///
-/// Per `commands/*.json`, only `MULTI` and `WATCH` are tagged. Inside a MULTI
-/// block these commands are rejected with the generic `Command 'X' not
-/// allowed inside a transaction` error real Valkey emits (see C
-/// `server.c::processCommand` after the `flag.multi && CMD_NO_MULTI` check).
+/// Inside a MULTI block, these commands are rejected with the generic
+/// `Command 'X' not allowed inside a transaction` error real Valkey emits
+/// (see C `server.c::processCommand` after the `flag.multi && CMD_NO_MULTI`
+/// check).
 pub fn is_no_multi_command(name: &[u8]) -> bool {
-    eq_ignore_ascii(name, NAME_MULTI) || eq_ignore_ascii(name, NAME_WATCH)
+    command_is_no_multi(name)
 }
 
 pub fn is_multi_command(name: &[u8]) -> bool {
@@ -125,13 +127,18 @@ pub fn flag_transaction_dirty_exec(client: &mut Client) {
 /// check; on miss it sets the dirty-exec flag so the EXEC step responds with
 /// the `EXECABORT` error real Redis emits.
 pub fn queue_current_command(ctx: &mut CommandContext) -> RedisResult<()> {
+    if ctx.client_ref().flag_dirty_exec() || ctx.client_ref().flag_dirty_cas() {
+        ctx.reply_simple_string(b"QUEUED")?;
+        return Ok(());
+    }
+
     let argv: Vec<RedisString> = ctx.client_ref().argv.clone();
     let name = match argv.first() {
         Some(n) => n.clone(),
         None => return Err(RedisError::runtime(b"ERR empty command")),
     };
     if lookup_command(name.as_bytes()).is_none() {
-        ctx.client_mut().set_flag_dirty_exec(true);
+        flag_transaction_dirty_exec(ctx.client_mut());
         let mut msg =
             Vec::with_capacity(b"ERR unknown command '".len() + name.as_bytes().len() + 1);
         msg.extend_from_slice(b"ERR unknown command '");
@@ -186,6 +193,16 @@ pub fn exec_command(ctx: &mut CommandContext) -> RedisResult<()> {
         return Ok(());
     }
 
+    if queued_has_denyoom_command(&ctx.client_ref().queued_argvs) {
+        if let Some(reply) = enforce_maxmemory_gate(ctx, true) {
+            reset_multi_state(ctx.client_mut());
+            ctx.client_mut()
+                .reply_buf
+                .extend_from_slice(&execabort_from_error_reply(&reply));
+            return Ok(());
+        }
+    }
+
     let queued: Vec<Vec<RedisString>> = std::mem::take(&mut ctx.client_mut().queued_argvs);
     ctx.client_mut().set_flag_multi(false);
     ctx.client_mut().set_flag_deny_blocking(true);
@@ -209,6 +226,14 @@ pub fn exec_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
     reset_multi_state(ctx.client_mut());
     header_res
+}
+
+fn queued_has_denyoom_command(queued: &[Vec<RedisString>]) -> bool {
+    queued.iter().any(|argv| {
+        argv.first()
+            .map(|name| command_is_denyoom(name.as_bytes()))
+            .unwrap_or(false)
+    })
 }
 
 /// Run a single queued argv as if the client had just sent it directly.
@@ -286,6 +311,7 @@ pub fn reset_multi_state(client: &mut Client) {
     client.set_flag_dirty_cas(false);
     client.set_flag_dirty_exec(false);
     watched_keys_index_remove_client(client.id());
+    let _ = watched_keys_take_dirty(client.id());
 }
 
 #[cfg(test)]
@@ -331,6 +357,25 @@ mod tests {
             .to_resp_payload()
             .as_bytes()
             .starts_with(b"ERR Command 'multi' not allowed inside a transaction"));
+        assert!(ctx.client_ref().flag_multi());
+        assert!(ctx.client_ref().flag_dirty_exec());
+        assert!(ctx.client_ref().queued_argvs.is_empty());
+    }
+
+    #[test]
+    fn watch_inside_multi_rejection_marks_dirty_exec() {
+        let mut c = Client::new(5);
+        c.set_flag_multi(true);
+        c.queued_argvs.push(vec![RedisString::from_bytes(b"SET")]);
+        c.set_args(vec![RedisString::from_bytes(b"WATCH"), RedisString::from_bytes(b"x")]);
+        let mut ctx = CommandContext::new(&mut c);
+
+        let err = crate::dispatch::dispatch(&mut ctx).unwrap_err();
+
+        assert!(err
+            .to_resp_payload()
+            .as_bytes()
+            .starts_with(b"ERR Command 'watch' not allowed inside a transaction"));
         assert!(ctx.client_ref().flag_multi());
         assert!(ctx.client_ref().flag_dirty_exec());
         assert!(ctx.client_ref().queued_argvs.is_empty());

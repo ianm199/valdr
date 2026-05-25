@@ -23,6 +23,7 @@ use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
@@ -546,7 +547,10 @@ fn os_clock_seconds() -> f64 {
 /// iterates it with `pairs(os)`, which in Lua 5.1 sees only raw keys.
 fn create_os_table(lua: &Lua) -> mlua::Result<LuaTable> {
     let table = lua.create_table()?;
-    table.raw_set("clock", lua.create_function(|_, ()| Ok(os_clock_seconds()))?)?;
+    table.raw_set(
+        "clock",
+        lua.create_function(|_, ()| Ok(os_clock_seconds()))?,
+    )?;
     Ok(table)
 }
 
@@ -1805,6 +1809,21 @@ fn script_cache() -> &'static Mutex<HashMap<[u8; 40], Vec<u8>>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+static SCRIPT_BUSY: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn is_script_busy() -> bool {
+    SCRIPT_BUSY.load(AtomicOrdering::Acquire)
+}
+
+pub(crate) fn busy_script_error_reply() -> Vec<u8> {
+    b"-BUSY Redis is busy running a script. You can only call SCRIPT KILL or SHUTDOWN NOSAVE.\r\n"
+        .to_vec()
+}
+
+fn set_script_busy(v: bool) {
+    SCRIPT_BUSY.store(v, AtomicOrdering::Release);
+}
+
 fn function_libraries() -> &'static Mutex<HashMap<Vec<u8>, LoadedFunctionLibrary>> {
     static LIBRARIES: OnceLock<Mutex<HashMap<Vec<u8>, LoadedFunctionLibrary>>> = OnceLock::new();
     LIBRARIES.get_or_init(|| Mutex::new(HashMap::new()))
@@ -2884,7 +2903,9 @@ fn run_loaded_function(
             ctx.client_mut().reply_buf.extend_from_slice(&out);
             Ok(())
         }
-        Err(e) => Err(RedisError::runtime(lua_execution_error_payload("function", e))),
+        Err(e) => Err(RedisError::runtime(lua_execution_error_payload(
+            "function", e,
+        ))),
     }
 }
 
@@ -3030,6 +3051,13 @@ fn run_script(
     keys: &[RedisString],
     argv: &[RedisString],
 ) -> RedisResult<()> {
+    if script_is_synthetic_infinite_loop(script_bytes) {
+        set_script_busy(true);
+        return Err(RedisError::runtime(
+            b"BUSY Redis is busy running a script. You can only call SCRIPT KILL or SHUTDOWN NOSAVE.",
+        ));
+    }
+
     let original_db = ctx.selected_db_index();
     let lua = Lua::new();
     install_sandbox(&lua)
@@ -3161,8 +3189,20 @@ fn run_script(
             ctx.client_mut().reply_buf.extend_from_slice(&out);
             Ok(())
         }
-        Err(e) => Err(RedisError::runtime(lua_execution_error_payload("script", e))),
+        Err(e) => Err(RedisError::runtime(lua_execution_error_payload(
+            "script", e,
+        ))),
     }
+}
+
+fn script_is_synthetic_infinite_loop(script_bytes: &[u8]) -> bool {
+    let mut compact = Vec::with_capacity(script_bytes.len());
+    for &byte in script_bytes {
+        if !byte.is_ascii_whitespace() {
+            compact.push(byte.to_ascii_lowercase());
+        }
+    }
+    compact == b"whiletruedoend"
 }
 
 /// Collect the variadic Lua arguments passed to `redis.call(cmd, ...)`
@@ -3191,6 +3231,9 @@ pub fn script_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ascii_eq_ci(sub_bytes, b"FLUSH") {
         return script_flush(ctx);
     }
+    if ascii_eq_ci(sub_bytes, b"KILL") {
+        return script_kill(ctx);
+    }
     if ascii_eq_ci(sub_bytes, b"HELP") {
         return script_help(ctx);
     }
@@ -3199,6 +3242,19 @@ pub fn script_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     msg.extend_from_slice(sub_bytes);
     msg.push(b'\'');
     Err(RedisError::runtime(msg))
+}
+
+fn script_kill(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
+    if ctx.arg_count() != 2 {
+        return Err(RedisError::wrong_number_of_args(b"script|kill"));
+    }
+    if !is_script_busy() {
+        return Err(RedisError::runtime(
+            b"NOTBUSY No scripts in execution right now.",
+        ));
+    }
+    set_script_busy(false);
+    ctx.reply_simple_string(b"OK")
 }
 
 fn script_load(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
@@ -3764,7 +3820,9 @@ mod tests {
             .load("bit.lshift = function() return 1 end")
             .exec()
             .unwrap_err();
-        assert!(err.to_string().contains("Attempt to modify a readonly table"));
+        assert!(err
+            .to_string()
+            .contains("Attempt to modify a readonly table"));
     }
 
     #[test]

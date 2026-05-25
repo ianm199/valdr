@@ -831,6 +831,9 @@ fn apply_config_set_for_context(
     if ascii_eq_ignore_case(key, b"appendonly") {
         return apply_appendonly_config_set(ctx, cfg, value);
     }
+    if ascii_eq_ignore_case(key, b"maxmemory") && parse_memsize(value).is_none() {
+        return Err(RedisError::runtime(b"ERR CONFIG SET failed"));
+    }
     if ascii_eq_ignore_case(key, b"tracking-table-max-keys") {
         if let Some(max_keys) = parse_usize_strict(value) {
             let pubsub = ctx.pubsub.as_ref().cloned();

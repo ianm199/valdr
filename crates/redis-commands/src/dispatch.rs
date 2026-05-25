@@ -47,6 +47,8 @@ struct CommandMetadata {
     write: bool,
     no_auth: bool,
     denyoom: bool,
+    no_multi: bool,
+    allow_busy: bool,
     skip_commandlog: bool,
     skip_monitor: bool,
     admin: bool,
@@ -199,13 +201,32 @@ pub fn dispatch(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         return Ok(());
     }
     if ctx.client_ref().flag_multi() {
+        if is_client_reply_command(ctx, name) {
+            crate::multi::flag_transaction_dirty_exec(ctx.client_mut());
+            ctx.client_mut().reply_buf.extend_from_slice(
+                b"-ERR Command 'client|reply' not allowed inside a transaction\r\n",
+            );
+            return Ok(());
+        }
         if crate::multi::is_no_multi_command(name) {
-            if crate::multi::is_multi_command(name) {
-                crate::multi::flag_transaction_dirty_exec(ctx.client_mut());
-            }
+            crate::multi::flag_transaction_dirty_exec(ctx.client_mut());
             return Err(crate::multi::reject_no_multi_command(name));
         }
         if !crate::multi::is_tx_control_command(name) {
+            if let Some(runtime_entry) = lookup_runtime_command(name) {
+                if let Some(reply) = enforce_maxmemory_gate(ctx, runtime_entry.metadata.denyoom) {
+                    crate::multi::flag_transaction_dirty_exec(ctx.client_mut());
+                    ctx.client_mut().reply_buf.extend_from_slice(&reply);
+                    return Ok(());
+                }
+                if let Some(reply) =
+                    enforce_busy_script_gate(ctx, name, runtime_entry.metadata.allow_busy)
+                {
+                    crate::multi::flag_transaction_dirty_exec(ctx.client_mut());
+                    ctx.client_mut().reply_buf.extend_from_slice(&reply);
+                    return Ok(());
+                }
+            }
             return crate::multi::queue_current_command(ctx);
         }
     }
@@ -273,6 +294,18 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
 
     if let Some(reply) = enforce_maxmemory_gate(ctx, metadata.denyoom) {
         ctx.client_mut().reply_buf.extend_from_slice(&reply);
+        return Ok(());
+    }
+
+    if let Some(reply) = enforce_busy_script_gate(ctx, name, metadata.allow_busy) {
+        if ctx.client_ref().flag_multi() && ascii_eq_ignore_case(name, b"EXEC") {
+            crate::multi::reset_multi_state(ctx.client_mut());
+            ctx.client_mut()
+                .reply_buf
+                .extend_from_slice(&execabort_from_error_reply(&reply));
+        } else {
+            ctx.client_mut().reply_buf.extend_from_slice(&reply);
+        }
         return Ok(());
     }
 
@@ -479,6 +512,14 @@ fn command_metadata(name: &[u8]) -> CommandMetadata {
         .unwrap_or_default()
 }
 
+pub(crate) fn command_is_denyoom(name: &[u8]) -> bool {
+    command_metadata(name).denyoom
+}
+
+pub(crate) fn command_is_no_multi(name: &[u8]) -> bool {
+    command_metadata(name).no_multi
+}
+
 fn command_metadata_table() -> &'static [(&'static [u8], CommandMetadata)] {
     COMMAND_METADATA_TABLE.get_or_init(|| {
         let mut rows: Vec<(&'static [u8], CommandMetadata)> = Vec::new();
@@ -557,6 +598,8 @@ impl CommandMetadata {
                 CommandFlag::WRITE => self.write = true,
                 CommandFlag::NO_AUTH => self.no_auth = true,
                 CommandFlag::DENYOOM => self.denyoom = true,
+                CommandFlag::NO_MULTI => self.no_multi = true,
+                CommandFlag::ALLOW_BUSY => self.allow_busy = true,
                 CommandFlag::SKIP_COMMANDLOG => self.skip_commandlog = true,
                 CommandFlag::SKIP_MONITOR => self.skip_monitor = true,
                 _ => {}
@@ -702,7 +745,7 @@ fn enforce_replica_readonly_gate(
 /// either cannot or refuses to recover memory. Returns `None` when dispatch
 /// should proceed (either we were under the limit, or eviction trimmed the
 /// keyspace back under it, or the command is exempt from DENYOOM).
-fn enforce_maxmemory_gate(
+pub(crate) fn enforce_maxmemory_gate(
     ctx: &mut CommandContext<'_>,
     is_denyoom_command: bool,
 ) -> Option<Vec<u8>> {
@@ -725,6 +768,53 @@ fn enforce_maxmemory_gate(
         EvictionOutcome::Sufficient | EvictionOutcome::Evicted(_) => None,
         EvictionOutcome::StillOver => Some(oom_error_reply()),
     }
+}
+
+fn enforce_busy_script_gate(
+    ctx: &CommandContext<'_>,
+    name: &[u8],
+    allow_busy_command: bool,
+) -> Option<Vec<u8>> {
+    if !crate::eval::is_script_busy() {
+        return None;
+    }
+    if allow_busy_command || is_script_kill_command(ctx, name) {
+        return None;
+    }
+    Some(crate::eval::busy_script_error_reply())
+}
+
+fn is_script_kill_command(ctx: &CommandContext<'_>, name: &[u8]) -> bool {
+    if !ascii_eq_ignore_case(name, b"SCRIPT") {
+        return false;
+    }
+    match ctx.client_ref().arg(1) {
+        Some(sub) => ascii_eq_ignore_case(sub.as_bytes(), b"KILL"),
+        None => false,
+    }
+}
+
+fn is_client_reply_command(ctx: &CommandContext<'_>, name: &[u8]) -> bool {
+    if !ascii_eq_ignore_case(name, b"CLIENT") {
+        return false;
+    }
+    match ctx.client_ref().arg(1) {
+        Some(sub) => ascii_eq_ignore_case(sub.as_bytes(), b"REPLY"),
+        None => false,
+    }
+}
+
+pub(crate) fn execabort_from_error_reply(reply: &[u8]) -> Vec<u8> {
+    let msg = reply
+        .strip_prefix(b"-")
+        .unwrap_or(reply)
+        .strip_suffix(b"\r\n")
+        .unwrap_or(reply);
+    let mut out = Vec::with_capacity(b"-EXECABORT Transaction discarded because of: \r\n".len() + msg.len());
+    out.extend_from_slice(b"-EXECABORT Transaction discarded because of: ");
+    out.extend_from_slice(msg);
+    out.extend_from_slice(b"\r\n");
+    out
 }
 
 /// Append `argv` to the replication backlog and fan out to all online replicas.
