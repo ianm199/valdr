@@ -16,7 +16,10 @@ use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::sync::{OnceLock, RwLock};
 
-use redis_core::acl::{category as acl_category, global_acl_state, record_acl_log_entry, AclUser};
+use redis_core::acl::{
+    category as acl_category, global_acl_state, record_acl_log_entry, AclUser, ACL_KEY_ANY,
+    ACL_KEY_READ, ACL_KEY_READ_WRITE, ACL_KEY_WRITE,
+};
 use redis_core::eviction::{oom_error_reply, try_evict_to_fit, EvictionOutcome};
 use redis_core::memory::approximate_memory_used;
 use redis_core::metrics::{
@@ -327,8 +330,7 @@ pub fn dispatch(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
                 if !metadata.no_auth {
                     let acl_categories =
                         acl_categories_for_context(ctx, dispatch_name, metadata.acl_categories);
-                    if let Some(noauth_reply) =
-                        enforce_acl_gate(ctx, dispatch_name, acl_categories)
+                    if let Some(noauth_reply) = enforce_acl_gate(ctx, dispatch_name, acl_categories)
                     {
                         crate::multi::flag_transaction_dirty_exec(ctx.client_mut());
                         if close_unauthenticated_client_for_debug_reply_limit(ctx) {
@@ -827,48 +829,58 @@ fn enforce_acl_gate(ctx: &CommandContext<'_>, name: &[u8], cmd_categories: u64) 
         return None;
     }
 
-    let first_arg = ctx.client_ref().arg(1).map(|arg| arg.as_bytes());
-    if !user.can_execute_command_with_arg(name, first_arg, cmd_categories) {
-        let object = RedisString::from_vec(acl_command_error_name(ctx, name, user));
-        let mut msg: Vec<u8> = Vec::new();
-        msg.extend_from_slice(b"-NOPERM This user has no permissions to run the '");
-        msg.extend_from_slice(object.as_bytes());
-        msg.extend_from_slice(b"' command\r\n");
-        let client_info = acl_log_client_info(ctx, name);
-        drop(guard);
-        record_acl_access_denied_cmd();
-        record_acl_log_entry(b"command", acl_log_context(ctx), object, user_name, client_info);
-        return Some(msg);
+    match evaluate_acl_access(ctx, name, cmd_categories, user) {
+        Ok(()) => None,
+        Err(AclDeny::Command(object)) => {
+            let mut msg: Vec<u8> = Vec::new();
+            msg.extend_from_slice(b"-NOPERM This user has no permissions to run the '");
+            msg.extend_from_slice(object.as_bytes());
+            msg.extend_from_slice(b"' command\r\n");
+            let client_info = acl_log_client_info(ctx, name);
+            drop(guard);
+            record_acl_access_denied_cmd();
+            record_acl_log_entry(
+                b"command",
+                acl_log_context(ctx),
+                object,
+                user_name,
+                client_info,
+            );
+            Some(msg)
+        }
+        Err(AclDeny::Key(object)) => {
+            let client_info = acl_log_client_info(ctx, name);
+            drop(guard);
+            record_acl_access_denied_key();
+            record_acl_log_entry(b"key", acl_log_context(ctx), object, user_name, client_info);
+            Some(b"-NOPERM No permissions to access a key\r\n".to_vec())
+        }
+        Err(AclDeny::Channel(object)) => {
+            let client_info = acl_log_client_info(ctx, name);
+            drop(guard);
+            record_acl_access_denied_channel();
+            record_acl_log_entry(
+                b"channel",
+                acl_log_context(ctx),
+                object,
+                user_name,
+                client_info,
+            );
+            Some(b"-NOPERM No permissions to access a channel\r\n".to_vec())
+        }
+        Err(AclDeny::Database(object)) => {
+            let client_info = acl_log_client_info(ctx, name);
+            drop(guard);
+            record_acl_log_entry(
+                b"database",
+                acl_log_context(ctx),
+                object,
+                user_name,
+                client_info,
+            );
+            Some(b"-NOPERM No permissions to access a database\r\n".to_vec())
+        }
     }
-
-    if let Some(object) = enforce_acl_key_gate(ctx, name, user) {
-        let client_info = acl_log_client_info(ctx, name);
-        drop(guard);
-        record_acl_access_denied_key();
-        record_acl_log_entry(b"key", acl_log_context(ctx), object, user_name, client_info);
-        return Some(b"-NOPERM No permissions to access a key\r\n".to_vec());
-    }
-    if let Some(object) = enforce_acl_channel_gate(ctx, name, user) {
-        let client_info = acl_log_client_info(ctx, name);
-        drop(guard);
-        record_acl_access_denied_channel();
-        record_acl_log_entry(b"channel", acl_log_context(ctx), object, user_name, client_info);
-        return Some(b"-NOPERM No permissions to access a channel\r\n".to_vec());
-    }
-    if let Some(object) = enforce_acl_database_gate(ctx, name, user) {
-        let client_info = acl_log_client_info(ctx, name);
-        drop(guard);
-        record_acl_log_entry(
-            b"database",
-            acl_log_context(ctx),
-            object,
-            user_name,
-            client_info,
-        );
-        return Some(b"-NOPERM No permissions to access a database\r\n".to_vec());
-    }
-
-    None
 }
 
 fn close_unauthenticated_client_for_debug_reply_limit(ctx: &mut CommandContext<'_>) -> bool {
@@ -882,11 +894,68 @@ fn close_unauthenticated_client_for_debug_reply_limit(ctx: &mut CommandContext<'
     false
 }
 
-fn acl_categories_for_context(
+enum AclDeny {
+    Command(RedisString),
+    Key(RedisString),
+    Channel(RedisString),
+    Database(RedisString),
+}
+
+fn evaluate_acl_access(
     ctx: &CommandContext<'_>,
     name: &[u8],
-    base_categories: u64,
-) -> u64 {
+    cmd_categories: u64,
+    user: &AclUser,
+) -> Result<(), AclDeny> {
+    let first_arg = ctx.client_ref().arg(1).map(|arg| arg.as_bytes());
+    let mut key_denial: Option<AclKeyDeny> = None;
+    let mut channel_denial = None;
+    let mut database_denial = None;
+
+    for (idx, candidate) in std::iter::once(user)
+        .chain(user.selectors.iter())
+        .enumerate()
+    {
+        if !candidate.can_execute_command_with_arg(name, first_arg, cmd_categories) {
+            continue;
+        }
+        if let Some(object) = enforce_acl_database_gate(ctx, name, candidate) {
+            if idx == 0 {
+                database_denial.get_or_insert(object);
+            }
+            continue;
+        }
+        if let Some(object) = enforce_acl_channel_gate(ctx, name, candidate) {
+            channel_denial.get_or_insert(object);
+            continue;
+        }
+        if let Some(object) = enforce_acl_key_gate(ctx, name, candidate) {
+            if key_denial
+                .as_ref()
+                .is_none_or(|current| object.matched > current.matched)
+            {
+                key_denial = Some(object);
+            }
+            continue;
+        }
+        return Ok(());
+    }
+
+    if let Some(object) = key_denial {
+        return Err(AclDeny::Key(object.object));
+    }
+    if let Some(object) = channel_denial {
+        return Err(AclDeny::Channel(object));
+    }
+    if let Some(object) = database_denial {
+        return Err(AclDeny::Database(object));
+    }
+    Err(AclDeny::Command(RedisString::from_vec(
+        acl_command_error_name(ctx, name, user),
+    )))
+}
+
+fn acl_categories_for_context(ctx: &CommandContext<'_>, name: &[u8], base_categories: u64) -> u64 {
     if ascii_eq_ignore_case(name, b"XINFO") {
         return base_categories | acl_category::STREAM | acl_category::READ;
     }
@@ -903,11 +972,38 @@ fn enforce_acl_key_gate(
     ctx: &CommandContext<'_>,
     name: &[u8],
     user: &AclUser,
-) -> Option<RedisString> {
-    if user.flags.allkeys {
-        return None;
+) -> Option<AclKeyDeny> {
+    let requirements = acl_key_requirements(ctx, name, 0);
+    let mut matched = 0usize;
+    for req in requirements {
+        if !user.can_access_key_for(req.key.as_bytes(), req.access) {
+            return Some(AclKeyDeny {
+                object: req.key,
+                matched,
+            });
+        }
+        matched += 1;
     }
-    let argc = ctx.arg_count();
+    None
+}
+
+struct AclKeyDeny {
+    object: RedisString,
+    matched: usize,
+}
+
+pub(crate) struct AclKeyRequirement {
+    pub(crate) key: RedisString,
+    pub(crate) access: u8,
+}
+
+pub(crate) fn acl_key_requirements(
+    ctx: &CommandContext<'_>,
+    name: &[u8],
+    arg_offset: usize,
+) -> Vec<AclKeyRequirement> {
+    let mut out = Vec::new();
+    let effective_argc = ctx.arg_count().saturating_sub(arg_offset);
     for spec in COMMANDS
         .iter()
         .filter(|spec| ascii_eq_ignore_case(spec.name.as_bytes(), name))
@@ -927,19 +1023,23 @@ fn enforce_acl_key_gate(
                 continue;
             };
             if let Some(range) = item.pointer("/find_keys/range") {
+                let access = acl_key_access_for_spec_item(ctx, name, &item, arg_offset);
                 let step = range
                     .get("step")
                     .and_then(Value::as_u64)
                     .unwrap_or(1)
                     .max(1) as usize;
                 let lastkey = range.get("lastkey").and_then(Value::as_i64).unwrap_or(0);
-                let end = acl_range_end(argc, begin, lastkey)?;
+                let Some(end) = acl_range_end(effective_argc, begin, lastkey) else {
+                    continue;
+                };
                 let mut idx = begin;
                 while idx <= end {
-                    if let Some(key) = ctx.client_ref().arg(idx) {
-                        if !user.can_access_key(key.as_bytes()) {
-                            return Some(key.clone());
-                        }
+                    if let Some(key) = ctx.client_ref().arg(idx + arg_offset) {
+                        out.push(AclKeyRequirement {
+                            key: key.clone(),
+                            access,
+                        });
                     }
                     idx = match idx.checked_add(step) {
                         Some(next) => next,
@@ -947,20 +1047,29 @@ fn enforce_acl_key_gate(
                     };
                 }
             } else if let Some(keynum) = item.pointer("/find_keys/keynum") {
+                let access = acl_key_access_for_spec_item(ctx, name, &item, arg_offset);
                 let keynumidx = keynum
                     .get("keynumidx")
                     .and_then(Value::as_u64)
-                    .map(|v| v as usize)?;
+                    .map(|v| v as usize);
+                let Some(keynumidx) = keynumidx else {
+                    continue;
+                };
                 let firstkey = keynum
                     .get("firstkey")
                     .and_then(Value::as_u64)
-                    .map(|v| v as usize)?;
+                    .map(|v| v as usize);
+                let Some(firstkey) = firstkey else {
+                    continue;
+                };
                 let step = keynum
                     .get("step")
                     .and_then(Value::as_u64)
                     .unwrap_or(1)
                     .max(1) as usize;
-                let raw_count = ctx.client_ref().arg(keynumidx)?;
+                let Some(raw_count) = ctx.client_ref().arg(keynumidx + arg_offset) else {
+                    continue;
+                };
                 let Ok(raw_count) = std::str::from_utf8(raw_count.as_bytes()) else {
                     continue;
                 };
@@ -969,16 +1078,85 @@ fn enforce_acl_key_gate(
                 };
                 for n in 0..count {
                     let idx = firstkey + n * step;
-                    if let Some(key) = ctx.client_ref().arg(idx) {
-                        if !user.can_access_key(key.as_bytes()) {
-                            return Some(key.clone());
-                        }
+                    if let Some(key) = ctx.client_ref().arg(idx + arg_offset) {
+                        out.push(AclKeyRequirement {
+                            key: key.clone(),
+                            access,
+                        });
                     }
                 }
             }
         }
     }
-    None
+    out
+}
+
+fn acl_key_access_for_spec_item(
+    ctx: &CommandContext<'_>,
+    name: &[u8],
+    item: &Value,
+    arg_offset: usize,
+) -> u8 {
+    if ascii_eq_ignore_case(name, b"SET") {
+        return if acl_command_args_contain_token(ctx, arg_offset + 3, b"GET") {
+            ACL_KEY_READ_WRITE
+        } else {
+            ACL_KEY_WRITE
+        };
+    }
+    if ascii_eq_ignore_case(name, b"BITFIELD") {
+        return acl_bitfield_access(ctx, arg_offset);
+    }
+    let flags = item.get("flags").and_then(Value::as_array);
+    let has = |flag: &str| {
+        flags.is_some_and(|items| items.iter().any(|item| item.as_str() == Some(flag)))
+    };
+    if has("OW") || has("WO") || has("INSERT") {
+        return ACL_KEY_WRITE;
+    }
+    if has("RO") {
+        return if has("ACCESS") {
+            ACL_KEY_READ
+        } else {
+            ACL_KEY_ANY
+        };
+    }
+    if has("RW") {
+        return if has("ACCESS") {
+            ACL_KEY_READ_WRITE
+        } else {
+            ACL_KEY_WRITE
+        };
+    }
+    ACL_KEY_READ_WRITE
+}
+
+fn acl_command_args_contain_token(ctx: &CommandContext<'_>, start: usize, token: &[u8]) -> bool {
+    (start..ctx.arg_count()).any(|idx| {
+        ctx.client_ref()
+            .arg(idx)
+            .is_some_and(|arg| arg.as_bytes().eq_ignore_ascii_case(token))
+    })
+}
+
+fn acl_bitfield_access(ctx: &CommandContext<'_>, arg_offset: usize) -> u8 {
+    let mut access = 0u8;
+    for idx in (arg_offset + 2)..ctx.arg_count() {
+        let Some(arg) = ctx.client_ref().arg(idx) else {
+            continue;
+        };
+        let bytes = arg.as_bytes();
+        if bytes.eq_ignore_ascii_case(b"GET") {
+            access |= ACL_KEY_READ;
+        } else if bytes.eq_ignore_ascii_case(b"SET") || bytes.eq_ignore_ascii_case(b"INCRBY") {
+            access |= ACL_KEY_READ_WRITE;
+        }
+    }
+    if access == 0 {
+        ACL_KEY_READ_WRITE
+    } else {
+        access
+    }
 }
 
 fn acl_range_end(argc: usize, begin: usize, lastkey: i64) -> Option<usize> {
@@ -1119,11 +1297,7 @@ fn acl_log_client_info(ctx: &CommandContext<'_>, name: &[u8]) -> RedisString {
     )
 }
 
-fn acl_command_error_name(
-    ctx: &CommandContext<'_>,
-    name: &[u8],
-    user: &AclUser,
-) -> Vec<u8> {
+fn acl_command_error_name(ctx: &CommandContext<'_>, name: &[u8], user: &AclUser) -> Vec<u8> {
     let lower = ascii_lower_vec(name);
     let lower_rs = RedisString::from_bytes(&lower);
     if let Some(first_arg) = ctx.client_ref().arg(1) {

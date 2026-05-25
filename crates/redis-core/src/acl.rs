@@ -273,6 +273,11 @@ pub const DEFAULT_ACLLOG_MAX_LEN: usize = 128;
 
 static ACL_PUBSUB_DEFAULT_ALLCHANNELS: AtomicBool = AtomicBool::new(false);
 
+pub const ACL_KEY_READ: u8 = 0b01;
+pub const ACL_KEY_WRITE: u8 = 0b10;
+pub const ACL_KEY_READ_WRITE: u8 = ACL_KEY_READ | ACL_KEY_WRITE;
+pub const ACL_KEY_ANY: u8 = 0;
+
 pub fn acl_pubsub_default_allchannels() -> bool {
     ACL_PUBSUB_DEFAULT_ALLCHANNELS.load(Ordering::Relaxed)
 }
@@ -337,10 +342,21 @@ pub struct AclUser {
     pub command_rules: Vec<RedisString>,
     /// Key glob patterns allowed (`~pattern`).
     pub key_patterns: Vec<RedisString>,
+    /// Key glob patterns with separate read/write permissions (`%R~pattern`).
+    pub key_permissions: Vec<AclKeyPattern>,
     /// Channel glob patterns allowed (`&pattern`).
     pub channel_patterns: Vec<RedisString>,
     /// Logical database ids allowed by `db=N` rules.
     pub allowed_dbs: Vec<u32>,
+    /// ACL v2 selectors. Each selector is an independent rule set; permissions
+    /// from different selectors are intentionally not additive.
+    pub selectors: Vec<AclUser>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AclKeyPattern {
+    pub pattern: RedisString,
+    pub permissions: u8,
 }
 
 impl AclUser {
@@ -364,9 +380,18 @@ impl AclUser {
             denied_commands: Vec::new(),
             command_rules: Vec::new(),
             key_patterns: Vec::new(),
+            key_permissions: Vec::new(),
             channel_patterns: Vec::new(),
             allowed_dbs: Vec::new(),
+            selectors: Vec::new(),
         }
+    }
+
+    /// Create a selector rule set. Selectors share the same deny-all command,
+    /// no-key, no-channel defaults as reset users, but do not carry identity or
+    /// authentication state.
+    pub fn new_selector() -> Self {
+        AclUser::new_reset(RedisString::from_static(b""))
     }
 
     /// Create the default user: `on nopass ~* &* +@all`.
@@ -389,8 +414,10 @@ impl AclUser {
             denied_commands: Vec::new(),
             command_rules: Vec::new(),
             key_patterns: vec![RedisString::from_bytes(b"*")],
+            key_permissions: Vec::new(),
             channel_patterns: vec![RedisString::from_bytes(b"*")],
             allowed_dbs: Vec::new(),
+            selectors: Vec::new(),
         }
     }
 
@@ -438,12 +465,34 @@ impl AclUser {
 
     /// Check whether this user may access `key`.
     pub fn can_access_key(&self, key: &[u8]) -> bool {
+        self.can_access_key_for(key, ACL_KEY_READ_WRITE)
+    }
+
+    /// Check whether this selector/user may access `key` with the requested
+    /// read/write mode. `ACL_KEY_ANY` is used for existence/cardinality-style
+    /// commands where Valkey accepts either read or write key permission.
+    pub fn can_access_key_for(&self, key: &[u8], required: u8) -> bool {
         if self.flags.allkeys {
             return true;
         }
-        self.key_patterns
+        let mut granted = 0u8;
+        if self
+            .key_patterns
             .iter()
             .any(|pat| string_match_len(pat.as_bytes(), key, false))
+        {
+            granted |= ACL_KEY_READ_WRITE;
+        }
+        for pat in &self.key_permissions {
+            if string_match_len(pat.pattern.as_bytes(), key, false) {
+                granted |= pat.permissions;
+            }
+        }
+        if required == ACL_KEY_ANY {
+            granted != 0
+        } else {
+            granted & required == required
+        }
     }
 
     /// Check whether this user may access `channel`.
@@ -509,10 +558,9 @@ impl AclUser {
         if self.flags.allkeys {
             out.extend_from_slice(b" ~*");
         } else {
-            for pat in &self.key_patterns {
+            for item in self.key_summary_items() {
                 out.push(b' ');
-                out.push(b'~');
-                out.extend_from_slice(pat.as_bytes());
+                out.extend_from_slice(&item);
             }
         }
         if self.flags.allchannels {
@@ -529,6 +577,11 @@ impl AclUser {
         out.extend_from_slice(&self.databases_summary());
         out.push(b' ');
         out.extend_from_slice(&self.commands_summary());
+        for selector in &self.selectors {
+            out.extend_from_slice(b" (");
+            out.extend_from_slice(&selector.selector_rule_body());
+            out.push(b')');
+        }
         out
     }
 
@@ -551,18 +604,42 @@ impl AclUser {
         if self.flags.allkeys {
             return b"~*".to_vec();
         }
-        if self.key_patterns.is_empty() {
+        let items = self.key_summary_items();
+        if items.is_empty() {
             return b"".to_vec();
         }
         let mut out: Vec<u8> = Vec::new();
-        for pat in &self.key_patterns {
+        for item in items {
             if !out.is_empty() {
                 out.push(b' ');
             }
-            out.push(b'~');
-            out.extend_from_slice(pat.as_bytes());
+            out.extend_from_slice(&item);
         }
         out
+    }
+
+    fn key_summary_items(&self) -> Vec<Vec<u8>> {
+        let mut items: Vec<(RedisString, u8)> = Vec::new();
+        for pat in &self.key_permissions {
+            merge_key_summary_item(&mut items, pat.pattern.clone(), pat.permissions);
+        }
+        for pat in &self.key_patterns {
+            merge_key_summary_item(&mut items, pat.clone(), ACL_KEY_READ_WRITE);
+        }
+        items
+            .into_iter()
+            .map(|(pattern, permissions)| {
+                let mut out = Vec::new();
+                match permissions & ACL_KEY_READ_WRITE {
+                    ACL_KEY_READ_WRITE => out.push(b'~'),
+                    ACL_KEY_READ => out.extend_from_slice(b"%R~"),
+                    ACL_KEY_WRITE => out.extend_from_slice(b"%W~"),
+                    _ => out.extend_from_slice(b"%RW~"),
+                }
+                out.extend_from_slice(pattern.as_bytes());
+                out
+            })
+            .collect()
     }
 
     /// Render channel patterns for GETUSER.
@@ -589,15 +666,55 @@ impl AclUser {
         if self.flags.alldbs {
             return b"alldbs".to_vec();
         }
+        if self.allowed_dbs.is_empty() {
+            return Vec::new();
+        }
         let mut out = Vec::new();
-        for db in &self.allowed_dbs {
-            if !out.is_empty() {
-                out.push(b' ');
+        let mut dbs = self.allowed_dbs.clone();
+        dbs.sort_unstable();
+        dbs.dedup();
+        out.extend_from_slice(b"db=");
+        for (idx, db) in dbs.iter().enumerate() {
+            if idx > 0 {
+                out.push(b',');
             }
-            out.extend_from_slice(b"db=");
             out.extend_from_slice(db.to_string().as_bytes());
         }
         out
+    }
+
+    pub fn selector_rule_body(&self) -> Vec<u8> {
+        let mut parts: Vec<Vec<u8>> = Vec::new();
+        parts.push(self.databases_summary());
+        parts.push(self.commands_summary());
+        let channels = self.channels_summary();
+        if !channels.is_empty() {
+            parts.push(channels);
+        }
+        let keys = self.keys_summary();
+        if !keys.is_empty() {
+            parts.push(keys);
+        }
+        let mut out = Vec::new();
+        for part in parts.into_iter().filter(|p| !p.is_empty()) {
+            if !out.is_empty() {
+                out.push(b' ');
+            }
+            out.extend_from_slice(&part);
+        }
+        out
+    }
+}
+
+fn merge_key_summary_item(
+    items: &mut Vec<(RedisString, u8)>,
+    pattern: RedisString,
+    permissions: u8,
+) {
+    if let Some((_, existing)) = items.iter_mut().find(|(pat, _)| pat == &pattern) {
+        *existing |= permissions;
+    } else {
+        items.push((pattern, permissions));
     }
 }
 
