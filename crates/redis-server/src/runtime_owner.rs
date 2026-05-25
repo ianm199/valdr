@@ -568,6 +568,7 @@ impl RuntimeOwner {
 
             progressed |= owner.active_expire_step();
             progressed |= owner.dispatch_scheduled_commands(poll.registry(), &registry, &server);
+            progressed |= owner.install_pending_dynamic_listeners(&mut listeners, poll.registry());
 
             let timeout = if owner.has_scheduled_commands() {
                 Some(Duration::from_millis(0))
@@ -591,14 +592,57 @@ impl RuntimeOwner {
                 &registry,
                 &server,
             );
+            progressed |= owner.install_pending_dynamic_listeners(&mut listeners, poll.registry());
             progressed |= owner.drain_foreign_payloads(poll.registry());
             progressed |= owner.dispatch_scheduled_commands(poll.registry(), &registry, &server);
+            progressed |= owner.install_pending_dynamic_listeners(&mut listeners, poll.registry());
             progressed |= owner.cleanup_closed_clients(poll.registry(), &registry);
 
             let _ = progressed;
         }
 
         owner.close_all_clients(poll.registry(), &registry);
+    }
+
+    fn install_pending_dynamic_listeners(
+        &mut self,
+        listeners: &mut Vec<MioTcpListener>,
+        poll_registry: &MioRegistry,
+    ) -> bool {
+        let pending = redis_commands::connection::drain_pending_tcp_listeners();
+        if pending.is_empty() {
+            return false;
+        }
+
+        let mut progressed = false;
+        for listener in pending {
+            if listeners.len() >= MAX_LISTENER_TOKENS {
+                eprintln!(
+                    "redis-server: dynamic TCP listener ignored; listener token capacity {} exhausted",
+                    MAX_LISTENER_TOKENS
+                );
+                continue;
+            }
+            let token = Token(listeners.len());
+            let mut listener = MioTcpListener::from_std(listener);
+            match poll_registry.register(&mut listener, token, Interest::READABLE) {
+                Ok(()) => {
+                    eprintln!(
+                        "redis-server: dynamic TCP listener registered at token {}",
+                        token.0
+                    );
+                    listeners.push(listener);
+                    progressed = true;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "redis-server: dynamic TCP listener registration failed: {}",
+                        e
+                    );
+                }
+            }
+        }
+        progressed
     }
 
     fn accept_ready(

@@ -523,6 +523,7 @@ fn main() {
     emit_startup_log();
 
     server_metrics().set_tcp_port(args.port);
+    redis_commands::connection::set_tcp_port_config(args.port);
 
     let live_config = Arc::new(redis_core::live_config::LiveConfig::new());
     let live_config_for_hook = Arc::clone(&live_config);
@@ -670,6 +671,28 @@ fn main() {
     let _ = spawn_lru_clock_thread();
     spawn_bgsave_reaper(Arc::clone(&server), Arc::clone(&live_config));
     spawn_repl_bgsave_reaper();
+
+    let bind_addrs_for_port_hook = args.bind.clone();
+    redis_commands::connection::install_tcp_port_set_hook(Box::new(move |port| {
+        if port == 0 {
+            return Ok(Vec::new());
+        }
+        let mut listeners = Vec::with_capacity(bind_addrs_for_port_hook.len());
+        for bind in &bind_addrs_for_port_hook {
+            let bind_ip: IpAddr = bind
+                .parse()
+                .map_err(|_| b"ERR Failed to bind to specified addresses".to_vec())?;
+            let addr = SocketAddr::new(bind_ip, port);
+            let listener = TcpListener::bind(addr)
+                .map_err(|_| b"ERR Unable to listen on this port".to_vec())?;
+            listener
+                .set_nonblocking(true)
+                .map_err(|_| b"ERR Unable to listen on this port".to_vec())?;
+            eprintln!("redis-server: queued dynamic listener on {}", addr);
+            listeners.push(listener);
+        }
+        Ok(listeners)
+    }));
 
     redis_core::tls::install_tls_start_hook(Box::new(move |port| {
         if port == 0 {

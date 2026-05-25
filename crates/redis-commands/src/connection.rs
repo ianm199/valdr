@@ -6,7 +6,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -38,6 +40,10 @@ pub const DEFAULT_MAX_CLIENTS: u64 = redis_core::live_config::DEFAULT_MAX_CLIENT
 
 static MONITOR_CLIENTS: OnceLock<Mutex<HashMap<u64, Sender<Vec<u8>>>>> = OnceLock::new();
 static ACLFILE_CONFIG: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+type TcpPortSetHook = dyn Fn(u16) -> Result<Vec<TcpListener>, Vec<u8>> + Send + Sync + 'static;
+static TCP_PORT_SET_HOOK: OnceLock<Box<TcpPortSetHook>> = OnceLock::new();
+static PENDING_TCP_LISTENERS: OnceLock<Mutex<Vec<TcpListener>>> = OnceLock::new();
+static TCP_PORT_CONFIG: AtomicU16 = AtomicU16::new(0);
 
 fn monitor_clients() -> &'static Mutex<HashMap<u64, Sender<Vec<u8>>>> {
     MONITOR_CLIENTS.get_or_init(|| Mutex::new(HashMap::new()))
@@ -81,6 +87,29 @@ pub fn get_max_clients() -> u64 {
 /// override and again from `CONFIG SET maxclients <n>`.
 pub fn set_max_clients(n: u64) {
     live_config_handle().set_maxclients(n);
+}
+
+pub fn set_tcp_port_config(port: u16) {
+    TCP_PORT_CONFIG.store(port, Ordering::Relaxed);
+}
+
+fn tcp_port_config() -> u16 {
+    TCP_PORT_CONFIG.load(Ordering::Relaxed)
+}
+
+pub fn install_tcp_port_set_hook(hook: Box<TcpPortSetHook>) {
+    let _ = TCP_PORT_SET_HOOK.set(hook);
+}
+
+pub fn drain_pending_tcp_listeners() -> Vec<TcpListener> {
+    let Some(cell) = PENDING_TCP_LISTENERS.get() else {
+        return Vec::new();
+    };
+    let mut guard = match cell.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    std::mem::take(&mut *guard)
 }
 
 /// `PING [message]`.
@@ -406,6 +435,7 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
     let live_dbfilename = cfg.rdb_filename();
     let live_availability_zone = cfg.availability_zone();
     let live_import_mode = yes_no(cfg.import_mode()).to_string();
+    let live_port = tcp_port_config().to_string();
     let live_lfu_log_factor = cfg.lfu_log_factor().to_string();
     let live_lfu_decay_time = cfg.lfu_decay_time().to_string();
     let live_tls_port = cfg.tls_port().to_string();
@@ -493,6 +523,7 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
             "dbfilename" => Some(live_dbfilename.clone()),
             "availability-zone" => Some(live_availability_zone.clone()),
             "import-mode" => Some(live_import_mode.clone()),
+            "port" => Some(live_port.clone()),
             "lfu-log-factor" => Some(live_lfu_log_factor.clone()),
             "lfu-decay-time" => Some(live_lfu_decay_time.clone()),
             "tls-port" => Some(live_tls_port.clone()),
@@ -877,6 +908,9 @@ fn apply_config_set_for_context(
     if ascii_eq_ignore_case(key, b"appendonly") {
         return apply_appendonly_config_set(ctx, cfg, value);
     }
+    if ascii_eq_ignore_case(key, b"port") {
+        return apply_port_config_set(value);
+    }
     if ascii_eq_ignore_case(key, b"maxmemory") && parse_memsize(value).is_none() {
         return Err(RedisError::runtime(b"ERR CONFIG SET failed"));
     }
@@ -891,6 +925,33 @@ fn apply_config_set_for_context(
         }
     }
     apply_config_set(cfg, key, value);
+    Ok(())
+}
+
+fn apply_port_config_set(value: &[u8]) -> RedisResult<()> {
+    let port = parse_usize_strict(value)
+        .filter(|n| *n <= u16::MAX as usize)
+        .map(|n| n as u16)
+        .ok_or_else(|| RedisError::runtime(b"ERR CONFIG SET failed"))?;
+
+    if port == tcp_port_config() {
+        return Ok(());
+    }
+
+    if let Some(hook) = TCP_PORT_SET_HOOK.get() {
+        let listeners = hook(port).map_err(RedisError::runtime)?;
+        if !listeners.is_empty() {
+            let cell = PENDING_TCP_LISTENERS.get_or_init(|| Mutex::new(Vec::new()));
+            let mut guard = match cell.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            guard.extend(listeners);
+        }
+    }
+
+    set_tcp_port_config(port);
+    server_metrics().set_tcp_port(port);
     Ok(())
 }
 

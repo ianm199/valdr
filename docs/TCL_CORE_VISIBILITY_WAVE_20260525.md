@@ -302,6 +302,58 @@ Interpretation: `unit/maxmemory` is not a quick +13 unlock. It probably needs
 the output-buffer accounting / client-eviction subsystem before it becomes
 counted or green.
 
+## Networking Pull: Dynamic `CONFIG SET port`
+
+Patch:
+
+- Added a bounded dynamic plain-TCP listener hook for `CONFIG SET port <n>`.
+- `redis-server` binds the requested port through the same configured bind
+  addresses, queues the new listener, and the `RuntimeOwner` registers it into
+  the existing `mio` poll loop before the OK reply is flushed.
+- If the new port cannot bind, `CONFIG SET port` fails with Valkey-shaped
+  `ERR Unable to listen on this port` and the previous listener remains live.
+
+Why this was selected:
+
+- `unit/networking` was hidden/no-summary under the new single-node profile.
+- The first abort was exact and product-real: dynamic `CONFIG SET port` did not
+  install a listener, so the harness immediately got connection refused.
+- The edit was in the server/runtime listener path, not in active ACL, stream
+  blocking, or persistence lanes.
+
+Verification:
+
+```bash
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-networking-dynamic-port-v1 \
+  --profile single-node-external \
+  --skip-build \
+  --timeout-s 90 \
+  --baseport 33111 \
+  --portcount 4000 \
+  --files unit/networking
+```
+
+Evidence:
+
+`harness/oracle/results/tcl-survey/20260525T045406Z/unit__networking.json`
+
+Result:
+
+```text
+unit/networking: no-summary -> 3 pass / 2 fail / 5 counted
+```
+
+Remaining failures:
+
+- `CONFIG SET bind address`
+- `Default bind address configuration handling`
+
+Interpretation: this is a small counted-coverage gain (+5), but it is a useful
+runtime capability: the owner loop can now grow its listener set after startup.
+The bind-address semantics are a separate listener-policy packet.
+
 ## Next Overnight Targets
 
 1. Survey-profile change: add a `single-node-external` TCL profile that allows
