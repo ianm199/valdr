@@ -738,6 +738,13 @@ pub fn wake_blocked_xreadgroup_for_key(db: &mut RedisDb, key: &RedisString, new_
     if waiters.is_empty() {
         return;
     }
+    // A single new entry is delivered to at most one consumer per group: the
+    // first waiter (FIFO) whose group cursor is still behind the entry. Once a
+    // group's cursor advances past the entry, later waiters of that same group
+    // find no new data and must stay blocked — re-registered with their
+    // original deadline so their BLOCK timeout is preserved (matches the
+    // upstream "reprocessing" semantics in handleClientsBlockedOnKey).
+    let mut to_reblock: Vec<BlockedWaiter> = Vec::new();
     for waiter in waiters {
         let (group, consumer, noack) = match &waiter.action {
             BlockedAction::StreamGroup { group, consumer, noack, .. } => {
@@ -751,6 +758,11 @@ pub fn wake_blocked_xreadgroup_for_key(db: &mut RedisDb, key: &RedisString, new_
             Ok(Some(stream)) => {
                 if !stream.groups.contains_key(&group) {
                     encode_nogroup_error(key.as_bytes(), group.as_bytes())
+                } else if new_entry.id
+                    <= stream.groups[&group].last_delivered_id
+                {
+                    to_reblock.push(waiter);
+                    continue;
                 } else {
                     let now = now_ms_clamped();
                     let view = stream.lag_view();
@@ -779,6 +791,15 @@ pub fn wake_blocked_xreadgroup_for_key(db: &mut RedisDb, key: &RedisString, new_
             }
         };
         let _ = waiter.sender.send(reply);
+    }
+    if !to_reblock.is_empty() {
+        let mut idx = match blocked_keys_index().lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        for waiter in to_reblock {
+            idx.add(waiter);
+        }
     }
 }
 
