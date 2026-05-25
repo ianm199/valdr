@@ -182,6 +182,9 @@ pub struct LiveConfig {
     /// Replicas may serve commands while the master link is down
     /// (`replica-serve-stale-data`/`slave-serve-stale-data`). Default `true`.
     pub replica_serve_stale_data: AtomicBool,
+    /// Enable Lua 5.1 APIs that upstream marks insecure/deprecated
+    /// (`lua-enable-insecure-api`). Default `false`.
+    pub lua_enable_insecure_api: AtomicBool,
     /// Whether the primary is in import mode (`import-mode` config key).
     pub import_mode: AtomicBool,
     /// Optional availability-zone string surfaced by HELLO.
@@ -334,6 +337,7 @@ impl Default for LiveConfig {
             repl_disable_tcp_nodelay: AtomicBool::new(false),
             slave_read_only: AtomicBool::new(true),
             replica_serve_stale_data: AtomicBool::new(true),
+            lua_enable_insecure_api: AtomicBool::new(false),
             import_mode: AtomicBool::new(false),
             availability_zone: Mutex::new(String::new()),
             repl_diskless_sync: AtomicBool::new(true),
@@ -802,6 +806,14 @@ impl LiveConfig {
 
     pub fn set_replica_serve_stale_data(&self, v: bool) {
         self.replica_serve_stale_data.store(v, Ordering::Relaxed);
+    }
+
+    pub fn lua_enable_insecure_api(&self) -> bool {
+        self.lua_enable_insecure_api.load(Ordering::Relaxed)
+    }
+
+    pub fn set_lua_enable_insecure_api(&self, v: bool) {
+        self.lua_enable_insecure_api.store(v, Ordering::Relaxed);
     }
 
     pub fn import_mode(&self) -> bool {

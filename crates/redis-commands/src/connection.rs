@@ -360,6 +360,7 @@ pub fn config_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     }
     if ascii_eq_ignore_case(sub_bytes, b"RESETSTAT") {
         server_metrics().reset_stats();
+        crate::eval::reset_script_cache_stats();
         crate::hash::reset_expired_fields_count();
         crate::slowlog_cmd::reset_latency_histograms();
         return ctx.reply_simple_string(b"OK");
@@ -478,6 +479,7 @@ fn default_config_pairs() -> &'static [(&'static str, &'static str)] {
         ("replica-read-only", "yes"),
         ("slave-serve-stale-data", "yes"),
         ("replica-serve-stale-data", "yes"),
+        ("lua-enable-insecure-api", "no"),
         ("repl-diskless-sync", "yes"),
     ]
 }
@@ -570,6 +572,11 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
     } else {
         "no".to_string()
     };
+    let live_lua_enable_insecure_api = if cfg.lua_enable_insecure_api() {
+        "yes".to_string()
+    } else {
+        "no".to_string()
+    };
     let live_repl_diskless = if cfg.repl_diskless_sync() {
         "yes".to_string()
     } else {
@@ -639,6 +646,7 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
             "slave-serve-stale-data" | "replica-serve-stale-data" => {
                 Some(live_replica_serve_stale_data.clone())
             }
+            "lua-enable-insecure-api" => Some(live_lua_enable_insecure_api.clone()),
             "repl-diskless-sync" => Some(live_repl_diskless.clone()),
             "rdb-version-check" => Some(live_rdb_version_check.clone()),
             "client-output-buffer-limit" => Some(live_client_obuf_limit.clone()),
@@ -957,6 +965,9 @@ fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
         }
         b"slave-serve-stale-data" | b"replica-serve-stale-data" => {
             cfg.set_replica_serve_stale_data(value == b"yes");
+        }
+        b"lua-enable-insecure-api" => {
+            cfg.set_lua_enable_insecure_api(value == b"yes");
         }
         b"repl-diskless-sync" => {
             cfg.set_repl_diskless_sync(value == b"yes");

@@ -21,7 +21,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
@@ -44,6 +44,7 @@ use crate::dispatch::{command_acl_categories, command_is_denyoom, dispatch_comma
 
 const LUA_REDIS_VERSION: &str = "7.0.0";
 const LUA_REDIS_VERSION_NUM: i64 = 7 << 16;
+const EVAL_SCRIPT_CACHE_LIMIT: usize = 500;
 
 /// One captured reply from a `redis.call` re-entry.
 ///
@@ -267,6 +268,7 @@ fn reply_to_lua(lua: &Lua, value: &ReplyValue, resp_view: u8) -> mlua::Result<Lu
         ReplyValue::Error(s) => {
             let t = lua.create_table()?;
             t.raw_set("err", lua.create_string(s)?)?;
+            t.raw_set(LUA_ERROR_ALREADY_RECORDED_FIELD, true)?;
             Ok(LuaValue::Table(t))
         }
         ReplyValue::Integer(n) => Ok(LuaValue::Integer(*n)),
@@ -351,6 +353,7 @@ fn reply_to_lua(lua: &Lua, value: &ReplyValue, resp_view: u8) -> mlua::Result<Lu
 /// otherwise a 1-indexed array (terminated at the first nil per Lua-array
 /// convention).
 const LUA_REPLY_MAX_DEPTH: usize = 200;
+const LUA_ERROR_ALREADY_RECORDED_FIELD: &str = "__redis_error_already_recorded";
 
 fn lua_to_resp(value: &LuaValue, out: &mut Vec<u8>, resp3: bool) {
     lua_to_resp_inner(value, out, resp3, 0);
@@ -388,16 +391,14 @@ fn lua_to_resp_inner(value: &LuaValue, out: &mut Vec<u8>, resp3: bool, depth: us
         LuaValue::Table(t) => {
             if let Ok(Some(err)) = t.get::<Option<mlua::String>>("err") {
                 let bytes = err.as_bytes();
-                out.push(b'-');
-                if !bytes.starts_with(b"ERR ")
-                    && !bytes
-                        .iter()
-                        .take_while(|b| **b != b' ')
-                        .all(u8::is_ascii_uppercase)
-                {
-                    out.extend_from_slice(b"ERR ");
+                let wire_error = lua_error_reply_wire_bytes(&bytes);
+                let already_recorded = t
+                    .raw_get::<bool>(LUA_ERROR_ALREADY_RECORDED_FIELD)
+                    .unwrap_or(false);
+                if !already_recorded {
+                    record_error_reply(&wire_error);
                 }
-                out.extend_from_slice(&bytes);
+                out.extend_from_slice(&wire_error);
                 out.extend_from_slice(b"\r\n");
                 return;
             }
@@ -474,6 +475,36 @@ fn lua_to_resp_inner(value: &LuaValue, out: &mut Vec<u8>, resp3: bool, depth: us
     }
 }
 
+fn lua_error_code_token(bytes: &[u8]) -> &[u8] {
+    bytes
+        .split(|b| *b == b' ' || *b == b'\t' || *b == b'\r' || *b == b'\n')
+        .next()
+        .unwrap_or(bytes)
+}
+
+fn lua_error_token_is_code(token: &[u8]) -> bool {
+    !token.is_empty()
+        && token
+            .iter()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || *b == b'_')
+}
+
+fn lua_error_reply_wire_bytes(bytes: &[u8]) -> Vec<u8> {
+    let clean = bytes
+        .split(|b| *b == b'\r' || *b == b'\n')
+        .next()
+        .unwrap_or(bytes);
+    let mut out = Vec::with_capacity(clean.len() + 5);
+    out.push(b'-');
+    if clean.is_empty() {
+        out.extend_from_slice(b"ERR");
+    } else if !clean.starts_with(b"ERR ") && !lua_error_token_is_code(lua_error_code_token(clean)) {
+        out.extend_from_slice(b"ERR ");
+    }
+    out.extend_from_slice(clean);
+    out
+}
+
 fn runtime_error_payload(message: &str) -> Vec<u8> {
     let without_trace = message
         .split_once("\nstack traceback")
@@ -496,10 +527,7 @@ fn runtime_error_payload(message: &str) -> Vec<u8> {
     }
 
     let bytes = normalized.as_bytes();
-    let first_token_is_error_code = bytes
-        .iter()
-        .take_while(|b| **b != b' ')
-        .all(u8::is_ascii_uppercase);
+    let first_token_is_error_code = lua_error_token_is_code(lua_error_code_token(bytes));
 
     let mut out = Vec::new();
     if !bytes.starts_with(b"ERR ") && !first_token_is_error_code {
@@ -536,7 +564,7 @@ fn lua_arg_to_bytes(v: &LuaValue) -> Result<Vec<u8>, LuaError> {
         LuaValue::Boolean(true) => Ok(b"1".to_vec()),
         LuaValue::Boolean(false) => Ok(b"0".to_vec()),
         _ => Err(LuaError::RuntimeError(
-            "Lua redis() command arguments must be strings or integers".to_string(),
+            "Command arguments must be strings or integers".to_string(),
         )),
     }
 }
@@ -553,7 +581,10 @@ fn install_sandbox(lua: &Lua) -> mlua::Result<()> {
         "require",
         "loadfile",
         "dofile",
+        "loadstring",
         "print",
+        "getfenv",
+        "setfenv",
         "getmetatable",
     ] {
         globals.set(name, LuaValue::Nil)?;
@@ -577,6 +608,79 @@ fn install_global_protection(lua: &Lua) -> mlua::Result<()> {
     )
     .set_name("global_protection")
     .exec()
+}
+
+fn install_eval_global_protection(lua: &Lua) -> mlua::Result<()> {
+    lua.load(
+        r#"
+        local raw_setmetatable = setmetatable
+        local raw_getmetatable = getmetatable
+        local global_meta = {
+            __index = function(_, key)
+                error("Script attempted to access nonexistent global variable '" .. tostring(key) .. "'", 2)
+            end,
+            __newindex = function(_, key, _)
+                error("Attempt to modify a readonly table", 2)
+            end
+        }
+        local readonly_global_meta = {}
+        raw_setmetatable(readonly_global_meta, {
+            __index = global_meta,
+            __newindex = function(_, _, _)
+                error("Attempt to modify a readonly table", 2)
+            end,
+            __metatable = false
+        })
+        global_meta.__metatable = readonly_global_meta
+        raw_setmetatable(_G, global_meta)
+        setmetatable = function(t, mt)
+            if t == _G then
+                error("Attempt to modify a readonly table", 2)
+            end
+            return raw_setmetatable(t, mt)
+        end
+        getmetatable = function(t)
+            if t == _G then
+                return readonly_global_meta
+            end
+            if type(t) ~= "table" then
+                return nil
+            end
+            return raw_getmetatable(t)
+        end
+        "#,
+    )
+    .set_name("eval_global_protection")
+    .exec()
+}
+
+fn create_script_environment(lua: &Lua) -> mlua::Result<LuaTable> {
+    let env = lua.create_table()?;
+    let globals = lua.globals();
+    let install: LuaFunction = lua
+        .load(
+            r#"
+        return function(env, globals)
+            setmetatable(env, {
+                __index = function(_, key)
+                    local value = rawget(globals, key)
+                    if value == nil then
+                        error("Script attempted to access nonexistent global variable '" .. tostring(key) .. "'", 2)
+                    end
+                    return value
+                end,
+                __newindex = function()
+                    error("Attempt to modify a readonly table", 2)
+                end,
+                __metatable = false
+            })
+        end
+        "#,
+        )
+        .set_name("script_environment")
+        .eval()?;
+    install.call::<()>((env.clone(), globals))?;
+    Ok(env)
 }
 
 /// Process-relative seconds for `os.clock`. Valkey's Lua sandbox keeps only
@@ -1931,21 +2035,110 @@ fn record_script_rejected_command(args: &[Vec<u8>], payload: &[u8]) {
     record_error_reply(payload);
 }
 
-/// Process-wide script cache. Keys are the 40-byte lowercase SHA-1 hex of
-/// the source bytes. Values are the source bytes themselves.
-fn script_cache() -> &'static Mutex<HashMap<[u8; 40], Vec<u8>>> {
-    static CACHE: OnceLock<Mutex<HashMap<[u8; 40], Vec<u8>>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+#[derive(Clone)]
+struct CachedScript {
+    body: Vec<u8>,
+    evictable: bool,
 }
 
-fn cache_script(script_bytes: &[u8]) -> [u8; 40] {
+#[derive(Default)]
+struct ScriptCache {
+    entries: HashMap<[u8; 40], CachedScript>,
+    lru: VecDeque<[u8; 40]>,
+    evicted: u64,
+}
+
+impl ScriptCache {
+    fn touch_eval_script(&mut self, sha: [u8; 40]) {
+        self.lru.retain(|existing| existing != &sha);
+        self.lru.push_back(sha);
+    }
+
+    fn evict_eval_scripts_if_needed(&mut self) {
+        while self
+            .entries
+            .values()
+            .filter(|entry| entry.evictable)
+            .count()
+            > EVAL_SCRIPT_CACHE_LIMIT
+        {
+            let Some(candidate) = self.lru.pop_front() else {
+                break;
+            };
+            if self
+                .entries
+                .get(&candidate)
+                .is_some_and(|entry| entry.evictable)
+            {
+                self.entries.remove(&candidate);
+                self.evicted = self.evicted.saturating_add(1);
+            }
+        }
+    }
+}
+
+/// Process-wide script cache. Keys are the 40-byte lowercase SHA-1 hex of
+/// the source bytes. `EVAL` scripts are capped by a small LRU; `SCRIPT LOAD`
+/// entries are persistent and do not participate in that LRU, matching Valkey.
+fn script_cache() -> &'static Mutex<ScriptCache> {
+    static CACHE: OnceLock<Mutex<ScriptCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(ScriptCache::default()))
+}
+
+fn cache_script(script_bytes: &[u8], evictable: bool) -> [u8; 40] {
     let hex = sha1_hex(script_bytes);
     let mut guard = match script_cache().lock() {
         Ok(g) => g,
         Err(p) => p.into_inner(),
     };
-    guard.insert(hex, script_bytes.to_vec());
+    guard.entries.insert(
+        hex,
+        CachedScript {
+            body: script_bytes.to_vec(),
+            evictable,
+        },
+    );
+    if evictable {
+        guard.touch_eval_script(hex);
+        guard.evict_eval_scripts_if_needed();
+    }
     hex
+}
+
+pub(crate) fn script_cache_memory_estimate() -> usize {
+    let guard = match script_cache().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    guard
+        .entries
+        .values()
+        .map(|entry| entry.body.len() + 96)
+        .sum()
+}
+
+pub(crate) fn script_cache_len() -> usize {
+    let guard = match script_cache().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    guard.entries.len()
+}
+
+pub(crate) fn evicted_scripts_count() -> u64 {
+    let guard = match script_cache().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    guard.evicted
+}
+
+pub(crate) fn reset_script_cache_stats() {
+    let mut guard = match script_cache().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    guard.evicted = 0;
 }
 
 fn busy_script_state() -> &'static Mutex<Option<BusyScriptState>> {
@@ -2186,12 +2379,19 @@ fn stale_replica_masterdown_error() -> RedisError {
 }
 
 fn stale_replica_lua_call_allowed(args: &[Vec<u8>]) -> bool {
-    args.first()
-        .is_some_and(|name| ascii_eq_ci(name.as_slice(), b"INFO"))
+    args.first().is_some_and(|name| {
+        let name = name.as_slice();
+        ascii_eq_ci(name, b"ECHO") || ascii_eq_ci(name, b"INFO")
+    })
 }
 
 fn stale_replica_lua_call_error() -> LuaError {
     LuaError::RuntimeError("Can not execute the command on a stale replica".to_string())
+}
+
+fn script_command_not_allowed(args: &[Vec<u8>]) -> bool {
+    args.first()
+        .is_some_and(|name| ascii_eq_ci(name.as_slice(), b"CLUSTER"))
 }
 
 fn hex_encode(bytes: &[u8]) -> Vec<u8> {
@@ -3033,6 +3233,9 @@ fn is_known_function_flag(flag: &[u8]) -> bool {
 }
 
 fn parse_eval_shebang(script_bytes: &[u8]) -> RedisResult<(EvalScriptFlags, &[u8])> {
+    if script_bytes.starts_with(b"#!") && !script_bytes.starts_with(b"#!lua") {
+        return Err(RedisError::runtime(b"ERR Could not find scripting engine"));
+    }
     if !script_bytes.starts_with(b"#!lua") {
         return Ok((EvalScriptFlags::default(), script_bytes));
     }
@@ -3344,6 +3547,7 @@ fn run_loaded_function(
                                 "Write commands are not allowed from read-only scripts",
                             )?,
                         )?;
+                        t.raw_set(LUA_ERROR_ALREADY_RECORDED_FIELD, true)?;
                         return Ok(LuaValue::Table(t));
                     }
                     let mut borrow = cell.borrow_mut();
@@ -3354,6 +3558,7 @@ fn run_loaded_function(
                                 .into_owned();
                             let t = lua_inner.create_table()?;
                             t.raw_set("err", lua_inner.create_string(&msg)?)?;
+                            t.raw_set(LUA_ERROR_ALREADY_RECORDED_FIELD, true)?;
                             Ok(LuaValue::Table(t))
                         }
                     }
@@ -3607,7 +3812,7 @@ fn eval_command_impl(
     let script_bytes = script.as_bytes();
     let result = run_script(ctx, script_bytes, &keys, &argv, read_only);
     if result.is_ok() {
-        cache_script(script_bytes);
+        cache_script(script_bytes, true);
     }
     result
 }
@@ -3642,11 +3847,18 @@ fn evalsha_command_impl(
         }
     };
     let script_bytes: Option<Vec<u8>> = {
-        let guard = match script_cache().lock() {
+        let mut guard = match script_cache().lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
-        guard.get(&sha_norm).cloned()
+        let body = guard
+            .entries
+            .get(&sha_norm)
+            .map(|entry| (entry.body.clone(), entry.evictable));
+        if let Some((_, true)) = &body {
+            guard.touch_eval_script(sha_norm);
+        }
+        body.map(|(body, _)| body)
     };
     let script = match script_bytes {
         Some(b) => b,
@@ -3729,9 +3941,52 @@ fn run_script(
     } else {
         None
     };
+    if stale_replica_scripts_blocked(ctx) && !script_flags.allow_stale {
+        return Err(stale_replica_masterdown_error());
+    }
+    let stale_replica_blocked = stale_replica_scripts_blocked(ctx);
+    let script_allow_stale = script_flags.allow_stale;
+    let insecure_api_enabled = ctx.live_config().lua_enable_insecure_api();
     let lua = Lua::new();
+    let builtin_getmetatable: LuaValue = lua
+        .globals()
+        .raw_get("getmetatable")
+        .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
+    let builtin_getfenv: LuaValue = lua
+        .globals()
+        .raw_get("getfenv")
+        .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
+    let builtin_setfenv: LuaValue = lua
+        .globals()
+        .raw_get("setfenv")
+        .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
+    let builtin_loadstring: LuaValue = lua
+        .globals()
+        .raw_get("loadstring")
+        .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
     install_sandbox(&lua)
         .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
+    lua.globals()
+        .raw_set("getmetatable", builtin_getmetatable)
+        .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
+    if insecure_api_enabled {
+        lua.globals()
+            .raw_set("getfenv", builtin_getfenv)
+            .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
+        lua.globals()
+            .raw_set("setfenv", builtin_setfenv)
+            .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
+        lua.globals()
+            .raw_set("loadstring", builtin_loadstring)
+            .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
+    } else {
+        let disabled_loadstring = lua
+            .create_function(|_, _: MultiValue| -> mlua::Result<LuaValue> { Ok(LuaValue::Nil) })
+            .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
+        lua.globals()
+            .raw_set("loadstring", disabled_loadstring)
+            .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
+    }
     install_cjson(&lua)
         .map_err(|e| RedisError::runtime(format!("ERR Lua cjson install: {}", e).into_bytes()))?;
     install_cmsgpack(&lua).map_err(|e| {
@@ -3754,6 +4009,17 @@ fn run_script(
             let dirty = Rc::clone(&script_dirty);
             scope.create_function_mut(move |_lua, args: MultiValue| -> mlua::Result<LuaValue> {
                 let arg_bytes = collect_call_args(args)?;
+                if script_command_not_allowed(&arg_bytes) {
+                    return Err(LuaError::RuntimeError(
+                        "This Redis command is not allowed from script".to_string(),
+                    ));
+                }
+                if stale_replica_blocked
+                    && script_allow_stale
+                    && !stale_replica_lua_call_allowed(&arg_bytes)
+                {
+                    return Err(stale_replica_lua_call_error());
+                }
                 if read_only && call_is_write_command(&arg_bytes) {
                     record_script_rejected_command(
                         &arg_bytes,
@@ -3786,6 +4052,27 @@ fn run_script(
             scope.create_function_mut(
                 move |lua_inner, args: MultiValue| -> mlua::Result<LuaValue> {
                     let arg_bytes = collect_call_args(args)?;
+                    if script_command_not_allowed(&arg_bytes) {
+                        let t = lua_inner.create_table()?;
+                        t.raw_set(
+                            "err",
+                            lua_inner
+                                .create_string("This Redis command is not allowed from script")?,
+                        )?;
+                        return Ok(LuaValue::Table(t));
+                    }
+                    if stale_replica_blocked
+                        && script_allow_stale
+                        && !stale_replica_lua_call_allowed(&arg_bytes)
+                    {
+                        let t = lua_inner.create_table()?;
+                        t.raw_set(
+                            "err",
+                            lua_inner
+                                .create_string("Can not execute the command on a stale replica")?,
+                        )?;
+                        return Ok(LuaValue::Table(t));
+                    }
                     if read_only && call_is_write_command(&arg_bytes) {
                         record_script_rejected_command(
                             &arg_bytes,
@@ -3798,6 +4085,7 @@ fn run_script(
                                 "Write commands are not allowed from read-only scripts",
                             )?,
                         )?;
+                        t.raw_set(LUA_ERROR_ALREADY_RECORDED_FIELD, true)?;
                         return Ok(LuaValue::Table(t));
                     }
                     let mut borrow = cell.borrow_mut();
@@ -3808,6 +4096,7 @@ fn run_script(
                                 .into_owned();
                             let t = lua_inner.create_table()?;
                             t.raw_set("err", lua_inner.create_string(&msg)?)?;
+                            t.raw_set(LUA_ERROR_ALREADY_RECORDED_FIELD, true)?;
                             Ok(LuaValue::Table(t))
                         }
                     }
@@ -3829,7 +4118,17 @@ fn run_script(
                 Ok(t)
             })?;
 
-        let sha1hex_fn = lua.create_function(|_lua, s: mlua::String| -> mlua::Result<String> {
+        let sha1hex_fn = lua.create_function(|_lua, args: MultiValue| -> mlua::Result<String> {
+            if args.len() != 1 {
+                return Err(LuaError::RuntimeError(
+                    "wrong number of arguments to redis.sha1hex".to_string(),
+                ));
+            }
+            let Some(LuaValue::String(s)) = args.front() else {
+                return Err(LuaError::RuntimeError(
+                    "bad argument #1 to redis.sha1hex".to_string(),
+                ));
+            };
             let hex = sha1_hex(&s.as_bytes());
             Ok(String::from_utf8(hex.to_vec()).unwrap_or_default())
         })?;
@@ -3887,10 +4186,12 @@ fn run_script(
         let redis_api = readonly_table_proxy(&lua, redis_tbl)?;
         lua.globals().set("redis", redis_api.clone())?;
         lua.globals().set("server", redis_api)?;
-        install_global_protection(&lua)?;
+        install_eval_global_protection(&lua)?;
 
+        let script_env = create_script_environment(&lua)?;
         lua.load(script_body)
             .set_name("user_script")
+            .set_environment(script_env)
             .eval::<LuaValue>()
     });
 
@@ -4073,7 +4374,7 @@ fn script_load(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         return Err(RedisError::wrong_number_of_args(b"script|load"));
     }
     let body = ctx.arg_owned(2usize)?;
-    let hex = cache_script(body.as_bytes());
+    let hex = cache_script(body.as_bytes(), false);
     ctx.reply_bulk(&hex)
 }
 
@@ -4090,7 +4391,7 @@ fn script_exists(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     for i in 0..n {
         let raw = ctx.arg_owned(2 + i)?;
         let exists = normalise_sha(raw.as_bytes())
-            .map(|h| guard.contains_key(&h))
+            .map(|h| guard.entries.contains_key(&h))
             .unwrap_or(false);
         ctx.reply_integer(if exists { 1 } else { 0 })?;
     }
@@ -4111,8 +4412,8 @@ fn script_show(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         Ok(g) => g,
         Err(p) => p.into_inner(),
     };
-    match guard.get(&sha) {
-        Some(script) => ctx.reply_bulk(script),
+    match guard.entries.get(&sha) {
+        Some(script) => ctx.reply_bulk(&script.body),
         None => Err(RedisError::runtime(
             b"NOSCRIPT No matching script. Please use EVAL.",
         )),
@@ -4134,7 +4435,8 @@ fn script_flush(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         Ok(g) => g,
         Err(p) => p.into_inner(),
     };
-    guard.clear();
+    guard.entries.clear();
+    guard.lru.clear();
     ctx.reply_simple_string(b"OK")
 }
 

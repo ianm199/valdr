@@ -231,6 +231,25 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
             "used_memory_vm_functions:{}\r",
             crate::eval::function_vm_memory_used_estimate()
         );
+        let used_memory_scripts_eval = crate::eval::script_cache_memory_estimate();
+        let used_memory_scripts =
+            used_memory_scripts_eval + crate::eval::function_vm_memory_used_estimate();
+        let _ = writeln!(
+            buf,
+            "used_memory_scripts_eval:{}\r",
+            used_memory_scripts_eval
+        );
+        let _ = writeln!(
+            buf,
+            "number_of_cached_scripts:{}\r",
+            crate::eval::script_cache_len()
+        );
+        let _ = writeln!(buf, "used_memory_scripts:{}\r", used_memory_scripts);
+        let _ = writeln!(
+            buf,
+            "used_memory_scripts_human:{}\r",
+            format_human_bytes(used_memory_scripts as u64)
+        );
         let _ = writeln!(buf, "total_system_memory:0\r");
         let _ = writeln!(buf, "mem_not_counted_for_evict:0\r");
         let (mem_clients_normal, mem_clients_slaves) = client_memory_info_totals();
@@ -328,6 +347,11 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
             crate::hash::expired_fields_count()
         );
         let _ = writeln!(buf, "evicted_keys:{}\r", evicted_keys);
+        let _ = writeln!(
+            buf,
+            "evicted_scripts:{}\r",
+            crate::eval::evicted_scripts_count()
+        );
         let _ = writeln!(buf, "evicted_clients:{}\r", evicted_clients);
         let _ = writeln!(buf, "keyspace_hits:{}\r", hits);
         let _ = writeln!(buf, "keyspace_misses:{}\r", misses);

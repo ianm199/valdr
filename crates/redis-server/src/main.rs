@@ -123,6 +123,7 @@ struct CliArgs {
     acl_user_lines: Vec<String>,
     requirepass: Option<String>,
     command_renames: Vec<(String, String)>,
+    lua_enable_insecure_api: bool,
 }
 
 impl Default for CliArgs {
@@ -156,6 +157,7 @@ impl Default for CliArgs {
             acl_user_lines: Vec::new(),
             requirepass: None,
             command_renames: Vec::new(),
+            lua_enable_insecure_api: false,
         }
     }
 }
@@ -279,6 +281,12 @@ fn parse_args(argv: Vec<String>) -> Result<CliArgs, String> {
                     .next()
                     .ok_or_else(|| "--user requires a value".to_string())?;
                 out.acl_user_lines.push(v);
+            }
+            "--lua-enable-insecure-api" | "--lua-enable-deprecated-api" => {
+                let v = it
+                    .next()
+                    .ok_or_else(|| format!("{} requires yes/no", flag))?;
+                out.lua_enable_insecure_api = v.eq_ignore_ascii_case("yes");
             }
             "--help" | "-h" => {
                 println!(
@@ -490,6 +498,9 @@ fn apply_config_file(args: &mut CliArgs, path: &Path) -> Result<(), String> {
                         .push((from.to_string(), unquote_config_token(to).to_string()));
                 }
             }
+            "lua-enable-insecure-api" | "lua-enable-deprecated-api" => {
+                args.lua_enable_insecure_api = value.eq_ignore_ascii_case("yes");
+            }
             _ => {}
         }
     }
@@ -652,6 +663,7 @@ fn main() {
     live_config.store_set_max_listpack_value(args.set_max_listpack_value);
     live_config.set_zset_max_listpack_entries(args.zset_max_listpack_entries);
     live_config.set_zset_max_listpack_value(args.zset_max_listpack_value);
+    live_config.set_lua_enable_insecure_api(args.lua_enable_insecure_api);
     if let Some(secret) = &args.requirepass {
         live_config.set_requirepass(Some(redis_types::RedisString::from_bytes(
             secret.as_bytes(),

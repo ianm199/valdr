@@ -390,6 +390,11 @@ pub fn waitaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 
     let needs_local = numlocal > acklocal;
     let needs_replica = numreplicas > ackreplicas;
+    if ctx.client_ref().flag_deny_blocking() {
+        ctx.reply_array_header(2)?;
+        ctx.reply_integer(acklocal)?;
+        return ctx.reply_integer(ackreplicas);
+    }
     if timeout_ms == 0 && (needs_local || needs_replica) {
         if block_replica_waiter(ctx, target_offset, numreplicas.max(0) as usize, 2.0) {
             request_ack_from_replicas(&repl);
