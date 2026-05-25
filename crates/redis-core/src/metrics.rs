@@ -81,6 +81,24 @@ pub fn record_command_stat(name: &[u8], elapsed_us: u64, rejected_call: bool, fa
     }
 }
 
+/// Mark an already-counted command as failed (increment `failed_calls` only).
+///
+/// Used when a blocked command — counted as a call when it first dispatched
+/// and parked — is later unblocked with an error reply. Incrementing `calls`
+/// again would double-count, so only `failed_calls` moves.
+pub fn record_command_failure(name: &[u8]) {
+    let key = command_stats_key(name);
+    if key.is_empty() {
+        return;
+    }
+    let mut stats = match command_stats_handle().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let row = stats.entry(key).or_default();
+    row.failed_calls = row.failed_calls.saturating_add(1);
+}
+
 pub fn record_blocked_command_rejected(name: &[u8]) {
     let key = command_stats_key(name);
     if key.is_empty() {

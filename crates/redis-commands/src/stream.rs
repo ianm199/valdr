@@ -831,8 +831,18 @@ pub fn wake_xreadgroup_with_nogroup(key: &RedisString) {
             _ => continue,
         };
         let reply = encode_nogroup_error(key.as_bytes(), group.as_bytes());
+        record_blocked_xreadgroup_error(&reply);
         let _ = waiter.sender.send(reply);
     }
+}
+
+/// Record server stats for a blocked XREADGROUP that is unblocked with an error
+/// (NOGROUP / WRONGTYPE). The original command parked without completing, so
+/// the failed completion is counted here: one `xreadgroup` call with
+/// `failed_calls`, the error code in errorstats, and `total_error_replies`.
+fn record_blocked_xreadgroup_error(reply: &[u8]) {
+    redis_core::metrics::record_error_reply(reply);
+    redis_core::metrics::record_command_failure(b"xreadgroup");
 }
 
 /// Wake all blocked XREADGROUP clients across all keys with NOGROUP errors.
@@ -854,6 +864,7 @@ pub fn wake_all_xreadgroup_with_nogroup() {
         };
         let key = waiter.keys.first().cloned().unwrap_or_default();
         let reply = encode_nogroup_error(key.as_bytes(), group.as_bytes());
+        record_blocked_xreadgroup_error(&reply);
         let _ = waiter.sender.send(reply);
     }
 }
