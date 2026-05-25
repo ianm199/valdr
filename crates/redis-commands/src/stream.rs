@@ -197,6 +197,22 @@ fn as_stream_mut(
     }
 }
 
+/// Default `stream-node-max-entries`; how many entries upstream packs per
+/// listpack macro-node in the stream rax.
+const STREAM_NODE_MAX_ENTRIES: usize = 100;
+
+/// Synthetic radix-tree key count for `XINFO STREAM`.
+///
+/// Our stream uses inline (`Vec`) storage rather than a radix tree of listpack
+/// nodes, so there is no real `raxSize`. We report a plausible macro-node count
+/// (`ceil(len / node-max)`) so clients and tests that size the rax behave
+/// correctly — notably the `XDEL fuzz test`, which loops `XADD` until
+/// `radix-tree-keys > 20` and would otherwise spin forever against a hardcoded
+/// 0.
+fn synthetic_radix_keys(len: usize) -> i64 {
+    len.div_ceil(STREAM_NODE_MAX_ENTRIES) as i64
+}
+
 /// Reply with a single stream entry as `[id, [f1, v1, f2, v2, ...]]`.
 fn reply_entry(ctx: &mut CommandContext, entry: &StreamEntry) -> RedisResult<()> {
     ctx.reply_array_header(2usize)?;
@@ -1403,9 +1419,9 @@ pub fn xinfo_command(ctx: &mut CommandContext) -> RedisResult<()> {
             ctx.reply_bulk(b"length")?;
             ctx.reply_integer(length)?;
             ctx.reply_bulk(b"radix-tree-keys")?;
-            ctx.reply_integer(0)?;
+            ctx.reply_integer(synthetic_radix_keys(length as usize))?;
             ctx.reply_bulk(b"radix-tree-nodes")?;
-            ctx.reply_integer(0)?;
+            ctx.reply_integer(synthetic_radix_keys(length as usize) + 1)?;
             ctx.reply_bulk(b"last-generated-id")?;
             ctx.reply_bulk_string(RedisString::from_vec(last_id.to_display_bytes()))?;
             ctx.reply_bulk(b"max-deleted-entry-id")?;
@@ -2881,9 +2897,9 @@ fn xinfo_stream_full(ctx: &mut CommandContext, key: &RedisString, count: i64) ->
     ctx.reply_bulk(b"length")?;
     ctx.reply_integer(length)?;
     ctx.reply_bulk(b"radix-tree-keys")?;
-    ctx.reply_integer(0)?;
+    ctx.reply_integer(synthetic_radix_keys(length as usize))?;
     ctx.reply_bulk(b"radix-tree-nodes")?;
-    ctx.reply_integer(0)?;
+    ctx.reply_integer(synthetic_radix_keys(length as usize) + 1)?;
     ctx.reply_bulk(b"last-generated-id")?;
     ctx.reply_bulk_string(id_str(last_id))?;
     ctx.reply_bulk(b"max-deleted-entry-id")?;
