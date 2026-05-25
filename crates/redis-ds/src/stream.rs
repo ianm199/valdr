@@ -172,13 +172,19 @@ pub struct Consumer {
 /// `pel` is the group-wide PEL: it is the union of the per-consumer PELs
 /// and is also sorted by `entry_id`. Helpers on `InlineStream` keep the
 /// two views consistent so callers can scan either side cheaply.
+/// Sentinel for a consumer group whose logical read counter is unknown, e.g.
+/// a group created behind existing entries without `ENTRIESREAD`, or one whose
+/// position is fragmented by a tombstone. Mirrors `SCG_INVALID_ENTRIES_READ`
+/// (stream.h:114). Reported to clients as a null `entries-read`/`lag`.
+pub const SCG_INVALID_ENTRIES_READ: i64 = -1;
+
 #[derive(Clone, Debug)]
 pub struct ConsumerGroup {
     pub name: RedisString,
     pub last_delivered_id: StreamId,
     pub consumers: HashMap<RedisString, Consumer>,
     pub pel: Vec<PelEntry>,
-    pub entries_read: u64,
+    pub entries_read: i64,
 }
 
 /// Phase-B inline stream storage.
@@ -244,6 +250,134 @@ impl InlineStream {
         }
         false
     }
+
+    /// ID of the first surviving entry, or `0-0` for an empty stream.
+    /// Mirrors `stream->first_id` after `streamGetEdgeID(s, 1, 1, ...)`.
+    pub fn first_id(&self) -> StreamId {
+        self.entries.first().map(|e| e.id).unwrap_or(StreamId::ZERO)
+    }
+
+    /// Snapshot the stream-level scalars consumer-group lag math depends on.
+    ///
+    /// Taken before mutating a group so the read counter can be advanced in
+    /// place without aliasing the stream (the snapshot is `Copy`).
+    pub fn lag_view(&self) -> StreamLagView {
+        StreamLagView {
+            entries_added: self.entries_added,
+            length: self.entries.len() as u64,
+            last_id: self.last_id,
+            first_id: self.first_id(),
+            max_deleted_id: self.max_deleted_id,
+        }
+    }
+}
+
+/// A `Copy` snapshot of the stream-level scalars used to compute a consumer
+/// group's `entries-read` and `lag`. Mirrors the inputs of
+/// `streamEstimateDistanceFromFirstEverEntry`, `streamRangeHasTombstones`, and
+/// `streamReplyWithCGLag` (t_stream.c).
+#[derive(Clone, Copy, Debug)]
+pub struct StreamLagView {
+    pub entries_added: u64,
+    pub length: u64,
+    pub last_id: StreamId,
+    pub first_id: StreamId,
+    pub max_deleted_id: StreamId,
+}
+
+impl StreamLagView {
+    /// Port of `streamEstimateDistanceFromFirstEverEntry` (t_stream.c:1494):
+    /// the logical read counter of `id`, or `SCG_INVALID_ENTRIES_READ` when it
+    /// cannot be determined.
+    pub fn estimate_entries_read(&self, id: StreamId) -> i64 {
+        if self.entries_added == 0 {
+            return 0;
+        }
+
+        let entries_added = self.entries_added as i64;
+        let length = self.length as i64;
+
+        if self.length == 0 && id <= self.last_id {
+            return entries_added;
+        }
+
+        if id != StreamId::ZERO && id < self.max_deleted_id {
+            return SCG_INVALID_ENTRIES_READ;
+        }
+
+        if id == self.last_id {
+            return entries_added;
+        } else if id > self.last_id {
+            return SCG_INVALID_ENTRIES_READ;
+        }
+
+        if self.max_deleted_id == StreamId::ZERO || self.max_deleted_id < self.first_id {
+            if id < self.first_id {
+                return entries_added - length;
+            } else if id == self.first_id {
+                return entries_added - length + 1;
+            }
+        }
+
+        SCG_INVALID_ENTRIES_READ
+    }
+
+    /// Port of `streamRangeHasTombstones` (t_stream.c:1407). `end == None`
+    /// means the open-ended upper bound (`UINT64_MAX`).
+    pub fn range_has_tombstones(&self, start: StreamId, end: Option<StreamId>) -> bool {
+        if self.length == 0 || self.max_deleted_id == StreamId::ZERO {
+            return false;
+        }
+        let end_id = end.unwrap_or(StreamId::new(u64::MAX, u64::MAX));
+        start <= self.max_deleted_id && self.max_deleted_id <= end_id
+    }
+
+    /// Port of `streamReplyWithCGLag` (t_stream.c:1442): the group's lag, or
+    /// `None` when it cannot be determined (reported to clients as null).
+    pub fn group_lag(&self, group_entries_read: i64, group_last_id: StreamId) -> Option<i64> {
+        if self.entries_added == 0 {
+            return Some(0);
+        }
+        if group_entries_read != SCG_INVALID_ENTRIES_READ
+            && !self.range_has_tombstones(group_last_id, None)
+        {
+            return Some(self.entries_added as i64 - group_entries_read);
+        }
+        let estimate = self.estimate_entries_read(group_last_id);
+        if estimate != SCG_INVALID_ENTRIES_READ {
+            return Some(self.entries_added as i64 - estimate);
+        }
+        None
+    }
+
+    /// Advance a group's read counter over a run of newly delivered entry IDs,
+    /// returning the updated `(entries_read, last_delivered_id)`. Port of the
+    /// per-entry maintenance in `streamReplyWithRange` (t_stream.c:1700): for
+    /// each ID past the group's last-delivered, increment the counter when it
+    /// is valid and unfragmented, otherwise re-estimate it.
+    pub fn advance_read_counter(
+        &self,
+        entries_read: i64,
+        last_id: StreamId,
+        delivered_ids: &[StreamId],
+    ) -> (i64, StreamId) {
+        let mut read = entries_read;
+        let mut last = last_id;
+        for &id in delivered_ids {
+            if id > last {
+                if read != SCG_INVALID_ENTRIES_READ
+                    && last >= self.first_id
+                    && !self.range_has_tombstones(last, None)
+                {
+                    read += 1;
+                } else if self.entries_added != 0 {
+                    read = self.estimate_entries_read(id);
+                }
+                last = id;
+            }
+        }
+        (read, last)
+    }
 }
 
 impl Consumer {
@@ -279,7 +413,7 @@ impl ConsumerGroup {
             last_delivered_id,
             consumers: HashMap::new(),
             pel: Vec::new(),
-            entries_read: 0,
+            entries_read: SCG_INVALID_ENTRIES_READ,
         }
     }
 

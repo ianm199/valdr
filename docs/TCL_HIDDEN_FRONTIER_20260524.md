@@ -1,6 +1,6 @@
 # TCL Hidden Frontier - 2026-05-24
 
-Generated: `2026-05-25T03:58:40.612898+00:00`
+Generated: `2026-05-25T04:05:30.667340+00:00`
 
 This is an illumination artifact, not a conformance claim. It maps the
 timeout/no-summary bucket into concrete subsystem packets so broad
@@ -9,16 +9,16 @@ implementation work can start from evidence instead of guessing.
 ## Accounting Snapshot
 
 - Full upstream TCL denominator: **4299** source test blocks
-- Counted runner result: **1682 pass / 52 fail / 1734 counted**
-- Conservative full-suite proof: **39.1%** counted-pass / full denominator
+- Counted runner result: **1741 pass / 52 fail / 1793 counted**
+- Conservative full-suite proof: **40.5%** counted-pass / full denominator
 - Non-skipped denominator: **2568** source test blocks
-- Hidden timeout/no-summary bucket: **708** source tests (**27.6%** of non-skipped)
+- Hidden timeout/no-summary bucket: **647** source tests (**25.2%** of non-skipped)
 
 | Status | Source tests |
 |---|---:|
 | `fail` | 229 |
-| `no-summary` | 450 |
-| `pass` | 1353 |
+| `no-summary` | 389 |
+| `pass` | 1414 |
 | `skipped-by-policy` | 1731 |
 | `timeout` | 258 |
 | `zero-count` | 278 |

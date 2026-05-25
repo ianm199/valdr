@@ -15,7 +15,7 @@ use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use redis_core::memory::approximate_memory_used;
-use redis_core::metrics::{rss_bytes, server_metrics};
+use redis_core::metrics::{error_stats_snapshot, rss_bytes, server_metrics};
 use redis_core::CommandContext;
 use redis_types::{RedisError, RedisResult, RedisString};
 
@@ -98,6 +98,7 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let expired_keys = metrics.expired_keys.load(Ordering::Relaxed);
     let evicted_keys = metrics.evicted_keys.load(Ordering::Relaxed);
     let active_time_us = metrics.active_time_main_thread_us.load(Ordering::Relaxed);
+    let total_error_replies = metrics.total_error_replies.load(Ordering::Relaxed);
     let maxclients = get_max_clients();
     let tracking = redis_core::tracking::runtime_tracking_info_counters();
 
@@ -114,6 +115,10 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         || sections
             .iter()
             .any(|s| ascii_eq_ignore_case(s.as_bytes(), b"commandstats"));
+    let want_errorstats = has_all
+        || sections
+            .iter()
+            .any(|s| ascii_eq_ignore_case(s.as_bytes(), b"errorstats"));
 
     let mut buf: Vec<u8> = Vec::with_capacity(2048);
 
@@ -284,6 +289,7 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let _ = writeln!(buf, "tracking_total_keys:{}\r", tracking.total_keys);
         let _ = writeln!(buf, "tracking_total_items:{}\r", tracking.total_items);
         let _ = writeln!(buf, "tracking_total_prefixes:{}\r", tracking.total_prefixes);
+        let _ = writeln!(buf, "total_error_replies:{}\r", total_error_replies);
         let _ = writeln!(buf, "used_active_time_main_thread:{}\r", active_time_us);
         let _ = writeln!(buf, "\r");
     }
@@ -362,6 +368,14 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
                 stat.rejected_calls,
                 stat.failed_calls
             );
+        }
+        let _ = writeln!(buf, "\r");
+    }
+    if want_errorstats {
+        let _ = writeln!(buf, "# Errorstats\r");
+        for stat in error_stats_snapshot() {
+            let name = String::from_utf8_lossy(&stat.name);
+            let _ = writeln!(buf, "errorstat_{}:count={}\r", name, stat.count);
         }
         let _ = writeln!(buf, "\r");
     }

@@ -52,6 +52,8 @@ struct CommandMetadata {
     write: bool,
     no_auth: bool,
     denyoom: bool,
+    no_multi: bool,
+    allow_busy: bool,
     skip_commandlog: bool,
     skip_monitor: bool,
     admin: bool,
@@ -308,10 +310,15 @@ pub fn dispatch(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     let resolved_name = resolve_command_name(name);
     let dispatch_name = resolved_name.as_deref().unwrap_or(name);
     if ctx.client_ref().flag_multi() {
+        if is_client_reply_command(ctx, dispatch_name) {
+            crate::multi::flag_transaction_dirty_exec(ctx.client_mut());
+            ctx.client_mut().reply_buf.extend_from_slice(
+                b"-ERR Command 'client|reply' not allowed inside a transaction\r\n",
+            );
+            return Ok(());
+        }
         if crate::multi::is_no_multi_command(dispatch_name) {
-            if crate::multi::is_multi_command(dispatch_name) {
-                crate::multi::flag_transaction_dirty_exec(ctx.client_mut());
-            }
+            crate::multi::flag_transaction_dirty_exec(ctx.client_mut());
             return Err(crate::multi::reject_no_multi_command(dispatch_name));
         }
         if !crate::multi::is_tx_control_command(dispatch_name) {
@@ -327,6 +334,18 @@ pub fn dispatch(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
                         ctx.client_mut().reply_buf.extend_from_slice(&noauth_reply);
                         return Ok(());
                     }
+                }
+                if let Some(reply) = enforce_maxmemory_gate(ctx, metadata.denyoom) {
+                    crate::multi::flag_transaction_dirty_exec(ctx.client_mut());
+                    ctx.client_mut().reply_buf.extend_from_slice(&reply);
+                    return Ok(());
+                }
+                if let Some(reply) =
+                    enforce_busy_script_gate(ctx, dispatch_name, metadata.allow_busy)
+                {
+                    crate::multi::flag_transaction_dirty_exec(ctx.client_mut());
+                    ctx.client_mut().reply_buf.extend_from_slice(&reply);
+                    return Ok(());
                 }
             }
             return crate::multi::queue_current_command(ctx);
@@ -406,6 +425,18 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
         return Ok(());
     }
 
+    if let Some(reply) = enforce_busy_script_gate(ctx, name, metadata.allow_busy) {
+        if ctx.client_ref().flag_multi() && ascii_eq_ignore_case(name, b"EXEC") {
+            crate::multi::reset_multi_state(ctx.client_mut());
+            ctx.client_mut()
+                .reply_buf
+                .extend_from_slice(&execabort_from_error_reply(&reply));
+        } else {
+            ctx.client_mut().reply_buf.extend_from_slice(&reply);
+        }
+        return Ok(());
+    }
+
     // C: db.c:2126/2144 + getExpirationPolicyWithFlags — a primary in
     // import-mode lets an import-source client see otherwise-expired keys, and
     // keeps expired keys (no lazy delete) for everyone else. Refresh the
@@ -421,12 +452,23 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
     let pre_reply_len = ctx.client_ref().reply_buf.len();
     let result = (entry.handler)(ctx);
     let command_blocked = result.is_ok() && ctx.client_ref().blocked_on_keys;
+    let reply_is_error = result.is_ok()
+        && ctx
+            .client_ref()
+            .reply_buf
+            .get(pre_reply_len)
+            .is_some_and(|b| *b == b'-');
     let elapsed_micros = if command_blocked {
         None
     } else {
         Some(elapsed_us(start))
     };
-    record_command_stat(name, elapsed_micros.unwrap_or(0), false, result.is_err());
+    record_command_stat(
+        name,
+        elapsed_micros.unwrap_or(0),
+        false,
+        result.is_err() || reply_is_error,
+    );
     let reply_bytes = ctx
         .client_ref()
         .reply_buf
@@ -609,6 +651,18 @@ fn command_metadata(name: &[u8]) -> CommandMetadata {
         .unwrap_or_default()
 }
 
+pub(crate) fn command_is_denyoom(name: &[u8]) -> bool {
+    command_metadata(name).denyoom
+}
+
+pub(crate) fn command_is_no_multi(name: &[u8]) -> bool {
+    command_metadata(name).no_multi
+}
+
+pub(crate) fn command_acl_categories(name: &[u8]) -> Option<u64> {
+    lookup_runtime_command(name).map(|entry| entry.metadata.acl_categories)
+}
+
 fn command_metadata_table() -> &'static [(&'static [u8], CommandMetadata)] {
     COMMAND_METADATA_TABLE.get_or_init(|| {
         let mut rows: Vec<(&'static [u8], CommandMetadata)> = Vec::new();
@@ -622,6 +676,14 @@ fn command_metadata_table() -> &'static [(&'static [u8], CommandMetadata)] {
                     let mut metadata = CommandMetadata::default();
                     metadata.include(spec.flags, spec.acl_categories);
                     rows.push((spec.name.as_bytes(), metadata));
+                }
+            }
+            if spec.group == "scripting" {
+                if let Some((_, metadata)) = rows
+                    .iter_mut()
+                    .find(|(name, _)| ascii_eq_ignore_case(name, spec.name.as_bytes()))
+                {
+                    metadata.acl_categories |= acl_category::SCRIPTING;
                 }
             }
         }
@@ -687,6 +749,8 @@ impl CommandMetadata {
                 CommandFlag::WRITE => self.write = true,
                 CommandFlag::NO_AUTH => self.no_auth = true,
                 CommandFlag::DENYOOM => self.denyoom = true,
+                CommandFlag::NO_MULTI => self.no_multi = true,
+                CommandFlag::ALLOW_BUSY => self.allow_busy = true,
                 CommandFlag::SKIP_COMMANDLOG => self.skip_commandlog = true,
                 CommandFlag::SKIP_MONITOR => self.skip_monitor = true,
                 _ => {}
@@ -1152,7 +1216,7 @@ fn enforce_replica_readonly_gate(
 /// either cannot or refuses to recover memory. Returns `None` when dispatch
 /// should proceed (either we were under the limit, or eviction trimmed the
 /// keyspace back under it, or the command is exempt from DENYOOM).
-fn enforce_maxmemory_gate(
+pub(crate) fn enforce_maxmemory_gate(
     ctx: &mut CommandContext<'_>,
     is_denyoom_command: bool,
 ) -> Option<Vec<u8>> {
@@ -1204,6 +1268,74 @@ fn enforce_maxmemory_gate(
     } else {
         None
     }
+}
+
+fn enforce_busy_script_gate(
+    ctx: &CommandContext<'_>,
+    name: &[u8],
+    allow_busy_command: bool,
+) -> Option<Vec<u8>> {
+    if !crate::eval::is_script_busy() {
+        return None;
+    }
+    if ascii_eq_ignore_case(name, b"PING") && crate::eval::busy_script_owner_is(ctx.client_ref().id)
+    {
+        return None;
+    }
+    if allow_busy_command
+        || is_script_kill_command(ctx, name)
+        || is_function_busy_command(ctx, name)
+    {
+        return None;
+    }
+    Some(crate::eval::busy_script_error_reply())
+}
+
+fn is_script_kill_command(ctx: &CommandContext<'_>, name: &[u8]) -> bool {
+    if !ascii_eq_ignore_case(name, b"SCRIPT") {
+        return false;
+    }
+    match ctx.client_ref().arg(1) {
+        Some(sub) => ascii_eq_ignore_case(sub.as_bytes(), b"KILL"),
+        None => false,
+    }
+}
+
+fn is_function_busy_command(ctx: &CommandContext<'_>, name: &[u8]) -> bool {
+    if !ascii_eq_ignore_case(name, b"FUNCTION") {
+        return false;
+    }
+    match ctx.client_ref().arg(1) {
+        Some(sub) => {
+            ascii_eq_ignore_case(sub.as_bytes(), b"KILL")
+                || ascii_eq_ignore_case(sub.as_bytes(), b"STATS")
+        }
+        None => false,
+    }
+}
+
+fn is_client_reply_command(ctx: &CommandContext<'_>, name: &[u8]) -> bool {
+    if !ascii_eq_ignore_case(name, b"CLIENT") {
+        return false;
+    }
+    match ctx.client_ref().arg(1) {
+        Some(sub) => ascii_eq_ignore_case(sub.as_bytes(), b"REPLY"),
+        None => false,
+    }
+}
+
+pub(crate) fn execabort_from_error_reply(reply: &[u8]) -> Vec<u8> {
+    let msg = reply
+        .strip_prefix(b"-")
+        .unwrap_or(reply)
+        .strip_suffix(b"\r\n")
+        .unwrap_or(reply);
+    let mut out =
+        Vec::with_capacity(b"-EXECABORT Transaction discarded because of: \r\n".len() + msg.len());
+    out.extend_from_slice(b"-EXECABORT Transaction discarded because of: ");
+    out.extend_from_slice(msg);
+    out.extend_from_slice(b"\r\n");
+    out
 }
 
 /// Append `argv` to the replication backlog and fan out to all online replicas.
@@ -2328,16 +2460,16 @@ pub static HANDLERS: &[DispatchEntry] = &[
         handler: crate::eval::eval_command,
     },
     DispatchEntry {
+        name: b"EVAL_RO",
+        handler: crate::eval::eval_ro_command,
+    },
+    DispatchEntry {
         name: b"EVALSHA",
         handler: crate::eval::evalsha_command,
     },
     DispatchEntry {
         name: b"EVALSHA_RO",
-        handler: crate::eval::evalsha_command,
-    },
-    DispatchEntry {
-        name: b"EVAL_RO",
-        handler: crate::eval::eval_command,
+        handler: crate::eval::evalsha_ro_command,
     },
     DispatchEntry {
         name: b"SCRIPT",

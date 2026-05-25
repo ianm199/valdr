@@ -14,6 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 static METRICS: OnceLock<Arc<ServerMetrics>> = OnceLock::new();
 static COMMAND_STATS: OnceLock<Arc<Mutex<HashMap<Vec<u8>, CommandStat>>>> = OnceLock::new();
+static ERROR_STATS: OnceLock<Arc<Mutex<HashMap<Vec<u8>, u64>>>> = OnceLock::new();
 
 #[derive(Clone, Debug, Default)]
 struct CommandStat {
@@ -30,6 +31,12 @@ pub struct CommandStatSnapshot {
     pub usec: u64,
     pub rejected_calls: u64,
     pub failed_calls: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ErrorStatSnapshot {
+    pub name: Vec<u8>,
+    pub count: u64,
 }
 
 /// Install the global metrics instance. Must be called once at server startup
@@ -49,6 +56,10 @@ fn command_stats_handle() -> &'static Arc<Mutex<HashMap<Vec<u8>, CommandStat>>> 
     COMMAND_STATS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
 
+fn error_stats_handle() -> &'static Arc<Mutex<HashMap<Vec<u8>, u64>>> {
+    ERROR_STATS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+}
+
 pub fn record_command_stat(name: &[u8], elapsed_us: u64, rejected_call: bool, failed_call: bool) {
     let key = command_stats_key(name);
     if key.is_empty() {
@@ -59,11 +70,12 @@ pub fn record_command_stat(name: &[u8], elapsed_us: u64, rejected_call: bool, fa
         Err(p) => p.into_inner(),
     };
     let row = stats.entry(key).or_default();
-    row.calls = row.calls.saturating_add(1);
-    row.usec = row.usec.saturating_add(elapsed_us);
     if rejected_call {
         row.rejected_calls = row.rejected_calls.saturating_add(1);
+        return;
     }
+    row.calls = row.calls.saturating_add(1);
+    row.usec = row.usec.saturating_add(elapsed_us);
     if failed_call {
         row.failed_calls = row.failed_calls.saturating_add(1);
     }
@@ -116,6 +128,61 @@ pub fn reset_command_stats() {
     stats.clear();
 }
 
+pub fn record_error_reply(payload: &[u8]) {
+    let mut payload = payload;
+    if payload.first() == Some(&b'-') {
+        payload = &payload[1..];
+    }
+    let payload = payload
+        .split(|b| *b == b'\r' || *b == b'\n')
+        .next()
+        .unwrap_or(payload);
+    let code = payload
+        .split(|b| *b == b' ' || *b == b'\t')
+        .next()
+        .unwrap_or(payload);
+    if code.is_empty() {
+        return;
+    }
+
+    server_metrics()
+        .total_error_replies
+        .fetch_add(1, Ordering::Relaxed);
+
+    let mut key = code.to_ascii_uppercase();
+    key.retain(|b| *b != b'\r' && *b != b'\n');
+    let mut stats = match error_stats_handle().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let count = stats.entry(key).or_default();
+    *count = count.saturating_add(1);
+}
+
+pub fn error_stats_snapshot() -> Vec<ErrorStatSnapshot> {
+    let stats = match error_stats_handle().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let mut out: Vec<ErrorStatSnapshot> = stats
+        .iter()
+        .map(|(name, count)| ErrorStatSnapshot {
+            name: name.clone(),
+            count: *count,
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+pub fn reset_error_stats() {
+    let mut stats = match error_stats_handle().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    stats.clear();
+}
+
 /// Atomically tracked server-wide counters.
 pub struct ServerMetrics {
     /// Unix milliseconds when the server process started.
@@ -150,6 +217,8 @@ pub struct ServerMetrics {
     pub evicted_keys: AtomicU64,
     /// Cumulative microseconds spent inside command dispatch on the main thread.
     pub active_time_main_thread_us: AtomicU64,
+    /// Total error replies emitted since the last `CONFIG RESETSTAT`.
+    pub total_error_replies: AtomicU64,
     /// Number of BGSAVE child processes that exited with status 0.
     pub rdb_saves_succeeded: AtomicU64,
     /// Number of BGSAVE child processes that exited with a non-zero status.
@@ -175,6 +244,7 @@ impl ServerMetrics {
             expired_keys: AtomicU64::new(0),
             evicted_keys: AtomicU64::new(0),
             active_time_main_thread_us: AtomicU64::new(0),
+            total_error_replies: AtomicU64::new(0),
             rdb_saves_succeeded: AtomicU64::new(0),
             rdb_saves_failed: AtomicU64::new(0),
         }
@@ -228,9 +298,11 @@ impl ServerMetrics {
         self.expired_keys.store(0, Ordering::Relaxed);
         self.evicted_keys.store(0, Ordering::Relaxed);
         self.active_time_main_thread_us.store(0, Ordering::Relaxed);
+        self.total_error_replies.store(0, Ordering::Relaxed);
         self.rdb_saves_succeeded.store(0, Ordering::Relaxed);
         self.rdb_saves_failed.store(0, Ordering::Relaxed);
         reset_command_stats();
+        reset_error_stats();
     }
 }
 
