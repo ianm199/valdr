@@ -1109,8 +1109,10 @@ impl RuntimeOwner {
                         }
                         if slot.client.blocked_on_keys {
                             slot.client.blocked_on_keys = false;
+                            slot.client.commands_processed =
+                                slot.client.commands_processed.saturating_add(1);
                             if let Ok(mut guard) = client_info_registry().lock() {
-                                guard.set_blocked(slot.client.id, false);
+                                guard.update_client_metadata(&slot.client);
                             }
                         }
                         slot.queue_write_owned(payload);
@@ -1162,6 +1164,11 @@ impl RuntimeOwner {
                     }
                 }
             };
+            slot.client.net_input_bytes = slot.client.net_input_bytes.saturating_add(n as u64);
+            if super::client_has_pending_kill(slot.client.id) {
+                slot.mark_closed();
+                break;
+            }
             slot.ingest(&read_buf[..n]);
             slot.refresh_client_memory_snapshot();
             progressed = true;
@@ -1461,6 +1468,11 @@ impl RuntimeOwner {
                 }
                 Ok(n) => {
                     buffer.consume_front(n);
+                    slot.client.net_output_bytes =
+                        slot.client.net_output_bytes.saturating_add(n as u64);
+                    if let Ok(mut guard) = client_info_registry().lock() {
+                        guard.update_client_metadata(&slot.client);
+                    }
                     progressed = true;
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,

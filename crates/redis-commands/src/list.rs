@@ -1509,6 +1509,10 @@ fn park_blocked_client(
         idx.add(waiter);
     }
     ctx.client_mut().blocked_on_keys = true;
+    if let Ok(mut guard) = client_info_registry().lock() {
+        guard.update_client_metadata(ctx.client_ref());
+        guard.set_blocked(ctx.client_ref().id, true);
+    }
     Ok(())
 }
 

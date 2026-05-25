@@ -1286,15 +1286,13 @@ impl RedisObject {
     /// Return the approximate LRU idle time in seconds.
     /// C: objectGetLRUIdleSecs(o) → object.c:1652
     pub fn lru_idle_secs(&self) -> u32 {
-        // TODO(port): call lrulfu module's lru_getIdleSecs when available
-        self.lru
+        crate::lru_clock::current_lru_clock().wrapping_sub(self.lru)
     }
 
     /// Return an idleness measure (larger = more idle).
     /// C: objectGetIdleness(o) → object.c:1657
     pub fn idleness(&self) -> u32 {
-        // TODO(port): call lrulfu_getIdleness when available
-        self.lru
+        self.lru_idle_secs()
     }
 }
 

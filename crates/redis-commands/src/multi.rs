@@ -146,6 +146,9 @@ pub fn queue_current_command(ctx: &mut CommandContext) -> RedisResult<()> {
         msg.push(b'\'');
         return Err(RedisError::runtime(msg));
     }
+    if !ctx.client_ref().suppress_monitor {
+        crate::connection::feed_monitors(ctx, &argv);
+    }
     ctx.client_mut().queued_argvs.push(argv);
     ctx.reply_simple_string(b"QUEUED")
 }
@@ -263,10 +266,13 @@ fn run_one_queued(ctx: &mut CommandContext, argv: Vec<RedisString>) -> u32 {
     ctx.client_mut().set_args(argv);
     let selected_db = ctx.client_ref().db_index;
     let name = ctx.client_ref().arg(0).cloned();
+    let previous_suppress = ctx.client_ref().suppress_monitor;
+    ctx.client_mut().suppress_monitor = true;
     let result = match name {
         Some(n) => dispatch_queued_on_db(ctx, n.as_bytes(), selected_db),
         None => Err(RedisError::runtime(b"ERR empty queued command")),
     };
+    ctx.client_mut().suppress_monitor = previous_suppress;
     if let Err(err) = result {
         let payload = err.to_resp_payload();
         encode_resp2(&RespFrame::Error(payload), &mut ctx.client_mut().reply_buf);

@@ -1826,8 +1826,12 @@ pub fn client_list_command(ctx: &mut CommandContext) -> RedisResult<()> {
 pub fn client_pause_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let timeout = match parse_i64(ctx.arg(2)?.as_bytes()) {
         Some(t) if t >= 0 => t,
+        Some(_) => {
+            add_reply_error(ctx.client, b"timeout is negative");
+            return Ok(());
+        }
         _ => {
-            add_reply_error(ctx.client, b"ERR timeout is not an integer or out of range");
+            add_reply_error(ctx.client, b"timeout is not an integer or out of range");
             return Ok(());
         }
     };

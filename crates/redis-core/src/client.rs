@@ -260,6 +260,16 @@ pub struct Client {
     pub lib_name: Option<RedisString>,
     /// Optional client library version set via `CLIENT SETINFO lib-ver`.
     pub lib_ver: Option<RedisString>,
+    /// Bytes read from this client connection.
+    pub net_input_bytes: u64,
+    /// Bytes written to this client connection.
+    pub net_output_bytes: u64,
+    /// Commands completed by this client. The currently executing command is
+    /// not counted until after its handler returns, matching CLIENT INFO.
+    pub commands_processed: u64,
+    /// Temporarily suppress MONITOR feed for nested execution contexts such as
+    /// EXEC draining queued commands that were already logged at queue time.
+    pub suppress_monitor: bool,
 }
 
 /// Per-client transient flags.
@@ -277,6 +287,7 @@ pub struct ClientFlags {
     pub monitor: bool,
     pub readonly: bool,
     pub no_evict: bool,
+    pub no_touch: bool,
     pub aof_client: bool,
     pub reply_off: bool,
     pub reply_skip_next: bool,
@@ -351,6 +362,10 @@ impl Client {
             capa_redirect: false,
             lib_name: None,
             lib_ver: None,
+            net_input_bytes: 0,
+            net_output_bytes: 0,
+            commands_processed: 0,
+            suppress_monitor: false,
         }
     }
 
@@ -424,6 +439,7 @@ impl Client {
         crate::db::watched_keys_index_remove_client(self.id);
         let _ = crate::db::watched_keys_take_dirty(self.id);
         self.clear_blocked_on_keys();
+        self.suppress_monitor = false;
     }
 
     /// Drop the client from the global blocked-keys index, if registered.

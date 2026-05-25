@@ -97,7 +97,13 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let pid = std::process::id();
     let uptime = now_unix_seconds().saturating_sub(server_start_time());
     let metrics = server_metrics();
-    let connected_clients = metrics.connected_clients.load(Ordering::Relaxed);
+    let connected_clients = {
+        let guard = match client_info_registry().lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard.all().len()
+    };
     let total_connections = metrics.total_connections_received.load(Ordering::Relaxed);
     let total_commands = metrics.total_commands_processed.load(Ordering::Relaxed);
     let hits = metrics.keyspace_hits.load(Ordering::Relaxed);

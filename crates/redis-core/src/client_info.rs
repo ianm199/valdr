@@ -13,7 +13,7 @@
 //! Fields intentionally kept minimal: only what `CLIENT LIST` actually needs to
 //! satisfy the upstream TCL test suite (id, addr, db, flags, cmd).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use redis_types::RedisString;
@@ -38,6 +38,7 @@ pub struct ClientSnapshot {
     pub tracking_broken_redirect: bool,
     pub import_source: bool,
     pub capa_redirect: bool,
+    pub is_replica: bool,
     pub readonly: bool,
     pub lib_name: Option<RedisString>,
     pub lib_ver: Option<RedisString>,
@@ -53,12 +54,16 @@ pub struct ClientSnapshot {
     pub argv_memory_bytes: usize,
     pub multi_memory_bytes: usize,
     pub total_memory_bytes: usize,
+    pub net_input_bytes: u64,
+    pub net_output_bytes: u64,
+    pub commands_processed: u64,
 }
 
 /// Server-wide client info table.
 #[derive(Default)]
 pub struct ClientInfoRegistry {
     entries: HashMap<ClientId, ClientSnapshot>,
+    kill_marks: HashSet<ClientId>,
 }
 
 impl ClientInfoRegistry {
@@ -84,6 +89,7 @@ impl ClientInfoRegistry {
                 tracking_broken_redirect: false,
                 import_source: false,
                 capa_redirect: false,
+                is_replica: false,
                 readonly: false,
                 lib_name: None,
                 lib_ver: None,
@@ -99,6 +105,9 @@ impl ClientInfoRegistry {
                 argv_memory_bytes: 0,
                 multi_memory_bytes: 0,
                 total_memory_bytes: 0,
+                net_input_bytes: 0,
+                net_output_bytes: 0,
+                commands_processed: 0,
             },
         );
     }
@@ -131,6 +140,7 @@ impl ClientInfoRegistry {
             e.tracking_broken_redirect = client.tracking.broken_redirect;
             e.import_source = client.import_source;
             e.capa_redirect = client.capa_redirect;
+            e.is_replica = client.is_replica;
             e.readonly = client.flags.readonly;
             e.lib_name = client.lib_name.clone();
             e.lib_ver = client.lib_ver.clone();
@@ -141,6 +151,9 @@ impl ClientInfoRegistry {
             e.pattern_names = client.subscribed_patterns.iter().cloned().collect();
             e.shard_channel_names = client.subscribed_shard_channels.iter().cloned().collect();
             e.queued_multi_count = client.flags.multi.then_some(client.queued_argvs.len());
+            e.net_input_bytes = client.net_input_bytes;
+            e.net_output_bytes = client.net_output_bytes;
+            e.commands_processed = client.commands_processed;
         }
     }
 
@@ -183,6 +196,24 @@ impl ClientInfoRegistry {
     /// Remove a connection that has disconnected.
     pub fn deregister(&mut self, id: ClientId) {
         self.entries.remove(&id);
+        self.kill_marks.remove(&id);
+    }
+
+    /// Mark a connection for asynchronous teardown.
+    ///
+    /// The command handler cannot directly own another connection's socket in
+    /// the thread-per-client runtime. Removing the snapshot makes CLIENT LIST
+    /// observe Valkey-like immediate disappearance; the kill mark is consumed
+    /// by the target connection loop before it processes the next read.
+    pub fn mark_killed(&mut self, id: ClientId) {
+        if self.entries.remove(&id).is_some() {
+            self.kill_marks.insert(id);
+        }
+    }
+
+    /// Return and clear the pending kill bit for `id`.
+    pub fn take_killed(&mut self, id: ClientId) -> bool {
+        self.kill_marks.remove(&id)
     }
 
     /// Remove pub/sub clients authenticated as `username` whose active

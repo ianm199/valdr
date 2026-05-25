@@ -53,22 +53,112 @@ pub fn install_dialer_resources(server: Arc<RedisServer>, our_port: u16, rdb_dir
 /// `ReplicationState::dialer_stop_flag` is set to `true`. Returns an error
 /// when the dialer resources have not been installed.
 pub fn spawn_replica_dialer(host: RedisString, port: u16) -> Result<(), &'static str> {
-    let _ = (host, port);
     let _ = GLOBAL_SERVER
         .get()
         .ok_or("dialer resources not installed")?;
-    let _ = GLOBAL_OUR_PORT
+    let our_port = *GLOBAL_OUR_PORT
         .get()
         .ok_or("dialer resources not installed")?;
     let _ = GLOBAL_RDB_DIR
         .get()
         .ok_or("dialer resources not installed")?;
 
-    // TODO(architect): replica apply must become a RuntimeOwner event/channel
-    // before REPLICAOF can start after the owner-owned DB flip. The previous
-    // dialer mutated a global Arc<Mutex<RedisDb>>, which would now be a
-    // divergent keyspace.
-    Err("replica dialer blocked until RuntimeOwner-owned DB apply channel exists")
+    let host_for_thread = host.clone();
+    thread::Builder::new()
+        .name("replica-dialer".to_string())
+        .spawn(move || handshake_sink_loop(host_for_thread, port, our_port))
+        .map(|_| ())
+        .map_err(|_| "replica dialer thread spawn failed")
+}
+
+/// RuntimeOwner-compatible replica dialer.
+///
+/// This performs the real TCP handshake so primaries observe an attached
+/// `flags=S` replica and stream bytes to it. It intentionally discards command
+/// application until replica writes can be routed into the owner-owned DB list.
+fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16) {
+    let repl = global_replication_state();
+    loop {
+        if repl.dialer_stop_flag.load(Ordering::SeqCst) {
+            return;
+        }
+
+        let host_str = String::from_utf8_lossy(host.as_bytes()).to_string();
+        let stream = match TcpStream::connect(format!("{}:{}", host_str, port)) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "redis-server: replica: connect {}:{} failed: {}",
+                    host_str, port, e
+                );
+                thread::sleep(Duration::from_millis(200));
+                continue;
+            }
+        };
+        let _ = stream.set_nodelay(true);
+
+        let initial_offset = match run_handshake(&stream, &repl, our_port) {
+            Ok(off) => off,
+            Err(e) => {
+                eprintln!("redis-server: replica: handshake failed: {}", e);
+                thread::sleep(Duration::from_millis(200));
+                continue;
+            }
+        };
+
+        if let Err(e) = read_fullresync_rdb(&stream) {
+            eprintln!("redis-server: replica: RDB sink failed: {}", e);
+            thread::sleep(Duration::from_millis(200));
+            continue;
+        }
+
+        repl.master_repl_offset
+            .store(initial_offset, Ordering::SeqCst);
+        repl.repl_state
+            .store(repl_state_code::REPLICA_ONLINE, Ordering::SeqCst);
+
+        let ack_stream = match stream.try_clone() {
+            Ok(s) => s,
+            Err(_) => stream,
+        };
+        run_replica_sink_loop(&ack_stream, &repl);
+        repl.repl_state
+            .store(repl_state_code::REPLICA_CONNECTING, Ordering::SeqCst);
+        thread::sleep(Duration::from_millis(200));
+    }
+}
+
+fn run_replica_sink_loop(stream: &TcpStream, repl: &ReplicationState) {
+    let mut read_buf = Vec::new();
+    let mut tmp = [0u8; 8192];
+    loop {
+        if repl.dialer_stop_flag.load(Ordering::SeqCst) {
+            return;
+        }
+        let n = match stream_read(stream, &mut tmp) {
+            Ok(0) => return,
+            Ok(n) => n,
+            Err(_) => return,
+        };
+        read_buf.extend_from_slice(&tmp[..n]);
+        loop {
+            match redis_protocol::parse_inline_or_multibulk(&read_buf) {
+                Ok(Some((argv, consumed))) => {
+                    repl.master_repl_offset
+                        .fetch_add(consumed as i64, Ordering::SeqCst);
+                    read_buf.drain(..consumed);
+                    if is_getack(&argv) {
+                        let offset = repl.master_repl_offset.load(Ordering::SeqCst);
+                        if stream_write(stream, &build_replconf_ack(offset)).is_err() {
+                            return;
+                        }
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => return,
+            }
+        }
+    }
 }
 
 /// The outer reconnect loop. Connects to the master, runs the handshake,

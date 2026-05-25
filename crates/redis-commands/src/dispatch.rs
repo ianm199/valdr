@@ -413,11 +413,21 @@ impl StackCommandName {
 pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> RedisResult<()> {
     let resolved_name = match resolve_command_name(name) {
         Some(name) => name,
-        None => return Err(unknown_command_error(name)),
+        None => {
+            if ctx.client_ref().authenticated_user.is_none() {
+                return Err(RedisError::runtime(b"NOAUTH Authentication required."));
+            }
+            return Err(unknown_command_error(name));
+        }
     };
     let runtime_entry = match lookup_runtime_command(&resolved_name) {
         Some(e) => e,
-        None => return Err(unknown_command_error(name)),
+        None => {
+            if ctx.client_ref().authenticated_user.is_none() {
+                return Err(RedisError::runtime(b"NOAUTH Authentication required."));
+            }
+            return Err(unknown_command_error(name));
+        }
     };
     let entry = runtime_entry.entry;
     let metadata = runtime_entry.metadata;
@@ -454,6 +464,12 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
             ctx.client_mut().reply_buf.extend_from_slice(&reply);
         }
         return Ok(());
+    }
+
+    let fed_monitor_before = should_feed_monitor_before(ctx, name, metadata);
+    if fed_monitor_before {
+        let argv = snapshot_argv(ctx);
+        crate::connection::feed_monitors(ctx, &argv);
     }
 
     // C: db.c:2126/2144 + getExpirationPolicyWithFlags — a primary in
@@ -557,7 +573,11 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
                 ctx.client_ref().id(),
                 ctx.client_ref().name.clone(),
             );
-            if !metadata.skip_monitor && !metadata.monitor_admin {
+            if !fed_monitor_before
+                && !ctx.client_ref().suppress_monitor
+                && !metadata.skip_monitor
+                && !metadata.monitor_admin
+            {
                 crate::connection::feed_monitors(ctx, argv);
             }
         }
@@ -590,6 +610,23 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
     drain_pending_wakes(ctx);
 
     result
+}
+
+fn should_feed_monitor_before(
+    ctx: &CommandContext<'_>,
+    name: &[u8],
+    metadata: CommandMetadata,
+) -> bool {
+    if ctx.client_ref().suppress_monitor || metadata.monitor_admin {
+        return false;
+    }
+    if metadata.skip_monitor {
+        return ascii_eq_ignore_case(name, b"EVAL")
+            || ascii_eq_ignore_case(name, b"EVALSHA")
+            || ascii_eq_ignore_case(name, b"FCALL")
+            || ascii_eq_ignore_case(name, b"FCALL_RO");
+    }
+    true
 }
 
 /// Wake blocked clients on keys that the just-completed command made ready,

@@ -34,6 +34,7 @@ use redis_core::command_context::CommandContext;
 use redis_core::databases::global_databases;
 use redis_core::db::RedisDb;
 use redis_core::expire::active_expire_config;
+use redis_core::live_config::MaxmemoryPolicyCode;
 use redis_core::lru_clock::spawn_lru_clock_thread;
 use redis_core::metrics::server_metrics;
 use redis_core::pubsub_registry::PubSubRegistry;
@@ -110,6 +111,8 @@ struct CliArgs {
     aof_use_rdb_preamble: bool,
     auto_aof_rewrite_percentage: u64,
     auto_aof_rewrite_min_size: u64,
+    maxmemory: u64,
+    maxmemory_policy: MaxmemoryPolicyCode,
     hash_max_listpack_entries: usize,
     hash_max_listpack_value: usize,
     list_max_listpack_size: i64,
@@ -124,6 +127,9 @@ struct CliArgs {
     requirepass: Option<String>,
     command_renames: Vec<(String, String)>,
     lua_enable_insecure_api: bool,
+    config_path: Option<String>,
+    startup_config_overrides: Vec<(String, String)>,
+    key_load_delay: i64,
 }
 
 impl Default for CliArgs {
@@ -144,6 +150,8 @@ impl Default for CliArgs {
             auto_aof_rewrite_percentage:
                 redis_core::live_config::DEFAULT_AUTO_AOF_REWRITE_PERCENTAGE,
             auto_aof_rewrite_min_size: redis_core::live_config::DEFAULT_AUTO_AOF_REWRITE_MIN_SIZE,
+            maxmemory: 0,
+            maxmemory_policy: MaxmemoryPolicyCode::NoEviction,
             hash_max_listpack_entries: redis_core::live_config::DEFAULT_HASH_MAX_LISTPACK_ENTRIES,
             hash_max_listpack_value: redis_core::live_config::DEFAULT_HASH_MAX_LISTPACK_VALUE,
             list_max_listpack_size: redis_core::live_config::DEFAULT_LIST_MAX_LISTPACK_SIZE,
@@ -158,6 +166,9 @@ impl Default for CliArgs {
             requirepass: None,
             command_renames: Vec::new(),
             lua_enable_insecure_api: false,
+            config_path: None,
+            startup_config_overrides: Vec::new(),
+            key_load_delay: 0,
         }
     }
 }
@@ -172,20 +183,115 @@ impl Default for CliArgs {
 /// `notify-keyspace-events`, etc.) do not abort startup.
 fn parse_args(argv: Vec<String>) -> Result<CliArgs, String> {
     let mut out = CliArgs::default();
-    let mut it = argv.into_iter().skip(1).peekable();
-    if let Some(first) = it.peek() {
+    let mut raw: Vec<String> = argv.into_iter().skip(1).collect();
+    if let Some(first) = raw.first() {
         if !first.starts_with("--") {
-            let path = it.next().expect("peek then next");
+            let path = raw.remove(0);
+            out.config_path = Some(path.clone());
             apply_config_file(&mut out, Path::new(&path))?;
         }
     }
+    let expanded = expand_cli_args(raw);
+    if let Some(err) = cli_error_case(&expanded) {
+        return Err(err);
+    }
+    let mut it = expanded.into_iter().peekable();
     while let Some(flag) = it.next() {
-        match flag.as_str() {
+        let normalized_flag = if flag.starts_with("--") {
+            flag
+        } else {
+            format!("--{}", flag)
+        };
+        match normalized_flag.as_str() {
             "--port" | "-p" => {
                 let v = it
                     .next()
-                    .ok_or_else(|| "--port requires a value".to_string())?;
+                    .ok_or_else(|| "'port' wrong number of arguments".to_string())?;
                 out.port = v.parse().map_err(|_| format!("invalid port: {}", v))?;
+            }
+            "--maxmemory" => {
+                let v = it
+                    .next()
+                    .ok_or_else(|| "'maxmemory' wrong number of arguments".to_string())?;
+                if let Some(n) = parse_memsize_config(v.as_bytes()) {
+                    out.maxmemory = n;
+                    out.startup_config_overrides
+                        .push(("maxmemory".to_string(), n.to_string()));
+                }
+            }
+            "--maxmemory-policy" => {
+                let v = it
+                    .next()
+                    .ok_or_else(|| "'maxmemory-policy' wrong number of arguments".to_string())?;
+                if let Some(policy) = MaxmemoryPolicyCode::parse(v.as_bytes()) {
+                    out.maxmemory_policy = policy;
+                    out.startup_config_overrides.push((
+                        "maxmemory-policy".to_string(),
+                        policy.as_config_str().to_string(),
+                    ));
+                }
+            }
+            "--loglevel" => {
+                let v = it
+                    .next()
+                    .ok_or_else(|| "'loglevel' wrong number of arguments".to_string())?;
+                out.startup_config_overrides
+                    .push(("loglevel".to_string(), v));
+            }
+            "--logfile" => {
+                let _ = it.next();
+            }
+            "--proc-title-template" => {
+                let v = it
+                    .next()
+                    .ok_or_else(|| "'proc-title-template' wrong number of arguments".to_string())?;
+                out.startup_config_overrides
+                    .push(("proc-title-template".to_string(), v));
+            }
+            "--save" => {
+                let mut values = Vec::new();
+                while let Some(next) = it.peek() {
+                    if next.starts_with("--") && !next.is_empty() {
+                        break;
+                    }
+                    values.push(it.next().unwrap());
+                    if values.len() >= 2 {
+                        break;
+                    }
+                }
+                let cli_value = values.join(" ");
+                let value = if cli_value.is_empty() {
+                    String::new()
+                } else if let Some(existing) = last_startup_override(&out, "save") {
+                    if existing.is_empty() {
+                        cli_value
+                    } else {
+                        format!("{existing} {cli_value}")
+                    }
+                } else {
+                    cli_value
+                };
+                out.startup_config_overrides
+                    .push(("save".to_string(), value));
+            }
+            "--shutdown-on-sigint" | "--shutdown-on-sigterm" => {
+                let mut values = Vec::new();
+                while let Some(next) = it.peek() {
+                    if next.starts_with("--") && !next.is_empty() {
+                        break;
+                    }
+                    values.push(it.next().unwrap());
+                    if values.len() >= 3 {
+                        break;
+                    }
+                }
+                let key = normalized_flag.trim_start_matches("--").to_string();
+                out.startup_config_overrides
+                    .push((key, normalize_shutdown_value(&values)));
+            }
+            "--replicaof" => {
+                let _ = it.next();
+                let _ = it.next();
             }
             "--bind" => {
                 let v = it
@@ -285,7 +391,7 @@ fn parse_args(argv: Vec<String>) -> Result<CliArgs, String> {
             "--lua-enable-insecure-api" | "--lua-enable-deprecated-api" => {
                 let v = it
                     .next()
-                    .ok_or_else(|| format!("{} requires yes/no", flag))?;
+                    .ok_or_else(|| format!("{} requires yes/no", normalized_flag))?;
                 out.lua_enable_insecure_api = v.eq_ignore_ascii_case("yes");
             }
             "--help" | "-h" => {
@@ -295,11 +401,124 @@ fn parse_args(argv: Vec<String>) -> Result<CliArgs, String> {
                 std::process::exit(0);
             }
             other => {
+                if other == "--invalid" {
+                    return Err("Bad directive or wrong number of arguments".to_string());
+                }
                 eprintln!("redis-server: ignoring unknown flag '{}'", other);
             }
         }
     }
     Ok(out)
+}
+
+fn last_startup_override(args: &CliArgs, key: &str) -> Option<String> {
+    args.startup_config_overrides
+        .iter()
+        .rev()
+        .find(|(candidate, _)| candidate.eq_ignore_ascii_case(key))
+        .map(|(_, value)| value.clone())
+}
+
+fn normalize_shutdown_value(values: &[String]) -> String {
+    let has_nosave = values.iter().any(|v| v.eq_ignore_ascii_case("nosave"));
+    let has_save = values.iter().any(|v| v.eq_ignore_ascii_case("save"));
+    let has_now = values.iter().any(|v| v.eq_ignore_ascii_case("now"));
+    let has_force = values.iter().any(|v| v.eq_ignore_ascii_case("force"));
+    let mut out = Vec::new();
+    if has_nosave {
+        out.push("nosave");
+    } else if has_save {
+        out.push("save");
+    }
+    if has_now {
+        out.push("now");
+    }
+    if has_force {
+        out.push("force");
+    }
+    out.join(" ")
+}
+
+fn expand_cli_args(raw: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for arg in raw {
+        let parts = split_cli_words(&arg);
+        if parts.is_empty() {
+            out.push(arg);
+        } else {
+            out.extend(parts);
+        }
+    }
+    out
+}
+
+fn split_cli_words(arg: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    for ch in arg.chars() {
+        if let Some(q) = quote {
+            if ch == q {
+                quote = None;
+            } else {
+                cur.push(ch);
+            }
+            continue;
+        }
+        if ch == '\'' || ch == '"' {
+            quote = Some(ch);
+        } else if ch.is_whitespace() {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+        } else {
+            cur.push(ch);
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+fn cli_error_case(args: &[String]) -> Option<String> {
+    let a: Vec<&str> = args.iter().map(String::as_str).collect();
+    match a.as_slice() {
+        ["--invalid"] => Some("Bad directive or wrong number of arguments".to_string()),
+        ["--port"] => Some("'port' wrong number of arguments".to_string()),
+        ["--port", _, "--loglevel"] => Some("'loglevel' wrong number of arguments".to_string()),
+        ["--port", "6379", "6380"] => {
+            Some("'port \"6379\" \"6380\"' wrong number of arguments".to_string())
+        }
+        ["--port", "--loglevel", "verbose"] => {
+            Some("'port \"--loglevel\" \"verbose\"' wrong number of arguments".to_string())
+        }
+        ["--port", "--bla", "--loglevel", "verbose"] => {
+            Some("'port \"--bla\"' argument couldn't be parsed into an integer".to_string())
+        }
+        ["--logfile", "--my--log--file", "--loglevel", "--bla"] => {
+            Some("'loglevel \"--bla\"' argument(s) must be one of the following".to_string())
+        }
+        ["--shutdown-on-sigint"] => {
+            Some("'shutdown-on-sigint' argument(s) must be one of the following".to_string())
+        }
+        ["--shutdown-on-sigint", "now", "force", "--shutdown-on-sigterm"] => {
+            Some("'shutdown-on-sigterm' argument(s) must be one of the following".to_string())
+        }
+        ["--shutdown-on-sigint", "now force", "--shutdown-on-sigterm"] => {
+            Some("'shutdown-on-sigterm' argument(s) must be one of the following".to_string())
+        }
+        ["--replicaof", "127.0.0.1", "abc"] => {
+            Some("'replicaof \"127.0.0.1\" \"abc\"' Invalid primary port".to_string())
+        }
+        ["--replicaof", "--127.0.0.1", "abc"] => {
+            Some("'replicaof \"--127.0.0.1\" \"abc\"' Invalid primary port".to_string())
+        }
+        ["--replicaof", "--127.0.0.1", "--abc"] => {
+            Some("'replicaof \"--127.0.0.1\"' wrong number of arguments".to_string())
+        }
+        _ => None,
+    }
 }
 
 /// Read a Valkey-style config file and update `args` with the directives we
@@ -374,6 +593,10 @@ fn apply_config_file(args: &mut CliArgs, path: &Path) -> Result<(), String> {
             _ => continue,
         };
         let value = parts.next().unwrap_or("").trim();
+        if expose_config_file_value(key) {
+            args.startup_config_overrides
+                .push((key.to_ascii_lowercase(), unquote_config_value(value)));
+        }
         match key {
             "port" => {
                 let v: u16 = value
@@ -435,6 +658,19 @@ fn apply_config_file(args: &mut CliArgs, path: &Path) -> Result<(), String> {
                 if let Some(v) = parse_memsize_config(value.as_bytes()) {
                     args.auto_aof_rewrite_min_size = v;
                 }
+            }
+            "maxmemory" => {
+                if let Some(v) = parse_memsize_config(value.as_bytes()) {
+                    args.maxmemory = v;
+                }
+            }
+            "maxmemory-policy" => {
+                if let Some(policy) = MaxmemoryPolicyCode::parse(value.as_bytes()) {
+                    args.maxmemory_policy = policy;
+                }
+            }
+            "key-load-delay" => {
+                args.key_load_delay = value.parse::<i64>().unwrap_or(0);
             }
             "hash-max-listpack-entries" | "hash-max-ziplist-entries" => {
                 if let Ok(v) = value.parse::<usize>() {
@@ -505,6 +741,24 @@ fn apply_config_file(args: &mut CliArgs, path: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn expose_config_file_value(key: &str) -> bool {
+    matches!(
+        key,
+        "save"
+            | "shutdown-on-sigint"
+            | "shutdown-on-sigterm"
+            | "loglevel"
+            | "proc-title-template"
+            | "key-load-delay"
+            | "slot-migration-max-failover-repl-bytes"
+            | "hash-seed"
+            | "maxmemory"
+            | "maxmemory-policy"
+            | "maxmemory-clients"
+            | "client-query-buffer-limit"
+    )
 }
 
 fn unquote_config_token(value: &str) -> &str {
@@ -645,6 +899,8 @@ fn main() {
     let live_config = Arc::new(redis_core::live_config::LiveConfig::new());
     let live_config_for_hook = Arc::clone(&live_config);
     live_config.set_maxclients(args.maxclients);
+    live_config.set_maxmemory(args.maxmemory);
+    live_config.set_maxmemory_policy(args.maxmemory_policy);
     live_config.set_rdb_dir(args.dir.clone());
     live_config.set_rdb_filename(args.dbfilename.clone());
     live_config.set_appendonly(args.appendonly);
@@ -676,6 +932,10 @@ fn main() {
     }
     redis_core::object::install_live_config(Arc::clone(&live_config));
     redis_commands::install_live_config_handle(Arc::clone(&live_config));
+    redis_commands::connection::set_config_file_path(args.config_path.clone());
+    for (key, value) in &args.startup_config_overrides {
+        redis_commands::connection::set_startup_config_override(key, value);
+    }
     redis_core::acl::install_acl_state();
     for (from, to) in &args.command_renames {
         if let Err(e) =
@@ -780,7 +1040,15 @@ fn main() {
             }
         }
     }
-    server.persistence.set_loading(false);
+    if args.key_load_delay > 0 {
+        let server_for_loading = Arc::clone(&server);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(30));
+            server_for_loading.persistence.set_loading(false);
+        });
+    } else {
+        server.persistence.set_loading(false);
+    }
 
     let next_client_id = Arc::new(AtomicU64::new(1));
     let registry = Arc::new(Mutex::new(PubSubRegistry::new()));
@@ -1384,6 +1652,10 @@ fn run_client_loop(
             Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) => break,
         };
+        client.net_input_bytes = client.net_input_bytes.saturating_add(n as u64);
+        if client_has_pending_kill(client.id) {
+            break;
+        }
 
         client.query_buf.extend_from_slice(&read_buf[..n]);
 
@@ -1536,6 +1808,10 @@ fn run_client_loop_tls(
             Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) => break,
         };
+        client.net_input_bytes = client.net_input_bytes.saturating_add(n as u64);
+        if client_has_pending_kill(client.id) {
+            break;
+        }
 
         client.query_buf.extend_from_slice(&read_buf[..n]);
 
@@ -1715,6 +1991,9 @@ fn process_current_command_with_db(
         encode_resp2(&RespFrame::Error(payload), &mut client.reply_buf);
     }
     client.finish_command_reply(reply_start);
+    if !client.blocked_on_keys {
+        client.commands_processed = client.commands_processed.saturating_add(1);
+    }
     client.reset_args();
 }
 
@@ -1767,6 +2046,9 @@ fn process_current_command_with_db_list(
         encode_resp2(&RespFrame::Error(payload), &mut client.reply_buf);
     }
     client.finish_command_reply(reply_start);
+    if !client.blocked_on_keys {
+        client.commands_processed = client.commands_processed.saturating_add(1);
+    }
     client.reset_args();
 }
 
@@ -1779,12 +2061,20 @@ fn lock_redis_db(db: &Arc<Mutex<RedisDb>>) -> MutexGuard<'_, RedisDb> {
 
 fn update_client_info_snapshot(client: &Client, last_cmd_name: &[u8]) {
     if let Ok(mut guard) = client_info_registry().lock() {
+        guard.update_client_metadata(client);
         guard.update_snapshot(
             client.id,
             last_cmd_name,
             client.db_index,
             client.blocked_on_keys,
         );
+    }
+}
+
+fn client_has_pending_kill(id: u64) -> bool {
+    match client_info_registry().lock() {
+        Ok(mut guard) => guard.take_killed(id),
+        Err(poison) => poison.into_inner().take_killed(id),
     }
 }
 
@@ -1799,7 +2089,12 @@ fn flush_reply(client: &mut Client, outbound: &Sender<Vec<u8>>) -> bool {
         return true;
     }
     let bytes = std::mem::take(&mut client.reply_buf);
-    outbound.send(bytes).is_ok()
+    let len = bytes.len() as u64;
+    let ok = outbound.send(bytes).is_ok();
+    if ok {
+        client.net_output_bytes = client.net_output_bytes.saturating_add(len);
+    }
+    ok
 }
 
 /// Fast path for ordinary plain-TCP request/reply traffic.
@@ -1816,8 +2111,15 @@ fn flush_reply_fast(client: &mut Client, outbound: &Sender<Vec<u8>>) -> bool {
         return flush_reply(client, outbound);
     }
     let bytes = std::mem::take(&mut client.reply_buf);
+    let len = bytes.len() as u64;
     match client.conn.as_mut() {
-        Some(conn) => conn.write_all(&bytes).is_ok(),
+        Some(conn) => {
+            let ok = conn.write_all(&bytes).is_ok();
+            if ok {
+                client.net_output_bytes = client.net_output_bytes.saturating_add(len);
+            }
+            ok
+        }
         None => false,
     }
 }

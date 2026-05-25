@@ -624,7 +624,12 @@ pub fn get_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         return Err(RedisError::wrong_number_of_args(b"get"));
     }
     let key = ctx.arg_owned(1usize)?;
-    let bytes: Option<Vec<u8>> = match ctx.db_mut().lookup_key_read_with_flags(&key, LOOKUP_NONE) {
+    let lookup_flags = if ctx.client_ref().flags.no_touch {
+        redis_core::db::LOOKUP_NOTOUCH
+    } else {
+        LOOKUP_NONE
+    };
+    let bytes: Option<Vec<u8>> = match ctx.db_mut().lookup_key_read_with_flags(&key, lookup_flags) {
         None => None,
         Some(obj) => match &obj.kind {
             ObjectKind::String(_) => Some(obj.string_bytes_owned()),

@@ -2111,6 +2111,7 @@ fn run_inner_command(
     ctx.client_mut().set_flag_lua(true);
 
     let dispatch_result = dispatch_command_name(ctx, &name_bytes);
+    ctx.client_mut().commands_processed = ctx.client_ref().commands_processed.saturating_add(1);
     ctx.client_mut().set_flag_deny_blocking(old_deny_blocking);
     ctx.client_mut().set_flag_lua(old_lua);
 
