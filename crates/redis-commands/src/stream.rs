@@ -743,6 +743,13 @@ pub fn wake_blocked_xreadgroup_for_key(
     if waiters.is_empty() {
         return;
     }
+    // A single new entry is delivered to at most one consumer per group: the
+    // first waiter (FIFO) whose group cursor is still behind the entry. Once a
+    // group's cursor advances past the entry, later waiters of that same group
+    // find no new data and must stay blocked — re-registered with their
+    // original deadline so their BLOCK timeout is preserved (matches the
+    // upstream "reprocessing" semantics in handleClientsBlockedOnKey).
+    let mut to_reblock: Vec<BlockedWaiter> = Vec::new();
     for waiter in waiters {
         let (group, consumer, noack) = match &waiter.action {
             BlockedAction::StreamGroup {
@@ -759,6 +766,11 @@ pub fn wake_blocked_xreadgroup_for_key(
             Ok(Some(stream)) => {
                 if !stream.groups.contains_key(&group) {
                     encode_nogroup_error(key.as_bytes(), group.as_bytes())
+                } else if new_entry.id
+                    <= stream.groups[&group].last_delivered_id
+                {
+                    to_reblock.push(waiter);
+                    continue;
                 } else {
                     let now = now_ms_clamped();
                     let view = stream.lag_view();
@@ -790,6 +802,15 @@ pub fn wake_blocked_xreadgroup_for_key(
             }
         };
         let _ = waiter.sender.send(reply);
+    }
+    if !to_reblock.is_empty() {
+        let mut idx = match blocked_keys_index().lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        for waiter in to_reblock {
+            idx.add(waiter);
+        }
     }
 }
 
@@ -2065,7 +2086,7 @@ pub fn xreadgroup_command(ctx: &mut CommandContext) -> RedisResult<()> {
                 touch_or_create_consumer(group, &consumer_name, now);
                 let pending_ids: Vec<StreamId> = match group.consumers.get(&consumer_name) {
                     Some(c) => {
-                        let start = c.pel_lower_bound(from_id);
+                        let start = c.pel.partition_point(|p| p.entry_id <= *from_id);
                         let take = match count {
                             None => c.pel.len() - start,
                             Some(n) => (n as usize).min(c.pel.len() - start),
