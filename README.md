@@ -186,13 +186,12 @@ python3 harness/oracle/rdb-diff --direction=all
 The TCL suite uses upstream Valkey's own test harness against our binary:
 
 ```bash
-bash harness/oracle/setup_tcl_runner.sh --skip-build
-cd reference/valkey
-VALKEY_BIN_DIR=$(pwd)/../../target/debug \
-  tclsh tests/test_helper.tcl --single unit/type/zset \
-  --clients 1 --skip-leaks --tags "-needs:repl -needs:debug" \
-  --durable --quiet
+bash harness/oracle/run-single-node-tcl-suite.sh
 ```
+
+For focused iteration, use the same wrapper with `--skip-build --files
+unit/maxmemory`. See [TCL test suite runbook](docs/TCL_TEST_SUITE_RUNBOOK.md)
+for the official profile, port rules, and contained safe-survey variant.
 
 ## Safety
 

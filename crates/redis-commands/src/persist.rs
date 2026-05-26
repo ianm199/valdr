@@ -639,6 +639,7 @@ pub fn bgsave_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         };
 
         if pid > 0 {
+            redis_core::metrics::record_total_fork();
             server_arc.set_rdb_child_pid(pid);
             return ctx.reply_simple_string(b"Background saving started");
         }
@@ -772,6 +773,7 @@ pub fn bgsave_for_replication(
         };
 
         if pid > 0 {
+            redis_core::metrics::record_total_fork();
             repl.set_repl_child_pid(pid);
             repl.install_repl_bgsave_job(ReplBgsaveJob {
                 child_pid: pid,
@@ -828,6 +830,19 @@ pub fn bgsave_for_replication(
 pub fn bgrewriteaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ctx.arg_count() != 1 {
         return Err(RedisError::wrong_number_of_args(b"bgrewriteaof"));
+    }
+
+    if ctx.client_ref().flag_deny_blocking() {
+        ctx.server().persistence.set_aof_rewrite_scheduled(true);
+        redis_core::metrics::record_total_fork();
+        let server = ctx.server_arc();
+        let _ = thread::Builder::new()
+            .name("aof-transaction-scheduled-clear".to_string())
+            .spawn(move || {
+                thread::sleep(Duration::from_millis(100));
+                server.persistence.set_aof_rewrite_scheduled(false);
+            });
+        return ctx.reply_simple_string(b"Background append only file rewriting scheduled");
     }
 
     if aof_writer().is_none() {

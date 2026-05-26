@@ -352,9 +352,9 @@ fn add_dirty_if_nonzero(ctx: &CommandContext, delta: i64) {
 fn deliver_to_waiter(db: &mut RedisDb, key: &RedisString, waiter: BlockedWaiter) {
     if let Some(reply) = blocked_waiter_acl_error(key, &waiter) {
         if waiter.sender.send(reply).is_ok() {
-            redis_core::metrics::record_blocked_command_rejected(blocked_waiter_command_name(
-                &waiter.action,
-            ));
+            redis_core::metrics::record_blocked_command_reprocessed_rejected(
+                blocked_waiter_command_name(&waiter.action),
+            );
         }
         return;
     }

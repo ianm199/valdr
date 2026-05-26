@@ -48,7 +48,8 @@ static ACLFILE_CONFIG: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static CONFIG_OVERRIDES: OnceLock<Mutex<HashMap<Vec<u8>, String>>> = OnceLock::new();
 static CONFIG_FILE_PATH: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 type TcpPortSetHook = dyn Fn(u16) -> Result<Vec<TcpListener>, Vec<u8>> + Send + Sync + 'static;
-type TcpBindSetHook = dyn Fn(&[u8], u16) -> Result<Vec<TcpListener>, Vec<u8>> + Send + Sync + 'static;
+type TcpBindSetHook =
+    dyn Fn(&[u8], u16) -> Result<Vec<TcpListener>, Vec<u8>> + Send + Sync + 'static;
 static TCP_PORT_SET_HOOK: OnceLock<Box<TcpPortSetHook>> = OnceLock::new();
 static TCP_BIND_SET_HOOK: OnceLock<Box<TcpBindSetHook>> = OnceLock::new();
 static PENDING_TCP_LISTENERS: OnceLock<Mutex<Vec<TcpListener>>> = OnceLock::new();
@@ -1302,6 +1303,9 @@ fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
                 RDB_KEY_SAVE_DELAY_US.store(n as u64, Ordering::Relaxed);
             }
         }
+        b"save" => {
+            cfg.set_save_enabled(value.iter().any(|b| !b.is_ascii_whitespace()));
+        }
         b"shutdown-on-sigterm" => {
             let value_text = String::from_utf8_lossy(value);
             SHUTDOWN_ON_SIGTERM_FORCE.store(
@@ -1614,9 +1618,12 @@ fn apply_config_set_for_context(
     Ok(())
 }
 
-fn enforce_maxmemory_after_config_set(ctx: &mut CommandContext<'_>) {
+pub(crate) fn enforce_maxmemory_after_config_set(ctx: &mut CommandContext<'_>) {
     let maxmemory = ctx.live_config().maxmemory();
     if maxmemory == 0 {
+        return;
+    }
+    if ctx.live_config().import_mode() {
         return;
     }
     if ctx.client_ref().flag_deny_blocking()
@@ -1642,6 +1649,23 @@ fn enforce_maxmemory_after_config_set(ctx: &mut CommandContext<'_>) {
         EvictionOutcome::Evicted(keys) | EvictionOutcome::StillOver(keys) => keys,
         EvictionOutcome::Sufficient => Vec::new(),
     };
+    if !evicted.is_empty() {
+        let pubsub = ctx.pubsub.as_ref().cloned();
+        redis_core::tracking::runtime_invalidate_keys(
+            ctx.client_ref().id,
+            ctx.client_mut(),
+            pubsub.as_ref(),
+            &evicted,
+            true,
+            false,
+        );
+    }
+    for key in &evicted {
+        crate::dispatch::propagate_command_from_wake(
+            ctx.selected_db_id(),
+            &[RedisString::from_bytes(b"UNLINK"), key.clone()],
+        );
+    }
     for key in evicted {
         ctx.notify_keyspace_event(NOTIFY_EVICTED, b"evicted", &key);
     }
@@ -1812,17 +1836,10 @@ fn apply_appendonly_config_set(
             crate::aof::install_aof_writer(std::sync::Arc::new(writer));
             ctx.server().persistence.set_aof_current_size(size);
             ctx.server().set_aof_state(redis_core::AofState::On);
-            ctx.server().persistence.set_aof_rewrite_in_progress(true);
-            let server = ctx.server_arc();
-            let delay = rdb_key_save_delay_us().min(5_000_000);
-            let _ = std::thread::Builder::new()
-                .name("aof-initial-rewrite-clear".to_string())
-                .spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_micros(delay.max(100_000)));
-                    server.persistence.set_aof_rewrite_in_progress(false);
-                });
             if ctx.server().rdb_child_pid() != 0 {
+                ctx.server().persistence.set_aof_rewrite_in_progress(false);
                 ctx.server().persistence.set_aof_rewrite_scheduled(true);
+                log_server_notice("AOF background was scheduled");
                 let server = ctx.server_arc();
                 let _ = std::thread::Builder::new()
                     .name("aof-scheduled-clear".to_string())
@@ -1836,7 +1853,21 @@ fn apply_appendonly_config_set(
                         }
                         server.persistence.set_aof_rewrite_scheduled(false);
                     });
+            } else {
+                ctx.server().persistence.set_aof_rewrite_in_progress(true);
+                let server = ctx.server_arc();
+                let delay = rdb_key_save_delay_us().min(5_000_000);
+                let _ = std::thread::Builder::new()
+                    .name("aof-initial-rewrite-clear".to_string())
+                    .spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_micros(delay.max(100_000)));
+                        server.persistence.set_aof_rewrite_in_progress(false);
+                    });
             }
+            if ctx.client_ref().flag_deny_blocking() {
+                log_server_notice("AOF background was scheduled");
+            }
+            redis_core::metrics::record_total_fork();
         }
         cfg.set_appendonly(true);
     } else {
@@ -1945,15 +1976,22 @@ pub fn memory_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         }
         let key_count = ctx.db().size();
         let (lut, rehashing, rehashing_count) = memory_hashtable_stats_for_key_count(key_count);
+        let db_key = RedisString::from_vec(format!("db.{}", ctx.selected_db_id()).into_bytes());
+        let db_stats = RespFrame::array(vec![
+            RespFrame::bulk(RedisString::from_static(b"overhead.hashtable.main")),
+            RespFrame::Integer(lut as i64),
+            RespFrame::bulk(RedisString::from_static(b"overhead.hashtable.expires")),
+            RespFrame::Integer(0),
+        ]);
         ctx.reply_frame(&RespFrame::array(vec![
             RespFrame::bulk(RedisString::from_static(b"overhead.db.hashtable.lut")),
             RespFrame::Integer(lut as i64),
-            RespFrame::bulk(RedisString::from_static(
-                b"overhead.db.hashtable.rehashing",
-            )),
+            RespFrame::bulk(RedisString::from_static(b"overhead.db.hashtable.rehashing")),
             RespFrame::Integer(rehashing as i64),
             RespFrame::bulk(RedisString::from_static(b"db.dict.rehashing.count")),
             RespFrame::Integer(rehashing_count as i64),
+            RespFrame::bulk(db_key),
+            db_stats,
         ]))
     } else if ascii_eq_ignore_case(sub_bytes, b"MALLOC-STATS") {
         ctx.reply_bulk(b"allocator stats not available")
@@ -2084,7 +2122,9 @@ pub fn shutdown_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         if shutdown_save_failed() || rdb_target_is_directory(ctx) {
             mark_shutdown_save_failed();
             log_server_notice("Error trying to save the DB, can't exit");
-            return Err(RedisError::runtime(b"ERR Errors trying to SHUTDOWN. Check logs."));
+            return Err(RedisError::runtime(
+                b"ERR Errors trying to SHUTDOWN. Check logs.",
+            ));
         }
     }
     log_server_notice("ready to exit, bye bye");

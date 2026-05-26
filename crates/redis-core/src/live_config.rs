@@ -133,6 +133,8 @@ pub struct LiveConfig {
     pub rdb_dir: Mutex<String>,
     /// Filename for the RDB dump (`dbfilename` config key).
     pub rdb_filename: Mutex<String>,
+    /// Whether RDB save rules are configured (`save` config key).
+    pub save_enabled: AtomicBool,
     /// Unix timestamp (seconds) of the last successful RDB save.
     pub last_save_unix: AtomicI64,
     /// LFU logarithmic counter growth factor (`lfu-log-factor` config key).
@@ -327,6 +329,7 @@ impl Default for LiveConfig {
             hll_sparse_max_bytes: AtomicUsize::new(DEFAULT_HLL_SPARSE_MAX_BYTES),
             rdb_dir: Mutex::new(DEFAULT_RDB_DIR.to_string()),
             rdb_filename: Mutex::new(DEFAULT_RDB_FILENAME.to_string()),
+            save_enabled: AtomicBool::new(true),
             last_save_unix: AtomicI64::new(0),
             lfu_log_factor: AtomicU32::new(DEFAULT_LFU_LOG_FACTOR),
             lfu_decay_time: AtomicU32::new(DEFAULT_LFU_DECAY_TIME),
@@ -605,6 +608,14 @@ impl LiveConfig {
             Ok(mut g) => *g = name,
             Err(p) => *p.into_inner() = name,
         }
+    }
+
+    pub fn save_enabled(&self) -> bool {
+        self.save_enabled.load(Ordering::Relaxed)
+    }
+
+    pub fn set_save_enabled(&self, enabled: bool) {
+        self.save_enabled.store(enabled, Ordering::Relaxed);
     }
 
     /// Return the Unix timestamp (seconds) of the last successful RDB save, or

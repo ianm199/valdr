@@ -156,6 +156,7 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let expired_keys = metrics.expired_keys.load(Ordering::Relaxed);
     let evicted_keys = metrics.evicted_keys.load(Ordering::Relaxed);
     let evicted_clients = metrics.evicted_clients.load(Ordering::Relaxed);
+    let total_forks = metrics.total_forks.load(Ordering::Relaxed);
     let active_time_us = metrics.active_time_main_thread_us.load(Ordering::Relaxed);
     let visible_active_time_us = if active_time_us == 0 && total_commands > 0 {
         1
@@ -419,6 +420,7 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let _ = writeln!(buf, "total_net_input_bytes:0\r");
         let _ = writeln!(buf, "total_net_output_bytes:0\r");
         let _ = writeln!(buf, "rejected_connections:{}\r", rejected);
+        let _ = writeln!(buf, "total_forks:{}\r", total_forks);
         let _ = writeln!(buf, "expired_keys:{}\r", expired_keys);
         let _ = writeln!(
             buf,

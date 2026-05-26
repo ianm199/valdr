@@ -211,6 +211,10 @@ impl RedisServer {
         self.dirty.fetch_add(delta, Ordering::Relaxed);
     }
 
+    pub fn set_dirty(&self, value: i64) {
+        self.dirty.store(value, Ordering::Relaxed);
+    }
+
     pub fn cmd_time_snapshot(&self) -> i64 {
         self.cmd_time_snapshot.load(Ordering::Relaxed)
     }

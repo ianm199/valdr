@@ -112,6 +112,26 @@ pub fn record_blocked_command_rejected(name: &[u8]) {
     row.rejected_calls = row.rejected_calls.saturating_add(1);
 }
 
+/// Reclassify a blocked command that parked successfully but was later
+/// rejected when the server retried it after wakeup.
+pub fn record_blocked_command_reprocessed_rejected(name: &[u8]) {
+    let key = command_stats_key(name);
+    if key.is_empty() {
+        return;
+    }
+    let mut stats = match command_stats_handle().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let row = stats.entry(key).or_default();
+    row.calls = row.calls.saturating_sub(1);
+    row.rejected_calls = row.rejected_calls.saturating_add(1);
+}
+
+pub fn record_total_fork() {
+    server_metrics().total_forks.fetch_add(1, Ordering::Relaxed);
+}
+
 fn command_stats_key(name: &[u8]) -> Vec<u8> {
     let mut key = name.to_ascii_lowercase();
     key.retain(|b| *b != b'\r' && *b != b'\n');
@@ -271,6 +291,8 @@ pub struct ServerMetrics {
     pub active_time_main_thread_us: AtomicU64,
     /// Total error replies emitted since the last `CONFIG RESETSTAT`.
     pub total_error_replies: AtomicU64,
+    /// Number of logical fork/background-persistence starts.
+    pub total_forks: AtomicU64,
     /// Number of BGSAVE child processes that exited with status 0.
     pub rdb_saves_succeeded: AtomicU64,
     /// Number of BGSAVE child processes that exited with a non-zero status.
@@ -301,6 +323,7 @@ impl ServerMetrics {
             client_output_buffer_limit_disconnections: AtomicU64::new(0),
             active_time_main_thread_us: AtomicU64::new(0),
             total_error_replies: AtomicU64::new(0),
+            total_forks: AtomicU64::new(0),
             rdb_saves_succeeded: AtomicU64::new(0),
             rdb_saves_failed: AtomicU64::new(0),
         }
@@ -361,6 +384,7 @@ impl ServerMetrics {
             .store(0, Ordering::Relaxed);
         self.active_time_main_thread_us.store(0, Ordering::Relaxed);
         self.total_error_replies.store(0, Ordering::Relaxed);
+        self.total_forks.store(0, Ordering::Relaxed);
         self.rdb_saves_succeeded.store(0, Ordering::Relaxed);
         self.rdb_saves_failed.store(0, Ordering::Relaxed);
         reset_command_stats();

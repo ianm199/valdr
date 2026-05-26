@@ -44,7 +44,7 @@ const READ_ONLY_SCRIPT_WRITE_ERROR_PAYLOAD: &[u8] =
 const READ_ONLY_SCRIPT_WRITE_ERROR_LUA: &str =
     "Write commands are not allowed from read-only scripts. script:1";
 const READ_ONLY_SCRIPT_WRITE_ERROR_RESP: &str =
-    "ERR Write commands are not allowed from read-only scripts. script:1";
+    "ERR Write commands are not allowed from read-only scripts.";
 use redis_types::{RedisError, RedisResult, RedisString};
 
 use crate::dispatch::{command_acl_categories, command_is_denyoom, dispatch_command_name};

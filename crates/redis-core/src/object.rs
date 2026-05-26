@@ -2145,7 +2145,7 @@ pub fn object_set_lru_or_lfu(obj: &mut RedisObject, lfu_freq: i64, lru_idle_secs
         return true;
     }
     if lru_idle_secs >= 0 {
-        obj.lru = lru_idle_secs as u32;
+        obj.lru = crate::lru_clock::current_lru_clock().wrapping_sub(lru_idle_secs as u32);
         return true;
     }
     false

@@ -1531,6 +1531,9 @@ impl RuntimeOwner {
         if current_paused_actions(server) & PAUSE_ACTION_EXPIRE != 0 {
             return false;
         }
+        if server.live_config.import_mode() {
+            return false;
+        }
         let (effort, hz) = redis_core::expire::active_expire_config().snapshot();
         if effort == 0 {
             return false;
@@ -1578,6 +1581,10 @@ impl RuntimeOwner {
             get_client_eviction_limit(maxmemory_clients, server.live_config.maxmemory());
         if client_limit > 0 {
             return self.evict_clients_to_limit(client_limit, client_memory);
+        }
+
+        if server.live_config.import_mode() {
+            return false;
         }
 
         let maxmemory = server.live_config.maxmemory();

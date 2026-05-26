@@ -437,16 +437,17 @@ TCL suite against our binary (one unit file):
 
 ```bash
 cargo build --bin redis-server
-bash harness/oracle/setup_tcl_runner.sh --skip-build
-cd reference/valkey
-VALKEY_BIN_DIR=$(pwd)/../../target/debug \
-  tclsh tests/test_helper.tcl \
-  --single unit/type/zset --clients 1 --skip-leaks \
-  --tags "-needs:repl -needs:debug" --durable --quiet
+bash harness/oracle/run-single-node-tcl-suite.sh --skip-build --files unit/type/zset
 ```
 
-For the full survey across the unit files in the table above, replace
-`unit/type/zset` with each one in turn.
+Canonical single-node unit/type survey:
+
+```bash
+bash harness/oracle/run-single-node-tcl-suite.sh
+```
+
+See [`TCL_TEST_SUITE_RUNBOOK.md`](TCL_TEST_SUITE_RUNBOOK.md) for the exact
+profile, file selection, port rules, and conservative contained survey variant.
 
 The TCL infrastructure requires `tclsh` (`brew install tcl-tk` on
 macOS, `apt-get install tcl` on Debian/Ubuntu).

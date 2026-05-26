@@ -50,6 +50,7 @@
 
 use redis_core::command_context::CommandContext;
 use redis_core::db::LOOKUP_NONE;
+use redis_core::live_config::MaxmemoryPolicyCode;
 use redis_core::notify::{NOTIFY_GENERIC, NOTIFY_NEW, NOTIFY_STRING};
 use redis_core::object::{ObjectKind, RedisObject};
 use redis_protocol::frame::RespFrame;
@@ -77,6 +78,17 @@ pub const SETKEY_KEEPTTL: u32 = 1 << 0;
 pub const SETKEY_DOESNT_EXIST: u32 = 1 << 1;
 pub const SETKEY_ALREADY_EXIST: u32 = 1 << 2;
 pub const SETKEY_ADD_OR_UPDATE: u32 = 1 << 3;
+
+fn new_string_object_for_write(ctx: &CommandContext<'_>, value: &[u8]) -> RedisObject {
+    let mut obj = RedisObject::new_string_try_encoded(value);
+    if matches!(
+        ctx.live_config().maxmemory_policy(),
+        MaxmemoryPolicyCode::AllkeysLfu | MaxmemoryPolicyCode::VolatileLfu
+    ) {
+        redis_core::eviction::lfu_init(&mut obj);
+    }
+    obj
+}
 
 /// Default maximum length of a single bulk string in bytes (512 MiB).
 ///
@@ -427,7 +439,7 @@ pub fn set_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     } else {
         0
     };
-    let obj = RedisObject::new_string_try_encoded(value.as_bytes());
+    let obj = new_string_object_for_write(ctx, value.as_bytes());
     let notify = ctx.keyspace_notifications_enabled(NOTIFY_STRING);
     let notify_new = !key_exists && ctx.keyspace_notifications_enabled(NOTIFY_NEW);
     match expire_at_ms {
@@ -474,6 +486,7 @@ pub fn set_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         }
     }
 
+    ctx.server().add_dirty(1);
     if flags & SET_FLAG_GET != 0 {
         reply_optional_bulk(ctx, prev_bytes)
     } else {

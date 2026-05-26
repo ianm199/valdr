@@ -1003,6 +1003,17 @@ impl RedisDb {
         self.dict.iter()
     }
 
+    /// Borrow live key/value pairs for coarse memory accounting.
+    ///
+    /// This preserves the same visibility filter as `keys_snapshot_with_types`
+    /// without cloning every key or doing a second lookup per entry.
+    pub fn iter_for_memory_accounting(&self) -> impl Iterator<Item = (&RedisString, &RedisObject)> {
+        let now = Self::now_ms();
+        self.dict.iter().filter(move |(_, obj)| {
+            self.import_source_active || obj.expire == EXPIRY_NONE || obj.expire >= now
+        })
+    }
+
     /// True if the key is in the dict regardless of TTL.
     pub fn exists_raw(&self, key: &RedisString) -> bool {
         self.dict.contains_key(key)
@@ -1299,9 +1310,10 @@ pub fn delete_expired_key_and_propagate(db: &mut RedisDb, key: &RedisString) {
 pub fn flushdb_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     // TODO(port): parse ASYNC/SYNC flag from argv[1]
     // TODO(port): forceCommandPropagation(c, PROPAGATE_REPL|PROPAGATE_AOF)
-    // TODO(port): server.dirty += emptyData(c->db->id, flags|EMPTYDB_NOFUNCTIONS, NULL)
     fire_stream_db_flushed_hook();
+    let removed = ctx.db().size() as i64;
     ctx.db_mut().clear();
+    ctx.server().add_dirty(removed);
     ctx.reply_simple_string(b"OK")
 }
 
@@ -1312,7 +1324,16 @@ pub fn flushdb_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 /// individually to avoid re-acquiring the mutex held by the accept loop.
 pub fn flushall_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     fire_stream_db_flushed_hook();
-    ctx.for_each_db_mut(|db| db.clear())?;
+    let mut removed = 0i64;
+    ctx.for_each_db_mut(|db| {
+        removed = removed.saturating_add(db.size() as i64);
+        db.clear();
+    })?;
+    if ctx.live_config().save_enabled() {
+        ctx.server().set_dirty(0);
+    } else {
+        ctx.server().add_dirty(removed);
+    }
     ctx.reply_simple_string(b"OK")
 }
 

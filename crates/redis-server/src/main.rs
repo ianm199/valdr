@@ -979,6 +979,9 @@ fn main() {
     redis_commands::connection::set_config_file_path(args.config_path.clone());
     for (key, value) in &args.startup_config_overrides {
         redis_commands::connection::set_startup_config_override(key, value);
+        if key.eq_ignore_ascii_case("save") {
+            live_config.set_save_enabled(value.split_whitespace().next().is_some());
+        }
     }
     redis_core::acl::install_acl_state();
     for (from, to) in &args.command_renames {
