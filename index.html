@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>valkey-rs — Redis/Valkey, reimplemented in safe Rust</title>
+  <meta name="description" content="valkey-rs is a from-scratch Rust port of the Redis/Valkey server. Safe Rust, no C bindings, speaks RESP2/3, and is verified against upstream Valkey's own test suite on every commit.">
+  <meta property="og:title" content="valkey-rs — Redis/Valkey, reimplemented in safe Rust">
+  <meta property="og:description" content="A safe-Rust Redis/Valkey server, verified against upstream Valkey's own TCL suite, RESP wire diffs, and RDB round-trips. Built by an AI porting harness.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://ianm199.github.io/valkey-rs/">
+  <meta property="og:image" content="https://ianm199.github.io/valkey-rs/assets/og.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="valkey-rs — Redis/Valkey, reimplemented in safe Rust">
+  <meta name="twitter:description" content="A safe-Rust Redis/Valkey server verified against upstream Valkey's own test suite.">
+  <meta name="twitter:image" content="https://ianm199.github.io/valkey-rs/assets/og.png">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+  <header class="hero">
+    <div class="wrap">
+      <nav class="topnav">
+        <a class="brand" href="./">valkey<span class="rs">-rs</span></a>
+        <div class="navlinks">
+          <a href="./convergence.html">Conformance</a>
+          <a href="./performance.html">Performance</a>
+          <a href="https://github.com/ianm199/valkey-rs">GitHub</a>
+        </div>
+      </nav>
+      <p class="eyebrow">A safe-Rust Redis/Valkey server</p>
+      <h1>valkey<span class="rs">-rs</span></h1>
+      <p class="tag"><strong>Redis/Valkey, reimplemented in safe Rust.</strong> A from-scratch port of the server interface that speaks RESP2/3, runs as a normal <code>redis-server</code>, and is checked against <strong>upstream Valkey's own test suite</strong> on every commit — with no C bindings.</p>
+
+      <div class="install">
+        <code><span class="prompt">$ </span><span id="install-cmd">docker run --rm -p 6379:6379 ghcr.io/ianm199/valkey-rs:alpha</span></code>
+        <button class="copy-btn" id="copy-btn" aria-label="Copy run command">Copy</button>
+      </div>
+      <p class="install-note">Speaks the Redis wire protocol — point any existing client (<code>redis-cli</code>, <code>redis-py</code>, <code>ioredis</code>, …) at it with no client-side changes.</p>
+
+      <div class="cta">
+        <a class="btn btn-primary" href="https://github.com/ianm199/valkey-rs">GitHub</a>
+        <a class="btn btn-ghost" href="./convergence.html">Test-suite convergence →</a>
+        <a class="btn btn-ghost" href="./performance.html">Performance →</a>
+      </div>
+    </div>
+  </header>
+
+  <div class="wrap">
+    <div class="stats">
+      <div class="stat"><div class="num good">877</div><div class="lbl">upstream Valkey TCL tests passing (within built slice)</div></div>
+      <div class="stat"><div class="num accent">23 / 23</div><div class="lbl">RESP wire frames byte-exact vs C</div></div>
+      <div class="stat"><div class="num accent">378 / 378</div><div class="lbl">RDB load/save round-trips vs C</div></div>
+      <div class="stat"><div class="num">5</div><div class="lbl"><code>unsafe</code> blocks, all <code>fork</code>/<code>waitpid</code></div></div>
+    </div>
+  </div>
+
+  <div class="wrap">
+    <section>
+      <h2>What it is</h2>
+      <p class="lead"><code>valkey-rs</code> is a from-scratch reimplementation of the <a href="https://github.com/valkey-io/valkey">Redis/Valkey</a> server in Rust — RESP2/3 protocol, all core data types, streams, pub/sub, transactions, Lua scripting, ACL, eviction, TLS, RDB + AOF persistence, and replication basics. It runs as an ordinary <code>redis-server</code> binary that existing Redis clients talk to unchanged. <strong>~80k lines of Rust</strong> stand in for upstream's <strong>~187k lines of C</strong>.</p>
+      <div class="callout">
+        <strong>Thinking about adopting?</strong> The 877 above is the pass rate <em>within the slice we've built</em>, not coverage of all upstream Valkey behavior. There is no clustering, no loadable C modules, and replication isn't gated yet. Read <a href="https://github.com/ianm199/valkey-rs/blob/main/docs/SCOPE_AND_GAPS.md">Scope and gaps</a> before wiring it into anything load-bearing.
+      </div>
+    </section>
+
+    <section>
+      <h2>Run it</h2>
+      <pre class="block"><span class="c"># from the published container image</span>
+$ docker run --rm -p 6379:6379 -v valkey-rs-data:/data ghcr.io/ianm199/valkey-rs:alpha
+
+<span class="c"># or build from source</span>
+$ cargo build --release
+$ ./target/release/redis-server --port 6379 --bind 127.0.0.1
+
+<span class="c"># then use any ordinary Redis client</span>
+$ redis-cli set hello world
+<span class="o">OK</span>
+$ redis-cli get hello
+<span class="o">"world"</span></pre>
+    </section>
+
+    <section>
+      <h2>Conformance</h2>
+      <p class="lead">The load-bearing claim. Three independent oracles re-verify the port against the real upstream binary on every commit — build success is never the signal.</p>
+      <div class="cards">
+        <div class="card">
+          <span class="badge good">23 / 23</span>
+          <h3>RESP wire-diff</h3>
+          <p>23 protocol corpus scripts are sent to both the C Valkey server and <code>valkey-rs</code> on parallel sockets; the raw RESP replies are compared byte-for-byte. Any single-byte divergence fails.</p>
+        </div>
+        <div class="card">
+          <span class="badge good">378 / 378</span>
+          <h3>RDB bidirectional</h3>
+          <p>We save → C loads, and C saves → we load, across every encoding (listpack, intset, skiplist, quicklist, streams). The resulting keyspaces are diffed.</p>
+        </div>
+        <div class="card">
+          <span class="badge good">877 pass</span>
+          <h3>Upstream TCL suite</h3>
+          <p>Valkey's own TCL test harness runs unmodified against our binary via a symlink trick. <a href="./convergence.html">See the full per-section convergence →</a></p>
+        </div>
+      </div>
+      <p class="muted" style="margin-top:14px;">The TCL number is scoped to the unit files we've attacked, not the full 4,299-block upstream denominator. The <a href="./convergence.html">conformance page</a> breaks it down honestly, section by section.</p>
+    </section>
+
+    <section>
+      <h2>Performance</h2>
+      <p class="lead">A first baseline against upstream Valkey on an Apple M3 Max. The architecture gap is real and honestly reported — the server is still a blocking thread-per-connection runtime sharing DB state through a mutex — but the per-command hot path has already been tuned hard, and some real-work commands already beat C.</p>
+      <table class="perf">
+        <tr><th>Workload</th><th>upstream</th><th>valkey-rs</th><th>ratio</th></tr>
+        <tr><td>GET, pipeline 100</td><td>3.33M req/s</td><td class="v">2.17M req/s</td><td>0.65×</td></tr>
+        <tr><td>SET, pipeline 100</td><td>2.47M req/s</td><td class="v">1.67M req/s</td><td>0.68×</td></tr>
+        <tr><td>LRANGE_300, pipeline 16</td><td>41.7k req/s</td><td class="v" style="color:var(--good)">66.1k req/s</td><td style="color:var(--good)">1.58×</td></tr>
+      </table>
+      <div class="callout">
+        Tuning moved deep-pipeline GET from ~221k to ~2.17M req/s. The remaining gap is architectural, with a documented next milestone.
+        <br><a href="./performance.html">Open the performance dashboard →</a>
+      </div>
+    </section>
+
+    <section>
+      <h2>Safety model</h2>
+      <p class="lead">A safe public surface over a tiny, audited unsafe core. Four of the six crates compile with zero <code>unsafe</code>. The only <code>unsafe</code> blocks — <strong>5 total</strong> — wrap Unix <code>fork(2)</code> and <code>waitpid(2)</code> for background save / rewrite flows, each with a <code>// SAFETY:</code> invariant and a per-crate budget enforced by a hook.</p>
+      <table class="perf">
+        <tr><th>Crate</th><th><code>unsafe</code></th><th>Reason</th></tr>
+        <tr><td><code>redis-types</code> / <code>-protocol</code> / <code>-ds</code> / <code>-core</code></td><td class="v">0</td><td>—</td></tr>
+        <tr><td><code>redis-commands</code></td><td class="v">3</td><td><code>fork</code>/<code>_exit</code> for BGSAVE, BGREWRITEAOF, full sync</td></tr>
+        <tr><td><code>redis-server</code></td><td class="v">2</td><td><code>waitpid</code> child reapers</td></tr>
+      </table>
+    </section>
+
+    <section>
+      <h2>How it was built</h2>
+      <p class="lead">The server is the artifact; the <strong>AI-agent porting harness</strong> is the method. Bounded single-purpose agents make small commits, gated by mechanical safety hooks and — non-negotiably — by compatibility oracles. The important claim is not that AI wrote the code; it is that every change is continuously checked against real upstream Valkey behavior.</p>
+      <div class="cards">
+        <div class="card">
+          <h3>Oracle-gated, not vibes-gated</h3>
+          <p>A change counts only when a wire-diff, RDB, or TCL oracle says it matches the reference C binary. Survey runners record abort / no-summary cases separately so no number hides behind an aggregate.</p>
+        </div>
+        <div class="card">
+          <h3>Mechanical guardrails</h3>
+          <p>An <code>unsafe</code>-budget ceiling, forbidden-pattern bans, and required status trailers are enforced as hooks that fail the tool call on violation.</p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Status &amp; scope</h2>
+      <div class="cards">
+        <div class="card"><span class="badge good">working</span><h3>Core data types &amp; commands</h3><p>Strings, lists, hashes, sets, sorted sets, streams, HyperLogLog, bitmaps, geo — plus pub/sub, transactions, Lua scripting, ACL, multi-DB, and eviction.</p></div>
+        <div class="card"><span class="badge good">working</span><h3>Persistence &amp; replication</h3><p>RDB v11 load/save, AOF, and replication basics including PSYNC, full sync, and WAIT.</p></div>
+        <div class="card"><span class="badge wip">not yet</span><h3>Cluster &amp; C modules</h3><p>No cluster mode and no loadable C-ABI modules. Native Rust implementations of the RedisJSON and RedisBloom command subsets ship instead.</p></div>
+      </div>
+    </section>
+  </div>
+
+  <footer>
+    <div class="wrap">
+      <div class="flinks">
+        <a href="https://github.com/ianm199/valkey-rs">GitHub</a>
+        <a href="./convergence.html">Conformance</a>
+        <a href="./performance.html">Performance</a>
+        <a href="https://github.com/valkey-io/valkey">Valkey</a>
+      </div>
+      <p><code>valkey-rs</code> is an independent port of <a href="https://github.com/valkey-io/valkey">Valkey</a>, the BSD-3 fork of Redis. Distributed under BSD-3-Clause, matching upstream.</p>
+    </div>
+  </footer>
+
+  <script>
+    (function () {
+      const btn = document.getElementById('copy-btn');
+      const cmd = document.getElementById('install-cmd').textContent;
+      btn.addEventListener('click', function () {
+        navigator.clipboard.writeText(cmd).then(function () {
+          const prev = btn.textContent;
+          btn.textContent = 'Copied';
+          setTimeout(function () { btn.textContent = prev; }, 1400);
+        });
+      });
+    })();
+  </script>
+</body>
+</html>

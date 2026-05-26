@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Performance — valkey-rs</title>
+  <meta name="description" content="valkey-rs performance vs upstream Valkey: profile-matrix throughput, the 221k→2.17M req/s GET tuning trajectory, methodology, and the architectural gap that remains.">
+  <meta property="og:title" content="valkey-rs — performance vs upstream Valkey">
+  <meta property="og:description" content="Profile-matrix throughput against upstream Valkey, the per-command tuning trajectory, and an honest account of the architectural gap.">
+  <meta property="og:url" content="https://ianm199.github.io/valkey-rs/performance.html">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+  <header class="hero sub">
+    <div class="wrap">
+      <nav class="topnav">
+        <a class="brand" href="./">valkey<span class="rs">-rs</span></a>
+        <div class="navlinks">
+          <a href="./convergence.html">Conformance</a>
+          <a href="./performance.html">Performance</a>
+          <a href="https://github.com/ianm199/valkey-rs">GitHub</a>
+        </div>
+      </nav>
+      <p class="eyebrow">Performance</p>
+      <h1>Competitive, and honest about the gap</h1>
+      <p class="tag">Throughput against upstream Valkey on the same host, measured with the project's own <code>valkey-benchmark</code> profile matrix. The trajectory matters more than any single number — the same matrix is rerun after every tuning packet.</p>
+    </div>
+  </header>
+
+  <div class="wrap">
+    <div class="stats">
+      <div class="stat"><div class="num accent">2.17M</div><div class="lbl">GET req/s, pipeline 100 (from 221k)</div></div>
+      <div class="stat"><div class="num good">1.58×</div><div class="lbl">LRANGE_300 vs upstream (faster than C)</div></div>
+      <div class="stat"><div class="num">0.65×</div><div class="lbl">deep-pipeline GET vs upstream</div></div>
+      <div class="stat"><div class="num">&lt;2×</div><div class="lbl">p99 latency vs upstream on most ops</div></div>
+    </div>
+  </div>
+
+  <div class="wrap">
+    <section>
+      <h2>Profile matrix vs upstream Valkey</h2>
+      <p class="lead">Apple M3 Max, macOS arm64. Both binaries run on the same host, on different ports, <strong>sequentially</strong> to keep CPU contention out of the picture, driven by the official upstream <code>valkey-benchmark</code>.</p>
+      <table class="perf">
+        <tr><th>Profile</th><th>Command</th><th>upstream</th><th>valkey-rs</th><th>ratio</th></tr>
+        <tr><td>50 clients, pipeline 1</td><td>GET</td><td>181k req/s</td><td class="v">141k req/s</td><td>0.78×</td></tr>
+        <tr><td>50 clients, pipeline 16</td><td>GET</td><td>2.08M req/s</td><td class="v">1.34M req/s</td><td>0.64×</td></tr>
+        <tr><td>50 clients, pipeline 100</td><td>GET</td><td>3.33M req/s</td><td class="v">2.17M req/s</td><td>0.65×</td></tr>
+        <tr><td>50 clients, pipeline 100</td><td>SET</td><td>2.47M req/s</td><td class="v">1.67M req/s</td><td>0.68×</td></tr>
+        <tr><td>50 clients, pipeline 16</td><td>LRANGE_300</td><td>41.7k req/s</td><td class="v" style="color:var(--good)">66.1k req/s</td><td style="color:var(--good)">1.58×</td></tr>
+      </table>
+      <p class="muted" style="margin-top:14px;">Per-op p99 latency is mostly within 2× of upstream even where throughput is not. The gap on tiny commands is the connection-serving path and shared-state ownership model; it amortizes away on commands that do real work — and on range reads, <code>valkey-rs</code> is already ahead.</p>
+    </section>
+
+    <section>
+      <h2>The tuning trajectory</h2>
+      <p class="lead">Performance work is tied to a reproducible objective: the profile matrix is the harness's optimization target, rerun after each focused packet. Deep-pipeline GET moved from <strong>~221k req/s to ~2.17M req/s</strong> — roughly a 10× improvement — across a sequence of hot-path passes:</p>
+      <pre class="block"><span class="c"># each line is a landed tuning packet, oldest first</span>
+batch replies on the write side
+drain the query buffer once per read batch
+direct-write ordinary request/reply traffic
+batch client-info snapshots
+reuse argv storage instead of reallocating
+monotonic timing on the hot path
+hold the DB0 lock across safe read batches
+cache generated command metadata
+skip argv snapshots unless slowlog / AOF / replication need them
+skip idle standalone replication propagation
+fold handler + metadata lookup into one dispatch table
+bucket the dispatch table by command prefix</pre>
+      <div class="callout">
+        Every benchmarked commit is recorded and plotted on a live, auto-built dashboard — each point keyed to its commit and hardware fingerprint so results from different machines are never silently merged.
+        <br><a href="./harness/bench/history/index.html">Open the live performance dashboard →</a>
+      </div>
+    </section>
+
+    <section>
+      <h2>The gap that remains is architectural</h2>
+      <p class="lead">This is stated plainly because it is the honest read. <code>valkey-rs</code> is still a <strong>blocking thread-per-connection</strong> runtime that shares DB state through <code>Arc&lt;Mutex&lt;RedisDb&gt;&gt;</code>. Upstream Valkey's advantage on tiny pipelined commands comes from single-threaded event-loop ownership and batching with no locking.</p>
+      <p class="muted" style="margin-top:10px;">Closing it is a known piece of work, not a mystery: the next performance milestone — moving to an event-loop ownership model — is specified in <a href="https://github.com/ianm199/valkey-rs/blob/main/docs/RUNTIME_OWNERSHIP_PLAN.md">RUNTIME_OWNERSHIP_PLAN.md</a>. This is not a claim of being "faster than C"; it is a memory-safe reimplementation that is already <strong>competitive</strong> — within a small constant factor on average, and ahead on real-work commands.</p>
+    </section>
+
+    <section>
+      <h2>Reproduce it</h2>
+      <pre class="block"><span class="c"># standard suite: -n 1,000,000 -c 50 -P 100 -d 64</span>
+$ bash harness/bench/run.sh
+
+<span class="c"># the profile matrix (the harness optimization target)</span>
+$ bash harness/bench/run-profile-matrix.sh
+
+<span class="c"># rebuild the live history dashboard from recorded results</span>
+$ python3 harness/bench/history.py</pre>
+      <p class="muted" style="margin-top:14px;">Full methodology, every iteration's table, and the optimization roadmap live in <a href="https://github.com/ianm199/valkey-rs/blob/main/docs/BENCHMARKS.md">docs/BENCHMARKS.md</a>.</p>
+    </section>
+  </div>
+
+  <footer>
+    <div class="wrap">
+      <div class="flinks">
+        <a href="./">Home</a>
+        <a href="./convergence.html">Conformance</a>
+        <a href="./harness/bench/history/index.html">Live dashboard</a>
+        <a href="https://github.com/ianm199/valkey-rs">GitHub</a>
+      </div>
+      <p><code>valkey-rs</code> is an independent safe-Rust port of <a href="https://github.com/valkey-io/valkey">Valkey</a>. Benchmarks use the upstream <code>valkey-benchmark</code> tool; your numbers will vary by hardware.</p>
+    </div>
+  </footer>
+</body>
+</html>

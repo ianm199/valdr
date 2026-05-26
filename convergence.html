@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Test-suite convergence — valkey-rs</title>
+  <meta name="description" content="How valkey-rs converged on upstream Valkey's own TCL test suite — overall pass count over time, reconstructed from git history, plus a per-section breakdown.">
+  <meta property="og:title" content="valkey-rs — test-suite convergence">
+  <meta property="og:description" content="The real convergence curve on Valkey's own TCL suite, reconstructed by replaying the suite against the Rust server built at each historical commit. Overall and per section.">
+  <meta property="og:url" content="https://ianm199.github.io/valkey-rs/convergence.html">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+  <header class="hero sub">
+    <div class="wrap">
+      <nav class="topnav">
+        <a class="brand" href="./">valkey<span class="rs">-rs</span></a>
+        <div class="navlinks">
+          <a href="./convergence.html">Conformance</a>
+          <a href="./performance.html">Performance</a>
+          <a href="https://github.com/ianm199/valkey-rs">GitHub</a>
+        </div>
+      </nav>
+      <p class="eyebrow">Test-suite convergence</p>
+      <h1>Converging on Valkey's own test suite</h1>
+      <p class="tag">Valkey ships a large TCL test suite. The honest question for any reimplementation is: <strong>does it pass, and is the curve still climbing?</strong> Below is the real trajectory — reconstructed by replaying the suite against the Rust server built at each historical commit — overall, and broken down section by section.</p>
+    </div>
+  </header>
+
+  <div class="wrap">
+    <div class="stats" id="stat-strip">
+      <div class="stat"><div class="num accent" id="s-passing">—</div><div class="lbl">tests passing across tracked unit files</div></div>
+      <div class="stat"><div class="num good" id="s-full">—</div><div class="lbl">sections at a full pass</div></div>
+      <div class="stat"><div class="num" id="s-sections">—</div><div class="lbl">unit files tracked over time</div></div>
+      <div class="stat"><div class="num" id="s-days">—</div><div class="lbl">days of history reconstructed</div></div>
+    </div>
+  </div>
+
+  <div class="wrap">
+    <section>
+      <h2>Overall convergence</h2>
+      <p class="lead">Each point is a sampled commit (last of each day). The line is the total tests passing across the tracked unit files when the upstream suite is replayed against the Rust binary built at that commit — the same deny-tag policy the project's own conformance runner uses.</p>
+      <div class="chart-card">
+        <h3 id="overall-title">Tests passing over time</h3>
+        <p class="sub" id="overall-sub">Reconstructed from git history.</p>
+        <div id="overall-chart"></div>
+        <div class="legend">
+          <span class="key"><span class="swatch" style="background:var(--accent)"></span> tests passing</span>
+          <span class="key"><span class="swatch" style="background:var(--muted)"></span> ceiling (tests observed at latest commit)</span>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>By section — current state</h2>
+      <p class="lead">Where each tracked unit file stands at the most recent sampled commit. Green bars are full passes; red is the still-converging remainder.</p>
+      <div id="bars"></div>
+    </section>
+
+    <section>
+      <h2>By section — trajectory</h2>
+      <p class="lead">The same convergence, one sparkline per section, so you can see which areas landed early and which are still moving.</p>
+      <div class="section-grid" id="sparks"></div>
+    </section>
+
+    <section>
+      <h2>How this was measured</h2>
+      <p class="lead" id="method-text">Loading methodology…</p>
+      <pre class="block"><span class="c"># replay one unit file against the Rust server, exactly as the curve does</span>
+$ bash harness/oracle/setup_tcl_runner.sh --skip-build
+$ cd reference/valkey
+$ VALKEY_BIN_DIR=$(pwd)/../../target/debug \
+    tclsh tests/test_helper.tcl --single unit/type/zset \
+    --clients 1 --skip-leaks --tags "-needs:repl -needs:debug -external:skip" --quiet</pre>
+      <div class="callout">
+        These numbers are scoped to the unit files tracked here, not the full <strong>4,299-block</strong> upstream denominator. A file that aborts on a missing global is counted honestly as <em>no-summary</em> (zero), not silently dropped. Read the full accounting in <a href="https://github.com/ianm199/valkey-rs/blob/main/docs/CONFORMANCE.md">docs/CONFORMANCE.md</a>.
+      </div>
+    </section>
+  </div>
+
+  <footer>
+    <div class="wrap">
+      <div class="flinks">
+        <a href="./">Home</a>
+        <a href="./performance.html">Performance</a>
+        <a href="https://github.com/ianm199/valkey-rs/blob/main/docs/CONFORMANCE.md">Conformance doc</a>
+        <a href="https://github.com/ianm199/valkey-rs">GitHub</a>
+      </div>
+      <p id="gen-note"><code>valkey-rs</code> is an independent safe-Rust port of <a href="https://github.com/valkey-io/valkey">Valkey</a>.</p>
+    </div>
+  </footer>
+
+  <script>
+  const fmt = n => n.toLocaleString('en-US');
+
+  function svgEl(tag, attrs) {
+    const e = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  // passing-test total for a point (build-failed or empty -> 0)
+  function pointPassing(p) {
+    if (!p.build_ok) return 0;
+    let t = 0;
+    for (const k in p.sections) t += p.sections[k].passed || 0;
+    return t;
+  }
+  function pointObserved(p) {
+    if (!p.build_ok) return 0;
+    let t = 0;
+    for (const k in p.sections) t += p.sections[k].total || 0;
+    return t;
+  }
+
+  function buildOverall(data) {
+    const pts = data.points;
+    const W = 820, H = 300, padL = 52, padR = 18, padT = 18, padB = 36;
+    const innerW = W - padL - padR, innerH = H - padT - padB;
+    const passing = pts.map(pointPassing);
+    const ceiling = Math.max(1, ...pts.map(pointObserved));
+    const yMax = Math.ceil(ceiling / 100) * 100 || ceiling;
+    const x = i => padL + (pts.length === 1 ? innerW / 2 : innerW * i / (pts.length - 1));
+    const y = v => padT + innerH - innerH * v / yMax;
+
+    const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, width: '100%', role: 'img' });
+
+    // y gridlines + labels
+    for (let g = 0; g <= 4; g++) {
+      const v = yMax * g / 4, yy = y(v);
+      svg.appendChild(svgEl('line', { class: 'grid', x1: padL, y1: yy, x2: W - padR, y2: yy }));
+      const t = svgEl('text', { class: 'axis-label', x: padL - 8, y: yy + 3, 'text-anchor': 'end' });
+      t.textContent = fmt(Math.round(v));
+      svg.appendChild(t);
+    }
+    // ceiling line
+    const yc = y(ceiling);
+    svg.appendChild(svgEl('line', { class: 'target', x1: padL, y1: yc, x2: W - padR, y2: yc }));
+
+    // area + line
+    const linePts = passing.map((v, i) => `${x(i)},${y(v)}`);
+    const area = svgEl('path', { class: 'area',
+      d: `M${x(0)},${y(0)} L${linePts.join(' L')} L${x(pts.length - 1)},${y(0)} Z` });
+    svg.appendChild(area);
+    svg.appendChild(svgEl('path', { class: 'line', d: `M${linePts.join(' L')}` }));
+
+    // dots + x labels (first, middle, last)
+    pts.forEach((p, i) => {
+      const dot = svgEl('circle', { class: 'dot', cx: x(i), cy: y(passing[i]), r: 3.5 });
+      const title = svgEl('title');
+      title.textContent = `${p.date} (${p.sha}) — ${fmt(passing[i])} passing`;
+      dot.appendChild(title);
+      svg.appendChild(dot);
+    });
+    const labelIdx = pts.length <= 4 ? pts.map((_, i) => i)
+      : [0, Math.floor((pts.length - 1) / 2), pts.length - 1];
+    labelIdx.forEach(i => {
+      const t = svgEl('text', { class: 'axis-label', x: x(i), y: H - 12, 'text-anchor': 'middle' });
+      t.textContent = pts[i].date.slice(5);
+      svg.appendChild(t);
+    });
+    return svg;
+  }
+
+  function sparkline(series, max) {
+    const W = 220, H = 46, pad = 3;
+    const x = i => pad + (series.length === 1 ? (W - 2 * pad) / 2 : (W - 2 * pad) * i / (series.length - 1));
+    const y = v => H - pad - (H - 2 * pad) * v / (max || 1);
+    const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, width: '100%', preserveAspectRatio: 'none' });
+    const linePts = series.map((v, i) => `${x(i)},${y(v)}`);
+    svg.appendChild(svgEl('path', { class: 'area', d: `M${x(0)},${y(0)} L${linePts.join(' L')} L${x(series.length - 1)},${y(0)} Z` }));
+    svg.appendChild(svgEl('path', { class: 'line', d: `M${linePts.join(' L')}` }));
+    return svg;
+  }
+
+  function sectionSeries(data, file) {
+    return data.points.map(p => {
+      if (!p.build_ok) return { passed: 0, total: 0 };
+      const s = p.sections[file];
+      if (!s || s.passed == null) return { passed: 0, total: s ? s.total : 0 };
+      return { passed: s.passed, total: s.total };
+    });
+  }
+
+  function render(data) {
+    const pts = data.points;
+    const last = pts[pts.length - 1];
+    const passingNow = pointPassing(last);
+    const observedNow = pointObserved(last);
+
+    // section current-state list, sorted by remaining work then by passing desc
+    const rows = data.sections.map(sec => {
+      const s = (last.build_ok && last.sections[sec.file]) || null;
+      const passed = s && s.passed != null ? s.passed : 0;
+      const total = s && s.total != null ? s.total : 0;
+      return { ...sec, passed, total, full: total > 0 && passed === total };
+    });
+    const fullCount = rows.filter(r => r.full).length;
+
+    // stat strip
+    document.getElementById('s-passing').textContent = fmt(passingNow);
+    document.getElementById('s-full').textContent = `${fullCount} / ${rows.length}`;
+    document.getElementById('s-sections').textContent = rows.length;
+    const days = new Set(pts.map(p => p.date)).size;
+    document.getElementById('s-days').textContent = days;
+
+    // overall chart
+    document.getElementById('overall-chart').appendChild(buildOverall(data));
+    document.getElementById('overall-sub').textContent =
+      `${fmt(passingNow)} of ${fmt(observedNow)} observed tests passing at ${last.sha} (${last.date}).`;
+
+    // bars
+    const barsEl = document.getElementById('bars');
+    const maxTotal = Math.max(1, ...rows.map(r => r.total));
+    rows.slice().sort((a, b) => (b.passed) - (a.passed)).forEach(r => {
+      const row = document.createElement('div');
+      row.className = 'bar-row';
+      const pct = r.total ? (r.passed / r.total * 100) : 0;
+      const widthPct = (r.total / maxTotal * 100);
+      row.innerHTML =
+        `<div class="lbl">${r.label}</div>` +
+        `<div class="bar-track" style="width:${Math.max(8, widthPct)}%">` +
+        `<div class="bar-fill ${r.full ? '' : 'partial'}" style="width:${pct}%"></div></div>` +
+        `<div class="count">${r.passed} / ${r.total || '—'}</div>`;
+      barsEl.appendChild(row);
+    });
+
+    // sparklines
+    const sparksEl = document.getElementById('sparks');
+    data.sections.forEach(sec => {
+      const series = sectionSeries(data, sec.file);
+      const passedSeries = series.map(s => s.passed);
+      const max = Math.max(1, ...series.map(s => s.total), ...passedSeries);
+      const cur = series[series.length - 1];
+      const full = cur.total > 0 && cur.passed === cur.total;
+      const card = document.createElement('div');
+      card.className = 'spark';
+      card.innerHTML =
+        `<p class="name">${sec.label}</p>` +
+        `<p class="val"><b>${cur.passed}</b> / ${cur.total || '—'}` +
+        (full ? ` <span class="full">✓ full</span>` : '') + `</p>`;
+      card.appendChild(sparkline(passedSeries, max));
+      sparksEl.appendChild(card);
+    });
+
+    // methodology + footer
+    document.getElementById('method-text').textContent = data.method;
+    if (data.generated_at) {
+      document.getElementById('gen-note').innerHTML =
+        `Reconstructed ${data.generated_at.slice(0, 10)} by replaying the upstream suite against the Rust binary at each sampled commit. ` +
+        `<code>valkey-rs</code> is an independent safe-Rust port of <a href="https://github.com/valkey-io/valkey">Valkey</a>.`;
+    }
+  }
+
+  fetch('convergence-data.json', { cache: 'no-store' })
+    .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then(data => {
+      if (!data.points || !data.points.length) throw new Error('no points');
+      render(data);
+    })
+    .catch(err => {
+      document.getElementById('overall-chart').innerHTML =
+        `<p class="muted">Convergence data is still being reconstructed (${err.message}). ` +
+        `The curve appears here once <code>convergence-data.json</code> is generated.</p>`;
+    });
+  </script>
+</body>
+</html>
