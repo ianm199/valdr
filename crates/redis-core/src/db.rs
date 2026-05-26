@@ -315,6 +315,27 @@ pub fn watched_keys_any() -> bool {
     WATCHED_KEYS_REGISTRATIONS.load(Ordering::Acquire) != 0
 }
 
+/// Return `(unique_watching_clients, total_watched_key_registrations)`.
+///
+/// C exposes these through INFO as `watching_clients` and
+/// `total_watched_keys`. The global index is authoritative because WATCH state
+/// is cross-connection, while `WATCHED_KEYS_REGISTRATIONS` is only the fast
+/// non-zero mirror used by write paths.
+pub fn watched_keys_info_counts() -> (usize, usize) {
+    let idx = watched_keys_index();
+    let guard = match idx.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let mut clients = std::collections::HashSet::new();
+    let mut registrations = 0usize;
+    for watchers in guard.watched.values() {
+        registrations = registrations.saturating_add(watchers.len());
+        clients.extend(watchers.iter().copied());
+    }
+    (clients.len(), registrations)
+}
+
 fn watched_keys_sub_registrations(n: usize) {
     if n == 0 {
         return;

@@ -506,10 +506,9 @@ fn lua_error_reply_wire_bytes(bytes: &[u8]) -> Vec<u8> {
     out.push(b'-');
     if clean.is_empty() {
         out.extend_from_slice(b"ERR");
-    } else if !clean.starts_with(b"ERR ") && !lua_error_token_is_code(lua_error_code_token(clean)) {
-        out.extend_from_slice(b"ERR ");
+    } else {
+        out.extend_from_slice(clean);
     }
-    out.extend_from_slice(clean);
     out
 }
 
@@ -4185,6 +4184,7 @@ fn evalsha_command_impl(
     let sha_norm = match normalise_sha(sha_in.as_bytes()) {
         Some(s) => s,
         None => {
+            record_error_reply(b"NOSCRIPT No matching script. Please use EVAL.");
             return Err(RedisError::runtime(
                 b"NOSCRIPT No matching script. Please use EVAL.",
             ));
@@ -4207,6 +4207,7 @@ fn evalsha_command_impl(
     let script = match script_bytes {
         Some(b) => b,
         None => {
+            record_error_reply(b"NOSCRIPT No matching script. Please use EVAL.");
             return Err(RedisError::runtime(
                 b"NOSCRIPT No matching script. Please use EVAL.",
             ));

@@ -365,6 +365,15 @@ impl ClientSlot {
         self.closed = true;
     }
 
+    fn mark_closed_by_output_buffer_limit(&mut self) {
+        if !self.closed {
+            server_metrics()
+                .client_output_buffer_limit_disconnections
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        self.mark_closed();
+    }
+
     fn refresh_output_buffer_state(&mut self) {
         self.refresh_output_buffer_state_at(Instant::now());
     }
@@ -378,13 +387,13 @@ impl ClientSlot {
         let limit =
             redis_commands::connection::client_output_buffer_limit(self.client.in_pubsub_mode());
         if limit.hard > 0 && pending > limit.hard {
-            self.mark_closed();
+            self.mark_closed_by_output_buffer_limit();
             return;
         }
         if limit.soft > 0 && limit.soft_seconds > 0 && pending > limit.soft {
             let since = *self.obuf_soft_limit_since.get_or_insert(now);
             if now.duration_since(since) >= Duration::from_secs(limit.soft_seconds) {
-                self.mark_closed();
+                self.mark_closed_by_output_buffer_limit();
             }
         } else {
             self.obuf_soft_limit_since = None;
@@ -1326,6 +1335,15 @@ impl RuntimeOwner {
             }
             slot.ingest(&read_buf[..n]);
             slot.refresh_client_memory_snapshot();
+            let query_limit = redis_commands::connection::client_query_buffer_limit();
+            if query_limit > 0 && slot.client.query_buf.len() > query_limit {
+                slot.mark_closed();
+                server_metrics()
+                    .client_query_buffer_limit_disconnections
+                    .fetch_add(1, Ordering::Relaxed);
+                progressed = true;
+                break;
+            }
             progressed = true;
         }
         progressed
@@ -1894,6 +1912,8 @@ fn cleanup_slot(mut slot: ClientSlot, registry: &Arc<Mutex<PubSubRegistry>>) {
     let _ = redis_commands::pubsub::drop_client_from_registry(registry, id);
     redis_core::replication::global_replication_state().remove_replica(id);
     redis_core::tracking::remove_runtime_client_tracking(id);
+    redis_core::db::watched_keys_index_remove_client(id);
+    let _ = redis_core::db::watched_keys_take_dirty(id);
     slot.client.clear_blocked_on_keys();
     if let Ok(mut guard) = client_info_registry().lock() {
         guard.deregister(id);

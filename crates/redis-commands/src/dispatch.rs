@@ -244,6 +244,17 @@ fn command_records_own_error_stats(name: &[u8]) -> bool {
         || ascii_eq_ignore_case(name, b"FCALL_RO")
 }
 
+fn command_stats_name<'a>(ctx: &'a CommandContext<'_>, name: &'a [u8]) -> Cow<'a, [u8]> {
+    if ascii_eq_ignore_case(name, b"XGROUP") {
+        if let Some(sub) = ctx.client_ref().arg(1) {
+            if sub.as_bytes().eq_ignore_ascii_case(b"CREATECONSUMER") {
+                return Cow::Borrowed(b"xgroup|createconsumer");
+            }
+        }
+    }
+    Cow::Borrowed(name)
+}
+
 fn record_dispatch_error_reply(ctx: &CommandContext<'_>, payload: &[u8]) {
     if !ctx.client_ref().flag_lua() {
         record_error_reply(payload);
@@ -623,8 +634,9 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
     } else {
         Some(elapsed_us(start))
     };
+    let stat_name = command_stats_name(ctx, name);
     record_command_stat(
-        name,
+        stat_name.as_ref(),
         elapsed_micros.unwrap_or(0),
         rejected_call,
         failed_call,
@@ -633,7 +645,7 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
         if !command_records_own_error_stats(name) {
             record_dispatch_error_reply(ctx, err.to_resp_payload().as_bytes());
         }
-    } else if reply_is_error {
+    } else if reply_is_error && !command_records_own_error_stats(name) {
         record_dispatch_error_reply(ctx, &ctx.client_ref().reply_buf[pre_reply_len..]);
     }
     let reply_bytes = ctx

@@ -1690,6 +1690,13 @@ fn run_client_loop(
         }
 
         client.query_buf.extend_from_slice(&read_buf[..n]);
+        let query_limit = redis_commands::connection::client_query_buffer_limit();
+        if query_limit > 0 && client.query_buf.len() > query_limit {
+            server_metrics()
+                .client_query_buffer_limit_disconnections
+                .fetch_add(1, Ordering::Relaxed);
+            break;
+        }
 
         let mut disconnect = false;
         let mut consumed_total = 0usize;
@@ -1788,6 +1795,8 @@ fn run_client_loop(
     let _ = pubsub::drop_client_from_registry(&registry, id);
     redis_core::replication::global_replication_state().remove_replica(id);
     redis_core::tracking::remove_runtime_client_tracking(id);
+    redis_core::db::watched_keys_index_remove_client(id);
+    let _ = redis_core::db::watched_keys_take_dirty(id);
     client.clear_blocked_on_keys();
     if let Ok(mut guard) = client_info_registry().lock() {
         guard.deregister(id);
@@ -1846,6 +1855,13 @@ fn run_client_loop_tls(
         }
 
         client.query_buf.extend_from_slice(&read_buf[..n]);
+        let query_limit = redis_commands::connection::client_query_buffer_limit();
+        if query_limit > 0 && client.query_buf.len() > query_limit {
+            server_metrics()
+                .client_query_buffer_limit_disconnections
+                .fetch_add(1, Ordering::Relaxed);
+            break;
+        }
 
         let mut disconnect = false;
         let mut consumed_total = 0usize;
@@ -1958,6 +1974,8 @@ fn run_client_loop_tls(
     let _ = pubsub::drop_client_from_registry(&registry, id);
     redis_core::replication::global_replication_state().remove_replica(id);
     redis_core::tracking::remove_runtime_client_tracking(id);
+    redis_core::db::watched_keys_index_remove_client(id);
+    let _ = redis_core::db::watched_keys_take_dirty(id);
     client.clear_blocked_on_keys();
     if let Ok(mut guard) = client_info_registry().lock() {
         guard.deregister(id);

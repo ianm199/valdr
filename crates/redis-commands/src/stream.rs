@@ -1904,9 +1904,8 @@ fn xgroup_createconsumer(ctx: &mut CommandContext) -> RedisResult<()> {
     let stream = match stream_for_write(ctx.db_mut(), &key)? {
         Some(s) => s,
         None => {
-            return Err(no_such_key_or_group_short(
-                key.as_bytes(),
-                group_name.as_bytes(),
+            return Err(RedisError::runtime(
+                b"ERR The XGROUP subcommand requires the key to exist. Note that for CREATE you may want to use the MKSTREAM option to create an empty stream automatically.",
             ))
         }
     };
