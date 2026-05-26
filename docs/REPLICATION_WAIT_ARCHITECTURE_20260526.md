@@ -12,9 +12,9 @@ Focused TCL evidence from the resumed replication run:
 
 | File | Latest result | Evidence |
 |---|---:|---|
-| `unit/wait` | 39 passed / 0 failed | `harness/oracle/results/tcl-survey/20260526T003336291954Z/unit__wait.json` |
-| `unit/bitfield` | 22 passed / 0 failed | `harness/oracle/results/tcl-survey/20260526T003404860676Z/unit__bitfield.json` |
-| `unit/auth` | 16 passed / 0 failed | `harness/oracle/results/tcl-survey/20260526T004117630920Z/unit__auth.json` |
+| `unit/wait` | 39 passed / 0 failed | `harness/oracle/results/tcl-survey/20260526T010311347419Z/unit__wait.json` |
+| `unit/bitfield` | 22 passed / 0 failed | `harness/oracle/results/tcl-survey/20260526T010311347419Z/unit__bitfield.json` |
+| `unit/auth` | 16 passed / 0 failed | `harness/oracle/results/tcl-survey/20260526T010311347419Z/unit__auth.json` |
 | `unit/maxmemory` | timeout/no-summary | `harness/oracle/results/tcl-survey/20260525T233141143791Z/unit__maxmemory.json` |
 
 Before this replication push, `unit/wait` was at 13 passed / 26 failed. The
@@ -190,9 +190,9 @@ What is not yet claimable from this work alone:
 
 ## Smoke Check Caveat
 
-The focused replication files pass on current `main`, but the broader smoke
-check that includes replication-tagged subtests in otherwise core files is not
-all green on the current tree:
+The focused replication files passed after the primaryauth fix, but the first
+broader smoke check that included replication-tagged subtests in otherwise core
+files exposed a separate regression:
 
 ```text
 harness/oracle/results/tcl-survey/20260526T004953034243Z/
@@ -205,15 +205,37 @@ harness/oracle/results/tcl-survey/20260526T004953034243Z/
 
 Those failures are mostly propagation-shape tests such as `GETDEL`/`GETEX`,
 `ZMPOP`/`BZMPOP`, TTL absolute-time propagation, and hash-field TTL
-propagation. They are real replication-frontier work, but they are not caused
-by the `primaryauth` handshake or link-state fix documented here. The narrower
-WAIT/ACK/auth proof remains valid:
+propagation. The common root was not the command rewrite code; it was an
+unconditional post-full-sync `REPLCONF GETACK *` inserted by the WAIT work. That
+extra command polluted every replication stream and, because it advanced the
+replication offset, made some assertions miss their final command.
+
+The fix is to send the post-full-sync GETACK only when the full-sync job was
+armed while a `WAIT`/`WAITAOF` waiter was present, or when such a waiter is
+still present at completion. Recording the condition on `ReplBgsaveJob` matters:
+the waiter can be transient by the time the child exits, but the retarget case
+still needs the post-sync ACK prompt. This preserves the "client entered WAIT
+while a replica was still full-syncing" behavior without changing normal
+replication streams. The narrower WAIT/ACK/auth proof remains valid:
 
 ```text
-harness/oracle/results/tcl-survey/20260526T004502200948Z/
+harness/oracle/results/tcl-survey/20260526T010311347419Z/
   unit/wait:     39 passed / 0 failed
   unit/bitfield: 22 passed / 0 failed
   unit/auth:     16 passed / 0 failed
+```
+
+Final smoke after that gate:
+
+```text
+harness/oracle/results/tcl-survey/20260526T010357438677Z/
+  unit/type/string: 108 passed / 0 failed
+  unit/type/zset:   320 passed / 0 failed
+  unit/expire:       67 passed / 0 failed
+  unit/hashexpire:  207 passed / 0 failed
+
+harness/oracle/results/tcl-survey/20260526T011653359945Z/
+  unit/introspection: 113 passed / 0 failed
 ```
 
 ## Next Packet

@@ -283,6 +283,10 @@ pub struct ReplBgsaveJob {
     /// current master offset, so the replica receives every write that arrived
     /// during the snapshot window.
     pub snapshot_offset: i64,
+    /// Whether this full-sync was armed while a WAIT/WAITAOF client was
+    /// blocked. The reaper uses this to prompt replicas for an ACK after the
+    /// RDB transfer without emitting GETACK for ordinary replication streams.
+    pub needs_getack_on_completion: bool,
 }
 
 /// Process-wide replication state.
@@ -606,6 +610,8 @@ impl ReplicationState {
         match guard.as_mut() {
             Some(job) => {
                 job.waiting_replicas.push(client_id);
+                job.needs_getack_on_completion |=
+                    crate::blocked_keys::blocked_replication_wait_any();
                 true
             }
             None => false,

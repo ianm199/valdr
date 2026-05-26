@@ -31,6 +31,22 @@ pub fn blocked_keys_any() -> bool {
     BLOCKED_KEYS_WAITERS.load(Ordering::Acquire) != 0
 }
 
+/// Whether any client is currently blocked in WAIT or WAITAOF.
+///
+/// This is intentionally narrower than [`blocked_keys_any`]. List, zset, stream,
+/// and XREADGROUP waiters should not cause replication-side GETACK traffic; only
+/// clients parked on replica ACK progress need that prompt.
+pub fn blocked_replication_wait_any() -> bool {
+    if !blocked_keys_any() {
+        return false;
+    }
+    let guard = match blocked_keys_index().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    guard.has_replication_waiters()
+}
+
 /// Which end of the list to pop on wake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockedSide {
@@ -411,6 +427,13 @@ impl BlockedKeysIndex {
     /// Whether the index is empty.
     pub fn is_empty(&self) -> bool {
         self.waiters.is_empty()
+    }
+
+    /// Whether any client is blocked in WAIT or WAITAOF.
+    pub fn has_replication_waiters(&self) -> bool {
+        self.waiters
+            .values()
+            .any(|w| matches!(w.action, BlockedAction::Wait { .. } | BlockedAction::WaitAof { .. }))
     }
 
     /// Number of distinct keys that have at least one blocked client.

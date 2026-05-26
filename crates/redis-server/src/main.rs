@@ -28,7 +28,9 @@ use rustls::StreamOwned;
 use libc;
 use redis_commands::connection::get_max_clients;
 use redis_commands::{dispatch, pubsub};
-use redis_core::blocked_keys::{blocked_keys_index, current_time_ms};
+use redis_core::blocked_keys::{
+    blocked_keys_index, blocked_replication_wait_any, current_time_ms,
+};
 use redis_core::client_info::client_info_registry;
 use redis_core::command_context::CommandContext;
 use redis_core::databases::global_databases;
@@ -1323,11 +1325,13 @@ fn dispatch_full_sync_transfer() {
     }
     // A client can enter WAIT while one replica is still in full-sync and
     // therefore before `request_ack_from_replicas` will address it. Once the
-    // RDB plus catch-up backlog are queued, prompt every online replica for an
-    // ACK. This mirrors Valkey's replicationFeedReplicas(-1, GETACK) behavior:
-    // GETACK is one stream item broadcast to all online replicas, so existing
-    // replicas do not fall behind the offset advanced for the newly-online one.
-    send_getack_to_online_replicas(&repl);
+    // RDB plus catch-up backlog are queued, prompt replicas only if a WAIT or
+    // WAITAOF waiter is actually present. Sending GETACK unconditionally
+    // pollutes normal replication-stream assertions and diverges from Valkey's
+    // "only request ACKs for blocked WAIT clients" behavior.
+    if job.needs_getack_on_completion || blocked_replication_wait_any() {
+        send_getack_to_online_replicas(&repl);
+    }
     let _ = std::fs::remove_file(&job.temp_path);
 }
 
