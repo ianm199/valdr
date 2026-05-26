@@ -1,0 +1,29 @@
+mode=current-binary | 1 commit(s) | workers=4 | sandbox=convsafev port=38000 | free 79.2 GB | config e9f7787ef560
+mounted /Volumes/convsafev (image free 8.3 GB)
+
+[1/1] 2026-05-26 f7e590a68 measuring existing binary (x4)...
+    AOF rewrite      unit/aofrw                        0/0  | sys free 79.2 GB
+    Auth             unit/auth                         0/0  | sys free 79.2 GB
+    ACL v2           unit/acl-v2                       0/0  | sys free 79.2 GB
+    ACL              unit/acl                          0/0  | sys free 79.2 GB
+    Client eviction  unit/client-eviction              0/0  | sys free 79.2 GB
+    Command log      unit/commandlog                 14/14  | sys free 79.2 GB
+    Dump/Restore     unit/dump                       13/13  | sys free 79.2 GB
+    Bitfield         unit/bitfield                   18/18  | sys free 79.2 GB
+    Fuzzer           unit/fuzzer                       1/1  | sys free 79.2 GB
+    Bitops           unit/bitops                     50/50  | sys free 79.1 GB
+    Expire           unit/expire                     63/65  | sys free 79.1 GB
+    Hash field expiry unit/hashexpire               207/207  | sys free 79.1 GB
+    INFO command     unit/info-command                 5/5  | sys free 79.1 GB
+    INFO             unit/info                         0/0  | sys free 79.1 GB
+    Introspection (2) unit/introspection-2            49/49  | sys free 79.3 GB
+    Geo              unit/geo                        71/71  | sys free 79.3 GB
+    Keyspace         unit/keyspace                   65/65  | sys free 79.3 GB
+    Introspection    unit/introspection              93/93  | sys free 79.3 GB
+    Lazy free        unit/lazyfree                     4/4  | sys free 79.3 GB
+    Limits           unit/limits                       0/0  | sys free 79.3 GB
+    Max-memory       unit/maxmemory                    0/0  | sys free 79.3 GB
+    Memory efficiency unit/memefficiency                0/0  | sys free 79.3 GB
+    Transactions     unit/multi                      45/45  | sys free 79.3 GB
+    Networking       unit/networking                   0/0  | sys free 79.3 GB
+    Output-buffer limits unit/obuf-limits                  0/0  | sys free 79.3 GB

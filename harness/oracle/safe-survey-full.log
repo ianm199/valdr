@@ -1,0 +1,61 @@
+mode=current-binary | 1 commit(s) | free 85.1 GB | image 8g | per-file cap 1024 MB | config e9f7787ef560
+mounted /Volumes/convsafe (image free 8.3 GB)
+
+[1/1] 2026-05-26 f7e590a68 measuring existing binary...
+    ACL v2         unit/acl-v2                       0/0   | sys free 85.1 GB
+    ACL            unit/acl                          0/0   | sys free 85.1 GB
+    AOF rewrite    unit/aofrw                        0/0   | sys free 85.1 GB
+    Auth           unit/auth                         0/0   | sys free 85.1 GB
+    Bitfield       unit/bitfield                   18/18   | sys free 85.1 GB
+    Bitops         unit/bitops                     50/50   | sys free 85.1 GB
+    Client eviction unit/client-eviction              0/0   | sys free 85.1 GB
+    Command log    unit/commandlog                 14/14   | sys free 85.1 GB
+    Dump/Restore   unit/dump                       12/13   | sys free 85.1 GB
+    Expire         unit/expire                     65/65   | sys free 85.1 GB
+    Functions      unit/functions                  93/93   | sys free 85.1 GB
+    Fuzzer         unit/fuzzer                       1/1   | sys free 85.1 GB
+    Geo            unit/geo                        71/71   | sys free 85.1 GB
+    Hash field expiry unit/hashexpire               207/207   | sys free 85.1 GB
+    HyperLogLog    unit/hyperloglog                26/26   | sys free 85.1 GB
+    INFO command   unit/info-command                 5/5   | sys free 85.1 GB
+    INFO           unit/info                         0/0   | sys free 85.1 GB
+    Introspection (2) unit/introspection-2            49/49   | sys free 85.1 GB
+    Introspection  unit/introspection              93/93   | sys free 85.1 GB
+    Keyspace       unit/keyspace                   65/65   | sys free 85.1 GB
+    Latency monitor unit/latency-monitor            12/12   | sys free 85.1 GB
+    Lazy free      unit/lazyfree                     4/4   | sys free 85.1 GB
+    Limits         unit/limits                       0/0   | sys free 85.1 GB
+    Max-memory     unit/maxmemory                    0/0   | sys free 85.1 GB
+    Memory efficiency unit/memefficiency                0/0   | sys free 85.1 GB
+    Transactions   unit/multi                      45/45   | sys free 85.1 GB
+    Networking     unit/networking                   0/0   | sys free 85.1 GB
+    Output-buffer limits unit/obuf-limits                  0/0   | sys free 85.1 GB
+    Other ops      unit/other                      22/22   | sys free 85.1 GB
+    CLIENT PAUSE   unit/pause                    timeout   | sys free 85.1 GB
+    Protocol       unit/protocol                   28/28   | sys free 85.1 GB
+    Pub/Sub        unit/pubsub                     35/35   | sys free 85.1 GB
+    Sharded pub/sub unit/pubsubshard                  0/0   | sys free 85.1 GB
+    Query buffer   unit/querybuf                     2/2   | sys free 85.1 GB
+    QUIT           unit/quit                         3/3   | sys free 85.1 GB
+    Reply buffer   unit/replybufsize                 0/0   | sys free 85.1 GB
+    Scan           unit/scan                       21/21   | sys free 85.1 GB
+    Scripting      unit/scripting                401/402   | sys free 85.0 GB
+    Shutdown       unit/shutdown                     0/0   | sys free 85.0 GB
+    Slow log       unit/slowlog                    13/13   | sys free 85.0 GB
+    Sort           unit/sort                       54/54   | sys free 85.0 GB
+    Client tracking unit/tracking                   59/59   | sys free 85.0 GB
+    Violations     unit/violations                   1/1   | sys free 85.0 GB
+    WAIT           unit/wait                         0/0   | sys free 85.0 GB
+    Hashes         unit/type/hash                  83/83   | sys free 85.0 GB
+    Incr           unit/type/incr                  31/31   | sys free 85.0 GB
+    Lists (large)  unit/type/list-2                  2/2   | sys free 85.0 GB
+    Lists (edge)   unit/type/list-3                11/11   | sys free 85.0 GB
+    Lists          unit/type/list                254/254   | sys free 85.0 GB
+    Sets           unit/type/set                 114/114   | sys free 85.0 GB
+    Stream groups  unit/type/stream-cgroups        59/59   | sys free 86.0 GB
+    Streams        unit/type/stream              timeout   | sys free 86.0 GB
+    Strings        unit/type/string              104/104   | sys free 86.0 GB
+    Sorted sets    unit/type/zset                318/318   | sys free 85.7 GB
+    -> 2445 passing | sys free 85.7 GB
+
+DONE | free 85.1 -> 85.7 GB (max drop -0.58 GB)
