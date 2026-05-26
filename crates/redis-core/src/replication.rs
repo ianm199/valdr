@@ -22,7 +22,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{
-    AtomicBool, AtomicI32, AtomicI64, AtomicU16, AtomicU32, AtomicU8, Ordering,
+    AtomicBool, AtomicI32, AtomicI64, AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering,
 };
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -191,6 +191,11 @@ pub struct ReplicaConn {
     /// Wave B's REPLCONF ACK handler updates this; for now it just tracks
     /// the snapshot/partial-resync starting offset.
     pub offset: AtomicI64,
+    /// Last replication offset the replica reported as fsynced to its AOF via
+    /// `REPLCONF ACK <off> FACK <aof-off>`. `-1` means the replica has not
+    /// advertised an AOF fsync offset, which matches upstream's "AOF disabled"
+    /// sentinel.
+    pub aof_offset: AtomicI64,
     /// Listening port the replica is exposing for client connections, set by
     /// `REPLCONF listening-port <port>` (Wave B). 0 until reported.
     pub listening_port: AtomicU16,
@@ -218,6 +223,7 @@ impl ReplicaConn {
             client_id,
             state: AtomicU8::new(state as u8),
             offset: AtomicI64::new(offset),
+            aof_offset: AtomicI64::new(-1),
             listening_port: AtomicU16::new(0),
             capa_flags: AtomicU32::new(0),
             last_ack_time_ms: AtomicI64::new(0),
@@ -239,6 +245,11 @@ impl ReplicaConn {
     /// Read the last acknowledged offset.
     pub fn offset(&self) -> i64 {
         self.offset.load(Ordering::Relaxed)
+    }
+
+    /// Read the last acknowledged AOF-fsynced offset.
+    pub fn aof_offset(&self) -> i64 {
+        self.aof_offset.load(Ordering::Relaxed)
     }
 
     /// Listening port reported by the replica via REPLCONF.
@@ -312,6 +323,14 @@ pub struct ReplicationState {
     /// Set to `true` by `REPLICAOF NO ONE` to signal the running dialer thread
     /// to exit its reconnection loop immediately.
     pub dialer_stop_flag: AtomicBool,
+    /// Monotonic generation for replica-side dialer threads.
+    ///
+    /// `REPLICAOF <host> <port>` can retarget an already-running replica.
+    /// A boolean stop flag is insufficient because the new dialer clears it
+    /// while the old dialer may still be reading from the previous master.
+    /// Dialers capture this epoch at spawn and must stop applying bytes or
+    /// sending ACKs once it changes.
+    pub dialer_epoch: AtomicU64,
 }
 
 impl ReplicationState {
@@ -330,6 +349,7 @@ impl ReplicationState {
             repl_bgsave_job: Mutex::new(None),
             selected_db: AtomicI32::new(-1),
             dialer_stop_flag: AtomicBool::new(false),
+            dialer_epoch: AtomicU64::new(0),
         }
     }
 
@@ -423,6 +443,7 @@ impl ReplicationState {
     /// `replica_of` to `None` and `repl_state` to MASTER. Signals the running
     /// dialer thread to exit via `dialer_stop_flag`.
     pub fn become_master(&self) {
+        self.dialer_epoch.fetch_add(1, Ordering::SeqCst);
         self.dialer_stop_flag.store(true, Ordering::SeqCst);
         match self.replica_of.lock() {
             Ok(mut g) => *g = None,
@@ -435,7 +456,11 @@ impl ReplicationState {
     /// Configure this server as a replica of `(host, port)` and move the
     /// top-level state to `REPLICA_CONNECTING`. Clears the dialer stop flag so
     /// a freshly-spawned dialer thread is not immediately told to quit.
-    pub fn become_replica_of(&self, host: RedisString, port: u16) {
+    pub fn become_replica_of(&self, host: RedisString, port: u16) -> u64 {
+        let epoch = self
+            .dialer_epoch
+            .fetch_add(1, Ordering::SeqCst)
+            .saturating_add(1);
         self.dialer_stop_flag.store(false, Ordering::SeqCst);
         match self.replica_of.lock() {
             Ok(mut g) => *g = Some((host, port)),
@@ -443,6 +468,13 @@ impl ReplicationState {
         }
         self.repl_state
             .store(repl_state_code::REPLICA_CONNECTING, Ordering::Relaxed);
+        epoch
+    }
+
+    /// True if a replica-side dialer captured the currently-active generation.
+    pub fn dialer_epoch_is_current(&self, epoch: u64) -> bool {
+        !self.dialer_stop_flag.load(Ordering::SeqCst)
+            && self.dialer_epoch.load(Ordering::SeqCst) == epoch
     }
 
     /// Snapshot of the connected replicas in a stable, sorted order keyed by

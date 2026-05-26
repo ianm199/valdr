@@ -2100,6 +2100,10 @@ fn run_inner_command(
     let saved_reply_len = ctx.client_ref().reply_buf.len();
     let name_bytes = args[0].clone();
 
+    if ascii_eq_ci(&name_bytes, b"WAIT") {
+        return script_wait_reply(ctx, args);
+    }
+
     if command_is_denyoom(&name_bytes)
         && !script_dirty.is_some_and(Cell::get)
         && function_command_would_exceed_maxmemory(ctx)
@@ -2165,6 +2169,40 @@ fn run_inner_command(
         }
     }
     Ok(reply)
+}
+
+fn script_wait_reply(ctx: &CommandContext<'_>, args: &[Vec<u8>]) -> Result<ReplyValue, RedisError> {
+    if args.len() != 3 {
+        return Err(RedisError::wrong_number_of_args(b"wait"));
+    }
+    parse_script_i64(&args[1])?;
+    let timeout = parse_script_i64(&args[2])?;
+    if timeout < 0 {
+        return Err(RedisError::runtime(b"ERR timeout is negative".to_vec()));
+    }
+    let target = ctx.client_ref().last_write_repl_offset;
+    let repl = redis_core::replication::global_replication_state();
+    let count = {
+        let guard = match repl.replicas.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard
+            .values()
+            .filter(|replica| {
+                replica.state() == redis_core::replication::ReplicaState::Online
+                    && replica.offset.load(std::sync::atomic::Ordering::Relaxed) >= target
+            })
+            .count()
+    };
+    Ok(ReplyValue::Integer(count as i64))
+}
+
+fn parse_script_i64(bytes: &[u8]) -> Result<i64, RedisError> {
+    std::str::from_utf8(bytes)
+        .ok()
+        .and_then(|s| s.parse::<i64>().ok())
+        .ok_or_else(|| RedisError::runtime(b"ERR value is not an integer or out of range".to_vec()))
 }
 
 fn record_script_rejected_command(args: &[Vec<u8>], payload: &[u8]) {

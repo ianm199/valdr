@@ -108,6 +108,9 @@ pub struct LiveConfig {
     pub maxmemory_clients: AtomicI64,
     pub maxclients: AtomicU64,
     pub requirepass: Mutex<Option<RedisString>>,
+    /// Password this instance uses when authenticating to its configured
+    /// primary (`primaryauth` / legacy `masterauth`).
+    pub primaryauth: Mutex<Option<RedisString>>,
     pub notify_keyspace_events_flags: AtomicU32,
     pub slowlog_threshold_micros: AtomicI64,
     pub slowlog_max_len: AtomicUsize,
@@ -306,6 +309,7 @@ impl Default for LiveConfig {
             maxmemory_clients: AtomicI64::new(0),
             maxclients: AtomicU64::new(DEFAULT_MAX_CLIENTS),
             requirepass: Mutex::new(None),
+            primaryauth: Mutex::new(None),
             notify_keyspace_events_flags: AtomicU32::new(0),
             slowlog_threshold_micros: AtomicI64::new(DEFAULT_SLOWLOG_THRESHOLD_MICROS),
             slowlog_max_len: AtomicUsize::new(DEFAULT_SLOWLOG_MAX_LEN),
@@ -412,6 +416,26 @@ impl LiveConfig {
             other => other,
         };
         match self.requirepass.lock() {
+            Ok(mut g) => *g = value,
+            Err(p) => *p.into_inner() = value,
+        }
+    }
+
+    /// Snapshot the password used for AUTH during replica handshakes.
+    pub fn primaryauth(&self) -> Option<RedisString> {
+        match self.primaryauth.lock() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
+        }
+    }
+
+    /// Update the primary authentication secret. Empty disables it.
+    pub fn set_primaryauth(&self, secret: Option<RedisString>) {
+        let value = match secret {
+            Some(s) if s.as_bytes().is_empty() => None,
+            other => other,
+        };
+        match self.primaryauth.lock() {
             Ok(mut g) => *g = value,
             Err(p) => *p.into_inner() = value,
         }

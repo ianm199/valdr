@@ -24,7 +24,7 @@ use redis_core::eviction::{oom_error_reply, try_evict_to_fit, EvictionOutcome};
 use redis_core::memory::approximate_memory_used;
 use redis_core::metrics::{
     record_acl_access_denied_channel, record_acl_access_denied_cmd, record_acl_access_denied_db,
-    record_acl_access_denied_key, record_command_stat,
+    record_acl_access_denied_key, record_command_stat, record_error_reply,
 };
 use redis_core::monotonic::{elapsed_start, elapsed_us};
 use redis_core::CommandContext;
@@ -201,6 +201,52 @@ pub(crate) fn registered_command_spec(name: &[u8]) -> Option<&'static GeneratedC
         .find(|spec| ascii_eq_ignore_case(spec.name.as_bytes(), name))
 }
 
+fn command_arity_error(name: &[u8], argc: usize) -> Option<RedisError> {
+    let argc = argc as i32;
+    let mut saw_spec = false;
+    let valid = COMMANDS
+        .iter()
+        .filter(|spec| ascii_eq_ignore_case(spec.name.as_bytes(), name))
+        .any(|spec| {
+            saw_spec = true;
+            if spec.arity >= 0 {
+                argc == spec.arity
+            } else {
+                argc >= -spec.arity
+            }
+        });
+    if !saw_spec {
+        return None;
+    }
+    if valid {
+        None
+    } else {
+        Some(RedisError::wrong_number_of_args(name.to_ascii_lowercase()))
+    }
+}
+
+fn is_rejected_command_error(err: &RedisError) -> bool {
+    matches!(
+        err,
+        RedisError::WrongNumberOfArgs(_) | RedisError::Syntax(_)
+    )
+}
+
+fn command_records_own_error_stats(name: &[u8]) -> bool {
+    ascii_eq_ignore_case(name, b"EVAL")
+        || ascii_eq_ignore_case(name, b"EVALSHA")
+        || ascii_eq_ignore_case(name, b"EVAL_RO")
+        || ascii_eq_ignore_case(name, b"EVALSHA_RO")
+        || ascii_eq_ignore_case(name, b"FCALL")
+        || ascii_eq_ignore_case(name, b"FCALL_RO")
+}
+
+fn record_dispatch_error_reply(ctx: &CommandContext<'_>, payload: &[u8]) {
+    if !ctx.client_ref().flag_lua() {
+        record_error_reply(payload);
+    }
+}
+
 fn lookup_runtime_command(name: &[u8]) -> Option<&'static RuntimeDispatchEntry> {
     if let Some(entry) = lookup_hot_runtime_command(name) {
         return Some(entry);
@@ -318,7 +364,10 @@ pub fn dispatch(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         None => return Err(RedisError::runtime(b"ERR empty command")),
     };
     let name = command_name.as_bytes();
-    if ctx.client_ref().is_replica() && !is_replica_allowed_command(name) {
+    if ctx.client_ref().is_replica()
+        && !ctx.client_ref().replication_apply
+        && !is_replica_allowed_command(name)
+    {
         return Ok(());
     }
     let resolved_name = resolve_command_name(name);
@@ -338,6 +387,12 @@ pub fn dispatch(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         if !crate::multi::is_tx_control_command(dispatch_name) {
             if let Some(runtime_entry) = lookup_runtime_command(dispatch_name) {
                 let metadata = runtime_entry.metadata;
+                if let Some(err) = command_arity_error(dispatch_name, ctx.arg_count()) {
+                    crate::multi::flag_transaction_dirty_exec(ctx.client_mut());
+                    record_command_stat(dispatch_name, 0, true, false);
+                    record_dispatch_error_reply(ctx, err.to_resp_payload().as_bytes());
+                    return Err(err);
+                }
                 if !metadata.no_auth {
                     let acl_categories =
                         acl_categories_for_context(ctx, dispatch_name, metadata.acl_categories);
@@ -348,12 +403,16 @@ pub fn dispatch(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
                         if close_unauthenticated_client_for_debug_reply_limit(ctx) {
                             return Ok(());
                         }
+                        record_command_stat(dispatch_name, 0, true, false);
+                        record_dispatch_error_reply(ctx, &noauth_reply);
                         ctx.client_mut().reply_buf.extend_from_slice(&noauth_reply);
                         return Ok(());
                     }
                 }
                 if let Some(reply) = enforce_maxmemory_gate(ctx, metadata.denyoom) {
                     crate::multi::flag_transaction_dirty_exec(ctx.client_mut());
+                    record_command_stat(dispatch_name, 0, true, false);
+                    record_dispatch_error_reply(ctx, &reply);
                     ctx.client_mut().reply_buf.extend_from_slice(&reply);
                     return Ok(());
                 }
@@ -361,6 +420,8 @@ pub fn dispatch(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
                     enforce_busy_script_gate(ctx, dispatch_name, metadata.allow_busy)
                 {
                     crate::multi::flag_transaction_dirty_exec(ctx.client_mut());
+                    record_command_stat(dispatch_name, 0, true, false);
+                    record_dispatch_error_reply(ctx, &reply);
                     ctx.client_mut().reply_buf.extend_from_slice(&reply);
                     return Ok(());
                 }
@@ -448,23 +509,37 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
         Some(name) => name,
         None => {
             if ctx.client_ref().authenticated_user.is_none() {
-                return Err(RedisError::runtime(b"NOAUTH Authentication required."));
+                let err = RedisError::runtime(b"NOAUTH Authentication required.");
+                record_dispatch_error_reply(ctx, err.to_resp_payload().as_bytes());
+                return Err(err);
             }
-            return Err(unknown_command_error(name));
+            let err = unknown_command_error(name);
+            record_dispatch_error_reply(ctx, err.to_resp_payload().as_bytes());
+            return Err(err);
         }
     };
     let runtime_entry = match lookup_runtime_command(&resolved_name) {
         Some(e) => e,
         None => {
             if ctx.client_ref().authenticated_user.is_none() {
-                return Err(RedisError::runtime(b"NOAUTH Authentication required."));
+                let err = RedisError::runtime(b"NOAUTH Authentication required.");
+                record_dispatch_error_reply(ctx, err.to_resp_payload().as_bytes());
+                return Err(err);
             }
-            return Err(unknown_command_error(name));
+            let err = unknown_command_error(name);
+            record_dispatch_error_reply(ctx, err.to_resp_payload().as_bytes());
+            return Err(err);
         }
     };
     let entry = runtime_entry.entry;
     let metadata = runtime_entry.metadata;
     let name = entry.name;
+
+    if let Some(err) = command_arity_error(name, ctx.arg_count()) {
+        record_command_stat(name, 0, true, false);
+        record_dispatch_error_reply(ctx, err.to_resp_payload().as_bytes());
+        return Err(err);
+    }
 
     if !metadata.no_auth {
         let acl_categories = acl_categories_for_context(ctx, name, metadata.acl_categories);
@@ -472,22 +547,30 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
             if close_unauthenticated_client_for_debug_reply_limit(ctx) {
                 return Ok(());
             }
+            record_command_stat(name, 0, true, false);
+            record_dispatch_error_reply(ctx, &noauth_reply);
             ctx.client_mut().reply_buf.extend_from_slice(&noauth_reply);
             return Ok(());
         }
     }
 
     if let Some(reply) = enforce_replica_readonly_gate(ctx, name, metadata.write) {
+        record_command_stat(name, 0, true, false);
+        record_dispatch_error_reply(ctx, &reply);
         ctx.client_mut().reply_buf.extend_from_slice(&reply);
         return Ok(());
     }
 
     if let Some(reply) = enforce_maxmemory_gate(ctx, metadata.denyoom) {
+        record_command_stat(name, 0, true, false);
+        record_dispatch_error_reply(ctx, &reply);
         ctx.client_mut().reply_buf.extend_from_slice(&reply);
         return Ok(());
     }
 
     if let Some(reply) = enforce_busy_script_gate(ctx, name, metadata.allow_busy) {
+        record_command_stat(name, 0, true, false);
+        record_dispatch_error_reply(ctx, &reply);
         if ctx.client_ref().flag_multi() && ascii_eq_ignore_case(name, b"EXEC") {
             crate::multi::reset_multi_state(ctx.client_mut());
             ctx.client_mut()
@@ -526,6 +609,8 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
             .reply_buf
             .get(pre_reply_len)
             .is_some_and(|b| *b == b'-');
+    let rejected_call = result.as_ref().err().is_some_and(is_rejected_command_error);
+    let failed_call = (result.is_err() && !rejected_call) || reply_is_error;
     let elapsed_micros = if command_blocked {
         None
     } else {
@@ -534,9 +619,16 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
     record_command_stat(
         name,
         elapsed_micros.unwrap_or(0),
-        false,
-        result.is_err() || reply_is_error,
+        rejected_call,
+        failed_call,
     );
+    if let Err(err) = result.as_ref() {
+        if !command_records_own_error_stats(name) {
+            record_dispatch_error_reply(ctx, err.to_resp_payload().as_bytes());
+        }
+    } else if reply_is_error {
+        record_dispatch_error_reply(ctx, &ctx.client_ref().reply_buf[pre_reply_len..]);
+    }
     let reply_bytes = ctx
         .client_ref()
         .reply_buf
@@ -562,16 +654,17 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
     } else {
         None
     };
-    let replication = if propagate_write && !ctx.client_ref().is_replica {
-        let repl = redis_core::replication::global_replication_state();
-        if repl.should_propagate_writes() {
-            Some(repl)
+    let replication =
+        if propagate_write && !ctx.client_ref().is_replica && !ctx.client_ref().replication_apply {
+            let repl = redis_core::replication::global_replication_state();
+            if repl.should_propagate_writes() || aof.is_some() {
+                Some(repl)
+            } else {
+                None
+            }
         } else {
             None
-        }
-    } else {
-        None
-    };
+        };
 
     let mut argv_snapshot: Option<Vec<RedisString>> = None;
     let successful_complete = result.is_ok() && !command_blocked;
@@ -627,16 +720,22 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
         }
     }
 
+    let mut propagated_offset = None;
+    if let Some(repl) = replication {
+        if let Some(argv) = argv_snapshot.as_ref() {
+            let offset = propagate_write_to_replicas(&repl, ctx.selected_db_id(), argv);
+            ctx.client_mut().last_write_repl_offset = offset;
+            propagated_offset = Some(offset);
+        }
+    }
     if let Some(aof) = aof {
         if let Some(argv) = argv_snapshot.as_ref() {
             if let Err(e) = aof.append_selected(ctx.selected_db_id(), argv) {
                 eprintln!("redis-server: AOF append failed: {}", e);
+            } else if let Some(offset) = propagated_offset {
+                aof.note_repl_offset(offset);
+                crate::replication::maybe_wake_wait_clients();
             }
-        }
-    }
-    if let Some(repl) = replication {
-        if let Some(argv) = argv_snapshot.as_ref() {
-            propagate_write_to_replicas(&repl, ctx.selected_db_id(), argv);
         }
     }
 
@@ -1207,11 +1306,7 @@ pub(crate) fn acl_key_requirements(
     out
 }
 
-fn acl_option_value(
-    ctx: &CommandContext<'_>,
-    start: usize,
-    option: &[u8],
-) -> Option<RedisString> {
+fn acl_option_value(ctx: &CommandContext<'_>, start: usize, option: &[u8]) -> Option<RedisString> {
     let mut idx = start;
     while idx + 1 < ctx.arg_count() {
         let arg = ctx.client_ref().arg(idx)?;
@@ -1677,7 +1772,7 @@ fn enforce_replica_readonly_gate(
     if !repl.is_replica() {
         return None;
     }
-    if ctx.client_ref().is_replica {
+    if ctx.client_ref().is_replica || ctx.client_ref().replication_apply {
         return None;
     }
     if ascii_eq_ignore_case(name, b"REPLICAOF")
@@ -1838,13 +1933,13 @@ fn propagate_write_to_replicas(
     repl: &redis_core::replication::ReplicationState,
     selected_db: u32,
     argv: &[RedisString],
-) {
+) -> i64 {
     let select_bytes = replication_select_bytes_if_needed(repl, selected_db);
     let argv_bytes = crate::aof::encode_resp_command(argv);
     if let Some(select_bytes) = select_bytes.as_ref() {
         repl.append_to_backlog(select_bytes);
     }
-    repl.append_to_backlog(&argv_bytes);
+    let offset = repl.append_to_backlog(&argv_bytes);
     let guard = match repl.replicas.lock() {
         Ok(g) => g,
         Err(p) => p.into_inner(),
@@ -1871,6 +1966,7 @@ fn propagate_write_to_replicas(
             }
         }
     }
+    offset
 }
 
 /// Feed a synthesized write command to the replication stream from outside a

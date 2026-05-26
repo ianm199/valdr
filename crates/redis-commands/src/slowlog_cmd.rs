@@ -20,7 +20,7 @@
 //! `record_slowlog_entry` defined here.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use redis_core::commandlog::{
@@ -43,6 +43,8 @@ static BLOCKED_SLOWLOG: OnceLock<Arc<Mutex<HashMap<u64, PendingBlockedSlowlogEnt
 static LATENCY_HISTOGRAMS: OnceLock<Arc<Mutex<HashMap<Vec<u8>, CommandLatencyStats>>>> =
     OnceLock::new();
 static LATENCY_MONITOR_THRESHOLD_MS: AtomicI64 = AtomicI64::new(0);
+static LATENCY_TRACKING_ENABLED: AtomicBool = AtomicBool::new(true);
+static LATENCY_TRACKING_INFO_PERCENTILES: OnceLock<Arc<Mutex<Vec<f64>>>> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, Default)]
 struct CommandLatencyStats {
@@ -93,6 +95,12 @@ fn global_large_reply_log() -> Arc<Mutex<CommandLog>> {
 fn global_latency_histograms() -> Arc<Mutex<HashMap<Vec<u8>, CommandLatencyStats>>> {
     LATENCY_HISTOGRAMS
         .get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+        .clone()
+}
+
+fn latency_tracking_info_percentiles() -> Arc<Mutex<Vec<f64>>> {
+    LATENCY_TRACKING_INFO_PERCENTILES
+        .get_or_init(|| Arc::new(Mutex::new(vec![50.0, 99.0, 99.9])))
         .clone()
 }
 
@@ -210,12 +218,9 @@ pub fn record_blocked_slowlog_entry(client_id: u64) {
         pending.remove(&client_id)
     };
     if let Some(entry) = pending_entry {
-        record_slowlog_entry(
-            &entry.argv,
-            elapsed_us(entry.start_micros),
-            client_id,
-            entry.client_name,
-        );
+        let elapsed = elapsed_us(entry.start_micros);
+        record_latency_histogram(&entry.argv, elapsed);
+        record_slowlog_entry(&entry.argv, elapsed, client_id, entry.client_name);
     }
 }
 
@@ -304,6 +309,9 @@ fn commandlog_stored_argv(argv: &[RedisString]) -> Vec<RedisString> {
 }
 
 pub fn record_latency_histogram(argv: &[RedisString], elapsed_usec: u64) {
+    if !latency_tracking_enabled() {
+        return;
+    }
     let Some(fullname) = latency_command_fullname(argv) else {
         return;
     };
@@ -324,6 +332,100 @@ pub fn reset_latency_histograms() {
         Err(p) => p.into_inner(),
     };
     histograms.clear();
+}
+
+pub fn set_latency_tracking_enabled(enabled: bool) {
+    LATENCY_TRACKING_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+pub fn latency_tracking_enabled() -> bool {
+    LATENCY_TRACKING_ENABLED.load(Ordering::Relaxed)
+}
+
+pub fn set_latency_tracking_info_percentiles(raw: &[u8]) -> Result<(), ()> {
+    let values = parse_latency_tracking_info_percentiles(raw)?;
+    let handle = latency_tracking_info_percentiles();
+    let mut percentiles = match handle.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    *percentiles = values;
+    Ok(())
+}
+
+pub fn validate_latency_tracking_info_percentiles(raw: &[u8]) -> bool {
+    parse_latency_tracking_info_percentiles(raw).is_ok()
+}
+
+pub fn latency_tracking_info_percentiles_config() -> String {
+    let handle = latency_tracking_info_percentiles();
+    let percentiles = match handle.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    percentiles
+        .iter()
+        .map(|p| render_percentile_name(*p))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+pub fn latency_percentile_snapshot() -> Vec<(Vec<u8>, String)> {
+    let handle = global_latency_histograms();
+    let histograms = match handle.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let percentiles_handle = latency_tracking_info_percentiles();
+    let percentiles = match percentiles_handle.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let mut rows: Vec<(Vec<u8>, String)> = histograms
+        .iter()
+        .filter(|(_, stats)| stats.calls > 0)
+        .map(|(name, stats)| {
+            let value = stats.max_usec.max(1);
+            let rendered = percentiles
+                .iter()
+                .map(|p| format!("p{}={}", render_percentile_name(*p), value))
+                .collect::<Vec<_>>()
+                .join(",");
+            (name.clone(), rendered)
+        })
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    rows
+}
+
+fn parse_latency_tracking_info_percentiles(raw: &[u8]) -> Result<Vec<f64>, ()> {
+    let text = std::str::from_utf8(raw).map_err(|_| ())?;
+    let mut values = Vec::new();
+    for part in text.split_ascii_whitespace() {
+        let value = part.parse::<f64>().map_err(|_| ())?;
+        if !value.is_finite() || !(0.0..=100.0).contains(&value) {
+            return Err(());
+        }
+        values.push(value);
+    }
+    if values.is_empty() {
+        return Err(());
+    }
+    Ok(values)
+}
+
+fn render_percentile_name(value: f64) -> String {
+    if (value.fract()).abs() < f64::EPSILON {
+        return format!("{}", value as u64);
+    }
+    let mut text = format!("{:.3}", value);
+    while text.ends_with('0') {
+        text.pop();
+    }
+    if text.ends_with('.') {
+        text.pop();
+    }
+    text
 }
 
 /// Update the latency-monitor threshold in milliseconds.

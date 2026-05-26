@@ -61,7 +61,8 @@ pub fn replicaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             ));
         }
     };
-    repl.become_replica_of(host.clone(), port);
+    unblock_waitaof_role_change();
+    let dialer_epoch = repl.become_replica_of(host.clone(), port);
     println!(
         "redis-server: Connecting to PRIMARY {}:{}",
         String::from_utf8_lossy(host.as_bytes()),
@@ -75,7 +76,7 @@ pub fn replicaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             String::from_utf8_lossy(e.to_resp_payload().as_bytes())
         );
     }
-    match crate::replica_dialer::spawn_replica_dialer(host.clone(), port) {
+    match crate::replica_dialer::spawn_replica_dialer(host.clone(), port, dialer_epoch) {
         Ok(()) => {
             eprintln!(
                 "redis-server: REPLICAOF {} {} — replica dialer spawned",
@@ -442,6 +443,17 @@ pub fn replconf_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
                 };
                 if let Some(conn) = guard.get(&client_id) {
                     conn.offset.store(offset, Ordering::Relaxed);
+                    let mut i = 3usize;
+                    while i + 1 < ctx.arg_count() {
+                        let option = ctx.arg_owned(i)?;
+                        if option.as_bytes().eq_ignore_ascii_case(b"FACK") {
+                            let aof_offset_arg = ctx.arg_owned(i + 1)?;
+                            if let Ok(aof_offset) = parse_i64(aof_offset_arg.as_bytes()) {
+                                conn.aof_offset.store(aof_offset, Ordering::Relaxed);
+                            }
+                        }
+                        i += 2;
+                    }
                     conn.last_ack_time_ms.store(now_ms, Ordering::Relaxed);
                 }
             }
@@ -485,10 +497,10 @@ pub fn wait_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     }
 
     let repl = global_replication_state();
-    let target_offset = repl.master_offset();
+    let target_offset = ctx.client_ref().last_write_repl_offset;
     let current_acked = count_acked_replicas(&repl, target_offset);
 
-    if ctx.client_ref().flag_deny_blocking() {
+    if ctx.client_ref().flag_deny_blocking() || ctx.client_ref().flag_lua() {
         return ctx.reply_integer(current_acked as i64);
     }
 
@@ -558,8 +570,8 @@ pub fn wait_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 
 /// `WAITAOF numlocal numreplicas timeout`
 ///
-/// Minimal non-replication-safe implementation:
-/// returns a two-element array immediately without blocking.
+/// Wait until the local AOF and/or attached replicas have fsynced the
+/// caller's last write offset.
 pub fn waitaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ctx.arg_count() != 4 {
         return Err(RedisError::wrong_number_of_args(b"waitaof"));
@@ -587,26 +599,49 @@ pub fn waitaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         return Err(RedisError::runtime(b"ERR timeout is out of range".to_vec()));
     }
 
+    let repl = global_replication_state();
+    if repl.is_replica() {
+        return Err(RedisError::runtime(
+            b"ERR WAITAOF cannot be used with replica instances. Please also note that writes to replicas are just local and are not propagated.".to_vec(),
+        ));
+    }
+
     if numlocal > 0 && !ctx.live_config().appendonly() {
         return Err(RedisError::runtime(
             b"ERR WAITAOF cannot be used when numlocal is set but appendonly is disabled.",
         ));
     }
 
-    let repl = global_replication_state();
-    let target_offset = repl.master_offset();
-    let ackreplicas = count_acked_replicas(&repl, target_offset) as i64;
-    let acklocal = 0;
+    let target_offset = ctx.client_ref().last_write_repl_offset;
+    let ackreplicas = count_aof_acked_replicas(&repl, target_offset) as i64;
+    let acklocal = local_aof_ack_count(target_offset) as i64;
 
     let needs_local = numlocal > acklocal;
     let needs_replica = numreplicas > ackreplicas;
-    if ctx.client_ref().flag_deny_blocking() {
+    if ctx.client_ref().flag_deny_blocking() || ctx.client_ref().flag_lua() {
+        if acklocal >= numlocal {
+            ctx.server().persistence.set_aof_rewrite_scheduled(false);
+        }
         ctx.reply_array_header(2)?;
         ctx.reply_integer(acklocal)?;
         return ctx.reply_integer(ackreplicas);
     }
-    if timeout_ms == 0 && (needs_local || needs_replica) {
-        if block_replica_waiter(ctx, target_offset, numreplicas.max(0) as usize, 2.0) {
+    if !needs_local {
+        ctx.server().persistence.set_aof_rewrite_scheduled(false);
+    }
+    if needs_local || needs_replica {
+        let timeout_secs = if timeout_ms == 0 {
+            0.0
+        } else {
+            timeout_ms as f64 / 1000.0
+        };
+        if block_waitaof_waiter(
+            ctx,
+            target_offset,
+            numreplicas.max(0) as usize,
+            numlocal.max(0) as usize,
+            timeout_secs,
+        ) {
             request_ack_from_replicas(&repl);
             return Ok(());
         }
@@ -663,6 +698,54 @@ fn block_replica_waiter(
     true
 }
 
+fn block_waitaof_waiter(
+    ctx: &mut CommandContext<'_>,
+    target_offset: i64,
+    numreplicas: usize,
+    numlocal: usize,
+    timeout_secs: f64,
+) -> bool {
+    let registry = match ctx.pubsub.as_ref() {
+        Some(r) => r.clone(),
+        None => return false,
+    };
+    let sender = {
+        let guard = match registry.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard.sender_for(ctx.client_ref().id())
+    };
+    let sender = match sender {
+        Some(s) => s,
+        None => return false,
+    };
+
+    let sentinel_key = RedisString::from_bytes(b"__wait__");
+    let waiter = BlockedWaiter {
+        client_id: ctx.client_ref().id(),
+        sender,
+        keys: vec![sentinel_key],
+        action: BlockedAction::WaitAof {
+            target_offset,
+            numreplicas,
+            numlocal,
+        },
+        deadline_ms: deadline_from_timeout_secs(timeout_secs),
+        resp_proto: ctx.client_ref().resp_proto,
+        username: ctx.client_ref().authenticated_user.clone(),
+    };
+    {
+        let mut idx = match blocked_keys_index().lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        idx.add(waiter);
+    }
+    ctx.client_mut().blocked_on_keys = true;
+    true
+}
+
 /// Return the count of replicas whose acknowledged offset is `>= target`.
 fn count_acked_replicas(repl: &ReplicationState, target: i64) -> usize {
     let guard = match repl.replicas.lock() {
@@ -671,14 +754,31 @@ fn count_acked_replicas(repl: &ReplicationState, target: i64) -> usize {
     };
     guard
         .values()
-        .filter(|r| r.offset.load(Ordering::Relaxed) >= target)
+        .filter(|r| r.state() == ReplicaState::Online && r.offset.load(Ordering::Relaxed) >= target)
         .count()
+}
+
+fn count_aof_acked_replicas(repl: &ReplicationState, target: i64) -> usize {
+    let guard = match repl.replicas.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    guard
+        .values()
+        .filter(|r| {
+            r.state() == ReplicaState::Online && r.aof_offset.load(Ordering::Relaxed) >= target
+        })
+        .count()
+}
+
+fn local_aof_ack_count(target: i64) -> usize {
+    usize::from(crate::aof::current_fsynced_repl_offset() >= target)
 }
 
 /// Walk all WAIT waiters and wake those whose required replica count is
 /// now satisfied. Called from the REPLCONF ACK handler after updating a
 /// replica's offset.
-fn maybe_wake_wait_clients() {
+pub fn maybe_wake_wait_clients() {
     let repl = global_replication_state();
     let acked_offsets: Vec<i64> = {
         let guard = match repl.replicas.lock() {
@@ -687,7 +787,19 @@ fn maybe_wake_wait_clients() {
         };
         guard
             .values()
+            .filter(|r| r.state() == ReplicaState::Online)
             .map(|r| r.offset.load(Ordering::Relaxed))
+            .collect()
+    };
+    let aof_acked_offsets: Vec<i64> = {
+        let guard = match repl.replicas.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard
+            .values()
+            .filter(|r| r.state() == ReplicaState::Online)
+            .map(|r| r.aof_offset.load(Ordering::Relaxed))
             .collect()
     };
     let mut idx = match blocked_keys_index().lock() {
@@ -697,6 +809,10 @@ fn maybe_wake_wait_clients() {
     let satisfied = idx.take_satisfied_wait_waiters(|target| {
         acked_offsets.iter().filter(|&&o| o >= target).count()
     });
+    let satisfied_aof = idx.take_satisfied_waitaof_waiters(
+        local_aof_ack_count,
+        |target| aof_acked_offsets.iter().filter(|&&o| o >= target).count(),
+    );
     drop(idx);
     for (waiter, count) in satisfied {
         let reply = format!(":{}\r\n", count).into_bytes();
@@ -706,6 +822,64 @@ fn maybe_wake_wait_clients() {
                 waiter.client_id
             );
         }
+    }
+    for (waiter, local, replicas) in satisfied_aof {
+        let reply = format!("*2\r\n:{}\r\n:{}\r\n", local, replicas).into_bytes();
+        if waiter.sender.send(reply).is_err() {
+            eprintln!(
+                "redis-server: WAITAOF wake send failed for client {}",
+                waiter.client_id
+            );
+        }
+    }
+}
+
+pub fn timeout_reply_for_wait_action(action: &BlockedAction) -> Option<Vec<u8>> {
+    match action {
+        BlockedAction::Wait { target_offset, .. } => {
+            let repl = global_replication_state();
+            let count = count_acked_replicas(&repl, *target_offset);
+            Some(format!(":{}\r\n", count).into_bytes())
+        }
+        BlockedAction::WaitAof { target_offset, .. } => {
+            let repl = global_replication_state();
+            let local = local_aof_ack_count(*target_offset);
+            let replicas = count_aof_acked_replicas(&repl, *target_offset);
+            Some(format!("*2\r\n:{}\r\n:{}\r\n", local, replicas).into_bytes())
+        }
+        _ => None,
+    }
+}
+
+pub fn unblock_waitaof_local_disabled() {
+    let waiters = {
+        let mut idx = match blocked_keys_index().lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        idx.take_waitaof_local_waiters()
+    };
+    for waiter in waiters {
+        let _ = waiter.sender.send(
+            b"-ERR WAITAOF cannot be used when numlocal is set but appendonly is disabled.\r\n"
+                .to_vec(),
+        );
+    }
+}
+
+pub fn unblock_waitaof_role_change() {
+    let waiters = {
+        let mut idx = match blocked_keys_index().lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        idx.take_all_waitaof_waiters()
+    };
+    for waiter in waiters {
+        let _ = waiter.sender.send(
+            b"-UNBLOCKED force unblock from blocking operation, instance state changed\r\n"
+                .to_vec(),
+        );
     }
 }
 
@@ -724,6 +898,16 @@ fn request_ack_from_replicas(repl: &ReplicationState) {
         Ok(g) => g,
         Err(p) => p.into_inner(),
     };
+    let has_online = guard.values().any(|conn| {
+        ReplicaState::from_u8(conn.state.load(Ordering::Acquire)) == ReplicaState::Online
+    });
+    if has_online {
+        // C Valkey sends GETACK through replicationFeedReplicas(-1), so the
+        // request itself is part of the replication stream and advances
+        // offsets. Keeping that invariant prevents an ACK for GETACK from
+        // jumping ahead of future writes.
+        repl.append_to_backlog(&getack);
+    }
     for conn in guard.values() {
         if ReplicaState::from_u8(conn.state.load(Ordering::Acquire)) != ReplicaState::Online {
             continue;

@@ -254,6 +254,21 @@ pub struct Client {
     /// will parse. The flag is cleared on disconnect via the standard
     /// cleanup path.
     pub is_replica: bool,
+    /// True for the short-lived pseudo-client that applies commands received
+    /// from an upstream primary's replication stream.
+    ///
+    /// This is deliberately separate from `is_replica`: `is_replica` means "a
+    /// downstream replica connection to this server" and is allowed to send only
+    /// REPLCONF/PING/QUIT. `replication_apply` means "execute the master's
+    /// write locally without re-propagating or tripping replica read-only."
+    pub replication_apply: bool,
+    /// Replication offset after this client's last write was fed to replicas.
+    ///
+    /// Upstream stores this as `client.woff` and WAIT/WAITAOF wait for that
+    /// client-specific offset, not the process-global latest replication
+    /// offset. That distinction matters when a client calls WAIT without
+    /// writing, while other clients continue to advance the stream.
+    pub last_write_repl_offset: i64,
     /// CLIENT CAPA REDIRECT visible capability bit.
     pub capa_redirect: bool,
     /// Optional client library name set via `CLIENT SETINFO lib-name`.
@@ -359,6 +374,8 @@ impl Client {
             authenticated_user,
             ever_authenticated,
             is_replica: false,
+            replication_apply: false,
+            last_write_repl_offset: 0,
             capa_redirect: false,
             lib_name: None,
             lib_ver: None,

@@ -173,8 +173,35 @@ pub fn record_error_reply(payload: &[u8]) {
         Ok(g) => g,
         Err(p) => p.into_inner(),
     };
+    if !stats.contains_key(&key) && stats.len() >= 128 && !is_builtin_error_code(&key) {
+        key = b"ERRORSTATS_OVERFLOW".to_vec();
+    }
     let count = stats.entry(key).or_default();
     *count = count.saturating_add(1);
+}
+
+fn is_builtin_error_code(code: &[u8]) -> bool {
+    matches!(
+        code,
+        b"ASK"
+            | b"BUSY"
+            | b"CLUSTERDOWN"
+            | b"CROSSSLOT"
+            | b"ERR"
+            | b"EXECABORT"
+            | b"LOADING"
+            | b"MOVED"
+            | b"NOAUTH"
+            | b"NOGROUP"
+            | b"NOSCRIPT"
+            | b"NOPERM"
+            | b"OOM"
+            | b"READONLY"
+            | b"TRYAGAIN"
+            | b"UNBLOCKED"
+            | b"WRONGPASS"
+            | b"WRONGTYPE"
+    )
 }
 
 pub fn error_stats_snapshot() -> Vec<ErrorStatSnapshot> {

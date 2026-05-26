@@ -476,6 +476,7 @@ fn deliver_to_waiter(db: &mut RedisDb, key: &RedisString, waiter: BlockedWaiter)
         BlockedAction::Stream { .. } => {}
         BlockedAction::StreamGroup { .. } => {}
         BlockedAction::Wait { .. } => {}
+        BlockedAction::WaitAof { .. } => {}
     }
 }
 
@@ -1436,6 +1437,12 @@ fn position_to_side(p: ListPosition) -> BlockedSide {
     }
 }
 
+fn reply_waitaof_zero(ctx: &mut CommandContext) -> RedisResult<()> {
+    ctx.reply_array_header(2)?;
+    ctx.reply_integer(0)?;
+    ctx.reply_integer(0)
+}
+
 /// Park the current client in the global blocked-keys index.
 ///
 /// Sets `client.blocked_on_keys` so the per-connection loop knows the empty
@@ -1457,6 +1464,7 @@ fn park_blocked_client(
             BlockedAction::Stream { .. } => ctx.reply_null_bulk(),
             BlockedAction::StreamGroup { .. } => ctx.reply_null_array(),
             BlockedAction::Wait { .. } => ctx.reply_integer(0),
+            BlockedAction::WaitAof { .. } => reply_waitaof_zero(ctx),
         };
     }
     let registry = match ctx.pubsub.as_ref() {
@@ -1469,6 +1477,7 @@ fn park_blocked_client(
                 BlockedAction::Stream { .. } => ctx.reply_null_bulk(),
                 BlockedAction::StreamGroup { .. } => ctx.reply_null_array(),
                 BlockedAction::Wait { .. } => ctx.reply_integer(0),
+                BlockedAction::WaitAof { .. } => reply_waitaof_zero(ctx),
             };
         }
     };
@@ -1489,6 +1498,7 @@ fn park_blocked_client(
                 BlockedAction::Stream { .. } => ctx.reply_null_bulk(),
                 BlockedAction::StreamGroup { .. } => ctx.reply_null_array(),
                 BlockedAction::Wait { .. } => ctx.reply_integer(0),
+                BlockedAction::WaitAof { .. } => reply_waitaof_zero(ctx),
             };
         }
     };

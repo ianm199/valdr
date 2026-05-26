@@ -15,7 +15,7 @@ use std::collections::{HashSet, VecDeque};
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener as StdTcpListener, TcpStream as StdTcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -569,6 +569,8 @@ pub struct RuntimeOwner {
     active_expire_cursor: usize,
     last_active_expire: Instant,
     events: VecDeque<RuntimeEvent>,
+    replica_apply_rx: Option<Receiver<redis_commands::replica_dialer::ReplicaApplyRequest>>,
+    replica_apply_db_index: u32,
 }
 
 impl RuntimeOwner {
@@ -595,6 +597,8 @@ impl RuntimeOwner {
             active_expire_cursor: 0,
             last_active_expire: Instant::now(),
             events: VecDeque::new(),
+            replica_apply_rx: None,
+            replica_apply_db_index: 0,
         }
     }
 
@@ -690,6 +694,7 @@ impl RuntimeOwner {
         server: Arc<redis_core::RedisServer>,
         tcp_port: u16,
         initial_dbs: Vec<RedisDb>,
+        replica_apply_rx: Receiver<redis_commands::replica_dialer::ReplicaApplyRequest>,
     ) {
         let _ = tcp_port;
         let mut listeners: Vec<MioTcpListener> = listeners
@@ -729,6 +734,7 @@ impl RuntimeOwner {
             .with_enabled(true)
             .with_database_count(initial_dbs.len() as u32);
         let mut owner = RuntimeOwner::with_databases(config, initial_dbs);
+        owner.replica_apply_rx = Some(replica_apply_rx);
         owner.poll_driver = PollDriverHandle::mio(1);
         eprintln!("redis-server: RuntimeOwner mio plain TCP loop enabled with owner-owned DBs");
 
@@ -736,6 +742,7 @@ impl RuntimeOwner {
             let mut progressed = false;
 
             progressed |= owner.active_expire_step();
+            progressed |= owner.drain_replica_apply_requests(&registry, &server);
             progressed |= owner.dispatch_scheduled_commands(poll.registry(), &registry, &server);
             progressed |= owner.install_pending_dynamic_listeners(&mut listeners, poll.registry());
 
@@ -763,6 +770,7 @@ impl RuntimeOwner {
             );
             progressed |= owner.install_pending_dynamic_listeners(&mut listeners, poll.registry());
             progressed |= owner.drain_foreign_payloads(poll.registry());
+            progressed |= owner.drain_replica_apply_requests(&registry, &server);
             progressed |= owner.dispatch_scheduled_commands(poll.registry(), &registry, &server);
             progressed |= owner.install_pending_dynamic_listeners(&mut listeners, poll.registry());
             owner.sweep_output_buffer_limits();
@@ -1129,6 +1137,63 @@ impl RuntimeOwner {
             self.ensure_writable_interest(poll_registry, slot_id);
         }
         progressed
+    }
+
+    fn drain_replica_apply_requests(
+        &mut self,
+        registry: &Arc<Mutex<PubSubRegistry>>,
+        server: &Arc<redis_core::RedisServer>,
+    ) -> bool {
+        let mut progressed = false;
+        loop {
+            let request = {
+                let rx = match self.replica_apply_rx.as_ref() {
+                    Some(rx) => rx,
+                    None => return progressed,
+                };
+                match rx.try_recv() {
+                    Ok(request) => request,
+                    Err(TryRecvError::Empty) => return progressed,
+                    Err(TryRecvError::Disconnected) => {
+                        self.replica_apply_rx = None;
+                        return progressed;
+                    }
+                }
+            };
+            let ok = self.apply_replica_command(request.argv, registry, server);
+            let _ = request.done.send(ok);
+            if ok {
+                redis_commands::aof::note_current_writer_repl_offset(request.offset_after);
+                redis_core::replication::global_replication_state()
+                    .master_repl_offset
+                    .store(request.offset_after, Ordering::SeqCst);
+                redis_commands::replication::maybe_wake_wait_clients();
+            }
+            progressed = true;
+        }
+    }
+
+    fn apply_replica_command(
+        &mut self,
+        argv: Vec<RedisString>,
+        registry: &Arc<Mutex<PubSubRegistry>>,
+        server: &Arc<redis_core::RedisServer>,
+    ) -> bool {
+        if argv.is_empty() {
+            return true;
+        }
+
+        let mut client = Client::new(0);
+        client.replication_apply = true;
+        client.suppress_monitor = true;
+        client.authenticated_user = Some(RedisString::from_bytes(b"default"));
+        client.db_index = self.replica_apply_db_index;
+        client.set_args(argv);
+
+        super::process_current_command_with_db_list(&mut client, &mut self.dbs, registry, server);
+        self.replica_apply_db_index = client.db_index;
+
+        !client.reply_buf.starts_with(b"-")
     }
 
     fn read_slot(&mut self, idx: usize, read_buf: &mut [u8; READ_BUFFER_SIZE]) -> bool {

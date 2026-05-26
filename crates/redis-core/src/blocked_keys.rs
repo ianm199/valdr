@@ -84,6 +84,11 @@ pub enum BlockedAction {
         target_offset: i64,
         numreplicas: usize,
     },
+    WaitAof {
+        target_offset: i64,
+        numreplicas: usize,
+        numlocal: usize,
+    },
 }
 
 impl BlockedAction {
@@ -105,6 +110,7 @@ impl BlockedAction {
             BlockedAction::Stream { .. } => b"$-1\r\n".to_vec(),
             BlockedAction::StreamGroup { .. } => b"*-1\r\n".to_vec(),
             BlockedAction::Wait { .. } => format!(":{}\r\n", acked_count).into_bytes(),
+            BlockedAction::WaitAof { .. } => format!("*2\r\n:0\r\n:{}\r\n", acked_count).into_bytes(),
         }
     }
 
@@ -121,6 +127,7 @@ impl BlockedAction {
             BlockedAction::Stream { .. } => b"$-1\r\n",
             BlockedAction::StreamGroup { .. } => b"*-1\r\n",
             BlockedAction::Wait { .. } => b":0\r\n",
+            BlockedAction::WaitAof { .. } => b"*2\r\n:0\r\n:0\r\n",
         }
     }
 
@@ -467,10 +474,88 @@ impl BlockedKeysIndex {
         out
     }
 
+    /// Drain every `WaitAof` waiter whose local and replica fsync
+    /// requirements are now satisfied.
+    pub fn take_satisfied_waitaof_waiters(
+        &mut self,
+        local_count_for: impl Fn(i64) -> usize,
+        aof_acked_count_for: impl Fn(i64) -> usize,
+    ) -> Vec<(BlockedWaiter, usize, usize)> {
+        let satisfied: Vec<(ClientId, usize, usize)> = self
+            .waiters
+            .iter()
+            .filter_map(|(cid, w)| match &w.action {
+                BlockedAction::WaitAof {
+                    target_offset,
+                    numreplicas,
+                    numlocal,
+                } => {
+                    let local = local_count_for(*target_offset);
+                    let replicas = aof_acked_count_for(*target_offset);
+                    if local >= *numlocal && replicas >= *numreplicas {
+                        Some((*cid, local, replicas))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            })
+            .collect();
+        let mut out = Vec::with_capacity(satisfied.len());
+        for (cid, local, replicas) in satisfied {
+            if let Some(w) = self.remove_wait_client(cid) {
+                out.push((w, local, replicas));
+            }
+        }
+        out
+    }
+
+    /// Drain WAITAOF waiters that require local AOF after appendonly was
+    /// disabled. Upstream unblocks these with an error rather than waiting
+    /// until their timeout.
+    pub fn take_waitaof_local_waiters(&mut self) -> Vec<BlockedWaiter> {
+        let cids: Vec<ClientId> = self
+            .waiters
+            .iter()
+            .filter_map(|(cid, w)| match &w.action {
+                BlockedAction::WaitAof { numlocal, .. } if *numlocal > 0 => Some(*cid),
+                _ => None,
+            })
+            .collect();
+        let mut out = Vec::with_capacity(cids.len());
+        for cid in cids {
+            if let Some(w) = self.remove_wait_client(cid) {
+                out.push(w);
+            }
+        }
+        out
+    }
+
+    pub fn take_all_waitaof_waiters(&mut self) -> Vec<BlockedWaiter> {
+        let cids: Vec<ClientId> = self
+            .waiters
+            .iter()
+            .filter_map(|(cid, w)| match &w.action {
+                BlockedAction::WaitAof { .. } => Some(*cid),
+                _ => None,
+            })
+            .collect();
+        let mut out = Vec::with_capacity(cids.len());
+        for cid in cids {
+            if let Some(w) = self.remove_wait_client(cid) {
+                out.push(w);
+            }
+        }
+        out
+    }
+
     /// Remove a `Wait` waiter by client id without consulting the keys index
     /// (Wait waiters are not keyed — they park under a sentinel key).
     fn remove_wait_client(&mut self, client_id: ClientId) -> Option<BlockedWaiter> {
         let waiter = self.waiters.remove(&client_id)?;
+        let _ = BLOCKED_KEYS_WAITERS.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            Some(current.saturating_sub(1))
+        });
         for key in &waiter.keys {
             if let Some(deque) = self.keys.get_mut(key) {
                 deque.retain(|cid| *cid != client_id);

@@ -974,6 +974,9 @@ fn main() {
         Arc::clone(&live_config),
     ));
 
+    let (replica_apply_tx, replica_apply_rx) =
+        mpsc::channel::<redis_commands::replica_dialer::ReplicaApplyRequest>();
+    redis_commands::replica_dialer::install_runtime_apply_sender(replica_apply_tx);
     redis_commands::replica_dialer::install_dialer_resources(
         Arc::clone(&server),
         args.port,
@@ -1117,6 +1120,7 @@ fn main() {
         server,
         args.port,
         owner_dbs,
+        replica_apply_rx,
     );
 }
 
@@ -1317,7 +1321,40 @@ fn dispatch_full_sync_transfer() {
             snapshot_offset
         );
     }
+    // A client can enter WAIT while one replica is still in full-sync and
+    // therefore before `request_ack_from_replicas` will address it. Once the
+    // RDB plus catch-up backlog are queued, prompt every online replica for an
+    // ACK. This mirrors Valkey's replicationFeedReplicas(-1, GETACK) behavior:
+    // GETACK is one stream item broadcast to all online replicas, so existing
+    // replicas do not fall behind the offset advanced for the newly-online one.
+    send_getack_to_online_replicas(&repl);
     let _ = std::fs::remove_file(&job.temp_path);
+}
+
+fn replconf_getack_frame() -> Vec<u8> {
+    b"*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n$1\r\n*\r\n".to_vec()
+}
+
+fn send_getack_to_online_replicas(repl: &redis_core::replication::ReplicationState) {
+    let client_ids: Vec<_> = {
+        let guard = match repl.replicas.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard
+            .values()
+            .filter(|conn| conn.state() == redis_core::replication::ReplicaState::Online)
+            .map(|conn| conn.client_id)
+            .collect()
+    };
+    if client_ids.is_empty() {
+        return;
+    }
+    let getack = replconf_getack_frame();
+    repl.append_to_backlog(&getack);
+    for client_id in client_ids {
+        let _ = repl.send_to_replica(client_id, getack.clone());
+    }
 }
 
 /// Background scanner that wakes blocked BLPOP/BRPOP/BLMOVE waiters once
@@ -1341,35 +1378,21 @@ fn spawn_blocked_timeout_thread(shutdown: Arc<AtomicBool>) {
                     idx.take_expired(current_time_ms())
                 };
                 for waiter in expired {
-                    let reply = match &waiter.action {
-                        redis_core::blocked_keys::BlockedAction::Wait { target_offset, .. } => {
-                            let repl = redis_core::replication::global_replication_state();
-                            let count = {
-                                let guard = match repl.replicas.lock() {
-                                    Ok(g) => g,
-                                    Err(p) => p.into_inner(),
-                                };
-                                guard
-                                    .values()
-                                    .filter(|r| {
-                                        r.offset.load(std::sync::atomic::Ordering::Relaxed)
-                                            >= *target_offset
-                                    })
-                                    .count()
-                            };
-                            waiter.action.timeout_reply_bytes_with_count(count)
-                        }
-                        other => {
+                    let reply = match redis_commands::replication::timeout_reply_for_wait_action(
+                        &waiter.action,
+                    ) {
+                        Some(reply) => reply,
+                        None => {
                             if waiter.resp_proto == 3 {
-                                match other {
+                                match &waiter.action {
                                     redis_core::blocked_keys::BlockedAction::ZSetPop { .. }
                                     | redis_core::blocked_keys::BlockedAction::Pop { .. } => {
                                         b"_\r\n".to_vec()
                                     }
-                                    _ => other.timeout_reply_bytes().to_vec(),
+                                    _ => waiter.action.timeout_reply_bytes().to_vec(),
                                 }
                             } else {
-                                other.timeout_reply_bytes().to_vec()
+                                waiter.action.timeout_reply_bytes().to_vec()
                             }
                         }
                     };

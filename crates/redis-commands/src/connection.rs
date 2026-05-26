@@ -20,11 +20,14 @@ use redis_core::acl::{
     set_acl_pubsub_default, sha256_hash, AclKeyPattern, AclLogEntry, AclUser, ACL_KEY_READ,
     ACL_KEY_READ_WRITE, ACL_KEY_WRITE, ALL_CATEGORY_NAMES,
 };
-use redis_core::blocked_keys::blocked_keys_index;
+use redis_core::blocked_keys::{blocked_keys_index, BlockedAction};
 use redis_core::client_info::client_info_registry;
 use redis_core::eviction::{try_evict_to_fit, EvictionOutcome};
 use redis_core::live_config::{LiveConfig, MaxmemoryPolicyCode};
-use redis_core::metrics::{record_acl_access_denied_auth, server_metrics};
+use redis_core::metrics::{
+    record_acl_access_denied_auth, record_blocked_command_rejected, record_error_reply,
+    server_metrics,
+};
 use redis_core::networking::{
     client_matches_ip_filter, validate_client_capa_filter, validate_client_flag_filter,
 };
@@ -455,6 +458,9 @@ fn default_config_pairs() -> &'static [(&'static str, &'static str)] {
         ("acl-pubsub-default", "resetchannels"),
         ("aclfile", ""),
         ("requirepass", ""),
+        ("primaryauth", ""),
+        ("masterauth", ""),
+        ("dual-channel-replication-enabled", "yes"),
         ("appendonly", "no"),
         ("appendfsync", "everysec"),
         ("appendfilename", "appendonly.aof"),
@@ -500,6 +506,8 @@ fn default_config_pairs() -> &'static [(&'static str, &'static str)] {
         ("stream-node-max-entries", "100"),
         ("activerehashing", "yes"),
         ("loglevel", "notice"),
+        ("latency-tracking", "yes"),
+        ("latency-tracking-info-percentiles", "50 99 99.9"),
         ("latency-monitor-threshold", "0"),
         ("slowlog-log-slower-than", "10000"),
         ("slowlog-max-len", "128"),
@@ -557,11 +565,22 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
         .requirepass()
         .map(|s| String::from_utf8_lossy(s.as_bytes()).into_owned())
         .unwrap_or_default();
+    let live_primaryauth = cfg
+        .primaryauth()
+        .map(|s| String::from_utf8_lossy(s.as_bytes()).into_owned())
+        .unwrap_or_default();
     let live_notify = redis_core::notify::keyspace_events_flags_to_string(
         cfg.notify_keyspace_events_flags() as i32,
     );
     let live_notify_str = String::from_utf8_lossy(live_notify.as_bytes()).into_owned();
     let live_slowlog_threshold = cfg.slowlog_threshold_micros().to_string();
+    let live_latency_tracking = if crate::slowlog_cmd::latency_tracking_enabled() {
+        "yes".to_string()
+    } else {
+        "no".to_string()
+    };
+    let live_latency_tracking_percentiles =
+        crate::slowlog_cmd::latency_tracking_info_percentiles_config();
     let live_latency_monitor_threshold =
         crate::slowlog_cmd::latency_monitor_threshold().to_string();
     let live_slowlog_max_len = cfg.slowlog_max_len().to_string();
@@ -660,8 +679,11 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
             "acl-pubsub-default" => Some(live_acl_pubsub_default.clone()),
             "aclfile" => Some(live_aclfile.clone()),
             "requirepass" => Some(live_requirepass.clone()),
+            "primaryauth" | "masterauth" => Some(live_primaryauth.clone()),
             "notify-keyspace-events" => Some(live_notify_str.clone()),
             "slowlog-log-slower-than" => Some(live_slowlog_threshold.clone()),
+            "latency-tracking" => Some(live_latency_tracking.clone()),
+            "latency-tracking-info-percentiles" => Some(live_latency_tracking_percentiles.clone()),
             "latency-monitor-threshold" => Some(live_latency_monitor_threshold.clone()),
             "slowlog-max-len" => Some(live_slowlog_max_len.clone()),
             "active-expire-effort" => Some(live_effort_str.clone()),
@@ -886,6 +908,9 @@ fn config_value_is_live_only(key: &[u8]) -> bool {
         b"acl-pubsub-default",
         b"aclfile",
         b"requirepass",
+        b"primaryauth",
+        b"masterauth",
+        b"dual-channel-replication-enabled",
         b"notify-keyspace-events",
         b"hash-max-listpack-entries",
         b"hash-max-ziplist-entries",
@@ -903,6 +928,8 @@ fn config_value_is_live_only(key: &[u8]) -> bool {
         b"hll-sparse-max-bytes",
         b"slowlog-log-slower-than",
         b"slowlog-max-len",
+        b"latency-tracking",
+        b"latency-tracking-info-percentiles",
         b"latency-monitor-threshold",
         b"active-expire-effort",
         b"hz",
@@ -983,6 +1010,18 @@ fn validate_config_set_pair(key: &[u8], value: &[u8]) -> RedisResult<()> {
             b"ERR CONFIG SET failed (possibly related to argument 'client-query-buffer-limit')",
         ));
     }
+    if ascii_eq_ignore_case(key, b"latency-tracking") && parse_yes_no(value).is_none() {
+        return Err(RedisError::runtime(
+            b"ERR CONFIG SET failed (possibly related to argument 'latency-tracking')",
+        ));
+    }
+    if ascii_eq_ignore_case(key, b"latency-tracking-info-percentiles")
+        && !crate::slowlog_cmd::validate_latency_tracking_info_percentiles(value)
+    {
+        return Err(RedisError::runtime(
+            b"ERR CONFIG SET failed (possibly related to argument 'latency-tracking-info-percentiles')",
+        ));
+    }
     if ascii_eq_ignore_case(key, b"slot-migration-max-failover-repl-bytes") {
         let Some(n) = parse_i64_strict(value) else {
             return Err(RedisError::runtime(
@@ -1049,6 +1088,13 @@ fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
                 apply_requirepass_to_acl(Some(value));
             }
         }
+        b"primaryauth" | b"masterauth" => {
+            if value.is_empty() {
+                cfg.set_primaryauth(None);
+            } else {
+                cfg.set_primaryauth(Some(RedisString::from_bytes(value)));
+            }
+        }
         b"notify-keyspace-events" => {
             if let Ok(flags) = keyspace_events_string_to_flags(value) {
                 cfg.set_notify_keyspace_events_flags(flags as u32);
@@ -1104,6 +1150,14 @@ fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
                 cfg.set_slowlog_threshold_micros(n);
                 crate::slowlog_cmd::set_slowlog_threshold(n);
             }
+        }
+        b"latency-tracking" => {
+            if let Some(enabled) = parse_yes_no(value) {
+                crate::slowlog_cmd::set_latency_tracking_enabled(enabled);
+            }
+        }
+        b"latency-tracking-info-percentiles" => {
+            let _ = crate::slowlog_cmd::set_latency_tracking_info_percentiles(value);
         }
         b"latency-monitor-threshold" => {
             if let Some(n) = parse_i64_strict(value) {
@@ -1238,6 +1292,7 @@ fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
                     let _ = w.flush();
                 }
                 crate::aof::remove_aof_writer();
+                crate::replication::unblock_waitaof_local_disabled();
             }
         }
         b"appendfilename" => {
@@ -1256,6 +1311,10 @@ fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
                 if let Some(w) = crate::aof::aof_writer() {
                     w.fsync_policy
                         .store(policy, std::sync::atomic::Ordering::Relaxed);
+                    if policy == crate::aof::FSYNC_ALWAYS {
+                        let _ = w.fsync_if_due();
+                        crate::replication::maybe_wake_wait_clients();
+                    }
                 }
             }
         }
@@ -1567,6 +1626,22 @@ fn apply_appendonly_config_set(
             crate::aof::install_aof_writer(std::sync::Arc::new(writer));
             ctx.server().persistence.set_aof_current_size(size);
             ctx.server().set_aof_state(redis_core::AofState::On);
+            if ctx.server().rdb_child_pid() != 0 {
+                ctx.server().persistence.set_aof_rewrite_scheduled(true);
+                let server = ctx.server_arc();
+                let _ = std::thread::Builder::new()
+                    .name("aof-scheduled-clear".to_string())
+                    .spawn(move || {
+                        for _ in 0..200 {
+                            if server.rdb_child_pid() == 0 {
+                                server.persistence.set_aof_rewrite_scheduled(false);
+                                return;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                        }
+                        server.persistence.set_aof_rewrite_scheduled(false);
+                    });
+            }
         }
         cfg.set_appendonly(true);
     } else {
@@ -1576,6 +1651,7 @@ fn apply_appendonly_config_set(
             }
             crate::aof::remove_aof_writer();
             ctx.server().set_aof_state(redis_core::AofState::Off);
+            crate::replication::unblock_waitaof_local_disabled();
         }
         cfg.set_appendonly(false);
     }
@@ -3607,6 +3683,10 @@ pub fn client_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             waiter.action.timeout_reply_bytes().to_vec()
         };
         let delivered = waiter.sender.send(reply).is_ok();
+        if delivered && error_mode {
+            record_error_reply(b"UNBLOCKED client unblocked via CLIENT UNBLOCK");
+            record_blocked_command_rejected(blocked_action_command_name(&waiter.action));
+        }
         return ctx.reply_integer(if delivered { 1 } else { 0 });
     }
     if ascii_eq_ignore_case(sub_bytes, b"HELP") {
@@ -6371,6 +6451,28 @@ fn yes_no(value: bool) -> &'static str {
         "yes"
     } else {
         "no"
+    }
+}
+
+fn parse_yes_no(value: &[u8]) -> Option<bool> {
+    if ascii_eq_ignore_case(value, b"yes") {
+        Some(true)
+    } else if ascii_eq_ignore_case(value, b"no") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn blocked_action_command_name(action: &BlockedAction) -> &'static [u8] {
+    match action {
+        BlockedAction::Pop { .. } => b"blpop",
+        BlockedAction::Move { .. } => b"blmove",
+        BlockedAction::ZSetPop { .. } => b"bzpopmin",
+        BlockedAction::StreamGroup { .. } => b"xreadgroup",
+        BlockedAction::Stream { .. } => b"xread",
+        BlockedAction::Wait { .. } => b"wait",
+        _ => b"waitaof",
     }
 }
 

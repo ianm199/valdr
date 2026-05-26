@@ -6,20 +6,20 @@
 //!  1. Connects to the master's TCP port.
 //!  2. Runs the PING / REPLCONF / PSYNC handshake.
 //!  3. Reads the `$<size>\r\n<rdb-bytes>` full-resync payload.
-//!  4. Writes the blob to a temp file and calls `rdb::load_into` to populate the DB.
+//!  4. Drains the full-resync RDB payload. RuntimeOwner-backed loading is a
+//!     separate follow-up; the current frontier starts from empty replicas.
 //!  5. Enters the command-apply loop: reads one RESP frame per iteration,
-//!     applies it locally (through a discarding `CommandContext`), and
-//!     responds to `REPLCONF GETACK *` with `REPLCONF ACK <offset>`.
-//!  6. Sends a periodic `REPLCONF ACK <offset>` every second so the master
-//!     can power WAIT and detect lagging replicas.
-//!  7. On any I/O error or EOF: sleeps one second and restarts from step 1.
-//!  8. If `ReplicationState::dialer_stop_flag` is set (by `REPLICAOF NO ONE`),
+//!     applies it through the RuntimeOwner-owned DB queue, and responds to
+//!     `REPLCONF GETACK *` with `REPLCONF ACK <offset>`.
+//!  6. On any I/O error or EOF: sleeps briefly and restarts from step 1.
+//!  7. If `ReplicationState::dialer_stop_flag` is set (by `REPLICAOF NO ONE`),
 //!     exits immediately.
 
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
@@ -35,6 +35,15 @@ use redis_types::RedisString;
 static GLOBAL_SERVER: OnceLock<Arc<RedisServer>> = OnceLock::new();
 static GLOBAL_OUR_PORT: OnceLock<u16> = OnceLock::new();
 static GLOBAL_RDB_DIR: OnceLock<String> = OnceLock::new();
+static RUNTIME_APPLY_TX: OnceLock<Sender<ReplicaApplyRequest>> = OnceLock::new();
+
+/// Command received from the primary replication stream that must be applied by
+/// the runtime owner loop, not by the dialer thread.
+pub struct ReplicaApplyRequest {
+    pub argv: Vec<RedisString>,
+    pub offset_after: i64,
+    pub done: Sender<bool>,
+}
 
 /// Register the shared resources the dialer thread needs.
 ///
@@ -46,13 +55,27 @@ pub fn install_dialer_resources(server: Arc<RedisServer>, our_port: u16, rdb_dir
     let _ = GLOBAL_RDB_DIR.set(rdb_dir);
 }
 
+/// Install the RuntimeOwner-owned DB apply queue used by the replica dialer.
+///
+/// The dialer owns the master TCP stream and parses replication frames, but it
+/// cannot mutate the live keyspace directly because RuntimeOwner owns the DB
+/// slice. Applying through this queue keeps replica writes on the same thread
+/// and ownership boundary as ordinary client writes.
+pub fn install_runtime_apply_sender(tx: Sender<ReplicaApplyRequest>) {
+    let _ = RUNTIME_APPLY_TX.set(tx);
+}
+
 /// Spawn a background dialer thread that implements the full replica state
 /// machine described in the module doc.
 ///
 /// The function returns immediately; the spawned thread runs until
 /// `ReplicationState::dialer_stop_flag` is set to `true`. Returns an error
 /// when the dialer resources have not been installed.
-pub fn spawn_replica_dialer(host: RedisString, port: u16) -> Result<(), &'static str> {
+pub fn spawn_replica_dialer(
+    host: RedisString,
+    port: u16,
+    dialer_epoch: u64,
+) -> Result<(), &'static str> {
     let _ = GLOBAL_SERVER
         .get()
         .ok_or("dialer resources not installed")?;
@@ -66,7 +89,7 @@ pub fn spawn_replica_dialer(host: RedisString, port: u16) -> Result<(), &'static
     let host_for_thread = host.clone();
     thread::Builder::new()
         .name("replica-dialer".to_string())
-        .spawn(move || handshake_sink_loop(host_for_thread, port, our_port))
+        .spawn(move || handshake_sink_loop(host_for_thread, port, our_port, dialer_epoch))
         .map(|_| ())
         .map_err(|_| "replica dialer thread spawn failed")
 }
@@ -74,12 +97,12 @@ pub fn spawn_replica_dialer(host: RedisString, port: u16) -> Result<(), &'static
 /// RuntimeOwner-compatible replica dialer.
 ///
 /// This performs the real TCP handshake so primaries observe an attached
-/// `flags=S` replica and stream bytes to it. It intentionally discards command
-/// application until replica writes can be routed into the owner-owned DB list.
-fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16) {
+/// `flags=S` replica and stream bytes to it. Streamed write commands are routed
+/// back into RuntimeOwner so they mutate the live owner-owned DB list.
+fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch: u64) {
     let repl = global_replication_state();
     loop {
-        if repl.dialer_stop_flag.load(Ordering::SeqCst) {
+        if !repl.dialer_epoch_is_current(dialer_epoch) {
             return;
         }
 
@@ -106,50 +129,94 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16) {
             }
         };
 
+        if !repl.dialer_epoch_is_current(dialer_epoch) {
+            return;
+        }
         if let Err(e) = read_fullresync_rdb(&stream) {
             eprintln!("redis-server: replica: RDB sink failed: {}", e);
             thread::sleep(Duration::from_millis(200));
             continue;
         }
 
+        if !repl.dialer_epoch_is_current(dialer_epoch) {
+            return;
+        }
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+        crate::aof::force_current_writer_fsynced_repl_offset(initial_offset);
         repl.master_repl_offset
             .store(initial_offset, Ordering::SeqCst);
         repl.repl_state
             .store(repl_state_code::REPLICA_ONLINE, Ordering::SeqCst);
 
-        let ack_stream = match stream.try_clone() {
-            Ok(s) => s,
-            Err(_) => stream,
-        };
-        run_replica_sink_loop(&ack_stream, &repl);
+        let periodic_ack_stream = stream.try_clone().ok();
+        if let Some(ack_stream) = periodic_ack_stream {
+            let repl_for_ack = Arc::clone(&repl);
+            let _ = thread::Builder::new()
+                .name("replica-ack".to_string())
+                .spawn(move || periodic_ack_loop(ack_stream, repl_for_ack, dialer_epoch));
+        }
+        run_replica_sink_loop(&stream, &repl, dialer_epoch);
+        if !repl.dialer_epoch_is_current(dialer_epoch) {
+            return;
+        }
         repl.repl_state
             .store(repl_state_code::REPLICA_CONNECTING, Ordering::SeqCst);
         thread::sleep(Duration::from_millis(200));
     }
 }
 
-fn run_replica_sink_loop(stream: &TcpStream, repl: &ReplicationState) {
+fn run_replica_sink_loop(stream: &TcpStream, repl: &ReplicationState, dialer_epoch: u64) {
     let mut read_buf = Vec::new();
     let mut tmp = [0u8; 8192];
     loop {
-        if repl.dialer_stop_flag.load(Ordering::SeqCst) {
+        if !repl.dialer_epoch_is_current(dialer_epoch) {
             return;
         }
         let n = match stream_read(stream, &mut tmp) {
             Ok(0) => return,
             Ok(n) => n,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue;
+            }
             Err(_) => return,
         };
+        if !repl.dialer_epoch_is_current(dialer_epoch) {
+            return;
+        }
         read_buf.extend_from_slice(&tmp[..n]);
         loop {
             match redis_protocol::parse_inline_or_multibulk(&read_buf) {
                 Ok(Some((argv, consumed))) => {
-                    repl.master_repl_offset
-                        .fetch_add(consumed as i64, Ordering::SeqCst);
+                    if !repl.dialer_epoch_is_current(dialer_epoch) {
+                        return;
+                    }
+                    let offset_after = repl
+                        .master_repl_offset
+                        .fetch_add(consumed as i64, Ordering::SeqCst)
+                        .saturating_add(consumed as i64);
                     read_buf.drain(..consumed);
                     if is_getack(&argv) {
-                        let offset = repl.master_repl_offset.load(Ordering::SeqCst);
-                        if stream_write(stream, &build_replconf_ack(offset)).is_err() {
+                        if stream_write(stream, &build_replconf_ack(offset_after)).is_err() {
+                            return;
+                        }
+                    } else {
+                        if !apply_command_via_runtime_owner(argv, offset_after) {
+                            return;
+                        }
+                        if !repl.dialer_epoch_is_current(dialer_epoch) {
+                            return;
+                        }
+                        // C Valkey replicas periodically ACK their processed
+                        // offset even when the primary did not send GETACK.
+                        // This eager ACK keeps script WAIT's non-blocking
+                        // path accurate without adding a second timer thread
+                        // to the RuntimeOwner-compatible dialer.
+                        if stream_write(stream, &build_replconf_ack(offset_after)).is_err() {
                             return;
                         }
                     }
@@ -172,6 +239,7 @@ fn dialer_loop(
     server: Arc<RedisServer>,
 ) {
     let repl = global_replication_state();
+    let dialer_epoch = repl.dialer_epoch.load(Ordering::SeqCst);
 
     loop {
         if repl.dialer_stop_flag.load(Ordering::SeqCst) {
@@ -246,7 +314,7 @@ fn dialer_loop(
         let _ = thread::Builder::new()
             .name("replica-ack".to_string())
             .spawn(move || {
-                periodic_ack_loop(ack_stream, repl_for_ack);
+                periodic_ack_loop(ack_stream, repl_for_ack, dialer_epoch);
             });
 
         run_command_apply_loop(&stream, &repl, &db, &server);
@@ -270,6 +338,29 @@ fn run_handshake(stream: &TcpStream, repl: &ReplicationState, our_port: u16) -> 
             io::ErrorKind::InvalidData,
             format!("expected +PONG, got: {:?}", String::from_utf8_lossy(&pong)),
         ));
+    }
+
+    if let Some(primaryauth) = GLOBAL_SERVER
+        .get()
+        .and_then(|server| server.live_config.primaryauth())
+    {
+        send_multibulk(stream, &[b"AUTH", primaryauth.as_bytes()])?;
+        let auth_reply = read_line(stream)?;
+        if !auth_reply.starts_with(b"+OK") {
+            let msg = format!(
+                "redis-server: Unable to AUTH to PRIMARY: {}",
+                String::from_utf8_lossy(&auth_reply)
+            );
+            eprintln!("{}", msg);
+            println!("{}", msg);
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "AUTH to primary failed: {}",
+                    String::from_utf8_lossy(&auth_reply)
+                ),
+            ));
+        }
     }
 
     let port_str = our_port.to_string();
@@ -428,8 +519,10 @@ fn run_command_apply_loop(
         loop {
             match redis_protocol::parse_inline_or_multibulk(&read_buf) {
                 Ok(Some((argv, consumed))) => {
-                    repl.master_repl_offset
-                        .fetch_add(consumed as i64, Ordering::SeqCst);
+                    let offset_after = repl
+                        .master_repl_offset
+                        .fetch_add(consumed as i64, Ordering::SeqCst)
+                        .saturating_add(consumed as i64);
                     read_buf.drain(..consumed);
 
                     if argv.is_empty() {
@@ -437,8 +530,7 @@ fn run_command_apply_loop(
                     }
 
                     if is_getack(&argv) {
-                        let offset = repl.master_repl_offset.load(Ordering::SeqCst);
-                        let ack_msg = build_replconf_ack(offset);
+                        let ack_msg = build_replconf_ack(offset_after);
                         if stream_write(stream, &ack_msg).is_err() {
                             return;
                         }
@@ -453,6 +545,27 @@ fn run_command_apply_loop(
     }
 }
 
+fn apply_command_via_runtime_owner(argv: Vec<RedisString>, offset_after: i64) -> bool {
+    let tx = match RUNTIME_APPLY_TX.get() {
+        Some(tx) => tx.clone(),
+        None => return false,
+    };
+    let (done_tx, done_rx) = mpsc::channel();
+    if tx
+        .send(ReplicaApplyRequest {
+            argv,
+            offset_after,
+            done: done_tx,
+        })
+        .is_err()
+    {
+        return false;
+    }
+    done_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap_or(false)
+}
+
 /// Returns true when the argv represents `REPLCONF GETACK *`.
 fn is_getack(argv: &[RedisString]) -> bool {
     argv.len() >= 2
@@ -463,8 +576,9 @@ fn is_getack(argv: &[RedisString]) -> bool {
 /// Apply a command received from the master to our local DB.
 ///
 /// Uses a discarding `CommandContext` (replies written into a `Client` whose
-/// `reply_buf` is never flushed to a socket). The `is_replica` flag on the
-/// client prevents re-propagation of the write to our own downstream replicas.
+/// `reply_buf` is never flushed to a socket). The `replication_apply` flag
+/// allows ordinary writes through the replica read-only gate while suppressing
+/// re-propagation to downstream replicas.
 fn apply_command_locally(
     argv: &[RedisString],
     db: &Arc<Mutex<RedisDb>>,
@@ -475,7 +589,7 @@ fn apply_command_locally(
     }
     let name = argv[0].clone();
     let mut client = Client::new(0);
-    client.is_replica = true;
+    client.replication_apply = true;
     client.authenticated_user = Some(RedisString::from_bytes(b"default"));
     client.set_args(argv.to_vec());
 
@@ -513,11 +627,11 @@ fn apply_command_locally(
 /// Periodically send `REPLCONF ACK <offset>` to the master every second.
 ///
 /// Exits when the stop flag is set or the write fails (master disconnected).
-fn periodic_ack_loop(mut stream: TcpStream, repl: Arc<ReplicationState>) {
+fn periodic_ack_loop(mut stream: TcpStream, repl: Arc<ReplicationState>, dialer_epoch: u64) {
     loop {
         thread::sleep(Duration::from_secs(1));
 
-        if repl.dialer_stop_flag.load(Ordering::SeqCst) {
+        if !repl.dialer_epoch_is_current(dialer_epoch) {
             return;
         }
         if repl.repl_state.load(Ordering::SeqCst) != repl_state_code::REPLICA_ONLINE {
@@ -535,7 +649,19 @@ fn periodic_ack_loop(mut stream: TcpStream, repl: Arc<ReplicationState>) {
 /// Build a `REPLCONF ACK <offset>` multibulk frame.
 fn build_replconf_ack(offset: i64) -> Vec<u8> {
     let offset_str = offset.to_string();
-    build_multibulk(&[b"REPLCONF", b"ACK", offset_str.as_bytes()])
+    let fack = crate::aof::current_fsynced_repl_offset();
+    if fack >= 0 {
+        let fack_str = fack.to_string();
+        build_multibulk(&[
+            b"REPLCONF",
+            b"ACK",
+            offset_str.as_bytes(),
+            b"FACK",
+            fack_str.as_bytes(),
+        ])
+    } else {
+        build_multibulk(&[b"REPLCONF", b"ACK", offset_str.as_bytes()])
+    }
 }
 
 /// Encode `parts` as a RESP multibulk array and write it to `stream`.

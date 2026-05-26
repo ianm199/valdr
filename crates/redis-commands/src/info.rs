@@ -144,6 +144,10 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         || sections
             .iter()
             .any(|s| ascii_eq_ignore_case(s.as_bytes(), b"errorstats"));
+    let want_latencystats = has_all
+        || sections
+            .iter()
+            .any(|s| ascii_eq_ignore_case(s.as_bytes(), b"latencystats"));
 
     let mut buf: Vec<u8> = Vec::with_capacity(2048);
 
@@ -468,6 +472,14 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         for stat in error_stats_snapshot() {
             let name = String::from_utf8_lossy(&stat.name);
             let _ = writeln!(buf, "errorstat_{}:count={}\r", name, stat.count);
+        }
+        let _ = writeln!(buf, "\r");
+    }
+    if want_latencystats {
+        let _ = writeln!(buf, "# Latencystats\r");
+        for (name, percentiles) in crate::slowlog_cmd::latency_percentile_snapshot() {
+            let name = String::from_utf8_lossy(&name);
+            let _ = writeln!(buf, "latency_percentiles_usec_{}:{}\r", name, percentiles);
         }
         let _ = writeln!(buf, "\r");
     }

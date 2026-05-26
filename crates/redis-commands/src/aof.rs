@@ -17,7 +17,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -183,6 +183,8 @@ pub struct AofWriter {
     selected_db: Mutex<Option<u32>>,
     pub pending_bytes: AtomicUsize,
     pub fsync_policy: AtomicU8,
+    pending_repl_offset: AtomicI64,
+    fsynced_repl_offset: AtomicI64,
 }
 
 impl AofWriter {
@@ -195,6 +197,8 @@ impl AofWriter {
             selected_db: Mutex::new(None),
             pending_bytes: AtomicUsize::new(0),
             fsync_policy: AtomicU8::new(fsync_policy),
+            pending_repl_offset: AtomicI64::new(-1),
+            fsynced_repl_offset: AtomicI64::new(0),
         })
     }
 
@@ -248,6 +252,10 @@ impl AofWriter {
                 guard.flush()?;
                 guard.get_ref().sync_data()?;
                 self.pending_bytes.store(0, Ordering::Relaxed);
+                let pending = self.pending_repl_offset.load(Ordering::Relaxed);
+                if pending >= 0 {
+                    self.fsynced_repl_offset.store(pending, Ordering::Release);
+                }
                 return Ok(());
             }
         }
@@ -269,7 +277,39 @@ impl AofWriter {
         guard.flush()?;
         guard.get_ref().sync_data()?;
         self.pending_bytes.store(0, Ordering::Relaxed);
+        let pending = self.pending_repl_offset.load(Ordering::Relaxed);
+        if pending >= 0 {
+            self.fsynced_repl_offset.store(pending, Ordering::Release);
+        }
         Ok(())
+    }
+
+    /// Record the replication offset covered by the most recent AOF append.
+    ///
+    /// Upstream Valkey tracks `server.fsynced_reploff` rather than raw file
+    /// byte offsets. WAITAOF waits on that replication offset, so the Rust AOF
+    /// writer remembers the highest replication offset whose command bytes
+    /// have been appended, then publishes it after a successful fsync.
+    pub fn note_repl_offset(&self, offset: i64) {
+        if offset < 0 {
+            return;
+        }
+        self.pending_repl_offset.store(offset, Ordering::Release);
+        if self.fsync_policy.load(Ordering::Relaxed) == FSYNC_ALWAYS {
+            self.fsynced_repl_offset.store(offset, Ordering::Release);
+        }
+    }
+
+    pub fn fsynced_repl_offset(&self) -> i64 {
+        self.fsynced_repl_offset.load(Ordering::Acquire)
+    }
+
+    pub fn force_fsynced_repl_offset(&self, offset: i64) {
+        if offset < 0 {
+            return;
+        }
+        self.pending_repl_offset.store(offset, Ordering::Release);
+        self.fsynced_repl_offset.store(offset, Ordering::Release);
     }
 
     /// Flush the buffer without fsyncing. Used during clean shutdown.
@@ -327,6 +367,24 @@ impl AofWriter {
     }
 }
 
+pub fn note_current_writer_repl_offset(offset: i64) {
+    if let Some(writer) = aof_writer() {
+        writer.note_repl_offset(offset);
+    }
+}
+
+pub fn current_fsynced_repl_offset() -> i64 {
+    aof_writer()
+        .map(|writer| writer.fsynced_repl_offset())
+        .unwrap_or(-1)
+}
+
+pub fn force_current_writer_fsynced_repl_offset(offset: i64) {
+    if let Some(writer) = aof_writer() {
+        writer.force_fsynced_repl_offset(offset);
+    }
+}
+
 /// Encode a command argv slice as a RESP multibulk array.
 pub fn encode_resp_command(argv: &[RedisString]) -> Vec<u8> {
     let mut out = Vec::with_capacity(64);
@@ -356,6 +414,8 @@ pub fn spawn_fsync_thread() {
                         if writer.fsync_policy.load(Ordering::Relaxed) == FSYNC_EVERYSEC {
                             if let Err(e) = writer.fsync_if_due() {
                                 eprintln!("redis-server: AOF fsync failed: {}", e);
+                            } else {
+                                crate::replication::maybe_wake_wait_clients();
                             }
                         }
                     }
