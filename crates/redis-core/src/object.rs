@@ -627,6 +627,15 @@ impl RedisObject {
         }
     }
 
+    pub fn new_string_from_redis_string(s: RedisString) -> Self {
+        let kind = if should_embed_string(s.len()) {
+            ObjectKind::String(StringEncoding::Embstr(s))
+        } else {
+            ObjectKind::String(StringEncoding::Raw(s))
+        };
+        Self::bare(kind)
+    }
+
     /// Create an INT-encoded string object from an `i64`.
     /// C: createObject(OBJ_STRING, NULL) + set encoding INT → object.c:414
     pub fn new_int_string(value: i64) -> Self {
@@ -643,6 +652,13 @@ impl RedisObject {
             return Self::new_int_string(value);
         }
         Self::new_string(bytes)
+    }
+
+    pub fn new_string_try_encoded_from_redis_string(s: RedisString) -> Self {
+        if let Some(value) = parse_canonical_decimal_i64(s.as_bytes()) {
+            return Self::new_int_string(value);
+        }
+        Self::new_string_from_redis_string(s)
     }
 
     /// Create an empty list object with the pragmatic Inline encoding.
@@ -1441,6 +1457,8 @@ const LISTPACK_NEG_FILL_LIMITS: [usize; 5] = [4096, 8192, 16384, 32768, 65536];
 ///
 /// C: `quicklist.c` `SIZE_SAFETY_LIMIT`.
 const LISTPACK_SIZE_SAFETY_LIMIT: usize = 8192;
+const LISTPACK_FIXED_OVERHEAD_BYTES: usize = 7;
+const LISTPACK_MIN_ENTRY_BYTES: usize = 2;
 
 /// Valkey default `hash-max-listpack-entries`. Hashes with more entries
 /// report `hashtable`.
@@ -1515,6 +1533,9 @@ fn listpack_growing_exceeds_limit(d: &VecDeque<RedisString>, values: &[RedisStri
 fn quicklist_fits_listpack_after_shrink(d: &VecDeque<RedisString>) -> bool {
     let t = get_encoding_thresholds();
     let (size_limit, count_limit) = listpack_node_limit(t.list_max_listpack_size);
+    if !quicklist_shrink_may_fit_listpack(d.len(), size_limit, count_limit) {
+        return false;
+    }
     let Some(encoded_len) = listpack_encoded_len(d) else {
         return false;
     };
@@ -1522,6 +1543,87 @@ fn quicklist_fits_listpack_after_shrink(d: &VecDeque<RedisString>) -> bool {
         encoded_len <= (size_limit / 2)
     } else {
         d.len() <= (count_limit / 2)
+    }
+}
+
+fn quicklist_shrink_may_fit_listpack(len: usize, size_limit: usize, count_limit: usize) -> bool {
+    if size_limit == usize::MAX {
+        return len <= count_limit / 2;
+    }
+    let half_limit = size_limit / 2;
+    let min_encoded_len =
+        LISTPACK_FIXED_OVERHEAD_BYTES.saturating_add(len.saturating_mul(LISTPACK_MIN_ENTRY_BYTES));
+    min_encoded_len <= half_limit
+}
+
+#[cfg(test)]
+mod list_encoding_tests {
+    use super::*;
+
+    #[test]
+    fn quicklist_demote_gate_rejects_large_default_lists_before_encoding_scan() {
+        let (size_limit, count_limit) = listpack_node_limit(-2);
+
+        assert!(!quicklist_shrink_may_fit_listpack(
+            10_000,
+            size_limit,
+            count_limit
+        ));
+
+        let first_len_that_cannot_fit = ((size_limit / 2)
+            .saturating_sub(LISTPACK_FIXED_OVERHEAD_BYTES)
+            / LISTPACK_MIN_ENTRY_BYTES)
+            + 1;
+        assert!(!quicklist_shrink_may_fit_listpack(
+            first_len_that_cannot_fit,
+            size_limit,
+            count_limit
+        ));
+        assert!(quicklist_shrink_may_fit_listpack(
+            first_len_that_cannot_fit - 1,
+            size_limit,
+            count_limit
+        ));
+    }
+
+    #[test]
+    fn quicklist_demote_gate_uses_count_half_limit_for_positive_fill() {
+        let (size_limit, count_limit) = listpack_node_limit(128);
+
+        assert!(quicklist_shrink_may_fit_listpack(
+            64,
+            size_limit,
+            count_limit
+        ));
+        assert!(!quicklist_shrink_may_fit_listpack(
+            65,
+            size_limit,
+            count_limit
+        ));
+    }
+
+    #[test]
+    fn quicklist_demote_after_shrink_preserves_large_quicklist() {
+        let mut deque = VecDeque::with_capacity(10_000);
+        for _ in 0..10_000 {
+            deque.push_back(RedisString::from_static(b"x"));
+        }
+        let mut obj = RedisObject::new_quicklist_from_vec(deque);
+
+        obj.list_try_demote_after_shrink();
+
+        assert_eq!(obj.encoding_name(), "quicklist");
+    }
+
+    #[test]
+    fn quicklist_demote_after_shrink_still_demotes_small_quicklist() {
+        let mut deque = VecDeque::new();
+        deque.push_back(RedisString::from_static(b"x"));
+        let mut obj = RedisObject::new_quicklist_from_vec(deque);
+
+        obj.list_try_demote_after_shrink();
+
+        assert_eq!(obj.encoding_name(), "listpack");
     }
 }
 
@@ -1697,6 +1799,9 @@ fn parse_canonical_decimal_i64(bytes: &[u8]) -> Option<i64> {
     if bytes.is_empty() {
         return None;
     }
+    if !matches!(bytes[0], b'-' | b'0'..=b'9') {
+        return None;
+    }
     let s = core::str::from_utf8(bytes).ok()?;
     let value = s.parse::<i64>().ok()?;
     if value.to_string().as_bytes() == bytes {
@@ -1786,11 +1891,7 @@ pub fn create_string_object(bytes: &[u8]) -> RedisObject {
 /// Create a string object from an existing `RedisString`.
 /// C: createStringObjectFromSds(s) → object.c:252
 pub fn create_string_object_from_sds(s: RedisString) -> RedisObject {
-    if should_embed_string(s.len()) {
-        RedisObject::new_embstr(s.as_bytes())
-    } else {
-        RedisObject::new_raw_string(s.as_bytes())
-    }
+    RedisObject::new_string_from_redis_string(s)
 }
 
 /// Create a string object from a `long long`, with encoding control flags.

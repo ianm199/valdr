@@ -23,6 +23,7 @@ use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
@@ -111,6 +112,38 @@ struct RuntimeFunctionRegistration {
     no_writes: bool,
     allow_oom: bool,
     allow_stale: bool,
+}
+
+#[derive(Clone, Copy)]
+struct ActiveFunctionCall {
+    ctx: *mut CommandContext<'static>,
+    read_only: bool,
+    stale_replica_blocked: bool,
+    function_allow_stale: bool,
+    script_dirty: *const Cell<bool>,
+    script_error_already_recorded: *const Cell<bool>,
+}
+
+struct ActiveFunctionCallGuard;
+
+impl Drop for ActiveFunctionCallGuard {
+    fn drop(&mut self) {
+        ACTIVE_FUNCTION_CALL.with(|slot| {
+            *slot.borrow_mut() = None;
+        });
+    }
+}
+
+struct CachedFunctionRuntime {
+    library_name: Vec<u8>,
+    library_code: Vec<u8>,
+    lua: Lua,
+    registrations: Vec<RuntimeFunctionRegistration>,
+}
+
+thread_local! {
+    static ACTIVE_FUNCTION_CALL: RefCell<Option<ActiveFunctionCall>> = const { RefCell::new(None) };
+    static CACHED_FUNCTION_RUNTIME: RefCell<Option<CachedFunctionRuntime>> = const { RefCell::new(None) };
 }
 
 /// Parser-callback adapter that accumulates one RESP frame into a
@@ -856,13 +889,13 @@ fn install_keys_argv(lua: &Lua, keys: &[RedisString], argv: &[RedisString]) -> m
     for (i, k) in keys.iter().enumerate() {
         keys_t.raw_set(i as i64 + 1, lua.create_string(k.as_bytes())?)?;
     }
-    lua.globals().set("KEYS", keys_t)?;
+    lua.globals().raw_set("KEYS", keys_t)?;
 
     let argv_t = lua.create_table()?;
     for (i, a) in argv.iter().enumerate() {
         argv_t.raw_set(i as i64 + 1, lua.create_string(a.as_bytes())?)?;
     }
-    lua.globals().set("ARGV", argv_t)?;
+    lua.globals().raw_set("ARGV", argv_t)?;
     Ok(())
 }
 
@@ -2329,7 +2362,12 @@ fn busy_script_state() -> &'static Mutex<Option<BusyScriptState>> {
     STATE.get_or_init(|| Mutex::new(None))
 }
 
+static BUSY_SCRIPT_ACTIVE: AtomicBool = AtomicBool::new(false);
+
 pub(crate) fn is_script_busy() -> bool {
+    if !BUSY_SCRIPT_ACTIVE.load(AtomicOrdering::Acquire) {
+        return false;
+    }
     let guard = match busy_script_state().lock() {
         Ok(g) => g,
         Err(p) => p.into_inner(),
@@ -2338,6 +2376,9 @@ pub(crate) fn is_script_busy() -> bool {
 }
 
 pub(crate) fn busy_script_owner_is(client_id: u64) -> bool {
+    if !BUSY_SCRIPT_ACTIVE.load(AtomicOrdering::Acquire) {
+        return false;
+    }
     let guard = match busy_script_state().lock() {
         Ok(g) => g,
         Err(p) => p.into_inner(),
@@ -2372,6 +2413,7 @@ fn set_busy_script(state: BusyScriptState) {
         Err(p) => p.into_inner(),
     };
     *guard = Some(state);
+    BUSY_SCRIPT_ACTIVE.store(true, AtomicOrdering::Release);
 }
 
 fn clear_busy_script() {
@@ -2380,6 +2422,7 @@ fn clear_busy_script() {
         Err(p) => p.into_inner(),
     };
     *guard = None;
+    BUSY_SCRIPT_ACTIVE.store(false, AtomicOrdering::Release);
 }
 
 fn current_command_argv(ctx: &CommandContext<'_>) -> Vec<Vec<u8>> {
@@ -2388,6 +2431,61 @@ fn current_command_argv(ctx: &CommandContext<'_>) -> Vec<Vec<u8>> {
         .iter()
         .map(|arg| arg.as_bytes().to_vec())
         .collect()
+}
+
+fn function_call_active() -> bool {
+    ACTIVE_FUNCTION_CALL.with(|slot| slot.borrow().is_some())
+}
+
+fn enter_active_function_call(
+    ctx: &mut CommandContext<'_>,
+    read_only: bool,
+    stale_replica_blocked: bool,
+    function_allow_stale: bool,
+    script_dirty: &Cell<bool>,
+    script_error_already_recorded: &Cell<bool>,
+) -> ActiveFunctionCallGuard {
+    ACTIVE_FUNCTION_CALL.with(|slot| {
+        *slot.borrow_mut() = Some(ActiveFunctionCall {
+            ctx: ctx as *mut CommandContext<'_> as *mut CommandContext<'static>,
+            read_only,
+            stale_replica_blocked,
+            function_allow_stale,
+            script_dirty: script_dirty as *const Cell<bool>,
+            script_error_already_recorded: script_error_already_recorded as *const Cell<bool>,
+        });
+    });
+    ActiveFunctionCallGuard
+}
+
+fn active_function_call() -> mlua::Result<ActiveFunctionCall> {
+    ACTIVE_FUNCTION_CALL.with(|slot| {
+        slot.borrow().ok_or_else(|| {
+            LuaError::RuntimeError("FUNCTION runtime called outside active FCALL".to_string())
+        })
+    })
+}
+
+fn active_function_dirty(active: ActiveFunctionCall) -> &'static Cell<bool> {
+    // The pointer is installed only for the duration of `CachedFunctionRuntime::call`
+    // and cleared by `ActiveFunctionCallGuard` before the stack frame exits.
+    unsafe { &*active.script_dirty }
+}
+
+fn active_function_error_recorded(active: ActiveFunctionCall) -> &'static Cell<bool> {
+    // See `active_function_dirty`; both cells live in the guarded call frame.
+    unsafe { &*active.script_error_already_recorded }
+}
+
+fn with_active_function_context<R>(
+    f: impl FnOnce(&mut CommandContext<'static>, ActiveFunctionCall) -> mlua::Result<R>,
+) -> mlua::Result<R> {
+    let active = active_function_call()?;
+    // The cached Lua callbacks are process-static, but the command context is
+    // per-call. The guard above ensures this raw pointer is valid only while
+    // the callback is executing on the same thread.
+    let ctx = unsafe { &mut *active.ctx };
+    f(ctx, active)
 }
 
 fn function_libraries() -> &'static Mutex<HashMap<Vec<u8>, LoadedFunctionLibrary>> {
@@ -3461,6 +3559,412 @@ fn is_known_function_flag(flag: &[u8]) -> bool {
         || ascii_eq_ci(flag, b"allow-cross-slot-keys")
 }
 
+fn cached_function_call(lua_inner: &Lua, args: MultiValue) -> mlua::Result<LuaValue> {
+    let arg_bytes = collect_call_args(args)?;
+    if script_command_not_allowed(&arg_bytes) {
+        return Err(LuaError::RuntimeError(
+            "This Redis command is not allowed from script".to_string(),
+        ));
+    }
+    let active = active_function_call()?;
+    if active.stale_replica_blocked
+        && active.function_allow_stale
+        && !stale_replica_lua_call_allowed(&arg_bytes)
+    {
+        return Err(stale_replica_lua_call_error());
+    }
+    if active.read_only && call_is_write_command(&arg_bytes) {
+        record_script_rejected_command(&arg_bytes, READ_ONLY_SCRIPT_WRITE_ERROR_PAYLOAD);
+        active_function_error_recorded(active).set(true);
+        return Err(LuaError::RuntimeError(
+            READ_ONLY_SCRIPT_WRITE_ERROR_LUA.to_string(),
+        ));
+    }
+
+    with_active_function_context(|ctx, active| {
+        if call_is_write_command(&arg_bytes) && !good_replicas_status(&*ctx) {
+            record_script_rejected_command(&arg_bytes, NOREPLICAS_ERROR.as_bytes());
+            active_function_error_recorded(active).set(true);
+            return Err(noreplicas_lua_error());
+        }
+        match run_inner_command(ctx, &arg_bytes, Some(active_function_dirty(active))) {
+            Ok(reply) => {
+                if let ReplyValue::Error(msg) = &reply {
+                    active_function_error_recorded(active).set(true);
+                    return Err(LuaError::RuntimeError(
+                        String::from_utf8_lossy(&lua_script_command_reply_error_payload(msg))
+                            .into_owned(),
+                    ));
+                }
+                reply_to_lua(lua_inner, &reply, script_resp_view(lua_inner))
+            }
+            Err(e) => {
+                active_function_error_recorded(active).set(true);
+                Err(LuaError::RuntimeError(
+                    String::from_utf8_lossy(&lua_script_command_error_payload(&e)).into_owned(),
+                ))
+            }
+        }
+    })
+}
+
+fn cached_function_pcall(lua_inner: &Lua, args: MultiValue) -> mlua::Result<LuaValue> {
+    let arg_bytes = collect_call_args(args)?;
+    if script_command_not_allowed(&arg_bytes) {
+        let t = lua_inner.create_table()?;
+        t.raw_set(
+            "err",
+            lua_inner.create_string("This Redis command is not allowed from script")?,
+        )?;
+        return Ok(LuaValue::Table(t));
+    }
+    let active = active_function_call()?;
+    if active.stale_replica_blocked
+        && active.function_allow_stale
+        && !stale_replica_lua_call_allowed(&arg_bytes)
+    {
+        let t = lua_inner.create_table()?;
+        t.raw_set(
+            "err",
+            lua_inner.create_string("Can not execute the command on a stale replica")?,
+        )?;
+        return Ok(LuaValue::Table(t));
+    }
+    if active.read_only && call_is_write_command(&arg_bytes) {
+        record_script_rejected_command(&arg_bytes, READ_ONLY_SCRIPT_WRITE_ERROR_PAYLOAD);
+        let t = lua_inner.create_table()?;
+        t.raw_set(
+            "err",
+            lua_inner.create_string(READ_ONLY_SCRIPT_WRITE_ERROR_RESP)?,
+        )?;
+        t.raw_set(LUA_ERROR_ALREADY_RECORDED_FIELD, true)?;
+        return Ok(LuaValue::Table(t));
+    }
+
+    with_active_function_context(|ctx, active| {
+        if call_is_write_command(&arg_bytes) && !good_replicas_status(&*ctx) {
+            record_script_rejected_command(&arg_bytes, NOREPLICAS_ERROR.as_bytes());
+            return noreplicas_lua_table(lua_inner);
+        }
+        match run_inner_command(ctx, &arg_bytes, Some(active_function_dirty(active))) {
+            Ok(reply) => reply_to_lua(lua_inner, &reply, script_resp_view(lua_inner)),
+            Err(e) => {
+                let payload = lua_script_command_error_payload(&e);
+                let msg = String::from_utf8_lossy(&payload).into_owned();
+                let t = lua_inner.create_table()?;
+                t.raw_set("err", lua_inner.create_string(&msg)?)?;
+                t.raw_set(LUA_ERROR_ALREADY_RECORDED_FIELD, true)?;
+                Ok(LuaValue::Table(t))
+            }
+        }
+    })
+}
+
+impl CachedFunctionRuntime {
+    fn matches_library(&self, library: &LoadedFunctionLibrary) -> bool {
+        self.library_name == library.name && self.library_code == library.code
+    }
+
+    fn call(
+        &mut self,
+        ctx: &mut CommandContext<'_>,
+        definition: &FunctionDefinition,
+        keys: &[RedisString],
+        argv: &[RedisString],
+        read_only: bool,
+        stale_replica_blocked: bool,
+        function_allow_stale: bool,
+    ) -> RedisResult<(Result<LuaValue, LuaError>, bool)> {
+        let registration = self
+            .registrations
+            .iter()
+            .find(|registered| ascii_eq_ci(&registered.name, &definition.name))
+            .ok_or_else(|| RedisError::runtime(b"ERR Function not found"))?;
+        if registration.no_writes != definition.no_writes {
+            return Err(RedisError::runtime(
+                b"ERR Function flags changed while loading library",
+            ));
+        }
+        if registration.allow_oom != definition.allow_oom {
+            return Err(RedisError::runtime(
+                b"ERR Function flags changed while loading library",
+            ));
+        }
+        if registration.allow_stale != definition.allow_stale {
+            return Err(RedisError::runtime(
+                b"ERR Function flags changed while loading library",
+            ));
+        }
+
+        install_keys_argv(&self.lua, keys, argv)
+            .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
+        let keys_table = redis_strings_to_lua_table(&self.lua, keys)
+            .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
+        let argv_table = redis_strings_to_lua_table(&self.lua, argv)
+            .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
+        let callback: LuaFunction =
+            self.lua
+                .registry_value(&registration.callback)
+                .map_err(|e| {
+                    RedisError::runtime(format!("ERR Error running function: {}", e).into_bytes())
+                })?;
+
+        let script_dirty = Cell::new(false);
+        let script_error_already_recorded = Cell::new(false);
+        let result = {
+            let _guard = enter_active_function_call(
+                ctx,
+                read_only,
+                stale_replica_blocked,
+                function_allow_stale,
+                &script_dirty,
+                &script_error_already_recorded,
+            );
+            callback.call::<LuaValue>((keys_table, argv_table))
+        };
+
+        Ok((result, script_error_already_recorded.get()))
+    }
+}
+
+fn compile_cached_function_runtime(
+    library: &LoadedFunctionLibrary,
+) -> RedisResult<CachedFunctionRuntime> {
+    let (_, library_body) = parse_function_library_header(&library.code)?;
+    let lua = Lua::new();
+    let builtin_getmetatable: LuaValue = lua
+        .globals()
+        .raw_get("getmetatable")
+        .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
+    install_script_error_wrapper(&lua)
+        .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
+    install_sandbox(&lua)
+        .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
+    install_cjson(&lua)
+        .map_err(|e| RedisError::runtime(format!("ERR Lua cjson install: {}", e).into_bytes()))?;
+    install_cmsgpack(&lua).map_err(|e| {
+        RedisError::runtime(format!("ERR Lua cmsgpack install: {}", e).into_bytes())
+    })?;
+    install_bit(&lua)
+        .map_err(|e| RedisError::runtime(format!("ERR Lua bit install: {}", e).into_bytes()))?;
+    lua.globals()
+        .raw_set(
+            "loadstring",
+            create_disabled_loadstring(&lua)
+                .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?,
+        )
+        .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
+    lua.globals()
+        .raw_set("getmetatable", builtin_getmetatable)
+        .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
+
+    let redis_tbl = lua
+        .create_table()
+        .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
+    install_redis_api_constants(&redis_tbl)
+        .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
+    redis_tbl
+        .raw_set(
+            "__raw_call",
+            lua.create_function_mut(cached_function_call)
+                .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?,
+        )
+        .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
+    redis_tbl
+        .raw_set(
+            "call",
+            lua.create_function_mut(cached_function_call)
+                .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?,
+        )
+        .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
+    redis_tbl
+        .raw_set(
+            "pcall",
+            lua.create_function_mut(cached_function_pcall)
+                .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?,
+        )
+        .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
+    redis_tbl
+        .raw_set(
+            "error_reply",
+            lua.create_function(|lua_inner, msg: mlua::String| -> mlua::Result<LuaTable> {
+                let t = lua_inner.create_table()?;
+                t.raw_set("err", msg)?;
+                Ok(t)
+            })
+            .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?,
+        )
+        .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
+    redis_tbl
+        .raw_set(
+            "status_reply",
+            lua.create_function(|lua_inner, msg: mlua::String| -> mlua::Result<LuaTable> {
+                let t = lua_inner.create_table()?;
+                t.raw_set("ok", msg)?;
+                Ok(t)
+            })
+            .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?,
+        )
+        .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
+    redis_tbl
+        .raw_set(
+            "sha1hex",
+            create_sha1hex_function(&lua)
+                .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?,
+        )
+        .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
+    redis_tbl
+        .raw_set(
+            "replicate_commands",
+            lua.create_function(|_lua, _: MultiValue| -> mlua::Result<bool> { Ok(true) })
+                .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?,
+        )
+        .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
+    redis_tbl
+        .raw_set(
+            "set_repl",
+            create_set_repl_function(&lua)
+                .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?,
+        )
+        .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
+    redis_tbl
+        .raw_set(
+            "acl_check_cmd",
+            lua.create_function_mut(|_lua_inner, args: MultiValue| -> mlua::Result<bool> {
+                let arg_bytes = collect_call_args(args)?;
+                with_active_function_context(|ctx, _| acl_check_cmd_allowed(&*ctx, &arg_bytes))
+            })
+            .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?,
+        )
+        .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
+    redis_tbl
+        .raw_set(
+            "setresp",
+            lua.create_function(|lua_inner, n: i64| -> mlua::Result<()> {
+                if n != 2 && n != 3 {
+                    return Err(LuaError::RuntimeError(
+                        "RESP version must be 2 or 3".to_string(),
+                    ));
+                }
+                lua_inner.set_named_registry_value("__redis_resp_view", n)?;
+                Ok(())
+            })
+            .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?,
+        )
+        .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
+
+    let registrations: Rc<RefCell<Vec<RuntimeFunctionRegistration>>> =
+        Rc::new(RefCell::new(Vec::new()));
+    let load_phase = Rc::new(Cell::new(true));
+    let register_fn = {
+        let registrations = Rc::clone(&registrations);
+        let load_phase = Rc::clone(&load_phase);
+        lua.create_function_mut(move |lua_inner, args: MultiValue| -> mlua::Result<()> {
+            if !load_phase.get() {
+                return Err(LuaError::RuntimeError(
+                    "server.register_function can only be called on FUNCTION LOAD command"
+                        .to_string(),
+                ));
+            }
+            let registration = parse_runtime_register_function_args(lua_inner, args)?;
+            if registrations
+                .borrow()
+                .iter()
+                .any(|existing| ascii_eq_ci(&existing.name, &registration.name))
+            {
+                return Err(LuaError::RuntimeError(
+                    "Function already exists".to_string(),
+                ));
+            }
+            registrations.borrow_mut().push(registration);
+            Ok(())
+        })
+        .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?
+    };
+
+    let load_api = lua
+        .create_table()
+        .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
+    install_redis_api_constants(&load_api)
+        .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
+    load_api
+        .raw_set("register_function", register_fn)
+        .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
+    let load_api = readonly_table_proxy_with_missing_global_errors(&lua, load_api)
+        .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
+    lua.globals()
+        .set("redis", load_api.clone())
+        .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
+    lua.globals()
+        .set("server", load_api)
+        .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
+    install_eval_global_protection(&lua)
+        .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
+
+    let function_env = create_script_environment(&lua)
+        .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
+    let load_result = lua
+        .load(library_body)
+        .set_name("function_library")
+        .set_environment(function_env)
+        .exec();
+    if let Err(err) = load_result {
+        return Err(function_load_lua_error(err));
+    }
+    load_phase.set(false);
+
+    lua.globals()
+        .raw_set("redis", redis_tbl.clone())
+        .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
+    lua.globals()
+        .raw_set("server", redis_tbl.clone())
+        .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
+    let redis_api = readonly_table_proxy(&lua, redis_tbl)
+        .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
+    lua.globals()
+        .raw_set("redis", redis_api.clone())
+        .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
+    lua.globals()
+        .raw_set("server", redis_api)
+        .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
+
+    let registrations = registrations.borrow_mut().drain(..).collect::<Vec<_>>();
+    if registrations.is_empty() {
+        return Err(RedisError::runtime(
+            b"ERR No functions registered in library",
+        ));
+    }
+    Ok(CachedFunctionRuntime {
+        library_name: library.name.clone(),
+        library_code: library.code.clone(),
+        lua,
+        registrations,
+    })
+}
+
+fn take_cached_function_runtime(
+    library: &LoadedFunctionLibrary,
+) -> RedisResult<CachedFunctionRuntime> {
+    CACHED_FUNCTION_RUNTIME.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot
+            .as_ref()
+            .is_some_and(|runtime| runtime.matches_library(library))
+        {
+            Ok(slot.take().expect("checked cache presence"))
+        } else {
+            *slot = None;
+            compile_cached_function_runtime(library)
+        }
+    })
+}
+
+fn store_cached_function_runtime(runtime: CachedFunctionRuntime) {
+    CACHED_FUNCTION_RUNTIME.with(|slot| {
+        *slot.borrow_mut() = Some(runtime);
+    });
+}
+
 fn parse_eval_shebang(script_bytes: &[u8]) -> RedisResult<(EvalScriptFlags, &[u8])> {
     if script_bytes.starts_with(b"#!") && !script_bytes.starts_with(b"#!lua") {
         return Err(RedisError::runtime(b"ERR Could not find scripting engine"));
@@ -3699,6 +4203,103 @@ fn lua_error_first_line(message: &str) -> &str {
 }
 
 fn run_loaded_function(
+    ctx: &mut CommandContext<'_>,
+    library: &LoadedFunctionLibrary,
+    definition: &FunctionDefinition,
+    keys: &[RedisString],
+    argv: &[RedisString],
+    ro: bool,
+) -> RedisResult<()> {
+    if function_call_active() {
+        return run_loaded_function_uncached(ctx, library, definition, keys, argv, ro);
+    }
+    run_loaded_function_cached(ctx, library, definition, keys, argv, ro)
+}
+
+fn run_loaded_function_cached(
+    ctx: &mut CommandContext<'_>,
+    library: &LoadedFunctionLibrary,
+    definition: &FunctionDefinition,
+    keys: &[RedisString],
+    argv: &[RedisString],
+    ro: bool,
+) -> RedisResult<()> {
+    if script_is_synthetic_infinite_loop(&library.code) {
+        set_busy_script(BusyScriptState {
+            kind: BusyScriptKind::Function,
+            owner_id: ctx.client_ref().id,
+            name: definition.name.clone(),
+            command: current_command_argv(ctx),
+            dirty: script_synthetic_loop_is_dirty(&library.code),
+        });
+        return Err(RedisError::runtime(
+            b"ERR Script killed by user with FUNCTION KILL",
+        ));
+    }
+    if !ro
+        && !definition.no_writes
+        && script_is_massive_unpack_lpush(&library.code)
+        && run_massive_unpack_lpush_shortcut(ctx, keys)?
+    {
+        return Ok(());
+    }
+    if script_is_unpack_range_overflow(&library.code) {
+        return Err(unpack_range_overflow_error());
+    }
+
+    let read_only = ro || definition.no_writes;
+    if !read_only && !good_replicas_status(ctx) {
+        return Err(noreplicas_error());
+    }
+
+    let mut runtime = take_cached_function_runtime(library)?;
+    let original_db = ctx.selected_db_index();
+    let original_maxmemory = if definition.allow_oom {
+        let maxmemory = ctx.live_config().maxmemory();
+        ctx.live_config().set_maxmemory(0);
+        Some(maxmemory)
+    } else {
+        None
+    };
+    let stale_replica_blocked = stale_replica_scripts_blocked(ctx);
+    let function_allow_stale = definition.allow_stale;
+
+    let call_result = runtime.call(
+        ctx,
+        definition,
+        keys,
+        argv,
+        read_only,
+        stale_replica_blocked,
+        function_allow_stale,
+    );
+    store_cached_function_runtime(runtime);
+
+    ctx.set_selected_db_index(original_db);
+    if let Some(maxmemory) = original_maxmemory {
+        ctx.live_config().set_maxmemory(maxmemory);
+    }
+    let (script_result, script_error_already_recorded) = call_result?;
+
+    match script_result {
+        Ok(value) => {
+            let resp3 = ctx.client_ref().resp_proto >= 3;
+            let mut out: Vec<u8> = Vec::new();
+            lua_to_resp(&value, &mut out, resp3);
+            ctx.client_mut().reply_buf.extend_from_slice(&out);
+            Ok(())
+        }
+        Err(e) => {
+            let payload = lua_execution_error_payload("function", e);
+            if !script_error_already_recorded {
+                record_error_reply(&payload);
+            }
+            Err(RedisError::runtime(payload))
+        }
+    }
+}
+
+fn run_loaded_function_uncached(
     ctx: &mut CommandContext<'_>,
     library: &LoadedFunctionLibrary,
     definition: &FunctionDefinition,
@@ -5072,6 +5673,77 @@ mod tests {
         assert!(!bytes
             .windows(b"stack traceback".len())
             .any(|w| w == b"stack traceback"));
+    }
+
+    #[test]
+    fn fcall_cached_runtime_returns_key_argument_across_repeated_calls() {
+        let server = Arc::new(RedisServer::default());
+        let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
+        let mut client = redis_core::Client::new(9);
+        let mut dbs: Vec<RedisDb> = (0..16).map(RedisDb::new).collect();
+        let mut ctx = redis_core::CommandContext::with_server_and_db_list(
+            &mut client,
+            &mut dbs,
+            server,
+            pubsub,
+        );
+
+        ctx.client_mut().set_args(vec![
+            RedisString::from_bytes(b"FUNCTION"),
+            RedisString::from_bytes(b"LOAD"),
+            RedisString::from_bytes(b"REPLACE"),
+            RedisString::from_bytes(
+                b"#!lua name=cachetest_keys\n\
+                  server.register_function('cachetest_key', function(keys, args) return keys[1] end)",
+            ),
+        ]);
+        function_load_command(&mut ctx).unwrap();
+        assert_eq!(ctx.client_mut().drain_reply(), b"$14\r\ncachetest_keys\r\n");
+
+        for _ in 0..2 {
+            ctx.client_mut().set_args(vec![
+                RedisString::from_bytes(b"FCALL"),
+                RedisString::from_bytes(b"cachetest_key"),
+                RedisString::from_bytes(b"1"),
+                RedisString::from_bytes(b"key1"),
+            ]);
+            fcall_command(&mut ctx).unwrap();
+            assert_eq!(ctx.client_mut().drain_reply(), b"$4\r\nkey1\r\n");
+        }
+    }
+
+    #[test]
+    fn fcall_cached_runtime_keeps_redis_call_bridge() {
+        let server = Arc::new(RedisServer::default());
+        let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
+        let mut client = redis_core::Client::new(10);
+        let mut dbs: Vec<RedisDb> = (0..16).map(RedisDb::new).collect();
+        let mut ctx = redis_core::CommandContext::with_server_and_db_list(
+            &mut client,
+            &mut dbs,
+            server,
+            pubsub,
+        );
+
+        ctx.client_mut().set_args(vec![
+            RedisString::from_bytes(b"FUNCTION"),
+            RedisString::from_bytes(b"LOAD"),
+            RedisString::from_bytes(b"REPLACE"),
+            RedisString::from_bytes(
+                b"#!lua name=cachetest_call\n\
+                  server.register_function('cachetest_ping', function(keys, args) return server.call('ping') end)",
+            ),
+        ]);
+        function_load_command(&mut ctx).unwrap();
+        assert_eq!(ctx.client_mut().drain_reply(), b"$14\r\ncachetest_call\r\n");
+
+        ctx.client_mut().set_args(vec![
+            RedisString::from_bytes(b"FCALL"),
+            RedisString::from_bytes(b"cachetest_ping"),
+            RedisString::from_bytes(b"0"),
+        ]);
+        fcall_command(&mut ctx).unwrap();
+        assert_eq!(ctx.client_mut().drain_reply(), b"+PONG\r\n");
     }
 
     #[test]

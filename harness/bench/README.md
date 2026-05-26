@@ -8,6 +8,26 @@ write raw artifacts under ignored `harness/bench/results/` and
 `harness/bench/profiles/`.
 
 ```bash
+# Decompose the Redis/Valkey default benchmark suite into bounded cells.
+# `ordered` preserves server state between parts, which catches default-suite
+# issues like LPOP after LPUSH/RPUSH.
+python3 harness/bench/default-suite-parts.py list
+python3 harness/bench/default-suite-parts.py run \
+  --mode ordered \
+  --target both \
+  --tests lpush,rpush,lpop \
+  --requests 10000 \
+  --timeout-s 20
+
+# `isolated` starts a fresh server for each part, which is better for checking
+# whether a command is intrinsically slow or only slow after prior state.
+python3 harness/bench/default-suite-parts.py run \
+  --mode isolated \
+  --target both \
+  --tests lpop \
+  --requests 10000 \
+  --timeout-s 20
+
 # Pipeline/payload/command shape. Answers whether the gap is fixed overhead,
 # payload copy, or pipeline batching.
 python3 harness/bench/probe-hypotheses.py protocol-shape --suite smoke
