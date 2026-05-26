@@ -500,6 +500,7 @@ pub fn xadd_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if idx >= ctx.arg_count() {
         return Err(RedisError::wrong_number_of_args(b"xadd"));
     }
+    let id_pos = idx;
     let id_arg = ctx.arg_owned(idx)?;
     idx += 1;
     let remaining = ctx.arg_count() - idx;
@@ -523,6 +524,7 @@ pub fn xadd_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let fields_for_wake = fields.clone();
     let key_for_wake = key.clone();
 
+    let mut id_autogen = false;
     let new_id = {
         let mut obj_owned: Option<RedisObject> = None;
         let stream: &mut InlineStream = if already_exists {
@@ -545,6 +547,7 @@ pub fn xadd_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
         let id_bytes = id_arg.as_bytes();
         let spec = parse_xadd_id_spec(id_bytes)?;
+        id_autogen = matches!(spec, None | Some(XaddIdSpec::Partial { .. }));
         let new_id = match spec {
             None => {
                 let next = auto_next_id(stream.last_id);
@@ -609,6 +612,23 @@ pub fn xadd_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
 
     ctx.notify_keyspace_event(NOTIFY_STREAM, b"xadd", &key_for_wake);
+
+    // Propagate the auto-generated ID explicitly so replicas/AOF store the same
+    // ID rather than re-generating their own. Mirrors `rewriteClientCommandArgument`
+    // for the ID in `xaddCommand`.
+    if id_autogen {
+        let argc = ctx.arg_count();
+        let mut new_argv: Vec<RedisString> = Vec::with_capacity(argc);
+        for k in 0..argc {
+            if k == id_pos {
+                new_argv.push(RedisString::from_vec(new_id.to_display_bytes()));
+            } else {
+                new_argv.push(ctx.arg_owned(k)?);
+            }
+        }
+        ctx.client_mut().set_args(new_argv);
+    }
+
     ctx.reply_bulk_string(RedisString::from_vec(new_id.to_display_bytes()))
 }
 
