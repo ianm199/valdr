@@ -11,6 +11,7 @@ appendonly.aof.*
 harness/oracle/results/
 harness/oracle/test-results.json
 harness/oracle/wire-diff.tsv
+harness/oracle/reconstruct.log
 harness/loop/
 *.actual.bytes
 *.actual.frames

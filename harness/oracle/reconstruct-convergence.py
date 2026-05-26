@@ -45,7 +45,24 @@ SUMMARY_RE = re.compile(r"Test Summary:\s+(\d+)\s+passed,\s+(\d+)\s+failed")
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 DENY_TAGS = ["needs:repl", "needs:debug", "external:skip"]
-BASEPORT = 60000
+
+# The TCL harness binds its coordination socket on a free port in
+# [baseport-32, baseport-1] and spawns servers from baseport up. Reusing one
+# baseport across rapid sequential runs fills that 32-port window with
+# TIME_WAIT sockets and the next run fails to bind. So each run gets its own
+# well-separated baseport, kept below the macOS ephemeral range (49152) and
+# clear of other agents' runners (45000, 52000).
+BASEPORT_START = 30000
+BASEPORT_STEP = 100
+_next_baseport = [BASEPORT_START]
+
+
+def alloc_baseport():
+    bp = _next_baseport[0]
+    _next_baseport[0] += BASEPORT_STEP
+    if _next_baseport[0] >= 44000:
+        _next_baseport[0] = BASEPORT_START
+    return bp
 
 SECTIONS = [
     ("unit/type/string", "Strings"),
@@ -131,7 +148,7 @@ def run_section(test_file, env):
         "1",
         "--skip-leaks",
         "--baseport",
-        str(BASEPORT),
+        str(alloc_baseport()),
         "--tags",
         " ".join(f"-{t}" for t in DENY_TAGS),
         "--quiet",
