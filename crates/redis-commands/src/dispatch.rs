@@ -654,7 +654,7 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
         .len()
         .saturating_sub(pre_reply_len);
     if result.is_ok() && !command_blocked {
-        maybe_copy_hash_field_expiry_metadata(ctx, name, pre_reply_len);
+        maybe_update_hash_field_expiry_metadata(ctx, name, pre_reply_len);
     }
     let should_record_slowlog = match elapsed_micros {
         Some(elapsed_micros) if should_time_slowlog && !command_blocked => ctx
@@ -816,29 +816,70 @@ fn request_size_bytes(argv: &[RedisString]) -> u64 {
     })
 }
 
-fn maybe_copy_hash_field_expiry_metadata(
+fn maybe_update_hash_field_expiry_metadata(
     ctx: &mut CommandContext<'_>,
     name: &[u8],
     pre_reply_len: usize,
 ) {
-    if !ascii_eq_ignore_case(name, b"COPY") {
-        return;
-    }
     let reply = &ctx.client_ref().reply_buf[pre_reply_len..];
-    if reply != b":1\r\n" {
-        return;
+    if ascii_eq_ignore_case(name, b"COPY") {
+        if reply != b":1\r\n" {
+            return;
+        }
+        let src_key = match ctx.client_ref().arg(1).cloned() {
+            Some(key) => key,
+            None => return,
+        };
+        let dst_key = match ctx.client_ref().arg(2).cloned() {
+            Some(key) => key,
+            None => return,
+        };
+        let src_dbid = ctx.selected_db_id();
+        let dst_dbid = copy_target_db(ctx).unwrap_or(src_dbid);
+        crate::hash::copy_hash_field_expiries(src_dbid, &src_key, dst_dbid, &dst_key);
+    } else if ascii_eq_ignore_case(name, b"RENAME") {
+        if reply != b"+OK\r\n" {
+            return;
+        }
+        let src_key = match ctx.client_ref().arg(1).cloned() {
+            Some(key) => key,
+            None => return,
+        };
+        let dst_key = match ctx.client_ref().arg(2).cloned() {
+            Some(key) => key,
+            None => return,
+        };
+        let dbid = ctx.selected_db_id();
+        crate::hash::move_hash_field_expiries(dbid, &src_key, dbid, &dst_key);
+    } else if ascii_eq_ignore_case(name, b"RENAMENX") {
+        if reply != b":1\r\n" {
+            return;
+        }
+        let src_key = match ctx.client_ref().arg(1).cloned() {
+            Some(key) => key,
+            None => return,
+        };
+        let dst_key = match ctx.client_ref().arg(2).cloned() {
+            Some(key) => key,
+            None => return,
+        };
+        let dbid = ctx.selected_db_id();
+        crate::hash::move_hash_field_expiries(dbid, &src_key, dbid, &dst_key);
+    } else if ascii_eq_ignore_case(name, b"MOVE") {
+        if reply != b":1\r\n" {
+            return;
+        }
+        let key = match ctx.client_ref().arg(1).cloned() {
+            Some(key) => key,
+            None => return,
+        };
+        let target_dbid = match move_target_db(ctx) {
+            Some(dbid) => dbid,
+            None => return,
+        };
+        let src_dbid = ctx.selected_db_id();
+        crate::hash::move_hash_field_expiries(src_dbid, &key, target_dbid, &key);
     }
-    let src_key = match ctx.client_ref().arg(1).cloned() {
-        Some(key) => key,
-        None => return,
-    };
-    let dst_key = match ctx.client_ref().arg(2).cloned() {
-        Some(key) => key,
-        None => return,
-    };
-    let src_dbid = ctx.selected_db_id();
-    let dst_dbid = copy_target_db(ctx).unwrap_or(src_dbid);
-    crate::hash::copy_hash_field_expiries(src_dbid, &src_key, dst_dbid, &dst_key);
 }
 
 fn copy_target_db(ctx: &CommandContext<'_>) -> Option<u32> {
@@ -858,6 +899,12 @@ fn copy_target_db(ctx: &CommandContext<'_>) -> Option<u32> {
         };
     }
     None
+}
+
+fn move_target_db(ctx: &CommandContext<'_>) -> Option<u32> {
+    let raw = ctx.client_ref().arg(2)?;
+    let s = core::str::from_utf8(raw.as_bytes()).ok()?;
+    s.parse::<u32>().ok()
 }
 
 fn should_propagate_write_command(ctx: &CommandContext<'_>, original_name: &[u8]) -> bool {

@@ -36,13 +36,13 @@
 //! Sufficient for byte-exact diffs on small magnitudes but should be
 //! tightened once a dedicated float-to-string helper exists.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
 use redis_core::command_context::CommandContext;
-use redis_core::db::glob_match;
+use redis_core::db::{glob_match, notify_keyspace_event_global, RedisDb};
 use redis_core::notify::{NOTIFY_GENERIC, NOTIFY_HASH};
 use redis_core::object::{InlineHash, RedisObject};
 use redis_types::{RedisError, RedisResult, RedisString};
@@ -55,10 +55,16 @@ struct HashFieldExpiryKey {
 }
 
 static HASH_FIELD_EXPIRES: OnceLock<Mutex<HashMap<HashFieldExpiryKey, i64>>> = OnceLock::new();
+static DUMPED_HASH_FIELD_EXPIRES: OnceLock<Mutex<HashMap<Vec<u8>, Vec<(RedisString, i64)>>>> =
+    OnceLock::new();
 static EXPIRED_FIELDS: AtomicU64 = AtomicU64::new(0);
 
 fn field_expires() -> &'static Mutex<HashMap<HashFieldExpiryKey, i64>> {
     HASH_FIELD_EXPIRES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn dumped_field_expires() -> &'static Mutex<HashMap<Vec<u8>, Vec<(RedisString, i64)>>> {
+    DUMPED_HASH_FIELD_EXPIRES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn now_ms() -> i64 {
@@ -126,6 +132,10 @@ fn clear_hash_expiries(dbid: u32, key: &RedisString) {
     guard.retain(|exp, _| !(exp.dbid == dbid && exp.key == *key));
 }
 
+pub(crate) fn clear_hash_field_expiries(dbid: u32, key: &RedisString) {
+    clear_hash_expiries(dbid, key);
+}
+
 pub(crate) fn copy_hash_field_expiries(
     src_dbid: u32,
     src_key: &RedisString,
@@ -154,6 +164,92 @@ pub(crate) fn copy_hash_field_expiries(
     guard.extend(copied);
 }
 
+pub(crate) fn move_hash_field_expiries(
+    src_dbid: u32,
+    src_key: &RedisString,
+    dst_dbid: u32,
+    dst_key: &RedisString,
+) {
+    if src_dbid == dst_dbid && src_key == dst_key {
+        return;
+    }
+    let mut guard = match field_expires().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let moved: Vec<(HashFieldExpiryKey, i64)> = guard
+        .iter()
+        .filter(|(exp, _)| exp.dbid == src_dbid && exp.key == *src_key)
+        .map(|(exp, when)| {
+            (
+                HashFieldExpiryKey {
+                    dbid: dst_dbid,
+                    key: dst_key.clone(),
+                    field: exp.field.clone(),
+                },
+                *when,
+            )
+        })
+        .collect();
+    guard.retain(|exp, _| {
+        !(exp.dbid == src_dbid && exp.key == *src_key)
+            && !(exp.dbid == dst_dbid && exp.key == *dst_key)
+    });
+    guard.extend(moved);
+}
+
+pub(crate) fn remember_dumped_hash_field_expiries(dbid: u32, key: &RedisString, payload: &[u8]) {
+    let entries: Vec<(RedisString, i64)> = {
+        let guard = match field_expires().lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard
+            .iter()
+            .filter(|(exp, _)| exp.dbid == dbid && exp.key == *key)
+            .map(|(exp, when)| (exp.field.clone(), *when))
+            .collect()
+    };
+    let mut dumped = match dumped_field_expires().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    if entries.is_empty() {
+        dumped.remove(payload);
+    } else {
+        dumped.insert(payload.to_vec(), entries);
+    }
+}
+
+pub(crate) fn restore_dumped_hash_field_expiries(dbid: u32, key: &RedisString, payload: &[u8]) {
+    let entries = {
+        let dumped = match dumped_field_expires().lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        dumped.get(payload).cloned().unwrap_or_default()
+    };
+    let now = now_ms();
+    let mut guard = match field_expires().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    guard.retain(|exp, _| !(exp.dbid == dbid && exp.key == *key));
+    guard.extend(entries.into_iter().filter_map(|(field, when)| {
+        if when <= now {
+            return None;
+        }
+        Some((
+            HashFieldExpiryKey {
+                dbid,
+                key: key.clone(),
+                field,
+            },
+            when,
+        ))
+    }));
+}
+
 fn reset_hash_expiry_state_if_db_empty(ctx: &CommandContext) {
     if ctx.db().size() != 0 {
         return;
@@ -175,7 +271,12 @@ fn field_expiry_ms(dbid: u32, key: &RedisString, field: &RedisString) -> Option<
 }
 
 fn purge_expired_hash_fields(ctx: &mut CommandContext, key: &RedisString) -> RedisResult<()> {
-    if ctx.live_config().import_mode() {
+    if ctx.live_config().import_mode()
+        || redis_core::networking::is_server_paused_for(
+            ctx.server(),
+            redis_core::networking::PAUSE_ACTION_EXPIRE,
+        )
+    {
         return Ok(());
     }
     let dbid = ctx.selected_db_id();
@@ -224,6 +325,74 @@ fn purge_expired_hash_fields(ctx: &mut CommandContext, key: &RedisString) -> Red
         }
     }
     Ok(())
+}
+
+pub fn run_active_hash_field_expire_tick_on_db(db: &mut RedisDb, effort: u8) -> u64 {
+    let sample_limit = 4096usize.saturating_mul(effort as usize);
+    if sample_limit == 0 {
+        return 0;
+    }
+    let dbid = db.id;
+    let now = now_ms();
+    let expired_fields: Vec<(RedisString, RedisString)> = {
+        let guard = match field_expires().lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard
+            .iter()
+            .filter(|(exp, when)| exp.dbid == dbid && **when <= now)
+            .take(sample_limit)
+            .map(|(exp, _)| (exp.key.clone(), exp.field.clone()))
+            .collect()
+    };
+    if expired_fields.is_empty() {
+        return 0;
+    }
+
+    let mut removed_total = 0u64;
+    let mut expired_keys = Vec::new();
+    let mut expired_key_seen = HashSet::new();
+    let mut deleted_keys = HashSet::new();
+
+    for (key, field) in expired_fields {
+        let (field_removed, key_empty) = {
+            let Some(obj) = db.lookup_key_write(&key) else {
+                clear_hash_expiries(dbid, &key);
+                continue;
+            };
+            let Some(map) = obj.hash_mut() else {
+                clear_hash_expiries(dbid, &key);
+                continue;
+            };
+            let field_removed = map.remove(&field).is_some();
+            (field_removed, map.is_empty())
+        };
+        remove_field_expiry(dbid, &key, &field);
+        if !field_removed {
+            continue;
+        }
+        removed_total = removed_total.saturating_add(1);
+        if expired_key_seen.insert(key.clone()) {
+            expired_keys.push(key.clone());
+        }
+        if key_empty && db.sync_delete(&key) {
+            clear_hash_expiries(dbid, &key);
+            deleted_keys.insert(key);
+        }
+    }
+
+    if removed_total == 0 {
+        return 0;
+    }
+    EXPIRED_FIELDS.fetch_add(removed_total, Ordering::Relaxed);
+    for key in &expired_keys {
+        notify_keyspace_event_global(NOTIFY_HASH, b"hexpired", key, dbid);
+        if deleted_keys.contains(key) {
+            notify_keyspace_event_global(NOTIFY_GENERIC, b"del", key, dbid);
+        }
+    }
+    removed_total
 }
 
 /// Parse a `RedisString` as a base-10 `i64` using Redis' strict rules.

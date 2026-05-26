@@ -1559,6 +1559,12 @@ impl RuntimeOwner {
                 effort,
                 Some(metrics.as_ref()),
             ));
+            deleted_total = deleted_total.saturating_add(
+                redis_commands::hash::run_active_hash_field_expire_tick_on_db(
+                    &mut self.dbs[idx],
+                    effort,
+                ),
+            );
         }
         if deleted_total > 0 {
             let elapsed_ms = start.elapsed().as_millis().max(1) as u64;

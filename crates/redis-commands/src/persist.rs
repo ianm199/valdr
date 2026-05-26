@@ -123,14 +123,21 @@ pub fn dump_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     }
 
     let key = ctx.arg_owned(1usize)?;
-    let payload = match ctx
+    let dbid = ctx.selected_db_id();
+    let (payload, is_hash) = match ctx
         .db_mut()
         .lookup_key_read_with_flags(&key, LOOKUP_NOTOUCH)
     {
-        Some(obj) => create_dump_payload(obj)
-            .map_err(|e| RedisError::runtime(format!("ERR DUMP failed: {}", e).into_bytes()))?,
+        Some(obj) => (
+            create_dump_payload(obj)
+                .map_err(|e| RedisError::runtime(format!("ERR DUMP failed: {}", e).into_bytes()))?,
+            obj.is_hash(),
+        ),
         None => return ctx.reply_null_bulk(),
     };
+    if is_hash {
+        crate::hash::remember_dumped_hash_field_expiries(dbid, &key, &payload);
+    }
 
     ctx.reply_bulk(&payload)
 }
@@ -218,16 +225,26 @@ pub fn restore_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     };
 
     if expire_at != EXPIRY_NONE && expire_at <= now {
+        let dbid = ctx.selected_db_id();
         if replace {
             ctx.db_mut().delete(&key);
         }
+        crate::hash::clear_hash_field_expiries(dbid, &key);
         ctx.server().add_dirty(1);
         return ctx.reply_simple_string(b"OK");
     }
 
+    let dbid = ctx.selected_db_id();
+    let is_hash = obj.is_hash();
+    let metadata_key = key.clone();
     object_set_lru_or_lfu(&mut obj, lfu_freq, lru_idle);
     ctx.db_mut()
         .set_key_with_known_expire(key, obj, expire_at, 0);
+    if is_hash {
+        crate::hash::restore_dumped_hash_field_expiries(dbid, &metadata_key, payload.as_bytes());
+    } else {
+        crate::hash::clear_hash_field_expiries(dbid, &metadata_key);
+    }
     ctx.server().add_dirty(1);
     rewrite_restore_propagation_absttl(ctx, ttl, absttl, expire_at);
     ctx.reply_simple_string(b"OK")

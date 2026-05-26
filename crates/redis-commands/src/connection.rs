@@ -32,6 +32,7 @@ use redis_core::networking::{
     client_matches_ip_filter, validate_client_capa_filter, validate_client_flag_filter,
 };
 use redis_core::notify::{keyspace_events_string_to_flags, NOTIFY_EVICTED};
+use redis_core::object::object_compute_size;
 use redis_core::{CommandContext, PersistenceStatus, RedisDb};
 use redis_protocol::frame::RespFrame;
 use redis_types::{RedisError, RedisResult, RedisString};
@@ -1962,12 +1963,11 @@ pub fn memory_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         }
         let key = ctx.arg_owned(2usize)?;
         let key_len = key.as_bytes().len();
-        let value_len = ctx
-            .db()
-            .lookup_key_read(key.as_bytes())
-            .and_then(|obj| obj.string_len().ok());
-        match value_len {
-            Some(v) => ctx.reply_integer((key_len + v + 48) as i64),
+        match ctx.db().lookup_key_read(key.as_bytes()) {
+            Some(obj) => {
+                let size = key_len + object_compute_size(&key, obj, 5, ctx.selected_db_id()) + 48;
+                ctx.reply_integer(size as i64)
+            }
             None => ctx.reply_null_bulk(),
         }
     } else if ascii_eq_ignore_case(sub_bytes, b"STATS") {
