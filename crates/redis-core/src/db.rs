@@ -912,8 +912,13 @@ impl RedisDb {
     /// C: db.c:546 dbAsyncDelete
     /// PERF(port): freeObjAsync — background deallocation deferred to Phase 3.
     pub fn async_delete(&mut self, key: &RedisString) -> bool {
-        // TODO(port): freeObjAsync when server.lazyfree_lazy_server_del is set
-        self.sync_delete(key)
+        let Some(obj) = self.dict.remove(key) else {
+            return false;
+        };
+        watched_keys_touch(self.id, key);
+        let key_obj = RedisObject::from_string(key.clone());
+        crate::lazyfree::free_obj_async(&key_obj, obj, self.id as i32);
+        true
     }
 
     /// Delete using the server's lazyfree setting.

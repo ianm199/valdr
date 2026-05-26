@@ -777,7 +777,6 @@ impl RuntimeOwner {
             .collect();
         if listeners.is_empty() {
             eprintln!("redis-server: no plain TCP listeners installed");
-            return;
         }
         if listeners.len() > MAX_LISTENER_TOKENS {
             eprintln!(
@@ -819,6 +818,7 @@ impl RuntimeOwner {
             progressed |= owner.drain_replica_apply_requests(&registry, &server);
             progressed |= owner.dispatch_scheduled_commands(poll.registry(), &registry, &server);
             progressed |= owner.schedule_unpaused_postponed_commands(&server);
+            progressed |= owner.apply_pending_listener_replacement(&mut listeners, poll.registry());
             progressed |= owner.install_pending_dynamic_listeners(&mut listeners, poll.registry());
 
             let timeout = if owner.has_scheduled_commands() {
@@ -848,6 +848,7 @@ impl RuntimeOwner {
             progressed |= owner.drain_replica_apply_requests(&registry, &server);
             progressed |= owner.dispatch_scheduled_commands(poll.registry(), &registry, &server);
             progressed |= owner.schedule_unpaused_postponed_commands(&server);
+            progressed |= owner.apply_pending_listener_replacement(&mut listeners, poll.registry());
             progressed |= owner.install_pending_dynamic_listeners(&mut listeners, poll.registry());
             owner.sweep_output_buffer_limits();
             progressed |= owner.enforce_client_memory_limits(&server);
@@ -900,6 +901,36 @@ impl RuntimeOwner {
         progressed
     }
 
+    fn apply_pending_listener_replacement(
+        &mut self,
+        listeners: &mut Vec<MioTcpListener>,
+        poll_registry: &MioRegistry,
+    ) -> bool {
+        let Some(replacement) =
+            redis_commands::connection::drain_pending_tcp_listener_replacement()
+        else {
+            return false;
+        };
+
+        for listener in listeners.iter_mut() {
+            let _ = poll_registry.deregister(listener);
+        }
+        listeners.clear();
+
+        for listener in replacement.into_iter().take(MAX_LISTENER_TOKENS) {
+            let token = Token(listeners.len());
+            let mut listener = MioTcpListener::from_std(listener);
+            match poll_registry.register(&mut listener, token, Interest::READABLE) {
+                Ok(()) => listeners.push(listener),
+                Err(e) => eprintln!(
+                    "redis-server: replacement TCP listener registration failed: {}",
+                    e
+                ),
+            }
+        }
+        true
+    }
+
     fn accept_ready(
         &mut self,
         listener: &MioTcpListener,
@@ -913,7 +944,10 @@ impl RuntimeOwner {
                 Ok((stream, peer_addr)) => {
                     progressed = true;
                     let metrics = server_metrics();
-                    let current = metrics.connected_clients.load(Ordering::Relaxed);
+                    let current = metrics
+                        .connected_clients
+                        .load(Ordering::Relaxed)
+                        .max(self.active_slot_count() as u64);
                     let limit = redis_commands::connection::get_max_clients();
                     if current >= limit {
                         metrics.rejected_connections.fetch_add(1, Ordering::Relaxed);

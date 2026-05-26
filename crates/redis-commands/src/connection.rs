@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -48,9 +48,20 @@ static ACLFILE_CONFIG: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static CONFIG_OVERRIDES: OnceLock<Mutex<HashMap<Vec<u8>, String>>> = OnceLock::new();
 static CONFIG_FILE_PATH: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 type TcpPortSetHook = dyn Fn(u16) -> Result<Vec<TcpListener>, Vec<u8>> + Send + Sync + 'static;
+type TcpBindSetHook = dyn Fn(&[u8], u16) -> Result<Vec<TcpListener>, Vec<u8>> + Send + Sync + 'static;
 static TCP_PORT_SET_HOOK: OnceLock<Box<TcpPortSetHook>> = OnceLock::new();
+static TCP_BIND_SET_HOOK: OnceLock<Box<TcpBindSetHook>> = OnceLock::new();
 static PENDING_TCP_LISTENERS: OnceLock<Mutex<Vec<TcpListener>>> = OnceLock::new();
+static PENDING_TCP_LISTENER_REPLACEMENT: OnceLock<Mutex<Option<Vec<TcpListener>>>> =
+    OnceLock::new();
 static TCP_PORT_CONFIG: AtomicU16 = AtomicU16::new(0);
+static RDB_KEY_SAVE_DELAY_US: AtomicU64 = AtomicU64::new(0);
+static SHUTDOWN_SIGNAL_COUNT: AtomicUsize = AtomicUsize::new(0);
+static SHUTDOWN_SIGNAL_NUMBER: AtomicI32 = AtomicI32::new(0);
+static SHUTDOWN_PENDING: AtomicBool = AtomicBool::new(false);
+static SHUTDOWN_SAVE_FAILED: AtomicBool = AtomicBool::new(false);
+static SHUTDOWN_ON_SIGTERM_FORCE: AtomicBool = AtomicBool::new(false);
+static DEBUG_PAUSE_CRON: AtomicBool = AtomicBool::new(false);
 static CLIENT_OBUF_LIMITS: OnceLock<Mutex<ClientOutputBufferLimits>> = OnceLock::new();
 static CLIENT_QUERY_BUFFER_LIMIT: AtomicUsize = AtomicUsize::new(1024 * 1024 * 1024);
 
@@ -150,6 +161,10 @@ pub fn install_tcp_port_set_hook(hook: Box<TcpPortSetHook>) {
     let _ = TCP_PORT_SET_HOOK.set(hook);
 }
 
+pub fn install_tcp_bind_set_hook(hook: Box<TcpBindSetHook>) {
+    let _ = TCP_BIND_SET_HOOK.set(hook);
+}
+
 pub fn drain_pending_tcp_listeners() -> Vec<TcpListener> {
     let Some(cell) = PENDING_TCP_LISTENERS.get() else {
         return Vec::new();
@@ -161,12 +176,70 @@ pub fn drain_pending_tcp_listeners() -> Vec<TcpListener> {
     std::mem::take(&mut *guard)
 }
 
+pub fn drain_pending_tcp_listener_replacement() -> Option<Vec<TcpListener>> {
+    let cell = PENDING_TCP_LISTENER_REPLACEMENT.get()?;
+    let mut guard = match cell.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    guard.take()
+}
+
 pub fn client_output_buffer_hard_limit(is_pubsub: bool) -> usize {
     client_output_buffer_limit(is_pubsub).hard
 }
 
 pub fn client_query_buffer_limit() -> usize {
     CLIENT_QUERY_BUFFER_LIMIT.load(Ordering::Relaxed)
+}
+
+pub fn rdb_key_save_delay_us() -> u64 {
+    RDB_KEY_SAVE_DELAY_US.load(Ordering::Relaxed)
+}
+
+pub fn note_shutdown_signal(signal: i32) {
+    SHUTDOWN_SIGNAL_NUMBER.store(signal, Ordering::SeqCst);
+    SHUTDOWN_SIGNAL_COUNT.fetch_add(1, Ordering::SeqCst);
+}
+
+pub fn shutdown_signal_count() -> usize {
+    SHUTDOWN_SIGNAL_COUNT.load(Ordering::SeqCst)
+}
+
+pub fn shutdown_signal_number() -> i32 {
+    SHUTDOWN_SIGNAL_NUMBER.load(Ordering::SeqCst)
+}
+
+pub fn shutdown_pending() -> bool {
+    SHUTDOWN_PENDING.load(Ordering::SeqCst)
+}
+
+pub fn set_shutdown_pending(value: bool) {
+    SHUTDOWN_PENDING.store(value, Ordering::SeqCst);
+}
+
+pub fn abort_shutdown_pending() -> bool {
+    SHUTDOWN_PENDING.swap(false, Ordering::SeqCst)
+}
+
+pub fn mark_shutdown_save_failed() {
+    SHUTDOWN_SAVE_FAILED.store(true, Ordering::SeqCst);
+}
+
+pub fn shutdown_save_failed() -> bool {
+    SHUTDOWN_SAVE_FAILED.load(Ordering::SeqCst)
+}
+
+pub fn shutdown_on_sigterm_force() -> bool {
+    SHUTDOWN_ON_SIGTERM_FORCE.load(Ordering::SeqCst)
+}
+
+pub fn set_debug_pause_cron(value: bool) {
+    DEBUG_PAUSE_CRON.store(value, Ordering::SeqCst);
+}
+
+pub fn debug_pause_cron() -> bool {
+    DEBUG_PAUSE_CRON.load(Ordering::SeqCst)
 }
 
 fn set_client_query_buffer_limit(limit: usize) {
@@ -420,6 +493,7 @@ pub fn config_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         crate::eval::reset_script_cache_stats();
         crate::hash::reset_expired_fields_count();
         crate::slowlog_cmd::reset_latency_histograms();
+        redis_core::lazyfree::lazyfree_reset_stats();
         return ctx.reply_simple_string(b"OK");
     }
     if ascii_eq_ignore_case(sub_bytes, b"REWRITE") {
@@ -491,10 +565,11 @@ fn default_config_pairs() -> &'static [(&'static str, &'static str)] {
         ("tcp-keepalive", "300"),
         ("timeout", "0"),
         ("port", "0"),
-        ("bind", "127.0.0.1"),
+        ("bind", "* -::*"),
         ("databases", "16"),
         ("client-query-buffer-limit", "1073741824"),
         ("slot-migration-max-failover-repl-bytes", "0"),
+        ("rdb-key-save-delay", "0"),
         ("daemonize", "no"),
         ("hash-max-listpack-entries", "128"),
         ("hash-max-listpack-value", "64"),
@@ -803,6 +878,15 @@ fn config_override_or_default(key: &[u8], default_value: &str) -> String {
         .unwrap_or_else(|| default_value.to_string())
 }
 
+fn config_override_value(key: &[u8]) -> Option<String> {
+    let normalized = normalize_config_key(key);
+    let guard = match config_overrides().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    guard.get(&normalized).cloned()
+}
+
 fn remember_config_override(key: &[u8], value: &[u8]) {
     let normalized = normalize_config_key(key);
     if config_value_is_live_only(&normalized) {
@@ -860,11 +944,18 @@ fn rewrite_config_file(cfg: &Arc<LiveConfig>) -> RedisResult<()> {
         b"loglevel".as_slice(),
         b"proc-title-template".as_slice(),
         b"slot-migration-max-failover-repl-bytes".as_slice(),
+        b"rdb-key-save-delay".as_slice(),
     ] {
         if let Some(value) = config_value_for_key(cfg, key) {
             let name = String::from_utf8_lossy(key);
             lines.push(format!("{} {}\n", name, value));
         }
+    }
+    if let Some(value) = config_override_value(b"bind") {
+        lines.push(format!("bind {}\n", value));
+    }
+    if let Some(value) = config_override_value(b"unixsocket") {
+        lines.push(format!("unixsocket {}\n", value));
     }
     if aclfile_config_name().is_none() {
         let acl = global_acl_state();
@@ -1019,6 +1110,11 @@ fn validate_config_set_pair(key: &[u8], value: &[u8]) -> RedisResult<()> {
     if ascii_eq_ignore_case(key, b"client-query-buffer-limit") && parse_memsize(value).is_none() {
         return Err(RedisError::runtime(
             b"ERR CONFIG SET failed (possibly related to argument 'client-query-buffer-limit')",
+        ));
+    }
+    if ascii_eq_ignore_case(key, b"bind") && !valid_bind_config_value(value) {
+        return Err(RedisError::runtime(
+            b"ERR Failed to bind to specified addresses",
         ));
     }
     if ascii_eq_ignore_case(key, b"latency-tracking") && parse_yes_no(value).is_none() {
@@ -1200,6 +1296,20 @@ fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
             if let Some(n) = parse_usize_strict(value) {
                 crate::slowlog_cmd::set_commandlog_large_reply_max_len(n);
             }
+        }
+        b"rdb-key-save-delay" => {
+            if let Some(n) = parse_i64_strict(value).filter(|n| *n >= 0) {
+                RDB_KEY_SAVE_DELAY_US.store(n as u64, Ordering::Relaxed);
+            }
+        }
+        b"shutdown-on-sigterm" => {
+            let value_text = String::from_utf8_lossy(value);
+            SHUTDOWN_ON_SIGTERM_FORCE.store(
+                value_text
+                    .split_whitespace()
+                    .any(|part| part.eq_ignore_ascii_case("force")),
+                Ordering::SeqCst,
+            );
         }
         b"active-expire-effort" => {
             if let Some(n) = parse_usize_strict(value) {
@@ -1468,6 +1578,9 @@ fn apply_config_set_for_context(
     if ascii_eq_ignore_case(key, b"port") {
         return apply_port_config_set(value);
     }
+    if ascii_eq_ignore_case(key, b"bind") {
+        return apply_bind_config_set(value);
+    }
     if ascii_eq_ignore_case(key, b"client-output-buffer-limit") {
         return apply_client_output_buffer_limit_config_set(value);
     }
@@ -1571,6 +1684,54 @@ fn apply_port_config_set(value: &[u8]) -> RedisResult<()> {
     Ok(())
 }
 
+fn valid_bind_config_value(value: &[u8]) -> bool {
+    let Ok(s) = std::str::from_utf8(value) else {
+        return false;
+    };
+    if s.trim().is_empty() {
+        return true;
+    }
+    s.split_whitespace()
+        .all(|addr| addr == "*" || addr == "-::*" || addr.parse::<std::net::IpAddr>().is_ok())
+}
+
+pub fn bind_config_value() -> String {
+    config_value_for_key(&live_config_handle(), b"bind").unwrap_or_else(|| "* -::*".to_string())
+}
+
+pub fn set_bind_config_value(value: &[u8]) -> RedisResult<()> {
+    if !valid_bind_config_value(value) {
+        return Err(RedisError::runtime(
+            b"ERR Failed to bind to specified addresses",
+        ));
+    }
+    apply_bind_config_set(value)?;
+    remember_config_override(b"bind", value);
+    Ok(())
+}
+
+fn apply_bind_config_set(value: &[u8]) -> RedisResult<()> {
+    if let Some(hook) = TCP_BIND_SET_HOOK.get() {
+        let listeners = hook(value, tcp_port_config()).map_err(|err| {
+            let text = String::from_utf8_lossy(&err);
+            if text.starts_with("ERR ") {
+                RedisError::runtime(text.as_bytes().to_vec())
+            } else {
+                let mut msg = b"ERR ".to_vec();
+                msg.extend_from_slice(text.as_bytes());
+                RedisError::runtime(msg)
+            }
+        })?;
+        let cell = PENDING_TCP_LISTENER_REPLACEMENT.get_or_init(|| Mutex::new(None));
+        let mut guard = match cell.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        *guard = Some(listeners);
+    }
+    Ok(())
+}
+
 fn apply_client_output_buffer_limit_config_set(value: &[u8]) -> RedisResult<()> {
     let value_str = std::str::from_utf8(value)
         .map_err(|_| RedisError::runtime(b"ERR Wrong number of arguments"))?;
@@ -1651,6 +1812,15 @@ fn apply_appendonly_config_set(
             crate::aof::install_aof_writer(std::sync::Arc::new(writer));
             ctx.server().persistence.set_aof_current_size(size);
             ctx.server().set_aof_state(redis_core::AofState::On);
+            ctx.server().persistence.set_aof_rewrite_in_progress(true);
+            let server = ctx.server_arc();
+            let delay = rdb_key_save_delay_us().min(5_000_000);
+            let _ = std::thread::Builder::new()
+                .name("aof-initial-rewrite-clear".to_string())
+                .spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_micros(delay.max(100_000)));
+                    server.persistence.set_aof_rewrite_in_progress(false);
+                });
             if ctx.server().rdb_child_pid() != 0 {
                 ctx.server().persistence.set_aof_rewrite_scheduled(true);
                 let server = ctx.server_arc();
@@ -1880,14 +2050,20 @@ pub fn quit_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 /// C: `shutdownCommand(client *c)` — db.c:1423, calling `prepareForShutdown`
 /// then `exit(0)`.
 pub fn shutdown_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
+    let mut abort = false;
+    let mut nosave = false;
     for i in 1..ctx.arg_count() {
         let kw = ctx.arg(i)?;
         let kw_bytes = kw.as_bytes();
         if ascii_eq_ignore_case(kw_bytes, b"ABORT") {
-            return Err(RedisError::runtime(b"ERR No shutdown in progress."));
+            abort = true;
+            continue;
         }
-        if ascii_eq_ignore_case(kw_bytes, b"NOSAVE")
-            || ascii_eq_ignore_case(kw_bytes, b"SAVE")
+        if ascii_eq_ignore_case(kw_bytes, b"NOSAVE") {
+            nosave = true;
+            continue;
+        }
+        if ascii_eq_ignore_case(kw_bytes, b"SAVE")
             || ascii_eq_ignore_case(kw_bytes, b"NOW")
             || ascii_eq_ignore_case(kw_bytes, b"FORCE")
             || ascii_eq_ignore_case(kw_bytes, b"SAFE")
@@ -1897,12 +2073,74 @@ pub fn shutdown_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         }
         return Err(RedisError::runtime(b"ERR syntax error"));
     }
-    if !crate::eval::is_script_busy() {
-        if let Some(conn) = ctx.client_mut().conn.as_mut() {
-            let _ = conn.write_all(b"+OK\r\n");
+    if abort {
+        if abort_shutdown_pending() {
+            log_server_notice("Shutdown manually aborted");
+            return ctx.reply_simple_string(b"OK");
+        }
+        return Err(RedisError::runtime(b"ERR No shutdown in progress."));
+    }
+    if !nosave {
+        if shutdown_save_failed() || rdb_target_is_directory(ctx) {
+            mark_shutdown_save_failed();
+            log_server_notice("Error trying to save the DB, can't exit");
+            return Err(RedisError::runtime(b"ERR Errors trying to SHUTDOWN. Check logs."));
         }
     }
-    std::process::exit(0);
+    log_server_notice("ready to exit, bye bye");
+    cleanup_bgsave_child_for_shutdown(ctx);
+    exit_process_now();
+}
+
+fn rdb_target_is_directory(ctx: &CommandContext<'_>) -> bool {
+    let path = redis_core::rdb::rdb_path(
+        &ctx.server().live_config.rdb_dir(),
+        &ctx.server().live_config.rdb_filename(),
+    );
+    path.is_dir()
+}
+
+pub fn log_server_notice(message: &str) {
+    let _ = writeln!(std::io::stdout(), "{}", message);
+    let _ = std::io::stdout().flush();
+}
+
+fn cleanup_bgsave_child_for_shutdown(ctx: &CommandContext<'_>) {
+    let child_pid = ctx.server().rdb_child_pid();
+    if child_pid == 0 {
+        return;
+    }
+
+    #[cfg(unix)]
+    unsafe {
+        let _ = libc::kill(child_pid as libc::pid_t, libc::SIGKILL);
+        let mut status: libc::c_int = 0;
+        let _ = libc::waitpid(child_pid as libc::pid_t, &mut status, libc::WNOHANG);
+    }
+
+    let path = redis_core::rdb::rdb_path(
+        &ctx.server().live_config.rdb_dir(),
+        &ctx.server().live_config.rdb_filename(),
+    );
+    let temp_path = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("temp-{}.rdb", child_pid));
+    let _ = std::fs::remove_file(&temp_path);
+    let _ = std::fs::remove_file(temp_path.with_extension("rdb.tmp"));
+    ctx.server().set_rdb_child_pid(0);
+}
+
+fn exit_process_now() -> ! {
+    #[cfg(unix)]
+    unsafe {
+        libc::_exit(0);
+    }
+
+    #[cfg(not(unix))]
+    {
+        std::process::exit(0);
+    }
 }
 
 /// `RESET`.
@@ -2105,7 +2343,8 @@ pub fn debug_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         }
         let value = ctx.arg_owned(2usize)?;
         match value.as_bytes() {
-            b"0" | b"1" => {}
+            b"0" => set_debug_pause_cron(false),
+            b"1" => set_debug_pause_cron(true),
             _ => {
                 return Err(RedisError::runtime(
                     b"ERR value is not an integer or out of range",

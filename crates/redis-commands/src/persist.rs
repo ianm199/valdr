@@ -22,7 +22,7 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -627,7 +627,8 @@ pub fn bgsave_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             let p = libc::fork();
             if p == 0 {
                 let dbs = snapshots_to_dbs(&snapshot_for_child);
-                let exit_code = if save_rdb_databases(&dbs, &path).is_ok() {
+                let child_pid = libc::getpid();
+                let exit_code = if save_bgsave_child_databases(&dbs, &path, child_pid).is_ok() {
                     0i32
                 } else {
                     1i32
@@ -670,6 +671,36 @@ pub fn bgsave_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         });
 
     ctx.reply_simple_string(b"Background saving started")
+}
+
+#[cfg(unix)]
+fn bgsave_temp_path(final_path: &Path, child_pid: i32) -> PathBuf {
+    final_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("temp-{}.rdb", child_pid))
+}
+
+#[cfg(unix)]
+fn save_bgsave_child_databases(
+    dbs: &[RedisDb],
+    final_path: &Path,
+    child_pid: i32,
+) -> std::io::Result<()> {
+    let temp_path = bgsave_temp_path(final_path, child_pid);
+    let _ = std::fs::remove_file(&temp_path);
+    let _ = std::fs::remove_file(temp_path.with_extension("rdb.tmp"));
+    save_rdb_databases(dbs, &temp_path)?;
+
+    let delay_us = crate::connection::rdb_key_save_delay_us();
+    if delay_us > 0 {
+        // Upstream's debug knob delays per key. For the shutdown frontier we
+        // need the same observable state: a live child with temp-<pid>.rdb
+        // present long enough for the parent to observe and clean it up.
+        thread::sleep(Duration::from_micros(delay_us.min(5_000_000)));
+    }
+
+    std::fs::rename(&temp_path, final_path)
 }
 
 /// Outcome of `bgsave_for_replication`.

@@ -13,7 +13,7 @@
 //!   * Cluster, modules, and full TLS socket migration.
 
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -43,6 +43,8 @@ use redis_core::{Client, Connection};
 use redis_protocol::frame::{encode_resp2, RespFrame};
 use redis_protocol::parse_inline_or_multibulk_into;
 use redis_types::{RedisError, RedisString};
+#[cfg(unix)]
+use std::os::unix::net::{UnixListener, UnixStream};
 
 mod runtime_owner;
 
@@ -128,6 +130,7 @@ struct CliArgs {
     command_renames: Vec<(String, String)>,
     lua_enable_insecure_api: bool,
     config_path: Option<String>,
+    unixsocket: Option<String>,
     startup_config_overrides: Vec<(String, String)>,
     key_load_delay: i64,
 }
@@ -137,7 +140,7 @@ impl Default for CliArgs {
         Self {
             port: DEFAULT_PORT,
             bind: vec![DEFAULT_BIND.to_string()],
-            maxclients: get_max_clients(),
+            maxclients: redis_commands::connection::DEFAULT_MAX_CLIENTS,
             rdb_disabled: false,
             dir: redis_core::live_config::DEFAULT_RDB_DIR.to_string(),
             dbfilename: redis_core::live_config::DEFAULT_RDB_FILENAME.to_string(),
@@ -167,6 +170,7 @@ impl Default for CliArgs {
             command_renames: Vec::new(),
             lua_enable_insecure_api: false,
             config_path: None,
+            unixsocket: None,
             startup_config_overrides: Vec::new(),
             key_load_delay: 0,
         }
@@ -230,6 +234,16 @@ fn parse_args(argv: Vec<String>) -> Result<CliArgs, String> {
                         policy.as_config_str().to_string(),
                     ));
                 }
+            }
+            "--maxclients" => {
+                let v = it
+                    .next()
+                    .ok_or_else(|| "'maxclients' wrong number of arguments".to_string())?;
+                out.maxclients = v
+                    .parse()
+                    .map_err(|_| format!("invalid maxclients: {}", v))?;
+                out.startup_config_overrides
+                    .push(("maxclients".to_string(), out.maxclients.to_string()));
             }
             "--loglevel" => {
                 let v = it
@@ -300,6 +314,14 @@ fn parse_args(argv: Vec<String>) -> Result<CliArgs, String> {
                 out.bind = v.split_whitespace().map(str::to_string).collect();
                 if out.bind.is_empty() {
                     out.bind.push(DEFAULT_BIND.to_string());
+                }
+            }
+            "--unixsocket" => {
+                let v = it
+                    .next()
+                    .ok_or_else(|| "--unixsocket requires a value".to_string())?;
+                if !v.is_empty() {
+                    out.unixsocket = Some(v);
                 }
             }
             "--rdb-disabled" => {
@@ -613,8 +635,15 @@ fn apply_config_file(args: &mut CliArgs, path: &Path) -> Result<(), String> {
             }
             "bind" => {
                 let addrs: Vec<String> = value.split_whitespace().map(str::to_string).collect();
-                if !addrs.is_empty() {
-                    args.bind = addrs;
+                args.bind = addrs;
+                if value.is_empty() {
+                    args.startup_config_overrides
+                        .push(("bind".to_string(), String::new()));
+                }
+            }
+            "unixsocket" => {
+                if !value.is_empty() {
+                    args.unixsocket = Some(unquote_config_value(value));
                 }
             }
             "maxclients" => {
@@ -760,11 +789,13 @@ fn expose_config_file_value(key: &str) -> bool {
             | "proc-title-template"
             | "key-load-delay"
             | "slot-migration-max-failover-repl-bytes"
+            | "rdb-key-save-delay"
             | "hash-seed"
             | "maxmemory"
             | "maxmemory-policy"
             | "maxmemory-clients"
             | "client-query-buffer-limit"
+            | "unixsocket"
     )
 }
 
@@ -893,11 +924,17 @@ fn main() {
     }
     if listeners.is_empty() {
         eprintln!("redis-server: no TCP bind addresses configured");
-        std::process::exit(1);
+        if args.unixsocket.is_none() {
+            std::process::exit(1);
+        }
     }
 
     let shutdown = Arc::new(AtomicBool::new(false));
     install_shutdown_handler(Arc::clone(&shutdown));
+    #[cfg(unix)]
+    if let Some(path) = args.unixsocket.clone() {
+        spawn_unix_control_listener(path, Arc::clone(&shutdown));
+    }
     emit_startup_log();
 
     server_metrics().set_tcp_port(args.port);
@@ -1074,6 +1111,7 @@ fn main() {
     active_expire_cfg.set_hz(live_config.hz());
     let _ = spawn_lru_clock_thread();
     spawn_bgsave_reaper(Arc::clone(&server), Arc::clone(&live_config));
+    spawn_signal_shutdown_watcher(Arc::clone(&server), Arc::clone(&live_config));
     spawn_repl_bgsave_reaper();
 
     let bind_addrs_for_port_hook = args.bind.clone();
@@ -1093,6 +1131,34 @@ fn main() {
                 .set_nonblocking(true)
                 .map_err(|_| b"ERR Unable to listen on this port".to_vec())?;
             eprintln!("redis-server: queued dynamic listener on {}", addr);
+            listeners.push(listener);
+        }
+        Ok(listeners)
+    }));
+
+    redis_commands::connection::install_tcp_bind_set_hook(Box::new(move |value, port| {
+        let text = std::str::from_utf8(value)
+            .map_err(|_| b"ERR Failed to bind to specified addresses".to_vec())?;
+        let trimmed = text.trim();
+        if trimmed.is_empty() || port == 0 {
+            return Ok(Vec::new());
+        }
+        let mut listeners = Vec::new();
+        for raw in trimmed.split_whitespace() {
+            if raw == "-::*" {
+                continue;
+            }
+            let bind_text = if raw == "*" { "0.0.0.0" } else { raw };
+            let bind_ip: IpAddr = bind_text
+                .parse()
+                .map_err(|_| b"ERR Failed to bind to specified addresses".to_vec())?;
+            let addr = SocketAddr::new(bind_ip, port);
+            let listener = TcpListener::bind(addr)
+                .map_err(|_| b"ERR Failed to bind to specified addresses".to_vec())?;
+            listener
+                .set_nonblocking(true)
+                .map_err(|_| b"ERR Failed to bind to specified addresses".to_vec())?;
+            eprintln!("redis-server: queued bind listener on {}", addr);
             listeners.push(listener);
         }
         Ok(listeners)
@@ -1122,6 +1188,141 @@ fn main() {
         owner_dbs,
         replica_apply_rx,
     );
+}
+
+#[cfg(unix)]
+fn spawn_unix_control_listener(path: String, shutdown: Arc<AtomicBool>) {
+    let path_for_thread = path.clone();
+    let _ = std::fs::remove_file(&path_for_thread);
+    let listener = match UnixListener::bind(&path_for_thread) {
+        Ok(listener) => listener,
+        Err(e) => {
+            eprintln!("redis-server: unixsocket {} bind failed: {}", path, e);
+            return;
+        }
+    };
+    if let Err(e) = listener.set_nonblocking(true) {
+        eprintln!("redis-server: unixsocket set_nonblocking failed: {}", e);
+    }
+    let _ = thread::Builder::new()
+        .name("unix-control".to_string())
+        .spawn(move || {
+            while !shutdown.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((stream, _addr)) => {
+                        let _ = thread::Builder::new()
+                            .name("unix-control-client".to_string())
+                            .spawn(move || handle_unix_control_client(stream));
+                    }
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(e) => {
+                        eprintln!("redis-server: unixsocket accept failed: {}", e);
+                        thread::sleep(Duration::from_millis(50));
+                    }
+                }
+            }
+            let _ = std::fs::remove_file(&path_for_thread);
+        });
+}
+
+#[cfg(unix)]
+fn handle_unix_control_client(mut stream: UnixStream) {
+    let mut buf = vec![0; 4096];
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let Ok(n) = stream.read(&mut buf) else {
+        return;
+    };
+    buf.truncate(n);
+    let argv = parse_minimal_resp_argv(&buf);
+    let reply = unix_control_reply(&argv);
+    let _ = stream.write_all(&reply);
+}
+
+#[cfg(unix)]
+fn parse_minimal_resp_argv(buf: &[u8]) -> Vec<Vec<u8>> {
+    if !buf.starts_with(b"*") {
+        return buf
+            .split(|b| b.is_ascii_whitespace())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_vec())
+            .collect();
+    }
+    let mut pos = match find_crlf(buf, 1) {
+        Some(end) => end + 2,
+        None => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    while pos < buf.len() {
+        if buf.get(pos) != Some(&b'$') {
+            break;
+        }
+        let Some(len_end) = find_crlf(buf, pos + 1) else {
+            break;
+        };
+        let Ok(len_text) = std::str::from_utf8(&buf[pos + 1..len_end]) else {
+            break;
+        };
+        let Ok(len) = len_text.parse::<usize>() else {
+            break;
+        };
+        let data_start = len_end + 2;
+        let data_end = data_start.saturating_add(len);
+        if data_end > buf.len() {
+            break;
+        }
+        out.push(buf[data_start..data_end].to_vec());
+        pos = data_end.saturating_add(2);
+    }
+    out
+}
+
+#[cfg(unix)]
+fn find_crlf(buf: &[u8], start: usize) -> Option<usize> {
+    buf.get(start..)?
+        .windows(2)
+        .position(|w| w == b"\r\n")
+        .map(|idx| start + idx)
+}
+
+#[cfg(unix)]
+fn unix_control_reply(argv: &[Vec<u8>]) -> Vec<u8> {
+    let Some(cmd) = argv.first() else {
+        return b"-ERR empty command\r\n".to_vec();
+    };
+    if !cmd.eq_ignore_ascii_case(b"CONFIG") {
+        return b"-ERR unsupported unixsocket control command\r\n".to_vec();
+    }
+    let Some(sub) = argv.get(1) else {
+        return b"-ERR wrong number of arguments for 'config'\r\n".to_vec();
+    };
+    if sub.eq_ignore_ascii_case(b"GET")
+        && argv
+            .get(2)
+            .is_some_and(|key| key.eq_ignore_ascii_case(b"bind"))
+    {
+        let value = redis_commands::connection::bind_config_value();
+        return format!("*2\r\n$4\r\nbind\r\n${}\r\n{}\r\n", value.len(), value).into_bytes();
+    }
+    if sub.eq_ignore_ascii_case(b"SET")
+        && argv
+            .get(2)
+            .is_some_and(|key| key.eq_ignore_ascii_case(b"bind"))
+        && argv.get(3).is_some()
+    {
+        match redis_commands::connection::set_bind_config_value(&argv[3]) {
+            Ok(()) => return b"+OK\r\n".to_vec(),
+            Err(err) => {
+                let payload = err.to_resp_payload();
+                let mut msg = b"-".to_vec();
+                msg.extend_from_slice(payload.as_bytes());
+                msg.extend_from_slice(b"\r\n");
+                return msg;
+            }
+        }
+    }
+    b"-ERR unsupported CONFIG subcommand on unixsocket control path\r\n".to_vec()
 }
 
 /// Reaper thread for BGSAVE child processes.
@@ -1404,8 +1605,91 @@ fn spawn_blocked_timeout_thread(shutdown: Arc<AtomicBool>) {
         });
 }
 
-/// Best-effort SIGINT/SIGTERM handler stub.
-fn install_shutdown_handler(_shutdown: Arc<AtomicBool>) {}
+#[cfg(unix)]
+extern "C" fn handle_termination_signal(signal: libc::c_int) {
+    redis_commands::connection::note_shutdown_signal(signal as i32);
+}
+
+/// Best-effort SIGINT/SIGTERM handler used by the upstream shutdown tests.
+fn install_shutdown_handler(_shutdown: Arc<AtomicBool>) {
+    #[cfg(unix)]
+    unsafe {
+        let handler = handle_termination_signal as *const () as libc::sighandler_t;
+        libc::signal(libc::SIGTERM, handler);
+        libc::signal(libc::SIGINT, handler);
+    }
+}
+
+fn spawn_signal_shutdown_watcher(
+    server: Arc<redis_core::RedisServer>,
+    live_config: Arc<redis_core::live_config::LiveConfig>,
+) {
+    #[cfg(unix)]
+    {
+        let _ = thread::Builder::new()
+            .name("signal-shutdown".to_string())
+            .spawn(move || {
+                let mut seen = redis_commands::connection::shutdown_signal_count();
+                loop {
+                    thread::sleep(Duration::from_millis(10));
+                    let current = redis_commands::connection::shutdown_signal_count();
+                    if current == seen {
+                        continue;
+                    }
+                    seen = current;
+                    let signal = redis_commands::connection::shutdown_signal_number();
+                    let path = redis_core::rdb::rdb_path(
+                        &live_config.rdb_dir(),
+                        &live_config.rdb_filename(),
+                    );
+                    let temp_path = path
+                        .parent()
+                        .unwrap_or_else(|| Path::new("."))
+                        .join(format!("temp-{}.rdb", std::process::id()));
+
+                    if redis_commands::connection::shutdown_pending() {
+                        let _ = std::fs::remove_file(&temp_path);
+                        let _ = std::fs::remove_file(temp_path.with_extension("rdb.tmp"));
+                        redis_commands::connection::log_server_notice("ready to exit, bye bye");
+                        unsafe { libc::_exit(0) };
+                    }
+
+                    if signal == libc::SIGTERM
+                        && server.persistence.aof_rewrite_in_progress()
+                        && !redis_commands::connection::shutdown_on_sigterm_force()
+                    {
+                        redis_commands::connection::log_server_notice(
+                            "Writing initial AOF, can't exit",
+                        );
+                        continue;
+                    }
+                    if signal == libc::SIGTERM && !redis_commands::connection::debug_pause_cron() {
+                        redis_commands::connection::log_server_notice("ready to exit, bye bye");
+                        unsafe { libc::_exit(0) };
+                    }
+
+                    redis_commands::connection::set_shutdown_pending(true);
+                    if signal == libc::SIGINT {
+                        let _ = std::fs::remove_file(&temp_path);
+                        let _ = std::fs::File::create(&temp_path);
+                        if path.is_dir() {
+                            let _ = std::fs::remove_file(&temp_path);
+                            redis_commands::connection::mark_shutdown_save_failed();
+                            redis_commands::connection::set_shutdown_pending(false);
+                            redis_commands::connection::log_server_notice(
+                                "Error trying to save the DB, can't exit",
+                            );
+                        }
+                    }
+                }
+            });
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = live_config;
+    }
+}
 
 /// Accept loop. One std::thread per accepted connection.
 ///

@@ -258,13 +258,29 @@ pub fn lazyfree_get_free_effort(key: &RedisObject, obj: &RedisObject, dbid: i32)
     if obj.is_list() || obj.is_set() || obj.is_zset() || obj.is_hash() {
         return obj.collection_len();
     }
-    if obj.is_stream() {
-        // C: lazyfree.c:150-173 — elaborate stream effort: rax node count
-        // plus consumer-group PEL sizes.
-        // TODO(port): stream internals (rax numnodes, cgroups, PEL sizes)
-        // are not yet accessible from ObjectKind::Stream (Phase 5 stub).
+    if let Some(stream) = obj.stream() {
+        // C: lazyfree.c:150-173 — stream effort is based on rax nodes plus
+        // consumer-group metadata. Our inline stream does not expose rax node
+        // counts, but entries + group/PEL cardinality preserve the threshold
+        // behavior the upstream lazyfree tests care about.
         let _ = (key, dbid); // silence unused-variable warnings
-        return 1;
+        let group_effort: usize = stream
+            .groups
+            .values()
+            .map(|group| {
+                group.pel.len()
+                    + group
+                        .consumers
+                        .values()
+                        .map(|consumer| 1 + consumer.pel.len())
+                        .sum::<usize>()
+            })
+            .sum();
+        return stream
+            .len()
+            .saturating_add(stream.groups.len())
+            .saturating_add(group_effort)
+            .max(1);
     }
     // String / Module fall here.
     // TODO(port): OBJ_MODULE → moduleGetFreeEffort(key, obj, dbid);
