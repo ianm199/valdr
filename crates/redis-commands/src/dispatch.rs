@@ -911,6 +911,9 @@ fn should_propagate_write_command(ctx: &CommandContext<'_>, original_name: &[u8]
     if ctx.client_ref().prevent_propagation() {
         return false;
     }
+    if ctx.client_ref().flag_deny_blocking() {
+        return false;
+    }
     if original_name.eq_ignore_ascii_case(b"GETEX") {
         return ctx
             .client_ref()
@@ -2134,12 +2137,43 @@ fn propagate_write_to_replicas(
 /// deferred wake path, where the pop has no dispatch-time argv to rewrite.
 /// Because `dispatch` drains pending wakes after propagating the triggering
 /// command, this lands in causal order. No-ops when propagation is disabled.
-pub fn propagate_command_from_wake(selected_db: u32, argv: &[RedisString]) {
+pub fn propagate_command_from_wake(selected_db: u32, argv: &[RedisString]) -> i64 {
     let repl = redis_core::replication::global_replication_state();
     if !repl.should_propagate_writes() {
-        return;
+        return 0;
     }
-    propagate_write_to_replicas(&repl, selected_db, argv);
+    propagate_write_to_replicas(&repl, selected_db, argv)
+}
+
+/// Append a synthesized write command to replication without an implicit SELECT.
+///
+/// EXEC uses this for the MULTI/EXEC envelope; commands inside the envelope
+/// still go through `propagate_command_from_wake` so DB selection is preserved.
+pub fn propagate_command_raw(argv: &[RedisString]) -> i64 {
+    let repl = redis_core::replication::global_replication_state();
+    if !repl.should_propagate_writes() {
+        return 0;
+    }
+
+    let argv_bytes = crate::aof::encode_resp_command(argv);
+    let offset = repl.append_to_backlog(&argv_bytes);
+    let guard = match repl.replicas.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    for conn in guard.values() {
+        if redis_core::replication::ReplicaState::from_u8(
+            conn.state.load(std::sync::atomic::Ordering::Acquire),
+        ) == redis_core::replication::ReplicaState::Online
+            && conn.outbound_sender.send(argv_bytes.clone()).is_err()
+        {
+            eprintln!(
+                "redis-server: raw replication fan-out failed for client {}",
+                conn.client_id
+            );
+        }
+    }
+    offset
 }
 
 fn replication_select_bytes_if_needed(

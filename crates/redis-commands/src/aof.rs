@@ -221,6 +221,16 @@ impl AofWriter {
         self.append_selected(0, argv)
     }
 
+    /// Append a command without inserting an implicit SELECT record.
+    ///
+    /// MULTI/EXEC transaction envelopes use this; commands inside the envelope
+    /// still call `append_selected` so DB selection is represented inside the
+    /// transaction.
+    pub fn append_raw(&self, argv: &[RedisString]) -> io::Result<()> {
+        let encoded = encode_resp_command(argv);
+        self.append_encoded(&encoded)
+    }
+
     /// Append a command that was executed against logical DB `db_id`.
     ///
     /// Mirrors Valkey `feedAppendOnlyFile`: a SELECT record is inserted when
@@ -241,13 +251,17 @@ impl AofWriter {
             }
         }
         encoded.extend_from_slice(&encode_resp_command(argv));
+        self.append_encoded(&encoded)
+    }
+
+    fn append_encoded(&self, encoded: &[u8]) -> io::Result<()> {
         let len = encoded.len();
         {
             let mut guard = match self.file.lock() {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
-            guard.write_all(&encoded)?;
+            guard.write_all(encoded)?;
             if self.fsync_policy.load(Ordering::Relaxed) == FSYNC_ALWAYS {
                 guard.flush()?;
                 guard.get_ref().sync_data()?;

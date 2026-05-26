@@ -36,8 +36,9 @@ use crate::list::wake_blocked_for_key;
 use crate::zset::wake_blocked_zset_for_key;
 
 use crate::dispatch::{
-    command_is_denyoom, command_is_no_multi, dispatch_command_name, enforce_maxmemory_gate,
-    execabort_from_error_reply, is_dispatchable_command,
+    command_is_denyoom, command_is_no_multi, command_is_write_or_may_replicate,
+    dispatch_command_name, enforce_maxmemory_gate, execabort_from_error_reply,
+    is_dispatchable_command,
 };
 
 const NAME_RESET: &[u8] = b"RESET";
@@ -222,15 +223,25 @@ pub fn exec_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let header_res = ctx.reply_array_header(queued.len());
 
     let mut deferred_wakes: Vec<(u32, RedisString)> = Vec::new();
+    let mut propagated_commands: Vec<(u32, Vec<RedisString>)> = Vec::new();
     if header_res.is_ok() {
         for argv in queued.into_iter() {
-            let db_id = run_one_queued(ctx, argv);
+            let (db_id, propagated) = run_one_queued(ctx, argv);
+            if let Some(argv) = propagated {
+                propagated_commands.push((db_id, argv));
+            }
             let keys: Vec<RedisString> = std::mem::take(&mut ctx.client_mut().pending_wakes);
             deferred_wakes.extend(keys.into_iter().map(|key| (db_id, key)));
         }
     }
 
     ctx.client_mut().set_flag_deny_blocking(false);
+
+    let propagated_offset = propagate_transaction_commands(&propagated_commands);
+    if propagated_offset > 0 {
+        ctx.client_mut().last_write_repl_offset = propagated_offset;
+    }
+    crate::connection::enforce_maxmemory_after_config_set(ctx);
 
     for (db_id, key) in deferred_wakes {
         wake_blocked_for_db(ctx, db_id, &key);
@@ -262,10 +273,16 @@ fn queued_has_declared_write_script_on_replica(queued: &[Vec<RedisString>]) -> b
 /// Replies (including errors) are written into `client.reply_buf` exactly as
 /// they would be for a top-level dispatch — that's what gives EXEC its array
 /// of inner frames.
-fn run_one_queued(ctx: &mut CommandContext, argv: Vec<RedisString>) -> u32 {
+fn run_one_queued(
+    ctx: &mut CommandContext,
+    argv: Vec<RedisString>,
+) -> (u32, Option<Vec<RedisString>>) {
     ctx.client_mut().set_args(argv);
     let selected_db = ctx.client_ref().db_index;
     let name = ctx.client_ref().arg(0).cloned();
+    let may_propagate = name
+        .as_ref()
+        .is_some_and(|name| command_is_write_or_may_replicate(name.as_bytes()));
     let previous_suppress = ctx.client_ref().suppress_monitor;
     ctx.client_mut().suppress_monitor = true;
     let result = match name {
@@ -273,11 +290,63 @@ fn run_one_queued(ctx: &mut CommandContext, argv: Vec<RedisString>) -> u32 {
         None => Err(RedisError::runtime(b"ERR empty queued command")),
     };
     ctx.client_mut().suppress_monitor = previous_suppress;
+    let propagated = if result.is_ok() && may_propagate && !ctx.client_ref().prevent_propagation() {
+        Some(ctx.client_ref().argv.clone())
+    } else {
+        None
+    };
     if let Err(err) = result {
         let payload = err.to_resp_payload();
         encode_resp2(&RespFrame::Error(payload), &mut ctx.client_mut().reply_buf);
     }
-    selected_db
+    (selected_db, propagated)
+}
+
+fn propagate_transaction_commands(commands: &[(u32, Vec<RedisString>)]) -> i64 {
+    append_transaction_commands_to_aof(commands);
+    match commands {
+        [] => 0,
+        [(db_id, argv)] => crate::dispatch::propagate_command_from_wake(*db_id, argv),
+        _ => {
+            let mut offset =
+                crate::dispatch::propagate_command_raw(&[RedisString::from_bytes(b"MULTI")]);
+            for (db_id, argv) in commands {
+                let next = crate::dispatch::propagate_command_from_wake(*db_id, argv);
+                if next > 0 {
+                    offset = next;
+                }
+            }
+            let exec_offset =
+                crate::dispatch::propagate_command_raw(&[RedisString::from_bytes(b"EXEC")]);
+            if exec_offset > 0 {
+                exec_offset
+            } else {
+                offset
+            }
+        }
+    }
+}
+
+fn append_transaction_commands_to_aof(commands: &[(u32, Vec<RedisString>)]) {
+    let Some(aof) = crate::aof::aof_writer() else {
+        return;
+    };
+    let result = match commands {
+        [] => Ok(()),
+        [(db_id, argv)] => aof.append_selected(*db_id, argv),
+        _ => aof
+            .append_raw(&[RedisString::from_bytes(b"MULTI")])
+            .and_then(|()| {
+                for (db_id, argv) in commands {
+                    aof.append_selected(*db_id, argv)?;
+                }
+                Ok(())
+            })
+            .and_then(|()| aof.append_raw(&[RedisString::from_bytes(b"EXEC")])),
+    };
+    if let Err(err) = result {
+        eprintln!("redis-server: transaction AOF append failed: {}", err);
+    }
 }
 
 fn dispatch_queued_on_db(
