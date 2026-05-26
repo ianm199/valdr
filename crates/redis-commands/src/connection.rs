@@ -1489,6 +1489,14 @@ fn enforce_maxmemory_after_config_set(ctx: &mut CommandContext<'_>) {
     if maxmemory == 0 {
         return;
     }
+    if ctx.client_ref().flag_deny_blocking()
+        || redis_core::networking::is_server_paused_for(
+            ctx.server(),
+            redis_core::networking::PAUSE_ACTION_EVICT,
+        )
+    {
+        return;
+    }
 
     let policy = ctx.live_config().maxmemory_policy();
     let lfu_log_factor = ctx.live_config().lfu_log_factor();
@@ -2745,6 +2753,14 @@ fn client_tracking_redir(client: &redis_core::client::Client) -> i64 {
     }
 }
 
+fn reported_reply_buffer_size(net_output_bytes: u64, pending_output_bytes: usize) -> usize {
+    if pending_output_bytes > 0 || net_output_bytes >= 32 * 1024 {
+        16 * 1024
+    } else {
+        1024
+    }
+}
+
 fn format_current_client_info_line(
     client: &redis_core::client::Client,
     command_name: &[u8],
@@ -2759,6 +2775,7 @@ fn format_current_client_info_line(
         -1
     };
     let watch = watched_key_count_for_client(client.id);
+    let rbs = reported_reply_buffer_size(client.net_output_bytes, client.reply_buf.len());
     let _ = write!(line, "id={} addr={}", client.id, addr);
     line.extend_from_slice(b" laddr=127.0.0.1:0 fd=0 name=");
     if let Some(name) = &client.name {
@@ -2770,13 +2787,14 @@ fn format_current_client_info_line(
     line.extend_from_slice(&capa);
     let _ = write!(
         line,
-        " db={} sub={} psub={} ssub={} multi={} watch={} qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 rbs=0 rbp=0 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd=",
+        " db={} sub={} psub={} ssub={} multi={} watch={} qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 rbs={} rbp=0 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd=",
         client.db_index,
         client.subscribed_channels.len(),
         client.subscribed_patterns.len(),
         client.subscribed_shard_channels.len(),
         multi,
         watch,
+        rbs,
     );
     line.extend_from_slice(command_name);
     line.extend_from_slice(b" user=");
@@ -2814,6 +2832,8 @@ fn format_snapshot_client_info_line(
         b"".as_slice()
     };
     let multi = snap.queued_multi_count.map(|n| n as i64).unwrap_or(-1);
+    let rbs = reported_reply_buffer_size(snap.net_output_bytes, snap.output_buffer_bytes);
+    let output_list_len = usize::from(snap.output_buffer_bytes > 0);
     let _ = write!(
         line,
         "id={} addr={} laddr=127.0.0.1:0 fd=0 name=",
@@ -2822,13 +2842,13 @@ fn format_snapshot_client_info_line(
     if let Some(name) = &snap.name {
         line.extend_from_slice(name.as_bytes());
     }
-    line.extend_from_slice(b" age=0 idle=0 flags=");
+    let _ = write!(line, " age=0 idle={} flags=", snap.idle_seconds);
     line.extend_from_slice(&flags);
     line.extend_from_slice(b" capa=");
     line.extend_from_slice(capa);
     let _ = write!(
         line,
-        " db={} sub={} psub={} ssub={} multi={} watch=0 qbuf={} qbuf-free=0 argv-mem={} multi-mem={} rbs=0 rbp=0 obl=0 oll=0 omem={} tot-mem={} events=r cmd=",
+        " db={} sub={} psub={} ssub={} multi={} watch=0 qbuf={} qbuf-free=0 argv-mem={} multi-mem={} rbs={} rbp=0 obl={} oll={} omem={} tot-mem={} events=r cmd=",
         snap.db_index,
         snap.subscribed_channels,
         snap.subscribed_patterns,
@@ -2837,6 +2857,9 @@ fn format_snapshot_client_info_line(
         snap.query_buffer_bytes,
         snap.argv_memory_bytes,
         snap.multi_memory_bytes,
+        rbs,
+        snap.output_buffer_bytes,
+        output_list_len,
         snap.output_buffer_bytes,
         snap.total_memory_bytes,
     );

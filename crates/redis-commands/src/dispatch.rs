@@ -20,6 +20,7 @@ use redis_core::acl::{
     category as acl_category, global_acl_state, record_acl_log_entry, AclUser, ACL_KEY_ANY,
     ACL_KEY_READ, ACL_KEY_READ_WRITE, ACL_KEY_WRITE,
 };
+use redis_core::client::Client;
 use redis_core::eviction::{oom_error_reply, try_evict_to_fit, EvictionOutcome};
 use redis_core::memory::approximate_memory_used;
 use redis_core::metrics::{
@@ -27,6 +28,7 @@ use redis_core::metrics::{
     record_acl_access_denied_key, record_command_stat, record_error_reply,
 };
 use redis_core::monotonic::{elapsed_start, elapsed_us};
+use redis_core::networking::{is_server_paused_for, PAUSE_ACTION_EVICT, PAUSE_ACTION_EXPIRE};
 use redis_core::CommandContext;
 use redis_types::{RedisError, RedisResult, RedisString};
 use serde_json::Value;
@@ -53,6 +55,7 @@ pub struct DispatchEntry {
 #[derive(Clone, Copy, Debug, Default)]
 struct CommandMetadata {
     write: bool,
+    may_replicate: bool,
     no_auth: bool,
     denyoom: bool,
     no_multi: bool,
@@ -355,8 +358,10 @@ pub fn dispatch(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     {
         let import_mode = ctx.server().live_config.import_mode();
         let import_source = ctx.client_ref().import_source;
+        let pause_expire = is_server_paused_for(ctx.server(), PAUSE_ACTION_EXPIRE);
         ctx.db_mut()
             .set_import_expire_state(import_source && import_mode, import_mode);
+        ctx.db_mut().set_pause_expire_keep(pause_expire);
     }
     ctx.client_mut().prevent_propagation = false;
     let command_name = match ctx.client_ref().arg(0) {
@@ -594,8 +599,10 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
     // selected DB's per-command flags before the handler runs.
     let import_mode = ctx.live_config().import_mode();
     let import_source_active = ctx.client_ref().import_source && import_mode;
+    let pause_expire = is_server_paused_for(ctx.server(), PAUSE_ACTION_EXPIRE);
     ctx.db_mut()
         .set_import_expire_state(import_source_active, import_mode);
+    ctx.db_mut().set_pause_expire_keep(pause_expire);
 
     let initial_slowlog_gate = ctx.live_config().slowlog_timing_gate();
     let should_time_slowlog = initial_slowlog_gate.should_time() && !metadata.skip_commandlog;
@@ -875,8 +882,91 @@ pub(crate) fn command_is_no_multi(name: &[u8]) -> bool {
     command_metadata(name).no_multi
 }
 
+pub(crate) fn command_is_write_or_may_replicate(name: &[u8]) -> bool {
+    let metadata = command_metadata(name);
+    metadata.write || metadata.may_replicate
+}
+
 pub(crate) fn command_acl_categories(name: &[u8]) -> Option<u64> {
     lookup_runtime_command(name).map(|entry| entry.metadata.acl_categories)
+}
+
+pub fn command_is_paused_by_client_pause(argv: &[RedisString], client: &Client) -> bool {
+    let Some(first) = argv.first() else {
+        return false;
+    };
+    let name = first.as_bytes();
+    let resolved_name = resolve_command_name(name);
+    let dispatch_name = resolved_name.as_deref().unwrap_or(name);
+    if command_pause_exempt(dispatch_name) {
+        return false;
+    }
+    if ascii_eq_ignore_case(dispatch_name, b"EXEC") {
+        return client
+            .queued_argvs
+            .iter()
+            .any(|queued| command_argv_requires_pause_write(queued));
+    }
+    command_argv_requires_pause_write(argv)
+}
+
+fn command_pause_exempt(name: &[u8]) -> bool {
+    ascii_eq_ignore_case(name, b"CLIENT")
+        || ascii_eq_ignore_case(name, b"INFO")
+        || ascii_eq_ignore_case(name, b"PING")
+        || ascii_eq_ignore_case(name, b"HELLO")
+        || ascii_eq_ignore_case(name, b"AUTH")
+        || ascii_eq_ignore_case(name, b"QUIT")
+        || ascii_eq_ignore_case(name, b"RESET")
+}
+
+fn command_argv_requires_pause_write(argv: &[RedisString]) -> bool {
+    let Some(first) = argv.first() else {
+        return false;
+    };
+    let name = first.as_bytes();
+    let resolved_name = resolve_command_name(name);
+    let dispatch_name = resolved_name.as_deref().unwrap_or(name);
+    if script_argv_is_no_writes(dispatch_name, argv) {
+        return false;
+    }
+    if script_argv_may_write(dispatch_name) {
+        return true;
+    }
+    lookup_runtime_command(dispatch_name)
+        .map(|entry| entry.metadata.write || entry.metadata.may_replicate)
+        .unwrap_or(false)
+}
+
+fn script_argv_may_write(name: &[u8]) -> bool {
+    ascii_eq_ignore_case(name, b"EVAL")
+        || ascii_eq_ignore_case(name, b"EVALSHA")
+        || ascii_eq_ignore_case(name, b"FCALL")
+}
+
+fn script_argv_is_no_writes(name: &[u8], argv: &[RedisString]) -> bool {
+    if ascii_eq_ignore_case(name, b"EVAL_RO")
+        || ascii_eq_ignore_case(name, b"EVALSHA_RO")
+        || ascii_eq_ignore_case(name, b"FCALL_RO")
+    {
+        return true;
+    }
+    if ascii_eq_ignore_case(name, b"EVAL") {
+        return argv
+            .get(1)
+            .is_some_and(|script| crate::eval::eval_script_arg_is_no_writes(script.as_bytes()));
+    }
+    if ascii_eq_ignore_case(name, b"EVALSHA") {
+        return argv
+            .get(1)
+            .is_some_and(|sha| crate::eval::cached_evalsha_is_no_writes(sha.as_bytes()));
+    }
+    if ascii_eq_ignore_case(name, b"FCALL") {
+        return argv
+            .get(1)
+            .is_some_and(|name| crate::eval::loaded_function_is_no_writes(name.as_bytes()));
+    }
+    false
 }
 
 fn command_metadata_table() -> &'static [(&'static [u8], CommandMetadata)] {
@@ -963,6 +1053,7 @@ impl CommandMetadata {
             match flag {
                 CommandFlag::ADMIN => self.admin = true,
                 CommandFlag::WRITE => self.write = true,
+                CommandFlag::MAY_REPLICATE => self.may_replicate = true,
                 CommandFlag::NO_AUTH => self.no_auth = true,
                 CommandFlag::DENYOOM => self.denyoom = true,
                 CommandFlag::NO_MULTI => self.no_multi = true,
@@ -1809,9 +1900,19 @@ pub(crate) fn enforce_maxmemory_gate(
     if maxmem == 0 {
         return None;
     }
+    if ctx.client_ref().flag_deny_blocking() {
+        return None;
+    }
     let used = approximate_memory_used(ctx.db());
     if used <= maxmem {
         return None;
+    }
+    if is_server_paused_for(ctx.server(), PAUSE_ACTION_EVICT) {
+        return if is_denyoom_command {
+            Some(oom_error_reply())
+        } else {
+            None
+        };
     }
     let policy = ctx.live_config().maxmemory_policy();
     let log_factor = ctx.live_config().lfu_log_factor();

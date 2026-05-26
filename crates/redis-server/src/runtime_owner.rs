@@ -27,7 +27,11 @@ use redis_core::eviction::{try_evict_to_fit, EvictionOutcome};
 use redis_core::expire::run_active_expire_tick_on_db;
 use redis_core::memory::approximate_memory_used;
 use redis_core::metrics::server_metrics;
-use redis_core::networking::get_client_eviction_limit;
+use redis_core::networking::{
+    current_paused_actions, get_client_eviction_limit, note_pause_postponed_client,
+    note_pause_resumed_client, PAUSE_ACTION_CLIENT_ALL, PAUSE_ACTION_CLIENT_WRITE,
+    PAUSE_ACTION_EVICT, PAUSE_ACTION_EXPIRE,
+};
 use redis_core::pubsub_registry::PubSubRegistry;
 use redis_core::{Client, Connection};
 use redis_protocol::parse_inline_or_multibulk_into;
@@ -234,6 +238,9 @@ pub struct ClientSlot {
     foreign_rx: Option<Receiver<Vec<u8>>>,
     write_buffer: ClientWriteBuffer,
     output_accounted_bytes: usize,
+    query_buffer_reported_bytes: usize,
+    last_client_activity: Instant,
+    pause_postponed: bool,
     obuf_soft_limit_since: Option<Instant>,
     writable_interest: bool,
     closed: bool,
@@ -249,6 +256,9 @@ impl ClientSlot {
             foreign_rx: None,
             write_buffer: ClientWriteBuffer::new(),
             output_accounted_bytes: 0,
+            query_buffer_reported_bytes: 0,
+            last_client_activity: Instant::now(),
+            pause_postponed: false,
             obuf_soft_limit_since: None,
             writable_interest: false,
             closed: false,
@@ -269,6 +279,9 @@ impl ClientSlot {
             foreign_rx: Some(foreign_rx),
             write_buffer: ClientWriteBuffer::new(),
             output_accounted_bytes: 0,
+            query_buffer_reported_bytes: 0,
+            last_client_activity: Instant::now(),
+            pause_postponed: false,
             obuf_soft_limit_since: None,
             writable_interest: false,
             closed: false,
@@ -290,6 +303,7 @@ impl ClientSlot {
 
     pub fn ingest(&mut self, bytes: &[u8]) {
         self.client.query_buf.extend_from_slice(bytes);
+        self.last_client_activity = Instant::now();
     }
 
     pub fn query_buffer(&self) -> &[u8] {
@@ -298,6 +312,25 @@ impl ClientSlot {
 
     pub fn clear_query_buffer(&mut self) {
         self.client.query_buf.clear();
+    }
+
+    fn observe_incomplete_query_buffer(&mut self) {
+        let estimate = estimated_query_buffer_allocation(&self.client.query_buf, 0);
+        if estimate > 0 {
+            self.query_buffer_reported_bytes = self.query_buffer_reported_bytes.max(estimate);
+            self.last_client_activity = Instant::now();
+        }
+    }
+
+    fn observe_completed_query_buffer(&mut self, consumed_total: usize) {
+        if consumed_total == 0 {
+            return;
+        }
+        if consumed_total > QUERY_BUFFER_RESIZE_THRESHOLD || self.query_buffer_reported_bytes > 0 {
+            self.query_buffer_reported_bytes =
+                estimated_query_buffer_allocation(&self.client.query_buf, consumed_total);
+        }
+        self.last_client_activity = Instant::now();
     }
 
     pub fn stage_argv(&mut self, argv: Vec<RedisString>) {
@@ -359,14 +392,26 @@ impl ClientSlot {
     }
 
     fn reconcile_output_buffer_after_write(&mut self) {
-        if !self.client.in_pubsub_mode() {
-            self.output_accounted_bytes = self.write_buffer.len();
-        }
+        self.output_accounted_bytes = self.write_buffer.len();
         self.refresh_output_buffer_state();
     }
 
     fn mark_close_after_flush(&mut self) {
         self.close_after_flush = true;
+    }
+
+    fn mark_pause_postponed(&mut self) {
+        if !self.pause_postponed {
+            self.pause_postponed = true;
+            note_pause_postponed_client();
+        }
+    }
+
+    fn clear_pause_postponed(&mut self) {
+        if self.pause_postponed {
+            self.pause_postponed = false;
+            note_pause_resumed_client();
+        }
     }
 
     pub fn is_closed(&self) -> bool {
@@ -381,7 +426,6 @@ impl ClientSlot {
         let argv_mem = self.current_argv_memory_usage();
         let multi_mem = self.multi_memory_usage();
         self.output_accounted_bytes
-            .saturating_add(self.write_buffer.len())
             .saturating_add(query_len)
             .saturating_add(argv_mem)
             .saturating_add(multi_mem)
@@ -391,14 +435,35 @@ impl ClientSlot {
             .saturating_add(self.name_memory_usage())
     }
 
-    fn refresh_client_memory_snapshot(&self) {
+    fn reported_query_buffer_bytes(&mut self) -> usize {
+        if self.query_buffer_reported_bytes > 0
+            && self.last_client_activity.elapsed() >= QUERY_BUFFER_IDLE_SHRINK_AFTER
+        {
+            self.query_buffer_reported_bytes =
+                if self.query_buffer_reported_bytes > QUERY_BUFFER_RESIZE_THRESHOLD {
+                    QUERY_BUFFER_IOBUF_LEN
+                } else if self.client.query_buf.is_empty() {
+                    0
+                } else {
+                    self.query_buffer_reported_bytes
+                };
+        }
+        self.query_buffer_reported_bytes
+    }
+
+    fn refresh_client_memory_snapshot(&mut self) {
+        let reported_query_buffer_bytes = self.reported_query_buffer_bytes();
         if let Ok(mut guard) = client_info_registry().lock() {
             guard.set_memory_usage(
                 self.client.id,
-                visible_query_buffer_len(&self.client.query_buf),
+                reported_query_buffer_bytes,
                 self.current_argv_memory_usage(),
                 self.multi_memory_usage(),
                 self.client_memory_usage(),
+            );
+            guard.set_idle_seconds(
+                self.client.id,
+                self.last_client_activity.elapsed().as_secs(),
             );
         }
     }
@@ -741,9 +806,10 @@ impl RuntimeOwner {
         while !shutdown.load(Ordering::SeqCst) {
             let mut progressed = false;
 
-            progressed |= owner.active_expire_step();
+            progressed |= owner.active_expire_step(&server);
             progressed |= owner.drain_replica_apply_requests(&registry, &server);
             progressed |= owner.dispatch_scheduled_commands(poll.registry(), &registry, &server);
+            progressed |= owner.schedule_unpaused_postponed_commands(&server);
             progressed |= owner.install_pending_dynamic_listeners(&mut listeners, poll.registry());
 
             let timeout = if owner.has_scheduled_commands() {
@@ -772,6 +838,7 @@ impl RuntimeOwner {
             progressed |= owner.drain_foreign_payloads(poll.registry());
             progressed |= owner.drain_replica_apply_requests(&registry, &server);
             progressed |= owner.dispatch_scheduled_commands(poll.registry(), &registry, &server);
+            progressed |= owner.schedule_unpaused_postponed_commands(&server);
             progressed |= owner.install_pending_dynamic_listeners(&mut listeners, poll.registry());
             owner.sweep_output_buffer_limits();
             progressed |= owner.enforce_client_memory_limits(&server);
@@ -1071,6 +1138,29 @@ impl RuntimeOwner {
         progressed
     }
 
+    fn schedule_unpaused_postponed_commands(
+        &mut self,
+        server: &Arc<redis_core::RedisServer>,
+    ) -> bool {
+        let paused_actions = current_paused_actions(server);
+        let mut scheduled = false;
+        let ids: Vec<SlotId> = self
+            .slots
+            .iter()
+            .flatten()
+            .filter(|slot| slot.pause_postponed && !slot_command_is_paused(slot, paused_actions))
+            .map(ClientSlot::id)
+            .collect();
+        for slot_id in ids {
+            if let Some(slot) = self.slot_mut(slot_id) {
+                slot.clear_pause_postponed();
+            }
+            self.schedule_command_continuation(slot_id);
+            scheduled = true;
+        }
+        scheduled
+    }
+
     fn ensure_writable_interest(&mut self, poll_registry: &MioRegistry, slot_id: SlotId) -> bool {
         let slot = match self.slot_mut(slot_id) {
             Some(slot) => slot,
@@ -1258,7 +1348,10 @@ impl RuntimeOwner {
         let mut consumed_total = 0usize;
         let mut commands = 0usize;
         let mut saw_command = false;
+        let mut saw_incomplete_query = false;
+        let mut paused_before_dispatch = false;
         let mut last_cmd_name: Vec<u8> = Vec::new();
+        let mut paused_actions = current_paused_actions(server);
 
         while commands < MAX_COMMANDS_PER_SLOT_TICK {
             if let Some(err) = super::unauthenticated_protocol_limit_error(
@@ -1288,6 +1381,12 @@ impl RuntimeOwner {
                     if super::is_client_info_observer(&last_cmd_name) {
                         super::update_client_info_snapshot(&slot.client, &last_cmd_name);
                     }
+                    if slot_command_is_paused(slot, paused_actions) {
+                        slot.mark_pause_postponed();
+                        paused_before_dispatch = true;
+                        break;
+                    }
+                    slot.clear_pause_postponed();
                     if client_exceeds_own_memory_limit_after_parse(slot, server, consumed_total) {
                         slot.mark_closed();
                         server_metrics()
@@ -1315,8 +1414,12 @@ impl RuntimeOwner {
                         slot.mark_close_after_flush();
                         break;
                     }
+                    paused_actions = current_paused_actions(server);
                 }
-                Ok(None) => break,
+                Ok(None) => {
+                    saw_incomplete_query = consumed_total < slot.client.query_buf.len();
+                    break;
+                }
                 Err(err) => {
                     super::queue_error_reply(&mut slot.client, &err);
                     slot.mark_close_after_flush();
@@ -1329,7 +1432,19 @@ impl RuntimeOwner {
             && consumed_total < slot.client.query_buf.len()
             && has_complete_command(&slot.client.query_buf[consumed_total..]);
 
+        if paused_before_dispatch {
+            return SlotDispatchOutcome {
+                progressed: false,
+                queued_write: false,
+                reschedule: false,
+            };
+        }
+
+        if saw_incomplete_query {
+            slot.observe_incomplete_query_buffer();
+        }
         if consumed_total > 0 {
+            slot.observe_completed_query_buffer(consumed_total);
             if consumed_total >= slot.client.query_buf.len() {
                 slot.client.query_buf.clear();
             } else {
@@ -1357,8 +1472,11 @@ impl RuntimeOwner {
         }
     }
 
-    fn active_expire_step(&mut self) -> bool {
+    fn active_expire_step(&mut self, server: &redis_core::RedisServer) -> bool {
         if self.dbs.is_empty() {
+            return false;
+        }
+        if current_paused_actions(server) & PAUSE_ACTION_EXPIRE != 0 {
             return false;
         }
         let (effort, hz) = redis_core::expire::active_expire_config().snapshot();
@@ -1414,14 +1532,18 @@ impl RuntimeOwner {
         if maxmemory == 0 {
             return false;
         }
-        if maxmemory_clients == 0 && client_memory < 1024 * 1024 {
+        if current_paused_actions(server) & PAUSE_ACTION_EVICT != 0 {
+            return false;
+        }
+        let evictable_client_memory = self.total_evictable_client_memory();
+        if maxmemory_clients == 0 && evictable_client_memory < 1024 * 1024 {
             return false;
         }
         let key_memory: u64 = self.dbs.iter().map(approximate_memory_used).sum();
-        if key_memory.saturating_add(client_memory as u64) <= maxmemory {
+        if key_memory.saturating_add(evictable_client_memory as u64) <= maxmemory {
             return false;
         }
-        let target_key_memory = maxmemory.saturating_sub(client_memory as u64);
+        let target_key_memory = maxmemory.saturating_sub(evictable_client_memory as u64);
         self.evict_keys_to_total(target_key_memory, server)
     }
 
@@ -1430,6 +1552,15 @@ impl RuntimeOwner {
             .iter()
             .flatten()
             .filter(|slot| !slot.closed && !slot.close_after_flush)
+            .map(ClientSlot::client_memory_usage)
+            .sum()
+    }
+
+    fn total_evictable_client_memory(&self) -> usize {
+        self.slots
+            .iter()
+            .flatten()
+            .filter(|slot| !slot.closed && !slot.close_after_flush && !slot.client.is_replica)
             .map(ClientSlot::client_memory_usage)
             .sum()
     }
@@ -1639,10 +1770,55 @@ fn has_complete_command(bytes: &[u8]) -> bool {
     )
 }
 
+const QUERY_BUFFER_IOBUF_LEN: usize = 16 * 1024;
+const QUERY_BUFFER_RESIZE_THRESHOLD: usize = 32 * 1024;
+const QUERY_BUFFER_IDLE_SHRINK_AFTER: Duration = Duration::from_secs(2);
+
+fn estimated_query_buffer_allocation(bytes: &[u8], consumed_hint: usize) -> usize {
+    let observed = visible_query_buffer_len(bytes)
+        .max(declared_bulk_argument_len(bytes))
+        .max(consumed_hint);
+    if observed == 0 {
+        0
+    } else if observed <= QUERY_BUFFER_RESIZE_THRESHOLD {
+        QUERY_BUFFER_IOBUF_LEN
+    } else {
+        observed
+    }
+}
+
 fn visible_query_buffer_len(bytes: &[u8]) -> usize {
     incomplete_multibulk_first_payload_start(bytes)
         .map(|start| bytes.len().saturating_sub(start))
         .unwrap_or(bytes.len())
+}
+
+fn declared_bulk_argument_len(bytes: &[u8]) -> usize {
+    let mut max_len = 0usize;
+    let mut pos = 0usize;
+    while let Some(rel) = bytes[pos..].iter().position(|&b| b == b'$') {
+        let dollar = pos + rel;
+        let line_start = dollar + 1;
+        let Some(line_end) = find_crlf(bytes, line_start) else {
+            break;
+        };
+        if line_end > line_start {
+            let mut n = 0usize;
+            let mut valid = true;
+            for &b in &bytes[line_start..line_end] {
+                if !b.is_ascii_digit() {
+                    valid = false;
+                    break;
+                }
+                n = n.saturating_mul(10).saturating_add((b - b'0') as usize);
+            }
+            if valid {
+                max_len = max_len.max(n);
+            }
+        }
+        pos = line_end + 2;
+    }
+    max_len
 }
 
 fn incomplete_multibulk_first_payload_start(bytes: &[u8]) -> Option<usize> {
@@ -1681,8 +1857,40 @@ fn client_exceeds_own_memory_limit_after_parse(
     limit > 0 && slot.client_memory_usage_after_parsed_command(consumed_total) > limit
 }
 
+fn slot_command_is_paused(slot: &ClientSlot, paused_actions: u32) -> bool {
+    if paused_actions & PAUSE_ACTION_CLIENT_ALL != 0 {
+        return !pause_exempt_current_command(&slot.client.argv);
+    }
+    if paused_actions & PAUSE_ACTION_CLIENT_WRITE != 0 {
+        return redis_commands::dispatch::command_is_paused_by_client_pause(
+            &slot.client.argv,
+            &slot.client,
+        );
+    }
+    false
+}
+
+fn pause_exempt_current_command(argv: &[RedisString]) -> bool {
+    let Some(name) = argv.first().map(|s| s.as_bytes()) else {
+        return true;
+    };
+    if name.eq_ignore_ascii_case(b"CLIENT") {
+        return argv
+            .get(1)
+            .map(|subcmd| subcmd.as_bytes().eq_ignore_ascii_case(b"UNPAUSE"))
+            .unwrap_or(false);
+    }
+    name.eq_ignore_ascii_case(b"INFO")
+        || name.eq_ignore_ascii_case(b"PING")
+        || name.eq_ignore_ascii_case(b"HELLO")
+        || name.eq_ignore_ascii_case(b"AUTH")
+        || name.eq_ignore_ascii_case(b"QUIT")
+        || name.eq_ignore_ascii_case(b"RESET")
+}
+
 fn cleanup_slot(mut slot: ClientSlot, registry: &Arc<Mutex<PubSubRegistry>>) {
     let id = slot.client.id;
+    slot.clear_pause_postponed();
     let _ = redis_commands::pubsub::drop_client_from_registry(registry, id);
     redis_core::replication::global_replication_state().remove_replica(id);
     redis_core::tracking::remove_runtime_client_tracking(id);

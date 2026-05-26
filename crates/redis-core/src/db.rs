@@ -591,6 +591,11 @@ pub struct RedisDb {
     /// waits for an explicit DEL from the import source. C: the `KEEP_EXPIRED`
     /// branch of `getExpirationPolicyWithFlags` (expire.c:995-1019).
     import_mode_keep: bool,
+
+    /// When true, CLIENT PAUSE is suppressing physical expiry. Expired keys
+    /// remain logically expired for normal lookups but are not deleted and can
+    /// still be sampled by RANDOMKEY, matching Valkey's PAUSE_ACTION_EXPIRE.
+    pause_expire_keep: bool,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -653,6 +658,10 @@ impl RedisDb {
         self.import_mode_keep = import_mode_keep;
     }
 
+    pub fn set_pause_expire_keep(&mut self, pause_expire_keep: bool) {
+        self.pause_expire_keep = pause_expire_keep;
+    }
+
     /// Check and optionally delete an expired key. Returns the new `KeyStatus`.
     ///
     /// C: db.c:2157 expireIfNeededWithDictIndex
@@ -666,7 +675,9 @@ impl RedisDb {
         // C: getExpirationPolicyWithFlags KEEP_EXPIRED — a primary in import-mode
         // reports the key as expired but waits for the import source to delete
         // it, so non-force lookups must not lazily remove it.
-        if self.import_mode_keep && flags & EXPIRE_FORCE_DELETE_EXPIRED == 0 {
+        if (self.import_mode_keep || self.pause_expire_keep)
+            && flags & EXPIRE_FORCE_DELETE_EXPIRED == 0
+        {
             return KeyStatus::Expired;
         }
         // TODO(port): EXPIRE_FORCE_DELETE_EXPIRED — check replica mode before deleting
@@ -1053,7 +1064,10 @@ impl RedisDb {
             .skip(start)
             .take(self.dict.len())
             .find(|(_, obj)| {
-                self.import_source_active || obj.expire == EXPIRY_NONE || obj.expire >= now
+                self.import_source_active
+                    || self.pause_expire_keep
+                    || obj.expire == EXPIRY_NONE
+                    || obj.expire >= now
             })
             .map(|(k, _)| k.clone())
     }

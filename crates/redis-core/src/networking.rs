@@ -31,7 +31,7 @@
 // TODO(architect): add dep edge redis-core → redis-protocol for RespFrame.
 // TODO(architect): confirm Connection type for networking I/O abstraction.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU8, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use redis_types::{RedisError, RedisResult, RedisString};
@@ -143,8 +143,13 @@ pub const CLIENT_CAPA_REDIRECT: u32 = 1 << 0;
 
 pub const PAUSE_ACTION_CLIENT_WRITE: u32 = 1 << 0;
 pub const PAUSE_ACTION_CLIENT_ALL: u32 = 1 << 1;
-pub const PAUSE_ACTIONS_CLIENT_WRITE_SET: u32 = PAUSE_ACTION_CLIENT_WRITE;
-pub const PAUSE_ACTIONS_CLIENT_ALL_SET: u32 = PAUSE_ACTION_CLIENT_WRITE | PAUSE_ACTION_CLIENT_ALL;
+pub const PAUSE_ACTION_EXPIRE: u32 = 1 << 2;
+pub const PAUSE_ACTION_EVICT: u32 = 1 << 3;
+pub const PAUSE_ACTION_REPLICA: u32 = 1 << 4;
+pub const PAUSE_ACTIONS_CLIENT_WRITE_SET: u32 =
+    PAUSE_ACTION_CLIENT_WRITE | PAUSE_ACTION_EXPIRE | PAUSE_ACTION_EVICT | PAUSE_ACTION_REPLICA;
+pub const PAUSE_ACTIONS_CLIENT_ALL_SET: u32 =
+    PAUSE_ACTION_CLIENT_ALL | PAUSE_ACTION_EXPIRE | PAUSE_ACTION_EVICT | PAUSE_ACTION_REPLICA;
 
 // ── Payload type ─────────────────────────────────────────────────────────────
 // C: networking.c:106-110
@@ -551,11 +556,25 @@ pub fn free_shared_query_buf() {
 // AtomicI32 in Phase 3 with I/O threads.
 // PORT NOTE: Using AtomicI32 here so the code compiles without unsafe even
 // though Phase 2 is single-threaded.
-static PROCESSING_EVENTS_WHILE_BLOCKED: std::sync::atomic::AtomicI32 =
-    std::sync::atomic::AtomicI32::new(0);
+static PROCESSING_EVENTS_WHILE_BLOCKED: AtomicI32 = AtomicI32::new(0);
+static PAUSE_POSTPONED_CLIENTS: AtomicUsize = AtomicUsize::new(0);
 
 pub fn is_processing_events_while_blocked() -> bool {
     PROCESSING_EVENTS_WHILE_BLOCKED.load(Ordering::Relaxed) > 0
+}
+
+pub fn pause_postponed_client_count() -> usize {
+    PAUSE_POSTPONED_CLIENTS.load(Ordering::Relaxed)
+}
+
+pub fn note_pause_postponed_client() {
+    PAUSE_POSTPONED_CLIENTS.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn note_pause_resumed_client() {
+    let _ = PAUSE_POSTPONED_CLIENTS.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+        Some(count.saturating_sub(1))
+    });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1849,16 +1868,17 @@ pub fn client_pause_command(ctx: &mut CommandContext) -> RedisResult<()> {
         true
     };
     let end = crate::util::mstime().saturating_add(timeout);
-    {
-        let mut events = ctx
-            .server()
-            .pause_events
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        pause_clients_by_client(&mut events, end, pause_all);
-    }
+    apply_client_pause(ctx.server(), end, pause_all);
     add_reply_status(ctx.client, b"OK");
     Ok(())
+}
+
+pub fn apply_client_pause(server: &RedisServer, end: i64, pause_all: bool) {
+    let mut events = server
+        .pause_events
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    pause_clients_by_client(&mut events, end, pause_all);
 }
 
 /// CLIENT UNPAUSE
@@ -1886,7 +1906,12 @@ pub fn pause_info(events: &[PauseEvent; 4], now: i64) -> (&'static str, &'static
     if paused == 0 {
         return ("none", "none", 0);
     }
-    let (timeout, purpose) = get_paused_action_timeout(events, PAUSE_ACTION_CLIENT_WRITE, now);
+    let timeout_action = if paused & PAUSE_ACTION_CLIENT_ALL != 0 {
+        PAUSE_ACTION_CLIENT_ALL
+    } else {
+        PAUSE_ACTION_CLIENT_WRITE
+    };
+    let (timeout, purpose) = get_paused_action_timeout(events, timeout_action, now);
     let reason = match purpose {
         PausePurpose::ByClientCommand => "client_pause",
         PausePurpose::DuringShutdown => "shutdown",
@@ -2296,14 +2321,29 @@ pub fn update_paused_actions(events: &[PauseEvent; 4], mstime: i64) -> u32 {
     paused
 }
 
+pub fn current_paused_actions(server: &RedisServer) -> u32 {
+    let now = crate::util::mstime();
+    let events = server
+        .pause_events
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    update_paused_actions(&events, now)
+}
+
+pub fn is_server_paused_for(server: &RedisServer, action: u32) -> bool {
+    current_paused_actions(server) & action != 0
+}
+
 /// Set pause for `PAUSE_BY_CLIENT_COMMAND` (CLIENT PAUSE implementation).
 ///
 /// C: networking.c:6315 `pauseClientsByClient`
 pub fn pause_clients_by_client(events: &mut [PauseEvent; 4], end_time: i64, pause_all: bool) {
     let p = &mut events[PausePurpose::ByClientCommand as usize];
+    let old_pause_all_is_active =
+        p.end > crate::util::mstime() && p.paused_actions & PAUSE_ACTION_CLIENT_ALL != 0;
     let actions = if pause_all {
         PAUSE_ACTIONS_CLIENT_ALL_SET
-    } else if p.paused_actions & PAUSE_ACTION_CLIENT_ALL != 0 {
+    } else if old_pause_all_is_active {
         PAUSE_ACTIONS_CLIENT_ALL_SET // keep most restrictive
     } else {
         PAUSE_ACTIONS_CLIENT_WRITE_SET

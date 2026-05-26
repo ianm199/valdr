@@ -809,10 +809,9 @@ pub fn maybe_wake_wait_clients() {
     let satisfied = idx.take_satisfied_wait_waiters(|target| {
         acked_offsets.iter().filter(|&&o| o >= target).count()
     });
-    let satisfied_aof = idx.take_satisfied_waitaof_waiters(
-        local_aof_ack_count,
-        |target| aof_acked_offsets.iter().filter(|&&o| o >= target).count(),
-    );
+    let satisfied_aof = idx.take_satisfied_waitaof_waiters(local_aof_ack_count, |target| {
+        aof_acked_offsets.iter().filter(|&&o| o >= target).count()
+    });
     drop(idx);
     for (waiter, count) in satisfied {
         let reply = format!(":{}\r\n", count).into_bytes();

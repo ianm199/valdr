@@ -22,7 +22,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{
-    AtomicBool, AtomicI32, AtomicI64, AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering,
+    AtomicBool, AtomicI32, AtomicI64, AtomicU16, AtomicU32, AtomicU64, AtomicU8, AtomicUsize,
+    Ordering,
 };
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -205,6 +206,10 @@ pub struct ReplicaConn {
     /// Unix millisecond timestamp of the last REPLCONF ACK seen from the
     /// replica. Drives the `lag` field in `INFO replication`.
     pub last_ack_time_ms: AtomicI64,
+    /// Approximate bytes queued to the replica writer thread. This mirrors the
+    /// backlog that Valkey reports as slave/client output memory so INFO can
+    /// exclude it from key-eviction pressure.
+    pub pending_output_bytes: AtomicUsize,
     /// Outbound mpsc sender — the writer-thread channel the master pushes
     /// backlog deltas and the RDB blob through.
     pub outbound_sender: Sender<Vec<u8>>,
@@ -227,6 +232,7 @@ impl ReplicaConn {
             listening_port: AtomicU16::new(0),
             capa_flags: AtomicU32::new(0),
             last_ack_time_ms: AtomicI64::new(0),
+            pending_output_bytes: AtomicUsize::new(0),
             outbound_sender,
         }
     }
@@ -566,6 +572,9 @@ impl ReplicationState {
                 p.into_inner().remove(&client_id);
             }
         }
+        if let Ok(mut guard) = crate::client_info::client_info_registry().lock() {
+            guard.set_output_buffer_memory(client_id, 0);
+        }
     }
 
     /// PID of the in-flight BGSAVE-for-replication child, or 0 when no such
@@ -641,12 +650,26 @@ impl ReplicationState {
     /// is alive). Returns `false` when the replica is gone or the channel is
     /// closed.
     pub fn send_to_replica(&self, client_id: ClientId, bytes: Vec<u8>) -> bool {
+        let len = bytes.len();
         let guard = match self.replicas.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
         match guard.get(&client_id) {
-            Some(r) => r.outbound_sender.send(bytes).is_ok(),
+            Some(r) => {
+                if r.outbound_sender.send(bytes).is_ok() {
+                    let pending = r
+                        .pending_output_bytes
+                        .fetch_add(len, Ordering::Relaxed)
+                        .saturating_add(len);
+                    if let Ok(mut guard) = crate::client_info::client_info_registry().lock() {
+                        guard.set_output_buffer_memory(client_id, pending);
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
             None => false,
         }
     }

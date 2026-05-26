@@ -126,7 +126,9 @@ impl BlockedAction {
             BlockedAction::Stream { .. } => b"$-1\r\n".to_vec(),
             BlockedAction::StreamGroup { .. } => b"*-1\r\n".to_vec(),
             BlockedAction::Wait { .. } => format!(":{}\r\n", acked_count).into_bytes(),
-            BlockedAction::WaitAof { .. } => format!("*2\r\n:0\r\n:{}\r\n", acked_count).into_bytes(),
+            BlockedAction::WaitAof { .. } => {
+                format!("*2\r\n:0\r\n:{}\r\n", acked_count).into_bytes()
+            }
         }
     }
 
@@ -431,9 +433,12 @@ impl BlockedKeysIndex {
 
     /// Whether any client is blocked in WAIT or WAITAOF.
     pub fn has_replication_waiters(&self) -> bool {
-        self.waiters
-            .values()
-            .any(|w| matches!(w.action, BlockedAction::Wait { .. } | BlockedAction::WaitAof { .. }))
+        self.waiters.values().any(|w| {
+            matches!(
+                w.action,
+                BlockedAction::Wait { .. } | BlockedAction::WaitAof { .. }
+            )
+        })
     }
 
     /// Number of distinct keys that have at least one blocked client.

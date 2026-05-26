@@ -38,6 +38,13 @@ use redis_core::metrics::{record_command_stat, record_error_reply};
 use redis_core::CommandContext;
 use redis_protocol::frame::RespFrame;
 use redis_protocol::parser::{ParserCallbacks, ParserCursor};
+
+const READ_ONLY_SCRIPT_WRITE_ERROR_PAYLOAD: &[u8] =
+    b"ERR Write commands are not allowed from read-only scripts. script:1";
+const READ_ONLY_SCRIPT_WRITE_ERROR_LUA: &str =
+    "Write commands are not allowed from read-only scripts. script:1";
+const READ_ONLY_SCRIPT_WRITE_ERROR_RESP: &str =
+    "ERR Write commands are not allowed from read-only scripts. script:1";
 use redis_types::{RedisError, RedisResult, RedisString};
 
 use crate::dispatch::{command_acl_categories, command_is_denyoom, dispatch_command_name};
@@ -3549,6 +3556,30 @@ pub(crate) fn queued_script_declares_write(argv: &[RedisString]) -> bool {
     false
 }
 
+pub(crate) fn eval_script_arg_is_no_writes(script: &[u8]) -> bool {
+    parse_eval_shebang(script)
+        .map(|(flags, _)| flags.has_shebang && flags.no_writes)
+        .unwrap_or(false)
+}
+
+pub(crate) fn cached_evalsha_is_no_writes(raw_sha: &[u8]) -> bool {
+    let Some(sha) = normalise_sha(raw_sha) else {
+        return false;
+    };
+    let script = {
+        let guard = match script_cache().lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard.entries.get(&sha).map(|entry| entry.body.clone())
+    };
+    script.as_deref().is_some_and(eval_script_arg_is_no_writes)
+}
+
+pub(crate) fn loaded_function_is_no_writes(name: &[u8]) -> bool {
+    find_loaded_function(name).is_some_and(|(_, definition)| definition.no_writes)
+}
+
 fn function_source_eval_flags(code: &[u8]) -> EvalScriptFlags {
     EvalScriptFlags {
         has_shebang: ascii_contains_ci(code, b"#!lua"),
@@ -3775,11 +3806,11 @@ fn run_loaded_function(
                     if read_only && call_is_write_command(&arg_bytes) {
                         record_script_rejected_command(
                             &arg_bytes,
-                            b"ERR Write commands are not allowed from read-only scripts.",
+                            READ_ONLY_SCRIPT_WRITE_ERROR_PAYLOAD,
                         );
                         error_recorded.set(true);
                         return Err(LuaError::RuntimeError(
-                            "Write commands are not allowed from read-only scripts".to_string(),
+                            READ_ONLY_SCRIPT_WRITE_ERROR_LUA.to_string(),
                         ));
                     }
                     let mut borrow = cell.borrow_mut();
@@ -3843,14 +3874,12 @@ fn run_loaded_function(
                     if read_only && call_is_write_command(&arg_bytes) {
                         record_script_rejected_command(
                             &arg_bytes,
-                            b"ERR Write commands are not allowed from read-only scripts.",
+                            READ_ONLY_SCRIPT_WRITE_ERROR_PAYLOAD,
                         );
                         let t = lua_inner.create_table()?;
                         t.raw_set(
                             "err",
-                            lua_inner.create_string(
-                                "ERR Write commands are not allowed from read-only scripts.",
-                            )?,
+                            lua_inner.create_string(READ_ONLY_SCRIPT_WRITE_ERROR_RESP)?,
                         )?;
                         t.raw_set(LUA_ERROR_ALREADY_RECORDED_FIELD, true)?;
                         return Ok(LuaValue::Table(t));
@@ -4048,6 +4077,9 @@ fn call_is_write_command(args: &[Vec<u8>]) -> bool {
         return false;
     };
     let name = command.as_slice();
+    if crate::dispatch::command_is_write_or_may_replicate(name) {
+        return true;
+    }
     ascii_eq_ci(name, b"SET")
         || ascii_eq_ci(name, b"SETEX")
         || ascii_eq_ci(name, b"PSETEX")
@@ -4348,11 +4380,11 @@ fn run_script(
                 if read_only && call_is_write_command(&arg_bytes) {
                     record_script_rejected_command(
                         &arg_bytes,
-                        b"ERR Write commands are not allowed from read-only scripts.",
+                        READ_ONLY_SCRIPT_WRITE_ERROR_PAYLOAD,
                     );
                     error_recorded.set(true);
                     return Err(LuaError::RuntimeError(
-                        "Write commands are not allowed from read-only scripts".to_string(),
+                        READ_ONLY_SCRIPT_WRITE_ERROR_LUA.to_string(),
                     ));
                 }
                 let mut borrow = cell.borrow_mut();
@@ -4415,14 +4447,12 @@ fn run_script(
                     if read_only && call_is_write_command(&arg_bytes) {
                         record_script_rejected_command(
                             &arg_bytes,
-                            b"ERR Write commands are not allowed from read-only scripts.",
+                            READ_ONLY_SCRIPT_WRITE_ERROR_PAYLOAD,
                         );
                         let t = lua_inner.create_table()?;
                         t.raw_set(
                             "err",
-                            lua_inner.create_string(
-                                "ERR Write commands are not allowed from read-only scripts.",
-                            )?,
+                            lua_inner.create_string(READ_ONLY_SCRIPT_WRITE_ERROR_RESP)?,
                         )?;
                         t.raw_set(LUA_ERROR_ALREADY_RECORDED_FIELD, true)?;
                         return Ok(LuaValue::Table(t));

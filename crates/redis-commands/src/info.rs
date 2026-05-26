@@ -62,12 +62,17 @@ fn client_memory_info_totals() -> (usize, usize) {
         Ok(g) => g,
         Err(p) => p.into_inner(),
     };
-    let normal = guard
-        .all()
-        .into_iter()
-        .map(|snap| snap.total_memory_bytes)
-        .sum();
-    (normal, 0)
+    let mut normal = 0usize;
+    let mut replicas = 0usize;
+    for snap in guard.all() {
+        if snap.is_replica {
+            replicas =
+                replicas.saturating_add(snap.total_memory_bytes.max(snap.output_buffer_bytes));
+        } else {
+            normal = normal.saturating_add(snap.total_memory_bytes);
+        }
+    }
+    (normal, replicas)
 }
 
 /// `INFO [section]`.
@@ -172,7 +177,7 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let _ = writeln!(buf, "\r");
     }
     if want(b"clients") {
-        let (blocked, blocking_keys, blocking_keys_on_nokey) =
+        let (blocked_on_keys, blocking_keys, blocking_keys_on_nokey) =
             match redis_core::blocked_keys::blocked_keys_index().lock() {
                 Ok(g) => (
                     g.len(),
@@ -188,6 +193,8 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
                     )
                 }
             };
+        let blocked =
+            blocked_on_keys.saturating_add(redis_core::networking::pause_postponed_client_count());
         let _ = writeln!(buf, "# Clients\r");
         let _ = writeln!(buf, "connected_clients:{}\r", connected_clients);
         let _ = writeln!(buf, "maxclients:{}\r", maxclients);
@@ -217,7 +224,11 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let _ = writeln!(buf, "\r");
     }
     if want(b"memory") {
-        let used_memory = approximate_memory_used(ctx.db());
+        let key_memory = approximate_memory_used(ctx.db());
+        let (mem_clients_normal, mem_clients_slaves) = client_memory_info_totals();
+        let used_memory = key_memory
+            .saturating_add(mem_clients_normal as u64)
+            .saturating_add(mem_clients_slaves as u64);
         let used_memory_human = format_human_bytes(used_memory);
         let peak = metrics.max_clients_seen.load(Ordering::Relaxed);
         let (rss, rss_source) = match rss_bytes() {
@@ -262,8 +273,7 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
             format_human_bytes(used_memory_scripts as u64)
         );
         let _ = writeln!(buf, "total_system_memory:0\r");
-        let _ = writeln!(buf, "mem_not_counted_for_evict:0\r");
-        let (mem_clients_normal, mem_clients_slaves) = client_memory_info_totals();
+        let _ = writeln!(buf, "mem_not_counted_for_evict:{}\r", mem_clients_slaves);
         let _ = writeln!(buf, "mem_clients_normal:{}\r", mem_clients_normal);
         let _ = writeln!(buf, "mem_clients_slaves:{}\r", mem_clients_slaves);
         let live_maxmemory = ctx.live_config().maxmemory();

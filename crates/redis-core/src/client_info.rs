@@ -30,6 +30,7 @@ pub struct ClientSnapshot {
     pub db_index: u32,
     pub cmd: String,
     pub blocked: bool,
+    pub idle_seconds: u64,
     pub name: Option<RedisString>,
     pub user: Option<RedisString>,
     pub resp_proto: i32,
@@ -81,6 +82,7 @@ impl ClientInfoRegistry {
                 db_index: 0,
                 cmd: String::new(),
                 blocked: false,
+                idle_seconds: 0,
                 name: None,
                 user: Some(RedisString::from_static(b"default")),
                 resp_proto: 2,
@@ -176,6 +178,12 @@ impl ClientInfoRegistry {
             e.argv_memory_bytes = argv_memory_bytes;
             e.multi_memory_bytes = multi_memory_bytes;
             e.total_memory_bytes = total_memory_bytes;
+        }
+    }
+
+    pub fn set_idle_seconds(&mut self, id: ClientId, idle_seconds: u64) {
+        if let Some(e) = self.entries.get_mut(&id) {
+            e.idle_seconds = idle_seconds;
         }
     }
 

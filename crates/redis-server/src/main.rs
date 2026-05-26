@@ -28,9 +28,7 @@ use rustls::StreamOwned;
 use libc;
 use redis_commands::connection::get_max_clients;
 use redis_commands::{dispatch, pubsub};
-use redis_core::blocked_keys::{
-    blocked_keys_index, blocked_replication_wait_any, current_time_ms,
-};
+use redis_core::blocked_keys::{blocked_keys_index, blocked_replication_wait_any, current_time_ms};
 use redis_core::client_info::client_info_registry;
 use redis_core::command_context::CommandContext;
 use redis_core::databases::global_databases;

@@ -747,8 +747,8 @@ pub fn bgsave_for_replication(
                 temp_path,
                 waiting_replicas: vec![requesting_client_id],
                 snapshot_offset,
-                needs_getack_on_completion:
-                    redis_core::blocked_keys::blocked_replication_wait_any(),
+                needs_getack_on_completion: redis_core::blocked_keys::blocked_replication_wait_any(
+                ),
             });
             return BgsaveForReplResult::Started;
         }
