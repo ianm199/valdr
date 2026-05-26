@@ -410,8 +410,18 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
                 String::from_utf8_lossy(host.as_bytes())
             );
             let _ = writeln!(buf, "master_port:{}\r", port);
-            let _ = writeln!(buf, "master_link_status:up\r");
-            let _ = writeln!(buf, "master_sync_in_progress:0\r");
+            let online = repl.repl_state.load(Ordering::Relaxed)
+                == redis_core::replication::repl_state_code::REPLICA_ONLINE;
+            let _ = writeln!(
+                buf,
+                "master_link_status:{}\r",
+                if online { "up" } else { "down" }
+            );
+            let _ = writeln!(
+                buf,
+                "master_sync_in_progress:{}\r",
+                if online { 0 } else { 1 }
+            );
         }
         let _ = writeln!(buf, "connected_slaves:{}\r", connected);
         for (idx, (_cid, state, port, offset, last_ack_ms)) in replicas.iter().enumerate() {

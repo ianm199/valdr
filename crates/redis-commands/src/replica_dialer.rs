@@ -331,15 +331,6 @@ fn dialer_loop(
 /// Returns the initial replication offset from the `+FULLRESYNC` reply.
 /// On `+CONTINUE` we return the current master offset (partial resync).
 fn run_handshake(stream: &TcpStream, repl: &ReplicationState, our_port: u16) -> io::Result<i64> {
-    send_multibulk(stream, &[b"PING"])?;
-    let pong = read_line(stream)?;
-    if !pong.starts_with(b"+PONG") && !pong.starts_with(b"+pong") {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("expected +PONG, got: {:?}", String::from_utf8_lossy(&pong)),
-        ));
-    }
-
     if let Some(primaryauth) = GLOBAL_SERVER
         .get()
         .and_then(|server| server.live_config.primaryauth())
@@ -361,6 +352,15 @@ fn run_handshake(stream: &TcpStream, repl: &ReplicationState, our_port: u16) -> 
                 ),
             ));
         }
+    }
+
+    send_multibulk(stream, &[b"PING"])?;
+    let pong = read_line(stream)?;
+    if !pong.starts_with(b"+PONG") && !pong.starts_with(b"+pong") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("expected +PONG, got: {:?}", String::from_utf8_lossy(&pong)),
+        ));
     }
 
     let port_str = our_port.to_string();
