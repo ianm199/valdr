@@ -92,7 +92,15 @@ def artifact_header(path: Path, data: dict[str, Any]) -> str:
         bits.append(f"min `{fmt_ratio(summary['min_ratio'])}`")
     if params:
         selected = []
-        for key in ("mode", "requests", "clients", "pipeline", "payload"):
+        for key in (
+            "mode",
+            "requests",
+            "clients",
+            "pipeline",
+            "payload",
+            "warmup_requests",
+            "warmup_command",
+        ):
             if key in params and params[key] is not None:
                 selected.append(f"{key}={params[key]}")
         if selected:
@@ -112,8 +120,12 @@ def render_default_suite(path: Path, data: dict[str, Any]) -> str:
                 fmt_rps(row.get("rust_rps")),
                 fmt_ms(row.get("reference_p50_ms")),
                 fmt_ms(row.get("rust_p50_ms")),
+                fmt_ms(row.get("reference_p95_ms")),
+                fmt_ms(row.get("rust_p95_ms")),
                 fmt_ms(row.get("reference_p99_ms")),
                 fmt_ms(row.get("rust_p99_ms")),
+                fmt_ms(row.get("reference_max_ms")),
+                fmt_ms(row.get("rust_max_ms")),
             ]
         )
     return "\n\n".join(
@@ -129,8 +141,12 @@ def render_default_suite(path: Path, data: dict[str, Any]) -> str:
                     "Rust rps",
                     "Valkey p50 ms",
                     "Rust p50 ms",
+                    "Valkey p95 ms",
+                    "Rust p95 ms",
                     "Valkey p99 ms",
                     "Rust p99 ms",
+                    "Valkey max ms",
+                    "Rust max ms",
                 ],
                 rows,
             ),
@@ -152,8 +168,14 @@ def render_pipeline_smoke(path: Path, data: dict[str, Any]) -> str:
                 fmt_ratio(row.get("ratio")),
                 fmt_rps(row.get("reference_rps")),
                 fmt_rps(row.get("rust_rps")),
+                fmt_ms(row.get("reference_p50_ms")),
+                fmt_ms(row.get("rust_p50_ms")),
+                fmt_ms(row.get("reference_p95_ms")),
+                fmt_ms(row.get("rust_p95_ms")),
                 fmt_ms(row.get("reference_p99_ms")),
                 fmt_ms(row.get("rust_p99_ms")),
+                fmt_ms(row.get("reference_max_ms")),
+                fmt_ms(row.get("rust_max_ms")),
             ]
         )
     return "\n\n".join(
@@ -171,8 +193,14 @@ def render_pipeline_smoke(path: Path, data: dict[str, Any]) -> str:
                     "Ratio",
                     "Valkey rps",
                     "Rust rps",
+                    "Valkey p50 ms",
+                    "Rust p50 ms",
+                    "Valkey p95 ms",
+                    "Rust p95 ms",
                     "Valkey p99 ms",
                     "Rust p99 ms",
+                    "Valkey max ms",
+                    "Rust max ms",
                 ],
                 rows,
             ),
@@ -198,6 +226,8 @@ def render_json_doc_mix(path: Path, data: dict[str, Any]) -> str:
                 fmt_ms(row.get("rust_p50_ms")),
                 fmt_ms(row.get("reference_p90_ms")),
                 fmt_ms(row.get("rust_p90_ms")),
+                fmt_ms(row.get("reference_p95_ms")),
+                fmt_ms(row.get("rust_p95_ms")),
                 fmt_ms(row.get("reference_p99_ms")),
                 fmt_ms(row.get("rust_p99_ms")),
             ]
@@ -221,6 +251,8 @@ def render_json_doc_mix(path: Path, data: dict[str, Any]) -> str:
                     "Rust p50 ms",
                     "Valkey p90 ms",
                     "Rust p90 ms",
+                    "Valkey p95 ms",
+                    "Rust p95 ms",
                     "Valkey p99 ms",
                     "Rust p99 ms",
                 ],

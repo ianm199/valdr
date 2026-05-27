@@ -7,6 +7,30 @@ want to create a harness work packet yet. These probes are telemetry only; they
 write raw artifacts under ignored `harness/bench/results/` and
 `harness/bench/profiles/`.
 
+## Warmed Release Tables
+
+Use `official-warm-run.sh` for the release-facing performance packet. It builds
+the current checkout once, warms each benchmarked server with a small
+`PING_MBULK` pass before measured rows, runs the default-suite, pipeline, and
+JSON-document probes, then writes a Markdown table bundle under
+`harness/bench/results/`.
+
+```bash
+bash harness/bench/official-warm-run.sh
+
+# Optional knobs for a shorter local smoke:
+DEFAULT_REQUESTS=10000 \
+PIPELINE_P1_REQUESTS=20000 \
+PIPELINE_REQUESTS_PIPELINED=100000 \
+JSON_REQUESTS=10000 \
+bash harness/bench/official-warm-run.sh
+```
+
+The warmed results should be described with the warmup note from the artifact
+header. The default is `1000` `PING_MBULK` requests with one client and
+pipeline depth `1`; this is intended to remove first-traffic cold-path noise
+without pre-running the measured command workload.
+
 ```bash
 # Decompose the Redis/Valkey default benchmark suite into bounded cells.
 # `ordered` preserves server state between parts, which catches default-suite

@@ -294,6 +294,77 @@ def benchmark_command(
     return cmd
 
 
+def warmup_command(port: int, args: argparse.Namespace) -> list[str]:
+    return [
+        str(VALKEY_BENCH),
+        "-h",
+        "127.0.0.1",
+        "-p",
+        str(port),
+        "-n",
+        str(args.warmup_requests),
+        "-c",
+        str(args.warmup_clients),
+        "-P",
+        str(args.warmup_pipeline),
+        "-d",
+        str(args.warmup_payload),
+        "-t",
+        args.warmup_command,
+        "--csv",
+        "--precision",
+        "3",
+    ]
+
+
+def run_warmup_on_port(port: int, args: argparse.Namespace) -> dict[str, Any]:
+    if args.warmup_requests <= 0:
+        return {"status": "skipped", "requests": 0}
+
+    cmd = warmup_command(port, args)
+    started = time.monotonic()
+    try:
+        completed = subprocess.run(
+            cmd,
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=args.timeout_s,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "timeout",
+            "requests": args.warmup_requests,
+            "elapsed_s": time.monotonic() - started,
+            "command_line": cmd,
+        }
+    if completed.returncode != 0:
+        return {
+            "status": "error",
+            "requests": args.warmup_requests,
+            "elapsed_s": time.monotonic() - started,
+            "returncode": completed.returncode,
+            "stderr_tail": completed.stderr[-1000:],
+            "command_line": cmd,
+        }
+    try:
+        rows = parse_csv_rows(completed.stdout)
+        rps = rows[-1].get("rps")
+    except RuntimeError:
+        rps = None
+    return {
+        "status": "ok",
+        "requests": args.warmup_requests,
+        "clients": args.warmup_clients,
+        "pipeline": args.warmup_pipeline,
+        "payload": args.warmup_payload,
+        "command": args.warmup_command,
+        "elapsed_s": time.monotonic() - started,
+        "rps": rps,
+        "command_line": cmd,
+    }
+
+
 def run_benchmark_on_port(
     target: Target,
     part: DefaultPart,
@@ -387,7 +458,12 @@ def run_isolated(target: Target, part: DefaultPart, stamp: str, args: argparse.N
     proc: subprocess.Popen[str] | None = None
     try:
         proc = start_server(target, port, log_path)
-        return run_benchmark_on_port(target, part, port, log_path, args)
+        warmup = run_warmup_on_port(port, args)
+        if warmup["status"] not in ("ok", "skipped"):
+            raise RuntimeError(f"warmup failed for {target.value}:{part.selector}: {warmup}")
+        row = run_benchmark_on_port(target, part, port, log_path, args)
+        row["warmup"] = warmup
+        return row
     finally:
         stop_server(proc)
 
@@ -399,8 +475,13 @@ def run_ordered(target: Target, parts: list[DefaultPart], stamp: str, args: argp
     rows = []
     try:
         proc = start_server(target, port, log_path)
+        warmup = run_warmup_on_port(port, args)
+        if warmup["status"] not in ("ok", "skipped"):
+            raise RuntimeError(f"warmup failed for {target.value}: {warmup}")
         for part in parts:
-            rows.append(run_benchmark_on_port(target, part, port, log_path, args))
+            row = run_benchmark_on_port(target, part, port, log_path, args)
+            row["warmup"] = warmup
+            rows.append(row)
             if args.stop_on_timeout and rows[-1]["status"] == "timeout":
                 break
         return rows
@@ -459,8 +540,12 @@ def pair_rows(part: DefaultPart, target_rows: dict[str, dict[str, Any]]) -> dict
         "rust_elapsed_s": rust.get("elapsed_s") if rust else None,
         "reference_p50_ms": reference.get("p50_ms") if reference else None,
         "rust_p50_ms": rust.get("p50_ms") if rust else None,
+        "reference_p95_ms": reference.get("p95_ms") if reference else None,
+        "rust_p95_ms": rust.get("p95_ms") if rust else None,
         "reference_p99_ms": reference.get("p99_ms") if reference else None,
         "rust_p99_ms": rust.get("p99_ms") if rust else None,
+        "reference_max_ms": reference.get("max_ms") if reference else None,
+        "rust_max_ms": rust.get("max_ms") if rust else None,
         "targets": target_rows,
     }
 
@@ -522,10 +607,13 @@ def write_tsv(path: Path, stamp: str, commit: str, hardware: dict[str, str], row
         out.write(f"# os\t{hardware['os']}\n")
         out.write(f"# arch\t{hardware['arch']}\n")
         out.write(f"# cpu\t{hardware['cpu']}\n")
+        out.write(f"# warmup_requests\t{rows[0]['targets'][next(iter(rows[0]['targets']))].get('warmup', {}).get('requests', '') if rows and rows[0].get('targets') else ''}\n")
+        out.write(f"# warmup_command\t{rows[0]['targets'][next(iter(rows[0]['targets']))].get('warmup', {}).get('command', '') if rows and rows[0].get('targets') else ''}\n")
         out.write(
             "selector\ttitle\tstatus\treference_rps\trust_rps\tratio\t"
             "reference_elapsed_s\trust_elapsed_s\treference_p50_ms\trust_p50_ms\t"
-            "reference_p99_ms\trust_p99_ms\n"
+            "reference_p95_ms\trust_p95_ms\treference_p99_ms\trust_p99_ms\t"
+            "reference_max_ms\trust_max_ms\n"
         )
         for row in rows:
             out.write(
@@ -533,7 +621,9 @@ def write_tsv(path: Path, stamp: str, commit: str, hardware: dict[str, str], row
                 f"{fmt(row['reference_rps'])}\t{fmt(row['rust_rps'])}\t{fmt(row['ratio'], 6)}\t"
                 f"{fmt(row['reference_elapsed_s'], 3)}\t{fmt(row['rust_elapsed_s'], 3)}\t"
                 f"{fmt(row['reference_p50_ms'], 3)}\t{fmt(row['rust_p50_ms'], 3)}\t"
-                f"{fmt(row['reference_p99_ms'], 3)}\t{fmt(row['rust_p99_ms'], 3)}\n"
+                f"{fmt(row['reference_p95_ms'], 3)}\t{fmt(row['rust_p95_ms'], 3)}\t"
+                f"{fmt(row['reference_p99_ms'], 3)}\t{fmt(row['rust_p99_ms'], 3)}\t"
+                f"{fmt(row['reference_max_ms'], 3)}\t{fmt(row['rust_max_ms'], 3)}\n"
             )
 
 
@@ -622,6 +712,11 @@ def main() -> int:
     run_parser.add_argument("--timeout-s", type=int, default=20)
     run_parser.add_argument("--keyspace", type=int, default=None, help="Pass -r <keyspace> to valkey-benchmark")
     run_parser.add_argument("--seed", type=int, default=None, help="Pass --seed <seed> to valkey-benchmark")
+    run_parser.add_argument("--warmup-requests", type=int, default=0)
+    run_parser.add_argument("--warmup-clients", type=int, default=1)
+    run_parser.add_argument("--warmup-pipeline", type=int, default=1)
+    run_parser.add_argument("--warmup-payload", type=int, default=3)
+    run_parser.add_argument("--warmup-command", default="ping_mbulk")
     run_parser.add_argument("--no-build", action="store_true", help="Use existing target/release/redis-server")
     run_parser.add_argument(
         "--stop-on-timeout",

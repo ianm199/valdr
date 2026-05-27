@@ -182,13 +182,87 @@ def parse_csv(stdout: str) -> dict[str, Any]:
     }
 
 
-def run_benchmark(target: Target, workload: Workload, stamp: str, timeout_s: int) -> dict[str, Any]:
+def warmup_command(port: int, args: argparse.Namespace) -> list[str]:
+    return [
+        str(VALKEY_BENCH),
+        "-h",
+        "127.0.0.1",
+        "-p",
+        str(port),
+        "-n",
+        str(args.warmup_requests),
+        "-c",
+        str(args.warmup_clients),
+        "-P",
+        str(args.warmup_pipeline),
+        "-d",
+        str(args.warmup_payload),
+        "-t",
+        args.warmup_command,
+        "--csv",
+        "--precision",
+        "3",
+    ]
+
+
+def run_warmup_on_port(port: int, args: argparse.Namespace) -> dict[str, Any]:
+    if args.warmup_requests <= 0:
+        return {"status": "skipped", "requests": 0}
+
+    cmd = warmup_command(port, args)
+    started = time.monotonic()
+    try:
+        completed = subprocess.run(
+            cmd,
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=args.timeout_s,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "timeout",
+            "requests": args.warmup_requests,
+            "elapsed_s": time.monotonic() - started,
+            "command_line": cmd,
+        }
+    if completed.returncode != 0:
+        return {
+            "status": "error",
+            "requests": args.warmup_requests,
+            "elapsed_s": time.monotonic() - started,
+            "returncode": completed.returncode,
+            "stderr_tail": completed.stderr[-1000:],
+            "command_line": cmd,
+        }
+    try:
+        row = parse_csv(completed.stdout)
+        rps = row.get("rps")
+    except RuntimeError:
+        rps = None
+    return {
+        "status": "ok",
+        "requests": args.warmup_requests,
+        "clients": args.warmup_clients,
+        "pipeline": args.warmup_pipeline,
+        "payload": args.warmup_payload,
+        "command": args.warmup_command,
+        "elapsed_s": time.monotonic() - started,
+        "rps": rps,
+        "command_line": cmd,
+    }
+
+
+def run_benchmark(target: Target, workload: Workload, stamp: str, args: argparse.Namespace) -> dict[str, Any]:
     port = free_port()
     proc: subprocess.Popen[str] | None = None
     log_path = RESULTS_DIR / f"{stamp}-{target.value}-pipeline-smoke-{workload.name}.log"
     started = time.monotonic()
     try:
         proc = start_server(target, port, log_path)
+        warmup = run_warmup_on_port(port, args)
+        if warmup["status"] not in ("ok", "skipped"):
+            raise RuntimeError(f"warmup failed for {target.value}:{workload.name}: {warmup}")
         cmd = [
             str(VALKEY_BENCH),
             "-h",
@@ -215,16 +289,17 @@ def run_benchmark(target: Target, workload: Workload, stamp: str, timeout_s: int
                 cwd=ROOT,
                 capture_output=True,
                 text=True,
-                timeout=timeout_s,
+                timeout=args.timeout_s,
             )
         except subprocess.TimeoutExpired:
             return {
                 "target": target.value,
                 "status": "timeout",
                 "elapsed_s": time.monotonic() - started,
-                "timeout_s": timeout_s,
+                "timeout_s": args.timeout_s,
                 "log_path": relative(log_path),
                 "command_line": cmd,
+                "warmup": warmup,
             }
         if completed.returncode != 0:
             return {
@@ -235,6 +310,7 @@ def run_benchmark(target: Target, workload: Workload, stamp: str, timeout_s: int
                 "stderr_tail": completed.stderr[-1000:],
                 "log_path": relative(log_path),
                 "command_line": cmd,
+                "warmup": warmup,
             }
         row = parse_csv(completed.stdout)
         row.update(
@@ -244,6 +320,7 @@ def run_benchmark(target: Target, workload: Workload, stamp: str, timeout_s: int
                 "elapsed_s": time.monotonic() - started,
                 "log_path": relative(log_path),
                 "command_line": cmd,
+                "warmup": warmup,
             }
         )
         return row
@@ -293,9 +370,13 @@ def write_tsv(path: Path, stamp: str, commit: str, hardware: dict[str, str], row
         out.write(f"# os\t{hardware['os']}\n")
         out.write(f"# arch\t{hardware['arch']}\n")
         out.write(f"# cpu\t{hardware['cpu']}\n")
+        out.write(f"# warmup_requests\t{rows[0].get('reference', {}).get('warmup', {}).get('requests', '') if rows else ''}\n")
+        out.write(f"# warmup_command\t{rows[0].get('reference', {}).get('warmup', {}).get('command', '') if rows else ''}\n")
         out.write(
             "workload\tcommand\trequests\tclients\tpipeline\tpayload\tstatus\treference_rps\trust_rps\t"
-            "ratio\treference_elapsed_s\trust_elapsed_s\treference_p99_ms\trust_p99_ms\n"
+            "ratio\treference_elapsed_s\trust_elapsed_s\treference_p50_ms\trust_p50_ms\t"
+            "reference_p95_ms\trust_p95_ms\treference_p99_ms\trust_p99_ms\t"
+            "reference_max_ms\trust_max_ms\n"
         )
         for row in rows:
             out.write(
@@ -304,7 +385,10 @@ def write_tsv(path: Path, stamp: str, commit: str, hardware: dict[str, str], row
                 f"{row.get('reference_rps', 0.0):.2f}\t{row.get('rust_rps', 0.0):.2f}\t"
                 f"{row.get('ratio', 0.0):.6f}\t"
                 f"{row.get('reference_elapsed_s', 0.0):.3f}\t{row.get('rust_elapsed_s', 0.0):.3f}\t"
-                f"{row.get('reference_p99_ms', 0.0):.3f}\t{row.get('rust_p99_ms', 0.0):.3f}\n"
+                f"{row.get('reference_p50_ms', 0.0):.3f}\t{row.get('rust_p50_ms', 0.0):.3f}\t"
+                f"{row.get('reference_p95_ms', 0.0):.3f}\t{row.get('rust_p95_ms', 0.0):.3f}\t"
+                f"{row.get('reference_p99_ms', 0.0):.3f}\t{row.get('rust_p99_ms', 0.0):.3f}\t"
+                f"{row.get('reference_max_ms', 0.0):.3f}\t{row.get('rust_max_ms', 0.0):.3f}\n"
             )
 
 
@@ -336,6 +420,11 @@ def main() -> int:
     parser.add_argument("--clients", type=int, default=50)
     parser.add_argument("--payload", type=int, default=64)
     parser.add_argument("--timeout-s", type=int, default=20)
+    parser.add_argument("--warmup-requests", type=int, default=0)
+    parser.add_argument("--warmup-clients", type=int, default=1)
+    parser.add_argument("--warmup-pipeline", type=int, default=1)
+    parser.add_argument("--warmup-payload", type=int, default=3)
+    parser.add_argument("--warmup-command", default="ping_mbulk")
     parser.add_argument(
         "--fail-below-p100",
         type=float,
@@ -352,9 +441,9 @@ def main() -> int:
     rows = []
     for workload in build_workloads(args):
         print(f"==> {workload.name}: reference", flush=True)
-        reference = run_benchmark(Target.REFERENCE, workload, stamp, args.timeout_s)
+        reference = run_benchmark(Target.REFERENCE, workload, stamp, args)
         print(f"==> {workload.name}: rust", flush=True)
-        rust = run_benchmark(Target.RUST, workload, stamp, args.timeout_s)
+        rust = run_benchmark(Target.RUST, workload, stamp, args)
         status = "ok" if reference["status"] == "ok" and rust["status"] == "ok" else rust["status"]
         if reference["status"] != "ok":
             status = reference["status"]
@@ -373,8 +462,14 @@ def main() -> int:
                 "rust_rps": rust.get("rps", 0.0),
                 "reference_elapsed_s": reference.get("elapsed_s", 0.0),
                 "rust_elapsed_s": rust.get("elapsed_s", 0.0),
+                "reference_p50_ms": reference.get("p50_ms", 0.0),
+                "rust_p50_ms": rust.get("p50_ms", 0.0),
+                "reference_p95_ms": reference.get("p95_ms", 0.0),
+                "rust_p95_ms": rust.get("p95_ms", 0.0),
                 "reference_p99_ms": reference.get("p99_ms", 0.0),
                 "rust_p99_ms": rust.get("p99_ms", 0.0),
+                "reference_max_ms": reference.get("max_ms", 0.0),
+                "rust_max_ms": rust.get("max_ms", 0.0),
                 "reference": reference,
                 "rust": rust,
             }

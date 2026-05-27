@@ -13,6 +13,7 @@
 #   bash harness/bench/run.sh --requests 100000     # smaller run (smoke)
 #   bash harness/bench/run.sh --pipeline 1          # no pipelining
 #   bash harness/bench/run.sh --tests set,get,incr  # subset of commands
+#   bash harness/bench/run.sh --warmup-requests 1000
 #
 # Output:
 #   harness/bench/results/<UTC-timestamp>-<short-sha>.tsv
@@ -34,6 +35,11 @@ CLIENTS=50
 PIPELINE=100
 PAYLOAD=64
 TESTS="set,get,incr,lpush,rpush,lpop,rpop,sadd,hset,spop,zadd,lrange_100,lrange_300,mset,ping_mbulk"
+WARMUP_REQUESTS=0
+WARMUP_CLIENTS=1
+WARMUP_PIPELINE=1
+WARMUP_PAYLOAD=3
+WARMUP_TEST="ping_mbulk"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -42,6 +48,11 @@ while [[ $# -gt 0 ]]; do
         --pipeline)  PIPELINE=$2;  shift 2;;
         --payload)   PAYLOAD=$2;   shift 2;;
         --tests)     TESTS=$2;     shift 2;;
+        --warmup-requests) WARMUP_REQUESTS=$2; shift 2;;
+        --warmup-clients)  WARMUP_CLIENTS=$2;  shift 2;;
+        --warmup-pipeline) WARMUP_PIPELINE=$2; shift 2;;
+        --warmup-payload)  WARMUP_PAYLOAD=$2;  shift 2;;
+        --warmup-test)     WARMUP_TEST=$2;     shift 2;;
         -h|--help)
             sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed 's/^# //; s/^#//'
             exit 0;;
@@ -104,6 +115,16 @@ run_one() {
         -t "$TESTS" --csv 2>/dev/null
 }
 
+warm_one() {
+    local label=$1
+    local port=$2
+    [[ "$WARMUP_REQUESTS" -le 0 ]] && return 0
+    echo "==> warming $label on port $port" >&2
+    "$VALKEY_BENCH" -h 127.0.0.1 -p "$port" \
+        -n "$WARMUP_REQUESTS" -c "$WARMUP_CLIENTS" -P "$WARMUP_PIPELINE" -d "$WARMUP_PAYLOAD" \
+        -t "$WARMUP_TEST" --csv >/dev/null 2>/dev/null
+}
+
 # ── benchmark upstream Valkey ────────────────────────────────────────────
 
 echo "==> starting upstream valkey-server on $C_PORT" >&2
@@ -112,6 +133,7 @@ echo "==> starting upstream valkey-server on $C_PORT" >&2
     >/tmp/bench-c.log 2>&1 &
 C_PID=$!
 wait_for_port "$C_PORT" || { echo "ERROR: upstream did not come up" >&2; exit 1; }
+warm_one "upstream-valkey" "$C_PORT"
 C_CSV=$(run_one "upstream-valkey" "$C_PORT")
 kill "$C_PID" 2>/dev/null || true; wait "$C_PID" 2>/dev/null || true; C_PID=""
 
@@ -122,6 +144,7 @@ echo "==> starting valkey-rs on $RUST_PORT" >&2
     >/tmp/bench-rust.log 2>&1 &
 RUST_PID=$!
 wait_for_port "$RUST_PORT" || { echo "ERROR: valkey-rs did not come up" >&2; exit 1; }
+warm_one "valkey-rs" "$RUST_PORT"
 RUST_CSV=$(run_one "valkey-rs" "$RUST_PORT")
 kill "$RUST_PID" 2>/dev/null || true; wait "$RUST_PID" 2>/dev/null || true; RUST_PID=""
 
@@ -138,20 +161,27 @@ kill "$RUST_PID" 2>/dev/null || true; wait "$RUST_PID" 2>/dev/null || true; RUST
     echo "# clients:       ${CLIENTS}"
     echo "# pipeline:      ${PIPELINE}"
     echo "# payload_bytes: ${PAYLOAD}"
+    echo "# warmup_requests: ${WARMUP_REQUESTS}"
+    echo "# warmup_clients:  ${WARMUP_CLIENTS}"
+    echo "# warmup_pipeline: ${WARMUP_PIPELINE}"
+    echo "# warmup_test:     ${WARMUP_TEST}"
     echo
-    printf "test\tupstream_rps\tvalkey_rs_rps\tratio\tupstream_p99_ms\tvalkey_rs_p99_ms\n"
+    printf "test\tupstream_rps\tvalkey_rs_rps\tratio\tupstream_p50_ms\tvalkey_rs_p50_ms\tupstream_p95_ms\tvalkey_rs_p95_ms\tupstream_p99_ms\tvalkey_rs_p99_ms\tupstream_max_ms\tvalkey_rs_max_ms\n"
 
     # valkey-benchmark --csv emits:
     #   "test","rps","avg_lat_ms","min_lat_ms","p50_lat_ms","p95_lat_ms","p99_lat_ms","max_lat_ms"
     paste <(echo "$C_CSV") <(echo "$RUST_CSV") | \
     awk -F'\t' 'NR > 1 {
         n=split($1, c, ","); m=split($2, r, ",")
-        if (n < 7 || m < 7) next
+        if (n < 8 || m < 8) next
         cmd=c[1]; gsub(/"/, "", cmd)
         cps=c[2]; rps=r[2]; gsub(/"/, "", cps); gsub(/"/, "", rps)
+        cp50=c[5]; rp50=r[5]; gsub(/"/, "", cp50); gsub(/"/, "", rp50)
+        cp95=c[6]; rp95=r[6]; gsub(/"/, "", cp95); gsub(/"/, "", rp95)
         cp99=c[7]; rp99=r[7]; gsub(/"/, "", cp99); gsub(/"/, "", rp99)
+        cmax=c[8]; rmax=r[8]; gsub(/"/, "", cmax); gsub(/"/, "", rmax)
         ratio = (cps+0 > 0) ? (rps+0)/(cps+0) : 0
-        printf "%s\t%s\t%s\t%.2f\t%s\t%s\n", cmd, cps, rps, ratio, cp99, rp99
+        printf "%s\t%s\t%s\t%.2f\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", cmd, cps, rps, ratio, cp50, rp50, cp95, rp95, cp99, rp99, cmax, rmax
     }'
 } > "$TSV"
 
