@@ -18,7 +18,7 @@ Single-node Valkey-compatible server: a Rust port of the upstream Valkey C imple
 |---|---|---|
 | Single-node RESP wire behavior | Full on current smoke corpus | 23 / 23 byte-exact scripts vs upstream Valkey |
 | RDB load/save interop | Full on current corpus | 378 / 378 bidirectional checks |
-| Upstream TCL suite | Scoped evidence, not full-suite pass claim | Full denominator: 4,299 test blocks |
+| Upstream TCL suite | Single-node core green; not a full-suite claim | Full denominator 4,299 blocks, bucketed in [`docs/TEST_AND_FEATURE_COVERAGE.md`](docs/TEST_AND_FEATURE_COVERAGE.md) |
 | Cluster mode | Not implemented | Out of scope for current alpha |
 | Loadable C modules | Not implemented | Out of scope for current alpha |
 | Production HA / Sentinel | Not claimed | Replication/AOF exist but are not production-conformance gated |
@@ -193,7 +193,14 @@ docker run --rm -p 6379:6379 ghcr.io/ianm199/valkey-rs:alpha
 ```bash
 bash scripts/setup-reference.sh
 cargo build -p redis-server
+cargo test --workspace
 bash harness/oracle/smoke.sh --skip-build
 python3 harness/oracle/rdb-diff --direction=all
+bash harness/oracle/run-single-node-tcl-suite.sh --skip-build
 bash harness/bench/official-warm-run.sh
 ```
+
+The single source of truth for what these prove — counted TCL passes,
+single-node source-block coverage, and how the full 4,299-block upstream
+denominator is bucketed — is
+[`docs/TEST_AND_FEATURE_COVERAGE.md`](docs/TEST_AND_FEATURE_COVERAGE.md).

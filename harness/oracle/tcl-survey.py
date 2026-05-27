@@ -330,7 +330,9 @@ def main() -> int:
     measurements: list[dict[str, Any]] = []
     isolated_root: str | None = None
 
-    with tempfile.TemporaryDirectory(prefix=f"tcl-survey-{run_id}-") as raw_tmp:
+    tmp_parent = Path(os.environ.get("VALKEY_RS_TCL_TMPDIR", "/tmp"))
+    tmp_parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=f"tcl-survey-{run_id}-", dir=tmp_parent) as raw_tmp:
         reference_cwd = REFERENCE
         if args.isolated_tests_copy:
             reference_cwd = prepare_isolated_reference(Path(raw_tmp))

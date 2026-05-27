@@ -1,5 +1,5 @@
 {
-  "description": "Canonical single-node unit/type TCL surface for valkey-rs conformance. Consumed by harness/oracle/safe-survey.py. The deny-tag set is NOT duplicated here: it is resolved from tcl-survey.py's DENY_TAG_PROFILES[profile] so there is one source of truth for tags (the drift that undercounted ~2,445 vs the official ~3,010 on 2026-05-26 was a hardcoded deny set).",
+  "description": "Single-node unit/type TCL surface consumed by harness/oracle/safe-survey.py (the conservative contained runner, NOT the official number). The official single-node counted number is produced by harness/oracle/run-single-node-tcl-suite.sh and recorded in docs/TEST_AND_FEATURE_COVERAGE.md. The deny-tag set is NOT duplicated here: it is resolved from tcl-survey.py's DENY_TAG_PROFILES[profile] so tags have one source of truth (a hardcoded deny set previously drifted and undercounted this contained runner).",
   "profile": "single-node-external",
   "discover": ["unit/*.tcl", "unit/type/*.tcl"],
   "exclude_files": [

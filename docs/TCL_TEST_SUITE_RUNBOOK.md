@@ -1,7 +1,9 @@
 # TCL Test Suite Runbook
 
-This is the canonical way to run the upstream Valkey TCL suite against the Rust
-server for the current single-node conformance number.
+This is the canonical way to *run* the upstream Valkey TCL suite against the
+Rust server. For what the resulting numbers *mean* — the current counts, the
+source-block denominators, and how the full upstream suite is bucketed — see
+the source of truth: [`TEST_AND_FEATURE_COVERAGE.md`](TEST_AND_FEATURE_COVERAGE.md).
 
 ## Official Single-Node Run
 
@@ -54,6 +56,33 @@ bash harness/oracle/run-single-node-tcl-suite.sh --skip-build \
 
 Use focused runs for iteration. Use the full wrapper command before claiming a
 new official single-node number.
+
+For a single upstream test body, run `test_helper.tcl` directly from the Valkey
+checkout. This is the fastest edit/debug loop and still exercises the upstream
+harness:
+
+```bash
+cd reference/valkey
+
+VALKEY_BIN_DIR="$PWD/../../target/debug" \
+  tclsh tests/test_helper.tcl \
+  --single unit/lazyfree \
+  --only "UNLINK can reclaim memory in background" \
+  --clients 1 --skip-leaks \
+  --baseport 33000 --portcount 4000 \
+  --tags "-needs:repl -repl -needs:debug -cluster -needs:cluster" \
+  --quiet
+```
+
+Some files contain both single-node tests and nested external replication
+tests. For example, the core consumer-group portion of
+`unit/type/stream-cgroups` is checked with the conservative profile:
+
+```bash
+bash harness/oracle/run-single-node-tcl-suite.sh --skip-build \
+  --profile default \
+  --files unit/type/stream-cgroups
+```
 
 ## Port Rule
 

@@ -1,5 +1,9 @@
 # Scope and gaps — what valkey-rs does and does not do today
 
+Current test and feature coverage source of truth:
+[`TEST_AND_FEATURE_COVERAGE.md`](TEST_AND_FEATURE_COVERAGE.md). This file is
+scope-oriented and may contain older illustrative numbers.
+
 This document is the **honest counterpart** to the headline numbers in the
 README. The scoped TCL, wire-diff, RDB, and benchmark numbers are real, but
 they describe quality *within the scope we've built*. They do not describe how
@@ -10,8 +14,9 @@ There are two separate goals:
 - **Current claim:** accurately describe the scoped single-node behavior that
   is already backed by oracles.
 - **Conformance target:** grow the denominator to the full upstream Valkey TCL
-  suite, currently 4,299 `test` blocks across 245 `.tcl` files. See
-  [`TCL_FULL_SUITE_GOAL_20260523.md`](TCL_FULL_SUITE_GOAL_20260523.md).
+  suite, currently 4,299 `test` blocks across 245 `.tcl` files. The fresh
+  counts and bucketing live in
+  [`TEST_AND_FEATURE_COVERAGE.md`](TEST_AND_FEATURE_COVERAGE.md).
 
 If you're evaluating whether valkey-rs can replace `redis-server` /
 `valkey-server` in your stack, **read this before the README**.
@@ -41,29 +46,24 @@ and you should look at all three.
 
 | Oracle | Result |
 |---|---|
-| Upstream Tcl, historical scoped core survey | **~877 pass / ~73 fail** across the cleanup-wave core unit slice |
-| Upstream Tcl, latest focused frontier telemetry | **266 counted pass / 0 counted fail**, 1 file without summary |
+| Upstream single-node TCL suite | Single-node core green; exact counted/source numbers in [`TEST_AND_FEATURE_COVERAGE.md`](TEST_AND_FEATURE_COVERAGE.md) |
 | Wire-diff RESP corpus | **23 / 23 byte-exact** |
 | RDB bidirectional (we save → C loads; C saves → we load) | **378 / 378** |
 
 This is the strong story. Within the slice we've decided to build, the
 behavior matches upstream Valkey closely enough to satisfy upstream's own
-test harness. Source: [`docs/CONFORMANCE.md`](CONFORMANCE.md).
+test harness. The single source of truth for the TCL counts, regenerated from
+fresh runs, is [`TEST_AND_FEATURE_COVERAGE.md`](TEST_AND_FEATURE_COVERAGE.md).
 
 ### View 2 — Coverage of upstream's tests
 
 Upstream Valkey has **4,299 individual `test "..." { }` blocks** across
-245 `.tcl` files in this checkout. The old headline number was from a scoped
-single-node survey, not the full suite. The focused frontier runner we just
-use for packet work is smaller still.
-
-| Slice | Tests | Share of upstream |
-|---|---:|---:|
-| Full upstream inventory | 4,299 | 100% |
-| Historical scoped core survey | ~950 counted | ~22% |
-| Pass within historical scoped survey | ~877 | ~20% |
-| Latest focused frontier telemetry | 266 counted passes | ~6% |
-| `tcl-survey-core` source inventory | 1,160 source test blocks | ~27% |
+245 `.tcl` files in this checkout. Our built scope is the single-node core; the
+rest of the denominator is not "failing", it is out of the single-node runner
+and bucketed honestly (cluster, loadable modules, integration/replication,
+Sentinel, platform, and the persistence/robustness frontier). The exact
+per-bucket source-block split is in
+[`TEST_AND_FEATURE_COVERAGE.md`](TEST_AND_FEATURE_COVERAGE.md).
 
 The remaining upstream surface is not supposed to disappear from the
 accounting. Some areas need implementation work; some need multi-node or
@@ -103,7 +103,7 @@ Numbers are upstream `src/` LoC and signal how much surface area remains.
 | **AOF** (`aof.c`) | ~2,900 | Partial | RDB persistence works (378/378 bidirectional); AOF is not gated to the same standard. |
 | **TLS** (`tls.c`) | ~2,000 | Deferred post-1.0 | Plain TCP only. Put a TLS terminator in front (haproxy, envoy, nginx) if you need it. |
 | **I/O threads** (`io-threads`) | n/a | Deferred post-1.0 | Single-threaded I/O. Adequate for many workloads, not all. |
-| **Streams consumer groups, newer edges** | ~4,000 (`t_stream.c`) | Partial — `stream-cgroups` is 36 pass / 28 fail | XADD/XREAD/XACK/XCLAIM work; newer consumer-group lifecycle edges fail. |
+| **Streams consumer groups** | ~4,000 (`t_stream.c`) | Single-node `stream-cgroups` passes under the default profile; dual-server replication blocks belong to the replication suite | XADD/XREAD/XACK/XCLAIM and core consumer-group lifecycle work single-node. |
 | **HyperLogLog** | ~2,100 | Commands present, focused frontier is green | PFADD/PFCOUNT/PFMERGE are covered by wire/focused TCL evidence; still not part of a full-suite claim. |
 | **DEBUG command** | ~2,600 | Partial — Tcl tests using `needs:debug` are filtered out | Affects only Tcl-suite expansion, not application code. |
 | **Valkey 9.0 / Redis 7.4+ additions** | scattered | Mostly missing | HGETDEL, SET IFEQ, LCS, HELLO availability-zone, MSETEX edge semantics — listed as deliberate gaps in CONFORMANCE.md. |
@@ -113,11 +113,11 @@ Numbers are upstream `src/` LoC and signal how much surface area remains.
 | You're running... | Can valkey-rs replace it today? |
 |---|---|
 | Single-node Redis as a cache (GET/SET/INCR + TTLs) | **Likely yes** — exercise your real workload first; this is the strongest slice. |
-| Single-node with hashes / sets / zsets / lists | **Likely yes** — `unit/type/set` and `unit/type/zset` are full pass; `string`/`list`/`hash` have specific documented gaps. |
-| Streams (XADD/XREAD/consumer groups) | **Maybe** — basic ops work; consumer-group lifecycle edges fail. Test your specific group workflows. |
-| Transactions (MULTI/EXEC/WATCH) | **Mostly yes** — `unit/multi` is 12 pass / 5 fail. |
-| Pub/Sub | **Mostly yes** — `unit/pubsub` is 22 pass / 6 fail. Sharded pub/sub (`SSUBSCRIBE`) supported on single-node only. |
-| Scripting (EVAL / EVALSHA / Lua) | **Partial** — basic scripts work; `unit/scripting.tcl` not in the gated sweep. Don't rely on advanced Lua features. |
+| Single-node with hashes / sets / zsets / lists | **Likely yes** — all four type files pass under the single-node runner; see the per-file matrix in the source-of-truth doc. |
+| Streams (XADD/XREAD/consumer groups) | **Likely yes single-node** — `stream` and `stream-cgroups` pass under the single-node runner; cross-server replication of streams is part of the (separate) replication suite. |
+| Transactions (MULTI/EXEC/WATCH) | **Yes** — `unit/multi` passes under the single-node runner. |
+| Pub/Sub | **Yes** — `unit/pubsub` and `unit/pubsubshard` pass under the single-node runner. Sharded pub/sub (`SSUBSCRIBE`) is single-node only. |
+| Scripting (EVAL / EVALSHA / Lua) | **Yes single-node** — `unit/scripting` and `unit/functions` pass under the single-node runner. |
 | RDB-based persistence | **Yes** — 378/378 bidirectional pass. |
 | AOF-based persistence | **Not yet** — partial implementation, not gated. |
 | Redis Cluster (multi-shard, slot-routed) | **No.** Out of scope by design. |

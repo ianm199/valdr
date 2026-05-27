@@ -1,5 +1,9 @@
 # Conformance
 
+Current coverage source of truth:
+[`TEST_AND_FEATURE_COVERAGE.md`](TEST_AND_FEATURE_COVERAGE.md). Older
+numbers in this file are historical unless they match a fresh artifact.
+
 This document is the load-bearing answer to "does it actually work like
 Valkey?" It captures the current state across three independent oracles
 that verify every commit.
@@ -14,34 +18,33 @@ They are reproducible; see
 |---|---|
 | **Wire-diff smoke** (23 RESP corpus scripts vs upstream Valkey, byte-exact) | **23 / 23 PASS** ✅ |
 | **RDB bidirectional oracle** (we save → C loads; C saves → we load) | **378 / 378 PASS** ✅ |
-| **Upstream Valkey TCL suite** | Scoped evidence only: historical core survey plus focused frontier telemetry; full denominator is 4,299 test blocks |
+| **Upstream Valkey TCL suite** | Single-node core green; full denominator 4,299 blocks, bucketed in [`TEST_AND_FEATURE_COVERAGE.md`](TEST_AND_FEATURE_COVERAGE.md) |
 | **`unsafe` budget** | **14 first-party blocks**, tracked by `harness/unsafe-budgets.toml` |
 
 ## TCL Suite Accounting
 
+All TCL numbers — counted passes, source-block coverage, the full-suite
+denominator, and how the non-single-node surface is bucketed — live in one
+place: [`TEST_AND_FEATURE_COVERAGE.md`](TEST_AND_FEATURE_COVERAGE.md). That
+document is regenerated from fresh `run-single-node-tcl-suite.sh` artifacts.
+This file does not duplicate those counts; the explanation below is about the
+*mechanism* behind no-summary files, which the numbers alone do not convey.
+
 Do not read any single TCL number as "the whole upstream suite" unless it uses
-the full denominator.
-
-On this checkout, the full upstream suite is 245 `.tcl` files and 4,299
-`test` blocks under `reference/valkey/tests/`. The long-term conformance goal
-is to report against that denominator. The current numbers are scoped:
-
-| View | Status |
-|---|---|
-| Historical core unit survey | ~877 pass / ~73 fail, cleanup-wave baseline |
-| Latest generated full-suite inventory | 487 counted pass / 2 counted fail, 3 timeout files, 9 no-summary files, 219 skipped-by-policy files |
-| `tcl-survey-core` file inventory | 15 selected single-node files, 1,160 source test blocks |
-| Full upstream inventory | 245 files, 4,299 test blocks |
-
-See [`TCL_FULL_SUITE_GOAL_20260523.md`](TCL_FULL_SUITE_GOAL_20260523.md) for
-the reporting rules and expansion plan.
+the full denominator. On this checkout the full upstream suite is 245 `.tcl`
+files and 4,299 `test` blocks under `reference/valkey/tests/`; the single-node
+core runner covers a documented subset and the rest is bucketed (cluster,
+modules, integration, Sentinel, platform, persistence/robustness frontier) in
+the source-of-truth doc.
 
 ### Why "abort / no-summary" exists, and what unlocking one means
 
-A large slice of the denominator (≈40% on the single-node-core dashboard) is
-not *failing* — it is *hidden* behind an early file abort. Understanding the
-mechanism is the difference between reading the scoreboard correctly and
-chasing the wrong fixes.
+A no-summary file is not *failing* — it is *hidden* behind an early file abort.
+The single-node core surface is now almost entirely past this stage (see the
+source-of-truth doc for the current no-summary list), but the mechanism still
+governs the remaining frontier files (integration, replication, and the
+persistence/robustness frontier), so understanding it is the difference between
+reading the scoreboard correctly and chasing the wrong fixes.
 
 Each `.tcl` file runs its `test {name} {body} {expected}` blocks sequentially.
 The framework's `test` proc (`reference/valkey/tests/support/test.tcl:262`)
@@ -68,8 +71,10 @@ Consequence: **the first non-assertion error in a file hides every test after
 it.** So the high-leverage move is unlocking the *blocker*, not fixing wording
 in an already-running test.
 
-What "unlocking" actually buys, stated honestly (worked example — the
-`tcl-scripting-bit-lib-v1` packet, 2026-05-24):
+What "unlocking" actually buys, stated honestly (historical worked example —
+the `tcl-scripting-bit-lib-v1` packet, 2026-05-24; `unit/scripting.tcl` has
+since been fully unlocked and now reaches its summary, see the source-of-truth
+doc):
 
 - `unit/scripting.tcl` has **186** `test` blocks. It was aborting at the first
   `bit.*` use (line 574). Installing the `bit` global moved the abort to the
@@ -206,54 +211,19 @@ against our binary via a symlink trick — `harness/oracle/setup_tcl_runner.sh`
 creates `target/debug/valkey-server` as a symlink to our binary, so the
 unmodified TCL harness launches our server without modification.
 
-Per-unit-file tally below is from the cleanup-wave-8 baseline.
+The per-file matrix — every discovered single-node file, its source-block
+count, and its counted pass/fail/no-summary status — is maintained in
+[`TEST_AND_FEATURE_COVERAGE.md`](TEST_AND_FEATURE_COVERAGE.md) and regenerated
+from fresh `run-single-node-tcl-suite.sh` runs. It is not duplicated here so
+the two cannot drift apart.
 
-### Type tests
+The survey records abort/no-summary cases separately from counted pass/fail
+cases, so coverage is never hidden behind a single aggregate number. The deny
+policy is part of the meaning of any number: the single-node profile denies
+`needs:repl`, `needs:debug`, cluster, and external-replication tags, resolved
+from one place (`tcl-survey.py`'s `DENY_TAG_PROFILES`).
 
-| File | Pass | Fail | Notes |
-|---|---|---|---|
-| `unit/type/string` | 95 | 9 | 9 fails are deliberate gaps: LCS×5, SET IFEQ×4 |
-| `unit/type/list` | 88 | 1 | Remaining: SWAPDB-awakes-blocked-client (BlockedKeysIndex isn't per-DB yet) |
-| `unit/type/hash` | 70 | 13 | 13 fails: HGETDEL×10 (Valkey 9.0 extension), DUMP/RESTORE×2, HINCRBYFLOAT NaN error text×1 |
-| `unit/type/set` | **114** | **0** | ✅ full pass |
-| `unit/type/zset` | **256** | **0** | ✅ full pass |
-| `unit/type/incr` | **31** | **0** | ✅ full pass |
-| `unit/type/stream` | 39 | 6 | XREADGROUP wakeup edges |
-| `unit/type/stream-cgroups` | 36 | 28 | Newer consumer-group lifecycle edges |
-
-### Protocol / infra tests
-
-| File | Pass | Fail | Notes |
-|---|---|---|---|
-| `unit/protocol` | 26 | 2 | 2 fails: HELLO-no-protover, HELLO availability-zone (Valkey 9.0 negotiation) |
-| `unit/keyspace` | 62 | 2 | RANDOMKEY edge + long-glob pattern matching regression |
-| `unit/expire` | 16 | 1 | import-mode (enterprise feature, deliberate skip) |
-| `unit/multi` | 12 | 5 | Not yet attacked |
-| `unit/pubsub` | 22 | 6 | Not yet attacked |
-
-### Total surveyed
-
-**~877 passing / ~73 failing** across these 13 unit files.
-
-### Expanded TCL frontier
-
-The manual `tcl-survey-unswept` runner now sweeps the next frontier:
-
-`unit/bitops`, `unit/bitfield`, `unit/geo`, `unit/hyperloglog`,
-`unit/scripting`, `unit/scan`, `unit/sort`, `unit/dump`, `unit/info`,
-`unit/slowlog`.
-
-Latest focused run: **266 counted passes / 0 counted failures**, 0 timed out,
-1 file without summary. Counted-green files include `unit/bitops`,
-`unit/bitfield`, `unit/geo`, `unit/hyperloglog`, `unit/scan`, `unit/sort`,
-`unit/dump`, and `unit/slowlog`. The remaining no-summary frontier in that run
-is `unit/scripting`.
-
-See `docs/TCL_COVERAGE_EXPANSION.md`. That runner records abort/no-summary
-cases separately from counted pass/fail cases so packet generation does not
-hide behind a single aggregate number.
-
-Outside the current scoped claim, but still part of the full-suite goal:
+Outside the single-node core claim, bucketed in the source-of-truth doc:
 
 - `unit/cluster` — needs cluster/product decision and runner support
 - `unit/moduleapi` — needs module-ABI product decision
@@ -400,15 +370,15 @@ above are native Rust implementations of the popular commands.
 
 ### Open bugs (small / known)
 
-- Stream-cgroups: ~28 TCL failures concentrated in XREADGROUP wakeup
-  edge cases (consumer-group lifecycle interactions with DEL / SET
-  overwrite / SWAPDB / FLUSHDB / RENAME / XGROUP DESTROY are partially
-  covered by wave 7 but a few edges remain).
-- `unit/keyspace::RANDOMKEY` — distribution edge case in our impl
-- `unit/keyspace::glob pattern matching` — very long nested patterns
-  regress
-- `unit/type/hash::HINCRBYFLOAT NaN/Infinity` — error message text
-  mismatch
+The earlier per-test failure list here (stream-cgroups XREADGROUP edges,
+`RANDOMKEY` distribution, long-glob matching, `HINCRBYFLOAT` NaN text) is no
+longer accurate: those files now pass under the single-node runner. Any current
+counted failure or no-summary file is listed in
+[`TEST_AND_FEATURE_COVERAGE.md`](TEST_AND_FEATURE_COVERAGE.md), which is the
+only place that tracks the live per-file status.
+
+One architectural caveat is independent of the TCL count and still holds:
+
 - BlockedKeysIndex is keyed by `RedisString` only, not `(db_index,
   RedisString)`. A blocked `BLPOP` on key `"x"` in db 0 could be
   spuriously woken by `LPUSH "x"` in db 5. Rare in practice; deferred.

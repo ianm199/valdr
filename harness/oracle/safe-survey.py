@@ -54,7 +54,11 @@ TIMEOUT_S = 90
 # The suite definition (file globs, exclusions, labels) lives in a config file,
 # not hardcoded here. Deny-tags are resolved from tcl-survey.py's canonical
 # DENY_TAG_PROFILES[profile], so tags have ONE source of truth — a hardcoded
-# deny set drifted on 2026-05-26 and undercounted ~2,445 vs the official ~3,010.
+# deny set once drifted and undercounted this contained runner.
+#
+# This is the conservative contained runner, NOT the official number. The
+# official single-node counted number comes from run-single-node-tcl-suite.sh
+# and is recorded in docs/TEST_AND_FEATURE_COVERAGE.md.
 SUITE_CONFIG = MAIN / "harness/oracle/single-node-suite.json"
 
 

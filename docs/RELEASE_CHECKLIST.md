@@ -13,9 +13,16 @@ cargo build -p redis-server
 cargo test --workspace
 bash harness/oracle/smoke.sh --skip-build
 python3 harness/oracle/rdb-diff --direction=all
+bash harness/oracle/run-single-node-tcl-suite.sh --skip-build \
+  --timeout-s 180 --baseport 30000 --portcount 8000
 bash .claude/hooks/unsafe-budget.sh </dev/null
 bash harness/docker/smoke.sh
 ```
+
+The single-node TCL run is the headline conformance gate; interpret its result
+(counted assertions, source-block coverage, the bucketed denominator) against
+[`TEST_AND_FEATURE_COVERAGE.md`](TEST_AND_FEATURE_COVERAGE.md), which is the
+source of truth for all coverage numbers.
 
 Optional performance smoke:
 

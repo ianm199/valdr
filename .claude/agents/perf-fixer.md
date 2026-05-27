@@ -13,7 +13,7 @@ gates still pass.
 
 1. `PORTING.md`.
 2. `harness/work-packets.jsonl`, especially your packet row.
-3. `docs/TCL_COVERAGE_EXPANSION.md` if the packet references upstream TCL.
+3. `docs/TEST_AND_FEATURE_COVERAGE.md` if the packet references upstream TCL.
 4. Any evidence blob named in the packet note.
 5. The target Rust files.
 6. The corresponding upstream Valkey source ranges.
