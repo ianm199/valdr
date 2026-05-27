@@ -32,7 +32,7 @@ jobs:
         run: |
           rm -rf _site
           mkdir -p _site/assets _site/harness/bench/history
-          cp index.html performance.html convergence.html _site/
+          cp index.html performance.html convergence.html convergence-data.json _site/
           cp -R assets/. _site/assets/
           cp -R harness/bench/history/. _site/harness/bench/history/
       - name: Upload artifact
