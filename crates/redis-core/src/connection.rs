@@ -119,6 +119,64 @@ impl ConnectionTypeId {
 /// C: `typedef void (*ConnectionCallbackFunc)(struct connection *conn)`
 pub type ConnectionCallbackFunc = fn(&mut Connection);
 
+// ─── Per-connection transport I/O ──────────────────────────────────────────────
+
+/// The byte transport a `Connection` owns. Any non-blocking `Read + Write`
+/// qualifies — `mio::net::TcpStream` in the server, an in-memory `PipeEnd` in
+/// `tests/conn_transport_kit.rs`.
+///
+/// PORT NOTE: C `struct connection` held a raw `fd: int` and did I/O via libc
+/// `read`/`write` on it. A safe-Rust port cannot operate a bare fd without
+/// `unsafe`, so the connection instead *owns* a real stream object. The vtable
+/// abstraction is unchanged — only the handle representation differs
+/// (`fd` → owned stream). Backends read/write through this, not the fd.
+pub trait ConnIo: std::io::Read + std::io::Write + Send {}
+impl<T: std::io::Read + std::io::Write + Send> ConnIo for T {}
+
+/// A rustls server session layered over an owned byte stream.
+///
+/// PORT NOTE: C's `tls_connection` embedded the base `connection` and added
+/// `SSL *ssl`. Here the rustls `ServerConnection` (the safe-Rust replacement for
+/// the OpenSSL `SSL`) sits beside the raw stream it encrypts.
+pub struct TlsIo {
+    /// The raw ciphertext transport (TCP / test pipe).
+    pub io: Box<dyn ConnIo>,
+    /// The rustls server session — drives the handshake and record layer.
+    pub session: Box<rustls::ServerConnection>,
+}
+
+/// Per-connection transport state — the safe-Rust replacement for C's
+/// `void *priv` (which the TLS backend reached via `container_of` to get at its
+/// `tls_connection`). Plain backends store the raw stream; TLS additionally
+/// carries the rustls session.
+pub enum ConnIoSlot {
+    /// No stream attached yet (freshly created, pre-accept).
+    None,
+    /// A plain byte stream (TCP / Unix / test pipe).
+    Stream(Box<dyn ConnIo>),
+    /// A rustls-encrypted stream.
+    Tls(Box<TlsIo>),
+}
+
+impl ConnIoSlot {
+    /// Borrow the underlying *plain* byte stream. Returns `None` for TLS — TLS
+    /// I/O goes through the session, not the raw stream.
+    pub fn as_io_mut(&mut self) -> Option<&mut dyn ConnIo> {
+        match self {
+            ConnIoSlot::Stream(s) => Some(&mut **s),
+            _ => None,
+        }
+    }
+
+    /// Borrow the rustls session + its transport (TLS connections only).
+    pub fn as_tls_mut(&mut self) -> Option<&mut TlsIo> {
+        match self {
+            ConnIoSlot::Tls(t) => Some(&mut **t),
+            _ => None,
+        }
+    }
+}
+
 // ─── ConnectionTypeTrait ─────────────────────────────────────────────────────
 
 /// Vtable trait for connection-type backends.
@@ -298,7 +356,6 @@ pub trait ConnectionTypeTrait: Send + Sync {
 /// TODO(port): C `void *private_data` is omitted. Phase B should add a typed
 /// per-connection extension (e.g. `Option<Box<TlsState>>`) once concrete
 /// backends are ported.
-#[derive(Debug)]
 pub struct Connection {
     /// Which registered backend manages this connection.
     pub type_id: ConnectionTypeId,
@@ -319,6 +376,8 @@ pub struct Connection {
     pub write_handler: Option<ConnectionCallbackFunc>,
     /// Read-ready callback.
     pub read_handler: Option<ConnectionCallbackFunc>,
+    /// Owned transport I/O — the safe-Rust replacement for C's bare `fd`.
+    pub io: ConnIoSlot,
 }
 
 impl Connection {
@@ -335,7 +394,14 @@ impl Connection {
             conn_handler: None,
             write_handler: None,
             read_handler: None,
+            io: ConnIoSlot::None,
         }
+    }
+
+    /// Attach an owned byte stream to this connection (plain TCP / Unix / test).
+    pub fn with_stream(mut self, io: Box<dyn ConnIo>) -> Self {
+        self.io = ConnIoSlot::Stream(io);
+        self
     }
 
     /// C: `connGetState` — return the current lifecycle state.
@@ -380,6 +446,20 @@ impl Connection {
         buf.clear();
         let s = format!("fd={}", self.fd);
         buf.extend_from_slice(s.as_bytes());
+    }
+}
+
+impl std::fmt::Debug for Connection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Connection")
+            .field("type_id", &self.type_id)
+            .field("state", &self.state)
+            .field("fd", &self.fd)
+            .field("flags", &self.flags)
+            .field("has_read_handler", &self.read_handler.is_some())
+            .field("has_write_handler", &self.write_handler.is_some())
+            .field("has_io", &!matches!(self.io, ConnIoSlot::None))
+            .finish()
     }
 }
 

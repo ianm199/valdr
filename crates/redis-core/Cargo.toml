@@ -20,3 +20,8 @@ log = "0.4"
 rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+redis-types = { workspace = true }
