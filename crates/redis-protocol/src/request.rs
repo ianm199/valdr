@@ -64,6 +64,23 @@ pub fn parse_inline_or_multibulk_into(
     buf: &[u8],
     out: &mut Vec<RedisString>,
 ) -> Result<Option<usize>, RedisError> {
+    let parsed = parse_inline_or_multibulk_into_retaining_partial(buf, out);
+    if matches!(parsed, Ok(None) | Err(_)) {
+        out.clear();
+    }
+    parsed
+}
+
+/// Parse one request into `out` without clearing partial argv on incomplete
+/// input.
+///
+/// This variant is for live client parser scratch storage: partial arguments
+/// are not visible to command dispatch, so keeping them lets the next parse
+/// reuse already-allocated argument buffers instead of freeing them.
+pub fn parse_inline_or_multibulk_into_retaining_partial(
+    buf: &[u8],
+    out: &mut Vec<RedisString>,
+) -> Result<Option<usize>, RedisError> {
     let parsed = if buf.is_empty() {
         Ok(None)
     } else if buf[0] == b'*' {
@@ -71,9 +88,6 @@ pub fn parse_inline_or_multibulk_into(
     } else {
         parse_inline_into(buf, out)
     };
-    if matches!(parsed, Ok(None) | Err(_)) {
-        out.clear();
-    }
     parsed
 }
 
@@ -284,10 +298,9 @@ fn read_bulk_length(buf: &[u8], pos: usize) -> Result<Option<(i64, usize)>, Redi
 /// Shared RESP integer-line reader used by both [`read_multibulk_count`] and
 /// [`read_bulk_length`].
 ///
-/// Locates the `\r\n` terminator, validates the `\r\n` sequence, and delegates
-/// digit parsing to `parse_i64_ascii`. `err_msg` is the context-specific error
-/// text emitted when the digit field is invalid — this lets callers produce the
-/// exact Valkey wire text.
+/// Locates the `\r\n` terminator and parses digits in the same scan.
+/// `err_msg` is the context-specific error text emitted when the digit field
+/// is invalid — this lets callers produce the exact Valkey wire text.
 ///
 /// When no `\r` is found and the remaining buffer exceeds `PROTO_INLINE_MAX_SIZE`
 /// the field is clearly malformed; returns `err_msg` immediately. This matches
@@ -303,61 +316,51 @@ fn read_resp_integer(
     if pos >= buf.len() {
         return Ok(None);
     }
-    let cr_offset = match buf[pos..].iter().position(|&b| b == b'\r') {
-        Some(o) => o,
-        None => {
-            if buf.len() - pos > PROTO_INLINE_MAX_SIZE {
-                return Err(RedisError::runtime(err_msg));
-            }
-            return Ok(None);
-        }
-    };
-    let cr_idx = pos + cr_offset;
-    if cr_idx + 1 >= buf.len() {
-        return Ok(None);
-    }
-    if buf[cr_idx + 1] != b'\n' {
-        return Err(RedisError::runtime(
-            b"Protocol error: invalid CRLF in request",
-        ));
-    }
-    let value = parse_i64_ascii(&buf[pos..cr_idx], err_msg)?;
-    Ok(Some((value, cr_idx + 2)))
-}
 
-/// Parse an ASCII signed decimal `i64` from `bytes`.
-///
-/// Returns `Err` with the caller-supplied `err_msg` when the field is empty
-/// or contains non-digit bytes. This lets each call site emit the Valkey-exact
-/// error text for its context (multibulk count vs. bulk length).
-///
-/// C: `string2ll()` from `util.c`, restricted to the RESP integer field cases.
-fn parse_i64_ascii(bytes: &[u8], err_msg: &'static [u8]) -> Result<i64, RedisError> {
-    if bytes.is_empty() {
-        return Err(RedisError::runtime(err_msg));
+    let mut i = pos;
+    let mut negative = false;
+    if matches!(buf[i], b'-' | b'+') {
+        negative = buf[i] == b'-';
+        i += 1;
     }
-    let (negative, digits) = if bytes[0] == b'-' {
-        (true, &bytes[1..])
-    } else if bytes[0] == b'+' {
-        (false, &bytes[1..])
-    } else {
-        (false, bytes)
-    };
-    if digits.is_empty() {
-        return Err(RedisError::runtime(err_msg));
-    }
+
+    let mut saw_digit = false;
     let mut acc: i64 = 0;
-    for &b in digits {
-        let d = match b {
-            b'0'..=b'9' => (b - b'0') as i64,
-            _ => return Err(RedisError::runtime(err_msg)),
-        };
-        acc = acc
-            .checked_mul(10)
-            .and_then(|v| v.checked_add(d))
-            .ok_or_else(|| RedisError::runtime(err_msg))?;
+    let mut invalid = false;
+
+    while i < buf.len() {
+        match buf[i] {
+            b'\r' => {
+                if i + 1 >= buf.len() {
+                    return Ok(None);
+                }
+                if buf[i + 1] != b'\n' {
+                    return Err(RedisError::runtime(
+                        b"Protocol error: invalid CRLF in request",
+                    ));
+                }
+                if invalid || !saw_digit {
+                    return Err(RedisError::runtime(err_msg));
+                }
+                return Ok(Some((if negative { -acc } else { acc }, i + 2)));
+            }
+            b'0'..=b'9' if !invalid => {
+                saw_digit = true;
+                let digit = (buf[i] - b'0') as i64;
+                match acc.checked_mul(10).and_then(|v| v.checked_add(digit)) {
+                    Some(next) => acc = next,
+                    None => invalid = true,
+                }
+            }
+            _ => invalid = true,
+        }
+        i += 1;
     }
-    Ok(if negative { -acc } else { acc })
+
+    if buf.len() - pos > PROTO_INLINE_MAX_SIZE {
+        return Err(RedisError::runtime(err_msg));
+    }
+    Ok(None)
 }
 
 /// Split an inline command line into argv tokens.

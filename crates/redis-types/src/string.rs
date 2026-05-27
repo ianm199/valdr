@@ -48,6 +48,10 @@ impl RedisString {
         self.0.len()
     }
 
+    pub fn capacity(&self) -> usize {
+        self.0.capacity()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }

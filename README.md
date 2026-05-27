@@ -39,7 +39,7 @@ Other useful numbers:
 | Check | Result |
 |---|---:|
 | Source size | **~80k Rust LoC** vs upstream's ~187k C LoC |
-| `unsafe` blocks | **11**, all OS FFI — `fork`/`waitpid`/`kill`/`_exit`/`signal`, plus 2 AArch64 CPU-timer reads |
+| `unsafe` blocks | **14** in first-party Rust: OS/process control, AArch64 CPU-timer reads, and the FUNCTION/FCALL Lua callback bridge |
 
 What works today:
 
@@ -196,21 +196,31 @@ for the official profile, port rules, and contained safe-survey variant.
 
 ## Safety
 
-Most crates are safe Rust. Every `unsafe` block is either OS FFI for
-process management (background save / rewrite) or an architectural CPU-timer
-read; none touch the data path:
+Most crates are safe Rust. The first-party crates currently contain 14
+`unsafe` blocks, tracked by [`harness/unsafe-budgets.toml`](harness/unsafe-budgets.toml).
+The parser, command dispatch table, and Rust data-structure ports remain
+unsafe-free.
 
 | Crate | `unsafe` blocks | Reason |
 |---|---:|---|
-| `redis-types` | 0 | |
-| `redis-protocol` | 0 | |
-| `redis-ds` | 0 | |
+| `redis-types` | 0 | Shared byte strings, RESP values, and errors |
+| `redis-protocol` | 0 | RESP parsing and serialization |
+| `redis-ds` | 0 | Rust-native data structures |
 | `redis-core` | 2 | AArch64 `mrs` reads of CPU timer registers (`cntvct_el0`, `cntfrq_el0`) |
-| `redis-commands` | 4 | `fork`/`_exit` for BGSAVE & BGREWRITEAOF; `kill`/`waitpid` for child management |
-| `redis-server` | 5 | `waitpid` child reapers, SIGTERM/SIGINT `signal` handler, post-fork `_exit` |
+| `redis-commands` | 7 | `fork`/`_exit` BGSAVE paths, shutdown `kill`/`waitpid`/`_exit`, and the cached `mlua` FUNCTION/FCALL active-context bridge |
+| `redis-server` | 5 | `waitpid` child reapers, SIGTERM/SIGINT `signal` install, and immediate shutdown `_exit` calls |
 
-Each block has a `// SAFETY:` invariant. The hook
-`harness/unsafe-budget.sh` fails changes that exceed the crate budgets.
+Most current unsafe is boundary work around primitives the Rust standard
+library does not expose directly: Unix process control, signal handling, and
+AArch64 timer registers. The one application-level exception is the cached
+`mlua` FUNCTION/FCALL active-context bridge, which should be revisited when
+FUNCTION performance and correctness work resumes.
+
+The near-term safety plan is to keep new unsafe out of hot-path protocol,
+dispatch, and data-structure code; centralize Unix process-control calls behind
+small audited wrappers; and add or tighten explicit `SAFETY` comments for each
+remaining block. The unsafe-budget hook fails changes that exceed the crate
+ceilings.
 
 ## Architecture
 

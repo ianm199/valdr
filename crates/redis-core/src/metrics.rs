@@ -24,6 +24,82 @@ struct CommandStat {
     failed_calls: u64,
 }
 
+struct AtomicCommandStat {
+    calls: AtomicU64,
+    usec: AtomicU64,
+    rejected_calls: AtomicU64,
+    failed_calls: AtomicU64,
+}
+
+impl AtomicCommandStat {
+    const fn new() -> Self {
+        Self {
+            calls: AtomicU64::new(0),
+            usec: AtomicU64::new(0),
+            rejected_calls: AtomicU64::new(0),
+            failed_calls: AtomicU64::new(0),
+        }
+    }
+
+    fn record(&self, elapsed_us: u64, rejected_call: bool, failed_call: bool) {
+        if rejected_call {
+            self.rejected_calls.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        self.usec.fetch_add(elapsed_us, Ordering::Relaxed);
+        if failed_call {
+            self.failed_calls.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn record_failure(&self) {
+        self.failed_calls.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_blocked_rejected(&self) {
+        self.rejected_calls.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_reprocessed_rejected(&self) {
+        let _ = self
+            .calls
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |calls| {
+                Some(calls.saturating_sub(1))
+            });
+        self.rejected_calls.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self, name: &[u8]) -> Option<CommandStatSnapshot> {
+        let calls = self.calls.load(Ordering::Relaxed);
+        let usec = self.usec.load(Ordering::Relaxed);
+        let rejected_calls = self.rejected_calls.load(Ordering::Relaxed);
+        let failed_calls = self.failed_calls.load(Ordering::Relaxed);
+        if calls == 0 && usec == 0 && rejected_calls == 0 && failed_calls == 0 {
+            return None;
+        }
+        Some(CommandStatSnapshot {
+            name: name.to_vec(),
+            calls,
+            usec,
+            rejected_calls,
+            failed_calls,
+        })
+    }
+
+    fn reset(&self) {
+        self.calls.store(0, Ordering::Relaxed);
+        self.usec.store(0, Ordering::Relaxed);
+        self.rejected_calls.store(0, Ordering::Relaxed);
+        self.failed_calls.store(0, Ordering::Relaxed);
+    }
+}
+
+static GET_COMMAND_STATS: AtomicCommandStat = AtomicCommandStat::new();
+static SET_COMMAND_STATS: AtomicCommandStat = AtomicCommandStat::new();
+static PING_COMMAND_STATS: AtomicCommandStat = AtomicCommandStat::new();
+static INCR_COMMAND_STATS: AtomicCommandStat = AtomicCommandStat::new();
+
 #[derive(Clone, Debug, Default)]
 pub struct CommandStatSnapshot {
     pub name: Vec<u8>,
@@ -61,6 +137,10 @@ fn error_stats_handle() -> &'static Arc<Mutex<HashMap<Vec<u8>, u64>>> {
 }
 
 pub fn record_command_stat(name: &[u8], elapsed_us: u64, rejected_call: bool, failed_call: bool) {
+    if let Some((_, stat)) = hot_command_stat(name) {
+        stat.record(elapsed_us, rejected_call, failed_call);
+        return;
+    }
     let key = command_stats_key(name);
     if key.is_empty() {
         return;
@@ -87,6 +167,10 @@ pub fn record_command_stat(name: &[u8], elapsed_us: u64, rejected_call: bool, fa
 /// and parked — is later unblocked with an error reply. Incrementing `calls`
 /// again would double-count, so only `failed_calls` moves.
 pub fn record_command_failure(name: &[u8]) {
+    if let Some((_, stat)) = hot_command_stat(name) {
+        stat.record_failure();
+        return;
+    }
     let key = command_stats_key(name);
     if key.is_empty() {
         return;
@@ -100,6 +184,10 @@ pub fn record_command_failure(name: &[u8]) {
 }
 
 pub fn record_blocked_command_rejected(name: &[u8]) {
+    if let Some((_, stat)) = hot_command_stat(name) {
+        stat.record_blocked_rejected();
+        return;
+    }
     let key = command_stats_key(name);
     if key.is_empty() {
         return;
@@ -115,6 +203,10 @@ pub fn record_blocked_command_rejected(name: &[u8]) {
 /// Reclassify a blocked command that parked successfully but was later
 /// rejected when the server retried it after wakeup.
 pub fn record_blocked_command_reprocessed_rejected(name: &[u8]) {
+    if let Some((_, stat)) = hot_command_stat(name) {
+        stat.record_reprocessed_rejected();
+        return;
+    }
     let key = command_stats_key(name);
     if key.is_empty() {
         return;
@@ -138,6 +230,67 @@ fn command_stats_key(name: &[u8]) -> Vec<u8> {
     key
 }
 
+fn hot_command_stat(name: &[u8]) -> Option<(&'static [u8], &'static AtomicCommandStat)> {
+    match name {
+        [a, b, c]
+            if ascii_lower(*a) == b'g' && ascii_lower(*b) == b'e' && ascii_lower(*c) == b't' =>
+        {
+            Some((b"get", &GET_COMMAND_STATS))
+        }
+        [a, b, c]
+            if ascii_lower(*a) == b's' && ascii_lower(*b) == b'e' && ascii_lower(*c) == b't' =>
+        {
+            Some((b"set", &SET_COMMAND_STATS))
+        }
+        [a, b, c, d]
+            if ascii_lower(*a) == b'p'
+                && ascii_lower(*b) == b'i'
+                && ascii_lower(*c) == b'n'
+                && ascii_lower(*d) == b'g' =>
+        {
+            Some((b"ping", &PING_COMMAND_STATS))
+        }
+        [a, b, c, d]
+            if ascii_lower(*a) == b'i'
+                && ascii_lower(*b) == b'n'
+                && ascii_lower(*c) == b'c'
+                && ascii_lower(*d) == b'r' =>
+        {
+            Some((b"incr", &INCR_COMMAND_STATS))
+        }
+        _ => None,
+    }
+}
+
+#[inline]
+fn ascii_lower(byte: u8) -> u8 {
+    if byte.is_ascii_uppercase() {
+        byte + 32
+    } else {
+        byte
+    }
+}
+
+fn append_hot_command_stats(out: &mut Vec<CommandStatSnapshot>) {
+    for (name, stat) in [
+        (b"get".as_slice(), &GET_COMMAND_STATS),
+        (b"incr".as_slice(), &INCR_COMMAND_STATS),
+        (b"ping".as_slice(), &PING_COMMAND_STATS),
+        (b"set".as_slice(), &SET_COMMAND_STATS),
+    ] {
+        if let Some(snapshot) = stat.snapshot(name) {
+            out.push(snapshot);
+        }
+    }
+}
+
+fn reset_hot_command_stats() {
+    GET_COMMAND_STATS.reset();
+    INCR_COMMAND_STATS.reset();
+    SET_COMMAND_STATS.reset();
+    PING_COMMAND_STATS.reset();
+}
+
 pub fn command_stats_snapshot() -> Vec<CommandStatSnapshot> {
     let stats = match command_stats_handle().lock() {
         Ok(g) => g,
@@ -153,11 +306,13 @@ pub fn command_stats_snapshot() -> Vec<CommandStatSnapshot> {
             failed_calls: stat.failed_calls,
         })
         .collect();
+    append_hot_command_stats(&mut out);
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
 }
 
 pub fn reset_command_stats() {
+    reset_hot_command_stats();
     let mut stats = match command_stats_handle().lock() {
         Ok(g) => g,
         Err(p) => p.into_inner(),
@@ -420,6 +575,30 @@ pub fn record_acl_access_denied_db() {
     server_metrics()
         .acl_access_denied_db
         .fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn incr_uses_hot_command_stat_bucket() {
+        reset_command_stats();
+
+        record_command_stat(b"INCR", 7, false, false);
+
+        let snapshots = command_stats_snapshot();
+        let incr = snapshots
+            .iter()
+            .find(|snapshot| snapshot.name == b"incr")
+            .expect("INCR command stat snapshot");
+        assert_eq!(incr.calls, 1);
+        assert_eq!(incr.usec, 7);
+        assert_eq!(incr.rejected_calls, 0);
+        assert_eq!(incr.failed_calls, 0);
+
+        reset_command_stats();
+    }
 }
 
 /// Return the resident set size of this process in bytes, or `None` if the

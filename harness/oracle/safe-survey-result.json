@@ -1,16 +1,65 @@
 {
-  "32667a1b6": {
+  "04e63ab53": {
     "build_ok": true,
-    "config": "7ad3b432f7d4",
-    "date": "2026-05-24",
-    "iso": "2026-05-24T23:59:56-04:00",
+    "config": "c77842583f5b",
+    "date": "2026-05-26",
+    "full_sha": "04e63ab538ecc3739c22cb24a6f296beae4ea229",
+    "iso": "2026-05-26T14:33:21-04:00",
     "note": "ok",
     "sections": {
+      "unit/acl": {
+        "failed": 0,
+        "passed": 112,
+        "timed_out": false,
+        "total": 112
+      },
+      "unit/acl-v2": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/aofrw": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/auth": {
+        "failed": 0,
+        "passed": 16,
+        "timed_out": false,
+        "total": 16
+      },
+      "unit/bitfield": {
+        "failed": 0,
+        "passed": 18,
+        "timed_out": false,
+        "total": 18
+      },
       "unit/bitops": {
         "failed": 0,
         "passed": 50,
         "timed_out": false,
         "total": 50
+      },
+      "unit/client-eviction": {
+        "failed": 0,
+        "passed": 14,
+        "timed_out": false,
+        "total": 14
+      },
+      "unit/commandlog": {
+        "failed": 0,
+        "passed": 14,
+        "timed_out": false,
+        "total": 14
+      },
+      "unit/dump": {
+        "failed": 0,
+        "passed": 27,
+        "timed_out": false,
+        "total": 27
       },
       "unit/expire": {
         "failed": 0,
@@ -18,11 +67,59 @@
         "timed_out": false,
         "total": 65
       },
+      "unit/functions": {
+        "failed": 0,
+        "passed": 94,
+        "timed_out": false,
+        "total": 94
+      },
+      "unit/fuzzer": {
+        "failed": 0,
+        "passed": 1,
+        "timed_out": false,
+        "total": 1
+      },
       "unit/geo": {
         "failed": 0,
         "passed": 71,
         "timed_out": false,
         "total": 71
+      },
+      "unit/hashexpire": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/hyperloglog": {
+        "failed": 0,
+        "passed": 26,
+        "timed_out": false,
+        "total": 26
+      },
+      "unit/info": {
+        "failed": 0,
+        "passed": 24,
+        "timed_out": false,
+        "total": 24
+      },
+      "unit/info-command": {
+        "failed": 0,
+        "passed": 5,
+        "timed_out": false,
+        "total": 5
+      },
+      "unit/introspection": {
+        "failed": 0,
+        "passed": 113,
+        "timed_out": false,
+        "total": 113
+      },
+      "unit/introspection-2": {
+        "failed": 0,
+        "passed": 49,
+        "timed_out": false,
+        "total": 49
       },
       "unit/keyspace": {
         "failed": 0,
@@ -30,17 +127,137 @@
         "timed_out": false,
         "total": 65
       },
+      "unit/latency-monitor": {
+        "failed": 0,
+        "passed": 12,
+        "timed_out": false,
+        "total": 12
+      },
+      "unit/lazyfree": {
+        "failed": 0,
+        "passed": 4,
+        "timed_out": false,
+        "total": 4
+      },
+      "unit/limits": {
+        "failed": 0,
+        "passed": 1,
+        "timed_out": false,
+        "total": 1
+      },
+      "unit/maxmemory": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
+      "unit/memefficiency": {
+        "failed": 0,
+        "passed": 5,
+        "timed_out": false,
+        "total": 5
+      },
+      "unit/multi": {
+        "failed": 1,
+        "passed": 47,
+        "timed_out": false,
+        "total": 48
+      },
+      "unit/networking": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/obuf-limits": {
+        "failed": 0,
+        "passed": 13,
+        "timed_out": false,
+        "total": 13
+      },
+      "unit/other": {
+        "failed": 0,
+        "passed": 27,
+        "timed_out": false,
+        "total": 27
+      },
+      "unit/pause": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
       "unit/protocol": {
         "failed": 0,
         "passed": 28,
         "timed_out": false,
         "total": 28
       },
+      "unit/pubsub": {
+        "failed": 0,
+        "passed": 35,
+        "timed_out": false,
+        "total": 35
+      },
+      "unit/pubsubshard": {
+        "failed": 0,
+        "passed": 11,
+        "timed_out": false,
+        "total": 11
+      },
+      "unit/querybuf": {
+        "failed": 0,
+        "passed": 2,
+        "timed_out": false,
+        "total": 2
+      },
+      "unit/quit": {
+        "failed": 0,
+        "passed": 3,
+        "timed_out": false,
+        "total": 3
+      },
+      "unit/replybufsize": {
+        "failed": 0,
+        "passed": 0,
+        "timed_out": false,
+        "total": 0
+      },
       "unit/scan": {
         "failed": 0,
         "passed": 21,
         "timed_out": false,
         "total": 21
+      },
+      "unit/scripting": {
+        "failed": 0,
+        "passed": 420,
+        "timed_out": false,
+        "total": 420
+      },
+      "unit/shutdown": {
+        "failed": 0,
+        "passed": 9,
+        "timed_out": false,
+        "total": 9
+      },
+      "unit/slowlog": {
+        "failed": 0,
+        "passed": 13,
+        "timed_out": false,
+        "total": 13
+      },
+      "unit/sort": {
+        "failed": 0,
+        "passed": 54,
+        "timed_out": false,
+        "total": 54
+      },
+      "unit/tracking": {
+        "failed": 0,
+        "passed": 59,
+        "timed_out": false,
+        "total": 59
       },
       "unit/type/hash": {
         "failed": 0,
@@ -59,6 +276,18 @@
         "passed": 254,
         "timed_out": false,
         "total": 254
+      },
+      "unit/type/list-2": {
+        "failed": 0,
+        "passed": 2,
+        "timed_out": false,
+        "total": 2
+      },
+      "unit/type/list-3": {
+        "failed": 0,
+        "passed": 11,
+        "timed_out": false,
+        "total": 11
       },
       "unit/type/set": {
         "failed": 0,
@@ -89,152 +318,287 @@
         "passed": 318,
         "timed_out": false,
         "total": 318
-      }
-    },
-    "sha": "32667a1b6"
-  },
-  "3420794c0": {
-    "build_ok": true,
-    "config": "85a35c460821",
-    "date": "2026-05-18",
-    "iso": "2026-05-18T23:30:36-04:00",
-    "note": "ok",
-    "sections": {
-      "unit/bitops": {
-        "failed": null,
-        "passed": null,
-        "timed_out": false,
-        "total": 0
       },
-      "unit/expire": {
-        "failed": null,
-        "passed": null,
-        "timed_out": false,
-        "total": 0
-      },
-      "unit/geo": {
-        "failed": 9,
-        "passed": 62,
-        "timed_out": false,
-        "total": 71
-      },
-      "unit/keyspace": {
-        "failed": null,
-        "passed": null,
-        "timed_out": false,
-        "total": 0
-      },
-      "unit/protocol": {
-        "failed": null,
-        "passed": null,
-        "timed_out": false,
-        "total": 0
-      },
-      "unit/scan": {
-        "failed": null,
-        "passed": null,
-        "timed_out": false,
-        "total": 0
-      },
-      "unit/type/hash": {
-        "failed": null,
-        "passed": null,
-        "timed_out": true,
-        "total": 0
-      },
-      "unit/type/incr": {
+      "unit/violations": {
         "failed": 0,
-        "passed": 31,
+        "passed": 1,
         "timed_out": false,
-        "total": 31
+        "total": 1
       },
-      "unit/type/list": {
+      "unit/wait": {
+        "failed": 1,
+        "passed": 38,
+        "timed_out": false,
+        "total": 39
+      }
+    },
+    "sha": "04e63ab53"
+  },
+  "32667a1b6": {
+    "build_ok": true,
+    "config": "c77842583f5b",
+    "date": "2026-05-24",
+    "full_sha": "32667a1b6bbd8e69051af5a55a2cadf207da74c1",
+    "iso": "2026-05-24T23:59:56-04:00",
+    "note": "ok",
+    "sections": {
+      "unit/acl": {
+        "failed": 0,
+        "passed": 112,
+        "timed_out": false,
+        "total": 112
+      },
+      "unit/acl-v2": {
         "failed": null,
         "passed": null,
         "timed_out": false,
         "total": 0
       },
-      "unit/type/set": {
+      "unit/aofrw": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/auth": {
         "failed": null,
         "passed": null,
         "timed_out": true,
         "total": 0
       },
-      "unit/type/stream": {
-        "failed": null,
-        "passed": null,
+      "unit/bitfield": {
+        "failed": 0,
+        "passed": 18,
         "timed_out": false,
-        "total": 0
+        "total": 18
       },
-      "unit/type/stream-cgroups": {
-        "failed": null,
-        "passed": null,
-        "timed_out": false,
-        "total": 0
-      },
-      "unit/type/string": {
-        "failed": null,
-        "passed": null,
-        "timed_out": false,
-        "total": 0
-      },
-      "unit/type/zset": {
-        "failed": null,
-        "passed": null,
-        "timed_out": false,
-        "total": 0
-      }
-    },
-    "sha": "3420794c0"
-  },
-  "47915ba1b": {
-    "build_ok": true,
-    "config": "85a35c460821",
-    "date": "2026-05-20",
-    "iso": "2026-05-20T11:36:43-04:00",
-    "note": "ok",
-    "sections": {
       "unit/bitops": {
+        "failed": 0,
+        "passed": 50,
+        "timed_out": false,
+        "total": 50
+      },
+      "unit/client-eviction": {
         "failed": null,
         "passed": null,
-        "timed_out": false,
+        "timed_out": true,
         "total": 0
+      },
+      "unit/commandlog": {
+        "failed": 0,
+        "passed": 14,
+        "timed_out": false,
+        "total": 14
+      },
+      "unit/dump": {
+        "failed": 1,
+        "passed": 26,
+        "timed_out": false,
+        "total": 27
       },
       "unit/expire": {
-        "failed": null,
-        "passed": null,
-        "timed_out": false,
-        "total": 0
-      },
-      "unit/geo": {
-        "failed": 9,
-        "passed": 62,
-        "timed_out": false,
-        "total": 71
-      },
-      "unit/keyspace": {
-        "failed": 2,
-        "passed": 63,
+        "failed": 0,
+        "passed": 65,
         "timed_out": false,
         "total": 65
       },
+      "unit/functions": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
+      "unit/fuzzer": {
+        "failed": 0,
+        "passed": 1,
+        "timed_out": false,
+        "total": 1
+      },
+      "unit/geo": {
+        "failed": 0,
+        "passed": 71,
+        "timed_out": false,
+        "total": 71
+      },
+      "unit/hashexpire": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
+      "unit/hyperloglog": {
+        "failed": 0,
+        "passed": 26,
+        "timed_out": false,
+        "total": 26
+      },
+      "unit/info": {
+        "failed": 24,
+        "passed": 0,
+        "timed_out": false,
+        "total": 24
+      },
+      "unit/info-command": {
+        "failed": 1,
+        "passed": 4,
+        "timed_out": false,
+        "total": 5
+      },
+      "unit/introspection": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/introspection-2": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/keyspace": {
+        "failed": 0,
+        "passed": 65,
+        "timed_out": false,
+        "total": 65
+      },
+      "unit/latency-monitor": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
+      "unit/lazyfree": {
+        "failed": 4,
+        "passed": 0,
+        "timed_out": false,
+        "total": 4
+      },
+      "unit/limits": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/maxmemory": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/memefficiency": {
+        "failed": 0,
+        "passed": 5,
+        "timed_out": false,
+        "total": 5
+      },
+      "unit/multi": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
+      "unit/networking": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/obuf-limits": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
+      "unit/other": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/pause": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
       "unit/protocol": {
+        "failed": 0,
+        "passed": 28,
+        "timed_out": false,
+        "total": 28
+      },
+      "unit/pubsub": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
+      "unit/pubsubshard": {
+        "failed": 0,
+        "passed": 11,
+        "timed_out": false,
+        "total": 11
+      },
+      "unit/querybuf": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/quit": {
+        "failed": 0,
+        "passed": 3,
+        "timed_out": false,
+        "total": 3
+      },
+      "unit/replybufsize": {
         "failed": null,
         "passed": null,
         "timed_out": false,
         "total": 0
       },
       "unit/scan": {
+        "failed": 0,
+        "passed": 21,
+        "timed_out": false,
+        "total": 21
+      },
+      "unit/scripting": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/shutdown": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/slowlog": {
+        "failed": 0,
+        "passed": 13,
+        "timed_out": false,
+        "total": 13
+      },
+      "unit/sort": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/tracking": {
         "failed": null,
         "passed": null,
         "timed_out": false,
         "total": 0
       },
       "unit/type/hash": {
-        "failed": null,
-        "passed": null,
+        "failed": 0,
+        "passed": 83,
         "timed_out": false,
-        "total": 0
+        "total": 83
       },
       "unit/type/incr": {
         "failed": 0,
@@ -243,10 +607,22 @@
         "total": 31
       },
       "unit/type/list": {
-        "failed": null,
-        "passed": null,
-        "timed_out": true,
-        "total": 0
+        "failed": 0,
+        "passed": 254,
+        "timed_out": false,
+        "total": 254
+      },
+      "unit/type/list-2": {
+        "failed": 0,
+        "passed": 2,
+        "timed_out": false,
+        "total": 2
+      },
+      "unit/type/list-3": {
+        "failed": 0,
+        "passed": 11,
+        "timed_out": false,
+        "total": 11
       },
       "unit/type/set": {
         "failed": 0,
@@ -267,27 +643,89 @@
         "total": 0
       },
       "unit/type/string": {
+        "failed": 0,
+        "passed": 104,
+        "timed_out": false,
+        "total": 104
+      },
+      "unit/type/zset": {
+        "failed": 0,
+        "passed": 318,
+        "timed_out": false,
+        "total": 318
+      },
+      "unit/violations": {
+        "failed": 0,
+        "passed": 1,
+        "timed_out": false,
+        "total": 1
+      },
+      "unit/wait": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      }
+    },
+    "sha": "32667a1b6"
+  },
+  "3420794c0": {
+    "build_ok": true,
+    "config": "c77842583f5b",
+    "date": "2026-05-18",
+    "full_sha": "3420794c04a43ba114033dfd2b945dc52e63d7d3",
+    "iso": "2026-05-18T23:30:36-04:00",
+    "note": "ok",
+    "sections": {
+      "unit/acl": {
         "failed": null,
         "passed": null,
         "timed_out": false,
         "total": 0
       },
-      "unit/type/zset": {
+      "unit/acl-v2": {
         "failed": null,
         "passed": null,
         "timed_out": false,
         "total": 0
-      }
-    },
-    "sha": "47915ba1b"
-  },
-  "6e2d817c5": {
-    "build_ok": true,
-    "date": "2026-05-25",
-    "iso": "2026-05-25T23:06:49-04:00",
-    "note": "ok",
-    "sections": {
+      },
+      "unit/aofrw": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/auth": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
+      "unit/bitfield": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
       "unit/bitops": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/client-eviction": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/commandlog": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/dump": {
         "failed": null,
         "passed": null,
         "timed_out": false,
@@ -299,7 +737,55 @@
         "timed_out": false,
         "total": 0
       },
+      "unit/functions": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/fuzzer": {
+        "failed": 0,
+        "passed": 1,
+        "timed_out": false,
+        "total": 1
+      },
       "unit/geo": {
+        "failed": 9,
+        "passed": 62,
+        "timed_out": false,
+        "total": 71
+      },
+      "unit/hashexpire": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/hyperloglog": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/info": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
+      "unit/info-command": {
+        "failed": 0,
+        "passed": 5,
+        "timed_out": false,
+        "total": 5
+      },
+      "unit/introspection": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/introspection-2": {
         "failed": null,
         "passed": null,
         "timed_out": false,
@@ -311,9 +797,99 @@
         "timed_out": false,
         "total": 0
       },
+      "unit/latency-monitor": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/lazyfree": {
+        "failed": 4,
+        "passed": 0,
+        "timed_out": false,
+        "total": 4
+      },
+      "unit/limits": {
+        "failed": 1,
+        "passed": 0,
+        "timed_out": false,
+        "total": 1
+      },
+      "unit/maxmemory": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/memefficiency": {
+        "failed": 0,
+        "passed": 5,
+        "timed_out": false,
+        "total": 5
+      },
+      "unit/multi": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/networking": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/obuf-limits": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
+      "unit/other": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/pause": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
       "unit/protocol": {
         "failed": null,
         "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/pubsub": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/pubsubshard": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/querybuf": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/quit": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/replybufsize": {
+        "failed": 0,
+        "passed": 0,
         "timed_out": false,
         "total": 0
       },
@@ -323,17 +899,47 @@
         "timed_out": false,
         "total": 0
       },
-      "unit/type/hash": {
+      "unit/scripting": {
         "failed": null,
         "passed": null,
         "timed_out": false,
         "total": 0
       },
-      "unit/type/incr": {
+      "unit/shutdown": {
         "failed": null,
         "passed": null,
         "timed_out": false,
         "total": 0
+      },
+      "unit/slowlog": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/sort": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/tracking": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/type/hash": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
+      "unit/type/incr": {
+        "failed": 0,
+        "passed": 31,
+        "timed_out": false,
+        "total": 31
       },
       "unit/type/list": {
         "failed": null,
@@ -341,10 +947,22 @@
         "timed_out": false,
         "total": 0
       },
+      "unit/type/list-2": {
+        "failed": 0,
+        "passed": 2,
+        "timed_out": false,
+        "total": 2
+      },
+      "unit/type/list-3": {
+        "failed": 0,
+        "passed": 11,
+        "timed_out": false,
+        "total": 11
+      },
       "unit/type/set": {
         "failed": null,
         "passed": null,
-        "timed_out": false,
+        "timed_out": true,
         "total": 0
       },
       "unit/type/stream": {
@@ -370,40 +988,52 @@
         "passed": null,
         "timed_out": false,
         "total": 0
+      },
+      "unit/violations": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/wait": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
       }
     },
-    "sha": "6e2d817c5"
+    "sha": "3420794c0"
   },
-  "81c646a49": {
+  "47915ba1b": {
     "build_ok": true,
-    "config": "e9f7787ef560",
-    "date": "2026-05-17",
-    "full_sha": "81c646a49eaa7221124a3261845ef84f22bb15f8",
-    "iso": "2026-05-17T23:17:16-04:00",
+    "config": "c77842583f5b",
+    "date": "2026-05-20",
+    "full_sha": "47915ba1b34f77cb3e142d93cfc11a930fd67d64",
+    "iso": "2026-05-20T11:36:43-04:00",
     "note": "ok",
     "sections": {
       "unit/acl": {
-        "failed": 0,
-        "passed": 0,
+        "failed": null,
+        "passed": null,
         "timed_out": false,
         "total": 0
       },
       "unit/acl-v2": {
-        "failed": 0,
-        "passed": 0,
+        "failed": null,
+        "passed": null,
         "timed_out": false,
         "total": 0
       },
       "unit/aofrw": {
-        "failed": 0,
-        "passed": 0,
+        "failed": null,
+        "passed": null,
         "timed_out": false,
         "total": 0
       },
       "unit/auth": {
-        "failed": 0,
-        "passed": 0,
-        "timed_out": false,
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
         "total": 0
       },
       "unit/bitfield": {
@@ -419,8 +1049,8 @@
         "total": 0
       },
       "unit/client-eviction": {
-        "failed": 0,
-        "passed": 0,
+        "failed": null,
+        "passed": null,
         "timed_out": false,
         "total": 0
       },
@@ -473,9 +1103,344 @@
         "total": 0
       },
       "unit/info": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
+      "unit/info-command": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/introspection": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/introspection-2": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/keyspace": {
+        "failed": 2,
+        "passed": 63,
+        "timed_out": false,
+        "total": 65
+      },
+      "unit/latency-monitor": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/lazyfree": {
+        "failed": 4,
+        "passed": 0,
+        "timed_out": false,
+        "total": 4
+      },
+      "unit/limits": {
+        "failed": 1,
+        "passed": 0,
+        "timed_out": false,
+        "total": 1
+      },
+      "unit/maxmemory": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/memefficiency": {
+        "failed": 0,
+        "passed": 5,
+        "timed_out": false,
+        "total": 5
+      },
+      "unit/multi": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/networking": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/obuf-limits": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
+      "unit/other": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/pause": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/protocol": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/pubsub": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
+      "unit/pubsubshard": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/querybuf": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/quit": {
+        "failed": 0,
+        "passed": 3,
+        "timed_out": false,
+        "total": 3
+      },
+      "unit/replybufsize": {
         "failed": 0,
         "passed": 0,
         "timed_out": false,
+        "total": 0
+      },
+      "unit/scan": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/scripting": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/shutdown": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/slowlog": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/sort": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/tracking": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/type/hash": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/type/incr": {
+        "failed": 0,
+        "passed": 31,
+        "timed_out": false,
+        "total": 31
+      },
+      "unit/type/list": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
+      "unit/type/list-2": {
+        "failed": 0,
+        "passed": 2,
+        "timed_out": false,
+        "total": 2
+      },
+      "unit/type/list-3": {
+        "failed": 0,
+        "passed": 11,
+        "timed_out": false,
+        "total": 11
+      },
+      "unit/type/set": {
+        "failed": 0,
+        "passed": 114,
+        "timed_out": false,
+        "total": 114
+      },
+      "unit/type/stream": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
+      "unit/type/stream-cgroups": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/type/string": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/type/zset": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/violations": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/wait": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      }
+    },
+    "sha": "47915ba1b"
+  },
+  "81c646a49": {
+    "build_ok": true,
+    "config": "c77842583f5b",
+    "date": "2026-05-17",
+    "full_sha": "81c646a49eaa7221124a3261845ef84f22bb15f8",
+    "iso": "2026-05-17T23:17:16-04:00",
+    "note": "ok",
+    "sections": {
+      "unit/acl": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/acl-v2": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/aofrw": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/auth": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/bitfield": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
+      "unit/bitops": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/client-eviction": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/commandlog": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/dump": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/expire": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/functions": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/fuzzer": {
+        "failed": 0,
+        "passed": 1,
+        "timed_out": false,
+        "total": 1
+      },
+      "unit/geo": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/hashexpire": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/hyperloglog": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/info": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
         "total": 0
       },
       "unit/info-command": {
@@ -515,22 +1480,22 @@
         "total": 4
       },
       "unit/limits": {
-        "failed": 0,
+        "failed": 1,
         "passed": 0,
         "timed_out": false,
-        "total": 0
+        "total": 1
       },
       "unit/maxmemory": {
-        "failed": 0,
-        "passed": 0,
+        "failed": null,
+        "passed": null,
         "timed_out": false,
         "total": 0
       },
       "unit/memefficiency": {
         "failed": 0,
-        "passed": 0,
+        "passed": 5,
         "timed_out": false,
-        "total": 0
+        "total": 5
       },
       "unit/multi": {
         "failed": null,
@@ -539,15 +1504,15 @@
         "total": 0
       },
       "unit/networking": {
-        "failed": 0,
-        "passed": 0,
+        "failed": null,
+        "passed": null,
         "timed_out": false,
         "total": 0
       },
       "unit/obuf-limits": {
-        "failed": 0,
-        "passed": 0,
-        "timed_out": false,
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
         "total": 0
       },
       "unit/other": {
@@ -575,8 +1540,8 @@
         "total": 0
       },
       "unit/pubsubshard": {
-        "failed": 0,
-        "passed": 0,
+        "failed": null,
+        "passed": null,
         "timed_out": false,
         "total": 0
       },
@@ -587,10 +1552,10 @@
         "total": 0
       },
       "unit/quit": {
-        "failed": 0,
-        "passed": 3,
+        "failed": null,
+        "passed": null,
         "timed_out": false,
-        "total": 3
+        "total": 0
       },
       "unit/replybufsize": {
         "failed": 0,
@@ -611,8 +1576,8 @@
         "total": 0
       },
       "unit/shutdown": {
-        "failed": 0,
-        "passed": 0,
+        "failed": null,
+        "passed": null,
         "timed_out": false,
         "total": 0
       },
@@ -659,10 +1624,10 @@
         "total": 2
       },
       "unit/type/list-3": {
-        "failed": 0,
-        "passed": 11,
+        "failed": null,
+        "passed": null,
         "timed_out": false,
-        "total": 11
+        "total": 0
       },
       "unit/type/set": {
         "failed": null,
@@ -701,8 +1666,8 @@
         "total": 0
       },
       "unit/wait": {
-        "failed": 0,
-        "passed": 0,
+        "failed": null,
+        "passed": null,
         "timed_out": false,
         "total": 0
       }
@@ -711,12 +1676,61 @@
   },
   "970f2a1ef": {
     "build_ok": true,
-    "config": "85a35c460821",
+    "config": "c77842583f5b",
     "date": "2026-05-19",
+    "full_sha": "970f2a1ef3d985126517bf1ec6fa2dda0cb355e1",
     "iso": "2026-05-19T22:44:30-04:00",
     "note": "ok",
     "sections": {
+      "unit/acl": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/acl-v2": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/aofrw": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/auth": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
+      "unit/bitfield": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
       "unit/bitops": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/client-eviction": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/commandlog": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/dump": {
         "failed": null,
         "passed": null,
         "timed_out": false,
@@ -728,11 +1742,59 @@
         "timed_out": false,
         "total": 0
       },
-      "unit/geo": {
-        "failed": 9,
-        "passed": 62,
+      "unit/functions": {
+        "failed": null,
+        "passed": null,
         "timed_out": false,
-        "total": 71
+        "total": 0
+      },
+      "unit/fuzzer": {
+        "failed": 0,
+        "passed": 1,
+        "timed_out": false,
+        "total": 1
+      },
+      "unit/geo": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/hashexpire": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/hyperloglog": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/info": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
+      "unit/info-command": {
+        "failed": 0,
+        "passed": 5,
+        "timed_out": false,
+        "total": 5
+      },
+      "unit/introspection": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/introspection-2": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
       },
       "unit/keyspace": {
         "failed": 2,
@@ -740,13 +1802,133 @@
         "timed_out": false,
         "total": 65
       },
+      "unit/latency-monitor": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/lazyfree": {
+        "failed": 4,
+        "passed": 0,
+        "timed_out": false,
+        "total": 4
+      },
+      "unit/limits": {
+        "failed": 1,
+        "passed": 0,
+        "timed_out": false,
+        "total": 1
+      },
+      "unit/maxmemory": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/memefficiency": {
+        "failed": 0,
+        "passed": 5,
+        "timed_out": false,
+        "total": 5
+      },
+      "unit/multi": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/networking": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/obuf-limits": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
+      "unit/other": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/pause": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
       "unit/protocol": {
         "failed": null,
         "passed": null,
         "timed_out": false,
         "total": 0
       },
+      "unit/pubsub": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
+      "unit/pubsubshard": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/querybuf": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/quit": {
+        "failed": 0,
+        "passed": 3,
+        "timed_out": false,
+        "total": 3
+      },
+      "unit/replybufsize": {
+        "failed": 0,
+        "passed": 0,
+        "timed_out": false,
+        "total": 0
+      },
       "unit/scan": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/scripting": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/shutdown": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/slowlog": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/sort": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/tracking": {
         "failed": null,
         "passed": null,
         "timed_out": false,
@@ -769,6 +1951,18 @@
         "passed": null,
         "timed_out": true,
         "total": 0
+      },
+      "unit/type/list-2": {
+        "failed": 0,
+        "passed": 2,
+        "timed_out": false,
+        "total": 2
+      },
+      "unit/type/list-3": {
+        "failed": 0,
+        "passed": 11,
+        "timed_out": false,
+        "total": 11
       },
       "unit/type/set": {
         "failed": 0,
@@ -799,22 +1993,83 @@
         "passed": null,
         "timed_out": false,
         "total": 0
+      },
+      "unit/violations": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/wait": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
       }
     },
     "sha": "970f2a1ef"
   },
   "a93a2ad1a": {
     "build_ok": true,
-    "config": "7ad3b432f7d4",
+    "config": "c77842583f5b",
     "date": "2026-05-23",
+    "full_sha": "a93a2ad1af8ca90e1e6e0e2b6c37569c1f48f30b",
     "iso": "2026-05-23T13:47:18-04:00",
     "note": "ok",
     "sections": {
+      "unit/acl": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/acl-v2": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/aofrw": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/auth": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
+      "unit/bitfield": {
+        "failed": 0,
+        "passed": 18,
+        "timed_out": false,
+        "total": 18
+      },
       "unit/bitops": {
         "failed": 0,
         "passed": 50,
         "timed_out": false,
         "total": 50
+      },
+      "unit/client-eviction": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/commandlog": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/dump": {
+        "failed": 1,
+        "passed": 26,
+        "timed_out": false,
+        "total": 27
       },
       "unit/expire": {
         "failed": null,
@@ -822,11 +2077,59 @@
         "timed_out": false,
         "total": 0
       },
+      "unit/functions": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/fuzzer": {
+        "failed": 0,
+        "passed": 1,
+        "timed_out": false,
+        "total": 1
+      },
       "unit/geo": {
         "failed": 0,
         "passed": 71,
         "timed_out": false,
         "total": 71
+      },
+      "unit/hashexpire": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/hyperloglog": {
+        "failed": 0,
+        "passed": 26,
+        "timed_out": false,
+        "total": 26
+      },
+      "unit/info": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
+      "unit/info-command": {
+        "failed": 1,
+        "passed": 4,
+        "timed_out": false,
+        "total": 5
+      },
+      "unit/introspection": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/introspection-2": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
       },
       "unit/keyspace": {
         "failed": 2,
@@ -834,9 +2137,99 @@
         "timed_out": false,
         "total": 65
       },
+      "unit/latency-monitor": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/lazyfree": {
+        "failed": 4,
+        "passed": 0,
+        "timed_out": false,
+        "total": 4
+      },
+      "unit/limits": {
+        "failed": 1,
+        "passed": 0,
+        "timed_out": false,
+        "total": 1
+      },
+      "unit/maxmemory": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/memefficiency": {
+        "failed": 0,
+        "passed": 5,
+        "timed_out": false,
+        "total": 5
+      },
+      "unit/multi": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/networking": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/obuf-limits": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
+      "unit/other": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/pause": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
       "unit/protocol": {
         "failed": null,
         "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/pubsub": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
+      "unit/pubsubshard": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/querybuf": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/quit": {
+        "failed": 0,
+        "passed": 3,
+        "timed_out": false,
+        "total": 3
+      },
+      "unit/replybufsize": {
+        "failed": 0,
+        "passed": 0,
         "timed_out": false,
         "total": 0
       },
@@ -846,6 +2239,36 @@
         "timed_out": false,
         "total": 21
       },
+      "unit/scripting": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/shutdown": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/slowlog": {
+        "failed": 0,
+        "passed": 13,
+        "timed_out": false,
+        "total": 13
+      },
+      "unit/sort": {
+        "failed": 0,
+        "passed": 54,
+        "timed_out": false,
+        "total": 54
+      },
+      "unit/tracking": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
       "unit/type/hash": {
         "failed": null,
         "passed": null,
@@ -862,6 +2285,18 @@
         "failed": null,
         "passed": null,
         "timed_out": true,
+        "total": 0
+      },
+      "unit/type/list-2": {
+        "failed": 0,
+        "passed": 2,
+        "timed_out": false,
+        "total": 2
+      },
+      "unit/type/list-3": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
         "total": 0
       },
       "unit/type/set": {
@@ -893,22 +2328,83 @@
         "passed": null,
         "timed_out": false,
         "total": 0
+      },
+      "unit/violations": {
+        "failed": 0,
+        "passed": 1,
+        "timed_out": false,
+        "total": 1
+      },
+      "unit/wait": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
       }
     },
     "sha": "a93a2ad1a"
   },
   "c6ed196ff": {
     "build_ok": true,
-    "config": "85a35c460821",
+    "config": "c77842583f5b",
     "date": "2026-05-22",
+    "full_sha": "c6ed196ff842cc7e0518ad83040dbc3c085822c0",
     "iso": "2026-05-22T23:38:51-04:00",
     "note": "ok",
     "sections": {
+      "unit/acl": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/acl-v2": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/aofrw": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/auth": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
+      "unit/bitfield": {
+        "failed": 1,
+        "passed": 17,
+        "timed_out": false,
+        "total": 18
+      },
       "unit/bitops": {
         "failed": 1,
         "passed": 49,
         "timed_out": false,
         "total": 50
+      },
+      "unit/client-eviction": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/commandlog": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/dump": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
       },
       "unit/expire": {
         "failed": null,
@@ -916,11 +2412,59 @@
         "timed_out": false,
         "total": 0
       },
+      "unit/functions": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/fuzzer": {
+        "failed": 0,
+        "passed": 1,
+        "timed_out": false,
+        "total": 1
+      },
       "unit/geo": {
         "failed": 0,
         "passed": 71,
         "timed_out": false,
         "total": 71
+      },
+      "unit/hashexpire": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/hyperloglog": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/info": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
+      "unit/info-command": {
+        "failed": 1,
+        "passed": 4,
+        "timed_out": false,
+        "total": 5
+      },
+      "unit/introspection": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/introspection-2": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
       },
       "unit/keyspace": {
         "failed": 2,
@@ -928,9 +2472,99 @@
         "timed_out": false,
         "total": 65
       },
+      "unit/latency-monitor": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/lazyfree": {
+        "failed": 4,
+        "passed": 0,
+        "timed_out": false,
+        "total": 4
+      },
+      "unit/limits": {
+        "failed": 1,
+        "passed": 0,
+        "timed_out": false,
+        "total": 1
+      },
+      "unit/maxmemory": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/memefficiency": {
+        "failed": 0,
+        "passed": 5,
+        "timed_out": false,
+        "total": 5
+      },
+      "unit/multi": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/networking": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/obuf-limits": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
+      "unit/other": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/pause": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
       "unit/protocol": {
         "failed": null,
         "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/pubsub": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
+      "unit/pubsubshard": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/querybuf": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/quit": {
+        "failed": 0,
+        "passed": 3,
+        "timed_out": false,
+        "total": 3
+      },
+      "unit/replybufsize": {
+        "failed": 0,
+        "passed": 0,
         "timed_out": false,
         "total": 0
       },
@@ -940,6 +2574,36 @@
         "timed_out": false,
         "total": 21
       },
+      "unit/scripting": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/shutdown": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/slowlog": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/sort": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/tracking": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
       "unit/type/hash": {
         "failed": null,
         "passed": null,
@@ -957,6 +2621,18 @@
         "passed": null,
         "timed_out": true,
         "total": 0
+      },
+      "unit/type/list-2": {
+        "failed": 0,
+        "passed": 2,
+        "timed_out": false,
+        "total": 2
+      },
+      "unit/type/list-3": {
+        "failed": 0,
+        "passed": 11,
+        "timed_out": false,
+        "total": 11
       },
       "unit/type/set": {
         "failed": 0,
@@ -986,6 +2662,18 @@
         "failed": null,
         "passed": null,
         "timed_out": false,
+        "total": 0
+      },
+      "unit/violations": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/wait": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
         "total": 0
       }
     },
@@ -993,12 +2681,61 @@
   },
   "ca0ab1b22": {
     "build_ok": true,
-    "config": "85a35c460821",
+    "config": "c77842583f5b",
     "date": "2026-05-21",
+    "full_sha": "ca0ab1b2210565f0e412366426fead3fb592882b",
     "iso": "2026-05-21T23:59:58-04:00",
     "note": "ok",
     "sections": {
+      "unit/acl": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/acl-v2": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/aofrw": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/auth": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/bitfield": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
       "unit/bitops": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/client-eviction": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/commandlog": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/dump": {
         "failed": null,
         "passed": null,
         "timed_out": false,
@@ -1010,11 +2747,59 @@
         "timed_out": false,
         "total": 0
       },
+      "unit/functions": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/fuzzer": {
+        "failed": 0,
+        "passed": 1,
+        "timed_out": false,
+        "total": 1
+      },
       "unit/geo": {
         "failed": 9,
         "passed": 62,
         "timed_out": false,
         "total": 71
+      },
+      "unit/hashexpire": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/hyperloglog": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/info": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
+      "unit/info-command": {
+        "failed": 0,
+        "passed": 5,
+        "timed_out": false,
+        "total": 5
+      },
+      "unit/introspection": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/introspection-2": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
       },
       "unit/keyspace": {
         "failed": 2,
@@ -1022,13 +2807,133 @@
         "timed_out": false,
         "total": 65
       },
+      "unit/latency-monitor": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/lazyfree": {
+        "failed": 4,
+        "passed": 0,
+        "timed_out": false,
+        "total": 4
+      },
+      "unit/limits": {
+        "failed": 1,
+        "passed": 0,
+        "timed_out": false,
+        "total": 1
+      },
+      "unit/maxmemory": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/memefficiency": {
+        "failed": 0,
+        "passed": 5,
+        "timed_out": false,
+        "total": 5
+      },
+      "unit/multi": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/networking": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/obuf-limits": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
+      "unit/other": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
+      "unit/pause": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
       "unit/protocol": {
         "failed": null,
         "passed": null,
         "timed_out": false,
         "total": 0
       },
+      "unit/pubsub": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
+      "unit/pubsubshard": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/querybuf": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/quit": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/replybufsize": {
+        "failed": 0,
+        "passed": 0,
+        "timed_out": false,
+        "total": 0
+      },
       "unit/scan": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/scripting": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/shutdown": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/slowlog": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/sort": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/tracking": {
         "failed": null,
         "passed": null,
         "timed_out": false,
@@ -1051,6 +2956,18 @@
         "passed": null,
         "timed_out": true,
         "total": 0
+      },
+      "unit/type/list-2": {
+        "failed": 0,
+        "passed": 2,
+        "timed_out": false,
+        "total": 2
+      },
+      "unit/type/list-3": {
+        "failed": 0,
+        "passed": 11,
+        "timed_out": false,
+        "total": 11
       },
       "unit/type/set": {
         "failed": 0,
@@ -1081,28 +2998,101 @@
         "passed": null,
         "timed_out": false,
         "total": 0
+      },
+      "unit/violations": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/wait": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
       }
     },
     "sha": "ca0ab1b22"
   },
   "f4c16b7bf": {
     "build_ok": true,
-    "config": "7ad3b432f7d4",
+    "config": "c77842583f5b",
     "date": "2026-05-25",
+    "full_sha": "f4c16b7bfbd517bae5bf2512db1e7beed46adde8",
     "iso": "2026-05-25T23:25:45-04:00",
     "note": "ok",
     "sections": {
+      "unit/acl": {
+        "failed": 1,
+        "passed": 111,
+        "timed_out": false,
+        "total": 112
+      },
+      "unit/acl-v2": {
+        "failed": 0,
+        "passed": 72,
+        "timed_out": false,
+        "total": 72
+      },
+      "unit/aofrw": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/auth": {
+        "failed": 0,
+        "passed": 16,
+        "timed_out": false,
+        "total": 16
+      },
+      "unit/bitfield": {
+        "failed": 0,
+        "passed": 18,
+        "timed_out": false,
+        "total": 18
+      },
       "unit/bitops": {
         "failed": 0,
         "passed": 50,
         "timed_out": false,
         "total": 50
       },
-      "unit/expire": {
+      "unit/client-eviction": {
         "failed": 0,
-        "passed": 65,
+        "passed": 14,
+        "timed_out": false,
+        "total": 14
+      },
+      "unit/commandlog": {
+        "failed": 0,
+        "passed": 14,
+        "timed_out": false,
+        "total": 14
+      },
+      "unit/dump": {
+        "failed": 1,
+        "passed": 26,
+        "timed_out": false,
+        "total": 27
+      },
+      "unit/expire": {
+        "failed": 2,
+        "passed": 63,
         "timed_out": false,
         "total": 65
+      },
+      "unit/functions": {
+        "failed": 0,
+        "passed": 94,
+        "timed_out": false,
+        "total": 94
+      },
+      "unit/fuzzer": {
+        "failed": 0,
+        "passed": 1,
+        "timed_out": false,
+        "total": 1
       },
       "unit/geo": {
         "failed": 0,
@@ -1110,11 +3100,107 @@
         "timed_out": false,
         "total": 71
       },
-      "unit/keyspace": {
+      "unit/hashexpire": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
+      "unit/hyperloglog": {
         "failed": 0,
-        "passed": 65,
+        "passed": 26,
         "timed_out": false,
-        "total": 65
+        "total": 26
+      },
+      "unit/info": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/info-command": {
+        "failed": 0,
+        "passed": 5,
+        "timed_out": false,
+        "total": 5
+      },
+      "unit/introspection": {
+        "failed": 0,
+        "passed": 113,
+        "timed_out": false,
+        "total": 113
+      },
+      "unit/introspection-2": {
+        "failed": 0,
+        "passed": 49,
+        "timed_out": false,
+        "total": 49
+      },
+      "unit/keyspace": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/latency-monitor": {
+        "failed": 0,
+        "passed": 12,
+        "timed_out": false,
+        "total": 12
+      },
+      "unit/lazyfree": {
+        "failed": 1,
+        "passed": 3,
+        "timed_out": false,
+        "total": 4
+      },
+      "unit/limits": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/maxmemory": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
+      },
+      "unit/memefficiency": {
+        "failed": 0,
+        "passed": 5,
+        "timed_out": false,
+        "total": 5
+      },
+      "unit/multi": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/networking": {
+        "failed": 2,
+        "passed": 3,
+        "timed_out": false,
+        "total": 5
+      },
+      "unit/obuf-limits": {
+        "failed": 0,
+        "passed": 13,
+        "timed_out": false,
+        "total": 13
+      },
+      "unit/other": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/pause": {
+        "failed": null,
+        "passed": null,
+        "timed_out": true,
+        "total": 0
       },
       "unit/protocol": {
         "failed": 0,
@@ -1122,11 +3208,71 @@
         "timed_out": false,
         "total": 28
       },
+      "unit/pubsub": {
+        "failed": 0,
+        "passed": 35,
+        "timed_out": false,
+        "total": 35
+      },
+      "unit/pubsubshard": {
+        "failed": 0,
+        "passed": 11,
+        "timed_out": false,
+        "total": 11
+      },
+      "unit/querybuf": {
+        "failed": 0,
+        "passed": 2,
+        "timed_out": false,
+        "total": 2
+      },
+      "unit/quit": {
+        "failed": 0,
+        "passed": 3,
+        "timed_out": false,
+        "total": 3
+      },
+      "unit/replybufsize": {
+        "failed": 0,
+        "passed": 0,
+        "timed_out": false,
+        "total": 0
+      },
       "unit/scan": {
         "failed": 0,
         "passed": 21,
         "timed_out": false,
         "total": 21
+      },
+      "unit/scripting": {
+        "failed": 1,
+        "passed": 419,
+        "timed_out": false,
+        "total": 420
+      },
+      "unit/shutdown": {
+        "failed": null,
+        "passed": null,
+        "timed_out": false,
+        "total": 0
+      },
+      "unit/slowlog": {
+        "failed": 0,
+        "passed": 13,
+        "timed_out": false,
+        "total": 13
+      },
+      "unit/sort": {
+        "failed": 0,
+        "passed": 54,
+        "timed_out": false,
+        "total": 54
+      },
+      "unit/tracking": {
+        "failed": 0,
+        "passed": 59,
+        "timed_out": false,
+        "total": 59
       },
       "unit/type/hash": {
         "failed": 0,
@@ -1146,6 +3292,18 @@
         "timed_out": false,
         "total": 254
       },
+      "unit/type/list-2": {
+        "failed": 0,
+        "passed": 2,
+        "timed_out": false,
+        "total": 2
+      },
+      "unit/type/list-3": {
+        "failed": 0,
+        "passed": 11,
+        "timed_out": false,
+        "total": 11
+      },
       "unit/type/set": {
         "failed": 0,
         "passed": 114,
@@ -1159,10 +3317,10 @@
         "total": 0
       },
       "unit/type/stream-cgroups": {
-        "failed": 0,
-        "passed": 59,
+        "failed": null,
+        "passed": null,
         "timed_out": false,
-        "total": 59
+        "total": 0
       },
       "unit/type/string": {
         "failed": 0,
@@ -1175,50 +3333,53 @@
         "passed": 318,
         "timed_out": false,
         "total": 318
+      },
+      "unit/violations": {
+        "failed": 0,
+        "passed": 1,
+        "timed_out": false,
+        "total": 1
+      },
+      "unit/wait": {
+        "failed": 0,
+        "passed": 39,
+        "timed_out": false,
+        "total": 39
       }
     },
     "sha": "f4c16b7bf"
   },
-  "fbdefec43": {
-    "build_ok": false,
-    "config": "85a35c460821",
-    "date": "2026-05-16",
-    "iso": "2026-05-16T22:04:07-04:00",
-    "note": "build failed: For more information about an error, try `rustc --explain E0061`. | warning: `redis-core` (lib) generated 5 warnings | error: could not compile `redis-core` (lib) due to 19 previous errors; 5 warnings emitted",
-    "sections": {},
-    "sha": "fbdefec43"
-  },
-  "f7e590a68": {
+  "676765a0b": {
     "date": "2026-05-26",
-    "iso": "2026-05-26T10:48:19-04:00",
-    "sha": "f7e590a68",
-    "full_sha": "f7e590a68550cb32429f1100d32ecb832a237720",
+    "iso": "2026-05-26T15:47:40-04:00",
+    "sha": "676765a0b",
+    "full_sha": "676765a0b6865cb7e82f499d27bd3315d486ad2c",
     "build_ok": true,
     "note": "current",
-    "config": "e9f7787ef560",
+    "config": "c77842583f5b",
     "sections": {
       "unit/acl-v2": {
-        "passed": 0,
-        "failed": 0,
+        "passed": null,
+        "failed": null,
         "total": 0,
         "timed_out": false
       },
       "unit/acl": {
-        "passed": 0,
+        "passed": 112,
         "failed": 0,
-        "total": 0,
+        "total": 112,
         "timed_out": false
       },
       "unit/aofrw": {
-        "passed": 0,
-        "failed": 0,
+        "passed": null,
+        "failed": null,
         "total": 0,
         "timed_out": false
       },
       "unit/auth": {
-        "passed": 0,
+        "passed": 16,
         "failed": 0,
-        "total": 0,
+        "total": 16,
         "timed_out": false
       },
       "unit/bitfield": {
@@ -1234,9 +3395,9 @@
         "timed_out": false
       },
       "unit/client-eviction": {
-        "passed": 0,
+        "passed": 14,
         "failed": 0,
-        "total": 0,
+        "total": 14,
         "timed_out": false
       },
       "unit/commandlog": {
@@ -1246,9 +3407,9 @@
         "timed_out": false
       },
       "unit/dump": {
-        "passed": 12,
-        "failed": 1,
-        "total": 13,
+        "passed": 27,
+        "failed": 0,
+        "total": 27,
         "timed_out": false
       },
       "unit/expire": {
@@ -1258,9 +3419,9 @@
         "timed_out": false
       },
       "unit/functions": {
-        "passed": 93,
+        "passed": 94,
         "failed": 0,
-        "total": 93,
+        "total": 94,
         "timed_out": false
       },
       "unit/fuzzer": {
@@ -1276,9 +3437,9 @@
         "timed_out": false
       },
       "unit/hashexpire": {
-        "passed": 207,
-        "failed": 0,
-        "total": 207,
+        "passed": null,
+        "failed": null,
+        "total": 0,
         "timed_out": false
       },
       "unit/hyperloglog": {
@@ -1294,9 +3455,9 @@
         "timed_out": false
       },
       "unit/info": {
-        "passed": 0,
+        "passed": 24,
         "failed": 0,
-        "total": 0,
+        "total": 24,
         "timed_out": false
       },
       "unit/introspection-2": {
@@ -1306,9 +3467,9 @@
         "timed_out": false
       },
       "unit/introspection": {
-        "passed": 93,
+        "passed": 113,
         "failed": 0,
-        "total": 93,
+        "total": 113,
         "timed_out": false
       },
       "unit/keyspace": {
@@ -1330,45 +3491,45 @@
         "timed_out": false
       },
       "unit/limits": {
-        "passed": 0,
+        "passed": 1,
         "failed": 0,
-        "total": 0,
+        "total": 1,
         "timed_out": false
       },
       "unit/maxmemory": {
-        "passed": 0,
+        "passed": 30,
         "failed": 0,
-        "total": 0,
+        "total": 30,
         "timed_out": false
       },
       "unit/memefficiency": {
-        "passed": 0,
+        "passed": 5,
         "failed": 0,
-        "total": 0,
+        "total": 5,
         "timed_out": false
       },
       "unit/multi": {
-        "passed": 45,
+        "passed": 48,
         "failed": 0,
-        "total": 45,
+        "total": 48,
         "timed_out": false
       },
       "unit/networking": {
-        "passed": 0,
-        "failed": 0,
+        "passed": null,
+        "failed": null,
         "total": 0,
         "timed_out": false
       },
       "unit/obuf-limits": {
-        "passed": 0,
+        "passed": 13,
         "failed": 0,
-        "total": 0,
+        "total": 13,
         "timed_out": false
       },
       "unit/other": {
-        "passed": 22,
+        "passed": 27,
         "failed": 0,
-        "total": 22,
+        "total": 27,
         "timed_out": false
       },
       "unit/pause": {
@@ -1390,9 +3551,9 @@
         "timed_out": false
       },
       "unit/pubsubshard": {
-        "passed": 0,
+        "passed": 11,
         "failed": 0,
-        "total": 0,
+        "total": 11,
         "timed_out": false
       },
       "unit/querybuf": {
@@ -1420,15 +3581,15 @@
         "timed_out": false
       },
       "unit/scripting": {
-        "passed": 401,
-        "failed": 1,
-        "total": 402,
+        "passed": 420,
+        "failed": 0,
+        "total": 420,
         "timed_out": false
       },
       "unit/shutdown": {
-        "passed": 0,
+        "passed": 9,
         "failed": 0,
-        "total": 0,
+        "total": 9,
         "timed_out": false
       },
       "unit/slowlog": {
@@ -1456,9 +3617,9 @@
         "timed_out": false
       },
       "unit/wait": {
-        "passed": 0,
+        "passed": 39,
         "failed": 0,
-        "total": 0,
+        "total": 39,
         "timed_out": false
       },
       "unit/type/hash": {
@@ -1498,9 +3659,9 @@
         "timed_out": false
       },
       "unit/type/stream-cgroups": {
-        "passed": 59,
-        "failed": 0,
-        "total": 59,
+        "passed": null,
+        "failed": null,
+        "total": 0,
         "timed_out": false
       },
       "unit/type/stream": {

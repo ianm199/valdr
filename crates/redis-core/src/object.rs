@@ -23,7 +23,6 @@ use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, OnceLock};
 
-use redis_ds::listpack::ListPack;
 use redis_ds::stream::InlineStream;
 use redis_types::{RedisError, RedisString};
 
@@ -1459,6 +1458,8 @@ const LISTPACK_NEG_FILL_LIMITS: [usize; 5] = [4096, 8192, 16384, 32768, 65536];
 const LISTPACK_SIZE_SAFETY_LIMIT: usize = 8192;
 const LISTPACK_FIXED_OVERHEAD_BYTES: usize = 7;
 const LISTPACK_MIN_ENTRY_BYTES: usize = 2;
+const LISTPACK_INTBUF_SIZE: usize = 21;
+const LISTPACK_MAX_SAFETY_SIZE: usize = 1 << 30;
 
 /// Valkey default `hash-max-listpack-entries`. Hashes with more entries
 /// report `hashtable`.
@@ -1501,13 +1502,117 @@ fn listpack_node_limit(fill: i64) -> (usize, usize) {
 }
 
 fn listpack_encoded_len(d: &VecDeque<RedisString>) -> Option<usize> {
-    let mut lp = ListPack::new();
+    let mut encoded_len = LISTPACK_FIXED_OVERHEAD_BYTES;
     for value in d {
-        if !lp.append(value.as_bytes()) {
+        encoded_len = encoded_len.checked_add(listpack_entry_total_len(value.as_bytes())?)?;
+        if encoded_len > LISTPACK_MAX_SAFETY_SIZE {
             return None;
         }
     }
-    Some(lp.bytes_len())
+    Some(encoded_len)
+}
+
+fn listpack_entries_encoded_len(values: &[RedisString]) -> Option<usize> {
+    let mut encoded_len = 0usize;
+    for value in values {
+        encoded_len = encoded_len.checked_add(listpack_entry_total_len(value.as_bytes())?)?;
+    }
+    Some(encoded_len)
+}
+
+fn listpack_entry_total_len(value: &[u8]) -> Option<usize> {
+    let content_len = match listpack_bytes_to_i64(value) {
+        Some(n) => listpack_integer_content_len(n),
+        None => listpack_string_content_len(value.len())?,
+    };
+    content_len.checked_add(listpack_backlen_size(content_len)?)
+}
+
+fn listpack_string_content_len(len: usize) -> Option<usize> {
+    if len < 64 {
+        Some(1 + len)
+    } else if len < 4096 {
+        Some(2 + len)
+    } else {
+        5usize.checked_add(len)
+    }
+}
+
+fn listpack_integer_content_len(value: i64) -> usize {
+    if (0..=127).contains(&value) {
+        1
+    } else if (-4096..=4095).contains(&value) {
+        2
+    } else if (i16::MIN as i64..=i16::MAX as i64).contains(&value) {
+        3
+    } else if (-8_388_608..=8_388_607).contains(&value) {
+        4
+    } else if (i32::MIN as i64..=i32::MAX as i64).contains(&value) {
+        5
+    } else {
+        9
+    }
+}
+
+fn listpack_backlen_size(len: usize) -> Option<usize> {
+    if len <= 127 {
+        Some(1)
+    } else if len <= 16_383 {
+        Some(2)
+    } else if len <= 2_097_151 {
+        Some(3)
+    } else if len <= 268_435_455 {
+        Some(4)
+    } else if len <= 34_359_738_367 {
+        Some(5)
+    } else {
+        None
+    }
+}
+
+fn listpack_bytes_to_i64(s: &[u8]) -> Option<i64> {
+    if s.is_empty() || s.len() >= LISTPACK_INTBUF_SIZE {
+        return None;
+    }
+    if s.len() == 1 && s[0].is_ascii_digit() {
+        return Some((s[0] - b'0') as i64);
+    }
+
+    let mut index = 0usize;
+    let negative = s[0] == b'-';
+    if negative {
+        index += 1;
+        if index == s.len() {
+            return None;
+        }
+    }
+
+    if !(b'1'..=b'9').contains(&s[index]) {
+        return None;
+    }
+
+    let mut value = (s[index] - b'0') as u64;
+    index += 1;
+    while index < s.len() {
+        let digit = s[index];
+        if !digit.is_ascii_digit() {
+            return None;
+        }
+        value = value.checked_mul(10)?;
+        value = value.checked_add((digit - b'0') as u64)?;
+        index += 1;
+    }
+
+    if negative {
+        if value > (1u64 << 63) {
+            return None;
+        }
+        Some((value as i64).wrapping_neg())
+    } else if value > i64::MAX as u64 {
+        None
+    } else {
+        Some(value as i64)
+    }
 }
 
 fn listpack_growing_exceeds_limit(d: &VecDeque<RedisString>, values: &[RedisString]) -> bool {
@@ -1516,9 +1621,9 @@ fn listpack_growing_exceeds_limit(d: &VecDeque<RedisString>, values: &[RedisStri
     let Some(encoded_len) = listpack_encoded_len(d) else {
         return true;
     };
-    let added_bytes = values.iter().fold(0usize, |acc, value| {
-        acc.saturating_add(value.as_bytes().len())
-    });
+    let Some(added_bytes) = listpack_entries_encoded_len(values) else {
+        return true;
+    };
     let new_len = d.len().saturating_add(values.len());
     let new_encoded_len = encoded_len.saturating_add(added_bytes);
     if size_limit != usize::MAX {
@@ -1559,6 +1664,30 @@ fn quicklist_shrink_may_fit_listpack(len: usize, size_limit: usize, count_limit:
 #[cfg(test)]
 mod list_encoding_tests {
     use super::*;
+    use redis_ds::listpack::ListPack;
+
+    #[test]
+    fn listpack_encoded_len_matches_real_listpack_for_representative_values() {
+        let mut deque = VecDeque::new();
+        for value in [
+            b"".as_slice(),
+            b"x".as_slice(),
+            b"123".as_slice(),
+            b"-4096".as_slice(),
+            b"4096".as_slice(),
+            b"0007".as_slice(),
+            b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".as_slice(),
+        ] {
+            deque.push_back(RedisString::from_bytes(value));
+        }
+
+        let mut lp = ListPack::new();
+        for value in &deque {
+            assert!(lp.append(value.as_bytes()));
+        }
+
+        assert_eq!(listpack_encoded_len(&deque), Some(lp.bytes_len()));
+    }
 
     #[test]
     fn quicklist_demote_gate_rejects_large_default_lists_before_encoding_scan() {

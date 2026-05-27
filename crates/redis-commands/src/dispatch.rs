@@ -17,8 +17,8 @@ use std::cmp::Ordering;
 use std::sync::{OnceLock, RwLock};
 
 use redis_core::acl::{
-    category as acl_category, global_acl_state, record_acl_log_entry, AclUser, ACL_KEY_ANY,
-    ACL_KEY_READ, ACL_KEY_READ_WRITE, ACL_KEY_WRITE,
+    category as acl_category, default_user_all_access_fast_path, global_acl_state,
+    record_acl_log_entry, AclUser, ACL_KEY_ANY, ACL_KEY_READ, ACL_KEY_READ_WRITE, ACL_KEY_WRITE,
 };
 use redis_core::client::Client;
 use redis_core::eviction::{oom_error_reply, try_evict_to_fit, EvictionOutcome};
@@ -70,6 +70,7 @@ struct CommandMetadata {
 struct RuntimeDispatchEntry {
     entry: &'static DispatchEntry,
     metadata: CommandMetadata,
+    arities: Vec<i32>,
 }
 
 struct HotRuntimeDispatch {
@@ -204,27 +205,23 @@ pub(crate) fn registered_command_spec(name: &[u8]) -> Option<&'static GeneratedC
         .find(|spec| ascii_eq_ignore_case(spec.name.as_bytes(), name))
 }
 
-fn command_arity_error(name: &[u8], argc: usize) -> Option<RedisError> {
+fn command_arity_error(entry: &RuntimeDispatchEntry, argc: usize) -> Option<RedisError> {
     let argc = argc as i32;
-    let mut saw_spec = false;
-    let valid = COMMANDS
-        .iter()
-        .filter(|spec| ascii_eq_ignore_case(spec.name.as_bytes(), name))
-        .any(|spec| {
-            saw_spec = true;
-            if spec.arity >= 0 {
-                argc == spec.arity
-            } else {
-                argc >= -spec.arity
-            }
-        });
-    if !saw_spec {
+    if entry.arities.is_empty() {
         return None;
     }
-    if valid {
+    if entry.arities.iter().any(|arity| {
+        if *arity >= 0 {
+            argc == *arity
+        } else {
+            argc >= -*arity
+        }
+    }) {
         None
     } else {
-        Some(RedisError::wrong_number_of_args(name.to_ascii_lowercase()))
+        Some(RedisError::wrong_number_of_args(
+            entry.entry.name.to_ascii_lowercase(),
+        ))
     }
 }
 
@@ -333,6 +330,7 @@ fn runtime_dispatch_index() -> &'static RuntimeDispatchIndex {
             .map(|entry| RuntimeDispatchEntry {
                 entry,
                 metadata: command_metadata(entry.name),
+                arities: command_arities(entry.name),
             })
             .collect();
         rows.sort_by(|left, right| ascii_casecmp(left.entry.name, right.entry.name));
@@ -362,18 +360,6 @@ fn runtime_dispatch_index() -> &'static RuntimeDispatchIndex {
 /// WATCH / UNWATCH / RESET) is appended to `client.queued_argvs` and the
 /// client receives `+QUEUED\r\n` instead of executing immediately.
 pub fn dispatch(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
-    // Refresh per-command import-expiry state before the command runs (C: the
-    // dispatcher does this each command). A primary in import-mode keeps expired
-    // keys instead of lazily deleting them, and a client in import-source state
-    // sees their values rather than treating them as expired.
-    {
-        let import_mode = ctx.server().live_config.import_mode();
-        let import_source = ctx.client_ref().import_source;
-        let pause_expire = is_server_paused_for(ctx.server(), PAUSE_ACTION_EXPIRE);
-        ctx.db_mut()
-            .set_import_expire_state(import_source && import_mode, import_mode);
-        ctx.db_mut().set_pause_expire_keep(pause_expire);
-    }
     ctx.client_mut().prevent_propagation = false;
     let command_name = match ctx.client_ref().arg(0) {
         Some(s) => StackCommandName::from_slice(s.as_bytes()),
@@ -403,7 +389,7 @@ pub fn dispatch(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         if !crate::multi::is_tx_control_command(dispatch_name) {
             if let Some(runtime_entry) = lookup_runtime_command(dispatch_name) {
                 let metadata = runtime_entry.metadata;
-                if let Some(err) = command_arity_error(dispatch_name, ctx.arg_count()) {
+                if let Some(err) = command_arity_error(runtime_entry, ctx.arg_count()) {
                     crate::multi::flag_transaction_dirty_exec(ctx.client_mut());
                     record_command_stat(dispatch_name, 0, true, false);
                     record_dispatch_error_reply(ctx, err.to_resp_payload().as_bytes());
@@ -551,7 +537,7 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
     let metadata = runtime_entry.metadata;
     let name = entry.name;
 
-    if let Some(err) = command_arity_error(name, ctx.arg_count()) {
+    if let Some(err) = command_arity_error(runtime_entry, ctx.arg_count()) {
         record_command_stat(name, 0, true, false);
         record_dispatch_error_reply(ctx, err.to_resp_payload().as_bytes());
         return Err(err);
@@ -599,9 +585,8 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
     }
 
     let fed_monitor_before = should_feed_monitor_before(ctx, name, metadata);
-    if fed_monitor_before {
-        let argv = snapshot_argv(ctx);
-        crate::connection::feed_monitors(ctx, &argv);
+    if fed_monitor_before && crate::connection::has_monitor_clients() {
+        crate::connection::feed_monitors(ctx, &ctx.client_ref().argv);
     }
 
     // C: db.c:2126/2144 + getExpirationPolicyWithFlags — a primary in
@@ -691,7 +676,6 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
         || should_record_slowlog
         || aof.is_some()
         || replication.is_some()
-        || successful_complete
     {
         argv_snapshot = Some(snapshot_argv(ctx));
     }
@@ -709,19 +693,25 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
 
     if successful_complete {
         ctx.apply_client_tracking_after_command(name, metadata.write);
-        if let (Some(argv), Some(elapsed_micros)) = (argv_snapshot.as_ref(), elapsed_micros) {
-            crate::slowlog_cmd::record_latency_histogram(argv, elapsed_micros);
-            crate::slowlog_cmd::record_large_commandlog_entries(
-                argv,
-                request_size_bytes(argv),
-                reply_bytes as u64,
-                ctx.client_ref().id(),
-                ctx.client_ref().name.clone(),
-            );
+        if let Some(elapsed_micros) = elapsed_micros {
+            let argv = argv_snapshot
+                .as_deref()
+                .unwrap_or_else(|| ctx.client_ref().argv.as_slice());
+            crate::slowlog_cmd::record_latency_histogram_for_command(name, argv, elapsed_micros);
+            if crate::slowlog_cmd::large_commandlog_enabled() {
+                crate::slowlog_cmd::record_large_commandlog_entries(
+                    argv,
+                    request_size_bytes(argv),
+                    reply_bytes as u64,
+                    ctx.client_ref().id(),
+                    ctx.client_ref().name.clone(),
+                );
+            }
             if !fed_monitor_before
                 && !ctx.client_ref().suppress_monitor
                 && !metadata.skip_monitor
                 && !metadata.monitor_admin
+                && crate::connection::has_monitor_clients()
             {
                 crate::connection::feed_monitors(ctx, argv);
             }
@@ -934,6 +924,14 @@ fn command_metadata(name: &[u8]) -> CommandMetadata {
         .binary_search_by(|(entry_name, _)| ascii_casecmp(entry_name, name))
         .map(|idx| table[idx].1)
         .unwrap_or_default()
+}
+
+fn command_arities(name: &[u8]) -> Vec<i32> {
+    COMMANDS
+        .iter()
+        .filter(|spec| ascii_eq_ignore_case(spec.name.as_bytes(), name))
+        .map(|spec| spec.arity)
+        .collect()
 }
 
 pub(crate) fn command_is_denyoom(name: &[u8]) -> bool {
@@ -1162,12 +1160,13 @@ fn acl_category_bits(cat: crate::generated::AclCategory) -> u64 {
 /// Returns `Some(reply_bytes)` to short-circuit dispatch with the encoded error.
 /// Returns `None` when the command should proceed.
 fn enforce_acl_gate(ctx: &CommandContext<'_>, name: &[u8], cmd_categories: u64) -> Option<Vec<u8>> {
-    let default_name = RedisString::from_bytes(b"default");
-    let user_name = ctx
-        .client_ref()
-        .authenticated_user
-        .clone()
-        .unwrap_or_else(|| default_name.clone());
+    let Some(user_name) = ctx.client_ref().authenticated_user.as_ref() else {
+        return Some(b"-NOAUTH Authentication required.\r\n".to_vec());
+    };
+
+    if user_name.as_bytes() == b"default" && default_user_all_access_fast_path() {
+        return None;
+    }
 
     let acl = global_acl_state();
     let guard = match acl.lock() {
@@ -1182,10 +1181,6 @@ fn enforce_acl_gate(ctx: &CommandContext<'_>, name: &[u8], cmd_categories: u64) 
         }
     };
 
-    if ctx.client_ref().authenticated_user.is_none() {
-        return Some(b"-NOAUTH Authentication required.\r\n".to_vec());
-    }
-
     if is_always_allowed_for_authenticated(ctx, name) {
         return None;
     }
@@ -1198,6 +1193,7 @@ fn enforce_acl_gate(ctx: &CommandContext<'_>, name: &[u8], cmd_categories: u64) 
             msg.extend_from_slice(object.as_bytes());
             msg.extend_from_slice(b"' command\r\n");
             let client_info = acl_log_client_info(ctx, name);
+            let user_name = user_name.clone();
             drop(guard);
             record_acl_access_denied_cmd();
             record_acl_log_entry(
@@ -1211,6 +1207,7 @@ fn enforce_acl_gate(ctx: &CommandContext<'_>, name: &[u8], cmd_categories: u64) 
         }
         Err(AclDeny::Key(object)) => {
             let client_info = acl_log_client_info(ctx, name);
+            let user_name = user_name.clone();
             drop(guard);
             record_acl_access_denied_key();
             record_acl_log_entry(b"key", acl_log_context(ctx), object, user_name, client_info);
@@ -1218,6 +1215,7 @@ fn enforce_acl_gate(ctx: &CommandContext<'_>, name: &[u8], cmd_categories: u64) 
         }
         Err(AclDeny::Channel(object)) => {
             let client_info = acl_log_client_info(ctx, name);
+            let user_name = user_name.clone();
             drop(guard);
             record_acl_access_denied_channel();
             record_acl_log_entry(
@@ -1231,6 +1229,7 @@ fn enforce_acl_gate(ctx: &CommandContext<'_>, name: &[u8], cmd_categories: u64) 
         }
         Err(AclDeny::Database(object)) => {
             let client_info = acl_log_client_info(ctx, name);
+            let user_name = user_name.clone();
             drop(guard);
             record_acl_access_denied_db();
             record_acl_log_entry(
@@ -1280,6 +1279,9 @@ fn evaluate_acl_access(
     {
         if !candidate.can_execute_command_with_arg(name, first_arg, cmd_categories) {
             continue;
+        }
+        if candidate.flags.alldbs && candidate.flags.allchannels && candidate.flags.allkeys {
+            return Ok(());
         }
         if let Some(object) = acl_database_denial_for_context(ctx, name, candidate, 0) {
             if idx == 0 {
@@ -1335,6 +1337,9 @@ fn enforce_acl_key_gate(
     name: &[u8],
     user: &AclUser,
 ) -> Option<AclKeyDeny> {
+    if user.flags.allkeys {
+        return None;
+    }
     let requirements = acl_key_requirements(ctx, name, 0);
     let mut matched = 0usize;
     for req in requirements {
@@ -1359,6 +1364,23 @@ pub(crate) struct AclKeyRequirement {
     pub(crate) access: u8,
 }
 
+static ACL_KEY_SPEC_CACHE: OnceLock<Vec<Option<Vec<Value>>>> = OnceLock::new();
+
+fn cached_acl_key_spec_items(index: usize) -> Option<&'static [Value]> {
+    let cache = ACL_KEY_SPEC_CACHE.get_or_init(|| {
+        COMMANDS
+            .iter()
+            .map(
+                |spec| match serde_json::from_str::<Value>(spec.key_specs_json) {
+                    Ok(Value::Array(items)) => Some(items),
+                    _ => None,
+                },
+            )
+            .collect()
+    });
+    cache.get(index).and_then(Option::as_deref)
+}
+
 pub(crate) fn acl_key_requirements(
     ctx: &CommandContext<'_>,
     name: &[u8],
@@ -1366,22 +1388,23 @@ pub(crate) fn acl_key_requirements(
 ) -> Vec<AclKeyRequirement> {
     let mut out = Vec::new();
     let effective_argc = ctx.arg_count().saturating_sub(arg_offset);
-    for spec in COMMANDS
+    for (spec_idx, _spec) in COMMANDS
         .iter()
-        .filter(|spec| ascii_eq_ignore_case(spec.name.as_bytes(), name))
+        .enumerate()
+        .filter(|(_, spec)| ascii_eq_ignore_case(spec.name.as_bytes(), name))
     {
-        let Ok(Value::Array(items)) = serde_json::from_str::<Value>(spec.key_specs_json) else {
+        let Some(items) = cached_acl_key_spec_items(spec_idx) else {
             continue;
         };
         for item in items {
-            if key_spec_has_flag(&item, "NOT_KEY") {
+            if key_spec_has_flag(item, "NOT_KEY") {
                 continue;
             }
-            let Some(begin) = acl_key_spec_begin(ctx, &item, arg_offset, effective_argc) else {
+            let Some(begin) = acl_key_spec_begin(ctx, item, arg_offset, effective_argc) else {
                 continue;
             };
             if let Some(range) = item.pointer("/find_keys/range") {
-                let access = acl_key_access_for_spec_item(ctx, name, &item, arg_offset);
+                let access = acl_key_access_for_spec_item(ctx, name, item, arg_offset);
                 let step = range
                     .get("step")
                     .and_then(Value::as_u64)
@@ -1402,7 +1425,7 @@ pub(crate) fn acl_key_requirements(
                     };
                 }
             } else if let Some(keynum) = item.pointer("/find_keys/keynum") {
-                let access = acl_key_access_for_spec_item(ctx, name, &item, arg_offset);
+                let access = acl_key_access_for_spec_item(ctx, name, item, arg_offset);
                 let keynumidx = keynum
                     .get("keynumidx")
                     .and_then(Value::as_u64)

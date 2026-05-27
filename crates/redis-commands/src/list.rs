@@ -31,7 +31,8 @@ use std::collections::VecDeque;
 
 use redis_core::acl::global_acl_state;
 use redis_core::blocked_keys::{
-    blocked_keys_index, deadline_from_timeout_secs, BlockedAction, BlockedSide, BlockedWaiter,
+    blocked_keys_any, blocked_keys_index, deadline_from_timeout_secs, BlockedAction, BlockedSide,
+    BlockedWaiter,
 };
 use redis_core::client_info::client_info_registry;
 use redis_core::command_context::CommandContext;
@@ -322,14 +323,10 @@ pub fn wake_ready_list_keys(db: &mut RedisDb) {
 /// effect (e.g. `LPOP`). Mirrors C's `handleClientsBlockedOnKeys` running in
 /// `beforeSleep`, after the command unit.
 fn schedule_or_wake(ctx: &mut CommandContext, key: &RedisString) {
+    if !blocked_keys_any() {
+        return;
+    }
     ctx.client_mut().pending_wakes.push(key.clone());
-}
-
-fn list_len(db: &RedisDb, key: &RedisString) -> usize {
-    db.lookup_key_read(key)
-        .and_then(RedisObject::list)
-        .map(VecDeque::len)
-        .unwrap_or(0)
 }
 
 fn add_dirty_if_nonzero(ctx: &CommandContext, delta: i64) {
@@ -581,11 +578,8 @@ fn push_generic(ctx: &mut CommandContext, position: ListPosition, xx: bool) -> R
             deque.len() as i64
         }
     };
-    let len_before_wake = list_len(ctx.db(), &key);
     schedule_or_wake(ctx, &key);
-    let len_after_wake = list_len(ctx.db(), &key);
-    let wake_pops = len_before_wake.saturating_sub(len_after_wake) as i64;
-    add_dirty_if_nonzero(ctx, pushed_count + wake_pops);
+    add_dirty_if_nonzero(ctx, pushed_count);
     let event = match position {
         ListPosition::Head => b"lpush" as &[u8],
         ListPosition::Tail => b"rpush" as &[u8],
@@ -1109,11 +1103,8 @@ fn lmove_generic(
         ListPosition::Tail => b"rpush" as &[u8],
     };
     ctx.notify_keyspace_event(NOTIFY_LIST, dst_push_event, &dst_key);
-    let dst_len_before_wake = list_len(ctx.db(), &dst_key);
     schedule_or_wake(ctx, &dst_key);
-    let dst_len_after_wake = list_len(ctx.db(), &dst_key);
-    let wake_pops = dst_len_before_wake.saturating_sub(dst_len_after_wake) as i64;
-    add_dirty_if_nonzero(ctx, 1 + wake_pops);
+    add_dirty_if_nonzero(ctx, 1);
     ctx.reply_bulk_string(value)
 }
 

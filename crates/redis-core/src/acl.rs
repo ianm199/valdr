@@ -272,6 +272,7 @@ pub const ALL_CATEGORY_NAMES: &[&[u8]] = &[
 pub const DEFAULT_ACLLOG_MAX_LEN: usize = 128;
 
 static ACL_PUBSUB_DEFAULT_ALLCHANNELS: AtomicBool = AtomicBool::new(false);
+static DEFAULT_USER_ALL_ACCESS: AtomicBool = AtomicBool::new(true);
 
 pub const ACL_KEY_READ: u8 = 0b01;
 pub const ACL_KEY_WRITE: u8 = 0b10;
@@ -307,6 +308,10 @@ pub fn apply_acl_pubsub_default_to_user(user: &mut AclUser) {
         user.flags.allchannels = true;
         user.channel_patterns = vec![RedisString::from_bytes(b"*")];
     }
+}
+
+pub fn default_user_all_access_fast_path() -> bool {
+    DEFAULT_USER_ALL_ACCESS.load(Ordering::Acquire)
 }
 
 /// One entry in the ACL access-denied log.
@@ -434,6 +439,9 @@ impl AclUser {
         first_arg: Option<&[u8]>,
         cmd_categories: u64,
     ) -> bool {
+        if self.flags.allcommands && self.denied_commands.is_empty() {
+            return self.denied_categories & cmd_categories == 0;
+        }
         let lower: Vec<u8> = cmd_name.iter().map(|b| b.to_ascii_lowercase()).collect();
         let lower_rs = RedisString::from_bytes(&lower);
         let subcommand = first_arg.map(|arg| {
@@ -753,6 +761,17 @@ impl AclState {
         }
     }
 
+    pub fn invalidate_fast_paths(&self) {
+        DEFAULT_USER_ALL_ACCESS.store(false, Ordering::Release);
+    }
+
+    pub fn refresh_fast_paths(&self) {
+        DEFAULT_USER_ALL_ACCESS.store(
+            default_user_allows_all_access(&self.users),
+            Ordering::Release,
+        );
+    }
+
     pub fn clear_log(&mut self) {
         self.log.clear();
     }
@@ -814,6 +833,27 @@ impl AclState {
             self.log.pop_back();
         }
     }
+}
+
+fn default_user_allows_all_access(users: &HashMap<RedisString, AclUser>) -> bool {
+    let default_key = RedisString::from_static(b"default");
+    users
+        .get(&default_key)
+        .is_some_and(acl_user_allows_all_access)
+}
+
+fn acl_user_allows_all_access(user: &AclUser) -> bool {
+    user.flags.enabled
+        && user.flags.allcommands
+        && user.flags.allkeys
+        && user.flags.allchannels
+        && user.flags.alldbs
+        && user.allowed_categories == category::ALL
+        && user.denied_categories == 0
+        && user.allowed_commands.is_empty()
+        && user.denied_commands.is_empty()
+        && user.key_permissions.is_empty()
+        && user.allowed_dbs.is_empty()
 }
 
 impl Default for AclState {
@@ -935,6 +975,23 @@ mod tests {
         );
         assert!(user.flags.enabled);
         assert!(user.flags.nopass);
+    }
+
+    #[test]
+    fn default_user_fast_path_requires_unrestricted_permissions() {
+        let mut users = HashMap::new();
+        let mut user = AclUser::new_default();
+        user.flags.nopass = false;
+        user.passwords.push(sha256_hash(b"secret"));
+        users.insert(user.name.clone(), user);
+        assert!(default_user_allows_all_access(&users));
+
+        users
+            .get_mut(&RedisString::from_static(b"default"))
+            .unwrap()
+            .denied_commands
+            .push(RedisString::from_static(b"get"));
+        assert!(!default_user_allows_all_access(&users));
     }
 
     #[test]

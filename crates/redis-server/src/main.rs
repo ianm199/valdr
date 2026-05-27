@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rustls::StreamOwned;
 
@@ -41,7 +41,6 @@ use redis_core::pubsub_registry::PubSubRegistry;
 use redis_core::PersistenceStatus;
 use redis_core::{Client, Connection};
 use redis_protocol::frame::{encode_resp2, RespFrame};
-use redis_protocol::parse_inline_or_multibulk_into;
 use redis_types::{RedisError, RedisString};
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -55,6 +54,7 @@ const MAX_UNAUTHENTICATED_MULTIBULK_LEN: i64 = 10;
 const MAX_UNAUTHENTICATED_BULK_LEN: i64 = 16 * 1024;
 
 static RENAMED_READY_KEYS: OnceLock<Mutex<Vec<(u32, RedisString)>>> = OnceLock::new();
+static RENAMED_READY_KEYS_PENDING: AtomicBool = AtomicBool::new(false);
 
 fn renamed_ready_keys() -> &'static Mutex<Vec<(u32, RedisString)>> {
     RENAMED_READY_KEYS.get_or_init(|| Mutex::new(Vec::new()))
@@ -67,10 +67,18 @@ fn install_deferred_rename_ready_hook() {
             Err(p) => p.into_inner(),
         };
         guard.push((db_id, dst_key.clone()));
+        RENAMED_READY_KEYS_PENDING.store(true, Ordering::Release);
     }));
 }
 
+fn renamed_ready_keys_pending() -> bool {
+    RENAMED_READY_KEYS_PENDING.load(Ordering::Acquire)
+}
+
 fn take_renamed_ready_keys(db_id: u32) -> Vec<RedisString> {
+    if !renamed_ready_keys_pending() {
+        return Vec::new();
+    }
     let mut guard = match renamed_ready_keys().lock() {
         Ok(g) => g,
         Err(p) => p.into_inner(),
@@ -85,16 +93,28 @@ fn take_renamed_ready_keys(db_id: u32) -> Vec<RedisString> {
             idx += 1;
         }
     }
+    if guard.is_empty() {
+        RENAMED_READY_KEYS_PENDING.store(false, Ordering::Release);
+    }
     out
 }
 
+fn wake_ready_after_command_needed() -> bool {
+    renamed_ready_keys_pending() || redis_core::blocked_keys::blocked_keys_any()
+}
+
 fn wake_ready_after_command(db: &mut RedisDb) {
+    if !wake_ready_after_command_needed() {
+        return;
+    }
     let db_id = db.id() as u32;
     for key in take_renamed_ready_keys(db_id) {
         redis_commands::stream::wake_xreadgroup_after_rename(db, &key);
         redis_commands::list::wake_blocked_for_key(db, &key);
     }
-    redis_commands::list::wake_ready_list_keys(db);
+    if redis_core::blocked_keys::blocked_keys_any() {
+        redis_commands::list::wake_ready_list_keys(db);
+    }
 }
 
 /// Parsed command-line arguments.
@@ -2003,10 +2023,7 @@ fn run_client_loop(
                 disconnect = true;
                 break;
             }
-            let parsed = parse_inline_or_multibulk_into(
-                &client.query_buf[consumed_total..],
-                &mut client.argv,
-            );
+            let parsed = client.parse_query_buffer_into_argv(consumed_total);
             match parsed {
                 Ok(Some(consumed)) => {
                     consumed_total += consumed;
@@ -2168,10 +2185,7 @@ fn run_client_loop_tls(
                 disconnect = true;
                 break;
             }
-            let parsed = parse_inline_or_multibulk_into(
-                &client.query_buf[consumed_total..],
-                &mut client.argv,
-            );
+            let parsed = client.parse_query_buffer_into_argv(consumed_total);
             match parsed {
                 Ok(Some(consumed)) => {
                     consumed_total += consumed;
@@ -2304,7 +2318,8 @@ fn process_current_command_with_db(
         .total_commands_processed
         .fetch_add(1, Ordering::Relaxed)
         + 1;
-    let active_time_sample = (command_number % ACTIVE_TIME_SAMPLE_INTERVAL == 0).then(Instant::now);
+    let active_time_sample = (command_number % ACTIVE_TIME_SAMPLE_INTERVAL == 0)
+        .then(redis_core::monotonic::elapsed_start);
     let result = {
         let mut ctx =
             CommandContext::with_server(client, db, Arc::clone(server), Arc::clone(registry));
@@ -2313,12 +2328,14 @@ fn process_current_command_with_db(
         for key in &deferred {
             redis_commands::list::wake_blocked_for_key(db, key);
         }
-        wake_ready_after_command(db);
+        if wake_ready_after_command_needed() {
+            wake_ready_after_command(db);
+        }
         r
     };
     if let Some(t0) = active_time_sample {
         let elapsed_us =
-            (t0.elapsed().as_micros() as u64).saturating_mul(ACTIVE_TIME_SAMPLE_INTERVAL);
+            redis_core::monotonic::elapsed_us(t0).saturating_mul(ACTIVE_TIME_SAMPLE_INTERVAL);
         metrics
             .active_time_main_thread_us
             .fetch_add(elapsed_us, Ordering::Relaxed);
@@ -2351,7 +2368,8 @@ fn process_current_command_with_db_list(
         .fetch_add(1, Ordering::Relaxed)
         + 1;
     let dispatch_db = client.db_index;
-    let active_time_sample = (command_number % ACTIVE_TIME_SAMPLE_INTERVAL == 0).then(Instant::now);
+    let active_time_sample = (command_number % ACTIVE_TIME_SAMPLE_INTERVAL == 0)
+        .then(redis_core::monotonic::elapsed_start);
     let result = {
         let mut ctx = CommandContext::with_server_and_db_list(
             client,
@@ -2366,14 +2384,16 @@ fn process_current_command_with_db_list(
                 redis_commands::list::wake_blocked_for_key(db, key);
             });
         }
-        let _ = ctx.with_db_index(dispatch_db, |db| {
-            wake_ready_after_command(db);
-        });
+        if wake_ready_after_command_needed() {
+            let _ = ctx.with_db_index(dispatch_db, |db| {
+                wake_ready_after_command(db);
+            });
+        }
         r
     };
     if let Some(t0) = active_time_sample {
         let elapsed_us =
-            (t0.elapsed().as_micros() as u64).saturating_mul(ACTIVE_TIME_SAMPLE_INTERVAL);
+            redis_core::monotonic::elapsed_us(t0).saturating_mul(ACTIVE_TIME_SAMPLE_INTERVAL);
         metrics
             .active_time_main_thread_us
             .fetch_add(elapsed_us, Ordering::Relaxed);
@@ -2447,13 +2467,13 @@ fn flush_reply_fast(client: &mut Client, outbound: &Sender<Vec<u8>>) -> bool {
     if client.in_pubsub_mode() || client.blocked_on_keys || client.is_replica {
         return flush_reply(client, outbound);
     }
-    let bytes = std::mem::take(&mut client.reply_buf);
-    let len = bytes.len() as u64;
+    let len = client.reply_buf.len() as u64;
     match client.conn.as_mut() {
         Some(conn) => {
-            let ok = conn.write_all(&bytes).is_ok();
+            let ok = conn.write_all(&client.reply_buf).is_ok();
             if ok {
                 client.net_output_bytes = client.net_output_bytes.saturating_add(len);
+                client.reply_buf.clear();
             }
             ok
         }

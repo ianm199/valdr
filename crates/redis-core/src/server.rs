@@ -11,7 +11,9 @@
 //! atomics so the server is shareable through `&RedisServer` without giving
 //! out a `&mut` reference.
 
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{
+    AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering,
+};
 use std::sync::{Arc, Mutex};
 
 use crate::client::ClientId;
@@ -69,6 +71,9 @@ pub struct RedisServer {
     /// CLIENT PAUSE/UNPAUSE and read by the command gate, INFO, and the
     /// eviction/active-expire paths. Mirrors `server.client_pause_*` in C.
     pub pause_events: Mutex<[crate::networking::PauseEvent; 4]>,
+    /// Cached aggregate of active pause actions. The common unpaused path can
+    /// read this without taking `pause_events` or sampling wall-clock time.
+    pub cached_paused_actions: AtomicU32,
     /// Maximum size of a bulk reply payload in bytes.
     pub proto_max_bulk_len: AtomicI64,
     /// Server start time (Unix milliseconds).
@@ -122,6 +127,7 @@ impl RedisServer {
             in_exec: AtomicBool::new(false),
             pause_cron: AtomicBool::new(false),
             pause_events: Mutex::new(<[crate::networking::PauseEvent; 4]>::default()),
+            cached_paused_actions: AtomicU32::new(0),
             proto_max_bulk_len: AtomicI64::new(PROTO_MAX_BULK_LEN_DEFAULT),
             start_time_ms: 0,
             shutdown_asap: AtomicBool::new(false),

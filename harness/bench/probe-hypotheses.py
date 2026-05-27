@@ -61,6 +61,16 @@ class CommandKind(Enum):
     GET = "get"
     SET = "set"
     INCR = "incr"
+    LPUSH = "lpush"
+    RPUSH = "rpush"
+    LPOP = "lpop"
+    RPOP = "rpop"
+    HSET = "hset"
+    MSET = "mset"
+    MGET = "mget"
+    XADD = "xadd"
+    FUNCTION_LOAD = "function_load"
+    FCALL = "fcall"
 
 
 @dataclass(frozen=True)
@@ -257,44 +267,48 @@ def run_benchmark(
     proc_env = {key: value for key, value in (env or {}).items() if key != "KEEP_SERVER_ALIVE"}
     try:
         proc = start_server(target, port, log_path, proc_env or None)
-        completed = subprocess.run(
-            [
-                str(VALKEY_BENCH),
-                "-h",
-                "127.0.0.1",
-                "-p",
-                str(port),
-                "-n",
-                str(workload.requests),
-                "-c",
-                str(workload.clients),
-                "-P",
-                str(workload.pipeline),
-                "-d",
-                str(workload.payload),
-                "-t",
-                workload.command.value,
-                "--csv",
-                "--precision",
-                "2",
-            ],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            timeout=900,
-        )
-        if completed.returncode != 0:
-            raise RuntimeError(
-                f"valkey-benchmark failed for {target.value}/{workload.name}: "
-                f"{completed.stderr[-2000:]}"
-            )
-        row = parse_benchmark_csv(completed.stdout, workload, target)
+        row = run_valkey_benchmark_on_port(port, workload, target)
         if keep_alive:
             return row, proc
         return row, None
     finally:
         if not keep_alive:
             stop_server(proc)
+
+
+def run_valkey_benchmark_on_port(port: int, workload: Workload, target: Target) -> BenchmarkRow:
+    completed = subprocess.run(
+        [
+            str(VALKEY_BENCH),
+            "-h",
+            "127.0.0.1",
+            "-p",
+            str(port),
+            "-n",
+            str(workload.requests),
+            "-c",
+            str(workload.clients),
+            "-P",
+            str(workload.pipeline),
+            "-d",
+            str(workload.payload),
+            "-t",
+            workload.command.value,
+            "--csv",
+            "--precision",
+            "2",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=900,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"valkey-benchmark failed for {target.value}/{workload.name}: "
+            f"{completed.stderr[-2000:]}"
+        )
+    return parse_benchmark_csv(completed.stdout, workload, target)
 
 
 def int_list(raw: str) -> list[int]:
@@ -660,6 +674,17 @@ def run_xctrace_time(args: argparse.Namespace) -> int:
     time_profile_xml = profile_root / "time-profile.xml"
     try:
         proc = start_server(Target.RUST, port, profile_root / "rust-server.log")
+        prep_rows = []
+        for command in command_list(args.prep_commands) if args.prep_commands.strip() else []:
+            prep = Workload(
+                name=f"{command.value}-prep-for-{workload.name}",
+                command=command,
+                requests=args.prep_requests if args.prep_requests is not None else args.requests,
+                clients=args.clients,
+                pipeline=args.pipeline,
+                payload=args.payload,
+            )
+            prep_rows.append(asdict(run_valkey_benchmark_on_port(port, prep, Target.RUST)) | {"target": Target.RUST.value})
         with xctrace_log.open("w", encoding="utf-8") as log:
             xctrace_proc = subprocess.Popen(
                 [
@@ -682,35 +707,7 @@ def run_xctrace_time(args: argparse.Namespace) -> int:
                 text=True,
             )
         time.sleep(args.warmup_s)
-        completed = subprocess.run(
-            [
-                str(VALKEY_BENCH),
-                "-h",
-                "127.0.0.1",
-                "-p",
-                str(port),
-                "-n",
-                str(workload.requests),
-                "-c",
-                str(workload.clients),
-                "-P",
-                str(workload.pipeline),
-                "-d",
-                str(workload.payload),
-                "-t",
-                workload.command.value,
-                "--csv",
-                "--precision",
-                "2",
-            ],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            timeout=900,
-        )
-        if completed.returncode != 0:
-            raise RuntimeError(f"valkey-benchmark failed: {completed.stderr[-2000:]}")
-        row = parse_benchmark_csv(completed.stdout, workload, Target.RUST)
+        row = run_valkey_benchmark_on_port(port, workload, Target.RUST)
         try:
             xctrace_proc.wait(timeout=args.time_limit_s + 15)
         except subprocess.TimeoutExpired:
@@ -725,6 +722,7 @@ def run_xctrace_time(args: argparse.Namespace) -> int:
             "commit": commit,
             "hardware": hardware,
             "workload": asdict(workload) | {"command": workload.command.value},
+            "prep": prep_rows,
             "rust": asdict(row) | {"target": row.target.value},
             "artifacts": [
                 {"path": relative(trace_path), "kind": "xctrace-time-profiler-trace"},
@@ -896,6 +894,17 @@ def main() -> int:
 
     time_prof = sub.add_parser("xctrace-time", help="record an Instruments Time Profiler trace for one Rust workload")
     time_prof.add_argument("--command", choices=[command.value for command in CommandKind], default=CommandKind.GET.value)
+    time_prof.add_argument(
+        "--prep-commands",
+        default="",
+        help="Comma-separated valkey-benchmark selectors to run on the same Rust server before profiling.",
+    )
+    time_prof.add_argument(
+        "--prep-requests",
+        type=int,
+        default=None,
+        help="Request count for --prep-commands. Defaults to --requests.",
+    )
     time_prof.add_argument("--requests", type=int, default=2_000_000)
     time_prof.add_argument("--clients", type=int, default=50)
     time_prof.add_argument("--pipeline", type=int, default=100)

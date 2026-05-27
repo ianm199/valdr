@@ -29,8 +29,8 @@ use redis_core::memory::approximate_memory_used;
 use redis_core::metrics::server_metrics;
 use redis_core::networking::{
     current_paused_actions, get_client_eviction_limit, note_pause_postponed_client,
-    note_pause_resumed_client, PAUSE_ACTION_CLIENT_ALL, PAUSE_ACTION_CLIENT_WRITE,
-    PAUSE_ACTION_EVICT, PAUSE_ACTION_EXPIRE,
+    note_pause_resumed_client, pause_postponed_client_count, PAUSE_ACTION_CLIENT_ALL,
+    PAUSE_ACTION_CLIENT_WRITE, PAUSE_ACTION_EVICT, PAUSE_ACTION_EXPIRE,
 };
 use redis_core::pubsub_registry::PubSubRegistry;
 use redis_core::{Client, Connection};
@@ -238,8 +238,10 @@ pub struct ClientSlot {
     foreign_rx: Option<Receiver<Vec<u8>>>,
     write_buffer: ClientWriteBuffer,
     output_accounted_bytes: usize,
+    output_reported_bytes: usize,
     query_buffer_reported_bytes: usize,
     last_client_activity: Instant,
+    last_client_info_memory_refresh: Instant,
     pause_postponed: bool,
     obuf_soft_limit_since: Option<Instant>,
     writable_interest: bool,
@@ -249,6 +251,7 @@ pub struct ClientSlot {
 
 impl ClientSlot {
     pub fn new(id: SlotId, client: Client) -> Self {
+        let now = Instant::now();
         Self {
             id,
             client,
@@ -256,8 +259,12 @@ impl ClientSlot {
             foreign_rx: None,
             write_buffer: ClientWriteBuffer::new(),
             output_accounted_bytes: 0,
+            output_reported_bytes: 0,
             query_buffer_reported_bytes: 0,
-            last_client_activity: Instant::now(),
+            last_client_activity: now,
+            last_client_info_memory_refresh: now
+                .checked_sub(CLIENT_INFO_MEMORY_REFRESH_INTERVAL)
+                .unwrap_or(now),
             pause_postponed: false,
             obuf_soft_limit_since: None,
             writable_interest: false,
@@ -272,6 +279,7 @@ impl ClientSlot {
         stream: MioTcpStream,
         foreign_rx: Receiver<Vec<u8>>,
     ) -> Self {
+        let now = Instant::now();
         Self {
             id,
             client,
@@ -279,8 +287,12 @@ impl ClientSlot {
             foreign_rx: Some(foreign_rx),
             write_buffer: ClientWriteBuffer::new(),
             output_accounted_bytes: 0,
+            output_reported_bytes: 0,
             query_buffer_reported_bytes: 0,
-            last_client_activity: Instant::now(),
+            last_client_activity: now,
+            last_client_info_memory_refresh: now
+                .checked_sub(CLIENT_INFO_MEMORY_REFRESH_INTERVAL)
+                .unwrap_or(now),
             pause_postponed: false,
             obuf_soft_limit_since: None,
             writable_interest: false,
@@ -353,6 +365,19 @@ impl ClientSlot {
         self.refresh_output_buffer_state();
     }
 
+    fn queue_client_reply_preserving_capacity(&mut self) -> bool {
+        if self.client.reply_buf.is_empty() {
+            return false;
+        }
+        self.output_accounted_bytes = self
+            .output_accounted_bytes
+            .saturating_add(self.client.reply_buf.len());
+        self.write_buffer.append(&self.client.reply_buf);
+        self.client.reply_buf.clear();
+        self.check_output_buffer_limits();
+        true
+    }
+
     pub fn pending_write_len(&self) -> usize {
         self.write_buffer.len()
     }
@@ -380,10 +405,27 @@ impl ClientSlot {
 
     fn refresh_output_buffer_state_at(&mut self, now: Instant) {
         let pending = self.output_accounted_bytes;
+        self.publish_output_buffer_memory(pending);
+        self.check_output_buffer_limits_at(now);
+    }
+
+    fn publish_output_buffer_memory(&mut self, pending: usize) {
+        if pending == self.output_reported_bytes {
+            return;
+        }
         if let Ok(mut guard) = client_info_registry().lock() {
             guard.set_output_buffer_memory(self.client.id, pending);
+            self.output_reported_bytes = pending;
         }
-        self.refresh_client_memory_snapshot();
+    }
+
+    fn check_output_buffer_limits(&mut self) {
+        self.check_output_buffer_limits_at(Instant::now());
+    }
+
+    fn check_output_buffer_limits_at(&mut self, now: Instant) {
+        let pending = self.output_accounted_bytes;
+        self.refresh_client_memory_snapshot_at(now);
         let limit =
             redis_commands::connection::client_output_buffer_limit(self.client.in_pubsub_mode());
         if limit.hard > 0 && pending > limit.hard {
@@ -402,7 +444,11 @@ impl ClientSlot {
 
     fn reconcile_output_buffer_after_write(&mut self) {
         self.output_accounted_bytes = self.write_buffer.len();
-        self.refresh_output_buffer_state();
+        self.check_output_buffer_limits();
+        let pending = self.output_accounted_bytes;
+        if pending > 0 || self.output_reported_bytes != 0 {
+            self.publish_output_buffer_memory(pending);
+        }
     }
 
     fn mark_close_after_flush(&mut self) {
@@ -461,6 +507,17 @@ impl ClientSlot {
     }
 
     fn refresh_client_memory_snapshot(&mut self) {
+        let now = Instant::now();
+        self.refresh_client_memory_snapshot_at(now);
+    }
+
+    fn refresh_client_memory_snapshot_at(&mut self, now: Instant) {
+        if now.duration_since(self.last_client_info_memory_refresh)
+            < CLIENT_INFO_MEMORY_REFRESH_INTERVAL
+        {
+            return;
+        }
+        self.last_client_info_memory_refresh = now;
         let reported_query_buffer_bytes = self.reported_query_buffer_bytes();
         if let Ok(mut guard) = client_info_registry().lock() {
             guard.set_memory_usage(
@@ -472,7 +529,7 @@ impl ClientSlot {
             );
             guard.set_idle_seconds(
                 self.client.id,
-                self.last_client_activity.elapsed().as_secs(),
+                now.duration_since(self.last_client_activity).as_secs(),
             );
         }
     }
@@ -1131,6 +1188,7 @@ impl RuntimeOwner {
                 let outcome = self.dispatch_slot_commands(idx, registry, server);
                 progressed |= outcome.progressed;
                 if outcome.queued_write {
+                    progressed |= self.flush_slot_pending_write(idx, poll_registry);
                     progressed |= self.ensure_writable_interest(poll_registry, slot_id);
                 }
                 if outcome.reschedule {
@@ -1172,6 +1230,7 @@ impl RuntimeOwner {
             let outcome = self.dispatch_slot_commands(slot_id.as_index(), registry, server);
             progressed |= outcome.progressed;
             if outcome.queued_write {
+                progressed |= self.flush_slot_pending_write(slot_id.as_index(), poll_registry);
                 progressed |= self.ensure_writable_interest(poll_registry, slot_id);
             }
             if outcome.reschedule {
@@ -1185,6 +1244,9 @@ impl RuntimeOwner {
         &mut self,
         server: &Arc<redis_core::RedisServer>,
     ) -> bool {
+        if pause_postponed_client_count() == 0 {
+            return false;
+        }
         let paused_actions = current_paused_actions(server);
         let mut scheduled = false;
         let ids: Vec<SlotId> = self
@@ -1414,10 +1476,7 @@ impl RuntimeOwner {
                 slot.mark_close_after_flush();
                 break;
             }
-            let parsed = parse_inline_or_multibulk_into(
-                &slot.client.query_buf[consumed_total..],
-                &mut slot.client.argv,
-            );
+            let parsed = slot.client.parse_query_buffer_into_argv(consumed_total);
             match parsed {
                 Ok(Some(consumed)) => {
                     consumed_total += consumed;
@@ -1506,11 +1565,7 @@ impl RuntimeOwner {
 
         // Command dispatch has already applied CLIENT REPLY OFF/SKIP while
         // retaining Pub/Sub push bytes in the shared reply buffer.
-        let reply = slot.client.drain_reply();
-        let queued_write = !reply.is_empty();
-        if !reply.is_empty() {
-            slot.queue_write_owned(reply);
-        }
+        let queued_write = slot.queue_client_reply_preserving_capacity();
         slot.refresh_client_memory_snapshot();
 
         if saw_command {
@@ -1700,6 +1755,9 @@ impl RuntimeOwner {
             Some(slot) => slot,
             None => return false,
         };
+        if slot.closed {
+            return false;
+        }
         if slot.write_buffer.is_empty() {
             if slot.writable_interest {
                 let token = token_for_slot(slot.id());
@@ -1838,6 +1896,7 @@ fn has_complete_command(bytes: &[u8]) -> bool {
 const QUERY_BUFFER_IOBUF_LEN: usize = 16 * 1024;
 const QUERY_BUFFER_RESIZE_THRESHOLD: usize = 32 * 1024;
 const QUERY_BUFFER_IDLE_SHRINK_AFTER: Duration = Duration::from_secs(2);
+const CLIENT_INFO_MEMORY_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
 
 fn estimated_query_buffer_allocation(bytes: &[u8], consumed_hint: usize) -> usize {
     let observed = visible_query_buffer_len(bytes)

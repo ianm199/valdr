@@ -5,8 +5,8 @@
 //! abstraction yet — those land in Phase 2-3 with the architect deciding
 //! sync/async strategy after we measure.
 
-use redis_protocol::RespFrame;
-use redis_types::RedisString;
+use redis_protocol::{parse_inline_or_multibulk_into_retaining_partial, RespFrame};
+use redis_types::{RedisError, RedisString};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -17,6 +17,7 @@ use crate::transport::Connection;
 pub type ClientId = u64;
 
 static DEBUG_CLIENT_ENFORCE_REPLY_LIST: AtomicBool = AtomicBool::new(false);
+const ARGV_REUSE_MAX_BYTES: usize = 64 * 1024;
 
 pub fn set_debug_client_enforce_reply_list(enabled: bool) {
     DEBUG_CLIENT_ENFORCE_REPLY_LIST.store(enabled, Ordering::Relaxed);
@@ -45,6 +46,10 @@ fn append_decimal_u64(buf: &mut Vec<u8>, mut n: u64) {
         }
     }
     buf.extend_from_slice(&tmp[i..]);
+}
+
+fn argv_storage_bytes(argv: &[RedisString]) -> usize {
+    argv.iter().map(RedisString::capacity).sum()
 }
 
 fn append_decimal_i64(buf: &mut Vec<u8>, n: i64) {
@@ -127,6 +132,9 @@ pub struct Client {
     pub id: ClientId,
     /// Parsed args of the current command (cleared per command).
     pub argv: Vec<RedisString>,
+    /// Private parser scratch used to reuse argument allocations between
+    /// commands while keeping `argv` logically empty after dispatch.
+    argv_scratch: Vec<RedisString>,
     /// Pending reply bytes, drained by the I/O layer.
     pub reply_buf: Vec<u8>,
     /// Ranges in `reply_buf` that are Pub/Sub push replies from the current
@@ -349,6 +357,7 @@ impl Client {
         Self {
             id,
             argv: Vec::new(),
+            argv_scratch: Vec::new(),
             reply_buf: Vec::new(),
             push_reply_segments: Vec::new(),
             pending_tracking_pushes: Vec::new(),
@@ -405,11 +414,45 @@ impl Client {
     }
 
     pub fn reset_args(&mut self) {
-        self.argv.clear();
+        self.park_current_argv_for_reuse();
     }
 
     pub fn set_args(&mut self, args: Vec<RedisString>) {
+        self.park_current_argv_for_reuse();
         self.argv = args;
+    }
+
+    pub fn parse_query_buffer_into_argv(
+        &mut self,
+        consumed: usize,
+    ) -> Result<Option<usize>, RedisError> {
+        let Some(buf) = self.query_buf.get(consumed..) else {
+            return Ok(None);
+        };
+        let parsed = parse_inline_or_multibulk_into_retaining_partial(buf, &mut self.argv_scratch)?;
+        if parsed.is_some() {
+            debug_assert!(self.argv.is_empty());
+            std::mem::swap(&mut self.argv, &mut self.argv_scratch);
+        }
+        Ok(parsed)
+    }
+
+    fn park_current_argv_for_reuse(&mut self) {
+        if self.argv.is_empty() {
+            return;
+        }
+        let current_storage = argv_storage_bytes(&self.argv);
+        if current_storage <= ARGV_REUSE_MAX_BYTES
+            && (self.argv_scratch.is_empty()
+                || current_storage > argv_storage_bytes(&self.argv_scratch))
+        {
+            for arg in &mut self.argv {
+                arg.clear();
+            }
+            self.argv_scratch = std::mem::take(&mut self.argv);
+        } else {
+            self.argv.clear();
+        }
     }
 
     /// Mark the current command as a no-op so it is not propagated to replicas
@@ -515,6 +558,10 @@ impl Client {
         self.pending_tracking_pushes.push(frame);
     }
 
+    pub fn has_deferred_tracking_pushes(&self) -> bool {
+        !self.pending_tracking_pushes.is_empty()
+    }
+
     /// Append deferred tracking pushes after the surrounding command reply.
     pub fn flush_deferred_tracking_pushes(&mut self) {
         let pending = std::mem::take(&mut self.pending_tracking_pushes);
@@ -579,13 +626,6 @@ impl Client {
         self.reply_buf.extend_from_slice(b"\r\n");
     }
 
-    fn append_len_header_usize(&mut self, prefix: u8, len: usize) {
-        self.reply_buf.reserve(1 + 20 + 2);
-        self.reply_buf.push(prefix);
-        append_decimal_u64(&mut self.reply_buf, len as u64);
-        self.reply_buf.extend_from_slice(b"\r\n");
-    }
-
     fn append_len_header_i64(&mut self, prefix: u8, len: i64) {
         self.reply_buf.reserve(1 + 20 + 2);
         self.reply_buf.push(prefix);
@@ -596,6 +636,10 @@ impl Client {
     /// Append a RESP simple-string reply without constructing a `RespFrame`.
     pub fn write_simple_string(&mut self, bytes: &[u8]) {
         self.append_prefixed_line(b'+', bytes);
+    }
+
+    pub fn write_pong(&mut self) {
+        self.reply_buf.extend_from_slice(b"+PONG\r\n");
     }
 
     /// Append a RESP error reply without constructing a `RespFrame`.
@@ -610,7 +654,10 @@ impl Client {
 
     /// Append a RESP bulk-string reply without constructing a `RespFrame`.
     pub fn write_bulk(&mut self, bytes: &[u8]) {
-        self.append_len_header_usize(b'$', bytes.len());
+        self.reply_buf.reserve(1 + 20 + 2 + bytes.len() + 2);
+        self.reply_buf.push(b'$');
+        append_decimal_u64(&mut self.reply_buf, bytes.len() as u64);
+        self.reply_buf.extend_from_slice(b"\r\n");
         self.reply_buf.extend_from_slice(bytes);
         self.reply_buf.extend_from_slice(b"\r\n");
     }
@@ -618,6 +665,21 @@ impl Client {
     /// Append a RESP bulk-string reply from a `RedisString` without cloning it.
     pub fn write_bulk_string(&mut self, s: &RedisString) {
         self.write_bulk(s.as_bytes());
+    }
+
+    /// Append a RESP bulk-string reply directly from argv without cloning it.
+    pub fn write_bulk_arg(&mut self, index: usize) -> bool {
+        let Some(arg) = self.argv.get(index) else {
+            return false;
+        };
+        let bytes = arg.as_bytes();
+        self.reply_buf.reserve(1 + 20 + 2 + bytes.len() + 2);
+        self.reply_buf.push(b'$');
+        append_decimal_u64(&mut self.reply_buf, bytes.len() as u64);
+        self.reply_buf.extend_from_slice(b"\r\n");
+        self.reply_buf.extend_from_slice(bytes);
+        self.reply_buf.extend_from_slice(b"\r\n");
+        true
     }
 
     /// Append the protocol-appropriate null bulk reply.

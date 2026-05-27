@@ -19,6 +19,7 @@
 //! See `docs/ADR_001_LUA_RUNTIME.md` for the runtime-choice rationale and
 //! the full sandbox patch list.
 
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
@@ -89,6 +90,15 @@ struct LoadedFunctionLibrary {
     name: Vec<u8>,
     code: Vec<u8>,
     functions: Vec<FunctionDefinition>,
+    script_checks: FunctionScriptChecks,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct FunctionScriptChecks {
+    synthetic_infinite_loop: bool,
+    synthetic_loop_dirty: bool,
+    massive_unpack_lpush: bool,
+    unpack_range_overflow: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2619,6 +2629,7 @@ fn decode_function_dump_inner(payload: &[u8]) -> Option<Vec<LoadedFunctionLibrar
         let functions = compile_function_library(library_body).ok()?;
         libraries.push(LoadedFunctionLibrary {
             name: parsed_name,
+            script_checks: function_script_checks(&code),
             code,
             functions,
         });
@@ -2798,6 +2809,25 @@ pub fn function_load_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     }
 
     let code = ctx.arg_owned(argc_pos)?;
+    let code_bytes = strip_embedded_eval_shebang_lines(code.as_bytes());
+    let code_unchanged = matches!(code_bytes, Cow::Borrowed(_));
+    let parsed_library = parse_function_library_header(code_bytes.as_ref());
+    if replace && code_unchanged {
+        if let Ok((library_name, _)) = &parsed_library {
+            if !function_source_allows_oom(code.as_bytes())
+                && function_command_would_exceed_maxmemory(ctx)
+            {
+                return Err(function_oom_error());
+            }
+            let guard = match function_libraries().lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            if loaded_library_code_is_identical(&guard, library_name, code_bytes.as_ref()) {
+                return ctx.reply_bulk(library_name);
+            }
+        }
+    }
     if script_is_top_level_infinite_function_load(code.as_bytes()) {
         return Err(RedisError::runtime(b"ERR FUNCTION LOAD timeout"));
     }
@@ -2805,8 +2835,7 @@ pub fn function_load_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if !source_flags.allow_oom && function_command_would_exceed_maxmemory(ctx) {
         return Err(function_oom_error());
     }
-    let code_bytes = strip_embedded_eval_shebang_lines(code.as_bytes());
-    let (library_name, library_body) = parse_function_library_header(&code_bytes)?;
+    let (library_name, library_body) = parsed_library?;
     let mut functions = compile_function_library(library_body)?;
     for function in &mut functions {
         function.no_writes |= source_flags.no_writes;
@@ -2815,7 +2844,8 @@ pub fn function_load_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     }
     let loaded = LoadedFunctionLibrary {
         name: library_name.clone(),
-        code: code_bytes,
+        script_checks: function_script_checks(code_bytes.as_ref()),
+        code: code_bytes.into_owned(),
         functions,
     };
 
@@ -3136,6 +3166,16 @@ fn install_function_library(
     }
     libraries.insert(loaded.name.clone(), loaded);
     Ok(())
+}
+
+fn loaded_library_code_is_identical(
+    libraries: &HashMap<Vec<u8>, LoadedFunctionLibrary>,
+    name: &[u8],
+    code: &[u8],
+) -> bool {
+    libraries
+        .values()
+        .any(|library| ascii_eq_ci(&library.name, name) && library.code == code)
 }
 
 fn function_library_key(
@@ -4084,16 +4124,52 @@ pub(crate) fn loaded_function_is_no_writes(name: &[u8]) -> bool {
 }
 
 fn function_source_eval_flags(code: &[u8]) -> EvalScriptFlags {
-    EvalScriptFlags {
-        has_shebang: ascii_contains_ci(code, b"#!lua"),
-        no_writes: ascii_contains_ci(code, b"flags=no-writes"),
-        allow_oom: ascii_contains_ci(code, b"flags=allow-oom"),
-        allow_stale: ascii_contains_ci(code, b"flags=allow-stale"),
+    let mut flags = EvalScriptFlags::default();
+    let mut offset = 0usize;
+    while offset < code.len()
+        && !(flags.has_shebang && flags.no_writes && flags.allow_oom && flags.allow_stale)
+    {
+        match ascii_lower(code[offset]) {
+            b'#' => {
+                if !flags.has_shebang && ascii_starts_with_ci(&code[offset..], b"#!lua") {
+                    flags.has_shebang = true;
+                }
+            }
+            b'f' => {
+                let rest = &code[offset..];
+                if !flags.no_writes && ascii_starts_with_ci(rest, b"flags=no-writes") {
+                    flags.no_writes = true;
+                }
+                if !flags.allow_oom && ascii_starts_with_ci(rest, b"flags=allow-oom") {
+                    flags.allow_oom = true;
+                }
+                if !flags.allow_stale && ascii_starts_with_ci(rest, b"flags=allow-stale") {
+                    flags.allow_stale = true;
+                }
+            }
+            _ => {}
+        }
+        offset += 1;
     }
+
+    flags
 }
 
-fn strip_embedded_eval_shebang_lines(code: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(code.len());
+fn function_source_allows_oom(code: &[u8]) -> bool {
+    let mut offset = 0usize;
+    while offset < code.len() {
+        if ascii_lower(code[offset]) == b'f'
+            && ascii_starts_with_ci(&code[offset..], b"flags=allow-oom")
+        {
+            return true;
+        }
+        offset += 1;
+    }
+    false
+}
+
+fn strip_embedded_eval_shebang_lines(code: &[u8]) -> Cow<'_, [u8]> {
+    let mut out: Option<Vec<u8>> = None;
     let mut start = 0usize;
     while start < code.len() {
         let rel_end = code[start..]
@@ -4104,11 +4180,20 @@ fn strip_embedded_eval_shebang_lines(code: &[u8]) -> Vec<u8> {
         let line = &code[start..start + rel_end];
         let trimmed = line.trim_ascii_start();
         if !trimmed.starts_with(b"#!lua flags=") {
-            out.extend_from_slice(line);
+            if let Some(out) = out.as_mut() {
+                out.extend_from_slice(line);
+            }
+        } else if out.is_none() {
+            let mut stripped = Vec::with_capacity(code.len());
+            stripped.extend_from_slice(&code[..start]);
+            out = Some(stripped);
         }
         start += rel_end;
     }
-    out
+    match out {
+        Some(out) => Cow::Owned(out),
+        None => Cow::Borrowed(code),
+    }
 }
 
 fn function_load_lua_error(err: LuaError) -> RedisError {
@@ -4224,13 +4309,14 @@ fn run_loaded_function_cached(
     argv: &[RedisString],
     ro: bool,
 ) -> RedisResult<()> {
-    if script_is_synthetic_infinite_loop(&library.code) {
+    let checks = library.script_checks;
+    if checks.synthetic_infinite_loop {
         set_busy_script(BusyScriptState {
             kind: BusyScriptKind::Function,
             owner_id: ctx.client_ref().id,
             name: definition.name.clone(),
             command: current_command_argv(ctx),
-            dirty: script_synthetic_loop_is_dirty(&library.code),
+            dirty: checks.synthetic_loop_dirty,
         });
         return Err(RedisError::runtime(
             b"ERR Script killed by user with FUNCTION KILL",
@@ -4238,12 +4324,12 @@ fn run_loaded_function_cached(
     }
     if !ro
         && !definition.no_writes
-        && script_is_massive_unpack_lpush(&library.code)
+        && checks.massive_unpack_lpush
         && run_massive_unpack_lpush_shortcut(ctx, keys)?
     {
         return Ok(());
     }
-    if script_is_unpack_range_overflow(&library.code) {
+    if checks.unpack_range_overflow {
         return Err(unpack_range_overflow_error());
     }
 
@@ -4307,13 +4393,14 @@ fn run_loaded_function_uncached(
     argv: &[RedisString],
     ro: bool,
 ) -> RedisResult<()> {
-    if script_is_synthetic_infinite_loop(&library.code) {
+    let checks = library.script_checks;
+    if checks.synthetic_infinite_loop {
         set_busy_script(BusyScriptState {
             kind: BusyScriptKind::Function,
             owner_id: ctx.client_ref().id,
             name: definition.name.clone(),
             command: current_command_argv(ctx),
-            dirty: script_synthetic_loop_is_dirty(&library.code),
+            dirty: checks.synthetic_loop_dirty,
         });
         return Err(RedisError::runtime(
             b"ERR Script killed by user with FUNCTION KILL",
@@ -4321,12 +4408,12 @@ fn run_loaded_function_uncached(
     }
     if !ro
         && !definition.no_writes
-        && script_is_massive_unpack_lpush(&library.code)
+        && checks.massive_unpack_lpush
         && run_massive_unpack_lpush_shortcut(ctx, keys)?
     {
         return Ok(());
     }
-    if script_is_unpack_range_overflow(&library.code) {
+    if checks.unpack_range_overflow {
         return Err(unpack_range_overflow_error());
     }
 
@@ -5190,6 +5277,17 @@ fn script_is_synthetic_infinite_loop(script_bytes: &[u8]) -> bool {
     byte_windows_contains(&compact, b"whiletruedo") || byte_windows_contains(&compact, b"while1do")
 }
 
+fn function_script_checks(script_bytes: &[u8]) -> FunctionScriptChecks {
+    let synthetic_infinite_loop = script_is_synthetic_infinite_loop(script_bytes);
+    FunctionScriptChecks {
+        synthetic_infinite_loop,
+        synthetic_loop_dirty: synthetic_infinite_loop
+            && script_synthetic_loop_is_dirty(script_bytes),
+        massive_unpack_lpush: script_is_massive_unpack_lpush(script_bytes),
+        unpack_range_overflow: script_is_unpack_range_overflow(script_bytes),
+    }
+}
+
 fn script_synthetic_loop_is_dirty(script_bytes: &[u8]) -> bool {
     let lower = script_bytes
         .iter()
@@ -5269,6 +5367,14 @@ fn ascii_contains_ci(haystack: &[u8], needle: &[u8]) -> bool {
             .zip(needle)
             .all(|(left, right)| left.to_ascii_lowercase() == right.to_ascii_lowercase())
     })
+}
+
+fn ascii_starts_with_ci(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.len() >= needle.len()
+        && haystack[..needle.len()]
+            .iter()
+            .zip(needle)
+            .all(|(left, right)| ascii_lower(*left) == ascii_lower(*right))
 }
 
 /// Collect the variadic Lua arguments passed to `redis.call(cmd, ...)`
@@ -5744,6 +5850,142 @@ mod tests {
         ]);
         fcall_command(&mut ctx).unwrap();
         assert_eq!(ctx.client_mut().drain_reply(), b"+PONG\r\n");
+    }
+
+    #[test]
+    fn function_load_replace_identical_library_preserves_behavior() {
+        let server = Arc::new(RedisServer::default());
+        let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
+        let mut client = redis_core::Client::new(11);
+        let mut dbs: Vec<RedisDb> = (0..16).map(RedisDb::new).collect();
+        let mut ctx = redis_core::CommandContext::with_server_and_db_list(
+            &mut client,
+            &mut dbs,
+            server,
+            pubsub,
+        );
+        let library_name = b"cachetest_noop_replace";
+        let code = b"#!lua name=cachetest_noop_replace\n\
+                     server.register_function('cachetest_noop_fn', function(keys, args) return 42 end)";
+
+        {
+            let mut guard = match function_libraries().lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            guard.retain(|_, library| !ascii_eq_ci(&library.name, library_name));
+        }
+
+        for _ in 0..2 {
+            ctx.client_mut().set_args(vec![
+                RedisString::from_bytes(b"FUNCTION"),
+                RedisString::from_bytes(b"LOAD"),
+                RedisString::from_bytes(b"REPLACE"),
+                RedisString::from_bytes(code),
+            ]);
+            function_load_command(&mut ctx).unwrap();
+            assert_eq!(
+                ctx.client_mut().drain_reply(),
+                b"$22\r\ncachetest_noop_replace\r\n"
+            );
+        }
+
+        ctx.client_mut().set_args(vec![
+            RedisString::from_bytes(b"FCALL"),
+            RedisString::from_bytes(b"cachetest_noop_fn"),
+            RedisString::from_bytes(b"0"),
+        ]);
+        fcall_command(&mut ctx).unwrap();
+        assert_eq!(ctx.client_mut().drain_reply(), b":42\r\n");
+
+        ctx.client_mut().set_args(vec![
+            RedisString::from_bytes(b"FUNCTION"),
+            RedisString::from_bytes(b"LOAD"),
+            RedisString::from_bytes(code),
+        ]);
+        let err = function_load_command(&mut ctx).unwrap_err();
+        assert!(err
+            .to_resp_payload()
+            .as_bytes()
+            .windows(b"already exists".len())
+            .any(|w| w == b"already exists"));
+
+        let mut guard = match function_libraries().lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard.retain(|_, library| !ascii_eq_ci(&library.name, library_name));
+    }
+
+    #[test]
+    fn loaded_library_code_identity_matches_name_case_insensitively() {
+        let mut libraries = HashMap::new();
+        libraries.insert(
+            b"BenchLib".to_vec(),
+            LoadedFunctionLibrary {
+                name: b"BenchLib".to_vec(),
+                code: b"body".to_vec(),
+                functions: Vec::new(),
+                script_checks: FunctionScriptChecks::default(),
+            },
+        );
+
+        assert!(loaded_library_code_is_identical(
+            &libraries,
+            b"benchlib",
+            b"body"
+        ));
+        assert!(!loaded_library_code_is_identical(
+            &libraries,
+            b"benchlib",
+            b"different"
+        ));
+        assert!(!loaded_library_code_is_identical(
+            &libraries, b"other", b"body"
+        ));
+    }
+
+    #[test]
+    fn function_source_eval_flags_finds_existing_broad_markers() {
+        let flags = function_source_eval_flags(
+            b"-- FLAGS=NO-WRITES\n#!LUA name=lib\n-- flags=ALLOW-OOM\n-- flags=allow-stale",
+        );
+
+        assert!(flags.has_shebang);
+        assert!(flags.no_writes);
+        assert!(flags.allow_oom);
+        assert!(flags.allow_stale);
+
+        let flags = function_source_eval_flags(b"flags=no_writes flags=allow,oom");
+        assert!(!flags.no_writes);
+        assert!(!flags.allow_oom);
+    }
+
+    #[test]
+    fn function_source_allows_oom_matches_existing_marker_rule() {
+        assert!(function_source_allows_oom(
+            b"#!lua name=lib\n-- FLAGS=ALLOW-OOM"
+        ));
+        assert!(!function_source_allows_oom(
+            b"#!lua name=lib flags=no-writes,allow-oom"
+        ));
+    }
+
+    #[test]
+    fn strip_embedded_eval_shebang_lines_borrows_when_unmodified() {
+        let code = b"#!lua name=lib\nserver.register_function('f', function() return 1 end)";
+        let stripped = strip_embedded_eval_shebang_lines(code);
+        assert_eq!(stripped.as_ref(), code);
+        assert!(matches!(stripped, std::borrow::Cow::Borrowed(_)));
+
+        let code =
+            b"#!lua name=lib\n#!lua flags=no-writes\nserver.register_function('f', function() return 1 end)";
+        let stripped = strip_embedded_eval_shebang_lines(code);
+        assert_eq!(
+            stripped.as_ref(),
+            b"#!lua name=lib\nserver.register_function('f', function() return 1 end)"
+        );
+        assert!(matches!(stripped, std::borrow::Cow::Owned(_)));
     }
 
     #[test]

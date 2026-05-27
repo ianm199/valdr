@@ -34,7 +34,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use redis_core::blocked_keys::{
-    blocked_keys_index, deadline_from_timeout_secs, BlockedAction, BlockedWaiter,
+    blocked_keys_any, blocked_keys_index, deadline_from_timeout_secs, BlockedAction, BlockedWaiter,
 };
 use redis_core::command_context::CommandContext;
 use redis_core::db::{glob_match, RedisDb};
@@ -2662,6 +2662,9 @@ pub fn bzmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
 /// effect has propagated (see `list::schedule_or_wake`). The key is appended to
 /// `client.pending_wakes`, drained by `dispatch` after propagation.
 pub fn schedule_or_wake_zset(ctx: &mut CommandContext, key: &RedisString) {
+    if !blocked_keys_any() {
+        return;
+    }
     ctx.client_mut().pending_wakes.push(key.clone());
 }
 

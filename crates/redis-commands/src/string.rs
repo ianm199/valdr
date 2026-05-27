@@ -49,10 +49,10 @@
 //! bypass for `check_string_length`.
 
 use redis_core::command_context::CommandContext;
-use redis_core::db::LOOKUP_NONE;
+use redis_core::db::{watched_keys_any, watched_keys_touch, LOOKUP_NONE};
 use redis_core::live_config::MaxmemoryPolicyCode;
 use redis_core::notify::{NOTIFY_GENERIC, NOTIFY_NEW, NOTIFY_STRING};
-use redis_core::object::{ObjectKind, RedisObject};
+use redis_core::object::{ObjectKind, RedisObject, StringEncoding};
 use redis_protocol::frame::RespFrame;
 use redis_types::{RedisError, RedisString};
 use std::io::Write;
@@ -79,8 +79,8 @@ pub const SETKEY_DOESNT_EXIST: u32 = 1 << 1;
 pub const SETKEY_ALREADY_EXIST: u32 = 1 << 2;
 pub const SETKEY_ADD_OR_UPDATE: u32 = 1 << 3;
 
-fn new_string_object_for_write(ctx: &CommandContext<'_>, value: &[u8]) -> RedisObject {
-    let mut obj = RedisObject::new_string_try_encoded(value);
+fn new_string_object_for_write_owned(ctx: &CommandContext<'_>, value: RedisString) -> RedisObject {
+    let mut obj = RedisObject::new_string_try_encoded_from_redis_string(value);
     if matches!(
         ctx.live_config().maxmemory_policy(),
         MaxmemoryPolicyCode::AllkeysLfu | MaxmemoryPolicyCode::VolatileLfu
@@ -176,7 +176,7 @@ pub fn set_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         return Err(RedisError::wrong_number_of_args(b"set"));
     }
     let key = ctx.arg_owned(1usize)?;
-    let value = ctx.arg_owned(2usize)?;
+    let value_arg = ctx.arg_owned(2usize)?;
 
     let mut flags: u32 = 0;
     let mut expire_at_ms: Option<i64> = None;
@@ -277,8 +277,12 @@ pub fn set_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         }
     }
 
+    let notify_new_enabled = ctx.keyspace_notifications_enabled(NOTIFY_NEW);
     let needs_current_value = flags & (SET_FLAG_GET | SET_FLAG_IFEQ) != 0;
-    let (key_exists, prev_bytes): (bool, Option<Vec<u8>>) =
+    let needs_existing_lookup = needs_current_value
+        || flags & (SET_FLAG_NX | SET_FLAG_XX | SET_FLAG_KEEPTTL) != 0
+        || notify_new_enabled;
+    let (key_exists, prev_bytes): (bool, Option<Vec<u8>>) = if needs_existing_lookup {
         match ctx.db_mut().lookup_key_write(&key) {
             None => (false, None),
             Some(obj) => {
@@ -291,7 +295,10 @@ pub fn set_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
                     (true, None)
                 }
             }
-        };
+        }
+    } else {
+        (false, None)
+    };
     if flags & SET_FLAG_IFEQ != 0 {
         let Some(compare) = comparison.as_ref() else {
             return Err(RedisError::runtime(b"ERR syntax error"));
@@ -327,9 +334,11 @@ pub fn set_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     } else {
         0
     };
-    let obj = new_string_object_for_write(ctx, value.as_bytes());
+    let rewrite_value =
+        (expire_at_ms.is_some() && flags & SET_FLAG_PXAT == 0).then(|| value_arg.clone());
+    let obj = new_string_object_for_write_owned(ctx, value_arg);
     let notify = ctx.keyspace_notifications_enabled(NOTIFY_STRING);
-    let notify_new = !key_exists && ctx.keyspace_notifications_enabled(NOTIFY_NEW);
+    let notify_new = notify_new_enabled && !key_exists;
     match expire_at_ms {
         Some(abs_ms) => {
             ctx.db_mut().set_key(key.clone(), obj, setkey_flags);
@@ -352,7 +361,7 @@ pub fn set_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
                 ctx.client_mut().set_args(vec![
                     RedisString::from_bytes(b"SET"),
                     key.clone(),
-                    value.clone(),
+                    rewrite_value.expect("SET PXAT rewrite value captured"),
                     RedisString::from_bytes(b"PXAT"),
                     RedisString::from_bytes(abs_ms.to_string().as_bytes()),
                 ]);
@@ -524,23 +533,12 @@ pub fn get_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     if ctx.arg_count() != 2 {
         return Err(RedisError::wrong_number_of_args(b"get"));
     }
-    let key = ctx.arg_owned(1usize)?;
     let lookup_flags = if ctx.client_ref().flags.no_touch {
         redis_core::db::LOOKUP_NOTOUCH
     } else {
         LOOKUP_NONE
     };
-    let bytes: Option<Vec<u8>> = match ctx.db_mut().lookup_key_read_with_flags(&key, lookup_flags) {
-        None => None,
-        Some(obj) => match &obj.kind {
-            ObjectKind::String(_) => Some(obj.string_bytes_owned()),
-            _ => return Err(RedisError::wrong_type()),
-        },
-    };
-    match bytes {
-        None => ctx.reply_null_bulk(),
-        Some(b) => ctx.reply_bulk_string(RedisString::from_bytes(&b)),
-    }
+    ctx.reply_string_key_arg(1usize, lookup_flags)
 }
 
 /// GETEX key [PERSIST|EX s|PX ms|EXAT ts|PXAT ms-ts]
@@ -835,28 +833,9 @@ pub fn mget_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     if argc < 2 {
         return Err(RedisError::wrong_number_of_args(b"mget"));
     }
-    let mut keys: Vec<RedisString> = Vec::with_capacity(argc - 1);
+    ctx.reply_array_header(argc - 1)?;
     for j in 1..argc {
-        keys.push(ctx.arg_owned(j)?);
-    }
-    let mut values: Vec<Option<Vec<u8>>> = Vec::with_capacity(keys.len());
-    for key in &keys {
-        let bytes: Option<Vec<u8>> = match ctx.db_mut().lookup_key_read_with_flags(key, LOOKUP_NONE)
-        {
-            None => None,
-            Some(obj) => match &obj.kind {
-                ObjectKind::String(_) => Some(obj.string_bytes_owned()),
-                _ => None,
-            },
-        };
-        values.push(bytes);
-    }
-    ctx.reply_array_header(values.len())?;
-    for v in values {
-        match v {
-            None => ctx.reply_null_bulk()?,
-            Some(b) => ctx.reply_bulk_string(RedisString::from_bytes(&b))?,
-        }
+        ctx.reply_string_key_arg_or_null(j, LOOKUP_NONE)?;
     }
     Ok(())
 }
@@ -872,13 +851,18 @@ pub fn mset_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     if argc < 3 || argc % 2 == 0 {
         return Err(RedisError::wrong_number_of_args(b"mset"));
     }
+    let notify = ctx.keyspace_notifications_enabled(NOTIFY_STRING);
     let mut j = 1;
     while j < argc {
         let key = ctx.arg_owned(j)?;
         let value = ctx.arg_owned(j + 1)?;
-        let obj = RedisObject::new_string_try_encoded(value.as_bytes());
-        ctx.db_mut().set_key(key.clone(), obj, 0);
-        ctx.notify_keyspace_event(NOTIFY_STRING, b"set", &key);
+        let obj = RedisObject::new_string_try_encoded_from_redis_string(value);
+        if notify {
+            ctx.db_mut().set_key(key.clone(), obj, 0);
+            ctx.notify_keyspace_event(NOTIFY_STRING, b"set", &key);
+        } else {
+            ctx.db_mut().set_key(key, obj, 0);
+        }
         j += 2;
     }
     ctx.reply_simple_string(b"OK")
@@ -908,10 +892,15 @@ pub fn msetnx_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
             return ctx.reply_integer(0);
         }
     }
+    let notify = ctx.keyspace_notifications_enabled(NOTIFY_STRING);
     for (key, value) in pairs {
-        let obj = RedisObject::new_string_try_encoded(value.as_bytes());
-        ctx.db_mut().set_key(key.clone(), obj, 0);
-        ctx.notify_keyspace_event(NOTIFY_STRING, b"set", &key);
+        let obj = RedisObject::new_string_try_encoded_from_redis_string(value);
+        if notify {
+            ctx.db_mut().set_key(key.clone(), obj, 0);
+            ctx.notify_keyspace_event(NOTIFY_STRING, b"set", &key);
+        } else {
+            ctx.db_mut().set_key(key, obj, 0);
+        }
     }
     ctx.reply_integer(1)
 }
@@ -1082,19 +1071,43 @@ fn incr_decr_apply(
     delta: i64,
 ) -> Result<(), RedisError> {
     let mut current_expire = redis_core::object::EXPIRY_NONE;
-    let current: i64 = match ctx.db_mut().lookup_key_write(&key) {
-        None => 0,
-        Some(obj) => match &obj.kind {
-            ObjectKind::String(_) => {
-                current_expire = obj.expire;
-                match obj.get_long_long() {
-                    Ok(n) => n,
-                    Err(_) => return Err(RedisError::not_integer()),
+    let db_id = ctx.selected_db_id();
+    let mut updated_in_place = None;
+    let current: i64 = {
+        let db = ctx.db_mut();
+        match db.lookup_key_write(&key) {
+            None => 0,
+            Some(obj) => match &mut obj.kind {
+                ObjectKind::String(StringEncoding::Int(current)) => {
+                    let next = match current.checked_add(delta) {
+                        Some(v) => v,
+                        None => {
+                            return Err(RedisError::runtime(
+                                b"ERR increment or decrement would overflow",
+                            ))
+                        }
+                    };
+                    *current = next;
+                    updated_in_place = Some(next);
+                    next
                 }
-            }
-            _ => return Err(RedisError::wrong_type()),
-        },
+                ObjectKind::String(_) => {
+                    current_expire = obj.expire;
+                    match obj.get_long_long() {
+                        Ok(n) => n,
+                        Err(_) => return Err(RedisError::not_integer()),
+                    }
+                }
+                _ => return Err(RedisError::wrong_type()),
+            },
+        }
     };
+    if let Some(next) = updated_in_place {
+        if watched_keys_any() {
+            watched_keys_touch(db_id, &key);
+        }
+        return ctx.reply_integer(next);
+    }
     let next = match current.checked_add(delta) {
         Some(v) => v,
         None => {
@@ -1536,6 +1549,177 @@ pub fn lcs_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         ctx.reply_integer(total_len as i64)
     } else {
         ctx.reply_bulk_string(RedisString::from_vec(result))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use redis_core::client::Client;
+    use redis_core::db::{
+        watched_keys_index_add, watched_keys_index_remove_client, watched_keys_take_dirty, RedisDb,
+    };
+
+    fn rs(bytes: &[u8]) -> RedisString {
+        RedisString::from_bytes(bytes)
+    }
+
+    fn run_mget(args: &[&[u8]], db: &mut RedisDb) -> (Result<(), RedisError>, Vec<u8>) {
+        let mut client = Client::new(1);
+        client.set_args(args.iter().map(|arg| rs(arg)).collect());
+        let result = {
+            let mut ctx = CommandContext::with_db(&mut client, db);
+            mget_command(&mut ctx)
+        };
+        let reply = client.drain_reply();
+        (result, reply)
+    }
+
+    fn run_incr(args: &[&[u8]], db: &mut RedisDb) -> (Result<(), RedisError>, Vec<u8>) {
+        let mut client = Client::new(1);
+        client.set_args(args.iter().map(|arg| rs(arg)).collect());
+        let result = {
+            let mut ctx = CommandContext::with_db(&mut client, db);
+            incr_command(&mut ctx)
+        };
+        let reply = client.drain_reply();
+        (result, reply)
+    }
+
+    fn run_mset(args: &[&[u8]], db: &mut RedisDb) -> (Result<(), RedisError>, Vec<u8>) {
+        let mut client = Client::new(1);
+        client.set_args(args.iter().map(|arg| rs(arg)).collect());
+        let result = {
+            let mut ctx = CommandContext::with_db(&mut client, db);
+            mset_command(&mut ctx)
+        };
+        let reply = client.drain_reply();
+        (result, reply)
+    }
+
+    fn run_msetnx(args: &[&[u8]], db: &mut RedisDb) -> (Result<(), RedisError>, Vec<u8>) {
+        let mut client = Client::new(1);
+        client.set_args(args.iter().map(|arg| rs(arg)).collect());
+        let result = {
+            let mut ctx = CommandContext::with_db(&mut client, db);
+            msetnx_command(&mut ctx)
+        };
+        let reply = client.drain_reply();
+        (result, reply)
+    }
+
+    #[test]
+    fn mget_returns_values_nulls_and_int_encoded_strings() {
+        let mut db = RedisDb::new(0);
+        db.set_key(rs(b"a"), RedisObject::new_raw_string(b"one"), 0);
+        db.set_key(rs(b"int"), RedisObject::new_int_string(42), 0);
+        db.set_key(rs(b"list"), RedisObject::new_list(), 0);
+
+        let (result, reply) = run_mget(
+            &[
+                b"MGET".as_slice(),
+                b"a".as_slice(),
+                b"missing".as_slice(),
+                b"list".as_slice(),
+                b"int".as_slice(),
+            ],
+            &mut db,
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(reply, b"*4\r\n$3\r\none\r\n$-1\r\n$-1\r\n$2\r\n42\r\n");
+    }
+
+    #[test]
+    fn mset_and_msetnx_store_pairs_without_notifications() {
+        let mut db = RedisDb::new(0);
+
+        let (result, reply) = run_mset(
+            &[
+                b"MSET".as_slice(),
+                b"a".as_slice(),
+                b"one".as_slice(),
+                b"b".as_slice(),
+                b"two".as_slice(),
+            ],
+            &mut db,
+        );
+        assert!(result.is_ok());
+        assert_eq!(reply, b"+OK\r\n");
+        assert_eq!(
+            db.lookup_key_read_with_flags(&rs(b"a"), LOOKUP_NONE)
+                .unwrap()
+                .as_string_bytes()
+                .unwrap(),
+            b"one"
+        );
+        assert_eq!(
+            db.lookup_key_read_with_flags(&rs(b"b"), LOOKUP_NONE)
+                .unwrap()
+                .as_string_bytes()
+                .unwrap(),
+            b"two"
+        );
+
+        let (result, reply) = run_msetnx(
+            &[
+                b"MSETNX".as_slice(),
+                b"a".as_slice(),
+                b"replace".as_slice(),
+                b"c".as_slice(),
+                b"three".as_slice(),
+            ],
+            &mut db,
+        );
+        assert!(result.is_ok());
+        assert_eq!(reply, b":0\r\n");
+        assert!(db
+            .lookup_key_read_with_flags(&rs(b"c"), LOOKUP_NONE)
+            .is_none());
+
+        let (result, reply) = run_msetnx(
+            &[
+                b"MSETNX".as_slice(),
+                b"c".as_slice(),
+                b"three".as_slice(),
+                b"d".as_slice(),
+                b"four".as_slice(),
+            ],
+            &mut db,
+        );
+        assert!(result.is_ok());
+        assert_eq!(reply, b":1\r\n");
+        assert_eq!(
+            db.lookup_key_read_with_flags(&rs(b"d"), LOOKUP_NONE)
+                .unwrap()
+                .as_string_bytes()
+                .unwrap(),
+            b"four"
+        );
+    }
+
+    #[test]
+    fn incr_int_encoding_fast_path_preserves_watch_dirtying() {
+        let key = rs(b"counter");
+        let watcher_id = 9001;
+        let mut db = RedisDb::new(0);
+        db.set_key(key.clone(), RedisObject::new_int_string(41), 0);
+
+        watched_keys_index_remove_client(watcher_id);
+        watched_keys_index_add(0, &key, watcher_id);
+        let (result, reply) = run_incr(&[b"INCR".as_slice(), b"counter".as_slice()], &mut db);
+
+        assert!(result.is_ok());
+        assert_eq!(reply, b":42\r\n");
+        assert_eq!(
+            db.lookup_key_read_with_flags(&key, LOOKUP_NONE)
+                .unwrap()
+                .get_long_long()
+                .unwrap(),
+            42
+        );
+        assert!(watched_keys_take_dirty(watcher_id));
+        watched_keys_index_remove_client(watcher_id);
     }
 }
 

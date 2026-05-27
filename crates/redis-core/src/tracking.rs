@@ -44,6 +44,7 @@ use crate::pubsub_registry::PubSubRegistry;
 use redis_protocol::RespFrame;
 use redis_types::{RedisError, RedisString};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 // ── Local types ────────────────────────────────────────────────────────────
@@ -208,6 +209,8 @@ struct RuntimeTrackingDelivery {
 }
 
 static RUNTIME_TRACKING: OnceLock<Mutex<RuntimeTrackingState>> = OnceLock::new();
+static RUNTIME_BCAST_PENDING: AtomicBool = AtomicBool::new(false);
+static RUNTIME_TRACKING_CLIENTS: AtomicU64 = AtomicU64::new(0);
 
 fn runtime_tracking() -> &'static Mutex<RuntimeTrackingState> {
     RUNTIME_TRACKING.get_or_init(|| Mutex::new(RuntimeTrackingState::default()))
@@ -220,6 +223,19 @@ fn lock_runtime_tracking() -> std::sync::MutexGuard<'static, RuntimeTrackingStat
     }
 }
 
+fn refresh_runtime_tracking_client_count(rt: &RuntimeTrackingState) {
+    let count = rt.clients.values().filter(|state| state.enabled).count() as u64;
+    RUNTIME_TRACKING_CLIENTS.store(count, Ordering::Relaxed);
+}
+
+pub fn runtime_has_tracking_clients() -> bool {
+    RUNTIME_TRACKING_CLIENTS.load(Ordering::Relaxed) != 0
+}
+
+pub fn runtime_has_pending_bcast() -> bool {
+    RUNTIME_BCAST_PENDING.load(Ordering::Relaxed)
+}
+
 fn remove_client_from_runtime_table(rt: &mut RuntimeTrackingState, client_id: ClientId) {
     rt.table.retain(|_, ids| {
         ids.remove(&client_id);
@@ -227,6 +243,7 @@ fn remove_client_from_runtime_table(rt: &mut RuntimeTrackingState, client_id: Cl
     });
     rt.bcast_pending
         .retain(|(pending_client_id, _), _| *pending_client_id != client_id);
+    RUNTIME_BCAST_PENDING.store(!rt.bcast_pending.is_empty(), Ordering::Relaxed);
 }
 
 /// Synchronize the packet-level per-client state into the small live tracking
@@ -242,6 +259,7 @@ pub fn sync_runtime_client_tracking(client_id: ClientId, state: &ClientTrackingS
         rt.clients.remove(&client_id);
         remove_client_from_runtime_table(&mut rt, client_id);
     }
+    refresh_runtime_tracking_client_count(&rt);
 }
 
 /// Remove all live tracking references for a client.
@@ -249,6 +267,7 @@ pub fn remove_runtime_client_tracking(client_id: ClientId) {
     let mut rt = lock_runtime_tracking();
     rt.clients.remove(&client_id);
     remove_client_from_runtime_table(&mut rt, client_id);
+    refresh_runtime_tracking_client_count(&rt);
 }
 
 /// Snapshot the counters exposed in `INFO`.
@@ -394,6 +413,7 @@ fn runtime_collect_key_deliveries(
                             .or_default(),
                         key,
                     );
+                    RUNTIME_BCAST_PENDING.store(true, Ordering::Relaxed);
                 } else {
                     add_unique_key(bcast_by_client.entry(*client_id).or_default(), key);
                 }
@@ -420,6 +440,7 @@ fn runtime_collect_pending_bcast_deliveries(
 ) -> Vec<RuntimeTrackingDelivery> {
     let pending: Vec<((ClientId, RedisString), Vec<RedisString>)> =
         rt.bcast_pending.drain().collect();
+    RUNTIME_BCAST_PENDING.store(false, Ordering::Relaxed);
     let mut deliveries = Vec::new();
     for ((client_id, _prefix), keys) in pending {
         let Some(state) = rt.clients.get(&client_id) else {
@@ -662,6 +683,9 @@ pub fn runtime_flush_pending_bcast(
     current: &mut Client,
     pubsub: Option<&Arc<Mutex<PubSubRegistry>>>,
 ) {
+    if !RUNTIME_BCAST_PENDING.load(Ordering::Relaxed) {
+        return;
+    }
     let deliveries = {
         let mut rt = lock_runtime_tracking();
         runtime_collect_pending_bcast_deliveries(&mut rt)
@@ -672,7 +696,7 @@ pub fn runtime_flush_pending_bcast(
 /// Flush tracking pushes deferred while an EXEC/script inner context was
 /// writing its own reply.
 pub fn runtime_flush_deferred_current_client(current: &mut Client) {
-    if !current.flag_deny_blocking() {
+    if !current.flag_deny_blocking() && current.has_deferred_tracking_pushes() {
         current.flush_deferred_tracking_pushes();
     }
 }
@@ -700,6 +724,7 @@ pub fn runtime_invalidate_all(current: &mut Client, pubsub: Option<&Arc<Mutex<Pu
         let deliveries = runtime_collect_all_deliveries(&rt);
         rt.table.clear();
         rt.bcast_pending.clear();
+        RUNTIME_BCAST_PENDING.store(false, Ordering::Relaxed);
         deliveries
     };
     runtime_deliver_messages(current, pubsub, deliveries);
@@ -1453,6 +1478,8 @@ mod tests {
         rt.clients.clear();
         rt.table.clear();
         rt.bcast_pending.clear();
+        RUNTIME_BCAST_PENDING.store(false, Ordering::Relaxed);
+        RUNTIME_TRACKING_CLIENTS.store(0, Ordering::Relaxed);
     }
 
     #[test]

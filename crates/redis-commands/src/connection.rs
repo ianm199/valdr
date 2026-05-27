@@ -45,6 +45,7 @@ use crate::live_config_handle;
 pub const DEFAULT_MAX_CLIENTS: u64 = redis_core::live_config::DEFAULT_MAX_CLIENTS;
 
 static MONITOR_CLIENTS: OnceLock<Mutex<HashMap<u64, Sender<Vec<u8>>>>> = OnceLock::new();
+static MONITOR_CLIENT_COUNT: AtomicUsize = AtomicUsize::new(0);
 static ACLFILE_CONFIG: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static CONFIG_OVERRIDES: OnceLock<Mutex<HashMap<Vec<u8>, String>>> = OnceLock::new();
 static CONFIG_FILE_PATH: OnceLock<Mutex<Option<String>>> = OnceLock::new();
@@ -65,6 +66,16 @@ static SHUTDOWN_SAVE_FAILED: AtomicBool = AtomicBool::new(false);
 static SHUTDOWN_ON_SIGTERM_FORCE: AtomicBool = AtomicBool::new(false);
 static DEBUG_PAUSE_CRON: AtomicBool = AtomicBool::new(false);
 static CLIENT_OBUF_LIMITS: OnceLock<Mutex<ClientOutputBufferLimits>> = OnceLock::new();
+static CLIENT_OBUF_LIMIT_VERSION: AtomicU64 = AtomicU64::new(0);
+static CLIENT_OBUF_NORMAL_HARD: AtomicUsize = AtomicUsize::new(0);
+static CLIENT_OBUF_NORMAL_SOFT: AtomicUsize = AtomicUsize::new(0);
+static CLIENT_OBUF_NORMAL_SOFT_SECONDS: AtomicU64 = AtomicU64::new(0);
+static CLIENT_OBUF_REPLICA_HARD: AtomicUsize = AtomicUsize::new(256 * 1024 * 1024);
+static CLIENT_OBUF_REPLICA_SOFT: AtomicUsize = AtomicUsize::new(64 * 1024 * 1024);
+static CLIENT_OBUF_REPLICA_SOFT_SECONDS: AtomicU64 = AtomicU64::new(60);
+static CLIENT_OBUF_PUBSUB_HARD: AtomicUsize = AtomicUsize::new(32 * 1024 * 1024);
+static CLIENT_OBUF_PUBSUB_SOFT: AtomicUsize = AtomicUsize::new(8 * 1024 * 1024);
+static CLIENT_OBUF_PUBSUB_SOFT_SECONDS: AtomicU64 = AtomicU64::new(60);
 static CLIENT_QUERY_BUFFER_LIMIT: AtomicUsize = AtomicUsize::new(1024 * 1024 * 1024);
 
 #[derive(Clone, Copy)]
@@ -113,6 +124,46 @@ fn aclfile_config_cell() -> &'static Mutex<Option<String>> {
 
 fn client_obuf_limits_cell() -> &'static Mutex<ClientOutputBufferLimits> {
     CLIENT_OBUF_LIMITS.get_or_init(|| Mutex::new(ClientOutputBufferLimits::default()))
+}
+
+fn store_client_obuf_limit_snapshot(next: ClientOutputBufferLimits) {
+    CLIENT_OBUF_LIMIT_VERSION.fetch_add(1, Ordering::Release);
+    CLIENT_OBUF_NORMAL_HARD.store(next.normal.hard, Ordering::Relaxed);
+    CLIENT_OBUF_NORMAL_SOFT.store(next.normal.soft, Ordering::Relaxed);
+    CLIENT_OBUF_NORMAL_SOFT_SECONDS.store(next.normal.soft_seconds, Ordering::Relaxed);
+    CLIENT_OBUF_REPLICA_HARD.store(next.replica.hard, Ordering::Relaxed);
+    CLIENT_OBUF_REPLICA_SOFT.store(next.replica.soft, Ordering::Relaxed);
+    CLIENT_OBUF_REPLICA_SOFT_SECONDS.store(next.replica.soft_seconds, Ordering::Relaxed);
+    CLIENT_OBUF_PUBSUB_HARD.store(next.pubsub.hard, Ordering::Relaxed);
+    CLIENT_OBUF_PUBSUB_SOFT.store(next.pubsub.soft, Ordering::Relaxed);
+    CLIENT_OBUF_PUBSUB_SOFT_SECONDS.store(next.pubsub.soft_seconds, Ordering::Relaxed);
+    CLIENT_OBUF_LIMIT_VERSION.fetch_add(1, Ordering::Release);
+}
+
+fn load_client_obuf_limit_snapshot(is_pubsub: bool) -> ClientOutputBufferLimit {
+    loop {
+        let before = CLIENT_OBUF_LIMIT_VERSION.load(Ordering::Acquire);
+        if before & 1 != 0 {
+            std::hint::spin_loop();
+            continue;
+        }
+        let limit = if is_pubsub {
+            ClientOutputBufferLimit {
+                hard: CLIENT_OBUF_PUBSUB_HARD.load(Ordering::Relaxed),
+                soft: CLIENT_OBUF_PUBSUB_SOFT.load(Ordering::Relaxed),
+                soft_seconds: CLIENT_OBUF_PUBSUB_SOFT_SECONDS.load(Ordering::Relaxed),
+            }
+        } else {
+            ClientOutputBufferLimit {
+                hard: CLIENT_OBUF_NORMAL_HARD.load(Ordering::Relaxed),
+                soft: CLIENT_OBUF_NORMAL_SOFT.load(Ordering::Relaxed),
+                soft_seconds: CLIENT_OBUF_NORMAL_SOFT_SECONDS.load(Ordering::Relaxed),
+            }
+        };
+        if before == CLIENT_OBUF_LIMIT_VERSION.load(Ordering::Acquire) {
+            return limit;
+        }
+    }
 }
 
 pub fn set_aclfile_config_name(name: Option<String>) {
@@ -249,15 +300,7 @@ fn set_client_query_buffer_limit(limit: usize) {
 }
 
 pub fn client_output_buffer_limit(is_pubsub: bool) -> ClientOutputBufferLimit {
-    let guard = match client_obuf_limits_cell().lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    if is_pubsub {
-        guard.pubsub
-    } else {
-        guard.normal
-    }
+    load_client_obuf_limit_snapshot(is_pubsub)
 }
 
 fn client_output_buffer_limit_config_string() -> String {
@@ -299,11 +342,8 @@ pub fn ping_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
                 RespFrame::bulk(msg),
             ]))
         }
-        1 => ctx.reply_simple_string(b"PONG"),
-        2 => {
-            let msg = ctx.arg_owned(1usize)?;
-            ctx.reply_bulk_string(msg)
-        }
+        1 => ctx.reply_pong(),
+        2 => ctx.reply_bulk_arg(1usize),
         _ => Err(RedisError::wrong_number_of_args(b"ping")),
     }
 }
@@ -1806,6 +1846,7 @@ fn apply_client_output_buffer_limit_config_set(value: &[u8]) -> RedisResult<()> 
         Err(p) => p.into_inner(),
     };
     *guard = next;
+    store_client_obuf_limit_snapshot(next);
     Ok(())
 }
 
@@ -2245,7 +2286,9 @@ pub fn monitor_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
-            monitors.insert(id, sender);
+            if monitors.insert(id, sender).is_none() {
+                MONITOR_CLIENT_COUNT.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
     ctx.client_mut().flags.monitor = true;
@@ -2258,8 +2301,14 @@ pub fn unregister_monitor_client(id: u64) {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
-        guard.remove(&id);
+        if guard.remove(&id).is_some() {
+            MONITOR_CLIENT_COUNT.fetch_sub(1, Ordering::Relaxed);
+        }
     }
+}
+
+pub fn has_monitor_clients() -> bool {
+    MONITOR_CLIENT_COUNT.load(Ordering::Relaxed) != 0
 }
 
 pub fn feed_monitors(ctx: &CommandContext<'_>, argv: &[RedisString]) {
@@ -2290,7 +2339,9 @@ pub fn feed_monitors(ctx: &CommandContext<'_>, argv: &[RedisString]) {
             Err(p) => p.into_inner(),
         };
         for id in dead {
-            guard.remove(&id);
+            if guard.remove(&id).is_some() {
+                MONITOR_CLIENT_COUNT.fetch_sub(1, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -5176,6 +5227,7 @@ pub fn apply_requirepass_to_acl(secret: Option<&[u8]>) {
         Err(p) => p.into_inner(),
     };
     let default_key = RedisString::from_static(b"default");
+    guard.invalidate_fast_paths();
     if let Some(secret) = secret.filter(|s| !s.is_empty()) {
         let user = guard
             .users
@@ -5201,6 +5253,7 @@ pub fn apply_requirepass_to_acl(secret: Option<&[u8]>) {
     } else {
         guard.users.insert(default_key, AclUser::new_default());
     }
+    guard.refresh_fast_paths();
 }
 
 fn default_user_has_no_password() -> bool {
@@ -5321,7 +5374,9 @@ fn install_acl_users(users: HashMap<RedisString, AclUser>) {
         Ok(g) => g,
         Err(p) => p.into_inner(),
     };
+    guard.invalidate_fast_paths();
     guard.users = users;
+    guard.refresh_fast_paths();
 }
 
 fn load_acl_users_from_path(path: &Path) -> Result<HashMap<RedisString, AclUser>, Vec<u8>> {
@@ -5782,7 +5837,9 @@ pub fn acl_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
                 }
             }
         }
+        guard.invalidate_fast_paths();
         guard.users.insert(username, user);
+        guard.refresh_fast_paths();
         if close_current_client {
             ctx.client_mut().should_close = true;
         }
@@ -5816,6 +5873,9 @@ pub fn acl_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
                     }
                 }
             }
+        }
+        if count > 0 {
+            guard.refresh_fast_paths();
         }
         drop(guard);
         if close_current_client {
@@ -7055,6 +7115,34 @@ mod tests {
         assert!(pairs
             .iter()
             .any(|(name, value)| { name == "hll-sparse-max-bytes" && value == "30" }));
+    }
+
+    #[test]
+    fn client_output_buffer_limit_updates_hot_snapshot() {
+        apply_client_output_buffer_limit_config_set(
+            b"normal 1024 512 3 slave 2048 1024 4 pubsub 4096 2048 7",
+        )
+        .unwrap();
+
+        let normal = client_output_buffer_limit(false);
+        assert_eq!(normal.hard, 1024);
+        assert_eq!(normal.soft, 512);
+        assert_eq!(normal.soft_seconds, 3);
+
+        let pubsub = client_output_buffer_limit(true);
+        assert_eq!(pubsub.hard, 4096);
+        assert_eq!(pubsub.soft, 2048);
+        assert_eq!(pubsub.soft_seconds, 7);
+
+        assert_eq!(
+            client_output_buffer_limit_config_string(),
+            "normal 1024 512 3 slave 2048 1024 4 pubsub 4096 2048 7"
+        );
+
+        apply_client_output_buffer_limit_config_set(
+            b"normal 0 0 0 slave 268435456 67108864 60 pubsub 33554432 8388608 60",
+        )
+        .unwrap();
     }
 }
 

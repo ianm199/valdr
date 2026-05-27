@@ -1879,6 +1879,7 @@ pub fn apply_client_pause(server: &RedisServer, end: i64, pause_all: bool) {
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     pause_clients_by_client(&mut events, end, pause_all);
+    refresh_cached_paused_actions(server, &events, crate::util::mstime());
 }
 
 /// CLIENT UNPAUSE
@@ -1893,6 +1894,7 @@ pub fn client_unpause_command(ctx: &mut CommandContext) -> RedisResult<()> {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         unpause_actions(&mut events, PausePurpose::ByClientCommand);
+        refresh_cached_paused_actions(ctx.server(), &events, crate::util::mstime());
     }
     add_reply_status(ctx.client, b"OK");
     Ok(())
@@ -2321,13 +2323,24 @@ pub fn update_paused_actions(events: &[PauseEvent; 4], mstime: i64) -> u32 {
     paused
 }
 
+fn refresh_cached_paused_actions(server: &RedisServer, events: &[PauseEvent; 4], now: i64) -> u32 {
+    let paused = update_paused_actions(events, now);
+    server
+        .cached_paused_actions
+        .store(paused, Ordering::Relaxed);
+    paused
+}
+
 pub fn current_paused_actions(server: &RedisServer) -> u32 {
+    if server.cached_paused_actions.load(Ordering::Relaxed) == 0 {
+        return 0;
+    }
     let now = crate::util::mstime();
     let events = server
         .pause_events
         .lock()
         .unwrap_or_else(|p| p.into_inner());
-    update_paused_actions(&events, now)
+    refresh_cached_paused_actions(server, &events, now)
 }
 
 pub fn is_server_paused_for(server: &RedisServer, action: u32) -> bool {

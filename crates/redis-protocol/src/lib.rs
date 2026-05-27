@@ -15,7 +15,10 @@ pub use frame::{
     encode_verbatim_string, format_double_text, RespFrame,
 };
 pub use parser::{ParserCallbacks, ParserCursor};
-pub use request::{parse_inline_or_multibulk, parse_inline_or_multibulk_into};
+pub use request::{
+    parse_inline_or_multibulk, parse_inline_or_multibulk_into,
+    parse_inline_or_multibulk_into_retaining_partial,
+};
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS

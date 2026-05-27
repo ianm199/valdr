@@ -20,7 +20,7 @@
 //! `record_slowlog_entry` defined here.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use redis_core::commandlog::{
@@ -45,6 +45,10 @@ static LATENCY_HISTOGRAMS: OnceLock<Arc<Mutex<HashMap<Vec<u8>, CommandLatencySta
 static LATENCY_MONITOR_THRESHOLD_MS: AtomicI64 = AtomicI64::new(0);
 static LATENCY_TRACKING_ENABLED: AtomicBool = AtomicBool::new(true);
 static LATENCY_TRACKING_INFO_PERCENTILES: OnceLock<Arc<Mutex<Vec<f64>>>> = OnceLock::new();
+static LARGE_REQUEST_THRESHOLD_BYTES: AtomicI64 = AtomicI64::new(-1);
+static LARGE_REPLY_THRESHOLD_BYTES: AtomicI64 = AtomicI64::new(-1);
+static LARGE_REQUEST_MAX_LEN: AtomicUsize = AtomicUsize::new(128);
+static LARGE_REPLY_MAX_LEN: AtomicUsize = AtomicUsize::new(128);
 
 #[derive(Clone, Copy, Debug, Default)]
 struct CommandLatencyStats {
@@ -56,6 +60,116 @@ struct PendingBlockedSlowlogEntry {
     argv: Vec<RedisString>,
     start_micros: MonoTime,
     client_name: Option<RedisString>,
+}
+
+struct AtomicCommandLatencyStats {
+    name: &'static [u8],
+    calls: AtomicU64,
+    max_usec: AtomicU64,
+}
+
+impl AtomicCommandLatencyStats {
+    const fn new(name: &'static [u8]) -> Self {
+        Self {
+            name,
+            calls: AtomicU64::new(0),
+            max_usec: AtomicU64::new(0),
+        }
+    }
+
+    fn record(&self, elapsed_usec: u64) {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        self.max_usec
+            .fetch_max(elapsed_usec.max(1), Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> Option<CommandLatencyStats> {
+        let calls = self.calls.load(Ordering::Relaxed);
+        if calls == 0 {
+            return None;
+        }
+        Some(CommandLatencyStats {
+            calls,
+            max_usec: self.max_usec.load(Ordering::Relaxed),
+        })
+    }
+
+    fn reset(&self) {
+        self.calls.store(0, Ordering::Relaxed);
+        self.max_usec.store(0, Ordering::Relaxed);
+    }
+}
+
+static HOT_LATENCY_HISTOGRAMS: [AtomicCommandLatencyStats; 4] = [
+    AtomicCommandLatencyStats::new(b"get"),
+    AtomicCommandLatencyStats::new(b"incr"),
+    AtomicCommandLatencyStats::new(b"ping"),
+    AtomicCommandLatencyStats::new(b"set"),
+];
+
+fn hot_latency_histogram(fullname: &[u8]) -> Option<&'static AtomicCommandLatencyStats> {
+    match fullname {
+        b"get" => Some(&HOT_LATENCY_HISTOGRAMS[0]),
+        b"incr" => Some(&HOT_LATENCY_HISTOGRAMS[1]),
+        b"ping" => Some(&HOT_LATENCY_HISTOGRAMS[2]),
+        b"set" => Some(&HOT_LATENCY_HISTOGRAMS[3]),
+        _ => None,
+    }
+}
+
+fn hot_latency_snapshot(fullname: &[u8]) -> Option<CommandLatencyStats> {
+    hot_latency_histogram(fullname).and_then(AtomicCommandLatencyStats::snapshot)
+}
+
+fn record_hot_latency_command(command_name: &[u8], elapsed_usec: u64) -> bool {
+    let histogram = match command_name {
+        [a, b, c]
+            if ascii_lower(*a) == b'g' && ascii_lower(*b) == b'e' && ascii_lower(*c) == b't' =>
+        {
+            &HOT_LATENCY_HISTOGRAMS[0]
+        }
+        [a, b, c]
+            if ascii_lower(*a) == b's' && ascii_lower(*b) == b'e' && ascii_lower(*c) == b't' =>
+        {
+            &HOT_LATENCY_HISTOGRAMS[3]
+        }
+        [a, b, c, d]
+            if ascii_lower(*a) == b'p'
+                && ascii_lower(*b) == b'i'
+                && ascii_lower(*c) == b'n'
+                && ascii_lower(*d) == b'g' =>
+        {
+            &HOT_LATENCY_HISTOGRAMS[2]
+        }
+        [a, b, c, d]
+            if ascii_lower(*a) == b'i'
+                && ascii_lower(*b) == b'n'
+                && ascii_lower(*c) == b'c'
+                && ascii_lower(*d) == b'r' =>
+        {
+            &HOT_LATENCY_HISTOGRAMS[1]
+        }
+        _ => return false,
+    };
+    histogram.record(elapsed_usec);
+    true
+}
+
+#[inline]
+fn ascii_lower(byte: u8) -> u8 {
+    if byte.is_ascii_uppercase() {
+        byte + 32
+    } else {
+        byte
+    }
+}
+
+fn append_hot_latency_histograms(out: &mut Vec<(Vec<u8>, CommandLatencyStats)>) {
+    for histogram in &HOT_LATENCY_HISTOGRAMS {
+        if let Some(stats) = histogram.snapshot() {
+            out.push((histogram.name.to_vec(), stats));
+        }
+    }
 }
 
 /// Return a handle to the global slowlog, initialising it on first call.
@@ -231,20 +345,49 @@ pub fn record_large_commandlog_entries(
     client_id: u64,
     client_name: Option<RedisString>,
 ) {
-    record_commandlog_entry_for_handle(
-        global_large_request_log(),
-        argv,
-        request_bytes as i64,
-        client_id,
-        client_name.clone(),
+    let request_enabled = commandlog_enabled(
+        LARGE_REQUEST_THRESHOLD_BYTES.load(Ordering::Relaxed),
+        LARGE_REQUEST_MAX_LEN.load(Ordering::Relaxed),
     );
-    record_commandlog_entry_for_handle(
-        global_large_reply_log(),
-        argv,
-        reply_bytes as i64,
-        client_id,
-        client_name,
+    let reply_enabled = commandlog_enabled(
+        LARGE_REPLY_THRESHOLD_BYTES.load(Ordering::Relaxed),
+        LARGE_REPLY_MAX_LEN.load(Ordering::Relaxed),
     );
+    if !request_enabled && !reply_enabled {
+        return;
+    }
+    if request_enabled {
+        record_commandlog_entry_for_handle(
+            global_large_request_log(),
+            argv,
+            request_bytes as i64,
+            client_id,
+            client_name.clone(),
+        );
+    }
+    if reply_enabled {
+        record_commandlog_entry_for_handle(
+            global_large_reply_log(),
+            argv,
+            reply_bytes as i64,
+            client_id,
+            client_name,
+        );
+    }
+}
+
+pub fn large_commandlog_enabled() -> bool {
+    commandlog_enabled(
+        LARGE_REQUEST_THRESHOLD_BYTES.load(Ordering::Relaxed),
+        LARGE_REQUEST_MAX_LEN.load(Ordering::Relaxed),
+    ) || commandlog_enabled(
+        LARGE_REPLY_THRESHOLD_BYTES.load(Ordering::Relaxed),
+        LARGE_REPLY_MAX_LEN.load(Ordering::Relaxed),
+    )
+}
+
+fn commandlog_enabled(threshold: i64, max_len: usize) -> bool {
+    threshold >= 0 && max_len > 0
 }
 
 fn record_commandlog_entry_for_handle(
@@ -315,12 +458,59 @@ pub fn record_latency_histogram(argv: &[RedisString], elapsed_usec: u64) {
     let Some(fullname) = latency_command_fullname(argv) else {
         return;
     };
+    record_latency_histogram_fullname(&fullname, elapsed_usec);
+}
+
+pub fn record_latency_histogram_for_command(
+    command_name: &[u8],
+    argv: &[RedisString],
+    elapsed_usec: u64,
+) {
+    if !latency_tracking_enabled() {
+        return;
+    }
+    if record_hot_latency_command(command_name, elapsed_usec) {
+        return;
+    }
+    if !argv.first().is_some_and(|arg| {
+        arg.as_bytes() == command_name || arg.as_bytes().eq_ignore_ascii_case(command_name)
+    }) {
+        record_latency_histogram(argv, elapsed_usec);
+        return;
+    }
+    let mut inline = [0u8; 64];
+    if command_name.len() > inline.len() {
+        record_latency_histogram(argv, elapsed_usec);
+        return;
+    }
+    for (dst, src) in inline.iter_mut().zip(command_name.iter()) {
+        *dst = src.to_ascii_lowercase();
+    }
+    let fullname = &inline[..command_name.len()];
+    if latency_parent_uses_subcommands(fullname) {
+        record_latency_histogram(argv, elapsed_usec);
+        return;
+    }
+    record_latency_histogram_fullname(fullname, elapsed_usec);
+}
+
+fn record_latency_histogram_fullname(fullname: &[u8], elapsed_usec: u64) {
+    if let Some(histogram) = hot_latency_histogram(fullname) {
+        histogram.record(elapsed_usec);
+        return;
+    }
     let handle = global_latency_histograms();
     let mut histograms = match handle.lock() {
         Ok(g) => g,
         Err(p) => p.into_inner(),
     };
-    let stats = histograms.entry(fullname).or_default();
+    let stats = if let Some(stats) = histograms.get_mut(fullname) {
+        stats
+    } else {
+        histograms
+            .entry(fullname.to_vec())
+            .or_insert(CommandLatencyStats::default())
+    };
     stats.calls = stats.calls.saturating_add(1);
     stats.max_usec = stats.max_usec.max(elapsed_usec.max(1));
 }
@@ -332,6 +522,9 @@ pub fn reset_latency_histograms() {
         Err(p) => p.into_inner(),
     };
     histograms.clear();
+    for histogram in &HOT_LATENCY_HISTOGRAMS {
+        histogram.reset();
+    }
 }
 
 pub fn set_latency_tracking_enabled(enabled: bool) {
@@ -394,6 +587,19 @@ pub fn latency_percentile_snapshot() -> Vec<(Vec<u8>, String)> {
             (name.clone(), rendered)
         })
         .collect();
+    for (name, stats) in {
+        let mut hot = Vec::new();
+        append_hot_latency_histograms(&mut hot);
+        hot
+    } {
+        let value = stats.max_usec.max(1);
+        let rendered = percentiles
+            .iter()
+            .map(|p| format!("p{}={}", render_percentile_name(*p), value))
+            .collect::<Vec<_>>()
+            .join(",");
+        rows.push((name, rendered));
+    }
     rows.sort_by(|a, b| a.0.cmp(&b.0));
     rows
 }
@@ -468,18 +674,22 @@ pub fn set_slowlog_max_len(max: usize) {
 }
 
 pub fn set_commandlog_large_request_threshold(bytes: i64) {
+    LARGE_REQUEST_THRESHOLD_BYTES.store(bytes, Ordering::Relaxed);
     set_commandlog_threshold(global_large_request_log(), bytes);
 }
 
 pub fn set_commandlog_large_request_max_len(max: usize) {
+    LARGE_REQUEST_MAX_LEN.store(max, Ordering::Relaxed);
     set_commandlog_max_len(global_large_request_log(), max);
 }
 
 pub fn set_commandlog_large_reply_threshold(bytes: i64) {
+    LARGE_REPLY_THRESHOLD_BYTES.store(bytes, Ordering::Relaxed);
     set_commandlog_threshold(global_large_reply_log(), bytes);
 }
 
 pub fn set_commandlog_large_reply_max_len(max: usize) {
+    LARGE_REPLY_MAX_LEN.store(max, Ordering::Relaxed);
     set_commandlog_max_len(global_large_reply_log(), max);
 }
 
@@ -1056,6 +1266,7 @@ fn selected_latency_histograms(ctx: &CommandContext) -> Vec<(Vec<u8>, CommandLat
     if ctx.arg_count() == 2 {
         let mut all: Vec<(Vec<u8>, CommandLatencyStats)> =
             histograms.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        append_hot_latency_histograms(&mut all);
         all.sort_by(|a, b| a.0.cmp(&b.0));
         return all;
     }
@@ -1108,6 +1319,8 @@ fn append_selected_latency_histogram(
     if parent_matches.is_empty() {
         if let Some(stats) = histograms.get(requested) {
             out.push((requested.to_vec(), *stats));
+        } else if let Some(stats) = hot_latency_snapshot(requested) {
+            out.push((requested.to_vec(), stats));
         }
     } else {
         out.extend(parent_matches);
@@ -1156,6 +1369,25 @@ fn reply_latency_history(
         ctx.reply_integer(latency)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn incr_uses_hot_latency_histogram_bucket() {
+        reset_latency_histograms();
+
+        let argv = [RedisString::from_bytes(b"INCR")];
+        record_latency_histogram_for_command(b"INCR", &argv, 42);
+
+        let stats = hot_latency_snapshot(b"incr").expect("INCR latency snapshot");
+        assert_eq!(stats.calls, 1);
+        assert_eq!(stats.max_usec, 42);
+
+        reset_latency_histograms();
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

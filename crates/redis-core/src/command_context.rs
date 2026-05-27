@@ -347,7 +347,16 @@ impl<'a> CommandContext<'a> {
     /// the matching write-command shapes through the existing outbound
     /// pub/sub channels.
     pub fn apply_client_tracking_after_command(&mut self, name: &[u8], is_write: bool) {
-        if is_write {
+        let runtime_tracking_active = crate::tracking::runtime_has_tracking_clients();
+        let runtime_bcast_pending = crate::tracking::runtime_has_pending_bcast();
+        let current_tracking_active = self.client.tracking.enabled
+            || self.client.tracking.caching
+            || self.client.has_deferred_tracking_pushes();
+        if !runtime_tracking_active && !runtime_bcast_pending && !current_tracking_active {
+            return;
+        }
+
+        if is_write && runtime_tracking_active {
             let mutation = tracking_mutation_for_command(name, &self.client.argv);
             if mutation.all_keys {
                 let pubsub = self.pubsub.as_ref().cloned();
@@ -364,7 +373,7 @@ impl<'a> CommandContext<'a> {
                     defer_bcast,
                 );
             }
-        } else {
+        } else if self.client.tracking.enabled && !self.client.tracking.bcast {
             let keys = tracking_read_keys_for_command(name, &self.client.argv);
             if !keys.is_empty() {
                 crate::tracking::runtime_remember_read_keys(
@@ -380,9 +389,13 @@ impl<'a> CommandContext<'a> {
             crate::tracking::sync_runtime_client_tracking(self.client.id, &self.client.tracking);
         }
         if !self.client.flag_deny_blocking() {
-            crate::tracking::runtime_flush_deferred_current_client(&mut *self.client);
-            let pubsub = self.pubsub.as_ref().cloned();
-            crate::tracking::runtime_flush_pending_bcast(&mut *self.client, pubsub.as_ref());
+            if self.client.has_deferred_tracking_pushes() {
+                crate::tracking::runtime_flush_deferred_current_client(&mut *self.client);
+            }
+            if crate::tracking::runtime_has_pending_bcast() {
+                let pubsub = self.pubsub.as_ref().cloned();
+                crate::tracking::runtime_flush_pending_bcast(&mut *self.client, pubsub.as_ref());
+            }
         }
     }
 
@@ -390,6 +403,11 @@ impl<'a> CommandContext<'a> {
 
     pub fn reply_simple_string(&mut self, bytes: &[u8]) -> RedisResult<()> {
         self.client.write_simple_string(bytes);
+        Ok(())
+    }
+
+    pub fn reply_pong(&mut self) -> RedisResult<()> {
+        self.client.write_pong();
         Ok(())
     }
 
@@ -401,6 +419,15 @@ impl<'a> CommandContext<'a> {
     pub fn reply_bulk_string(&mut self, s: RedisString) -> RedisResult<()> {
         self.client.write_bulk_string(&s);
         Ok(())
+    }
+
+    pub fn reply_bulk_arg<I: ArgIndex>(&mut self, i: I) -> RedisResult<()> {
+        let index = i.into_arg_index()?;
+        if self.client.write_bulk_arg(index) {
+            Ok(())
+        } else {
+            Err(RedisError::wrong_number_of_args(self.command_name()))
+        }
     }
 
     pub fn reply_null_bulk(&mut self) -> RedisResult<()> {
@@ -605,6 +632,64 @@ impl<'a> CommandContext<'a> {
     pub fn reply_bulk_object(&mut self, obj: &RedisObject) -> RedisResult<()> {
         let bytes = obj.string_bytes();
         self.reply_bulk(bytes.as_ref())
+    }
+
+    /// Look up a string key named by an argv slot and write the bulk reply
+    /// directly from the stored object where possible.
+    pub fn reply_string_key_arg<I: ArgIndex>(
+        &mut self,
+        i: I,
+        lookup_flags: u32,
+    ) -> RedisResult<()> {
+        let index = i.into_arg_index()?;
+        let key = self
+            .client
+            .arg(index)
+            .ok_or_else(|| RedisError::wrong_number_of_args(self.command_name()))?;
+        let Some(obj) = self
+            .db
+            .as_mut()
+            .lookup_key_read_with_flags(key, lookup_flags)
+        else {
+            self.client.write_null_bulk();
+            return Ok(());
+        };
+        if !obj.is_string() {
+            return Err(RedisError::wrong_type());
+        }
+        let bytes = obj.string_bytes();
+        self.client.write_bulk(bytes.as_ref());
+        Ok(())
+    }
+
+    /// Look up a string key named by an argv slot and write either the string
+    /// value or a null bulk. Used by multi-key read commands where wrong-type
+    /// elements are represented as nulls instead of command errors.
+    pub fn reply_string_key_arg_or_null<I: ArgIndex>(
+        &mut self,
+        i: I,
+        lookup_flags: u32,
+    ) -> RedisResult<()> {
+        let index = i.into_arg_index()?;
+        let key = self
+            .client
+            .arg(index)
+            .ok_or_else(|| RedisError::wrong_number_of_args(self.command_name()))?;
+        let Some(obj) = self
+            .db
+            .as_mut()
+            .lookup_key_read_with_flags(key, lookup_flags)
+        else {
+            self.client.write_null_bulk();
+            return Ok(());
+        };
+        if !obj.is_string() {
+            self.client.write_null_bulk();
+            return Ok(());
+        }
+        let bytes = obj.string_bytes();
+        self.client.write_bulk(bytes.as_ref());
+        Ok(())
     }
 
     /// Whether this command is executing inside Lua/script context.

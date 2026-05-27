@@ -1,11 +1,14 @@
-# Per-crate unsafe-block ceilings. Enforced by the chassis unsafe-budget hook.
+# Per-crate unsafe-occurrence ceilings. Enforced by the chassis
+# unsafe-budget hook.
 #
 # Default ceiling for unlisted crates: 0. Raising a ceiling requires
-# editing this file in a commit that explains why.
+# editing this file in a commit that explains why. These numbers are ceilings,
+# not targets: prefer deleting unsafe or moving it behind audited safe wrappers.
 #
-# Pilot crates: all start at 0 (no unsafe expected for byte-string parsing,
-# command dispatch, in-memory data). Later crates that wrap OS / modules
-# ABI will get raised ceilings.
+# Current approved exceptions are concentrated in OS/process-control paths,
+# hardware timer reads, and the FUNCTION/FCALL Lua callback lifetime bridge.
+# No unsafe is expected in byte-string parsing, command dispatch tables, or
+# in-memory data structure ports.
 
 [crates]
 "redis-types"     = 0
@@ -14,11 +17,16 @@
 # monotonic.rs. Both unsafe blocks are inline assembly `mrs` reads of CPU timer
 # registers (`cntvct_el0`, `cntfrq_el0`): no pointers, no memory access.
 "redis-core"      = 2
-# Raised to 1 for the fork(2)-based BGSAVE in persist.rs (Round 19 Session 1D).
-# The single unsafe block covers libc::fork + libc::_exit in the child path.
-# This is the standard Unix COW-snapshot mechanism; no other unsafe is expected.
-"redis-commands"  = 1
-# Raised to 1 for the BGSAVE child reaper in main.rs (Round 19 Session 1D).
-# The single unsafe block calls libc::waitpid(WNOHANG) to reap the fork child
-# without blocking. Necessary companion to the fork in redis-commands::persist.
-"redis-server"    = 1
+# Raised to 7 for:
+#   * persist.rs: two fork(2) + _exit child paths for BGSAVE and replication
+#     full-sync COW snapshots.
+#   * eval.rs: three raw-pointer dereferences used to bridge cached mlua
+#     callbacks to the active per-call CommandContext and script state cells.
+#   * connection.rs: shutdown child cleanup via kill/waitpid and immediate
+#     process _exit.
+"redis-commands"  = 7
+# Raised to 5 for:
+#   * two waitpid(WNOHANG) child reapers for BGSAVE and replication BGSAVE.
+#   * one SIGTERM/SIGINT signal-handler install.
+#   * two immediate _exit calls in the signal-shutdown watcher.
+"redis-server"    = 5
