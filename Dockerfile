@@ -13,8 +13,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 
-RUN cargo build --release --locked --bin redis-server \
-    && strip target/release/redis-server
+ARG CARGO_FEATURES=""
+ARG CARGO_NO_DEFAULT_FEATURES=0
+RUN set -eux; \
+    cargo_args=""; \
+    if [ "$CARGO_NO_DEFAULT_FEATURES" = "1" ]; then \
+        cargo_args="$cargo_args --no-default-features"; \
+    fi; \
+    if [ -n "$CARGO_FEATURES" ]; then \
+        cargo_args="$cargo_args --features $CARGO_FEATURES"; \
+    fi; \
+    cargo build --release --locked --bin redis-server $cargo_args; \
+    strip target/release/redis-server
 
 FROM debian:bookworm-slim AS runtime
 

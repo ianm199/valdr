@@ -45,6 +45,10 @@ use redis_types::{RedisError, RedisString};
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 
+#[cfg(feature = "allocator-jemalloc")]
+#[global_allocator]
+static GLOBAL_ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 mod runtime_owner;
 
 const DEFAULT_PORT: u16 = 6379;
@@ -1200,6 +1204,9 @@ fn main() {
         );
         live_config_for_hook.set_tls_port(0);
     }));
+
+    #[cfg(feature = "eager-dispatch-warmup")]
+    dispatch::warm_dispatch_tables();
 
     runtime_owner::RuntimeOwner::run_plain_tcp(
         listeners,

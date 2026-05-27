@@ -155,6 +155,19 @@ pub fn is_dispatchable_command(name: &[u8]) -> bool {
     lookup_runtime_command(&resolved).is_some()
 }
 
+/// Build dispatch-side lazy tables during server startup.
+///
+/// This keeps the first real client command from paying for command metadata,
+/// hot-command dispatch, and ACL key-spec cache construction.
+pub fn warm_dispatch_tables() {
+    let _ = runtime_dispatch_index();
+    let _ = hot_runtime_dispatch();
+    let _ = command_metadata_table();
+    for idx in 0..COMMANDS.len() {
+        let _ = cached_acl_key_spec_items(idx);
+    }
+}
+
 fn command_rename_state() -> &'static RwLock<CommandRenameState> {
     COMMAND_RENAME_STATE.get_or_init(|| RwLock::new(CommandRenameState::default()))
 }

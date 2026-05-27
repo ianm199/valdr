@@ -13,6 +13,12 @@ redis-commands = { workspace = true }
 libc = { workspace = true }
 mio = { workspace = true }
 rustls = { workspace = true }
+tikv-jemallocator = { workspace = true, optional = true }
+
+[features]
+default = ["eager-dispatch-warmup"]
+eager-dispatch-warmup = []
+allocator-jemalloc = ["dep:tikv-jemallocator"]
 
 [[bin]]
 name = "redis-server"
