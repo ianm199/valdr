@@ -34,6 +34,47 @@ Three numbers, three different denominators, all true at once:
 - **Full upstream (2466 / 4299):** the same proven single-node blocks measured
   against the entire upstream suite, whose remaining surface is bucketed below.
 
+## Conformance At A Glance
+
+Bars visualize the exact numbers tabulated in this document (single-node run
+`20260527T201327757399Z` + the `single-node-core-dashboard.py` projection).
+Within the scope we build (single-node core) we are at 97% proven / 100% of
+counted assertions; the full-suite bar reads lower only because ~41% of the
+4,299-block denominator is cluster/modules/sentinel/integration we have
+deliberately not built.
+
+```
+FULL UPSTREAM TCL SUITE — 4,299 source test blocks
+  ███████████████████▓░░░░░░░░░░░░░░  2,466 proven of 4,299
+  █ proven 2,465   ▓ in-scope pending 66   ░ not built (out of scope) 1,768
+
+COVERAGE WITHIN EACH BUCKET (proven of that bucket's own tests)
+  single-node core (built)    █████████████████████████████████░  2465 / 2531   97%
+  modules / C ABI             ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░     0 / 587     0%   not built (by design)
+  cluster                     ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░     0 / 564     0%   not built
+  integration (repl/AOF/CLI)  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░     0 / 473     0%   separate runner; not gated
+  sentinel                    ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░     0 / 100     0%   not built
+  platform (TLS/iothr/MPTCP)  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░     0 / 33      0%   deferred
+  persistence frontier        ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░     0 / 9       0%   unit/aofrw, alpha
+  robustness (fuzzer)         ██████████████████████████████████     1 / 1     100%
+
+SINGLE-NODE CORE — 2,541 source blocks (the scope we build)
+  proven                      █████████████████████████████████░ 2,466 / 2,541  97.0%
+  counted assertions          ██████████████████████████████████ 3,015 / 3,015  100.0%
+
+SINGLE-NODE CORE BY SUBSYSTEM (proven source blocks)
+  auth/config/introspection   ██████████████████████████████████ 436 / 436  100.0%
+  execution                   ██████████████████████████████████ 450 / 450  100.0%
+  keyspace/memory             ██████████████████████████████████ 524 / 524  100.0%
+  protocol/client             ██████████████████████████████████ 125 / 126   99.2%
+  data types                  ████████████████████████████████░░ 930 / 995   93.5%
+
+INDEPENDENT ORACLES
+  Rust workspace tests        ██████████████████████████████████ 405 / 405  100.0%
+  wire-diff smoke             ██████████████████████████████████  23 / 23   100.0%
+  RDB bidirectional           ██████████████████████████████████ 378 / 378  100.0%
+```
+
 ## Authoritative Commands
 
 ```bash

@@ -22,6 +22,10 @@ use redis_types::{RedisError, RedisResult, RedisString};
 
 use crate::connection::get_max_clients;
 
+// Keep INFO memory Redis-like: an empty server still has process overhead.
+// This stays tiny so maxmemory tests driven from used_memory remain stable.
+const ESTIMATED_SERVER_MEMORY_BASELINE: u64 = 1024;
+
 /// Process start time (unix seconds), captured on first call.
 ///
 /// Used by both `INFO server` (for `uptime_in_seconds`) and `LASTSAVE`.
@@ -280,7 +284,8 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if want(b"memory") {
         let key_memory = approximate_memory_used(ctx.db());
         let (mem_clients_normal, mem_clients_slaves) = client_memory_info_totals();
-        let used_memory = key_memory
+        let used_memory = ESTIMATED_SERVER_MEMORY_BASELINE
+            .saturating_add(key_memory)
             .saturating_add(mem_clients_normal as u64)
             .saturating_add(mem_clients_slaves as u64);
         let used_memory_human = format_human_bytes(used_memory);

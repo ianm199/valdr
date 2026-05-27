@@ -1257,9 +1257,6 @@ impl RuntimeOwner {
             .map(ClientSlot::id)
             .collect();
         for slot_id in ids {
-            if let Some(slot) = self.slot_mut(slot_id) {
-                slot.clear_pause_postponed();
-            }
             self.schedule_command_continuation(slot_id);
             scheduled = true;
         }
@@ -1455,7 +1452,11 @@ impl RuntimeOwner {
             Some(slot) => slot,
             None => return SlotDispatchOutcome::default(),
         };
-        if slot.closed || slot.close_after_flush || slot.client.query_buf.is_empty() {
+        let has_parked_paused_command = slot.pause_postponed && !slot.client.argv.is_empty();
+        if slot.closed
+            || slot.close_after_flush
+            || (slot.client.query_buf.is_empty() && !has_parked_paused_command)
+        {
             return SlotDispatchOutcome::default();
         }
 
@@ -1468,88 +1469,95 @@ impl RuntimeOwner {
         let mut paused_actions = current_paused_actions(server);
 
         while commands < MAX_COMMANDS_PER_SLOT_TICK {
-            if let Some(err) = super::unauthenticated_protocol_limit_error(
-                &slot.client,
-                &slot.client.query_buf[consumed_total..],
-            ) {
-                super::queue_error_reply(&mut slot.client, &err);
-                slot.mark_close_after_flush();
-                break;
-            }
-            let parsed = slot.client.parse_query_buffer_into_argv(consumed_total);
-            match parsed {
-                Ok(Some(consumed)) => {
-                    consumed_total += consumed;
-                    if slot.client.argv.is_empty() {
-                        continue;
-                    }
-                    commands += 1;
-                    saw_command = true;
-                    last_cmd_name.clear();
-                    if let Some(cmd) = slot.client.arg(0) {
-                        last_cmd_name.extend_from_slice(cmd.as_bytes());
-                    }
-                    if super::is_client_info_observer(&last_cmd_name) {
-                        super::update_client_info_snapshot(&slot.client, &last_cmd_name);
-                    }
-                    if slot_command_is_paused(slot, paused_actions) {
-                        slot.mark_pause_postponed();
-                        paused_before_dispatch = true;
-                        break;
-                    }
-                    slot.clear_pause_postponed();
-                    if client_exceeds_own_memory_limit_after_parse(slot, server, consumed_total) {
-                        slot.mark_closed();
-                        server_metrics()
-                            .evicted_clients
-                            .fetch_add(1, Ordering::Relaxed);
-                        break;
-                    }
-
-                    if (slot.client.db_index as usize) >= self.dbs.len() {
-                        super::queue_error_reply(
-                            &mut slot.client,
-                            &redis_types::RedisError::runtime(b"ERR DB index is out of range"),
-                        );
-                        slot.mark_close_after_flush();
-                        break;
-                    }
-                    super::process_current_command_with_db_list(
-                        &mut slot.client,
-                        &mut self.dbs,
-                        registry,
-                        server,
-                    );
-
-                    if slot.client.should_close {
-                        slot.mark_close_after_flush();
-                        break;
-                    }
-                    paused_actions = current_paused_actions(server);
+            if slot.pause_postponed && !slot.client.argv.is_empty() {
+                commands += 1;
+                saw_command = true;
+                last_cmd_name.clear();
+                if let Some(cmd) = slot.client.arg(0) {
+                    last_cmd_name.extend_from_slice(cmd.as_bytes());
                 }
-                Ok(None) => {
-                    saw_incomplete_query = consumed_total < slot.client.query_buf.len();
+                if slot_command_is_paused(slot, paused_actions) {
+                    paused_before_dispatch = true;
                     break;
                 }
-                Err(err) => {
+                slot.clear_pause_postponed();
+            } else {
+                if let Some(err) = super::unauthenticated_protocol_limit_error(
+                    &slot.client,
+                    &slot.client.query_buf[consumed_total..],
+                ) {
                     super::queue_error_reply(&mut slot.client, &err);
                     slot.mark_close_after_flush();
                     break;
                 }
+                let parsed = slot.client.parse_query_buffer_into_argv(consumed_total);
+                match parsed {
+                    Ok(Some(consumed)) => {
+                        consumed_total += consumed;
+                        if slot.client.argv.is_empty() {
+                            continue;
+                        }
+                        commands += 1;
+                        saw_command = true;
+                        last_cmd_name.clear();
+                        if let Some(cmd) = slot.client.arg(0) {
+                            last_cmd_name.extend_from_slice(cmd.as_bytes());
+                        }
+                        if super::is_client_info_observer(&last_cmd_name) {
+                            super::update_client_info_snapshot(&slot.client, &last_cmd_name);
+                        }
+                        if slot_command_is_paused(slot, paused_actions) {
+                            slot.mark_pause_postponed();
+                            paused_before_dispatch = true;
+                            break;
+                        }
+                        slot.clear_pause_postponed();
+                    }
+                    Ok(None) => {
+                        saw_incomplete_query = consumed_total < slot.client.query_buf.len();
+                        break;
+                    }
+                    Err(err) => {
+                        super::queue_error_reply(&mut slot.client, &err);
+                        slot.mark_close_after_flush();
+                        break;
+                    }
+                }
             }
+
+            if client_exceeds_own_memory_limit_after_parse(slot, server, consumed_total) {
+                slot.mark_closed();
+                server_metrics()
+                    .evicted_clients
+                    .fetch_add(1, Ordering::Relaxed);
+                break;
+            }
+
+            if (slot.client.db_index as usize) >= self.dbs.len() {
+                super::queue_error_reply(
+                    &mut slot.client,
+                    &redis_types::RedisError::runtime(b"ERR DB index is out of range"),
+                );
+                slot.mark_close_after_flush();
+                break;
+            }
+            super::process_current_command_with_db_list(
+                &mut slot.client,
+                &mut self.dbs,
+                registry,
+                server,
+            );
+
+            if slot.client.should_close {
+                slot.mark_close_after_flush();
+                break;
+            }
+            paused_actions = current_paused_actions(server);
         }
 
         let reschedule = commands == MAX_COMMANDS_PER_SLOT_TICK
             && consumed_total < slot.client.query_buf.len()
             && has_complete_command(&slot.client.query_buf[consumed_total..]);
-
-        if paused_before_dispatch {
-            return SlotDispatchOutcome {
-                progressed: false,
-                queued_write: false,
-                reschedule: false,
-            };
-        }
 
         if saw_incomplete_query {
             slot.observe_incomplete_query_buffer();
@@ -1575,7 +1583,7 @@ impl RuntimeOwner {
         SlotDispatchOutcome {
             progressed: saw_command || consumed_total > 0,
             queued_write,
-            reschedule,
+            reschedule: reschedule && !paused_before_dispatch,
         }
     }
 

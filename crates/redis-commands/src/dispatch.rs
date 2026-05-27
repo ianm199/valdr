@@ -563,6 +563,15 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
         return Ok(());
     }
 
+    if metadata.write {
+        if let Some(reply) = enforce_min_replicas_gate(ctx) {
+            record_command_stat(name, 0, true, false);
+            record_dispatch_error_reply(ctx, &reply);
+            ctx.client_mut().reply_buf.extend_from_slice(&reply);
+            return Ok(());
+        }
+    }
+
     if let Some(reply) = enforce_maxmemory_gate(ctx, metadata.denyoom) {
         record_command_stat(name, 0, true, false);
         record_dispatch_error_reply(ctx, &reply);
@@ -1963,6 +1972,28 @@ fn enforce_replica_readonly_gate(
     }
     Some(b"-READONLY You can't write against a read only replica.\r\n".to_vec())
 }
+
+fn enforce_min_replicas_gate(ctx: &CommandContext<'_>) -> Option<Vec<u8>> {
+    if good_replicas_status(ctx) {
+        return None;
+    }
+    Some(NOREPLICAS_ERROR.to_vec())
+}
+
+fn good_replicas_status(ctx: &CommandContext<'_>) -> bool {
+    let min_replicas = ctx.live_config().repl_min_replicas_to_write();
+    let max_lag_secs = ctx.live_config().repl_min_replicas_max_lag();
+    if min_replicas == 0 || max_lag_secs == 0 {
+        return true;
+    }
+    let repl = redis_core::replication::global_replication_state();
+    if repl.is_replica() {
+        return true;
+    }
+    repl.good_replicas_count(max_lag_secs) as u64 >= min_replicas
+}
+
+const NOREPLICAS_ERROR: &[u8] = b"-NOREPLICAS Not enough good replicas to write.\r\n";
 
 fn script_command_has_runtime_readonly_flags(name: &[u8]) -> bool {
     ascii_eq_ignore_case(name, b"EVAL")

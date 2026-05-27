@@ -59,7 +59,8 @@ pub fn save_hash_object(w: &mut impl Write, obj: &RedisObject) -> io::Result<()>
 /// Reads from `r` starting immediately after the type byte.
 pub fn load_hash_object(r: &mut impl Read) -> io::Result<RedisObject> {
     let (n, _is_encoded) = load_len(r)?;
-    let mut hash: HashMap<RedisString, RedisString> = HashMap::with_capacity(super::prealloc_capacity(n));
+    let mut hash: HashMap<RedisString, RedisString> =
+        HashMap::with_capacity(super::prealloc_capacity(n));
     for _ in 0..n {
         let field_bytes = read_rdb_string(r)?;
         let value_bytes = read_rdb_string(r)?;
