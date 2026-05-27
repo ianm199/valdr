@@ -67,16 +67,21 @@ fn would_block(e: &io::Error) -> bool {
     e.kind() == io::ErrorKind::WouldBlock
 }
 
-/// Pull all available ciphertext from the transport into the session and
-/// process it. Returns `Ok(true)` if the transport hit EOF.
+/// Pull available ciphertext from `stream` into `session` and process it.
+/// Returns `Ok(true)` if the transport hit EOF. Generic over the byte stream so
+/// the server's owner loop (which owns the `mio::TcpStream`) reuses the exact
+/// same, harness-tested pump as the backend.
 ///
-/// C: the `SSL_read`-side of `handleSSLReturnCode` + `read()` into the BIO.
-fn pump_incoming(tls: &mut TlsIo) -> Result<bool, RedisError> {
+/// C: the `SSL_read`-side of `handleSSLReturnCode` + the BIO read.
+pub fn session_read_pump<S: io::Read>(
+    session: &mut rustls::ServerConnection,
+    stream: &mut S,
+) -> Result<bool, RedisError> {
     loop {
-        match tls.session.read_tls(&mut tls.io) {
+        match session.read_tls(stream) {
             Ok(0) => return Ok(true),
             Ok(_) => {
-                tls.session
+                session
                     .process_new_packets()
                     .map_err(|_| RedisError::io(io::ErrorKind::InvalidData))?;
             }
@@ -86,12 +91,15 @@ fn pump_incoming(tls: &mut TlsIo) -> Result<bool, RedisError> {
     }
 }
 
-/// Flush pending ciphertext from the session to the transport.
+/// Flush pending ciphertext from `session` to `stream`.
 ///
 /// C: `updateSSLEvent` / the `SSL_write` BIO-drain side.
-fn pump_outgoing(tls: &mut TlsIo) -> Result<(), RedisError> {
-    while tls.session.wants_write() {
-        match tls.session.write_tls(&mut tls.io) {
+pub fn session_write_pump<S: io::Write>(
+    session: &mut rustls::ServerConnection,
+    stream: &mut S,
+) -> Result<(), RedisError> {
+    while session.wants_write() {
+        match session.write_tls(stream) {
             Ok(0) => break,
             Ok(_) => {}
             Err(e) if would_block(&e) => break,
@@ -99,6 +107,14 @@ fn pump_outgoing(tls: &mut TlsIo) -> Result<(), RedisError> {
         }
     }
     Ok(())
+}
+
+fn pump_incoming(tls: &mut TlsIo) -> Result<bool, RedisError> {
+    session_read_pump(&mut *tls.session, &mut tls.io)
+}
+
+fn pump_outgoing(tls: &mut TlsIo) -> Result<(), RedisError> {
+    session_write_pump(&mut *tls.session, &mut tls.io)
 }
 
 impl ConnectionTypeTrait for TlsConnectionType {

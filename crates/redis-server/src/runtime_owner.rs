@@ -32,10 +32,12 @@ use redis_core::networking::{
     note_pause_resumed_client, pause_postponed_client_count, PAUSE_ACTION_CLIENT_ALL,
     PAUSE_ACTION_CLIENT_WRITE, PAUSE_ACTION_EVICT, PAUSE_ACTION_EXPIRE,
 };
+use redis_core::conn_tls::{session_read_pump, session_write_pump};
 use redis_core::pubsub_registry::PubSubRegistry;
 use redis_core::{Client, Connection};
 use redis_protocol::parse_inline_or_multibulk_into;
 use redis_types::RedisString;
+use rustls::{ServerConfig, ServerConnection};
 
 pub const DEFAULT_DATABASE_COUNT: u32 = 16;
 const DEFAULT_EVENT_CAPACITY: usize = 1024;
@@ -247,6 +249,11 @@ pub struct ClientSlot {
     writable_interest: bool,
     closed: bool,
     close_after_flush: bool,
+    /// Present iff this is a TLS connection: the rustls server session layered
+    /// over `stream`. `None` for plain TCP (the untouched fast path).
+    tls: Option<Box<ServerConnection>>,
+    /// TLS handshake completed — only then is `stream` carrying app data.
+    tls_handshake_done: bool,
 }
 
 impl ClientSlot {
@@ -270,6 +277,8 @@ impl ClientSlot {
             writable_interest: false,
             closed: false,
             close_after_flush: false,
+            tls: None,
+            tls_handshake_done: false,
         }
     }
 
@@ -298,6 +307,8 @@ impl ClientSlot {
             writable_interest: false,
             closed: false,
             close_after_flush: false,
+            tls: None,
+            tls_handshake_done: false,
         }
     }
 
@@ -702,6 +713,11 @@ pub struct RuntimeOwner {
     events: VecDeque<RuntimeEvent>,
     replica_apply_rx: Option<Receiver<redis_commands::replica_dialer::ReplicaApplyRequest>>,
     replica_apply_db_index: u32,
+    /// rustls server config for TLS listeners; `None` when TLS is disabled.
+    tls_config: Option<Arc<ServerConfig>>,
+    /// First listener-token index that is a TLS listener. Tokens
+    /// `tls_listener_start..listeners.len()` accept TLS; below it, plain TCP.
+    tls_listener_start: usize,
 }
 
 impl RuntimeOwner {
@@ -730,6 +746,8 @@ impl RuntimeOwner {
             events: VecDeque::new(),
             replica_apply_rx: None,
             replica_apply_db_index: 0,
+            tls_config: None,
+            tls_listener_start: usize::MAX,
         }
     }
 
@@ -824,6 +842,8 @@ impl RuntimeOwner {
         registry: Arc<Mutex<PubSubRegistry>>,
         server: Arc<redis_core::RedisServer>,
         tcp_port: u16,
+        tls_listeners: Vec<StdTcpListener>,
+        tls_config: Option<Arc<ServerConfig>>,
         initial_dbs: Vec<RedisDb>,
         replica_apply_rx: Receiver<redis_commands::replica_dialer::ReplicaApplyRequest>,
     ) {
@@ -832,6 +852,13 @@ impl RuntimeOwner {
             .into_iter()
             .map(MioTcpListener::from_std)
             .collect();
+        // TLS listeners follow the plain ones; their token indices are
+        // `plain_listener_count..listeners.len()`.
+        let plain_listener_count = listeners.len();
+        let tls_listener_count = tls_listeners.len();
+        for l in tls_listeners {
+            listeners.push(MioTcpListener::from_std(l));
+        }
         if listeners.is_empty() {
             eprintln!("redis-server: no plain TCP listeners installed");
         }
@@ -866,6 +893,18 @@ impl RuntimeOwner {
         let mut owner = RuntimeOwner::with_databases(config, initial_dbs);
         owner.replica_apply_rx = Some(replica_apply_rx);
         owner.poll_driver = PollDriverHandle::mio(1);
+        owner.tls_config = tls_config;
+        owner.tls_listener_start = if tls_listener_count > 0 {
+            plain_listener_count
+        } else {
+            usize::MAX
+        };
+        if tls_listener_count > 0 {
+            eprintln!(
+                "redis-server: {} TLS listener(s) enabled (token >= {})",
+                tls_listener_count, plain_listener_count
+            );
+        }
         eprintln!("redis-server: RuntimeOwner mio plain TCP loop enabled with owner-owned DBs");
 
         while !shutdown.load(Ordering::SeqCst) {
@@ -994,6 +1033,7 @@ impl RuntimeOwner {
         poll_registry: &MioRegistry,
         next_client_id: &Arc<AtomicU64>,
         registry: &Arc<Mutex<PubSubRegistry>>,
+        is_tls: bool,
     ) -> bool {
         let mut progressed = false;
         loop {
@@ -1039,6 +1079,30 @@ impl RuntimeOwner {
                     }
                     let mio_stream = MioTcpStream::from_std(stream);
 
+                    let tls_session = if is_tls {
+                        match self.tls_config.clone() {
+                            Some(cfg) => match ServerConnection::new(cfg) {
+                                Ok(s) => Some(Box::new(s)),
+                                Err(e) => {
+                                    eprintln!(
+                                        "redis-server: tls ServerConnection::new failed for {}: {}",
+                                        peer_addr, e
+                                    );
+                                    continue;
+                                }
+                            },
+                            None => {
+                                eprintln!(
+                                    "redis-server: TLS accept but no tls_config; dropping {}",
+                                    peer_addr
+                                );
+                                continue;
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
                     let id = next_client_id.fetch_add(1, Ordering::Relaxed);
                     let (tx, rx) = mpsc::channel::<Vec<u8>>();
                     {
@@ -1073,6 +1137,12 @@ impl RuntimeOwner {
                             continue;
                         }
                     };
+
+                    if let Some(session) = tls_session {
+                        if let Some(slot) = self.slot_mut(slot_id) {
+                            slot.tls = Some(session);
+                        }
+                    }
 
                     metrics.on_connect();
                     metrics
@@ -1167,11 +1237,13 @@ impl RuntimeOwner {
         for event in events.iter() {
             if event.token().0 < listeners.len() {
                 if event.is_readable() {
+                    let is_tls = event.token().0 >= self.tls_listener_start;
                     progressed |= self.accept_ready(
                         &listeners[event.token().0],
                         poll_registry,
                         next_client_id,
                         registry,
+                        is_tls,
                     );
                 }
                 continue;
@@ -1187,7 +1259,11 @@ impl RuntimeOwner {
                 progressed |= self.read_slot(idx, &mut read_buf);
                 let outcome = self.dispatch_slot_commands(idx, registry, server);
                 progressed |= outcome.progressed;
-                if outcome.queued_write {
+                if self.slot_is_tls(idx) {
+                    // Flush handshake output and/or encrypted replies; the TLS
+                    // flush path owns interest recomputation.
+                    progressed |= self.flush_slot_pending_write(idx, poll_registry);
+                } else if outcome.queued_write {
                     progressed |= self.flush_slot_pending_write(idx, poll_registry);
                     progressed |= self.ensure_writable_interest(poll_registry, slot_id);
                 }
@@ -1388,7 +1464,195 @@ impl RuntimeOwner {
         !client.reply_buf.starts_with(b"-")
     }
 
+    fn slot_is_tls(&self, idx: usize) -> bool {
+        self.slots
+            .get(idx)
+            .and_then(Option::as_ref)
+            .is_some_and(|s| s.tls.is_some())
+    }
+
+    /// TLS counterpart of `read_slot`: advance the rustls handshake first, then
+    /// deliver decrypted plaintext into the query buffer. Reuses the shared,
+    /// harness-tested `session_read_pump`/`session_write_pump`. All `slot`
+    /// mutations happen outside the `stream`/`session` borrow scope.
+    fn read_slot_tls(&mut self, idx: usize, read_buf: &mut [u8; READ_BUFFER_SIZE]) -> bool {
+        let slot = match self.slots.get_mut(idx).and_then(Option::as_mut) {
+            Some(slot) => slot,
+            None => return false,
+        };
+        if slot.closed || slot.close_after_flush {
+            return false;
+        }
+        if slot.stream.is_none() || slot.tls.is_none() {
+            slot.mark_closed();
+            return false;
+        }
+
+        let mut progressed = false;
+        let mut plaintext: Vec<u8> = Vec::new();
+        let mut transport_closed = false;
+        let mut handshake_just_finished = false;
+        let mut errored = false;
+        let mut still_handshaking = false;
+
+        {
+            let stream = slot.stream.as_mut().unwrap();
+            let session = slot.tls.as_mut().unwrap().as_mut();
+
+            if !slot.tls_handshake_done {
+                if session_write_pump(session, stream).is_err() {
+                    errored = true;
+                } else {
+                    match session_read_pump(session, stream) {
+                        Ok(eof) => {
+                            let _ = session_write_pump(session, stream);
+                            if session.is_handshaking() {
+                                transport_closed = eof;
+                                still_handshaking = true;
+                            } else {
+                                handshake_just_finished = true;
+                            }
+                        }
+                        Err(_) => errored = true,
+                    }
+                }
+            }
+
+            if !errored && !still_handshaking {
+                match session_read_pump(session, stream) {
+                    Ok(eof) => transport_closed = eof,
+                    Err(_) => errored = true,
+                }
+                if !errored {
+                    loop {
+                        match session.reader().read(read_buf) {
+                            Ok(0) => {
+                                transport_closed = true;
+                                break;
+                            }
+                            Ok(n) => plaintext.extend_from_slice(&read_buf[..n]),
+                            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                            Err(_) => {
+                                transport_closed = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if handshake_just_finished {
+            slot.tls_handshake_done = true;
+        }
+        if errored {
+            slot.mark_closed();
+            return progressed;
+        }
+        if still_handshaking {
+            if transport_closed {
+                slot.mark_closed();
+            }
+            return progressed;
+        }
+        if !plaintext.is_empty() {
+            if super::client_has_pending_kill(slot.client.id) {
+                slot.mark_closed();
+                return progressed;
+            }
+            slot.client.net_input_bytes =
+                slot.client.net_input_bytes.saturating_add(plaintext.len() as u64);
+            slot.ingest(&plaintext);
+            slot.refresh_client_memory_snapshot();
+            let query_limit = redis_commands::connection::client_query_buffer_limit();
+            if query_limit > 0 && slot.client.query_buf.len() > query_limit {
+                slot.mark_closed();
+                server_metrics()
+                    .client_query_buffer_limit_disconnections
+                    .fetch_add(1, Ordering::Relaxed);
+                return progressed;
+            }
+            progressed = true;
+        }
+        if transport_closed && plaintext.is_empty() {
+            slot.mark_closed();
+        }
+        progressed
+    }
+
+    /// TLS counterpart of `flush_slot_pending_write`: move plaintext replies into
+    /// the rustls session, flush ciphertext to the socket, and recompute Poll
+    /// interest from the session's write intent (the `updateSSLEvent` analog).
+    fn flush_slot_pending_write_tls(&mut self, idx: usize, poll_registry: &MioRegistry) -> bool {
+        let slot = match self.slots.get_mut(idx).and_then(Option::as_mut) {
+            Some(slot) => slot,
+            None => return false,
+        };
+        if slot.closed {
+            return false;
+        }
+        if slot.stream.is_none() || slot.tls.is_none() {
+            slot.mark_closed();
+            return false;
+        }
+
+        let mut progressed = false;
+        let mut consumed = 0usize;
+        let mut errored = false;
+
+        {
+            let stream = slot.stream.as_mut().unwrap();
+            let session = slot.tls.as_mut().unwrap().as_mut();
+
+            // 1. Encrypt as much queued plaintext as the session buffer accepts.
+            let bytes = slot.write_buffer.as_bytes();
+            if !bytes.is_empty() {
+                match session.writer().write(bytes) {
+                    Ok(n) => consumed = n,
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(_) => errored = true,
+                }
+            }
+            // 2. Flush ciphertext (handshake output + encrypted replies).
+            if !errored && session_write_pump(session, stream).is_err() {
+                errored = true;
+            }
+        }
+
+        if consumed > 0 {
+            slot.write_buffer.consume_front(consumed);
+            slot.client.net_output_bytes =
+                slot.client.net_output_bytes.saturating_add(consumed as u64);
+            slot.reconcile_output_buffer_after_write();
+            progressed = true;
+        }
+        if errored {
+            slot.mark_closed();
+            return progressed;
+        }
+
+        // 3. Recompute interest: WRITABLE iff there is unflushed ciphertext or
+        //    still-queued plaintext.
+        let want_write = !slot.write_buffer.is_empty()
+            || slot.tls.as_ref().is_some_and(|s| s.wants_write());
+        if want_write != slot.writable_interest {
+            let token = token_for_slot(slot.id());
+            if let Some(stream) = slot.stream.as_mut() {
+                if poll_registry
+                    .reregister(stream, token, client_interest(want_write))
+                    .is_ok()
+                {
+                    slot.writable_interest = want_write;
+                }
+            }
+        }
+        progressed
+    }
+
     fn read_slot(&mut self, idx: usize, read_buf: &mut [u8; READ_BUFFER_SIZE]) -> bool {
+        if self.slot_is_tls(idx) {
+            return self.read_slot_tls(idx, read_buf);
+        }
         let slot = match self.slots.get_mut(idx).and_then(Option::as_mut) {
             Some(slot) => slot,
             None => return false,
@@ -1758,6 +2022,9 @@ impl RuntimeOwner {
     }
 
     fn flush_slot_pending_write(&mut self, idx: usize, poll_registry: &MioRegistry) -> bool {
+        if self.slot_is_tls(idx) {
+            return self.flush_slot_pending_write_tls(idx, poll_registry);
+        }
         let mut progressed = false;
         let slot = match self.slots.get_mut(idx).and_then(Option::as_mut) {
             Some(slot) => slot,

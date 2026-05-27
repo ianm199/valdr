@@ -208,6 +208,11 @@ def tcl_command(test_file: str, args: argparse.Namespace) -> list[str]:
         cmd.extend(["--portcount", str(args.portcount)])
     if args.deny_tags:
         cmd.extend(["--tags", " ".join(f"-{tag}" for tag in args.deny_tags)])
+    if getattr(args, "tls", False):
+        # test_helper --tls generates certs (tests/tls/gen-test-certs.sh) and
+        # starts each server with tls-port/tls-cert-file/etc.; our build_tls_startup
+        # honors those. Required for the `if {$::tls}`-gated unit/tls.tcl.
+        cmd.append("--tls")
     if args.quiet:
         cmd.append("--quiet")
     return cmd
@@ -276,6 +281,12 @@ def main() -> int:
         action="store_true",
         help="Do not apply the default needs:repl/needs:debug/external:skip deny policy.",
     )
+    parser.add_argument(
+        "--tls",
+        action="store_true",
+        help="Run test_helper in TLS mode: generate certs and start servers with "
+        "tls-port/tls-cert-file/etc. Required for the if {$::tls}-gated unit/tls.tcl.",
+    )
     args = parser.parse_args()
     deny_tags = [] if args.no_default_deny_tags else list(DENY_TAG_PROFILES[args.profile])
     deny_tags.extend(args.extra_deny_tags)
@@ -337,6 +348,22 @@ def main() -> int:
         if args.isolated_tests_copy:
             reference_cwd = prepare_isolated_reference(Path(raw_tmp))
             isolated_root = str(reference_cwd)
+
+        if getattr(args, "tls", False):
+            # Generate the test cert suite (tests/tls/{ca,server,client}.{crt,key},
+            # valkey.dh, …) that test_helper --tls and the spawned servers expect.
+            # The upstream generator lives in utils/, writing to ./tests/tls.
+            gen = REFERENCE / "utils" / "gen-test-certs.sh"
+            cert_proc = run_process(
+                ["bash", str(gen)],
+                cwd=reference_cwd,
+                timeout_s=args.setup_timeout_s,
+            )
+            if cert_proc.get("returncode") not in (0, None):
+                print(
+                    f"warning: gen-test-certs.sh exited {cert_proc.get('returncode')}",
+                    file=sys.stderr,
+                )
 
         for test_file in files:
             safe_name = test_file.replace("/", "__")

@@ -816,6 +816,15 @@ fn expose_config_file_value(key: &str) -> bool {
             | "maxmemory-clients"
             | "client-query-buffer-limit"
             | "unixsocket"
+            | "tls-port"
+            | "tls-cert-file"
+            | "tls-key-file"
+            | "tls-ca-cert-file"
+            | "tls-ca-cert-dir"
+            | "tls-auth-clients"
+            | "tls-protocols"
+            | "tls-ciphers"
+            | "tls-ciphersuites"
     )
 }
 
@@ -1201,6 +1210,11 @@ fn main() {
         live_config_for_hook.set_tls_port(0);
     }));
 
+    // Build the TLS listener(s) + rustls config from startup config (the same
+    // tls-* keys the upstream test harness passes). TLS connections are served
+    // by the same RuntimeOwner / DB as plain TCP (the divergent-DB path is gone).
+    let (tls_listeners, tls_config) = build_tls_startup(&args);
+
     runtime_owner::RuntimeOwner::run_plain_tcp(
         listeners,
         shutdown,
@@ -1208,9 +1222,72 @@ fn main() {
         registry,
         server,
         args.port,
+        tls_listeners,
+        tls_config,
         owner_dbs,
         replica_apply_rx,
     );
+}
+
+/// Read `tls-*` startup directives and, when `tls-port` is enabled, bind TLS
+/// listener(s) and build the rustls `ServerConfig`. Returns empty/None when TLS
+/// is disabled or misconfigured (logged, non-fatal).
+fn build_tls_startup(args: &CliArgs) -> (Vec<TcpListener>, Option<std::sync::Arc<rustls::ServerConfig>>) {
+    let mut tls_port: u16 = 0;
+    let mut cert: Option<std::path::PathBuf> = None;
+    let mut key: Option<std::path::PathBuf> = None;
+    let mut ca: Option<std::path::PathBuf> = None;
+    let mut auth_clients: u8 = 0;
+    for (k, v) in &args.startup_config_overrides {
+        match k.to_ascii_lowercase().as_str() {
+            "tls-port" => tls_port = v.trim().parse().unwrap_or(0),
+            "tls-cert-file" if !v.is_empty() => cert = Some(std::path::PathBuf::from(v)),
+            "tls-key-file" if !v.is_empty() => key = Some(std::path::PathBuf::from(v)),
+            "tls-ca-cert-file" if !v.is_empty() => ca = Some(std::path::PathBuf::from(v)),
+            "tls-auth-clients" => {
+                auth_clients = match v.trim() {
+                    "yes" => 1,
+                    "optional" => 2,
+                    _ => 0,
+                }
+            }
+            _ => {}
+        }
+    }
+    if tls_port == 0 {
+        return (Vec::new(), None);
+    }
+    let (cert, key) = match (cert, key) {
+        (Some(c), Some(k)) => (c, k),
+        _ => {
+            eprintln!("redis-server: tls-port set but tls-cert-file/tls-key-file missing; TLS disabled");
+            return (Vec::new(), None);
+        }
+    };
+    let cfg = match redis_core::tls::TlsConfig::from_paths(&cert, &key, ca.as_deref(), auth_clients == 1) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("redis-server: TLS config error: {}; TLS disabled", e);
+            return (Vec::new(), None);
+        }
+    };
+    let mut tls_listeners = Vec::new();
+    for bind in &args.bind {
+        let bind_ip: IpAddr = match bind.parse() {
+            Ok(ip) => ip,
+            Err(_) => continue,
+        };
+        let addr = SocketAddr::new(bind_ip, tls_port);
+        match TcpListener::bind(addr) {
+            Ok(l) => {
+                let _ = l.set_nonblocking(true);
+                eprintln!("redis-server: TLS listening on {}", addr);
+                tls_listeners.push(l);
+            }
+            Err(e) => eprintln!("redis-server: TLS bind {} failed: {}", addr, e),
+        }
+    }
+    (tls_listeners, Some(cfg.server_config))
 }
 
 #[cfg(unix)]
