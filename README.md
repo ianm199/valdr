@@ -49,28 +49,39 @@ Single-node Valkey-compatible server: a Rust port of the upstream Valkey C imple
 
 ## Performance
 
-Latest warmed local run:
+Latest warmed local run vs upstream Valkey:
 
-| Suite | Result |
-|---|---:|
-| Default suite, ordered, P100 | 23 / 23 pass |
-| Default suite median ratio vs Valkey | 1.250x |
-| Default suite min ratio vs Valkey | 0.593x |
-| Pipeline smoke | 9 / 9 pass |
-| Pipeline smoke median ratio vs Valkey | 1.108x |
-| JSON document mix, 4KB docs, P1 | 3 / 3 pass |
-| JSON document mix median ratio vs Valkey | 1.012x |
-
-Representative rows:
+Single-operation and cache-shaped workloads:
 
 | Workload | Pipeline | Valkey rps | valkey-rs rps | Ratio | Valkey p99 ms | valkey-rs p99 ms |
 |---|---:|---:|---:|---:|---:|---:|
 | GET | 1 | 149,031 | 147,275 | 0.988x | 0.407 | 0.399 |
 | SET | 1 | 136,426 | 143,678 | 1.053x | 0.439 | 0.399 |
+| JSON GET, 4KB docs | 1 | 34,288 | 33,832 | 0.987x | 4.167 | 4.173 |
+| JSON SET, 4KB docs | 1 | 32,503 | 32,889 | 1.012x | 4.249 | 4.387 |
+| JSON mixed, 4KB docs | 1 | 33,090 | 34,438 | 1.041x | 4.284 | 4.131 |
+
+Pipelined throughput:
+
+| Workload | Pipeline | Valkey rps | valkey-rs rps | Ratio | Valkey p99 ms | valkey-rs p99 ms |
+|---|---:|---:|---:|---:|---:|---:|
+| GET | 16 | 1,912,046 | 2,118,644 | 1.108x | 0.583 | 0.463 |
+| SET | 16 | 1,461,988 | 1,751,314 | 1.198x | 0.743 | 0.559 |
 | GET | 100 | 3,802,281 | 5,988,024 | 1.575x | 1.527 | 0.935 |
 | SET | 100 | 2,331,003 | 3,610,108 | 1.549x | 2.383 | 1.559 |
-| JSON GET, 4KB docs | 1 | 34,288 | 33,832 | 0.987x | 4.167 | 4.173 |
-| JSON mixed, 4KB docs | 1 | 33,090 | 34,438 | 1.041x | 4.284 | 4.131 |
+
+Broader command suite:
+
+| Suite | Result |
+|---|---:|
+| Default suite, ordered, P100 | 23 / 23 pass |
+| Default suite median ratio vs Valkey | 1.250x |
+| Pipeline smoke | 9 / 9 pass |
+| Pipeline smoke median ratio vs Valkey | 1.108x |
+| JSON document mix, 4KB docs, P1 | 3 / 3 pass |
+| JSON document mix median ratio vs Valkey | 1.012x |
+
+Known slow rows: `FCALL` 0.593x, `ZPOPMIN` 0.722x, `HSET` 0.768x, `ZADD` 0.776x.
 
 Benchmark note:
 
