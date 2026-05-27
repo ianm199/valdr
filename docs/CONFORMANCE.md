@@ -4,8 +4,8 @@ This document is the load-bearing answer to "does it actually work like
 Valkey?" It captures the current state across three independent oracles
 that verify every commit.
 
-For each oracle, the numbers below are the **post-cleanup-wave-8** state
-(commit `8208d9c` and later). They are reproducible; see
+For each oracle, the numbers below are the current alpha-release state.
+They are reproducible; see
 [Reproducing](#reproducing) at the bottom.
 
 ## At a glance
@@ -15,7 +15,7 @@ For each oracle, the numbers below are the **post-cleanup-wave-8** state
 | **Wire-diff smoke** (23 RESP corpus scripts vs upstream Valkey, byte-exact) | **23 / 23 PASS** ✅ |
 | **RDB bidirectional oracle** (we save → C loads; C saves → we load) | **378 / 378 PASS** ✅ |
 | **Upstream Valkey TCL suite** | Scoped evidence only: historical core survey plus focused frontier telemetry; full denominator is 4,299 test blocks |
-| **`unsafe` budget** | **5 documented blocks**, all wrapping `fork(2)` / `waitpid(2)` semantics |
+| **`unsafe` budget** | **14 first-party blocks**, tracked by `harness/unsafe-budgets.toml` |
 
 ## TCL Suite Accounting
 
@@ -362,7 +362,9 @@ Multi-user with SHA-256 password hashes. Category bitmasks
 LIST / WHOAMI / CAT). Channel-pattern allow-lists.
 
 ### TLS
-rustls-based. PEM cert + key loader. Mutual auth supported.
+rustls scaffolding is present, including PEM cert/key loading code, but
+in-process TLS is not release-supported on the runtime-owner path. Put a TLS
+terminator in front of the container if you need encrypted client connections.
 
 ### Native module commands
 RedisJSON-compatible: `JSON.SET / GET / DEL / TYPE / NUMINCRBY /
@@ -413,10 +415,20 @@ above are native Rust implementations of the popular commands.
 
 ### Performance
 
-**Not yet benchmarked.** Our impl uses safe Rust with per-command mutex
-locking on the active DB; real Valkey is single-threaded with no locking.
-Expected ballpark: meaningfully slower than upstream on tight benchmarks,
-similar on pipelined workloads. We'll publish numbers ahead of 1.0.
+The release-candidate benchmark matrix is published as alpha telemetry, not as
+production soak evidence. Latest local artifacts:
+
+- `harness/bench/results/20260527T025338Z-2ff3fcc-default-suite-parts.json`:
+  21/21 non-function default-suite rows pass, median `1.060x` vs upstream,
+  weakest row `0.986x`.
+- `harness/bench/results/20260527T025426Z-2ff3fcc-pipeline-smoke.json`:
+  12/12 pipeline-smoke rows pass, median `1.133x`; no P100 cliff or timeout.
+- `harness/bench/results/20260527T025203Z-2ff3fcc-json-doc-mix.json`:
+  3/3 JSON document scenarios pass, median `0.994x`.
+
+See [`BENCHMARKS.md`](BENCHMARKS.md) and
+[`RUST_PERFORMANCE_IMPROVEMENT_PLAYBOOK_20260526.md`](RUST_PERFORMANCE_IMPROVEMENT_PLAYBOOK_20260526.md)
+for methodology and the exact command lines.
 
 ## Reproducing
 
@@ -430,7 +442,7 @@ bash harness/oracle/smoke.sh --skip-build
 RDB oracle:
 
 ```bash
-bash harness/oracle/smoke.sh --skip-build --with-rdb
+python3 harness/oracle/rdb-diff --direction=all
 ```
 
 TCL suite against our binary (one unit file):

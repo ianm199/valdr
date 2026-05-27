@@ -1,9 +1,9 @@
 # Scope and gaps — what valkey-rs does and does not do today
 
 This document is the **honest counterpart** to the headline numbers in the
-README. The badges ("TCL: 877 pass", "97.9%") are real, but they describe
-quality *within the scope we've built*. They do not describe how much of
-Valkey we've built. That's what this page is for.
+README. The scoped TCL, wire-diff, RDB, and benchmark numbers are real, but
+they describe quality *within the scope we've built*. They do not describe how
+much of Valkey we've built. That's what this page is for.
 
 There are two separate goals:
 
@@ -21,13 +21,13 @@ If you're evaluating whether valkey-rs can replace `redis-server` /
 - **What works**: a single-node Redis/Valkey server speaking RESP2/RESP3
   over TCP and Unix sockets, with the standard data types (string, list,
   hash, set, zset, stream), transactions (MULTI/EXEC/WATCH), basic pub/sub,
-  RDB persistence (bidirectional with upstream), and EVAL/EVALSHA scripting.
-  Existing Redis clients connect without changes.
-- **What does not work yet**: clustering, replication (no replica
-  conformance), Sentinel, modules (RedisJSON / RedisSearch / etc.), TLS,
-  I/O threads, AOF (partial), ACL (partial), and a long tail of newer
-  Valkey 9.0 / Redis 7+ features (HGETDEL, SET IFEQ, LCS,
-  HELLO availability-zone, import-mode, etc.).
+  RDB persistence (bidirectional with upstream), EVAL/EVALSHA scripting, and
+  native RedisJSON/RedisBloom-compatible command subsets. Existing Redis
+  clients connect without changes.
+- **What is not release-grade yet**: clustering, replica/Sentinel HA
+  conformance, loadable C modules, in-process TLS, I/O threads, AOF parity,
+  deeper ACL sweeps, and a long tail of newer Valkey 9.0 / Redis 7+ features
+  (HGETDEL, SET IFEQ, LCS, HELLO availability-zone, import-mode, etc.).
 - **Drop-in readiness**: it can replace a *single-node, basic-types,
   no-replication* Redis. It cannot replace a Redis Cluster, a
   replica/sentinel HA setup, or anything using modules.
@@ -96,15 +96,15 @@ Numbers are upstream `src/` LoC and signal how much surface area remains.
 | Subsystem | Upstream LoC | Status here | Impact if you need it |
 |---|---:|---|---|
 | **Clustering** (`cluster_*.c`) | ~11,200 | Out of scope by design (single-node only) | Cannot drop in for a Redis Cluster deployment. |
-| **Modules API** (`module.c` + header) | ~18,200 | Out of scope by design | RedisJSON, RedisSearch, RedisBloom, RedisGraph, etc. **cannot** load. The C ABI is not exposed. |
-| **Replication** (`replication.c`) | ~5,800 | Backbone exists; not gated, not in CI | No replica conformance. Don't use as primary or replica in an HA setup. |
+| **Modules API** (`module.c` + header) | ~18,200 | Out of scope by design | Loadable `.so` modules cannot load. Native JSON/Bloom subsets exist; RedisSearch/RedisGraph/etc. require separate native ports. |
+| **Replication** (`replication.c`) | ~5,800 | Backbone exists; not release-gated as HA | No replica/Sentinel HA conformance. Don't use as primary or replica in an HA setup. |
 | **Sentinel** (`sentinel.c`) | ~5,400 | Not ported (separate process upstream) | Sentinel-managed failover is not supported. |
 | **ACL** (`acl.c`) | ~3,500 | Partial / not swept | If you rely on user-based authz beyond the legacy `requirepass`, expect gaps. |
 | **AOF** (`aof.c`) | ~2,900 | Partial | RDB persistence works (378/378 bidirectional); AOF is not gated to the same standard. |
 | **TLS** (`tls.c`) | ~2,000 | Deferred post-1.0 | Plain TCP only. Put a TLS terminator in front (haproxy, envoy, nginx) if you need it. |
 | **I/O threads** (`io-threads`) | n/a | Deferred post-1.0 | Single-threaded I/O. Adequate for many workloads, not all. |
 | **Streams consumer groups, newer edges** | ~4,000 (`t_stream.c`) | Partial — `stream-cgroups` is 36 pass / 28 fail | XADD/XREAD/XACK/XCLAIM work; newer consumer-group lifecycle edges fail. |
-| **HyperLogLog** | ~2,100 | Commands present, unit file unswept | PFADD/PFCOUNT/PFMERGE listed as supported but `unit/hyperloglog.tcl` is not in the gated sweep. |
+| **HyperLogLog** | ~2,100 | Commands present, focused frontier is green | PFADD/PFCOUNT/PFMERGE are covered by wire/focused TCL evidence; still not part of a full-suite claim. |
 | **DEBUG command** | ~2,600 | Partial — Tcl tests using `needs:debug` are filtered out | Affects only Tcl-suite expansion, not application code. |
 | **Valkey 9.0 / Redis 7.4+ additions** | scattered | Mostly missing | HGETDEL, SET IFEQ, LCS, HELLO availability-zone, MSETEX edge semantics — listed as deliberate gaps in CONFORMANCE.md. |
 
@@ -122,7 +122,8 @@ Numbers are upstream `src/` LoC and signal how much surface area remains.
 | AOF-based persistence | **Not yet** — partial implementation, not gated. |
 | Redis Cluster (multi-shard, slot-routed) | **No.** Out of scope by design. |
 | Replication / Sentinel HA | **No.** Backbone exists; conformance not established. |
-| RedisJSON / RedisSearch / RedisBloom / Modules | **No.** Module ABI is not exposed. Won't happen pre-1.0. |
+| RedisJSON / RedisBloom command subsets | **Maybe** — native Rust subsets exist; validate the exact commands and paths you use. |
+| RedisSearch / RedisGraph / loadable C modules | **No.** Module ABI is not exposed. Won't happen pre-1.0. |
 | TLS-terminated client connections | **Not in-process.** Use a TLS terminator. |
 
 The honest framing: **valkey-rs today is roughly "Redis 2.6 + most of Redis
@@ -137,9 +138,10 @@ single user's adoption blockers:
 
 1. **Full upstream TCL-suite accounting** — move from focused packet runners
    to a dashboard whose denominator is all 4,299 upstream test blocks.
-2. **Performance to parity** (in progress — see the dashboard at
-   `harness/bench/history/` and `docs/BENCHMARKS.md`). Throughput ratios are
-   climbing past 1.0x on the surveyed workloads.
+2. **Performance evidence and soak** (in progress — see the dashboard at
+   `harness/bench/history/` and `docs/BENCHMARKS.md`). The surveyed default
+   matrix is around parity, but broader workloads and long-duration soak still
+   need publication-grade evidence.
 3. **Replication conformance** — backbone exists; needs a multi-node
    integration sweep before it's claimable.
 4. **AOF parity** to match the RDB story.

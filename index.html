@@ -33,7 +33,7 @@
       <p class="tag"><strong>Redis/Valkey, reimplemented in safe Rust.</strong> A from-scratch port of the server interface that speaks RESP2/3, runs as a normal <code>redis-server</code>, and is checked against <strong>upstream Valkey's own test suite</strong> on every commit — with no C bindings.</p>
 
       <div class="install">
-        <code><span class="prompt">$ </span><span id="install-cmd">docker run --rm -p 6379:6379 ghcr.io/ianm199/valkey-rs:alpha</span></code>
+        <code><span class="prompt">$ </span><span id="install-cmd">docker pull ghcr.io/ianm199/valkey-rs:alpha && docker run --rm -p 6379:6379 -v valkey-rs-data:/data ghcr.io/ianm199/valkey-rs:alpha</span></code>
         <button class="copy-btn" id="copy-btn" aria-label="Copy run command">Copy</button>
       </div>
       <p class="install-note">Speaks the Redis wire protocol — point any existing client (<code>redis-cli</code>, <code>redis-py</code>, <code>ioredis</code>, …) at it with no client-side changes.</p>
@@ -48,19 +48,19 @@
 
   <div class="wrap">
     <div class="stats">
-      <div class="stat"><div class="num good">2,989</div><div class="lbl">upstream Valkey TCL tests passing (single-node suite, 99.3%)</div></div>
+      <div class="stat"><div class="num good">~877</div><div class="lbl">scoped upstream TCL tests passing</div></div>
       <div class="stat"><div class="num accent">23 / 23</div><div class="lbl">RESP wire frames byte-exact vs C</div></div>
       <div class="stat"><div class="num accent">378 / 378</div><div class="lbl">RDB load/save round-trips vs C</div></div>
-      <div class="stat"><div class="num">5</div><div class="lbl"><code>unsafe</code> blocks, all <code>fork</code>/<code>waitpid</code></div></div>
+      <div class="stat"><div class="num">14</div><div class="lbl">first-party <code>unsafe</code> blocks, budgeted and documented</div></div>
     </div>
   </div>
 
   <div class="wrap">
     <section>
       <h2>What it is</h2>
-      <p class="lead"><code>valkey-rs</code> is a from-scratch reimplementation of the <a href="https://github.com/valkey-io/valkey">Redis/Valkey</a> server in Rust — RESP2/3 protocol, all core data types, streams, pub/sub, transactions, Lua scripting, ACL, eviction, TLS, RDB + AOF persistence, and replication basics. It runs as an ordinary <code>redis-server</code> binary that existing Redis clients talk to unchanged. <strong>~80k lines of Rust</strong> stand in for upstream's <strong>~187k lines of C</strong>.</p>
+      <p class="lead"><code>valkey-rs</code> is a from-scratch reimplementation of the <a href="https://github.com/valkey-io/valkey">Redis/Valkey</a> server in Rust — RESP2/3 protocol, core data types, streams, pub/sub, transactions, Lua scripting, ACL, eviction, RDB persistence, and alpha AOF/replication basics. It runs as an ordinary <code>redis-server</code> binary that existing Redis clients talk to unchanged. <strong>~80k lines of Rust</strong> stand in for upstream's <strong>~187k lines of C</strong>.</p>
       <div class="callout">
-        <strong>Thinking about adopting?</strong> The 2,989 above is the single-node suite passing today — <em>not</em> coverage of all upstream Valkey behavior. There is no clustering, no loadable C modules, and replication isn't gated yet. Read <a href="https://github.com/ianm199/valkey-rs/blob/main/docs/SCOPE_AND_GAPS.md">Scope and gaps</a> before wiring it into anything load-bearing.
+        <strong>Thinking about adopting?</strong> The TCL number above is scoped evidence — <em>not</em> coverage of all upstream Valkey behavior. There is no clustering, no loadable C modules, no in-process TLS, and replication is not HA-gated yet. Read <a href="https://github.com/ianm199/valkey-rs/blob/main/docs/SCOPE_AND_GAPS.md">Scope and gaps</a> before wiring it into anything load-bearing.
       </div>
     </section>
 
@@ -95,12 +95,12 @@ $ redis-cli get hello
           <p>We save → C loads, and C saves → we load, across every encoding (listpack, intset, skiplist, quicklist, streams). The resulting keyspaces are diffed.</p>
         </div>
         <div class="card">
-          <span class="badge good">2,989 / 3,010</span>
+          <span class="badge good">~877 pass</span>
           <h3>Upstream TCL suite</h3>
           <p>Valkey's own TCL test harness runs unmodified against our binary via a symlink trick. <a href="./convergence.html">See the full per-section convergence →</a></p>
         </div>
       </div>
-      <p class="muted" style="margin-top:14px;">As of 2026-05-26 the single-node suite (54 files, <code>single-node-external</code> profile) passes <strong>2,989 / 3,010</strong> (99.3%); the full upstream denominator is <strong>4,299</strong> blocks — the remainder is cluster, replication, and loadable-module surface we don't target. The <a href="./convergence.html">conformance page</a> breaks it down by capability, with drill-down to each file.</p>
+      <p class="muted" style="margin-top:14px;">The historical scoped core survey is about <strong>877 pass / 73 known fail</strong>; the full upstream denominator is <strong>4,299</strong> blocks. The <a href="./convergence.html">conformance page</a> shows the tracked suite over time, and <a href="https://github.com/ianm199/valkey-rs/blob/main/docs/CONFORMANCE.md">docs/CONFORMANCE.md</a> explains the full-suite accounting.</p>
     </section>
 
     <section>
@@ -108,24 +108,25 @@ $ redis-cli get hello
       <p class="lead">A first baseline against upstream Valkey on an Apple M3 Max. The architecture gap is real and honestly reported — the server is still a blocking thread-per-connection runtime sharing DB state through a mutex — but the per-command hot path has already been tuned hard, and some real-work commands already beat C.</p>
       <table class="perf">
         <tr><th>Workload</th><th>upstream</th><th>valkey-rs</th><th>ratio</th></tr>
-        <tr><td>GET, pipeline 100</td><td>3.33M req/s</td><td class="v">2.17M req/s</td><td>0.65×</td></tr>
-        <tr><td>SET, pipeline 100</td><td>2.47M req/s</td><td class="v">1.67M req/s</td><td>0.68×</td></tr>
-        <tr><td>LRANGE_300, pipeline 16</td><td>41.7k req/s</td><td class="v" style="color:var(--good)">66.1k req/s</td><td style="color:var(--good)">1.58×</td></tr>
+        <tr><td>GET, pipeline 1</td><td>194.9k req/s</td><td class="v">194.6k req/s</td><td>1.00×</td></tr>
+        <tr><td>SET, pipeline 1</td><td>190.8k req/s</td><td class="v">211.4k req/s</td><td>1.11×</td></tr>
+        <tr><td>GET, pipeline 100</td><td>3.51M req/s</td><td class="v" style="color:var(--good)">4.55M req/s</td><td style="color:var(--good)">1.30×</td></tr>
       </table>
       <div class="callout">
-        Tuning moved deep-pipeline GET from ~221k to ~2.17M req/s. The remaining gap is architectural, with a documented next milestone.
+        Tuning moved deep-pipeline GET from ~221k to ~4.55M req/s in the latest smoke run. These are alpha benchmark signals; broader workloads and sustained soak remain release follow-up work.
         <br><a href="./performance.html">Open the performance dashboard →</a>
       </div>
     </section>
 
     <section>
       <h2>Safety model</h2>
-      <p class="lead">A safe public surface over a tiny, audited unsafe core. Four of the six crates compile with zero <code>unsafe</code>. The only <code>unsafe</code> blocks — <strong>5 total</strong> — wrap Unix <code>fork(2)</code> and <code>waitpid(2)</code> for background save / rewrite flows, each with a <code>// SAFETY:</code> invariant and a per-crate budget enforced by a hook.</p>
+      <p class="lead">A safe public surface over a small, audited unsafe core. Three first-party crates compile with zero <code>unsafe</code>, and the parser, command dispatch table, and Rust data-structure ports remain unsafe-free. The <strong>14 first-party unsafe blocks</strong> are budgeted by crate and reserved for OS/process control, AArch64 timer reads, and the cached Lua FUNCTION/FCALL bridge.</p>
       <table class="perf">
         <tr><th>Crate</th><th><code>unsafe</code></th><th>Reason</th></tr>
-        <tr><td><code>redis-types</code> / <code>-protocol</code> / <code>-ds</code> / <code>-core</code></td><td class="v">0</td><td>—</td></tr>
-        <tr><td><code>redis-commands</code></td><td class="v">3</td><td><code>fork</code>/<code>_exit</code> for BGSAVE, BGREWRITEAOF, full sync</td></tr>
-        <tr><td><code>redis-server</code></td><td class="v">2</td><td><code>waitpid</code> child reapers</td></tr>
+        <tr><td><code>redis-types</code> / <code>-protocol</code> / <code>-ds</code></td><td class="v">0</td><td>Shared types, RESP parser/serializer, data structures</td></tr>
+        <tr><td><code>redis-core</code></td><td class="v">2</td><td>AArch64 CPU timer register reads</td></tr>
+        <tr><td><code>redis-commands</code></td><td class="v">7</td><td>Unix process-control paths and Lua active-context bridge</td></tr>
+        <tr><td><code>redis-server</code></td><td class="v">5</td><td>Signal handlers, child reapers, immediate shutdown path</td></tr>
       </table>
     </section>
 
@@ -148,7 +149,8 @@ $ redis-cli get hello
       <h2>Status &amp; scope</h2>
       <div class="cards">
         <div class="card"><span class="badge good">working</span><h3>Core data types &amp; commands</h3><p>Strings, lists, hashes, sets, sorted sets, streams, HyperLogLog, bitmaps, geo — plus pub/sub, transactions, Lua scripting, ACL, multi-DB, and eviction.</p></div>
-        <div class="card"><span class="badge good">working</span><h3>Persistence &amp; replication</h3><p>RDB v11 load/save, AOF, and replication basics including PSYNC, full sync, and WAIT.</p></div>
+        <div class="card"><span class="badge good">working</span><h3>Persistence</h3><p>RDB v11 load/save is gated by bidirectional upstream tests. AOF exists but is still alpha and not gated to the same standard.</p></div>
+        <div class="card"><span class="badge wip">alpha</span><h3>Replication basics</h3><p>PSYNC, full sync, and WAIT basics exist, but replica/Sentinel HA conformance is not established yet.</p></div>
         <div class="card"><span class="badge wip">not yet</span><h3>Cluster &amp; C modules</h3><p>No cluster mode and no loadable C-ABI modules. Native Rust implementations of the RedisJSON and RedisBloom command subsets ship instead.</p></div>
       </div>
     </section>

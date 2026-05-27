@@ -91,10 +91,17 @@ that's non-optional at Redis scale.
 
 ## Current state
 
-**STUB** — the Rust `redis-server` doesn't exist yet, so the driver
-only proves the C side and the comparison machinery. Once the Rust
-server is alive (Phase 2 pilot deliverable), the spawning logic kicks
-in and real comparison happens.
+The Rust `redis-server` is live. The smoke wrapper builds or reuses
+`target/debug/redis-server`, starts it next to the pinned upstream Valkey
+binary, sends every corpus script to both servers, and compares the RESP
+frames.
 
-The corpus is structured so it's ready: drop a real Rust server in and
-the same `./wire-diff` invocation immediately becomes a real oracle.
+Current release gate:
+
+```sh
+bash harness/oracle/smoke.sh --skip-build
+```
+
+The corpus is intentionally small and byte-exact. It is the fast compatibility
+floor for local iteration; the TCL suite and RDB oracle provide broader
+coverage.

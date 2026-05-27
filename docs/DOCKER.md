@@ -6,11 +6,30 @@ under `/data`.
 
 ## Pull
 
-Published images are intended to live at GitHub Container Registry:
+Published images live at GitHub Container Registry:
 
 ```bash
-docker pull ghcr.io/ianm199/valkey-rs:alpha
+docker pull ghcr.io/ianm199/valkey-rs:alpha &&
 docker run --rm -p 6379:6379 -v valkey-rs-data:/data ghcr.io/ianm199/valkey-rs:alpha
+```
+
+One-copy try/smoke flow using only Docker:
+
+```bash
+docker network create valkey-rs-try >/dev/null 2>&1 || true
+docker rm -f valkey-rs-try >/dev/null 2>&1 || true
+docker pull ghcr.io/ianm199/valkey-rs:alpha
+docker run -d --name valkey-rs-try --network valkey-rs-try -v valkey-rs-data:/data ghcr.io/ianm199/valkey-rs:alpha
+docker run --rm --network valkey-rs-try redis:7-alpine redis-cli -h valkey-rs-try PING
+docker run --rm --network valkey-rs-try redis:7-alpine redis-cli -h valkey-rs-try SET hello world
+docker run --rm --network valkey-rs-try redis:7-alpine redis-cli -h valkey-rs-try GET hello
+```
+
+Stop it when done:
+
+```bash
+docker rm -f valkey-rs-try
+docker network rm valkey-rs-try
 ```
 
 Useful tags:
@@ -52,6 +71,35 @@ Set `IMAGE=...` to test a different image name:
 ```bash
 docker pull ghcr.io/ianm199/valkey-rs:alpha
 SKIP_BUILD=1 IMAGE=ghcr.io/ianm199/valkey-rs:alpha bash harness/docker/smoke.sh
+```
+
+## Benchmark with Docker
+
+`harness/docker/bench.sh` starts the published image in an isolated Docker
+network and runs `redis-benchmark` from `redis:7-alpine` against it. It does
+not require a local Redis/Valkey install:
+
+```bash
+IMAGE=ghcr.io/ianm199/valkey-rs:alpha \
+REQUESTS=100000 \
+CLIENTS=50 \
+PIPELINE=16 \
+TESTS=ping_inline,ping_mbulk,set,get,incr,lrange_100,lrange_300 \
+bash harness/docker/bench.sh
+```
+
+Useful variants:
+
+```bash
+# Deep-pipeline smoke, similar to the public pipeline regression check.
+PIPELINE=100 REQUESTS=200000 TESTS=get,set,incr,ping_mbulk bash harness/docker/bench.sh
+
+# CSV output for spreadsheets or quick comparisons.
+CSV=1 OUTPUT=harness/bench/results/docker-alpha.csv bash harness/docker/bench.sh
+
+# Benchmark a locally built image without pulling.
+docker build -t valkey-rs:local .
+PULL=0 IMAGE=valkey-rs:local bash harness/docker/bench.sh
 ```
 
 ## Runtime config
@@ -101,4 +149,5 @@ The image has the same limits as the binary:
 
 - single-node only, no cluster mode;
 - no loadable C-ABI modules;
-- alpha status until sustained-load and performance testing are published.
+- alpha status until sustained-load testing and broader workload evidence are
+  published.

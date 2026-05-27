@@ -247,7 +247,7 @@ dependencies = [
 
 [[package]]
 name = "redis-commands"
-version = "0.0.1"
+version = "0.1.0-alpha.1"
 dependencies = [
  "libc",
  "mlua",
@@ -260,7 +260,7 @@ dependencies = [
 
 [[package]]
 name = "redis-core"
-version = "0.0.1"
+version = "0.1.0-alpha.1"
 dependencies = [
  "fast-float",
  "log",
@@ -274,21 +274,21 @@ dependencies = [
 
 [[package]]
 name = "redis-ds"
-version = "0.0.1"
+version = "0.1.0-alpha.1"
 dependencies = [
  "redis-types",
 ]
 
 [[package]]
 name = "redis-protocol"
-version = "0.0.1"
+version = "0.1.0-alpha.1"
 dependencies = [
  "redis-types",
 ]
 
 [[package]]
 name = "redis-server"
-version = "0.0.1"
+version = "0.1.0-alpha.1"
 dependencies = [
  "libc",
  "mio",
@@ -301,7 +301,7 @@ dependencies = [
 
 [[package]]
 name = "redis-types"
-version = "0.0.1"
+version = "0.1.0-alpha.1"
 
 [[package]]
 name = "redox_syscall"

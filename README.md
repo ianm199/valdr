@@ -18,16 +18,16 @@ No C bindings. No shim process. BSD-3-Clause, matching upstream Valkey.
 The current compatibility picture:
 
 ```text
-TCL unit survey: [███████████████████▋] 877 / 896 (97.9%)
-RESP wire diff:  [████████████████████] 23 / 23
-RDB load/save:   [████████████████████] 378 / 378
+Scoped TCL survey: ~877 pass / ~73 known fail
+RESP wire diff:   23 / 23 byte-exact
+RDB load/save:    378 / 378 bidirectional
 ```
 
 [Run the same comparison](docs/CONFORMANCE.md#reproducing), or read the full
 [conformance matrix](docs/CONFORMANCE.md).
 
-> **Thinking about adopting?** The 97.9% above is the pass rate *within
-> the slice we've built*, not coverage of all upstream Valkey behavior.
+> **Thinking about adopting?** The TCL number above is a scoped single-node
+> survey, not coverage of all upstream Valkey behavior.
 > Before you wire valkey-rs into anything load-bearing, read
 > [**Scope and gaps**](docs/SCOPE_AND_GAPS.md) — it spells out what is
 > and isn't here today (no clustering, no modules, no in-process TLS,
@@ -45,8 +45,9 @@ What works today:
 
 - Strings, lists, hashes, sets, sorted sets, streams, HyperLogLog, bitmaps, geo.
 - Pub/sub, transactions, Lua scripting, ACL, multi-DB, eviction.
-- Persistence through RDB v11 and AOF.
-- Replication basics, including PSYNC and WAIT.
+- RDB v11 persistence, gated by bidirectional load/save tests against Valkey.
+- AOF and replication basics, including PSYNC and WAIT, with alpha-level
+  coverage rather than production HA conformance.
 - Native RedisJSON-compatible `JSON.*` commands.
 - Native RedisBloom-compatible `BF.*` commands.
 
@@ -55,6 +56,7 @@ Not done yet:
 - Cluster mode.
 - Loadable C-ABI modules.
 - In-process TLS termination (rustls scaffold present but not wired to the runtime owner; TLS listener requests are currently refused).
+- Production-grade AOF/replication/Sentinel/HA conformance.
 - A handful of Valkey 9.0 commands and edge cases.
 - Sustained production soak and performance tuning.
 
@@ -88,7 +90,22 @@ console.log(await r.get("hello"));
 ## Docker
 
 ```bash
+docker pull ghcr.io/ianm199/valkey-rs:alpha &&
 docker run --rm -p 6379:6379 -v valkey-rs-data:/data ghcr.io/ianm199/valkey-rs:alpha
+```
+
+One-copy smoke test with only Docker installed:
+
+```bash
+docker network create valkey-rs-try >/dev/null 2>&1 || true
+docker rm -f valkey-rs-try >/dev/null 2>&1 || true
+docker pull ghcr.io/ianm199/valkey-rs:alpha
+docker run -d --name valkey-rs-try --network valkey-rs-try -v valkey-rs-data:/data ghcr.io/ianm199/valkey-rs:alpha
+docker run --rm --network valkey-rs-try redis:7-alpine redis-cli -h valkey-rs-try PING
+docker run --rm --network valkey-rs-try redis:7-alpine redis-cli -h valkey-rs-try SET hello world
+docker run --rm --network valkey-rs-try redis:7-alpine redis-cli -h valkey-rs-try GET hello
+docker rm -f valkey-rs-try
+docker network rm valkey-rs-try
 ```
 
 Or build locally:
@@ -98,8 +115,13 @@ docker build -t valkey-rs:local .
 docker run --rm -p 6379:6379 -v valkey-rs-data:/data valkey-rs:local
 ```
 
-See [Docker](docs/DOCKER.md) for tags, Compose, persistence, and the container
-smoke test.
+See [Docker](docs/DOCKER.md) for tags, Compose, persistence, the container
+smoke test, and a Docker-only benchmark wrapper.
+
+```bash
+IMAGE=ghcr.io/ianm199/valkey-rs:alpha PIPELINE=100 TESTS=get,set,incr,ping_mbulk \
+  bash harness/docker/bench.sh
+```
 
 ## Status
 
@@ -113,47 +135,31 @@ more than perfect coverage of every upstream extension.
 
 ## Performance
 
-First-baseline numbers vs upstream Valkey on an Apple M3 Max (50 clients,
-pipeline 100, 64-byte payload):
+Current release-candidate telemetry vs upstream Valkey on an Apple M3 Max.
+Both servers are run sequentially on the same host with 50 clients and 64-byte
+payloads. These are benchmark signals, not production soak claims.
 
-| Command | upstream Valkey | valkey-rs | ratio |
-|---|---:|---:|---:|
-| SET / GET / INCR (simple ops)  | ~2.5–3.5M req/s | ~190–225k req/s | ~6–9% |
-| LRANGE_100 (100-elem range)    | 111k req/s      | 106k req/s      | **95%** |
-| LRANGE_300 (300-elem range)    | 36.7k req/s     | 52.4k req/s     | **143%** ⚡ |
-
-Per-op latency p99 is mostly competitive (within 2× of upstream) even
-when throughput is not. The gap on simple ops is mostly the connection-serving
-path and shared-state ownership model; the cost amortizes away on commands
-that do real work.
-
-A newer profile-matrix benchmark makes the architecture cliff clearer and gives
-the harness a performance objective it can optimize. The first tuning passes
-focused on the plain-TCP loop and then on the per-command hot path: batch
-replies, drain the query buffer once per read batch, direct-write ordinary
-request/reply traffic, batch client-info snapshots, reuse argv storage, use
-monotonic timing, hold the DB0 lock across safe read batches, cache generated
-command metadata, avoid argv snapshots unless slowlog/AOF/replication need
-them, skip idle standalone replication propagation, fold handler/metadata
-lookup into one runtime dispatch table, and bucket that table by command prefix.
-
-| Profile | Command | upstream Valkey | valkey-rs | ratio |
+| Benchmark | Workload | upstream Valkey | valkey-rs | ratio |
 |---|---|---:|---:|---:|
-| 50 clients, pipeline 1 | GET | 181k req/s | 141k req/s | 0.78× |
-| 50 clients, pipeline 16 | GET | 2.08M req/s | 1.34M req/s | 0.64× |
-| 50 clients, pipeline 100 | GET | 3.33M req/s | 2.17M req/s | 0.65× |
-| 50 clients, pipeline 100 | SET | 2.47M req/s | 1.67M req/s | 0.68× |
-| 50 clients, pipeline 16 | LRANGE_300 | 41.7k req/s | 66.1k req/s | **1.58×** |
+| Default suite, P=1 | GET | 194,932 req/s | 194,553 req/s | 1.00× |
+| Default suite, P=1 | SET | 190,840 req/s | 211,417 req/s | 1.11× |
+| Default suite, P=1 | MSET (10 keys) | 185,874 req/s | 207,900 req/s | 1.12× |
+| Default suite, P=1 | LRANGE_300 | 43,611 req/s | 45,956 req/s | 1.05× |
+| JSON document mix, P=1 | 80% GET / 15% SET / 5% MGET | 36,629 req/s | 36,163 req/s | 0.99× |
+| Pipeline smoke, P=100 | GET | 3.51M req/s | 4.55M req/s | 1.30× |
+| Pipeline smoke, P=100 | SET | 2.38M req/s | 3.70M req/s | 1.56× |
 
-The optimization log moved deep-pipeline GET from about 221k req/s to about
-2.17M req/s. See [`docs/BENCHMARKS.md`][bench] for full methodology, each
-iteration's table, and the optimization roadmap.
+The representative non-function default suite is 21/21 pass with median
+`1.060x` vs upstream and weakest row `0.986x`. The JSON document mix is 3/3
+pass with median `0.994x`. The pipeline smoke is 12/12 pass with median
+`1.133x`; it is useful for catching batching regressions, but loopback
+high-pipeline numbers can be noisy.
 
-The remaining throughput gap is architectural. The current server is still a
-blocking thread-per-connection runtime sharing DB state through
-`Arc<Mutex<RedisDb>>`; upstream Valkey's tiny-command pipeline advantage comes
-from event-loop ownership and batching. The proposed next performance milestone
-is documented in [`docs/RUNTIME_OWNERSHIP_PLAN.md`][runtime].
+The optimization log moved deep-pipeline GET from about 221k req/s in the
+first alpha baseline to 4.55M req/s in the latest smoke run. See
+[`docs/BENCHMARKS.md`][bench] and
+[`docs/RUST_PERFORMANCE_IMPROVEMENT_PLAYBOOK_20260526.md`](docs/RUST_PERFORMANCE_IMPROVEMENT_PLAYBOOK_20260526.md)
+for methodology, artifact paths, and the optimization roadmap.
 
 [bench]: docs/BENCHMARKS.md
 [runtime]: docs/RUNTIME_OWNERSHIP_PLAN.md
@@ -166,8 +172,8 @@ is documented in [`docs/RUNTIME_OWNERSHIP_PLAN.md`][runtime].
 | Core data types | Strings, lists, hashes, sets, sorted sets |
 | Streams | Entries, consumer groups, blocking variants |
 | Scripting | `EVAL` / `EVALSHA` through Lua 5.1 |
-| Persistence | RDB v11 load/save, AOF |
-| Replication | PSYNC, full sync, WAIT |
+| Persistence | RDB v11 load/save is gated; AOF exists but is alpha/not gated to the same standard |
+| Replication | PSYNC, full sync, WAIT basics; no production HA conformance yet |
 | Security | ACL, AUTH (TLS scaffold present via rustls, not yet wired to the runtime) |
 | Memory policies | 8 maxmemory eviction policies |
 | Modules | Native RedisJSON + RedisBloom command subsets |
@@ -180,6 +186,7 @@ The project is gated by three external compatibility checks:
 
 ```bash
 bash scripts/setup-reference.sh
+cargo build -p redis-server
 bash harness/oracle/smoke.sh --skip-build
 python3 harness/oracle/rdb-diff --direction=all
 ```
@@ -251,7 +258,7 @@ To reach upstream-suite parity:
 - HELLO availability-zone / no-protover variants.
 - Remaining stream consumer-group wakeup edges.
 - Per-DB blocked-key indexing.
-- Performance benchmarks and sustained-load tuning.
+- Sustained-load tuning and broader public benchmark coverage.
 
 Longer term:
 

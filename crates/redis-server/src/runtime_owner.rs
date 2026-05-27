@@ -2040,7 +2040,7 @@ mod tests {
         assert_eq!(slot_id.as_u32(), 42);
         assert_eq!(slot_id.as_index(), 42);
         assert_eq!(slot_id_from_token(token_for_slot(slot_id)), Some(slot_id));
-        assert_eq!(slot_id_from_token(LISTENER_TOKEN), None);
+        assert_eq!(slot_id_from_token(Token(0)), None);
     }
 
     #[test]

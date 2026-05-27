@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Performance — valkey-rs</title>
-  <meta name="description" content="valkey-rs performance vs upstream Valkey: profile-matrix throughput, the 221k→2.17M req/s GET tuning trajectory, methodology, and the architectural gap that remains.">
+  <meta name="description" content="valkey-rs performance vs upstream Valkey: release-candidate benchmark telemetry, the 221k→4.55M req/s GET tuning trajectory, methodology, and remaining soak gaps.">
   <meta property="og:title" content="valkey-rs — performance vs upstream Valkey">
   <meta property="og:description" content="Profile-matrix throughput against upstream Valkey, the per-command tuning trajectory, and an honest account of the architectural gap.">
   <meta property="og:url" content="https://ianm199.github.io/valkey-rs/performance.html">
@@ -23,38 +23,40 @@
         </div>
       </nav>
       <p class="eyebrow">Performance</p>
-      <h1>Competitive, and honest about the gap</h1>
-      <p class="tag">Throughput against upstream Valkey on the same host, measured with the project's own <code>valkey-benchmark</code> profile matrix. The trajectory matters more than any single number — the same matrix is rerun after every tuning packet.</p>
+      <h1>Near parity on the surveyed matrix</h1>
+      <p class="tag">Throughput against upstream Valkey on the same host, measured with repeatable benchmark harnesses. These are alpha telemetry numbers, not production soak claims; the trajectory matters more than any single row.</p>
     </div>
   </header>
 
   <div class="wrap">
     <div class="stats">
-      <div class="stat"><div class="num accent">2.17M</div><div class="lbl">GET req/s, pipeline 100 (from 221k)</div></div>
-      <div class="stat"><div class="num good">1.58×</div><div class="lbl">LRANGE_300 vs upstream (faster than C)</div></div>
-      <div class="stat"><div class="num">0.65×</div><div class="lbl">deep-pipeline GET vs upstream</div></div>
-      <div class="stat"><div class="num">&lt;2×</div><div class="lbl">p99 latency vs upstream on most ops</div></div>
+      <div class="stat"><div class="num accent">1.06×</div><div class="lbl">median default-suite ratio, pipeline 1</div></div>
+      <div class="stat"><div class="num good">4.55M</div><div class="lbl">GET req/s, pipeline 100 smoke</div></div>
+      <div class="stat"><div class="num">0.99×</div><div class="lbl">JSON document mix median</div></div>
+      <div class="stat"><div class="num">0.986×</div><div class="lbl">weakest default-suite row</div></div>
     </div>
   </div>
 
   <div class="wrap">
     <section>
-      <h2>Profile matrix vs upstream Valkey</h2>
-      <p class="lead">Apple M3 Max, macOS arm64. Both binaries run on the same host, on different ports, <strong>sequentially</strong> to keep CPU contention out of the picture, driven by the official upstream <code>valkey-benchmark</code>.</p>
+      <h2>Release-candidate telemetry vs upstream Valkey</h2>
+      <p class="lead">Apple M3 Max, macOS arm64. Both binaries run on the same host, on different ports, <strong>sequentially</strong> to keep CPU contention out of the picture. Default-suite rows use 50 clients, pipeline 1, and 64-byte payloads; pipeline smoke rows use the same client/payload shape at deeper pipeline depths.</p>
       <table class="perf">
         <tr><th>Profile</th><th>Command</th><th>upstream</th><th>valkey-rs</th><th>ratio</th></tr>
-        <tr><td>50 clients, pipeline 1</td><td>GET</td><td>181k req/s</td><td class="v">141k req/s</td><td>0.78×</td></tr>
-        <tr><td>50 clients, pipeline 16</td><td>GET</td><td>2.08M req/s</td><td class="v">1.34M req/s</td><td>0.64×</td></tr>
-        <tr><td>50 clients, pipeline 100</td><td>GET</td><td>3.33M req/s</td><td class="v">2.17M req/s</td><td>0.65×</td></tr>
-        <tr><td>50 clients, pipeline 100</td><td>SET</td><td>2.47M req/s</td><td class="v">1.67M req/s</td><td>0.68×</td></tr>
-        <tr><td>50 clients, pipeline 16</td><td>LRANGE_300</td><td>41.7k req/s</td><td class="v" style="color:var(--good)">66.1k req/s</td><td style="color:var(--good)">1.58×</td></tr>
+        <tr><td>default suite, P=1</td><td>GET</td><td>194.9k req/s</td><td class="v">194.6k req/s</td><td>1.00×</td></tr>
+        <tr><td>default suite, P=1</td><td>SET</td><td>190.8k req/s</td><td class="v">211.4k req/s</td><td>1.11×</td></tr>
+        <tr><td>default suite, P=1</td><td>MSET (10 keys)</td><td>185.9k req/s</td><td class="v">207.9k req/s</td><td>1.12×</td></tr>
+        <tr><td>default suite, P=1</td><td>LRANGE_300</td><td>43.6k req/s</td><td class="v">46.0k req/s</td><td>1.05×</td></tr>
+        <tr><td>JSON doc mix, P=1</td><td>mixed</td><td>36.6k req/s</td><td class="v">36.2k req/s</td><td>0.99×</td></tr>
+        <tr><td>pipeline smoke, P=100</td><td>GET</td><td>3.51M req/s</td><td class="v" style="color:var(--good)">4.55M req/s</td><td style="color:var(--good)">1.30×</td></tr>
+        <tr><td>pipeline smoke, P=100</td><td>SET</td><td>2.38M req/s</td><td class="v" style="color:var(--good)">3.70M req/s</td><td style="color:var(--good)">1.56×</td></tr>
       </table>
-      <p class="muted" style="margin-top:14px;">Per-op p99 latency is mostly within 2× of upstream even where throughput is not. The gap on tiny commands is the connection-serving path and shared-state ownership model; it amortizes away on commands that do real work — and on range reads, <code>valkey-rs</code> is already ahead.</p>
+      <p class="muted" style="margin-top:14px;">The representative non-function default suite is 21/21 pass, median 1.060×, weakest row 0.986×. The JSON document mix is 3/3 pass, median 0.994×. Deep-pipeline rows are useful for regression detection, but loopback high-throughput numbers are noisy and should be read as alpha telemetry.</p>
     </section>
 
     <section>
       <h2>The tuning trajectory</h2>
-      <p class="lead">Performance work is tied to a reproducible objective: the profile matrix is the harness's optimization target, rerun after each focused packet. Deep-pipeline GET moved from <strong>~221k req/s to ~2.17M req/s</strong> — roughly a 10× improvement — across a sequence of hot-path passes:</p>
+      <p class="lead">Performance work is tied to reproducible objectives: default-suite parts, pipeline smoke, JSON document mix, and profiler probes. Deep-pipeline GET moved from <strong>~221k req/s to ~4.55M req/s</strong> in the latest smoke artifact across a sequence of hot-path passes:</p>
       <pre class="block"><span class="c"># each line is a landed tuning packet, oldest first</span>
 batch replies on the write side
 drain the query buffer once per read batch
@@ -69,15 +71,15 @@ skip idle standalone replication propagation
 fold handler + metadata lookup into one dispatch table
 bucket the dispatch table by command prefix</pre>
       <div class="callout">
-        Every benchmarked commit is recorded and plotted on a live, auto-built dashboard — each point keyed to its commit and hardware fingerprint so results from different machines are never silently merged.
+        Benchmark artifacts record the commit, runner parameters, and hardware fingerprint so results from different machines are not silently merged. The latest performance playbook links the release-candidate artifacts used for the public alpha numbers.
         <br><a href="./harness/bench/history/index.html">Open the live performance dashboard →</a>
       </div>
     </section>
 
     <section>
-      <h2>The gap that remains is architectural</h2>
-      <p class="lead">This is stated plainly because it is the honest read. <code>valkey-rs</code> is still a <strong>blocking thread-per-connection</strong> runtime that shares DB state through <code>Arc&lt;Mutex&lt;RedisDb&gt;&gt;</code>. Upstream Valkey's advantage on tiny pipelined commands comes from single-threaded event-loop ownership and batching with no locking.</p>
-      <p class="muted" style="margin-top:10px;">Closing it is a known piece of work, not a mystery: the next performance milestone — moving to an event-loop ownership model — is specified in <a href="https://github.com/ianm199/valkey-rs/blob/main/docs/RUNTIME_OWNERSHIP_PLAN.md">RUNTIME_OWNERSHIP_PLAN.md</a>. This is not a claim of being "faster than C"; it is a memory-safe reimplementation that is already <strong>competitive</strong> — within a small constant factor on average, and ahead on real-work commands.</p>
+      <h2>What remains</h2>
+      <p class="lead">The release-candidate matrix is strong enough for an alpha launch, but it is not the end of performance work. The missing public evidence is broader workload coverage, longer soak, tail-latency under contention, and multi-node/persistence hot-path measurements.</p>
+      <p class="muted" style="margin-top:10px;">The next architectural milestone is specified in <a href="https://github.com/ianm199/valkey-rs/blob/main/docs/RUNTIME_OWNERSHIP_PLAN.md">RUNTIME_OWNERSHIP_PLAN.md</a>. The current public claim should stay modest: competitive alpha telemetry on surveyed single-node workloads, not universal speed parity.</p>
     </section>
 
     <section>
@@ -87,6 +89,9 @@ $ bash harness/bench/run.sh
 
 <span class="c"># the profile matrix (the harness optimization target)</span>
 $ bash harness/bench/run-profile-matrix.sh
+
+<span class="c"># benchmark the published Docker image without local redis-benchmark</span>
+$ IMAGE=ghcr.io/ianm199/valkey-rs:alpha PIPELINE=100 TESTS=get,set,incr,ping_mbulk bash harness/docker/bench.sh
 
 <span class="c"># rebuild the live history dashboard from recorded results</span>
 $ python3 harness/bench/history.py</pre>

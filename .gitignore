@@ -1,4 +1,5 @@
 target/
+_site/
 **/*.rs.bk
 
 reference/valkey/

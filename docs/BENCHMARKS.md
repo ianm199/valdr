@@ -5,6 +5,32 @@ performance iterations against upstream Valkey. The important read is the
 trajectory: the same profile matrix is rerun after each focused packet so
 performance work stays tied to a reproducible objective.
 
+## Current alpha scorecard
+
+The current public numbers are alpha telemetry from an Apple M3 Max on macOS,
+not production soak evidence. The benchmark runner recorded the dirty-worktree
+base commit as `2ff3fcc`; those changes were committed in
+`539850c` (`Close Redis performance parity gaps`).
+
+| Matrix | Artifact | Result |
+|---|---|---|
+| Default suite, pipeline 1, non-function rows | `harness/bench/results/20260527T025338Z-2ff3fcc-default-suite-parts.json` | 21/21 pass, median `1.060x`, weakest row `0.986x` |
+| Pipeline smoke, P=1/16/100 | `harness/bench/results/20260527T025426Z-2ff3fcc-pipeline-smoke.json` | 12/12 pass, median `1.133x`, no P100 cliff |
+| JSON document mix, 4 KiB docs | `harness/bench/results/20260527T025203Z-2ff3fcc-json-doc-mix.json` | 3/3 pass, median `0.994x`, weakest row `0.987x` |
+| Function-inclusive default suite | `harness/bench/results/20260527T025051Z-2ff3fcc-default-suite-parts.json` | 23/23 pass, median `1.082x`; `FUNCTION LOAD` `4.371x`, `FCALL` `1.076x` |
+
+Representative rows:
+
+| Workload | upstream Valkey | valkey-rs | ratio |
+|---|---:|---:|---:|
+| GET, default suite P=1 | 194,932 req/s | 194,553 req/s | 1.00x |
+| SET, default suite P=1 | 190,840 req/s | 211,417 req/s | 1.11x |
+| MSET 10 keys, default suite P=1 | 185,874 req/s | 207,900 req/s | 1.12x |
+| LRANGE_300, default suite P=1 | 43,611 req/s | 45,956 req/s | 1.05x |
+| JSON mixed doc workload, P=1 | 36,629 req/s | 36,163 req/s | 0.99x |
+| GET, pipeline smoke P=100 | 3.51M req/s | 4.55M req/s | 1.30x |
+| SET, pipeline smoke P=100 | 2.38M req/s | 3.70M req/s | 1.56x |
+
 ## Methodology
 
 Both binaries run on the same host, on different ports, sequentially
@@ -58,6 +84,17 @@ The script writes a TSV to `harness/bench/results/<UTC>-<commit>.tsv`
 recording the request count, client count, pipeline depth, payload size,
 hardware fingerprint (CPU + OS + arch), and the commit hash so results
 from different machines are not silently merged.
+
+To benchmark the published Docker image without a local Redis/Valkey install:
+
+```bash
+IMAGE=ghcr.io/ianm199/valkey-rs:alpha \
+REQUESTS=100000 \
+CLIENTS=50 \
+PIPELINE=16 \
+TESTS=ping_inline,ping_mbulk,set,get,incr,lrange_100,lrange_300 \
+bash harness/docker/bench.sh
+```
 
 ## Headline result (2026-05-20, alpha baseline)
 

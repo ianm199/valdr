@@ -1,6 +1,6 @@
 [package]
 name = "redis-types"
-version = "0.0.1"
+version = "0.1.0-alpha.1"
 edition.workspace = true
 license.workspace = true
 description = "Cross-cutting type vocabulary for redis-rs-port (byte strings, errors, RESP value)."
