@@ -47,6 +47,68 @@ Single-node Valkey-compatible server: a Rust port of the upstream Valkey C imple
 | RedisJSON-compatible commands | Native subset |
 | RedisBloom-compatible commands | Native subset |
 
+## Benchmark Commands
+
+<details>
+<summary>Run official valkey-benchmark against Valkey and valkey-rs Docker images</summary>
+
+```bash
+docker network create valkey-rs-bench
+
+docker run -d --rm \
+  --name valkey-ref \
+  --network valkey-rs-bench \
+  valkey/valkey:8-alpine
+
+docker run -d --rm \
+  --name valkey-rs \
+  --network valkey-rs-bench \
+  ghcr.io/ianm199/valkey-rs:alpha
+
+sleep 1
+```
+
+```bash
+docker run --rm \
+  --network valkey-rs-bench \
+  valkey/valkey:8-alpine \
+  valkey-benchmark \
+    -h valkey-ref \
+    -p 6379 \
+    -n 100000 \
+    -c 50 \
+    -P 100 \
+    -d 64 \
+    -t ping_inline,ping_mbulk,set,get,incr,lpush,rpush,lpop,rpop,sadd,hset,spop,zadd,zpopmin,lrange_100,lrange_300,lrange_500,lrange_600,mset,mget,xadd,function_load,fcall \
+    --warmup 1 \
+    --csv \
+    --precision 3
+```
+
+```bash
+docker run --rm \
+  --network valkey-rs-bench \
+  valkey/valkey:8-alpine \
+  valkey-benchmark \
+    -h valkey-rs \
+    -p 6379 \
+    -n 100000 \
+    -c 50 \
+    -P 100 \
+    -d 64 \
+    -t ping_inline,ping_mbulk,set,get,incr,lpush,rpush,lpop,rpop,sadd,hset,spop,zadd,zpopmin,lrange_100,lrange_300,lrange_500,lrange_600,mset,mget,xadd,function_load,fcall \
+    --warmup 1 \
+    --csv \
+    --precision 3
+```
+
+```bash
+docker rm -f valkey-ref valkey-rs
+docker network rm valkey-rs-bench
+```
+
+</details>
+
 ## Performance
 
 Latest warmed local run vs upstream Valkey:
