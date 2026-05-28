@@ -106,7 +106,7 @@ Numbers are upstream `src/` LoC and signal how much surface area remains.
 | **Streams consumer groups** | ~4,000 (`t_stream.c`) | Single-node `stream-cgroups` passes under the default profile; dual-server replication blocks belong to the replication suite | XADD/XREAD/XACK/XCLAIM and core consumer-group lifecycle work single-node. |
 | **HyperLogLog** | ~2,100 | Commands present, focused frontier is green | PFADD/PFCOUNT/PFMERGE are covered by wire/focused TCL evidence; still not part of a full-suite claim. |
 | **DEBUG command** | ~2,600 | Partial — Tcl tests using `needs:debug` are filtered out | Affects only Tcl-suite expansion, not application code. |
-| **Valkey 9.0 / Redis 7.4+ additions** | scattered | Mostly missing | HGETDEL, SET IFEQ, LCS, HELLO availability-zone, MSETEX edge semantics — listed as deliberate gaps in CONFORMANCE.md. |
+| **Valkey 9.0 / Redis 7.4+ additions** | scattered | Mostly missing | HGETDEL, SET IFEQ, LCS, HELLO availability-zone, MSETEX edge semantics — listed as deliberate gaps in [`TEST_AND_FEATURE_COVERAGE.md`](TEST_AND_FEATURE_COVERAGE.md). |
 
 ## Drop-in readiness — decision table
 
@@ -138,10 +138,10 @@ single user's adoption blockers:
 
 1. **Full upstream TCL-suite accounting** — move from focused packet runners
    to a dashboard whose denominator is all 4,299 upstream test blocks.
-2. **Performance evidence and soak** (in progress — see the dashboard at
-   `harness/bench/history/` and `docs/BENCHMARKS.md`). The surveyed default
-   matrix is around parity, but broader workloads and long-duration soak still
-   need publication-grade evidence.
+2. **Performance evidence and soak** (in progress — internal dashboards under
+   `harness/bench/history/`). The surveyed default matrix is around parity,
+   but broader workloads and long-duration soak still need publication-grade
+   evidence — *no public perf numbers are claimed yet.*
 3. **Replication conformance** — backbone exists; needs a multi-node
    integration sweep before it's claimable.
 4. **AOF parity** to match the RDB story.

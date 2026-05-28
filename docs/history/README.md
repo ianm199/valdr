@@ -6,8 +6,8 @@ load-bearing reference material.
 
 For *current* user-facing docs, see the top-level [`docs/`](../) folder:
 
-- [`docs/CONFORMANCE.md`](../CONFORMANCE.md) — compatibility matrix + test
-  pass rates
+- [`docs/TEST_AND_FEATURE_COVERAGE.md`](../TEST_AND_FEATURE_COVERAGE.md) —
+  current coverage source of truth (commands, oracles, divergences)
 - [`docs/DOCKER.md`](../DOCKER.md) — container deployment
 - [`docs/ADR_001_LUA_RUNTIME.md`](../ADR_001_LUA_RUNTIME.md) — Lua runtime
   decision record
@@ -26,6 +26,6 @@ For *current* user-facing docs, see the top-level [`docs/`](../) folder:
 | `TCL_TRIAGE.md` | First-run triage of `unit/type/string` against our binary (Round 9). |
 | `TCL_TRIAGE_DATATYPES.md` | First-run triage of `unit/type/{hash,set,zset}` (Round 10b). |
 | `TCL_TRIAGE_KEYOPS.md` | First-run triage of `unit/expire`, `unit/incr`, `unit/keyspace`, and friends (Round 10c). |
-| `TCL_DASHBOARD.md` | Mid-port TCL pass-rate snapshot. Numbers here are stale; see `docs/CONFORMANCE.md` for current. |
+| `TCL_DASHBOARD.md` | Mid-port TCL pass-rate snapshot. Numbers here are stale; see `docs/TEST_AND_FEATURE_COVERAGE.md` for current. |
 | `HARNESS_LEARNINGS.md` | Retrospective on running the AI porting harness at scale on Valkey for the first time. |
 | `HARNESS_MODE_A_VS_B.md` | Strategy doc distinguishing translation tasks (Mode A) from greenfield Rust subsystem tasks (Mode B). |
