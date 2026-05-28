@@ -13,7 +13,11 @@
 pub mod aof;
 pub mod bitops;
 pub mod bloom;
+pub mod client_limits;
+pub mod config_cmd;
 pub mod connection;
+pub mod listeners;
+pub mod shutdown_signals;
 pub mod dispatch;
 pub mod eval;
 pub mod generated;
