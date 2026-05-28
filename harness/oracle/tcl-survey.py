@@ -287,6 +287,20 @@ def main() -> int:
         help="Run test_helper in TLS mode: generate certs and start servers with "
         "tls-port/tls-cert-file/etc. Required for the if {$::tls}-gated unit/tls.tcl.",
     )
+    parser.add_argument(
+        "--tier",
+        choices=("all", "fast"),
+        default="all",
+        help=(
+            "all (default): every requested file. fast: exclude files listed in "
+            "harness/oracle/SLOW_FILES.txt (files that take ≥2s in baseline "
+            "because they exercise time-based behavior — pause windows, expiry, "
+            "AOF rewrite, function loading). On the canonical 54-file single-node "
+            "sweep: fast tier is 21 files in ~14s vs 11min full (~47× faster). "
+            "Use fast for between-refactor gates; use all for end-of-wave + nightly. "
+            "Ignored when --files is set."
+        ),
+    )
     args = parser.parse_args()
     deny_tags = [] if args.no_default_deny_tags else list(DENY_TAG_PROFILES[args.profile])
     deny_tags.extend(args.extra_deny_tags)
@@ -297,6 +311,23 @@ def main() -> int:
     files = parse_files(args.files)
     if not files:
         raise SystemExit("no TCL files selected")
+
+    if args.tier == "fast" and not args.files:
+        slow_path = Path(__file__).parent / "SLOW_FILES.txt"
+        if slow_path.exists():
+            slow = set()
+            for line in slow_path.read_text().splitlines():
+                stripped = line.split("#", 1)[0].strip()
+                if stripped:
+                    slow.add(stripped)
+            before = len(files)
+            files = [f for f in files if f not in slow]
+            skipped = before - len(files)
+            print(
+                f"==> tier=fast: skipping {skipped} files listed in "
+                f"harness/oracle/SLOW_FILES.txt ({before} -> {len(files)} files)",
+                flush=True,
+            )
 
     run_id, run_dir = unique_run_dir(utc_stamp())
     run_dir.mkdir(parents=True, exist_ok=True)

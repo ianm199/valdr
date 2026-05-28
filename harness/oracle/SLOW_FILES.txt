@@ -1,0 +1,63 @@
+# Files that take ≥2.0s in the canonical single-node sweep.
+# `--tier fast` excludes these; `--tier all` (default) runs everything.
+#
+# These are slow because they exercise time-based behavior — pause windows,
+# expiry, AOF rewrite, function/script loading, eviction watching, latency
+# monitoring, blocking waits — NOT because the code is slow. Speeding them
+# up means breaking what they test.
+#
+# Wall-clock impact (on the 54-file unit/* + unit/type/* canonical sweep):
+#   --tier all   54 files,  652s  (~11 min)   ← end-of-wave + nightly
+#   --tier fast  21 files,   14s  (~14 s)     ← between-refactor gates
+# Speedup: ~47× by skipping ~98% of the elapsed time across the 33 slow files.
+#
+# Last regenerated: 2026-05-28 from
+#   harness/oracle/results/tcl-survey/20260528T165141963858Z/
+#
+# Regenerate when feature work materially changes a file's elapsed time:
+#   bash harness/oracle/run-single-node-tcl-suite.sh
+#   then run the SLOW_FILES extraction script (see CLAUDE.md "Fast inner loop").
+#
+# Format: one filename per line, optional `# elapsed` comment.
+
+# >30s (4 files; 55% of total time)
+unit/hashexpire             # 123.3s — expire-watchdog timing windows
+unit/pause                  # 101.8s — client-pause windows
+unit/maxmemory              # 71.3s  — eviction watching across many policies
+unit/functions              # 59.5s  — function/library load+unload
+
+# 10-30s (12 files; 31% of total)
+unit/hyperloglog            # 28.7s  — sparse/dense encoding scan
+unit/wait                   # 28.7s  — WAIT/WAITAOF blocking
+unit/introspection          # 18.5s  — CLIENT INFO/LIST iteration
+unit/aofrw                  # 18.4s  — AOF rewrite full cycle
+unit/scripting              # 18.2s  — script loading, EVALSHA cache
+unit/type/stream            # 17.1s  — stream entry creation + reads
+unit/geo                    # 13.5s  — many GEOSEARCH/GEORADIUS variants
+unit/type/zset              # 13.2s  — large sorted-set ops
+unit/client-eviction        # 12.1s  — client output buffer eviction
+unit/other                  # 12.0s  — mixed slow tests
+unit/obuf-limits            # 11.1s  — output buffer overflow triggers
+unit/latency-monitor        # 10.3s  — latency sample windows
+
+# 5-10s (5 files)
+unit/introspection-2        #  9.3s
+unit/type/list              #  7.9s
+unit/querybuf               #  6.7s
+unit/expire                 #  6.4s
+unit/type/list-2            #  6.3s
+
+# 2-5s (12 files; bottom of the cut)
+unit/type/list-3            #  4.8s
+unit/type/string            #  4.6s
+unit/type/stream-cgroups    #  4.5s
+unit/dump                   #  4.0s
+unit/sort                   #  3.9s
+unit/multi                  #  3.7s
+unit/type/set               #  3.7s
+unit/scan                   #  3.5s
+unit/tracking               #  3.2s
+unit/info                   #  3.2s
+unit/type/hash              #  2.2s
+unit/auth                   #  2.1s
+unit/acl                    #  2.0s

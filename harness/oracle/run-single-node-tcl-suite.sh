@@ -17,6 +17,7 @@ PORTCOUNT=8000
 SKIP_BUILD=0
 ISOLATED=1
 FILES=""
+TIER="all"
 
 usage() {
     cat <<'EOF'
@@ -117,6 +118,10 @@ while [[ $# -gt 0 ]]; do
             ISOLATED=0
             shift
             ;;
+        --tier)
+            TIER="${2:?--tier requires a value (all|fast)}"
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -131,6 +136,31 @@ done
 
 if [[ -z "${FILES}" ]]; then
     FILES="$(discover_default_files)"
+fi
+
+if [[ "${TIER}" == "fast" ]]; then
+    SLOW_PATH="${ROOT}/harness/oracle/SLOW_FILES.txt"
+    if [[ -f "${SLOW_PATH}" ]]; then
+        FILES="$(python3 - <<PY
+import sys
+from pathlib import Path
+slow = set()
+for line in Path("${SLOW_PATH}").read_text().splitlines():
+    stripped = line.split("#", 1)[0].strip()
+    if stripped:
+        slow.add(stripped)
+files = "${FILES}".split(",")
+kept = [f for f in files if f and f not in slow]
+print(",".join(kept))
+PY
+)"
+        echo "==> tier=fast: filtered FILES list against SLOW_FILES.txt"
+    else
+        echo "WARN: SLOW_FILES.txt missing; tier=fast is a no-op" >&2
+    fi
+elif [[ "${TIER}" != "all" ]]; then
+    echo "ERROR: --tier must be 'all' or 'fast' (got: ${TIER})" >&2
+    exit 2
 fi
 
 if ! [[ "${BASEPORT}" =~ ^[0-9]+$ && "${PORTCOUNT}" =~ ^[0-9]+$ && "${TIMEOUT_S}" =~ ^[0-9]+$ ]]; then
