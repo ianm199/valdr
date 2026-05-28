@@ -1,51 +1,90 @@
 //! TLS configuration for the redis-server binary.
 //!
 //! Builds a `rustls::ServerConfig` from PEM-encoded certificate, private-key
-//! and optional CA certificate files. The resulting `TlsConfig` is cheap to
-//! clone (the inner `ServerConfig` lives behind `Arc`) and is passed to the
-//! per-listener accept thread in `redis-server::main`.
+//! and (optional) CA certificate files. The resulting `TlsConfig` wraps an
+//! `Arc<ServerConfig>` so it is cheap to clone and share across the accept
+//! path.
 //!
-//! mTLS (mutual TLS / client certificate validation) is enabled when
-//! `require_client_cert` is `true`. In that mode the server demands a valid
-//! certificate chain from every connecting client; connections that do not
-//! present one are rejected at the TLS handshake.
+//! mTLS (mutual TLS / client certificate validation) is configured via a
+//! tri-state matching upstream Valkey's `tls-auth-clients` directive:
 //!
-//! # Dynamic TLS listener startup
+//! | mode | meaning                                | rustls verifier                                                 |
+//! |------|----------------------------------------|------------------------------------------------------------------|
+//! | 0    | `no`        — never ask for a cert     | `with_no_client_auth()`                                          |
+//! | 1    | `yes`       — require a valid cert     | `WebPkiClientVerifier::builder(roots).build()`                   |
+//! | 2    | `optional`  — accept either            | `WebPkiClientVerifier::builder(roots).allow_unauthenticated()`   |
 //!
-//! `CONFIG SET tls-port <N>` must be able to start a new TLS listener at
-//! runtime. Because `apply_config_set` in `redis-commands` has no direct
-//! access to main's socket machinery, `main.rs` installs a callback via
-//! `install_tls_start_hook`. When `notify_tls_port_set` is called (from
-//! `apply_config_set`), it invokes that callback with the new port number.
-//! The callback is responsible for loading the TLS config from `LiveConfig`
-//! and spawning the accept thread.
+//! `protocols` restricts the negotiable TLS versions. The empty string means
+//! "all rustls-supported" (TLS 1.2 + TLS 1.3). Non-empty values are tokenized
+//! on whitespace and matched against `TLSv1.2` / `TLSv1.3`. Older protocols
+//! (`SSLv3`, `TLSv1`, `TLSv1.1`) are not supported by rustls and produce an
+//! error — that is a security upgrade vs. upstream OpenSSL, documented at the
+//! site level.
+//!
+//! # Dynamic reconfiguration
+//!
+//! `CONFIG SET tls-port`, `tls-auth-clients`, `tls-protocols`,
+//! `tls-cert-file`, etc. all need to take effect on the next accepted
+//! connection without restarting the listener. They route through
+//! `notify_tls_port_set`, which fires `TLS_START_HOOK`. The hook (installed
+//! by `main.rs`) calls [`rebuild_from_live`] and then [`set_current_server_config`]
+//! to atomically swap the live `Arc<ServerConfig>` that the accept loop reads
+//! via [`current_server_config`].
 
 use std::fs::File;
 use std::io::{self, BufReader};
 use std::path::Path;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
-use rustls::RootCertStore;
+use rustls::version::{TLS12, TLS13};
+use rustls::{RootCertStore, SupportedProtocolVersion};
+
+use crate::live_config::LiveConfig;
 
 static TLS_START_HOOK: OnceLock<Box<dyn Fn(u16) + Send + Sync>> = OnceLock::new();
 
-/// Install the runtime hook that starts (or attempts to start) a TLS listener
-/// on the given port. `main.rs` calls this exactly once after the plain TCP
-/// listener is bound. The hook captures everything it needs (live config, DB,
-/// registry, etc.) via `Arc` clones from within the closure.
+/// Holds the `Arc<ServerConfig>` currently used by every fresh TLS accept.
+/// `None` means TLS is disabled (no listener should be active). Swapped under
+/// a `RwLock` because the accept path reads concurrently with the hook that
+/// rebuilds on `CONFIG SET`.
+fn current_cell() -> &'static RwLock<Option<Arc<rustls::ServerConfig>>> {
+    static CELL: OnceLock<RwLock<Option<Arc<rustls::ServerConfig>>>> = OnceLock::new();
+    CELL.get_or_init(|| RwLock::new(None))
+}
+
+/// Read the live `Arc<ServerConfig>`. Returns `None` when TLS has not been
+/// configured (either because tls-port is 0 or because the most recent rebuild
+/// failed; in the latter case the previous config remains in place).
+pub fn current_server_config() -> Option<Arc<rustls::ServerConfig>> {
+    match current_cell().read() {
+        Ok(g) => g.clone(),
+        Err(p) => p.into_inner().clone(),
+    }
+}
+
+/// Replace the live `Arc<ServerConfig>`. `None` disables TLS for subsequent
+/// accepts; existing already-handshaked connections are unaffected.
+pub fn set_current_server_config(cfg: Option<Arc<rustls::ServerConfig>>) {
+    match current_cell().write() {
+        Ok(mut g) => *g = cfg,
+        Err(p) => *p.into_inner() = cfg,
+    }
+}
+
+/// Install the runtime hook that rebuilds and swaps the TLS server config when
+/// `CONFIG SET` mutates any TLS directive. `main.rs` calls this exactly once
+/// after the plain TCP listener is bound. The hook captures the
+/// `Arc<LiveConfig>` it needs.
 pub fn install_tls_start_hook(hook: Box<dyn Fn(u16) + Send + Sync>) {
     let _ = TLS_START_HOOK.set(hook);
 }
 
-/// Notify the TLS subsystem that `tls-port` was changed via CONFIG SET.
-///
-/// If `main.rs` has installed a hook (via `install_tls_start_hook`), it is
-/// invoked with the new port number. When `port` is 0 the hook is still
-/// called; the hook implementation treats 0 as "disable" and takes no action.
-/// If no hook is installed yet (startup race), this is a silent no-op — the
-/// correct port will be read from `LiveConfig` at listener-bind time.
+/// Notify the TLS subsystem that a TLS-related directive was changed via
+/// `CONFIG SET`. The port argument is informational — the hook reads
+/// everything it needs from `LiveConfig`. A 0 typically means "disable TLS"
+/// and the hook is expected to `set_current_server_config(None)`.
 pub fn notify_tls_port_set(port: u16) {
     if let Some(hook) = TLS_START_HOOK.get() {
         hook(port);
@@ -62,65 +101,140 @@ pub struct TlsConfig {
 }
 
 impl TlsConfig {
-    /// Build a `TlsConfig` from PEM files on disk.
+    /// Build a `TlsConfig` from PEM files on disk and `LiveConfig`-style
+    /// directives.
     ///
-    /// `cert_path`  — PEM certificate chain (leaf first).
-    /// `key_path`   — PEM private key corresponding to the leaf certificate.
-    /// `ca_path`    — Optional PEM CA bundle used to verify client certs when
-    ///                `require_client_cert` is `true`. Ignored otherwise.
-    /// `require_client_cert` — When `true`, the server performs mTLS: every
-    ///                client must present a valid certificate signed by the CA.
+    /// * `cert_path`         — PEM certificate chain (leaf first).
+    /// * `key_path`          — PEM private key matching the leaf cert.
+    /// * `ca_path`           — PEM CA bundle. Required when `auth_clients_mode`
+    ///                         is `1` (yes) or `2` (optional); ignored when `0`.
+    /// * `auth_clients_mode` — Tri-state from upstream's `tls-auth-clients`:
+    ///                         `0=no`, `1=yes`, `2=optional`.
+    /// * `protocols`         — Space-separated TLS version list (`"TLSv1.2"`,
+    ///                         `"TLSv1.3"`, both, or `""` for default).
     pub fn from_paths(
         cert_path: &Path,
         key_path: &Path,
         ca_path: Option<&Path>,
-        require_client_cert: bool,
+        auth_clients_mode: u8,
+        protocols: &str,
     ) -> io::Result<Self> {
         let cert_chain = load_certs(cert_path)?;
         let private_key = load_private_key(key_path)?;
 
-        let builder = rustls::ServerConfig::builder();
+        let versions = parse_protocols(protocols)?;
 
-        let server_config = if require_client_cert {
-            let ca = ca_path.ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "tls-auth-clients yes requires tls-ca-cert-file to be set",
-                )
-            })?;
-            let mut root_store = RootCertStore::empty();
-            for cert in load_certs(ca)? {
-                root_store.add(cert).map_err(|e| {
-                    io::Error::new(io::ErrorKind::InvalidData, format!("CA cert error: {e}"))
+        let builder = if versions.is_empty() {
+            rustls::ServerConfig::builder()
+        } else {
+            rustls::ServerConfig::builder_with_protocol_versions(&versions)
+        };
+
+        let server_config = match auth_clients_mode {
+            0 => builder
+                .with_no_client_auth()
+                .with_single_cert(cert_chain, private_key)
+                .map_err(|e| {
+                    io::Error::new(io::ErrorKind::InvalidData, format!("TLS config error: {e}"))
+                })?,
+            1 | 2 => {
+                let ca = ca_path.ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "tls-auth-clients yes/optional requires tls-ca-cert-file to be set",
+                    )
                 })?;
-            }
-            let verifier = WebPkiClientVerifier::builder(Arc::new(root_store))
-                .build()
+                let mut root_store = RootCertStore::empty();
+                for cert in load_certs(ca)? {
+                    root_store.add(cert).map_err(|e| {
+                        io::Error::new(io::ErrorKind::InvalidData, format!("CA cert error: {e}"))
+                    })?;
+                }
+                let verifier_builder = WebPkiClientVerifier::builder(Arc::new(root_store));
+                let verifier = if auth_clients_mode == 2 {
+                    verifier_builder.allow_unauthenticated().build()
+                } else {
+                    verifier_builder.build()
+                }
                 .map_err(|e| {
                     io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!("client verifier build error: {e}"),
                     )
                 })?;
-            builder
-                .with_client_cert_verifier(verifier)
-                .with_single_cert(cert_chain, private_key)
-                .map_err(|e| {
-                    io::Error::new(io::ErrorKind::InvalidData, format!("TLS config error: {e}"))
-                })?
-        } else {
-            builder
-                .with_no_client_auth()
-                .with_single_cert(cert_chain, private_key)
-                .map_err(|e| {
-                    io::Error::new(io::ErrorKind::InvalidData, format!("TLS config error: {e}"))
-                })?
+                builder
+                    .with_client_cert_verifier(verifier)
+                    .with_single_cert(cert_chain, private_key)
+                    .map_err(|e| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("TLS config error: {e}"),
+                        )
+                    })?
+            }
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("tls-auth-clients: unknown mode {other}"),
+                ));
+            }
         };
 
         Ok(Self {
             server_config: Arc::new(server_config),
         })
     }
+}
+
+/// Rebuild a `TlsConfig` from the current `LiveConfig` state. Returns
+/// `Ok(None)` when TLS is configured-off (either `tls-port` is 0 or
+/// cert/key paths are missing) — callers should then clear
+/// [`current_server_config`]. Returns `Err` when the configuration is
+/// invalid (missing CA for `yes`/`optional`, unparseable protocol, etc.) —
+/// callers should log and leave the previous config in place.
+pub fn rebuild_from_live(cfg: &LiveConfig) -> io::Result<Option<TlsConfig>> {
+    let (cert, key) = match (cfg.tls_cert_file(), cfg.tls_key_file()) {
+        (Some(c), Some(k)) => (c, k),
+        _ => return Ok(None),
+    };
+    let ca = cfg.tls_ca_cert_file();
+    let mode = cfg.tls_auth_clients();
+    let protocols = cfg.tls_protocols();
+    TlsConfig::from_paths(&cert, &key, ca.as_deref(), mode, &protocols).map(Some)
+}
+
+/// Parse a space-separated TLS-version list into rustls's
+/// `&'static SupportedProtocolVersion` references.
+///
+/// Empty input yields an empty `Vec`, which the builder treats as "default
+/// (all rustls-supported)". `SSLv3`, `TLSv1`, `TLSv1.1` produce an error
+/// because rustls cannot negotiate them — refusing legacy versions is a
+/// deliberate security upgrade vs. upstream OpenSSL.
+fn parse_protocols(s: &str) -> io::Result<Vec<&'static SupportedProtocolVersion>> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out: Vec<&'static SupportedProtocolVersion> = Vec::new();
+    for tok in trimmed.split_ascii_whitespace() {
+        match tok {
+            "TLSv1.2" => out.push(&TLS12),
+            "TLSv1.3" => out.push(&TLS13),
+            "SSLv3" | "TLSv1" | "TLSv1.1" => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("tls-protocols: {tok} is not supported by rustls (TLSv1.2 and TLSv1.3 only)"),
+                ));
+            }
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("tls-protocols: unrecognized token '{other}'"),
+                ));
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn load_certs(path: &Path) -> io::Result<Vec<CertificateDer<'static>>> {
@@ -170,7 +284,7 @@ mod tests {
     fn from_paths_returns_error_on_bad_cert() {
         let cert = write_temp("bad_cert.pem", b"not a cert");
         let key = write_temp("bad_key.pem", b"not a key");
-        let result = TlsConfig::from_paths(&cert, &key, None, false);
+        let result = TlsConfig::from_paths(&cert, &key, None, 0, "");
         assert!(result.is_err(), "should fail with invalid cert/key data");
     }
 
@@ -180,7 +294,8 @@ mod tests {
             std::path::Path::new("/nonexistent/cert.pem"),
             std::path::Path::new("/nonexistent/key.pem"),
             None,
-            false,
+            0,
+            "",
         );
         assert!(result.is_err(), "should fail when cert file is missing");
     }
@@ -189,22 +304,57 @@ mod tests {
     fn mtls_without_ca_returns_error() {
         let cert = write_temp("mtls_cert.pem", b"not a cert");
         let key = write_temp("mtls_key.pem", b"not a key");
-        let result = TlsConfig::from_paths(&cert, &key, None, true);
+        let result = TlsConfig::from_paths(&cert, &key, None, 1, "");
         assert!(
             result.is_err(),
             "mtls without CA path should return an error"
         );
     }
+
+    #[test]
+    fn parse_protocols_empty_means_default() {
+        let v = parse_protocols("").unwrap();
+        assert!(v.is_empty(), "empty input -> empty list (default versions)");
+    }
+
+    #[test]
+    fn parse_protocols_accepts_tls12_and_tls13() {
+        let v = parse_protocols("TLSv1.2").unwrap();
+        assert_eq!(v.len(), 1);
+        let v = parse_protocols("TLSv1.2 TLSv1.3").unwrap();
+        assert_eq!(v.len(), 2);
+    }
+
+    #[test]
+    fn parse_protocols_rejects_legacy() {
+        for tok in &["SSLv3", "TLSv1", "TLSv1.1"] {
+            assert!(
+                parse_protocols(tok).is_err(),
+                "{tok} must be rejected (rustls won't negotiate it)"
+            );
+        }
+    }
+
+    #[test]
+    fn current_server_config_round_trips() {
+        assert!(current_server_config().is_none() || current_server_config().is_some());
+        set_current_server_config(None);
+        assert!(current_server_config().is_none());
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        Session 2B (TLS support)
+//   source:        Session 2B + 2C (TLS support; dynamic reconfig)
 //   target_crate:  redis-core
 //   confidence:    high
-//   todos:         1  (SNI; cipher-suite selection from live config)
+//   todos:         1  (SNI; tls-ciphers is parsed-but-ignored — rustls won't
+//                      negotiate CBC suites, by design)
 //   port_notes:    0
 //   unsafe_blocks: 0
 //   notes:         Builds rustls ServerConfig from PEM files. Supports
-//                  optional mTLS client verification via WebPkiClientVerifier.
+//                  tri-state mTLS (no/yes/optional) via WebPkiClientVerifier
+//                  and protocol-version restriction via
+//                  builder_with_protocol_versions. Live reconfig via
+//                  `rebuild_from_live` + `set_current_server_config` swap.
 // ──────────────────────────────────────────────────────────────────────────

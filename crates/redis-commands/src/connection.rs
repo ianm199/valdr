@@ -657,7 +657,11 @@ fn default_config_pairs() -> &'static [(&'static str, &'static str)] {
         ("tls-cert-file", ""),
         ("tls-key-file", ""),
         ("tls-ca-cert-file", ""),
-        ("tls-auth-clients", "no"),
+        ("tls-auth-clients", "yes"),
+        ("tls-protocols", ""),
+        ("tls-ciphers", ""),
+        ("tls-ciphersuites", ""),
+        ("tls-prefer-server-ciphers", "no"),
         ("repl-backlog-size", "1048576"),
         ("repl-timeout", "60"),
         ("replicaof", ""),
@@ -746,6 +750,7 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
         2 => "optional".to_string(),
         _ => "no".to_string(),
     };
+    let live_tls_protocols = cfg.tls_protocols();
     let live_appendonly = if cfg.appendonly() {
         "yes".to_string()
     } else {
@@ -840,6 +845,7 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
             "tls-key-file" => Some(live_tls_key.clone()),
             "tls-ca-cert-file" => Some(live_tls_ca.clone()),
             "tls-auth-clients" => Some(live_tls_auth_clients.clone()),
+            "tls-protocols" => Some(live_tls_protocols.clone()),
             "appendonly" => Some(live_appendonly.clone()),
             "appendfsync" => Some(live_appendfsync.clone()),
             "appendfilename" => Some(live_appendfilename.clone()),
@@ -1089,6 +1095,10 @@ fn config_value_is_live_only(key: &[u8]) -> bool {
         b"tls-key-file",
         b"tls-ca-cert-file",
         b"tls-auth-clients",
+        b"tls-protocols",
+        b"tls-ciphers",
+        b"tls-ciphersuites",
+        b"tls-prefer-server-ciphers",
         b"appendonly",
         b"appendfsync",
         b"appendfilename",
@@ -1408,6 +1418,7 @@ fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
             } else if let Ok(s) = std::str::from_utf8(value) {
                 cfg.set_tls_cert_file(Some(std::path::PathBuf::from(s)));
             }
+            redis_core::tls::notify_tls_port_set(cfg.tls_port());
         }
         b"tls-key-file" => {
             if value.is_empty() {
@@ -1415,6 +1426,7 @@ fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
             } else if let Ok(s) = std::str::from_utf8(value) {
                 cfg.set_tls_key_file(Some(std::path::PathBuf::from(s)));
             }
+            redis_core::tls::notify_tls_port_set(cfg.tls_port());
         }
         b"tls-ca-cert-file" => {
             if value.is_empty() {
@@ -1422,6 +1434,7 @@ fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
             } else if let Ok(s) = std::str::from_utf8(value) {
                 cfg.set_tls_ca_cert_file(Some(std::path::PathBuf::from(s)));
             }
+            redis_core::tls::notify_tls_port_set(cfg.tls_port());
         }
         b"tls-auth-clients" => {
             let mode = match value {
@@ -1430,6 +1443,19 @@ fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
                 _ => 0u8,
             };
             cfg.set_tls_auth_clients(mode);
+            redis_core::tls::notify_tls_port_set(cfg.tls_port());
+        }
+        b"tls-protocols" => {
+            if let Ok(s) = std::str::from_utf8(value) {
+                cfg.set_tls_protocols(s.to_string());
+                redis_core::tls::notify_tls_port_set(cfg.tls_port());
+            }
+        }
+        b"tls-ciphers" | b"tls-ciphersuites" | b"tls-prefer-server-ciphers" => {
+            // Accepted for upstream-config compatibility but inert: rustls
+            // refuses CBC suites and always prefers server ciphers, so these
+            // OpenSSL knobs have no effect. Documented as a deliberate
+            // security-upgrade divergence on the site.
         }
         b"tls-port" => {
             if let Some(n) = parse_usize_strict(value) {

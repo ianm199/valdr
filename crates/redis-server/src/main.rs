@@ -1196,24 +1196,27 @@ fn main() {
         Ok(listeners)
     }));
 
-    redis_core::tls::install_tls_start_hook(Box::new(move |port| {
-        if port == 0 {
-            return;
+    redis_core::tls::install_tls_start_hook(Box::new(move |_port| {
+        match redis_core::tls::rebuild_from_live(&live_config_for_hook) {
+            Ok(Some(cfg)) => {
+                redis_core::tls::set_current_server_config(Some(cfg.server_config));
+            }
+            Ok(None) => {
+                redis_core::tls::set_current_server_config(None);
+            }
+            Err(e) => {
+                eprintln!(
+                    "redis-server: TLS reconfiguration failed: {}; previous config retained",
+                    e
+                );
+            }
         }
-        // TODO(human): TLS transport still needs an owner-command/effect route.
-        // Starting the old TLS thread path after the DB flip would mutate the
-        // divergent global DB store, so reject the dynamic listener request.
-        eprintln!(
-            "redis-server: TLS listener request on port {} refused until TLS commands route through RuntimeOwner",
-            port
-        );
-        live_config_for_hook.set_tls_port(0);
     }));
 
     // Build the TLS listener(s) + rustls config from startup config (the same
     // tls-* keys the upstream test harness passes). TLS connections are served
     // by the same RuntimeOwner / DB as plain TCP (the divergent-DB path is gone).
-    let (tls_listeners, tls_config) = build_tls_startup(&args);
+    let (tls_listeners, tls_config) = build_tls_startup(&args, &live_config);
 
     runtime_owner::RuntimeOwner::run_plain_tcp(
         listeners,
@@ -1229,15 +1232,22 @@ fn main() {
     );
 }
 
-/// Read `tls-*` startup directives and, when `tls-port` is enabled, bind TLS
-/// listener(s) and build the rustls `ServerConfig`. Returns empty/None when TLS
-/// is disabled or misconfigured (logged, non-fatal).
-fn build_tls_startup(args: &CliArgs) -> (Vec<TcpListener>, Option<std::sync::Arc<rustls::ServerConfig>>) {
+/// Read `tls-*` startup directives, seed `live_config` with them so subsequent
+/// `CONFIG SET tls-*` rebuilds have a complete picture, and — when `tls-port`
+/// is enabled — bind the TLS listener(s), build the initial rustls
+/// `ServerConfig`, and publish it into the global swap cell that
+/// `RuntimeOwner` reads at accept time. Returns empty/None when TLS is
+/// disabled or misconfigured (logged, non-fatal).
+fn build_tls_startup(
+    args: &CliArgs,
+    live_config: &redis_core::live_config::LiveConfig,
+) -> (Vec<TcpListener>, Option<std::sync::Arc<rustls::ServerConfig>>) {
     let mut tls_port: u16 = 0;
     let mut cert: Option<std::path::PathBuf> = None;
     let mut key: Option<std::path::PathBuf> = None;
     let mut ca: Option<std::path::PathBuf> = None;
-    let mut auth_clients: u8 = 0;
+    let mut auth_clients: u8 = 1;
+    let mut protocols = String::new();
     for (k, v) in &args.startup_config_overrides {
         match k.to_ascii_lowercase().as_str() {
             "tls-port" => tls_port = v.trim().parse().unwrap_or(0),
@@ -1251,9 +1261,17 @@ fn build_tls_startup(args: &CliArgs) -> (Vec<TcpListener>, Option<std::sync::Arc
                     _ => 0,
                 }
             }
+            "tls-protocols" => protocols = v.trim().to_string(),
             _ => {}
         }
     }
+    live_config.set_tls_port(tls_port);
+    live_config.set_tls_cert_file(cert.clone());
+    live_config.set_tls_key_file(key.clone());
+    live_config.set_tls_ca_cert_file(ca.clone());
+    live_config.set_tls_auth_clients(auth_clients);
+    live_config.set_tls_protocols(protocols.clone());
+
     if tls_port == 0 {
         return (Vec::new(), None);
     }
@@ -1264,13 +1282,21 @@ fn build_tls_startup(args: &CliArgs) -> (Vec<TcpListener>, Option<std::sync::Arc
             return (Vec::new(), None);
         }
     };
-    let cfg = match redis_core::tls::TlsConfig::from_paths(&cert, &key, ca.as_deref(), auth_clients == 1) {
+    let cfg = match redis_core::tls::TlsConfig::from_paths(
+        &cert,
+        &key,
+        ca.as_deref(),
+        auth_clients,
+        &protocols,
+    ) {
         Ok(cfg) => cfg,
         Err(e) => {
             eprintln!("redis-server: TLS config error: {}; TLS disabled", e);
             return (Vec::new(), None);
         }
     };
+    redis_core::tls::set_current_server_config(Some(cfg.server_config.clone()));
+
     let mut tls_listeners = Vec::new();
     for bind in &args.bind {
         let bind_ip: IpAddr = match bind.parse() {

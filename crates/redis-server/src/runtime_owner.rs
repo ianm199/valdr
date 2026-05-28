@@ -1080,7 +1080,7 @@ impl RuntimeOwner {
                     let mio_stream = MioTcpStream::from_std(stream);
 
                     let tls_session = if is_tls {
-                        match self.tls_config.clone() {
+                        match redis_core::tls::current_server_config() {
                             Some(cfg) => match ServerConnection::new(cfg) {
                                 Ok(mut s) => {
                                     // Unlimit rustls' plaintext buffer; app-layer

@@ -153,6 +153,10 @@ pub struct LiveConfig {
     pub tls_ca_cert_file: Mutex<Option<PathBuf>>,
     /// mTLS client-auth policy: 0 = no, 1 = yes (require cert), 2 = optional.
     pub tls_auth_clients: AtomicU8,
+    /// Allowed TLS protocol versions (`tls-protocols` config key). Empty string
+    /// means "all rustls-supported versions" (TLS 1.2 + TLS 1.3). Non-empty is a
+    /// space-separated subset, e.g. `"TLSv1.2"` or `"TLSv1.2 TLSv1.3"`.
+    pub tls_protocols: Mutex<String>,
     /// Whether AOF persistence is enabled (`appendonly` config key).
     pub appendonly: AtomicBool,
     /// AOF filename relative to `rdb_dir` (`appendfilename` config key).
@@ -337,7 +341,8 @@ impl Default for LiveConfig {
             tls_cert_file: Mutex::new(None),
             tls_key_file: Mutex::new(None),
             tls_ca_cert_file: Mutex::new(None),
-            tls_auth_clients: AtomicU8::new(0),
+            tls_auth_clients: AtomicU8::new(1),
+            tls_protocols: Mutex::new(String::new()),
             appendonly: AtomicBool::new(false),
             appendfilename: Mutex::new(DEFAULT_AOF_FILENAME.to_string()),
             appenddirname: Mutex::new(DEFAULT_AOF_DIRNAME.to_string()),
@@ -712,6 +717,24 @@ impl LiveConfig {
     /// Update the mTLS client-auth policy.
     pub fn set_tls_auth_clients(&self, mode: u8) {
         self.tls_auth_clients.store(mode, Ordering::Relaxed);
+    }
+
+    /// Snapshot the configured TLS protocol versions string.
+    pub fn tls_protocols(&self) -> String {
+        match self.tls_protocols.lock() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
+        }
+    }
+
+    /// Update the configured TLS protocol versions string. Empty means "default
+    /// (all rustls-supported)". Validation of the contents happens at rebuild
+    /// time in `redis_core::tls::rebuild_from_live`.
+    pub fn set_tls_protocols(&self, versions: String) {
+        match self.tls_protocols.lock() {
+            Ok(mut g) => *g = versions,
+            Err(p) => *p.into_inner() = versions,
+        }
     }
 
     /// Whether AOF persistence is currently enabled.
