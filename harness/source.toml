@@ -7,8 +7,10 @@
 [source]
 name     = "valkey"
 repo     = "https://github.com/valkey-io/valkey"
-branch   = "unstable"
-commit   = "0321a69e62f5148096d03358e26a1b884af3b969"  # 2026-05-16
+tag      = "9.1.0"
+commit   = "c9e8005e9"  # 2026-05-19 — first stable Valkey release that has the
+                        # --skip-leaks test_helper flag we depend on; 4 days
+                        # ahead of our prior unstable test base (0321a69).
 license  = "BSD-3-Clause"
 local    = "reference/valkey"
 primary_file = "reference/valkey/src/server.c"

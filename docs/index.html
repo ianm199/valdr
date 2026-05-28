@@ -43,8 +43,9 @@ Platform (TLS infra tests, IO threads, MPTCP)          █░░░░░░░�
 </code></pre>
   <p class="note">
     Numbers from <a href="https://github.com/flightdeckSystems/valdr/blob/main/docs/TEST_AND_FEATURE_COVERAGE.md">docs/TEST_AND_FEATURE_COVERAGE.md</a>,
-    regenerated 2026-05-27 against Valkey unstable @ 0321a69. The "single-node
-    core" envelope is the 54-file set under <code>unit/</code> and
+    pinned against Valkey <strong>9.1.0</strong>
+    (<a href="https://github.com/valkey-io/valkey/releases/tag/9.1.0">release notes</a>).
+    The "single-node core" envelope is the 54-file set under <code>unit/</code> and
     <code>unit/type/</code>; the 75 unproven blocks are in five known frontier
     files (<code>aofrw</code>, <code>stream-cgroups</code>,
     <code>replybufsize</code>, …) — listed there.
@@ -53,13 +54,11 @@ Platform (TLS infra tests, IO threads, MPTCP)          █░░░░░░░�
 
 <section>
   <h2>Quick start</h2>
-  <pre><code>docker pull ghcr.io/ianm199/valkey-rs:alpha
-docker run -d --name valdr -p 6379:6379 ghcr.io/ianm199/valkey-rs:alpha
+  <pre><code>docker pull ghcr.io/flightdecksystems/valdr:alpha
+docker run -d --name valdr -p 6379:6379 ghcr.io/flightdecksystems/valdr:alpha
 printf 'PING\r\n' | nc 127.0.0.1 6379
 # +PONG</code></pre>
   <p class="note">
-    The container image is currently published under the legacy
-    <code>valkey-rs</code> namespace; rename to <code>valdr</code> is pending.
     Or build from source: <code>cargo build --release --bin redis-server</code>.
   </p>
 </section>
@@ -160,7 +159,7 @@ requirepass   &lt;a long random string&gt;</code></pre>
     <a href="https://github.com/flightdeckSystems/valdr">github.com/flightdeckSystems/valdr</a>
   </p>
   <p class="verified">
-    Status verified 2026-05-28 against Valkey unstable @ 0321a69.
+    Status verified 2026-05-28 against Valkey 9.1.0.
   </p>
 </footer>
 
