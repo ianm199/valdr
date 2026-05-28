@@ -21,6 +21,16 @@ use redis_protocol::frame::encode_resp2;
 use redis_protocol::RespFrame;
 use redis_types::{RedisError, RedisResult, RedisString};
 
+pub use crate::pubsub_registry::{
+    encode_pubsub_message_resp2, encode_pubsub_message_resp3,
+    encode_pubsub_pmessage_resp2, encode_pubsub_pmessage_resp3,
+};
+pub use crate::tracking::{
+    command_mutates_first_key, tracking_mutation_for_command,
+    tracking_read_keys_for_command, TrackingMutation,
+};
+
+
 pub use crate::reply_traits::{ArgIndex, ReplyArrayLen, ReplyErrorArg};
 
 
@@ -1078,223 +1088,11 @@ fn parse_i64_from_bytes(bytes: &[u8]) -> Option<i64> {
 }
 
 /// Encode a RESP2 `*3 message channel payload` array.
-pub fn encode_pubsub_message_resp2(channel: &RedisString, message: &RedisString) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(32 + channel.as_bytes().len() + message.as_bytes().len());
-    encode_resp2(
-        &RespFrame::array(vec![
-            RespFrame::bulk(RedisString::from_static(b"message")),
-            RespFrame::bulk(channel.clone()),
-            RespFrame::bulk(message.clone()),
-        ]),
-        &mut buf,
-    );
-    buf
-}
-
-/// Encode a RESP3 `>3 message channel payload` push frame.
-pub fn encode_pubsub_message_resp3(channel: &RedisString, message: &RedisString) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(48 + channel.as_bytes().len() + message.as_bytes().len());
-    redis_protocol::encode_resp3(
-        &RespFrame::Push(vec![
-            RespFrame::bulk(RedisString::from_static(b"message")),
-            RespFrame::bulk(channel.clone()),
-            RespFrame::bulk(message.clone()),
-        ]),
-        &mut buf,
-    );
-    buf
-}
-
-/// Encode a RESP2 `*4 pmessage pattern channel payload` array.
-pub fn encode_pubsub_pmessage_resp2(
-    pattern: &RedisString,
-    channel: &RedisString,
-    message: &RedisString,
-) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(
-        48 + pattern.as_bytes().len() + channel.as_bytes().len() + message.as_bytes().len(),
-    );
-    encode_resp2(
-        &RespFrame::array(vec![
-            RespFrame::bulk(RedisString::from_static(b"pmessage")),
-            RespFrame::bulk(pattern.clone()),
-            RespFrame::bulk(channel.clone()),
-            RespFrame::bulk(message.clone()),
-        ]),
-        &mut buf,
-    );
-    buf
-}
-
-/// Encode a RESP3 `>4 pmessage pattern channel payload` push frame.
-pub fn encode_pubsub_pmessage_resp3(
-    pattern: &RedisString,
-    channel: &RedisString,
-    message: &RedisString,
-) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(
-        64 + pattern.as_bytes().len() + channel.as_bytes().len() + message.as_bytes().len(),
-    );
-    redis_protocol::encode_resp3(
-        &RespFrame::Push(vec![
-            RespFrame::bulk(RedisString::from_static(b"pmessage")),
-            RespFrame::bulk(pattern.clone()),
-            RespFrame::bulk(channel.clone()),
-            RespFrame::bulk(message.clone()),
-        ]),
-        &mut buf,
-    );
-    buf
-}
-
-#[derive(Default)]
-struct TrackingMutation {
-    keys: Vec<RedisString>,
-    all_keys: bool,
-    force_send_to_source: bool,
-}
-
-fn ascii_eq_ignore_case(left: &[u8], right: &[u8]) -> bool {
+pub(crate) fn ascii_eq_ignore_case(left: &[u8], right: &[u8]) -> bool {
     left.eq_ignore_ascii_case(right)
 }
 
-fn tracking_read_keys_for_command(name: &[u8], argv: &[RedisString]) -> Vec<RedisString> {
-    if ascii_eq_ignore_case(name, b"GET")
-        || ascii_eq_ignore_case(name, b"HGET")
-        || ascii_eq_ignore_case(name, b"HEXISTS")
-        || ascii_eq_ignore_case(name, b"HLEN")
-        || ascii_eq_ignore_case(name, b"HGETALL")
-        || ascii_eq_ignore_case(name, b"HKEYS")
-        || ascii_eq_ignore_case(name, b"HVALS")
-        || ascii_eq_ignore_case(name, b"HSTRLEN")
-        || ascii_eq_ignore_case(name, b"HRANDFIELD")
-        || ascii_eq_ignore_case(name, b"LINDEX")
-        || ascii_eq_ignore_case(name, b"LLEN")
-        || ascii_eq_ignore_case(name, b"LRANGE")
-        || ascii_eq_ignore_case(name, b"SCARD")
-        || ascii_eq_ignore_case(name, b"SISMEMBER")
-        || ascii_eq_ignore_case(name, b"SMEMBERS")
-        || ascii_eq_ignore_case(name, b"ZCARD")
-        || ascii_eq_ignore_case(name, b"ZRANGE")
-        || ascii_eq_ignore_case(name, b"ZSCORE")
-        || ascii_eq_ignore_case(name, b"TYPE")
-        || ascii_eq_ignore_case(name, b"TTL")
-        || ascii_eq_ignore_case(name, b"PTTL")
-    {
-        return argv.get(1).cloned().into_iter().collect();
-    }
-    if ascii_eq_ignore_case(name, b"MGET") {
-        return argv.iter().skip(1).cloned().collect();
-    }
-    if ascii_eq_ignore_case(name, b"HMGET") {
-        return argv.get(1).cloned().into_iter().collect();
-    }
-    Vec::new()
-}
 
-fn tracking_mutation_for_command(name: &[u8], argv: &[RedisString]) -> TrackingMutation {
-    if ascii_eq_ignore_case(name, b"FLUSHALL") || ascii_eq_ignore_case(name, b"FLUSHDB") {
-        return TrackingMutation {
-            all_keys: true,
-            ..TrackingMutation::default()
-        };
-    }
-
-    let mut out = TrackingMutation::default();
-    if ascii_eq_ignore_case(name, b"MSET") || ascii_eq_ignore_case(name, b"MSETNX") {
-        out.keys = argv
-            .iter()
-            .enumerate()
-            .skip(1)
-            .filter_map(|(idx, arg)| (idx % 2 == 1).then_some(arg.clone()))
-            .collect();
-        return out;
-    }
-    if ascii_eq_ignore_case(name, b"DEL") || ascii_eq_ignore_case(name, b"UNLINK") {
-        out.keys = argv.iter().skip(1).cloned().collect();
-        return out;
-    }
-    if ascii_eq_ignore_case(name, b"RENAME") || ascii_eq_ignore_case(name, b"RENAMENX") {
-        out.keys.extend(argv.get(1).cloned());
-        out.keys.extend(argv.get(2).cloned());
-        return out;
-    }
-    if ascii_eq_ignore_case(name, b"BLMOVE") || ascii_eq_ignore_case(name, b"LMOVE") {
-        out.keys.extend(argv.get(1).cloned());
-        out.keys.extend(argv.get(2).cloned());
-        return out;
-    }
-
-    if command_mutates_first_key(name) {
-        out.keys.extend(argv.get(1).cloned());
-        out.force_send_to_source = command_sets_expiry(name, argv);
-    }
-    out
-}
-
-fn command_mutates_first_key(name: &[u8]) -> bool {
-    ascii_eq_ignore_case(name, b"SET")
-        || ascii_eq_ignore_case(name, b"SETEX")
-        || ascii_eq_ignore_case(name, b"PSETEX")
-        || ascii_eq_ignore_case(name, b"SETNX")
-        || ascii_eq_ignore_case(name, b"GETSET")
-        || ascii_eq_ignore_case(name, b"GETDEL")
-        || ascii_eq_ignore_case(name, b"GETEX")
-        || ascii_eq_ignore_case(name, b"SETBIT")
-        || ascii_eq_ignore_case(name, b"SETRANGE")
-        || ascii_eq_ignore_case(name, b"APPEND")
-        || ascii_eq_ignore_case(name, b"INCR")
-        || ascii_eq_ignore_case(name, b"INCRBY")
-        || ascii_eq_ignore_case(name, b"INCRBYFLOAT")
-        || ascii_eq_ignore_case(name, b"DECR")
-        || ascii_eq_ignore_case(name, b"DECRBY")
-        || ascii_eq_ignore_case(name, b"EXPIRE")
-        || ascii_eq_ignore_case(name, b"PEXPIRE")
-        || ascii_eq_ignore_case(name, b"EXPIREAT")
-        || ascii_eq_ignore_case(name, b"PEXPIREAT")
-        || ascii_eq_ignore_case(name, b"EXPIRETIME")
-        || ascii_eq_ignore_case(name, b"PEXPIRETIME")
-        || ascii_eq_ignore_case(name, b"PERSIST")
-        || ascii_eq_ignore_case(name, b"HSET")
-        || ascii_eq_ignore_case(name, b"HSETNX")
-        || ascii_eq_ignore_case(name, b"HMSET")
-        || ascii_eq_ignore_case(name, b"HDEL")
-        || ascii_eq_ignore_case(name, b"HINCRBY")
-        || ascii_eq_ignore_case(name, b"HINCRBYFLOAT")
-        || ascii_eq_ignore_case(name, b"LPUSH")
-        || ascii_eq_ignore_case(name, b"RPUSH")
-        || ascii_eq_ignore_case(name, b"LPUSHX")
-        || ascii_eq_ignore_case(name, b"RPUSHX")
-        || ascii_eq_ignore_case(name, b"LPOP")
-        || ascii_eq_ignore_case(name, b"RPOP")
-        || ascii_eq_ignore_case(name, b"LSET")
-        || ascii_eq_ignore_case(name, b"LREM")
-        || ascii_eq_ignore_case(name, b"LTRIM")
-        || ascii_eq_ignore_case(name, b"LINSERT")
-        || ascii_eq_ignore_case(name, b"ZADD")
-        || ascii_eq_ignore_case(name, b"ZINCRBY")
-        || ascii_eq_ignore_case(name, b"ZREM")
-        || ascii_eq_ignore_case(name, b"SADD")
-        || ascii_eq_ignore_case(name, b"SREM")
-        || ascii_eq_ignore_case(name, b"XADD")
-        || ascii_eq_ignore_case(name, b"XDEL")
-}
-
-fn command_sets_expiry(name: &[u8], argv: &[RedisString]) -> bool {
-    if ascii_eq_ignore_case(name, b"SETEX") || ascii_eq_ignore_case(name, b"PSETEX") {
-        return true;
-    }
-    if !ascii_eq_ignore_case(name, b"SET") {
-        return false;
-    }
-    argv.iter().skip(3).any(|arg| {
-        let bytes = arg.as_bytes();
-        ascii_eq_ignore_case(bytes, b"EX")
-            || ascii_eq_ignore_case(bytes, b"PX")
-            || ascii_eq_ignore_case(bytes, b"EXAT")
-            || ascii_eq_ignore_case(bytes, b"PXAT")
-    })
-}
 
 fn glob_match_ascii_ci(pattern: &[u8], text: &[u8]) -> bool {
     let (mut pi, mut ti) = (0usize, 0usize);

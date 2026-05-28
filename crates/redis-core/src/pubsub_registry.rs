@@ -15,6 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::Sender;
 
 use redis_types::RedisString;
+use redis_protocol::frame::{encode_resp2, RespFrame};
 
 use crate::client::ClientId;
 
@@ -265,6 +266,82 @@ impl PubSubRegistry {
         self.patterns.len() as i64
     }
 }
+
+
+
+// ── Pub/Sub message-encoding helpers (moved from command_context.rs 2026-05-28) ──
+// These were tail-call helpers used by PUBLISH/SPUBLISH dispatch; they live
+// next to the PubSubRegistry now, not the dispatch context.
+
+pub fn encode_pubsub_message_resp2(channel: &RedisString, message: &RedisString) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(32 + channel.as_bytes().len() + message.as_bytes().len());
+    encode_resp2(
+        &RespFrame::array(vec![
+            RespFrame::bulk(RedisString::from_static(b"message")),
+            RespFrame::bulk(channel.clone()),
+            RespFrame::bulk(message.clone()),
+        ]),
+        &mut buf,
+    );
+    buf
+}
+
+/// Encode a RESP3 `>3 message channel payload` push frame.
+pub fn encode_pubsub_message_resp3(channel: &RedisString, message: &RedisString) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(48 + channel.as_bytes().len() + message.as_bytes().len());
+    redis_protocol::encode_resp3(
+        &RespFrame::Push(vec![
+            RespFrame::bulk(RedisString::from_static(b"message")),
+            RespFrame::bulk(channel.clone()),
+            RespFrame::bulk(message.clone()),
+        ]),
+        &mut buf,
+    );
+    buf
+}
+
+/// Encode a RESP2 `*4 pmessage pattern channel payload` array.
+pub fn encode_pubsub_pmessage_resp2(
+    pattern: &RedisString,
+    channel: &RedisString,
+    message: &RedisString,
+) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(
+        48 + pattern.as_bytes().len() + channel.as_bytes().len() + message.as_bytes().len(),
+    );
+    encode_resp2(
+        &RespFrame::array(vec![
+            RespFrame::bulk(RedisString::from_static(b"pmessage")),
+            RespFrame::bulk(pattern.clone()),
+            RespFrame::bulk(channel.clone()),
+            RespFrame::bulk(message.clone()),
+        ]),
+        &mut buf,
+    );
+    buf
+}
+
+/// Encode a RESP3 `>4 pmessage pattern channel payload` push frame.
+pub fn encode_pubsub_pmessage_resp3(
+    pattern: &RedisString,
+    channel: &RedisString,
+    message: &RedisString,
+) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(
+        64 + pattern.as_bytes().len() + channel.as_bytes().len() + message.as_bytes().len(),
+    );
+    redis_protocol::encode_resp3(
+        &RespFrame::Push(vec![
+            RespFrame::bulk(RedisString::from_static(b"pmessage")),
+            RespFrame::bulk(pattern.clone()),
+            RespFrame::bulk(channel.clone()),
+            RespFrame::bulk(message.clone()),
+        ]),
+        &mut buf,
+    );
+    buf
+}
+
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
