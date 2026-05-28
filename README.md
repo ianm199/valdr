@@ -22,7 +22,7 @@ Single-node Valkey-compatible server: a Rust port of the upstream Valkey C imple
 | Cluster mode | Not implemented | Out of scope for current alpha |
 | Loadable C modules | Not implemented | Out of scope for current alpha |
 | Production HA / Sentinel | Not claimed | Replication/AOF exist but are not production-conformance gated |
-| In-process TLS | Not enabled | rustls scaffold exists; listener is not wired to runtime owner |
+| In-process TLS | Enabled (rustls; no OpenSSL) | TLS 1.2 + 1.3; mTLS tri-state (`no`/`optional`/`yes`); dynamic CONFIG SET of `tls-protocols`, `tls-auth-clients`, cert/key paths. CBC-suite tests in `unit/tls.tcl` are a deliberate rustls divergence — see [`docs/TLS_FAITHFUL_PLAN.md`](docs/TLS_FAITHFUL_PLAN.md). |
 
 ## Features
 
