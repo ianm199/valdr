@@ -1082,7 +1082,12 @@ impl RuntimeOwner {
                     let tls_session = if is_tls {
                         match self.tls_config.clone() {
                             Some(cfg) => match ServerConnection::new(cfg) {
-                                Ok(s) => Some(Box::new(s)),
+                                Ok(mut s) => {
+                                    // Unlimit rustls' plaintext buffer; app-layer
+                                    // client-query-buffer-limit is the real bound.
+                                    s.set_buffer_limit(None);
+                                    Some(Box::new(s))
+                                }
                                 Err(e) => {
                                     eprintln!(
                                         "redis-server: tls ServerConnection::new failed for {}: {}",
@@ -1519,23 +1524,45 @@ impl RuntimeOwner {
             }
 
             if !errored && !still_handshaking {
-                match session_read_pump(session, stream) {
-                    Ok(eof) => transport_closed = eof,
-                    Err(_) => errored = true,
-                }
-                if !errored {
+                // Interleaved drain+read+process. rustls' internal "received
+                // plaintext" queue has a finite ceiling — feeding ciphertext
+                // without draining decrypted plaintext between cycles makes
+                // read_tls return "received plaintext buffer full". Drain at
+                // the *start* of each iteration so any plaintext already
+                // queued (e.g. left by the handshake-side pump that read past
+                // ServerFinished into early app data) is consumed first.
+                'pump: loop {
+                    // 1. drain any plaintext currently buffered in the session.
                     loop {
                         match session.reader().read(read_buf) {
                             Ok(0) => {
                                 transport_closed = true;
-                                break;
+                                break 'pump;
                             }
                             Ok(n) => plaintext.extend_from_slice(&read_buf[..n]),
                             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
                             Err(_) => {
                                 transport_closed = true;
-                                break;
+                                break 'pump;
                             }
+                        }
+                    }
+                    // 2. read more ciphertext, process, and loop (which drains).
+                    match session.read_tls(stream) {
+                        Ok(0) => {
+                            transport_closed = true;
+                            break 'pump;
+                        }
+                        Ok(_) => {
+                            if session.process_new_packets().is_err() {
+                                errored = true;
+                                break 'pump;
+                            }
+                        }
+                        Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break 'pump,
+                        Err(_) => {
+                            errored = true;
+                            break 'pump;
                         }
                     }
                 }

@@ -51,8 +51,14 @@ impl TlsConnectionType {
     /// C: `createTLSConnectionAccepted` / `connCreateAcceptedTLS`. The owner loop
     /// (or a test) supplies the freshly-accepted ciphertext transport.
     pub fn accept_connection(&self, io: Box<dyn ConnIo>) -> Result<Connection, RedisError> {
-        let session = rustls::ServerConnection::new(Arc::clone(&self.server_config))
+        let mut session = rustls::ServerConnection::new(Arc::clone(&self.server_config))
             .map_err(|e| RedisError::runtime(format!("tls ServerConnection::new: {e}").into_bytes()))?;
+        // Unlimit rustls' internal plaintext buffer — the application layer
+        // already bounds incoming data via `client-query-buffer-limit` (1 GB by
+        // default). With rustls' default ~64 KB ceiling, `read_tls` errors with
+        // "received plaintext buffer full" on any client write large enough to
+        // produce more plaintext than the session can hold between drains.
+        session.set_buffer_limit(None);
         let mut conn = Connection::new(ConnectionTypeId::Tls, -1);
         conn.state = ConnectionState::Accepting;
         conn.io = ConnIoSlot::Tls(Box::new(TlsIo {
