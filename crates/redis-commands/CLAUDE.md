@@ -7,13 +7,22 @@ and `redis-types`.
 ## Owns (canonical types — `harness/type-vocabulary.tsv`)
 `CommandSpec` — `src/spec.rs` (audit mode).
 
-## Module map (28 files)
+## Module map (32 files)
 - router            dispatch (the command table + `dispatch(ctx)` entry point)
 - generated table   generated.rs (425 commands; build output — see below)
 - data-type impls   string, list, set, zset, hash, stream, bitops, geo
                     (+ geohash helpers), hyperloglog, sort
-- server commands   connection, info, slowlog_cmd, multi, persist, pubsub,
-                    replication, replica_dialer, aof, eval (scripting)
+- server commands   connection (PING/ECHO/SELECT/HELLO/CLIENT/COMMAND/AUTH/ACL/
+                    DEBUG/MONITOR/MEMORY/TIME/QUIT/SHUTDOWN/RESET/READONLY/
+                    READWRITE/PUBSUB/MODULE), info, slowlog_cmd, multi, persist,
+                    pubsub, replication, replica_dialer, aof, eval (scripting)
+- config & server   config_cmd (CONFIG GET/SET, defaults, validation,
+                    apply_config_set, per-key appliers — was the bulk of the
+                    7,184-LOC connection.rs god-file, split out 2026-05-28)
+- runtime hooks     listeners (TCP port/bind dynamic-reconfig hooks),
+                    shutdown_signals (signal counters + debug cron-pause),
+                    client_limits (output-buffer-limit / query-buffer-limit /
+                    rdb-key-save-delay)
 - module-compat     bloom, json, vector — Rust-native subsets of
                     RedisBloom/JSON/vector, NOT C-module ABI ports
 
@@ -64,7 +73,13 @@ Per-type TCL:
 `bash harness/oracle/run-single-node-tcl-suite.sh --skip-build --files unit/type/<x>`
 
 ## Heads up
-`lib.rs` still lists "Pilot commands: PING, ECHO…" and a "(TODO)" generator —
-both stale; the full 425-command surface and the generator have landed.
+- `lib.rs` still lists "Pilot commands: PING, ECHO…" and a "(TODO)" generator —
+  both stale; the full 425-command surface and the generator have landed.
+- `connection.rs` re-exports everything in `config_cmd`, `listeners`,
+  `shutdown_signals`, `client_limits` via `pub use crate::<mod>::*;`. External
+  callers using `redis_commands::connection::<sym>` paths still work after the
+  2026-05-28 split — *but* new code should import from the canonical module
+  directly (e.g. `redis_commands::config_cmd::apply_config_set`, not
+  `redis_commands::connection::apply_config_set`).
 
 Project strategy & roles live in the parent `CLAUDE.md` files — not duplicated.

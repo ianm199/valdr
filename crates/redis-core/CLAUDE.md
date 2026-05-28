@@ -9,16 +9,22 @@ command reads and mutates. Sits above `redis-types`, `redis-protocol`, and
 `ListEncoding`, `SetEncoding`, `ZSetEncoding`, `HashEncoding`, `ObjectType`),
 `Client` (+ `MultiState`/`MultiCmd`/`WatchedKey`), `CommandContext`.
 
-## Module map (66 files, by subsystem)
+## Module map (68 files, by subsystem)
 - keyspace & values   db, databases, object, entry, expire, eviction, lrulfu,
-                      lru_clock, defrag, lazyfree
+                      lru_clock, defrag, lazyfree, stream_hooks (4 stream-side
+                      reactive hooks fired by db-side mutation paths — extracted
+                      from db.rs 2026-05-28)
 - clients & I/O       client, client_info, connection, networking, transport,
                       timeout, blocked_keys, tracking
+- dispatch context    command_context, reply_traits (ReplyErrorArg /
+                      ReplyArrayLen / ArgIndex adapter traits — extracted from
+                      command_context.rs 2026-05-28)
 - server lifecycle    server, persistence, rdb, replication, bio, threads_mngr,
                       childinfo, syscheck, setproctitle, cpu_affinity
 - pub/sub & events    pubsub_registry, notify
-- config & introspect live_config, acl, commandlog, latency, metrics, memory,
-                      memory_prefetch, logreqres
+- config & introspect live_config, tls (rustls server-config + dynamic
+                      reconfig swap cell), acl, commandlog, latency, metrics,
+                      memory, memory_prefetch, logreqres
 - primitives          rand, mt19937, siphash, strtod, monotonic, localtime,
                       fifo, queues, mutexqueue
 
@@ -67,8 +73,13 @@ After a behavior change, re-run the matching upstream TCL file:
 `bash harness/oracle/run-single-node-tcl-suite.sh --skip-build --files unit/<x>`
 
 ## Heads up
-`lib.rs` module doc-comments still say "STUB / Phase 2-3" — stale; the crate is
-full-featured. Trust the code and the oracle, not those.
+- `lib.rs` module doc-comments still say "STUB / Phase 2-3" — stale; the crate
+  is full-featured. Trust the code and the oracle, not those.
+- After the 2026-05-28 splits: `command_context.rs` re-exports the three
+  reply-adapter traits (`pub use crate::reply_traits::{ReplyErrorArg,
+  ReplyArrayLen, ArgIndex};`) and `db.rs` re-exports the four stream hooks
+  (`pub use crate::stream_hooks::{install_stream_*, fire_stream_*};`). New
+  code should import from the canonical module directly.
 
 Strategy, the oracle/phase model, and agent roles live in the parent `CLAUDE.md`
 files — not duplicated here.
