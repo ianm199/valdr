@@ -2023,6 +2023,11 @@ fn enforce_replica_readonly_gate(
     if !is_write_command {
         return None;
     }
+    // A writable replica (`replica-read-only no`) accepts writes directly;
+    // mirrors Valkey's `server.repl_replica_ro` guard in processCommand.
+    if !ctx.live_config().slave_read_only() {
+        return None;
+    }
     Some(b"-READONLY You can't write against a read only replica.\r\n".to_vec())
 }
 
