@@ -101,6 +101,9 @@ static PING_COMMAND_STATS: AtomicCommandStat = AtomicCommandStat::new();
 static INCR_COMMAND_STATS: AtomicCommandStat = AtomicCommandStat::new();
 static SADD_COMMAND_STATS: AtomicCommandStat = AtomicCommandStat::new();
 static HSET_COMMAND_STATS: AtomicCommandStat = AtomicCommandStat::new();
+static ZADD_COMMAND_STATS: AtomicCommandStat = AtomicCommandStat::new();
+static SPOP_COMMAND_STATS: AtomicCommandStat = AtomicCommandStat::new();
+static ZPOPMIN_COMMAND_STATS: AtomicCommandStat = AtomicCommandStat::new();
 
 #[derive(Clone, Debug, Default)]
 pub struct CommandStatSnapshot {
@@ -276,6 +279,33 @@ fn hot_command_stat(name: &[u8]) -> Option<(&'static [u8], &'static AtomicComman
         {
             Some((b"hset", &HSET_COMMAND_STATS))
         }
+        [a, b, c, d]
+            if ascii_lower(*a) == b'z'
+                && ascii_lower(*b) == b'a'
+                && ascii_lower(*c) == b'd'
+                && ascii_lower(*d) == b'd' =>
+        {
+            Some((b"zadd", &ZADD_COMMAND_STATS))
+        }
+        [a, b, c, d]
+            if ascii_lower(*a) == b's'
+                && ascii_lower(*b) == b'p'
+                && ascii_lower(*c) == b'o'
+                && ascii_lower(*d) == b'p' =>
+        {
+            Some((b"spop", &SPOP_COMMAND_STATS))
+        }
+        [a, b, c, d, e, f, g]
+            if ascii_lower(*a) == b'z'
+                && ascii_lower(*b) == b'p'
+                && ascii_lower(*c) == b'o'
+                && ascii_lower(*d) == b'p'
+                && ascii_lower(*e) == b'm'
+                && ascii_lower(*f) == b'i'
+                && ascii_lower(*g) == b'n' =>
+        {
+            Some((b"zpopmin", &ZPOPMIN_COMMAND_STATS))
+        }
         _ => None,
     }
 }
@@ -297,6 +327,9 @@ fn append_hot_command_stats(out: &mut Vec<CommandStatSnapshot>) {
         (b"ping".as_slice(), &PING_COMMAND_STATS),
         (b"sadd".as_slice(), &SADD_COMMAND_STATS),
         (b"set".as_slice(), &SET_COMMAND_STATS),
+        (b"zadd".as_slice(), &ZADD_COMMAND_STATS),
+        (b"spop".as_slice(), &SPOP_COMMAND_STATS),
+        (b"zpopmin".as_slice(), &ZPOPMIN_COMMAND_STATS),
     ] {
         if let Some(snapshot) = stat.snapshot(name) {
             out.push(snapshot);
@@ -311,6 +344,9 @@ fn reset_hot_command_stats() {
     PING_COMMAND_STATS.reset();
     SADD_COMMAND_STATS.reset();
     SET_COMMAND_STATS.reset();
+    ZADD_COMMAND_STATS.reset();
+    SPOP_COMMAND_STATS.reset();
+    ZPOPMIN_COMMAND_STATS.reset();
 }
 
 pub fn command_stats_snapshot() -> Vec<CommandStatSnapshot> {

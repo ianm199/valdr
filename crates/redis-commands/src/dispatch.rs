@@ -81,6 +81,9 @@ struct HotRuntimeDispatch {
     incr: Option<&'static RuntimeDispatchEntry>,
     sadd: Option<&'static RuntimeDispatchEntry>,
     hset: Option<&'static RuntimeDispatchEntry>,
+    zadd: Option<&'static RuntimeDispatchEntry>,
+    spop: Option<&'static RuntimeDispatchEntry>,
+    zpopmin: Option<&'static RuntimeDispatchEntry>,
 }
 
 struct RuntimeDispatchIndex {
@@ -324,6 +327,33 @@ fn lookup_hot_runtime_command(name: &[u8]) -> Option<&'static RuntimeDispatchEnt
         {
             hot.hset
         }
+        [a, b, c, d]
+            if ascii_lower(*a) == b'z'
+                && ascii_lower(*b) == b'a'
+                && ascii_lower(*c) == b'd'
+                && ascii_lower(*d) == b'd' =>
+        {
+            hot.zadd
+        }
+        [a, b, c, d]
+            if ascii_lower(*a) == b's'
+                && ascii_lower(*b) == b'p'
+                && ascii_lower(*c) == b'o'
+                && ascii_lower(*d) == b'p' =>
+        {
+            hot.spop
+        }
+        [a, b, c, d, e, f, g]
+            if ascii_lower(*a) == b'z'
+                && ascii_lower(*b) == b'p'
+                && ascii_lower(*c) == b'o'
+                && ascii_lower(*d) == b'p'
+                && ascii_lower(*e) == b'm'
+                && ascii_lower(*f) == b'i'
+                && ascii_lower(*g) == b'n' =>
+        {
+            hot.zpopmin
+        }
         _ => None,
     }
 }
@@ -336,6 +366,9 @@ fn hot_runtime_dispatch() -> &'static HotRuntimeDispatch {
         incr: lookup_runtime_command_indexed(b"INCR"),
         sadd: lookup_runtime_command_indexed(b"SADD"),
         hset: lookup_runtime_command_indexed(b"HSET"),
+        zadd: lookup_runtime_command_indexed(b"ZADD"),
+        spop: lookup_runtime_command_indexed(b"SPOP"),
+        zpopmin: lookup_runtime_command_indexed(b"ZPOPMIN"),
     })
 }
 
