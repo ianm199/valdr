@@ -37,7 +37,7 @@
 //! tightened once a dedicated float-to-string helper exists.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
@@ -55,6 +55,19 @@ struct HashFieldExpiryKey {
 }
 
 static HASH_FIELD_EXPIRES: OnceLock<Mutex<HashMap<HashFieldExpiryKey, i64>>> = OnceLock::new();
+
+/// Conservative "have any hash-field expiries ever been created?" gate. Set
+/// true at every site that can grow `HASH_FIELD_EXPIRES`; never reset. Lets the
+/// per-write `purge_expired_hash_fields` skip its clock read + global lock +
+/// scan on the overwhelmingly common path where no field has a TTL (which is
+/// also every HSET in the default benchmark). Worst case it stays true after
+/// the last expiry is removed and we take the correct slow path — it never
+/// skips a purge that is actually needed.
+static HASH_FIELD_EXPIRES_PRESENT: AtomicBool = AtomicBool::new(false);
+
+fn mark_hash_field_expiries_present() {
+    HASH_FIELD_EXPIRES_PRESENT.store(true, Ordering::Relaxed);
+}
 static DUMPED_HASH_FIELD_EXPIRES: OnceLock<Mutex<HashMap<Vec<u8>, Vec<(RedisString, i64)>>>> =
     OnceLock::new();
 static EXPIRED_FIELDS: AtomicU64 = AtomicU64::new(0);
@@ -114,6 +127,7 @@ fn set_field_expiry(dbid: u32, key: &RedisString, field: &RedisString, when_ms: 
         Err(p) => p.into_inner(),
     };
     guard.insert(expiry_key(dbid, key, field), when_ms);
+    mark_hash_field_expiries_present();
 }
 
 fn remove_field_expiry(dbid: u32, key: &RedisString, field: &RedisString) -> bool {
@@ -162,6 +176,7 @@ pub(crate) fn copy_hash_field_expiries(
         .collect();
     guard.retain(|exp, _| !(exp.dbid == dst_dbid && exp.key == *dst_key));
     guard.extend(copied);
+    mark_hash_field_expiries_present();
 }
 
 pub(crate) fn move_hash_field_expiries(
@@ -196,6 +211,7 @@ pub(crate) fn move_hash_field_expiries(
             && !(exp.dbid == dst_dbid && exp.key == *dst_key)
     });
     guard.extend(moved);
+    mark_hash_field_expiries_present();
 }
 
 pub(crate) fn remember_dumped_hash_field_expiries(dbid: u32, key: &RedisString, payload: &[u8]) {
@@ -248,6 +264,7 @@ pub(crate) fn restore_dumped_hash_field_expiries(dbid: u32, key: &RedisString, p
             when,
         ))
     }));
+    mark_hash_field_expiries_present();
 }
 
 fn reset_hash_expiry_state_if_db_empty(ctx: &CommandContext) {
@@ -271,6 +288,12 @@ fn field_expiry_ms(dbid: u32, key: &RedisString, field: &RedisString) -> Option<
 }
 
 fn purge_expired_hash_fields(ctx: &mut CommandContext, key: &RedisString) -> RedisResult<()> {
+    // Fast path: when no hash-field TTL has ever been created, there is nothing
+    // to purge — skip the clock read, the global HASH_FIELD_EXPIRES lock, and
+    // the full-index scan that would otherwise run on every hash write.
+    if !HASH_FIELD_EXPIRES_PRESENT.load(Ordering::Relaxed) {
+        return Ok(());
+    }
     if ctx.live_config().import_mode()
         || redis_core::networking::is_server_paused_for(
             ctx.server(),
