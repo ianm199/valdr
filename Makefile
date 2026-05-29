@@ -20,10 +20,15 @@ COMMANDS   ?= get,set,ping_mbulk   # bench-p1: any of get,set,incr,ping_mbulk
 REQUESTS   ?= 50000      # bench-p1: requests per trial
 CLIENTS    ?= 50         # concurrent clients
 PAYLOAD    ?= 64         # value size in bytes
+TIER       ?= fast       # oracle: fast (21 files ~14s) | all (full requested set)
+CRATE      ?=            # test: narrow to one crate, e.g. redis-core
+KIT        ?=            # test-kit: one kit, e.g. conn_transport_kit
+FILES      ?=            # oracle: specific files, e.g. unit/type/string (overrides TIER)
+FORMAT     ?= table      # bench/oracle output: table (human-readable) | json
 
 MATRIX_TSV = $$(ls -t harness/bench/results/*profile-matrix.tsv | head -1)
 
-.PHONY: help build bench bench-quick bench-p1 bench-show bench-release oracle
+.PHONY: help build test test-kit bench bench-quick bench-p1 bench-show bench-release oracle oracle-full
 
 help: ## Show this help
 	@echo "Valdr targets:"
@@ -31,22 +36,38 @@ help: ## Show this help
 	  | sort \
 	  | awk -F':.*## ' '{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 	@echo ""
-	@echo "Flags (override inline): SKIP_BUILD TRIALS COMMANDS REQUESTS CLIENTS PAYLOAD"
+	@echo "Flags (override inline): SKIP_BUILD TRIALS COMMANDS REQUESTS CLIENTS PAYLOAD TIER CRATE KIT FILES"
 	@echo "  e.g.  make bench-p1 TRIALS=40 COMMANDS=get,set"
-	@echo "        make bench-quick      # fast narrow matrix, no rebuild"
+	@echo "        make test CRATE=redis-core         # one crate, not the workspace"
+	@echo "        make oracle                        # fast tier, ~14s (TIER=all for full)"
+	@echo "        make oracle FILES=unit/type/string # just these files"
+	@echo "        make bench FORMAT=json             # raw JSON instead of the table"
 
 build: ## Build the release server binary the benchmarks drive
 	cargo build --release -p redis-server
 
-bench: ## Full profile matrix (p1/p16/p100 + range-heavy) vs upstream, printed readably
-	@echo "running profile matrix (SKIP_BUILD=$(SKIP_BUILD), clients=$(CLIENTS), payload=$(PAYLOAD))…"
+test: ## Rust tests — the fast inner loop. CRATE=redis-core to narrow to one crate
+	@if [ -n "$(CRATE)" ]; then cargo test -p $(CRATE); else cargo test --workspace; fi
+
+test-kit: ## Custom subsystem testers only (fastest tier). KIT=conn_transport_kit for one
+	@if [ -n "$(KIT)" ]; then \
+	  cargo test -p redis-core --test $(KIT) 2>/dev/null \
+	    || cargo test -p redis-commands --test $(KIT); \
+	else \
+	  cargo test -p redis-core --test conn_transport_kit \
+	    && cargo test -p redis-commands --test aof_correctness_kit \
+	    && cargo test -p redis-commands --test repl_correctness_kit; \
+	fi
+
+bench: ## Full profile matrix (p1/p16/p100 + range-heavy) vs upstream. FORMAT=json for raw JSON
+	@echo "running profile matrix (SKIP_BUILD=$(SKIP_BUILD), clients=$(CLIENTS), payload=$(PAYLOAD))…" >&2
 	@VALKEY_BENCH_SKIP_BUILD=$(SKIP_BUILD) \
 	VALKEY_MATRIX_CLIENTS=$(CLIENTS) VALKEY_MATRIX_PAYLOAD=$(PAYLOAD) \
 	  bash harness/bench/run-profile-matrix.sh >/tmp/valdr-matrix.json
-	@$(MAKE) -s bench-show
+	@if [ "$(FORMAT)" = "json" ]; then cat /tmp/valdr-matrix.json; else $(MAKE) -s bench-show; fi
 
-bench-quick: ## Fast narrow matrix (reduced request counts, reuses existing binary)
-	@echo "running quick narrow matrix (reusing existing binary)…"
+bench-quick: ## Fast narrow matrix (reduced request counts, reuses existing binary). FORMAT=json for raw JSON
+	@echo "running quick narrow matrix (reusing existing binary)…" >&2
 	@VALKEY_BENCH_SKIP_BUILD=1 \
 	VALKEY_MATRIX_CORE_P1_REQUESTS=20000 \
 	VALKEY_MATRIX_CORE_P16_REQUESTS=50000 \
@@ -54,7 +75,7 @@ bench-quick: ## Fast narrow matrix (reduced request counts, reuses existing bina
 	VALKEY_MATRIX_RANGE_REQUESTS=25000 \
 	VALKEY_MATRIX_CLIENTS=$(CLIENTS) VALKEY_MATRIX_PAYLOAD=$(PAYLOAD) \
 	  bash harness/bench/run-profile-matrix.sh >/tmp/valdr-matrix.json
-	@$(MAKE) -s bench-show
+	@if [ "$(FORMAT)" = "json" ]; then cat /tmp/valdr-matrix.json; else $(MAKE) -s bench-show; fi
 
 bench-p1: ## Paired pipeline=1 parity probe (low-noise median+IQR; the per-request-overhead question)
 	@if [ "$(SKIP_BUILD)" != "1" ]; then cargo build --release -p redis-server; fi
@@ -63,17 +84,20 @@ bench-p1: ## Paired pipeline=1 parity probe (low-noise median+IQR; the per-reque
 	  --requests $(REQUESTS) --clients $(CLIENTS) --payload $(PAYLOAD)
 
 bench-show: ## Reprint the most recent profile matrix as an aligned table
-	@echo "── $(MATRIX_TSV) ──"
-	@column -t -s $$'\t' "$(MATRIX_TSV)"
+	@tsv="$(MATRIX_TSV)"; echo "── $$tsv ──"; \
+	grep '^#' "$$tsv" | sed 's/^# //'; \
+	grep -v '^#' "$$tsv" | column -t -s $$'\t'
 
 bench-release: ## The release-grade packet (warmup + all probes + Markdown bundle, ~90s)
 	bash harness/bench/official-warm-run.sh
 
-oracle: ## Run the upstream Tcl suite against our server (FILES=unit/type/string for one file)
-	@if [ -n "$(FILES)" ]; then \
-	  python3 harness/oracle/tcl-survey.py --runner-id make --profile single-node-external \
-	    --timeout-s 180 --baseport 38000 --portcount 4000 \
-	    --files $(FILES) --isolated-tests-copy --skip-build; \
-	else \
-	  bash harness/oracle/run-single-node-tcl-suite.sh; \
-	fi
+oracle: ## Tcl oracle vs our server. TIER=fast (~14s, default) | all; FILES=unit/type/string; FORMAT=json for raw
+	@python3 harness/oracle/tcl-survey.py --runner-id make --profile single-node-external \
+	  --timeout-s 180 --baseport 38000 --portcount 4000 --isolated-tests-copy --skip-build \
+	  $(if $(FILES),--files $(FILES),--tier $(strip $(TIER))) >/tmp/valdr-oracle.raw; rc=$$?; \
+	if [ "$(FORMAT)" = "json" ]; then python3 harness/oracle/summarize-survey.py --json /tmp/valdr-oracle.raw; \
+	else python3 harness/oracle/summarize-survey.py /tmp/valdr-oracle.raw; fi; \
+	exit $$rc
+
+oracle-full: ## Full single-node publication suite (long; builds + runs everything)
+	bash harness/oracle/run-single-node-tcl-suite.sh
