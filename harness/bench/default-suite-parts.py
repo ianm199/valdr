@@ -723,10 +723,25 @@ def main() -> int:
         action="store_true",
         help="In ordered mode, stop the target sequence after the first timeout.",
     )
+    run_parser.add_argument(
+        "--benchmark-bin",
+        default=None,
+        help=(
+            "Path to a valkey-benchmark binary that drives load. Defaults to "
+            "reference/valkey/src/valkey-benchmark. Useful when the pinned "
+            "reference's valkey-benchmark doesn't know a test target — e.g. "
+            "Valkey 8.1.7 ships a benchmark that doesn't recognize -t mget; "
+            "pair this with a 9.x valkey-benchmark to fill that gap. The "
+            "Valkey server in reference/valkey/src/valkey-server stays the "
+            "adversary; only the load-driver client is swapped."
+        ),
+    )
     args = parser.parse_args()
     if args.command == "list":
         print_list()
         return 0
+    if getattr(args, "benchmark_bin", None):
+        globals()["VALKEY_BENCH"] = Path(args.benchmark_bin).resolve()
     return run(args)
 
 

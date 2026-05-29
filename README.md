@@ -119,7 +119,7 @@ benchmarked against both adversaries; both adversaries built from
 
 | Metric | vs Valkey 8.1.7 | vs Valkey 9.1.0 |
 |---|---:|---:|
-| Median ratio across 23 commands | **1.134x** | **1.150x** |
+| Median ratio across 23 commands | **1.139x** | **1.150x** |
 | Pipeline-smoke median (GET/PING_MBULK/SET × p=1/16/100) | 1.057x | 1.124x |
 | JSON cache mix median (4 KB docs, p=1) | — (see note) | 1.001x |
 
@@ -159,7 +159,7 @@ default-suite outputs to common figures, hence many identical pairs).
 | LRANGE_500 (first 500) | 34,153 | 23,175 | 1.474× | 35,137 | 21,777 | 1.613× |
 | LRANGE_600 (first 600) | 27,778 | 18,685 | 1.487× | 29,308 | 18,123 | 1.617× |
 | MSET (10 keys) | 636,943 | 456,621 | 1.395× | 628,931 | 442,478 | 1.421× |
-| MGET (10 keys) | — | — | — | 1,030,928 | 740,741 | 1.392× |
+| MGET (10 keys) | 1,063,829 | 847,457 | 1.255× | 1,030,928 | 740,741 | 1.392× |
 | XADD | 1,123,596 | 1,388,889 | 0.809× | 1,098,901 | 1,408,451 | 0.780× |
 | FUNCTION_LOAD | 578,035 | 58,893 | 9.815× | 588,235 | 56,593 | 10.394× |
 | FCALL | 847,458 | 1,428,571 | 0.593× | 869,565 | 1,351,351 | 0.643× |
@@ -206,8 +206,12 @@ Benchmark notes:
 - Full artifacts:
   `harness/bench/results/20260528T191756Z-9666290-official-warm-results.md` (vs 9.1.0),
   `harness/bench/results/20260528T193018Z-7838a3d-official-warm-run.log` (vs 8.1.7)
-- MGET vs 8.1.7 parse-errored in `valkey-benchmark`; row excluded from the 8.1.7 column.
-  Median is computed over the 22 commands present.
+- MGET against Valkey 8.1.7 needed a bench-client swap because 8.1.7's
+  `valkey-benchmark` doesn't recognize `-t mget` as a target (added later).
+  The MGET row was filled in by re-running just that command with a 9.x
+  `valkey-benchmark` driving the 8.1.7 server — see
+  `bash harness/bench/official-warm-run.sh` and its `TESTS=…` /
+  `BENCH_BIN=…` env-var overrides for the one-line reproduction.
 - Re-run: `bash harness/bench/official-warm-run.sh` (uses whatever Valkey
   is built at `reference/valkey`; switch tags with `git -C reference/valkey
   checkout <tag> && make -j BUILD_TLS=no`)

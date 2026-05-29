@@ -1,35 +1,65 @@
-# Benchmark Backfill
+# Benchmarks
 
-## Direct Hypothesis Probes
+`bash harness/bench/official-warm-run.sh` is the **one canonical entry
+point**. There is intentionally no alternative wrapper. Full runs, narrow
+runs, single-command runs, bench-client swaps — all go through the same
+script, controlled by environment-variable overrides. If you find yourself
+wanting to invoke `default-suite-parts.py` / `pipeline-smoke.py` /
+`json-doc-mix.py` directly, you almost always shouldn't — set the
+appropriate env vars on the wrapper instead.
 
-Use `probe-hypotheses.py` when deciding what to optimize next and you do not
-want to create a harness work packet yet. These probes are telemetry only; they
-write raw artifacts under ignored `harness/bench/results/` and
-`harness/bench/profiles/`.
-
-## Warmed Release Tables
-
-Use `official-warm-run.sh` for the release-facing performance packet. It builds
-the current checkout once, warms each benchmarked server with a small
-`PING_MBULK` pass before measured rows, runs the default-suite, pipeline, and
-JSON-document probes, then writes a Markdown table bundle under
-`harness/bench/results/`.
+## The release-grade packet
 
 ```bash
 bash harness/bench/official-warm-run.sh
+```
 
-# Optional knobs for a shorter local smoke:
+Builds the current checkout once, warms each benchmarked server with a
+small `PING_MBULK` pass, runs all three measured probes (pipeline-smoke,
+default-suite, JSON-doc-mix), then writes a Markdown table bundle under
+`harness/bench/results/`. ~90 s on M3 Max.
+
+## Narrow runs
+
+Same script, env-var overrides. Examples:
+
+```bash
+# Shorter local smoke (same probes, fewer requests):
 DEFAULT_REQUESTS=10000 \
 PIPELINE_P1_REQUESTS=20000 \
 PIPELINE_REQUESTS_PIPELINED=100000 \
 JSON_REQUESTS=10000 \
 bash harness/bench/official-warm-run.sh
+
+# Only the MGET command, skip the JSON probe entirely:
+TESTS=mget PIPELINE_COMMANDS=mget SKIP_JSON=1 \
+bash harness/bench/official-warm-run.sh
+
+# Override the bench-client binary — required when the pinned reference's
+# valkey-benchmark doesn't know a test target (Valkey 8.1.7's benchmark
+# doesn't recognize -t mget; pair with a 9.x binary to fill that gap):
+BENCH_BIN=/path/to/newer/valkey-benchmark \
+bash harness/bench/official-warm-run.sh
 ```
 
-The warmed results should be described with the warmup note from the artifact
-header. The default is `1000` `PING_MBULK` requests with one client and
-pipeline depth `1`; this is intended to remove first-traffic cold-path noise
-without pre-running the measured command workload.
+Full env-var reference is in the script header (`bash harness/bench/official-warm-run.sh`
+without args triggers the docs by running with the defaults; read the file
+or `grep '^#' harness/bench/official-warm-run.sh` for the catalog).
+
+## Why a single entry point
+
+Three measured probes feed into one combined Markdown table bundle. If you
+run them piecemeal, the bundle either reads stale data from previous runs
+or fails to assemble at all. The wrapper handles selection, sequencing,
+warmup state, and Markdown rendering atomically. Keep it that way.
+
+## Direct hypothesis probes (different category)
+
+`probe-hypotheses.py` is *not* a benchmark — it's a hypothesis-driven
+optimization tool that writes raw artifacts under ignored
+`harness/bench/results/` and `harness/bench/profiles/`. Use it when
+deciding what to *optimize next* and you do not want to create a release
+table. The artifacts it produces are telemetry, not publication numbers.
 
 ```bash
 # Decompose the Redis/Valkey default benchmark suite into bounded cells.

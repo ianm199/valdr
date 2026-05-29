@@ -431,7 +431,19 @@ def main() -> int:
         default=0.0,
         help="Exit non-zero when any successful P100 ratio is below this threshold.",
     )
+    parser.add_argument(
+        "--benchmark-bin",
+        default=None,
+        help=(
+            "Path to a valkey-benchmark binary that drives load. Defaults to "
+            "reference/valkey/src/valkey-benchmark. Use when the pinned "
+            "reference's valkey-benchmark doesn't know a test target."
+        ),
+    )
     args = parser.parse_args()
+
+    if getattr(args, "benchmark_bin", None):
+        globals()["VALKEY_BENCH"] = Path(args.benchmark_bin).resolve()
 
     require_binaries()
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)

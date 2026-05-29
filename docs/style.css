@@ -142,6 +142,78 @@ hr {
   margin: 56px 0;
 }
 
+/* Performance tables (option 1 + 3: plain stacked + ratio heatmap) */
+
+.perf-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 8px 0 4px;
+}
+
+.perf-table caption {
+  text-align: left;
+  caption-side: top;
+  font-style: italic;
+  font-size: 15px;
+  color: var(--text);
+  padding: 18px 0 6px;
+}
+
+.perf-table thead th {
+  font-weight: 600;
+  text-align: left;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--rule);
+  padding: 5px 14px 5px 0;
+}
+.perf-table thead th.num {
+  text-align: right;
+  padding-right: 0;
+  padding-left: 14px;
+}
+
+.perf-table td {
+  padding: 3px 14px 3px 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, "JetBrains Mono", Consolas, monospace;
+  font-size: 13.5px;
+  font-variant-numeric: tabular-nums;
+}
+.perf-table td.num {
+  text-align: right;
+  padding-right: 0;
+  padding-left: 14px;
+}
+
+.perf-table tr.group-head th {
+  font-style: italic;
+  font-weight: normal;
+  font-family: Charter, "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 14px;
+  color: var(--muted);
+  padding: 14px 0 4px;
+  border-bottom: 0;
+}
+
+/* Heatmap on the ratio cell only */
+.perf-table td.ratio        { padding-left: 12px; padding-right: 8px; }
+.perf-table td.ratio.win    { background: rgba(76, 29, 149, 0.07); }
+.perf-table td.ratio.behind { background: rgba(168, 79, 49, 0.09); }
+
+/* Utility: muted inline note, switches back to serif inside numeric cells */
+.muted {
+  color: var(--muted);
+  font-style: italic;
+}
+.perf-table td.num .muted {
+  font-family: Charter, "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  font-size: 12px;
+}
+
 /* Footer */
 
 footer {
