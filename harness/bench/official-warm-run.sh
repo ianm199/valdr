@@ -141,7 +141,7 @@ if [[ "${SKIP_PIPELINE_SMOKE}" != "1" ]]; then
         --warmup-clients "$WARMUP_CLIENTS" \
         --warmup-pipeline "$WARMUP_PIPELINE" \
         --warmup-command "$WARMUP_COMMAND" \
-        "${BENCH_BIN_ARG[@]}"
+        ${BENCH_BIN_ARG[@]+"${BENCH_BIN_ARG[@]}"}
 fi
 
 if [[ "${SKIP_DEFAULT_SUITE}" != "1" ]]; then
@@ -158,7 +158,7 @@ if [[ "${SKIP_DEFAULT_SUITE}" != "1" ]]; then
         --warmup-clients "$WARMUP_CLIENTS" \
         --warmup-pipeline "$WARMUP_PIPELINE" \
         --warmup-command "$WARMUP_COMMAND" \
-        "${BENCH_BIN_ARG[@]}"
+        ${BENCH_BIN_ARG[@]+"${BENCH_BIN_ARG[@]}"}
 fi
 
 if [[ "${SKIP_JSON}" != "1" ]]; then
