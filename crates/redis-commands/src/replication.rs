@@ -57,7 +57,7 @@ pub fn replicaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         Some(p) => p,
         None => {
             return Err(RedisError::runtime(
-                b"ERR value is out of range, value must between 1 and 65535".to_vec(),
+                b"ERR value is out of range, value must between 0 and 65535".to_vec(),
             ));
         }
     };
@@ -1122,7 +1122,10 @@ fn parse_offset(bytes: &[u8]) -> RedisResult<i64> {
 fn parse_port(bytes: &[u8]) -> Option<u16> {
     let s = std::str::from_utf8(bytes).ok()?;
     let n: i64 = s.parse().ok()?;
-    if !(1..=65535).contains(&n) {
+    // Valkey's REPLICAOF / REPLCONF parse the port via getRangeLongFromObject
+    // with bounds 0..=65535 — port 0 is accepted (e.g. `REPLICAOF host 0` to
+    // point at an unreachable primary).
+    if !(0..=65535).contains(&n) {
         return None;
     }
     Some(n as u16)

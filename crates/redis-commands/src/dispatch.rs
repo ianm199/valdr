@@ -64,6 +64,7 @@ struct CommandMetadata {
     skip_monitor: bool,
     admin: bool,
     monitor_admin: bool,
+    stale: bool,
     acl_categories: u64,
 }
 
@@ -968,6 +969,22 @@ pub(crate) fn command_is_write(name: &[u8]) -> bool {
     command_metadata(name).write
 }
 
+/// True when `name` carries the `STALE` flag, i.e. it is allowed to run on a
+/// stale replica (`replica-serve-stale-data no` while the master link is down).
+pub(crate) fn command_is_stale_allowed(name: &[u8]) -> bool {
+    command_metadata(name).stale
+}
+
+/// True when this server is a replica that must refuse non-`STALE` commands
+/// because its data is stale and `replica-serve-stale-data` is `no`. Single
+/// source of truth for the stale gate (shared by the dispatch path, EXEC
+/// pre-checks, and scripting).
+pub(crate) fn stale_replica_blocked(ctx: &CommandContext<'_>) -> bool {
+    let is_rep = redis_core::replication::global_replication_state().is_replica();
+    let serve_stale = ctx.live_config().replica_serve_stale_data();
+    is_rep && !serve_stale
+}
+
 /// Re-checkable min-replicas gate for EXEC: returns the NOREPLICAS reply when a
 /// write would be rejected under the current good-replica count, else None.
 pub(crate) fn min_replicas_write_blocked(ctx: &CommandContext<'_>) -> Option<Vec<u8>> {
@@ -1147,6 +1164,7 @@ impl CommandMetadata {
                 CommandFlag::ALLOW_BUSY => self.allow_busy = true,
                 CommandFlag::SKIP_COMMANDLOG => self.skip_commandlog = true,
                 CommandFlag::SKIP_MONITOR => self.skip_monitor = true,
+                CommandFlag::STALE => self.stale = true,
                 _ => {}
             }
         }

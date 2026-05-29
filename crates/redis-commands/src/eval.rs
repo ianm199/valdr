@@ -2660,8 +2660,7 @@ fn function_command_would_exceed_maxmemory(ctx: &CommandContext<'_>) -> bool {
 }
 
 fn stale_replica_scripts_blocked(ctx: &CommandContext<'_>) -> bool {
-    redis_core::replication::global_replication_state().is_replica()
-        && !ctx.live_config().replica_serve_stale_data()
+    crate::dispatch::stale_replica_blocked(ctx)
 }
 
 fn replica_readonly_script_blocked(ctx: &CommandContext<'_>) -> bool {

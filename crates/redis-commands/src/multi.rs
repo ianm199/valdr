@@ -224,6 +224,17 @@ pub fn exec_command(ctx: &mut CommandContext) -> RedisResult<()> {
             return Ok(());
         }
     }
+    if crate::dispatch::stale_replica_blocked(ctx)
+        && queued_has_non_stale_command(&ctx.client_ref().queued_argvs)
+    {
+        reset_multi_state(ctx.client_mut());
+        ctx.client_mut()
+            .reply_buf
+            .extend_from_slice(&execabort_from_error_reply(
+                b"-MASTERDOWN Link with MASTER is down and replica-serve-stale-data is set to 'no'.\r\n",
+            ));
+        return Ok(());
+    }
 
     let queued: Vec<Vec<RedisString>> = std::mem::take(&mut ctx.client_mut().queued_argvs);
     ctx.client_mut().set_flag_multi(false);
@@ -272,6 +283,17 @@ fn queued_has_write_command(queued: &[Vec<RedisString>]) -> bool {
     queued.iter().any(|argv| {
         argv.first()
             .map(|name| crate::dispatch::command_is_write(name.as_bytes()))
+            .unwrap_or(false)
+    })
+}
+
+/// True when any queued command lacks the `STALE` flag, i.e. it would be
+/// refused on a stale replica. Used to abort EXEC with `MASTERDOWN` when the
+/// server went stale after the commands were queued.
+fn queued_has_non_stale_command(queued: &[Vec<RedisString>]) -> bool {
+    queued.iter().any(|argv| {
+        argv.first()
+            .map(|name| !crate::dispatch::command_is_stale_allowed(name.as_bytes()))
             .unwrap_or(false)
     })
 }
