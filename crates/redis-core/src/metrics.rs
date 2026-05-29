@@ -99,6 +99,8 @@ static GET_COMMAND_STATS: AtomicCommandStat = AtomicCommandStat::new();
 static SET_COMMAND_STATS: AtomicCommandStat = AtomicCommandStat::new();
 static PING_COMMAND_STATS: AtomicCommandStat = AtomicCommandStat::new();
 static INCR_COMMAND_STATS: AtomicCommandStat = AtomicCommandStat::new();
+static SADD_COMMAND_STATS: AtomicCommandStat = AtomicCommandStat::new();
+static HSET_COMMAND_STATS: AtomicCommandStat = AtomicCommandStat::new();
 
 #[derive(Clone, Debug, Default)]
 pub struct CommandStatSnapshot {
@@ -258,6 +260,22 @@ fn hot_command_stat(name: &[u8]) -> Option<(&'static [u8], &'static AtomicComman
         {
             Some((b"incr", &INCR_COMMAND_STATS))
         }
+        [a, b, c, d]
+            if ascii_lower(*a) == b's'
+                && ascii_lower(*b) == b'a'
+                && ascii_lower(*c) == b'd'
+                && ascii_lower(*d) == b'd' =>
+        {
+            Some((b"sadd", &SADD_COMMAND_STATS))
+        }
+        [a, b, c, d]
+            if ascii_lower(*a) == b'h'
+                && ascii_lower(*b) == b's'
+                && ascii_lower(*c) == b'e'
+                && ascii_lower(*d) == b't' =>
+        {
+            Some((b"hset", &HSET_COMMAND_STATS))
+        }
         _ => None,
     }
 }
@@ -274,8 +292,10 @@ fn ascii_lower(byte: u8) -> u8 {
 fn append_hot_command_stats(out: &mut Vec<CommandStatSnapshot>) {
     for (name, stat) in [
         (b"get".as_slice(), &GET_COMMAND_STATS),
+        (b"hset".as_slice(), &HSET_COMMAND_STATS),
         (b"incr".as_slice(), &INCR_COMMAND_STATS),
         (b"ping".as_slice(), &PING_COMMAND_STATS),
+        (b"sadd".as_slice(), &SADD_COMMAND_STATS),
         (b"set".as_slice(), &SET_COMMAND_STATS),
     ] {
         if let Some(snapshot) = stat.snapshot(name) {
@@ -286,9 +306,11 @@ fn append_hot_command_stats(out: &mut Vec<CommandStatSnapshot>) {
 
 fn reset_hot_command_stats() {
     GET_COMMAND_STATS.reset();
+    HSET_COMMAND_STATS.reset();
     INCR_COMMAND_STATS.reset();
-    SET_COMMAND_STATS.reset();
     PING_COMMAND_STATS.reset();
+    SADD_COMMAND_STATS.reset();
+    SET_COMMAND_STATS.reset();
 }
 
 pub fn command_stats_snapshot() -> Vec<CommandStatSnapshot> {
