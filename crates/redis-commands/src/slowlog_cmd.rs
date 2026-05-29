@@ -100,11 +100,16 @@ impl AtomicCommandLatencyStats {
     }
 }
 
-static HOT_LATENCY_HISTOGRAMS: [AtomicCommandLatencyStats; 4] = [
+static HOT_LATENCY_HISTOGRAMS: [AtomicCommandLatencyStats; 9] = [
     AtomicCommandLatencyStats::new(b"get"),
     AtomicCommandLatencyStats::new(b"incr"),
     AtomicCommandLatencyStats::new(b"ping"),
     AtomicCommandLatencyStats::new(b"set"),
+    AtomicCommandLatencyStats::new(b"sadd"),
+    AtomicCommandLatencyStats::new(b"hset"),
+    AtomicCommandLatencyStats::new(b"zadd"),
+    AtomicCommandLatencyStats::new(b"spop"),
+    AtomicCommandLatencyStats::new(b"zpopmin"),
 ];
 
 fn hot_latency_histogram(fullname: &[u8]) -> Option<&'static AtomicCommandLatencyStats> {
@@ -113,6 +118,11 @@ fn hot_latency_histogram(fullname: &[u8]) -> Option<&'static AtomicCommandLatenc
         b"incr" => Some(&HOT_LATENCY_HISTOGRAMS[1]),
         b"ping" => Some(&HOT_LATENCY_HISTOGRAMS[2]),
         b"set" => Some(&HOT_LATENCY_HISTOGRAMS[3]),
+        b"sadd" => Some(&HOT_LATENCY_HISTOGRAMS[4]),
+        b"hset" => Some(&HOT_LATENCY_HISTOGRAMS[5]),
+        b"zadd" => Some(&HOT_LATENCY_HISTOGRAMS[6]),
+        b"spop" => Some(&HOT_LATENCY_HISTOGRAMS[7]),
+        b"zpopmin" => Some(&HOT_LATENCY_HISTOGRAMS[8]),
         _ => None,
     }
 }
@@ -148,6 +158,49 @@ fn record_hot_latency_command(command_name: &[u8], elapsed_usec: u64) -> bool {
                 && ascii_lower(*d) == b'r' =>
         {
             &HOT_LATENCY_HISTOGRAMS[1]
+        }
+        [a, b, c, d]
+            if ascii_lower(*a) == b's'
+                && ascii_lower(*b) == b'a'
+                && ascii_lower(*c) == b'd'
+                && ascii_lower(*d) == b'd' =>
+        {
+            &HOT_LATENCY_HISTOGRAMS[4]
+        }
+        [a, b, c, d]
+            if ascii_lower(*a) == b'h'
+                && ascii_lower(*b) == b's'
+                && ascii_lower(*c) == b'e'
+                && ascii_lower(*d) == b't' =>
+        {
+            &HOT_LATENCY_HISTOGRAMS[5]
+        }
+        [a, b, c, d]
+            if ascii_lower(*a) == b'z'
+                && ascii_lower(*b) == b'a'
+                && ascii_lower(*c) == b'd'
+                && ascii_lower(*d) == b'd' =>
+        {
+            &HOT_LATENCY_HISTOGRAMS[6]
+        }
+        [a, b, c, d]
+            if ascii_lower(*a) == b's'
+                && ascii_lower(*b) == b'p'
+                && ascii_lower(*c) == b'o'
+                && ascii_lower(*d) == b'p' =>
+        {
+            &HOT_LATENCY_HISTOGRAMS[7]
+        }
+        [a, b, c, d, e, f, g]
+            if ascii_lower(*a) == b'z'
+                && ascii_lower(*b) == b'p'
+                && ascii_lower(*c) == b'o'
+                && ascii_lower(*d) == b'p'
+                && ascii_lower(*e) == b'm'
+                && ascii_lower(*f) == b'i'
+                && ascii_lower(*g) == b'n' =>
+        {
+            &HOT_LATENCY_HISTOGRAMS[8]
         }
         _ => return false,
     };
