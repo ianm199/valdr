@@ -1,9 +1,17 @@
-# Deploy the valdr project site (landing + performance + convergence) to GitHub Pages.
+# Deploy the Valdr project site (docs/) to GitHub Pages.
+#
+# The site source lives entirely in docs/. The repo-root index.html /
+# performance.html / convergence.html / assets/ that this workflow used
+# to copy were the old ianm199/valkey-rs Pages layout and were deleted
+# 2026-05-28; this workflow now serves docs/ directly.
 name: Deploy static content to Pages
 
 on:
   push:
     branches: ["main"]
+    paths:
+      - "docs/**"
+      - ".github/workflows/static.yml"
   workflow_dispatch:
 
 permissions:
@@ -28,17 +36,10 @@ jobs:
         uses: actions/configure-pages@v5
         with:
           enablement: true
-      - name: Prepare static site
-        run: |
-          rm -rf _site
-          mkdir -p _site/assets _site/harness/bench/history
-          cp index.html performance.html convergence.html convergence-data.json _site/
-          cp -R assets/. _site/assets/
-          cp -R harness/bench/history/. _site/harness/bench/history/
-      - name: Upload artifact
+      - name: Upload docs/ as Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: '_site'
+          path: 'docs'
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5
