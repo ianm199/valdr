@@ -10,7 +10,7 @@
 //!           `reference/valkey/src/expire.h` (76 lines)
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -1135,6 +1135,9 @@ const ACTIVE_EXPIRE_KEYS_PER_EFFORT: usize = 20;
 pub struct ActiveExpireConfig {
     pub effort: AtomicU8,
     pub hz: AtomicU32,
+    /// `DEBUG SET-ACTIVE-EXPIRE 0/1` toggle. When false the active-expiration
+    /// cycle is suspended (keys still expire lazily on access). Test-only knob.
+    pub enabled: AtomicBool,
 }
 
 impl ActiveExpireConfig {
@@ -1143,7 +1146,16 @@ impl ActiveExpireConfig {
         Self {
             effort: AtomicU8::new(1),
             hz: AtomicU32::new(10),
+            enabled: AtomicBool::new(true),
         }
+    }
+
+    pub fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled.load(Ordering::Relaxed)
     }
 
     pub fn snapshot(&self) -> (u8, u32) {

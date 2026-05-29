@@ -113,11 +113,11 @@ class Trial:
     p99_ms: float
 
 
-def bench_once(port: int, command: str, requests: int, clients: int, payload: int) -> Trial:
+def bench_once(port: int, command: str, requests: int, clients: int, payload: int, pipeline: int = 1) -> Trial:
     completed = subprocess.run(
         [
             str(VALKEY_BENCH), "-h", "127.0.0.1", "-p", str(port),
-            "-n", str(requests), "-c", str(clients), "-P", "1",
+            "-n", str(requests), "-c", str(clients), "-P", str(pipeline),
             "-d", str(payload), "-t", command, "--csv", "--precision", "2",
         ],
         cwd=ROOT, capture_output=True, text=True, timeout=300,
@@ -149,6 +149,7 @@ def main() -> int:
     parser.add_argument("--clients", type=int, default=50)
     parser.add_argument("--payload", type=int, default=64)
     parser.add_argument("--warmups", type=int, default=2)
+    parser.add_argument("--pipeline", type=int, default=1)
     args = parser.parse_args()
 
     if not (os.access(VALKEY_BIN, os.X_OK) and os.access(VALKEY_BENCH, os.X_OK) and os.access(RUST_BIN, os.X_OK)):
@@ -170,8 +171,8 @@ def main() -> int:
         for command in commands:
             print(f"==> warming {command} ({args.warmups} passes/server)", file=sys.stderr)
             for _ in range(args.warmups):
-                bench_once(ref_port, command, args.requests, args.clients, args.payload)
-                bench_once(rust_port, command, args.requests, args.clients, args.payload)
+                bench_once(ref_port, command, args.requests, args.clients, args.payload, args.pipeline)
+                bench_once(rust_port, command, args.requests, args.clients, args.payload, args.pipeline)
 
             ratios: list[float] = []
             ref_rps: list[float] = []
@@ -179,8 +180,8 @@ def main() -> int:
             ref_p99: list[float] = []
             rust_p99: list[float] = []
             for trial in range(args.trials):
-                ref = bench_once(ref_port, command, args.requests, args.clients, args.payload)
-                rust = bench_once(rust_port, command, args.requests, args.clients, args.payload)
+                ref = bench_once(ref_port, command, args.requests, args.clients, args.payload, args.pipeline)
+                rust = bench_once(rust_port, command, args.requests, args.clients, args.payload, args.pipeline)
                 ratio = rust.rps / ref.rps if ref.rps else 0.0
                 ratios.append(ratio)
                 ref_rps.append(ref.rps)
@@ -217,7 +218,7 @@ def main() -> int:
         "commit": commit,
         "hardware": hardware_fingerprint(),
         "config": {
-            "pipeline": 1,
+            "pipeline": args.pipeline,
             "requests": args.requests,
             "clients": args.clients,
             "payload": args.payload,
@@ -231,7 +232,7 @@ def main() -> int:
     out_path = RESULTS_DIR / f"{stamp}-{commit}-p1-parity.json"
     out_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
 
-    print(f"\n=== p=1 parity (paired, {args.trials} trials, median ratio) ===", file=sys.stderr)
+    print(f"\n=== p={args.pipeline} parity (paired, {args.trials} trials, median ratio) ===", file=sys.stderr)
     for command, summary in per_command.items():
         verdict = "ABOVE parity" if summary["ratio_median"] >= 1.0 else "below parity"
         print(

@@ -202,10 +202,15 @@ impl InlineHash {
     }
 
     pub fn insert(&mut self, field: RedisString, value: RedisString) -> Option<RedisString> {
-        if !self.data.contains_key(&field) {
-            self.order.push(field.clone());
+        use std::collections::hash_map::Entry;
+        match self.data.entry(field) {
+            Entry::Occupied(mut e) => Some(e.insert(value)),
+            Entry::Vacant(e) => {
+                self.order.push(e.key().clone());
+                e.insert(value);
+                None
+            }
         }
-        self.data.insert(field, value)
     }
 
     pub fn get(&self, field: &RedisString) -> Option<&RedisString> {

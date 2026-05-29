@@ -12,6 +12,16 @@
 //!   * Tokio/raw pollers; plain TCP uses `mio`, TLS keeps the older path.
 //!   * Cluster, modules, and full TLS socket migration.
 
+/// Use jemalloc as the process global allocator. Valkey ships jemalloc; this
+/// reference build falls back to libc malloc, and a default Rust binary uses the
+/// system allocator. jemalloc's thread-local arenas and size classes cut the
+/// per-element heap-allocation cost that dominates collection-write commands
+/// (SADD/HSET/ZADD/SPOP/ZPOPMIN), where every member/field is its own
+/// `RedisString` allocation. The `unsafe impl GlobalAlloc` lives in the
+/// allocator crate, not here, so this stays within the crate unsafe budget.
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};

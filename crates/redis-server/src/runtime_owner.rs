@@ -1934,6 +1934,19 @@ impl RuntimeOwner {
         if server.live_config.import_mode() {
             return false;
         }
+        // A read-only replica never actively expires — it deletes only when the
+        // primary's DEL/UNLINK arrives on the replication stream, so replicated
+        // keys stay until then. A WRITABLE replica (replica-read-only no) DOES
+        // active-expire, since it owns locally-created keys (integration/replication-3
+        // "Slave is able to evict keys created in writable slaves").
+        if redis_core::replication::global_replication_state().is_replica()
+            && server.live_config.slave_read_only()
+        {
+            return false;
+        }
+        if !redis_core::expire::active_expire_config().enabled() {
+            return false;
+        }
         let (effort, hz) = redis_core::expire::active_expire_config().snapshot();
         if effort == 0 {
             return false;
