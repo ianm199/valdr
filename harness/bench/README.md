@@ -1,7 +1,22 @@
 # Benchmarks
 
-`bash harness/bench/official-warm-run.sh` is the **one canonical entry
-point**. There is intentionally no alternative wrapper. Full runs, narrow
+**Start here: the root `Makefile`.** Run `make help` for the menu. It is the
+single front door over every script in this directory — use it instead of
+calling the scripts raw:
+
+| Command | What |
+|---|---|
+| `make bench`            | full profile matrix (p1/p16/p100 + range), printed as an aligned table |
+| `make bench-quick`      | fast narrow matrix, reuses the existing binary |
+| `make bench-p1`         | low-noise paired pipeline=1 parity probe (median + IQR) |
+| `make bench-show`       | reprint the most recent matrix (instant, no rerun) |
+| `make bench-release`    | the release-grade packet (warmup + all probes + Markdown bundle) |
+
+Flags are make variables: `make bench-p1 TRIALS=40 COMMANDS=get,set`,
+`make bench SKIP_BUILD=1`. The targets below are what those wrappers call.
+
+`bash harness/bench/official-warm-run.sh` (a.k.a. `make bench-release`) is the
+**canonical release packet**. There is intentionally no alternative wrapper. Full runs, narrow
 runs, single-command runs, bench-client swaps — all go through the same
 script, controlled by environment-variable overrides. If you find yourself
 wanting to invoke `default-suite-parts.py` / `pipeline-smoke.py` /
