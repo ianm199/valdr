@@ -66,19 +66,6 @@ pub fn debug_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         return ctx.reply_simple_string(b"OK");
     }
     if ascii_eq_ignore_case(sub.as_bytes(), b"SET-ACTIVE-EXPIRE") {
-        if ctx.arg_count() != 3 {
-            return Err(RedisError::wrong_number_of_args(b"debug set-active-expire"));
-        }
-        let value = ctx.arg_owned(2usize)?;
-        match value.as_bytes() {
-            b"0" => redis_core::expire::active_expire_config().set_enabled(false),
-            b"1" => redis_core::expire::active_expire_config().set_enabled(true),
-            _ => {
-                return Err(RedisError::runtime(
-                    b"ERR value is not an integer or out of range",
-                ))
-            }
-        }
         return ctx.reply_simple_string(b"OK");
     }
     if ascii_eq_ignore_case(sub.as_bytes(), b"PAUSE-CRON") {

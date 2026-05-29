@@ -606,16 +606,9 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
     let import_mode = ctx.live_config().import_mode();
     let import_source_active = ctx.client_ref().import_source && import_mode;
     let pause_expire = is_server_paused_for(ctx.server(), PAUSE_ACTION_EXPIRE);
-    // Any replica keeps expired keys on lazy read (reports nil, waits for the
-    // primary's DEL) instead of deleting them — read-only AND writable replicas
-    // (a writable replica force-deletes only on an explicit write command, and
-    // its background active-expire cycle removes locally-created keys). C: db.c
-    // expireIfNeeded replica branch keyed on server.masterhost.
-    let replica_keep_expired = redis_core::replication::global_replication_state().is_replica();
     ctx.db_mut()
         .set_import_expire_state(import_source_active, import_mode);
     ctx.db_mut().set_pause_expire_keep(pause_expire);
-    ctx.db_mut().set_replica_keep_expired(replica_keep_expired);
 
     let initial_slowlog_gate = ctx.live_config().slowlog_timing_gate();
     let should_time_slowlog = initial_slowlog_gate.should_time() && !metadata.skip_commandlog;

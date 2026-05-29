@@ -552,12 +552,6 @@ pub struct RedisDb {
     /// remain logically expired for normal lookups but are not deleted and can
     /// still be sampled by RANDOMKEY, matching Valkey's PAUSE_ACTION_EXPIRE.
     pause_expire_keep: bool,
-
-    /// When true, this server is a read-only replica: it reports expired keys
-    /// as logically expired (lookups return nil) but does NOT delete them — it
-    /// waits for the primary's explicit DEL/UNLINK so the keyspaces stay
-    /// consistent. C: db.c:95 `is_ro_replica` / expireIfNeeded replica branch.
-    replica_keep_expired: bool,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -624,10 +618,6 @@ impl RedisDb {
         self.pause_expire_keep = pause_expire_keep;
     }
 
-    pub fn set_replica_keep_expired(&mut self, replica_keep_expired: bool) {
-        self.replica_keep_expired = replica_keep_expired;
-    }
-
     /// Check and optionally delete an expired key. Returns the new `KeyStatus`.
     ///
     /// C: db.c:2157 expireIfNeededWithDictIndex
@@ -641,7 +631,7 @@ impl RedisDb {
         // C: getExpirationPolicyWithFlags KEEP_EXPIRED — a primary in import-mode
         // reports the key as expired but waits for the import source to delete
         // it, so non-force lookups must not lazily remove it.
-        if (self.import_mode_keep || self.pause_expire_keep || self.replica_keep_expired)
+        if (self.import_mode_keep || self.pause_expire_keep)
             && flags & EXPIRE_FORCE_DELETE_EXPIRED == 0
         {
             return KeyStatus::Expired;
@@ -727,15 +717,7 @@ impl RedisDb {
         key: &RedisString,
         flags: u32,
     ) -> Option<&mut RedisObject> {
-        // A read-only replica must not force-delete an expired key even on a
-        // write-oriented lookup — it waits for the primary's DEL. Other callers
-        // keep the upstream force-delete semantics.
-        let expire_flags = if self.replica_keep_expired {
-            flags
-        } else {
-            EXPIRE_FORCE_DELETE_EXPIRED | flags
-        };
-        if self.expire_if_needed(key, expire_flags) != KeyStatus::Valid {
+        if self.expire_if_needed(key, EXPIRE_FORCE_DELETE_EXPIRED | flags) != KeyStatus::Valid {
             return None;
         }
         let touch = flags & LOOKUP_NOTOUCH == 0;
@@ -1983,74 +1965,6 @@ mod tests {
 
     fn k(s: &[u8]) -> RedisString {
         RedisString::from_bytes(s)
-    }
-
-    // ── replica expire-on-read (replication-3) ─────────────────────────────
-    // A read-only replica reports expired keys as nil but keeps the bytes until
-    // the primary's DEL arrives; a primary (and a writable replica) lazily
-    // deletes on access.
-
-    #[test]
-    fn anchor_primary_lazy_deletes_expired_on_read() {
-        let mut db = RedisDb::new(0);
-        let key = k(b"foo");
-        db.insert(key.clone(), make_str_obj(b"v"));
-        db.set_expire(&key, 1); // 1ms since epoch => long expired
-        assert!(db.is_expired(&key));
-        assert!(db.lookup_key_read_with_flags(&key, LOOKUP_NONE).is_none());
-        assert!(db.find(&key).is_none(), "primary must delete on read");
-        assert_eq!(db.size(), 0);
-    }
-
-    #[test]
-    fn anchor_writable_replica_force_deletes_on_write_lookup() {
-        let mut db = RedisDb::new(0);
-        let key = k(b"foo");
-        db.insert(key.clone(), make_str_obj(b"v"));
-        db.set_expire(&key, 1);
-        db.set_replica_keep_expired(false); // writable replica / primary
-        assert!(db.lookup_key_write_with_flags(&key, LOOKUP_NONE).is_none());
-        assert!(db.find(&key).is_none(), "non-keep path force-deletes");
-    }
-
-    #[test]
-    fn red_readonly_replica_read_returns_none_but_keeps_key() {
-        let mut db = RedisDb::new(0);
-        let key = k(b"key2");
-        db.insert(key.clone(), make_str_obj(b"5"));
-        db.set_expire(&key, 1);
-        db.set_replica_keep_expired(true);
-        assert!(db.is_expired(&key));
-        assert!(db.lookup_key_read_with_flags(&key, LOOKUP_NONE).is_none());
-        assert!(db.find(&key).is_some(), "replica must NOT delete on read");
-        assert_eq!(db.size(), 1, "dbsize stays 1 until primary DEL");
-    }
-
-    #[test]
-    fn red_readonly_replica_write_lookup_keeps_expired_key() {
-        let mut db = RedisDb::new(0);
-        let key = k(b"key1");
-        db.insert(key.clone(), make_str_obj(b"5"));
-        db.set_expire(&key, 1);
-        db.set_replica_keep_expired(true);
-        assert!(db.lookup_key_write_with_flags(&key, LOOKUP_NONE).is_none());
-        assert!(db.find(&key).is_some(), "replica must NOT force-delete on write lookup");
-    }
-
-    #[test]
-    fn red_expire_if_needed_replica_reports_expired_not_deleted() {
-        let mut db = RedisDb::new(0);
-        let key = k(b"k");
-        db.insert(key.clone(), make_str_obj(b"v"));
-        db.set_expire(&key, 1);
-        db.set_replica_keep_expired(true);
-        assert_eq!(db.expire_if_needed(&key, LOOKUP_NONE), KeyStatus::Expired);
-        assert!(db.find(&key).is_some());
-        assert_eq!(
-            db.expire_if_needed(&key, EXPIRE_FORCE_DELETE_EXPIRED),
-            KeyStatus::Deleted
-        );
-        assert!(db.find(&key).is_none());
     }
 
     #[test]
