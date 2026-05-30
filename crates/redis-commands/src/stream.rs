@@ -1,16 +1,14 @@
-//! Stream commands — Round 9 byte-exact port, Round 13b blocking extension.
+//! Stream commands — byte-exact port with blocking extension.
 //!
 //! Implements: XADD, XLEN, XRANGE, XREVRANGE, XREAD (blocking + non-blocking),
 //! XDEL, XTRIM, XINFO STREAM (basic), XINFO GROUPS (empty).
-//!
-//! C source: `reference/valkey/src/t_stream.c`
 //!
 //! # Storage shape
 //!
 //! Uses the pragmatic `ObjectKind::Stream(StreamEncoding::Inline(_))`
 //! encoding from `redis-core::object` — a sorted `Vec<StreamEntry>` in
-//! `redis_ds::stream::InlineStream`. Phase 5 swaps this for the real
-//! `rax` + `listpack` representation.
+//! `redis_ds::stream::InlineStream`. Real `rax` + `listpack` representation
+//! will be used when available.
 //!
 //! # Architect items
 //!
@@ -469,7 +467,7 @@ fn drain_front(stream: &mut InlineStream, count: usize) -> usize {
     }
     let count = count.min(stream.entries.len());
     // Trimming (XTRIM / XADD MAXLEN|MINID) removes entries from the front but,
-    // unlike XDEL, does NOT advance max_deleted_entry_id (C: streamTrim). Only
+    // unlike XDEL, does NOT advance max_deleted_entry_id. Only
     // XDEL and XSETID move the tombstone.
     stream.entries.drain(0..count);
     count
@@ -1622,7 +1620,6 @@ fn touch_or_create_consumer(group: &mut ConsumerGroup, name: &RedisString, now_m
     let exists = group.consumers.contains_key(name);
     if !exists {
         let mut consumer = Consumer::new(name.clone(), now_ms);
-        // C: streamCreateConsumer (t_stream.c:2539) seeds active_time to -1;
         // it only advances once the consumer actually receives entries, so
         // XINFO `inactive` reports -1 until the first real delivery.
         consumer.active_time_ms = -1;
@@ -2088,7 +2085,6 @@ pub fn xreadgroup_command(ctx: &mut CommandContext) -> RedisResult<()> {
                     None => slice_len,
                     Some(n) => (n as usize).min(slice_len),
                 };
-                // C: XREADGROUP '>' creates/touches the consumer (advancing
                 // seen-time) on every call, even when no new entries exist.
                 {
                     let group = stream
@@ -2747,7 +2743,7 @@ pub fn xautoclaim_command(ctx: &mut CommandContext) -> RedisResult<()> {
                     return Err(RedisError::syntax(b"syntax error"));
                 }
                 let n = parse_strict_i64(ctx.arg(idx + 1)?.as_bytes())?;
-                // C: t_stream.c:3358 — COUNT is bounded by LONG_MAX/16 so the
+                // COUNT is bounded by LONG_MAX/16 so the
                 // internal `count * attempts_factor` scan budget cannot overflow.
                 const MAX_COUNT: i64 = i64::MAX / 16;
                 if n <= 0 || n > MAX_COUNT {
@@ -2905,7 +2901,7 @@ pub fn xsetid_command(ctx: &mut CommandContext) -> RedisResult<()> {
                     return Err(RedisError::syntax(b"syntax error"));
                 }
                 let m = parse_explicit_id(ctx.arg(i + 1)?.as_bytes())?;
-                // C: xsetidCommand — the new last-id cannot be below the
+                // the new last-id cannot be below the
                 // provided max_deleted_entry_id.
                 if new_id < m {
                     return Err(RedisError::runtime(
@@ -2922,7 +2918,7 @@ pub fn xsetid_command(ctx: &mut CommandContext) -> RedisResult<()> {
         Some(s) => s,
         None => return Err(RedisError::runtime(b"ERR no such key")),
     };
-    // C: xsetidCommand — new last-id cannot be below the current
+    // new last-id cannot be below the current
     // max_deleted_entry_id.
     if new_id < stream.max_deleted_id {
         return Err(RedisError::runtime(
@@ -3024,7 +3020,6 @@ fn xinfo_groups(ctx: &mut CommandContext) -> RedisResult<()> {
 
 /// XINFO STREAM <key> FULL [COUNT <n>]
 ///
-/// C: `xinfoReplyWithStreamInfo` full branch (t_stream.c:3686). Emits the
 /// 9-field stream map with inline `entries` and a nested `groups` array
 /// (each group carries its PEL + consumers, each consumer its own PEL).
 /// `count` limits the `entries` and pending arrays (0 = unlimited; the XINFO

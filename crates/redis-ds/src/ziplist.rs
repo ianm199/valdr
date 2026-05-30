@@ -1,7 +1,5 @@
 //! `Ziplist` - legacy compact list/hash encoding superseded by listpack.
 //!
-//! Source: `reference/valkey/src/ziplist.c` and `ziplist.h`.
-//!
 //! Ziplists remain relevant for backward-compatible RDB loading: older RDB
 //! files can store small lists and hashes as contiguous ziplist blobs. This
 //! module owns a safe, read-only byte-buffer decoder for those legacy blobs.
@@ -85,8 +83,6 @@ pub struct Ziplist {
 
 impl Ziplist {
     /// Create a new empty ziplist.
-    ///
-    /// C: `ziplistNew`.
     pub fn new() -> Self {
         let size = ZIPLIST_HEADER_SIZE + ZIPLIST_END_SIZE;
         let mut data = vec![0; size];
@@ -113,12 +109,10 @@ impl Ziplist {
         &self.data
     }
 
-    /// C: `ziplistBlobLen`.
     pub fn blob_len(&self) -> usize {
         read_u32_le(&self.data, 0).map_or(0, |value| value as usize)
     }
 
-    /// C: `ziplistSafeToAdd`.
     pub fn safe_to_add(&self, add: usize) -> bool {
         self.blob_len()
             .checked_add(add)
@@ -129,9 +123,7 @@ impl Ziplist {
         self.first().is_none()
     }
 
-    /// C: `ziplistLen`.
-    ///
-    /// This read-only variant scans when the cached length is `UINT16_MAX`
+    /// This read-only variant scans when the cached length is `u16::MAX`
     /// instead of mutating through an immutable receiver.
     pub fn len(&self) -> usize {
         match read_u16_le(&self.data, 8) {
@@ -157,8 +149,6 @@ impl Ziplist {
     }
 
     /// Return the offset of the first entry, or `None` for an empty list.
-    ///
-    /// C: `ZIPLIST_ENTRY_HEAD`.
     pub fn first(&self) -> Option<usize> {
         let end = self.end_offset()?;
         if self.data.get(ZIPLIST_HEADER_SIZE).copied()? == ZIP_END {
@@ -172,8 +162,6 @@ impl Ziplist {
     }
 
     /// Return the offset of the last entry, or `None` for an empty list.
-    ///
-    /// C: `ZIPLIST_ENTRY_TAIL`.
     pub fn last(&self) -> Option<usize> {
         let end = self.end_offset()?;
         let tail = read_u32_le(&self.data, 4)? as usize;
@@ -187,8 +175,6 @@ impl Ziplist {
     }
 
     /// Return the entry offset at a positive or negative zero-based index.
-    ///
-    /// C: `ziplistIndex`.
     pub fn index(&self, index: isize) -> Option<usize> {
         if index >= 0 {
             let mut cursor = self.first()?;
@@ -220,7 +206,6 @@ impl Ziplist {
             .and_then(|offset| self.entry_at_offset(offset))
     }
 
-    /// C: `ziplistNext`.
     pub fn next(&self, offset: usize) -> Option<usize> {
         if self.data.get(offset).copied()? == ZIP_END {
             return None;
@@ -234,7 +219,7 @@ impl Ziplist {
         decode_entry(&self.data, self.blob_len(), next, true).map(|entry| entry.offset)
     }
 
-    /// C: `ziplistPrev`. Passing the EOF offset returns the tail entry.
+    /// Passing the EOF offset returns the tail entry.
     pub fn prev(&self, offset: usize) -> Option<usize> {
         let end = self.end_offset()?;
         if offset == end || self.data.get(offset).copied()? == ZIP_END {
@@ -251,7 +236,6 @@ impl Ziplist {
         decode_entry(&self.data, self.blob_len(), prev, true).map(|entry| entry.offset)
     }
 
-    /// C: `ziplistGet`.
     pub fn get(&self, offset: usize) -> Option<ZiplistValue<'_>> {
         let entry = self.entry_at_offset(offset)?;
         self.get_entry(&entry)
@@ -281,7 +265,6 @@ impl Ziplist {
         }
     }
 
-    /// C: `ziplistCompare`.
     pub fn compare(&self, offset: usize, value: &[u8]) -> bool {
         match self.get(offset) {
             Some(ZiplistValue::Bytes(bytes)) => bytes == value,
@@ -292,7 +275,6 @@ impl Ziplist {
         }
     }
 
-    /// C: `ziplistFind`.
     pub fn find(&self, start: usize, value: &[u8], skip: usize) -> Option<usize> {
         let mut cursor = start;
         let mut skip_count = 0usize;
@@ -348,7 +330,6 @@ impl Ziplist {
         }
     }
 
-    /// C: `ziplistValidateIntegrity`.
     pub fn validate_integrity(data: &[u8], deep: bool) -> bool {
         Self::validate_integrity_sized(data, data.len(), deep)
     }
@@ -366,7 +347,6 @@ impl Ziplist {
         validate_integrity_sized_with(data, data.len(), deep, entry_cb)
     }
 
-    /// C: `zipTryEncoding`.
     pub fn try_encode_integer(bytes: &[u8]) -> Option<(u8, i64)> {
         if bytes.is_empty() || bytes.len() >= 32 {
             return None;

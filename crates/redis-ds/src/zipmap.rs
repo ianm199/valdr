@@ -1,8 +1,5 @@
 //! `ZipMap` — compact byte-string-to-byte-string map optimised for small size.
 //!
-//! Port of `reference/valkey/src/zipmap.c` (237 lines, 7 functions). The
-//! header `zipmap.h` is merged here as per `harness/file-deps.tsv`.
-//!
 //! # On-wire format
 //!
 //! ```text
@@ -26,23 +23,19 @@
 //! on an owned `Vec<u8>`, which eliminates raw-pointer arithmetic without
 //! changing the observable behaviour.
 //!
-//! PORT NOTE: `zipmapRewind` / `zipmapNext` (raw-pointer cursor pair) are
+//! `zipmapRewind` / `zipmapNext` (raw-pointer cursor pair in C) are
 //! translated to `ZipMap::rewind()` (returns a `usize` offset) and
 //! `ZipMap::next_entry(offset)` (advances the offset). Callers loop until
 //! `next_entry` returns `None`.
-
-// C: zipmap.c (237 lines, 7 functions)
 
 use redis_types::error::RedisError;
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 /// Lengths ≥ this sentinel use the 5-byte big-length encoding.
-/// C: #define ZIPMAP_BIGLEN 254
 const ZIPMAP_BIGLEN: u8 = 254;
 
 /// Byte value that signals the end of the zipmap.
-/// C: #define ZIPMAP_END 255
 const ZIPMAP_END: u8 = 255;
 
 // ─── Public types ─────────────────────────────────────────────────────────────
@@ -70,8 +63,6 @@ pub struct ZipMapEntry {
 /// Returns the number of bytes required to encode `len` in the zipmap
 /// variable-length format: 1 byte for lengths < `ZIPMAP_BIGLEN`, 5 bytes
 /// otherwise.
-///
-/// Corresponds to the C macro `ZIPMAP_LEN_BYTES(_l)`.
 fn len_bytes_needed(len: u32) -> usize {
     if len < ZIPMAP_BIGLEN as u32 {
         1
@@ -83,8 +74,6 @@ fn len_bytes_needed(len: u32) -> usize {
 /// Decode the variable-length integer at `buf[offset]`.
 ///
 /// Returns `(decoded_value, bytes_consumed)`.
-///
-/// C: zipmap.c:92-99 `zipmapDecodeLength`
 fn decode_length(buf: &[u8], offset: usize) -> Result<(u32, usize), RedisError> {
     if offset >= buf.len() {
         return Err(RedisError::runtime(b"zipmap: decode_length out of bounds"));
@@ -121,9 +110,7 @@ fn decode_length(buf: &[u8], offset: usize) -> Result<(u32, usize), RedisError> 
 ///
 /// Returns the number of bytes written (1 or 5).
 /// The caller must ensure `buf` has sufficient capacity.
-///
-/// C: zipmap.c:103-117 `zipmapEncodeLength`
-#[allow(dead_code)] // legacy zipmap RDB-format helper; kept for Phase-C RDB round-trip work
+#[allow(dead_code)] // legacy zipmap RDB-format helper; kept for RDB round-trip work
 fn encode_length(buf: &mut [u8], offset: usize, len: u32) -> usize {
     if len < ZIPMAP_BIGLEN as u32 {
         buf[offset] = len as u8;
@@ -140,8 +127,6 @@ fn encode_length(buf: &mut [u8], offset: usize, len: u32) -> usize {
 }
 
 /// Returns the byte count of the length encoding at `buf[offset]` (1 or 5).
-///
-/// C: zipmap.c:119-121 `zipmapGetEncodedLengthSize`
 fn encoded_length_size(buf: &[u8], offset: usize) -> usize {
     if buf[offset] < ZIPMAP_BIGLEN {
         1
@@ -152,8 +137,6 @@ fn encoded_length_size(buf: &[u8], offset: usize) -> usize {
 
 /// Returns the total number of bytes occupied by the key entry at `buf[offset]`
 /// (length encoding + key data bytes).
-///
-/// C: zipmap.c:123-127 `zipmapRawKeyLength`
 fn raw_key_length(buf: &[u8], offset: usize) -> Result<usize, RedisError> {
     let (l, _) = decode_length(buf, offset)?;
     Ok(len_bytes_needed(l) + l as usize)
@@ -161,8 +144,6 @@ fn raw_key_length(buf: &[u8], offset: usize) -> Result<usize, RedisError> {
 
 /// Returns the total number of bytes occupied by the value entry at `buf[offset]`
 /// (length encoding + free byte + value data bytes + free padding bytes).
-///
-/// C: zipmap.c:130-138 `zipmapRawValueLength`
 fn raw_value_length(buf: &[u8], offset: usize) -> Result<usize, RedisError> {
     let (l, _) = decode_length(buf, offset)?;
     let enc_size = len_bytes_needed(l);
@@ -213,8 +194,6 @@ impl ZipMap {
     /// Return the byte offset of the first entry, i.e., 1 (past the zmlen byte).
     ///
     /// Pass the returned offset to [`ZipMap::next_entry`] to begin iteration.
-    ///
-    /// C: zipmap.c:141-143 `zipmapRewind` (returns `zm + 1`)
     pub fn rewind(&self) -> usize {
         1
     }
@@ -234,8 +213,6 @@ impl ZipMap {
     ///     off = next;
     /// }
     /// ```
-    ///
-    /// C: zipmap.c:156-172 `zipmapNext` (out-pointer pattern → returned tuple)
     pub fn next_entry(&self, offset: usize) -> Result<Option<(ZipMapEntry, usize)>, RedisError> {
         let buf = &self.buf;
         if offset >= buf.len() || buf[offset] == ZIPMAP_END {
@@ -243,7 +220,6 @@ impl ZipMap {
         }
 
         // ── Key ──────────────────────────────────────────────────────────────
-        // C: *key = zm; *klen = zipmapDecodeLength(zm); *key += ZIPMAP_LEN_BYTES(*klen);
         let (klen, kenc) = decode_length(buf, offset)?;
         let key_start = offset + kenc;
         let key_end = key_start + klen as usize;
@@ -253,12 +229,10 @@ impl ZipMap {
         let key = buf[key_start..key_end].to_vec();
 
         // Advance cursor past the full key entry (encoding + data).
-        // C: zm += zipmapRawKeyLength(zm);
         let val_offset = offset + raw_key_length(buf, offset)?;
 
         // ── Value ─────────────────────────────────────────────────────────────
         // Value entry layout: [<len_encoding>][<free_byte>][<data>][<padding>]
-        // C: *value = zm + 1; *vlen = zipmapDecodeLength(zm);
         //    *value += ZIPMAP_LEN_BYTES(*vlen);
         // The C sets *value = zm + 1, then adds ZIPMAP_LEN_BYTES. For 1-byte
         // encoding that is zm+2; for 5-byte encoding that is zm+6. Both land
@@ -278,7 +252,6 @@ impl ZipMap {
         let value = buf[val_start..val_end].to_vec();
 
         // Advance cursor past the full value entry.
-        // C: zm += zipmapRawValueLength(zm);
         let next_offset = val_offset + raw_value_length(buf, val_offset)?;
 
         Ok(Some((ZipMapEntry { key, value }, next_offset)))
@@ -292,11 +265,7 @@ impl ZipMap {
     ///
     /// Returns `true` if the buffer is well-formed.
     ///
-    /// This is a static method because the C function receives a raw pointer
-    /// and size rather than a ZipMap struct; callers may want to validate
-    /// before constructing a ZipMap.
-    ///
-    /// C: zipmap.c:177-236 `zipmapValidateIntegrity`
+    /// This is a static method so callers may validate before constructing a ZipMap.
     pub fn validate_integrity(zm: &[u8], deep: bool) -> bool {
         // Must have at least zmlen byte + end sentinel.
         if zm.len() < 2 {
@@ -316,14 +285,12 @@ impl ZipMap {
 
         while p < zm.len() && zm[p] != ZIPMAP_END {
             // ── Key length encoding ───────────────────────────────────────────
-            // C: s = zipmapGetEncodedLengthSize(p);
             //    if (OUT_OF_RANGE(p + s)) return 0;
             let s = encoded_length_size(zm, p);
             if p + s >= zm.len() {
                 return false;
             }
 
-            // C: l = zipmapDecodeLength(p);
             //    if (l < ZIPMAP_BIGLEN && s != 1) return 0;
             let (l, _) = match decode_length(zm, p) {
                 Ok(v) => v,
@@ -333,7 +300,6 @@ impl ZipMap {
                 return false;
             }
 
-            // C: p += s; p += l;
             //    if (OUT_OF_RANGE(p)) return 0;
             p += s;
             p += l as usize;
@@ -342,14 +308,12 @@ impl ZipMap {
             }
 
             // ── Value length encoding ─────────────────────────────────────────
-            // C: s = zipmapGetEncodedLengthSize(p);
             //    if (OUT_OF_RANGE(p + s)) return 0;
             let s = encoded_length_size(zm, p);
             if p + s >= zm.len() {
                 return false;
             }
 
-            // C: l = zipmapDecodeLength(p);
             //    if (l < ZIPMAP_BIGLEN && s != 1) return 0;
             let (l, _) = match decode_length(zm, p) {
                 Ok(v) => v,
@@ -359,7 +323,6 @@ impl ZipMap {
                 return false;
             }
 
-            // C: p += s; e = *p++; p += l + e;
             p += s;
             if p >= zm.len() {
                 return false;
@@ -369,21 +332,18 @@ impl ZipMap {
             p += l as usize + e; // skip value data + padding bytes
             count += 1;
 
-            // C: if (OUT_OF_RANGE(p)) return 0;
             if p >= zm.len() {
                 return false;
             }
         }
 
         // Must have found at least one entry.
-        // C: if (count == 0) return 0;
         if count == 0 {
             return false;
         }
 
         // If the header count is tracked (not ZIPMAP_BIGLEN), it must match
         // the number of entries we walked.
-        // C: if (zm[0] != ZIPMAP_BIGLEN && zm[0] != count) return 0;
         if zm[0] != ZIPMAP_BIGLEN && zm[0] as u32 != count {
             return false;
         }

@@ -1,7 +1,5 @@
 //! `RadixTree` - Redis's radix tree (rax) behavior surface.
 //!
-//! Source: `reference/valkey/src/rax.c` (and `rax.h`, `rax_malloc.h`).
-//!
 //! Upstream rax is a packed compressed radix tree whose node layout stores edge
 //! bytes, child pointers, and optional value pointers in one allocation. This
 //! Rust owner intentionally preserves the byte-key map semantics first: owned

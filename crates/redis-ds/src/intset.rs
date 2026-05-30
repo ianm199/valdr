@@ -1,9 +1,8 @@
 //! `IntSet` - sorted contiguous-buffer encoding for integer sets.
 //!
-//! Source: `reference/valkey/src/intset.c` and `intset.h`.
-//! The blob layout is byte-compatible with Valkey's intset:
-//! `[encoding:u32-le][length:u32-le][contents...]`, where each content value is
-//! a signed little-endian 16-, 32-, or 64-bit integer and the array is sorted.
+//! The blob layout is byte-compatible: `[encoding:u32-le][length:u32-le][contents...]`,
+//! where each content value is a signed little-endian 16-, 32-, or 64-bit integer
+//! and the array is sorted.
 
 use std::cell::Cell;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -61,8 +60,6 @@ pub struct IntSet {
 
 impl IntSet {
     /// Create a new empty intset with the default 16-bit encoding.
-    ///
-    /// C: `intsetNew`.
     pub fn new() -> Self {
         let mut buf = vec![0; HEADER_LEN];
         write_u32_le(&mut buf, 0, INTSET_ENC_INT16);
@@ -71,8 +68,6 @@ impl IntSet {
     }
 
     /// Insert `value`. Returns `true` when the value was added.
-    ///
-    /// C: `intsetAdd`.
     pub fn add(&mut self, value: i64) -> bool {
         let value_encoding = Encoding::for_value(value);
         let current_encoding = self.encoding();
@@ -121,8 +116,6 @@ impl IntSet {
     }
 
     /// Remove `value`. Returns `true` when an existing value was removed.
-    ///
-    /// C: `intsetRemove`.
     pub fn remove(&mut self, value: i64) -> bool {
         let value_encoding = Encoding::for_value(value);
         let current_encoding = self.encoding();
@@ -158,8 +151,6 @@ impl IntSet {
     }
 
     /// Determine whether `value` belongs to this intset.
-    ///
-    /// C: `intsetFind`.
     pub fn find(&self, value: i64) -> bool {
         if Encoding::for_value(value) > self.encoding() {
             return false;
@@ -168,9 +159,6 @@ impl IntSet {
     }
 
     /// Return a pseudo-random member, or `None` for an empty intset.
-    ///
-    /// C asserts non-empty in `intsetRandom`; Rust keeps the public API
-    /// non-panicking.
     pub fn random(&self) -> Option<i64> {
         let len = self.len_u32();
         if len == 0 {
@@ -181,8 +169,6 @@ impl IntSet {
     }
 
     /// Return the largest member, or `None` when empty.
-    ///
-    /// C: `intsetMax`.
     pub fn max(&self) -> Option<i64> {
         let len = self.len_u32();
         if len == 0 {
@@ -193,15 +179,11 @@ impl IntSet {
     }
 
     /// Return the smallest member, or `None` when empty.
-    ///
-    /// C: `intsetMin`.
     pub fn min(&self) -> Option<i64> {
         self.get(0)
     }
 
     /// Return the value at `pos`, or `None` when out of range.
-    ///
-    /// C: `intsetGet`.
     pub fn get(&self, pos: u32) -> Option<i64> {
         if pos >= self.len_u32() {
             return None;
@@ -210,8 +192,6 @@ impl IntSet {
     }
 
     /// Number of elements in the intset.
-    ///
-    /// C: `intsetLen`.
     pub fn len(&self) -> usize {
         self.len_u32() as usize
     }
@@ -221,15 +201,11 @@ impl IntSet {
     }
 
     /// Total byte length of the encoded blob.
-    ///
-    /// C: `intsetBlobLen`.
     pub fn blob_len(&self) -> usize {
         self.buf.len()
     }
 
-    /// Validate a raw Valkey intset blob.
-    ///
-    /// C: `intsetValidateIntegrity`.
+    /// Validate a raw intset blob.
     pub fn validate_integrity(data: &[u8], deep: bool) -> bool {
         if data.len() < HEADER_LEN {
             return false;
@@ -251,8 +227,8 @@ impl IntSet {
             return false;
         }
 
-        // This mirrors Valkey's validator. Empty live intsets are valid during
-        // normal construction, but empty serialized payloads are rejected.
+        // Empty live intsets are valid during construction, but empty serialized
+        // payloads are rejected.
         if count == 0 {
             return false;
         }
@@ -277,7 +253,7 @@ impl IntSet {
         true
     }
 
-    /// Construct an intset from a raw Valkey blob after deep validation.
+    /// Construct an intset from a raw blob after deep validation.
     pub fn from_raw_bytes(buf: Vec<u8>) -> Option<Self> {
         if Self::validate_integrity(&buf, true) {
             Some(Self { buf })
@@ -290,7 +266,7 @@ impl IntSet {
         &self.buf
     }
 
-    /// Deep-copy helper matching the C `intsetDup` public surface.
+    /// Deep-copy helper.
     pub fn dup(&self) -> Self {
         self.clone()
     }
@@ -727,15 +703,14 @@ mod tests {
     }
 }
 
-// --------------------------------------------------------------------------
+// ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        reference/valkey/src/intset.c, reference/valkey/src/intset.h
+//   source:        (sorted integer set, Redis stdlib)
 //   target_crate:  redis-ds
 //   confidence:    high
 //   todos:         0
 //   port_notes:    2
 //   unsafe_blocks: 0
-//   notes:         Source-shaped safe byte-buffer implementation; Valkey
-//                  little-endian blob layout preserved. Public random/min/max
-//                  are non-panicking Option APIs where C asserts non-empty.
-// --------------------------------------------------------------------------
+//   notes:         Safe byte-buffer implementation with little-endian blob layout
+//                  preserved. Public random/min/max are non-panicking Option APIs.
+// ──────────────────────────────────────────────────────────────────────────

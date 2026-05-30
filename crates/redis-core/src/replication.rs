@@ -1,23 +1,13 @@
 //! Replication backbone: master-side state, backlog, replica registry.
 //!
-//! Session 3A lays down the structural primitives that Waves B and C build
-//! on top of:
+//! Process-wide replication types and state management:
 //!   * [`ReplBacklog`] — circular byte buffer of recent write-command output,
 //!     consulted by PSYNC to decide between partial resync (`+CONTINUE`) and
 //!     full resync (`+FULLRESYNC`).
 //!   * [`ReplicationState`] — process-wide replication state (run id, master
 //!     offset, backlog, connected replicas, optional replica-of target).
-//!   * [`ReplicaConn`] — per-replica metadata + outbound mpsc sender stolen
-//!     from `PubSubRegistry` so the existing writer-thread pattern delivers
-//!     bytes to replicas without the master re-acquiring the socket.
-//!
-//! Wave B will wire up: write-command propagation into the backlog, the
-//! actual RDB-snapshot transfer to a replica after `+FULLRESYNC`, REPLCONF
-//! subcommands (listening-port, capa, ACK), and WAIT.
-//!
-//! Wave C will fill in the replica side: opening the TCP connection to the
-//! master after `REPLICAOF host port`, handshake (PING / REPLCONF / PSYNC),
-//! reading the RDB blob, and applying streamed commands.
+//!   * [`ReplicaConn`] — per-replica metadata + outbound mpsc sender
+//!     for delivering bytes to replicas without the master re-acquiring the socket.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -133,8 +123,7 @@ impl ReplBacklog {
     ///
     /// When `bytes.len()` exceeds `size`, only the trailing `size` bytes are
     /// retained (the older portion is effectively overwritten by the wrap).
-    /// Callers should still pass the full slice; this matches Redis's
-    /// `feedReplicationBuffer` semantics.
+    /// Callers should still pass the full slice.
     pub fn append(&mut self, bytes: &[u8]) -> i64 {
         if self.size == 0 {
             self.offset = self.offset.saturating_add(bytes.len() as i64);
@@ -375,10 +364,6 @@ impl ReplicationState {
     }
 
     /// Append `bytes` to the backlog and bump the master offset.
-    ///
-    /// PORT NOTE: Wave B wires this into the write-command propagation path.
-    /// Session 3A only exposes the entry point; no command handler calls it
-    /// yet, so the backlog stays empty in default smoke runs.
     pub fn append_to_backlog(&self, bytes: &[u8]) -> i64 {
         let new_offset = match self.backlog.lock() {
             Ok(mut g) => g.append(bytes),

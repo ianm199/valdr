@@ -4,37 +4,21 @@
 //! HEXISTS, HLEN, HSTRLEN, HGETALL, HKEYS, HVALS, HMGET, HMSET, HINCRBY,
 //! HINCRBYFLOAT, and HRANDFIELD for Round 3.
 //!
-//! C source: `reference/valkey/src/t_hash.c`
 //!
 //! # Storage shape
 //!
-//! Round 3 uses the pragmatic `ObjectKind::Hash(HashEncoding::Inline(_))`
+//! Uses the pragmatic `ObjectKind::Hash(HashEncoding::Inline(_))`
 //! encoding from `redis-core::object` — an insertion-order `InlineHash`
 //! providing field lookups and updates. The real
-//! `ListPack` / `HashTable` encodings land in Phase 4 when `redis-ds`
+//! `ListPack` / `HashTable` encodings are available when `redis-ds`
 //! exposes those types.
 //!
-//! # Architect items
+//! # TODOs
 //!
-//! TODO(architect): swap the `Inline` encoding for the real `ListPack` /
-//! `HashTable` types from `redis-ds` once Phase 4 makes them usable.
-//!
-//! TODO(architect): HSCAN cursor iteration depends on the cursor support
-//! that the keyspace scan implementation needs from redis-ds — not yet
-//! ported.
-//!
-//! TODO(architect): HRANDFIELD currently iterates the underlying HashMap
-//! in arbitrary insertion order rather than drawing from the server's PRNG
-//! state. Replace with the real `serverGenRandomNumber` style sampling
-//! once the RNG state is exposed through `CommandContext`.
-//!
-//! TODO(architect): replace the pragmatic per-field expiry side table with
-//! object-owned HASH_2 metadata once the real hash table encoding lands.
-//!
-//! TODO(port): HINCRBYFLOAT formats the result with Rust's default
-//! f64 `{}` formatter rather than the C long-double `%.17Lg` routine.
-//! Sufficient for byte-exact diffs on small magnitudes but should be
-//! tightened once a dedicated float-to-string helper exists.
+//! - HSCAN cursor iteration depends on cursor support from redis-ds.
+//! - HRANDFIELD currently iterates the underlying HashMap in arbitrary order.
+//! - HINCRBYFLOAT formats with Rust's default f64 `{}` formatter; tighter
+//!   formatting may be needed for byte-exact diffs on large magnitudes.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -456,7 +440,7 @@ fn parse_strict_f64(bytes: &[u8]) -> Result<f64, RedisError> {
 /// Parse an HINCRBYFLOAT increment. Unlike [`parse_strict_f64`], a parseable
 /// `nan`/`inf`/`+inf` is returned rather than rejected as "not a valid float";
 /// the caller reports the upstream `value is NaN or Infinity` error so the
-/// increment-argument case (C: t_hash.c:1004) is distinguished from a
+/// increment-argument case is distinguished from a
 /// genuinely-unparseable value.
 fn parse_incr_f64(bytes: &[u8]) -> Result<f64, RedisError> {
     if bytes.is_empty() {
@@ -1553,7 +1537,7 @@ pub fn hincrbyfloat_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let key = ctx.arg_owned(1usize)?;
     let field = ctx.arg_owned(2usize)?;
     let delta = parse_incr_f64(ctx.arg(3)?.as_bytes())?;
-    // C: t_hash.c:1004 — reject a NaN/Inf increment before touching the key, so
+    // reject a NaN/Inf increment before touching the key, so
     // `HINCRBYFLOAT k f +inf` errors and leaves the key uncreated.
     if delta.is_nan() || delta.is_infinite() {
         return Err(RedisError::runtime(b"ERR value is NaN or Infinity"));

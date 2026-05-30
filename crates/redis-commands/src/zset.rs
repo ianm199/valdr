@@ -3,16 +3,14 @@
 //! Covers the byte-exact wire surface of ZADD, ZSCORE, ZMSCORE, ZCARD,
 //! ZINCRBY, ZRANGE, ZRANGEBYSCORE, ZREVRANGE, ZREVRANGEBYSCORE, ZRANK,
 //! ZREVRANK, ZREM, ZCOUNT, ZPOPMIN, ZPOPMAX, ZREMRANGEBYRANK, and
-//! ZREMRANGEBYSCORE for Round 5.
-//!
-//! C source: `reference/valkey/src/t_zset.c`.
+//! ZREMRANGEBYSCORE.
 //!
 //! # Storage shape
 //!
-//! Round 5 uses the pragmatic `ObjectKind::ZSet(ZSetEncoding::Inline(_))`
+//! Uses the pragmatic `ObjectKind::ZSet(ZSetEncoding::Inline(_))`
 //! encoding from `redis-core::object` — an `InlineZSet` whose dual
 //! `HashMap` + `BTreeSet` mirror the dict + zskiplist pair in real
-//! Redis. Phase 4 swaps this for the real `redis_ds::ZSet` once that
+//! Redis. Real `redis_ds::ZSet` will be used once that
 //! crate ships the listpack / skiplist primitives.
 //!
 //! # Architect items

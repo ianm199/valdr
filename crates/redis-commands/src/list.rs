@@ -4,28 +4,20 @@
 //! LPOP, RPOP, LLEN, LRANGE, LINDEX, LSET, LREM, LTRIM, LINSERT, LMOVE,
 //! and RPOPLPUSH for Round 2.
 //!
-//! C source: `reference/valkey/src/t_list.c`
 //!
 //! # Storage shape
 //!
-//! Round 2 uses the pragmatic `ObjectKind::List(ListEncoding::Inline(_))`
+//! Uses the pragmatic `ObjectKind::List(ListEncoding::Inline(_))`
 //! encoding from `redis-core::object` — a `VecDeque<RedisString>` providing
 //! O(1) push/pop on both ends. The real `ListPack` / `QuickList` encodings
-//! land in Phase 4 when `redis-ds` exposes those types.
+//! are available when `redis-ds` exposes those types.
 //!
-//! # Architect items
+//! # TODOs
 //!
-//! TODO(architect): blocking variants (BLPOP, BRPOP, BLMOVE, BRPOPLPUSH,
-//! BLMPOP) need the `blockForKeys` infrastructure from
-//! `redis-core/src/blocked.rs`, which is not yet wired into the dispatch.
-//!
-//! TODO(architect): keyspace-event notifications, replication command
-//! rewriting, and the deferred-array-length protocol are all stubbed —
-//! they have no observable wire effect for the in-tree smoke tests but
-//! must land before the AOF / replication phases.
-//!
-//! TODO(architect): swap the `Inline` encoding for real `ListPack` /
-//! `QuickList` types from `redis-ds` once Phase 4 makes them usable.
+//! - Blocking variants (BLPOP, BRPOP, BLMOVE, BRPOPLPUSH, BLMPOP) need
+//!   the `blockForKeys` infrastructure from `redis-core/src/blocked.rs`.
+//! - Keyspace-event notifications, replication command rewriting, and
+//!   deferred-array-length protocol need implementation.
 
 use std::collections::VecDeque;
 
@@ -1127,7 +1119,6 @@ pub fn rpoplpush_command(ctx: &mut CommandContext) -> RedisResult<()> {
 /// keys. Replies a two-element array of `[key, [popped elements]]`, or a
 /// null array if every key is missing or empty.
 ///
-/// C: `lmpopCommand` (t_list.c).
 pub fn lmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
     if argc < 4 {
@@ -1239,7 +1230,6 @@ pub fn lmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
 /// Replies with `:integer` (single match), `*array` of indices (with COUNT),
 /// or `$-1` / `*0` for a no-match case.
 ///
-/// C: `lposCommand` (t_list.c).
 pub fn lpos_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
     if argc < 3 {

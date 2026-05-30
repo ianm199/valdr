@@ -22,3 +22,6 @@ harness/loop/
 __pycache__/
 harness/bench/results/
 harness/bench/profiles/
+
+# stray build artifacts
+*.rlib

@@ -1,8 +1,5 @@
 //! HyperLogLog probabilistic cardinality estimation: PFADD, PFCOUNT, PFMERGE.
 //!
-//! C source: `reference/valkey/src/hyperloglog.c` (2107 lines, 27 functions)
-//! Crate: `redis-commands` (later phase)
-//!
 //! Implements the HyperLogLog algorithm using 16384 6-bit registers in a
 //! compact binary format. Two on-disk representations are supported:
 //!
@@ -15,11 +12,9 @@
 //! (arXiv:1702.01284).
 //!
 //! ## SIMD
-//! AVX2 and ARM-NEON paths from the C source are intentionally omitted — they
-//! require `unsafe` SIMD intrinsics which are banned in pilot crates.  The
-//! scalar fallback path is used unconditionally.
-//! TODO(architect): SIMD optimization via a safe-intrinsics wrapper crate, after
-//! the unsafe budget policy is resolved for non-pilot crates.
+//! AVX2 and ARM-NEON paths are intentionally omitted — they require `unsafe`
+//! SIMD intrinsics which are banned in pilot crates. The scalar fallback path
+//! is used unconditionally.
 //!
 //! ## HLL header layout (16 bytes)
 //! ```text
@@ -182,7 +177,6 @@ fn hll_card_write(buf: &mut [u8], card: u64) {
 }
 
 // ── Dense register get/set ────────────────────────────────────────────────────
-// C: hyperloglog.c:376-400, HLL_DENSE_GET_REGISTER / HLL_DENSE_SET_REGISTER macros.
 //
 // Registers are packed at 6 bits each.  Register `regnum` spans bytes:
 //   b0 = regnum * 6 / 8
@@ -216,7 +210,6 @@ pub fn hll_dense_set_register(registers: &mut [u8], regnum: usize, val: u8) {
 }
 
 // ── Sparse opcode helpers ─────────────────────────────────────────────────────
-// C: hyperloglog.c:404-431, sparse representation macros.
 
 #[inline]
 fn sparse_is_zero(b: u8) -> bool {
@@ -264,7 +257,6 @@ fn sparse_zero_set(dst: &mut u8, len: usize) {
 }
 
 // ── MurmurHash64A ─────────────────────────────────────────────────────────────
-// C: hyperloglog.c:438-488, MurmurHash64A
 // Endian-neutral 64-bit Murmur2 hash used to hash HLL elements.
 
 pub fn murmur_hash64a(key: &[u8], seed: u32) -> u64 {
@@ -354,7 +346,6 @@ pub fn murmur_hash64a(key: &[u8], seed: u32) -> u64 {
 }
 
 // ── hll_pat_len ───────────────────────────────────────────────────────────────
-// C: hyperloglog.c:493-513, hllPatLen
 // Returns (count, register_index) where count is the length of the "000..1"
 // bit pattern (1-indexed; minimum 1).
 
@@ -370,7 +361,6 @@ pub fn hll_pat_len(ele: &[u8]) -> (u8, usize) {
 }
 
 // ── Dense representation ──────────────────────────────────────────────────────
-// C: hyperloglog.c:527-607
 
 /// Set register at `index` to `count` if current value is smaller.
 /// Returns true if the register was updated (cardinality may have changed).
@@ -394,7 +384,6 @@ pub(crate) fn hll_dense_add(registers: &mut [u8], ele: &[u8]) -> bool {
 
 /// Compute the register value frequency histogram for the dense representation.
 /// `reghisto[v]` accumulates the number of registers with value `v`.
-// C: hyperloglog.c:553-607, hllDenseRegHisto
 // The unrolled 16-registers-per-iteration fast path matches the C exactly for
 // HLL_REGISTERS==16384 && HLL_BITS==6.
 pub fn hll_dense_reg_histo(registers: &[u8], reghisto: &mut [i32; 64]) {
@@ -444,12 +433,10 @@ pub fn hll_dense_reg_histo(registers: &[u8], reghisto: &mut [i32; 64]) {
 }
 
 // ── Sparse representation ─────────────────────────────────────────────────────
-// C: hyperloglog.c:617-964
 
 /// Convert a sparse-encoded HLL byte buffer to dense in-place.
 /// `buf` must be the complete HLL byte vector (header + sparse opcodes).
 /// Returns Err if the sparse representation is corrupted.
-// C: hyperloglog.c:617-682, hllSparseToDense
 pub fn hll_sparse_to_dense(buf: &mut Vec<u8>) -> Result<(), RedisError> {
     if hll_encoding(buf) == HLL_DENSE {
         return Ok(());
@@ -513,7 +500,6 @@ pub fn hll_sparse_to_dense(buf: &mut Vec<u8>) -> Result<(), RedisError> {
 /// Set sparse register at `index` to `count` if current value is smaller.
 /// May promote the buffer to dense if needed.
 /// Returns Ok(true) if cardinality changed, Ok(false) if not, Err on corruption.
-// C: hyperloglog.c:699-951, hllSparseSet
 // PORT NOTE: C uses goto for promotion and for the "updated" merge-step entry.
 // Rust refactors those into early-returns and fall-through to a shared tail.
 pub(crate) fn hll_sparse_set(
@@ -527,7 +513,7 @@ pub(crate) fn hll_sparse_set(
         return hll_promote_to_dense(buf, index, count);
     }
 
-    // Greedy pre-allocation to amortize future reallocations (C: sdsResize).
+    // Greedy pre-allocation to amortize future reallocations.
     // PERF(port): C uses sdsResize with a "double or +300" greedy strategy.
     // Vec::reserve provides a similar amortised guarantee.
     {
@@ -700,7 +686,6 @@ pub(crate) fn hll_sparse_set(
     }
 
     // Step 4: merge adjacent VAL opcodes (scan up to 5 opcodes from prev).
-    // C: hyperloglog.c:900-930
     let scan_start = prev_pos.unwrap_or(data_start);
     let mut scan_pos = scan_start;
     let mut scan_remaining: i32 = 5;
@@ -724,7 +709,6 @@ pub(crate) fn hll_sparse_set(
                 let merged = sparse_val_len(buf[scan_pos]) + sparse_val_len(buf[scan_pos + 1]);
                 if merged <= HLL_SPARSE_VAL_MAX_LEN {
                     // Write merged value at scan_pos+1, then shift-delete scan_pos.
-                    // C: HLL_SPARSE_VAL_SET(p+1, v1, len); memmove(p, p+1, end-p); sdsIncrLen(-1);
                     sparse_val_set(&mut buf[scan_pos + 1], v1, merged);
                     let cur_len = buf.len();
                     buf.copy_within(scan_pos + 1..cur_len, scan_pos);
@@ -763,7 +747,6 @@ pub(crate) fn hll_sparse_add(
 /// Compute the register histogram for a sparse HLL.
 /// `sparse_data` is the slice starting immediately after the header.
 /// Returns false if the sparse representation is corrupted.
-// C: hyperloglog.c:967-1004, hllSparseRegHisto
 pub fn hll_sparse_reg_histo(sparse_data: &[u8], reghisto: &mut [i32; 64]) -> bool {
     let mut idx: usize = 0;
     let mut pos: usize = 0;
@@ -805,11 +788,9 @@ pub fn hll_sparse_reg_histo(sparse_data: &[u8], reghisto: &mut [i32; 64]) -> boo
 }
 
 // ── Cardinality estimation ────────────────────────────────────────────────────
-// C: hyperloglog.c:1014-1116
 
 /// Compute register histogram for the internal HLL_RAW encoding.
 /// Each byte of `registers` directly holds one register value (0..=63).
-// C: hyperloglog.c:1014-1035, hllRawRegHisto
 // PERF(port): C reads 8 bytes as u64 to zero-check; we replicate the same
 // optimisation using from_le_bytes on 8-byte chunks.
 pub fn hll_raw_reg_histo(registers: &[u8], reghisto: &mut [i32; 64]) {
@@ -875,7 +856,6 @@ pub fn hll_tau(mut x: f64) -> f64 {
 
 /// Compute the approximate cardinality from an HLL byte buffer (all encodings).
 /// Returns Err if the sparse representation is invalid.
-// C: hyperloglog.c:1082-1116, hllCount
 pub fn hll_count(buf: &[u8]) -> Result<u64, RedisError> {
     let m = HLL_REGISTERS as f64;
     let mut reghisto = [0i32; 64];
@@ -909,7 +889,6 @@ pub fn hll_count(buf: &[u8]) -> Result<u64, RedisError> {
 
 /// Dispatch hll_dense_add or hll_sparse_add based on the buffer encoding.
 /// Returns Ok(true) if the cardinality changed, Ok(false) if not, Err on error.
-// C: hyperloglog.c:1118-1126, hllAdd
 pub(crate) fn hll_add(
     buf: &mut Vec<u8>,
     ele: &[u8],
@@ -923,11 +902,9 @@ pub(crate) fn hll_add(
 }
 
 // ── Merge helpers ─────────────────────────────────────────────────────────────
-// C: hyperloglog.c:1327-1408
 
 /// Merge dense registers into a raw (1-byte-per-register) array by taking MAX.
 /// Scalar fallback; SIMD paths elided (unsafe not allowed in pilot crates).
-// C: hyperloglog.c:1327-1351, hllMergeDense
 // TODO(architect): SIMD optimisation paths (AVX2, NEON) via safe intrinsics.
 pub fn hll_merge_dense(reg_raw: &mut [u8], reg_dense: &[u8]) {
     for i in 0..HLL_REGISTERS {
@@ -941,7 +918,6 @@ pub fn hll_merge_dense(reg_raw: &mut [u8], reg_dense: &[u8]) {
 /// Merge HLL buffer `hll_buf` into raw register array `max` by taking MAX.
 /// `max` must be at least `HLL_REGISTERS` bytes.
 /// Returns Err if the sparse data is corrupted.
-// C: hyperloglog.c:1353-1408, hllMerge
 pub fn hll_merge(max: &mut [u8], hll_buf: &[u8]) -> Result<(), RedisError> {
     debug_assert!(max.len() >= HLL_REGISTERS);
     if hll_encoding(hll_buf) == HLL_DENSE {
@@ -996,7 +972,6 @@ pub fn hll_merge(max: &mut [u8], hll_buf: &[u8]) -> Result<(), RedisError> {
 
 /// Compress raw (1-byte-per-register) array into dense (6-bit-packed) format.
 /// Scalar fallback; SIMD paths elided.
-// C: hyperloglog.c:1577-1597, hllDenseCompress
 pub fn hll_dense_compress(reg_dense: &mut [u8], reg_raw: &[u8]) {
     for i in 0..HLL_REGISTERS {
         hll_dense_set_register(reg_dense, i, reg_raw[i]);
@@ -1004,11 +979,9 @@ pub fn hll_dense_compress(reg_dense: &mut [u8], reg_raw: &[u8]) {
 }
 
 // ── Object-level helpers ──────────────────────────────────────────────────────
-// C: hyperloglog.c:1601-1661
 
 /// Create a new HLL byte buffer in sparse encoding.
 /// The initial state encodes all 16384 registers as zero using XZERO opcodes.
-// C: hyperloglog.c:1603-1631, createHLLObject
 pub fn create_hll_object() -> Vec<u8> {
     let xzero_count = HLL_REGISTERS.div_ceil(HLL_SPARSE_XZERO_MAX_LEN);
     let sparselen = HLL_HDR_SIZE + xzero_count * 2;
@@ -1035,7 +1008,6 @@ pub fn create_hll_object() -> Vec<u8> {
 
 /// Validate that `buf` is a well-formed HLL byte buffer (header + data).
 /// Returns true if valid.
-// C: hyperloglog.c:1633-1661, isHLLObjectOrReply (validation portion)
 pub fn is_hll_valid(buf: &[u8]) -> bool {
     if buf.len() < HLL_HDR_SIZE {
         return false;
@@ -1133,7 +1105,6 @@ fn pfdebug_decode_sparse(buf: &[u8]) -> Result<Vec<u8>, RedisError> {
 /// (i.e. the cardinality estimate changed), `:0` otherwise. Returns WRONGTYPE
 /// when the existing key is not a valid HLL string. With no elements supplied
 /// (just the key) replies `:1` iff a new HLL was created.
-// C: hyperloglog.c:1664-1696, pfaddCommand
 pub fn pfadd_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     if ctx.arg_count() < 2 {
         return Err(RedisError::wrong_number_of_args(b"pfadd"));
@@ -1180,7 +1151,6 @@ pub fn pfadd_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 /// The single-key path mirrors the C source's cache-write optimisation: on a
 /// cache miss the freshly-computed cardinality is written back into the HLL
 /// header so subsequent reads are O(1).
-// C: hyperloglog.c:1698-1792, pfcountCommand
 pub fn pfcount_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     if ctx.arg_count() < 2 {
         return Err(RedisError::wrong_number_of_args(b"pfcount"));
@@ -1242,7 +1212,6 @@ pub fn pfcount_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 /// source keys are provided this still produces a valid HLL at `dest`
 /// (either created empty or left untouched). The destination is promoted to
 /// dense encoding whenever any participating HLL is already dense.
-// C: hyperloglog.c:1794-1871, pfmergeCommand
 pub fn pfmerge_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     if ctx.arg_count() < 2 {
         return Err(RedisError::wrong_number_of_args(b"pfmerge"));
@@ -1315,7 +1284,6 @@ pub fn pfmerge_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 
 /// PFSELFTEST
 /// Internal self-test of HLL register encoding and approximation accuracy.
-// C: hyperloglog.c:1878-1976, pfselftestCommand
 pub fn pfselftest_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     if ctx.arg_count() != 1 {
         return Err(RedisError::wrong_number_of_args(b"pfselftest"));
@@ -1397,7 +1365,6 @@ pub fn pfselftest_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 
 /// PFDEBUG subcommand key
 /// Subcommands: GETREG, DECODE, ENCODING, TODENSE, SIMD.
-// C: hyperloglog.c:1986-2106, pfdebugCommand
 // TODO(architect): server-global simd_enabled flag (currently a static C int).
 pub fn pfdebug_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let argc = ctx.argc();
@@ -1409,7 +1376,6 @@ pub fn pfdebug_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let subcmd_bytes = subcmd.as_bytes();
 
     // SIMD subcommand: toggle/report SIMD usage.
-    // C: hyperloglog.c:1992-2009
     if subcmd_bytes.eq_ignore_ascii_case(b"simd") {
         if argc != 3 {
             return Err(pfdebug_arity_error(subcmd_bytes));

@@ -875,11 +875,11 @@ fn os_clock_seconds() -> f64 {
 }
 
 /// Build the sandboxed `os` global. Valkey exposes a plain table holding only
-/// `os.clock` (`reference/valkey/src/modules/lua/script_lua.c`); every other
-/// `os.*` is absent, so a script calling e.g. `os.execute()` hits the Lua
-/// "attempt to call field 'execute' (a nil value)" error the suite asserts.
-/// The table must stay a plain (non-proxy) table because the sandbox test
-/// iterates it with `pairs(os)`, which in Lua 5.1 sees only raw keys.
+/// `os.clock`; every other `os.*` is absent, so a script calling e.g.
+/// `os.execute()` hits the Lua "attempt to call field 'execute' (a nil value)"
+/// error the suite asserts. The table must stay a plain (non-proxy) table
+/// because the sandbox test iterates it with `pairs(os)`, which in Lua 5.1
+/// sees only raw keys.
 fn create_os_table(lua: &Lua) -> mlua::Result<LuaTable> {
     let table = lua.create_table()?;
     table.raw_set(
@@ -2014,7 +2014,7 @@ fn bit_fold(args: Variadic<f64>, op: impl Fn(u32, u32) -> u32) -> mlua::Result<f
     Ok(bit_bret(acc))
 }
 
-/// LuaBitOp `bit.tohex`. Mirrors `bit_tohex` in `lua_bit.c`, including the
+/// LuaBitOp `bit.tohex`, including the
 /// `INT32_MIN` guard that makes `bit.tohex(65535, -2147483648)` resolve to
 /// `0000FFFF` (uppercase, clamped to 8 digits) rather than hitting the
 /// undefined `-INT32_MIN` negation.
