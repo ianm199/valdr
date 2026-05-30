@@ -1,9 +1,7 @@
 # Roadmap
 
-Where Valdr is headed. **To edit this page, just edit `docs/roadmap.md` and commit** —
-the site renders it automatically. Use `-` for a bullet, and indent **two spaces**
-for a sub-bullet. You can also use `- [ ]` for a todo and `- [x]` for a done item,
-`**bold**`, `` `code` ``, and `[links](https://example.com)`.
+Edit `docs/roadmap.md` and commit. `-` for a bullet, two-space indent for a
+sub-bullet, `- [x]` for done.
 
 ## Near term
 
