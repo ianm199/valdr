@@ -1,16 +1,14 @@
-//! `StreamId` + Phase-B inline stream storage.
-//!
-//! Source: `reference/valkey/src/stream.h` (paired with `t_stream.c`).
+//! `StreamId` + inline stream storage.
 //!
 //! A stream ID is a 128-bit composite: the upper 64 bits are a
 //! millisecond unix timestamp, the lower 64 bits a per-ms sequence
 //! counter. IDs are totally ordered and printed as `<ms>-<seq>` on the
 //! wire.
 //!
-//! Round 9 introduces a pragmatic `InlineStream` storage that mirrors
+//! The pragmatic `InlineStream` storage mirrors
 //! the LIST/HASH/SET/ZSET inline encodings: entries kept in a sorted
-//! `Vec<StreamEntry>` for binary-searchable range queries. Phase 5
-//! replaces this with a real radix-tree + listpack representation.
+//! `Vec<StreamEntry>` for binary-searchable range queries. A later phase
+//! will replace this with a real radix-tree + listpack representation.
 
 use redis_types::RedisString;
 use std::collections::HashMap;
@@ -173,9 +171,8 @@ pub struct Consumer {
 /// and is also sorted by `entry_id`. Helpers on `InlineStream` keep the
 /// two views consistent so callers can scan either side cheaply.
 /// Sentinel for a consumer group whose logical read counter is unknown, e.g.
-/// a group created behind existing entries without `ENTRIESREAD`, or one whose
-/// position is fragmented by a tombstone. Mirrors `SCG_INVALID_ENTRIES_READ`
-/// (stream.h:114). Reported to clients as a null `entries-read`/`lag`.
+/// a group created behind existing entries without ENTRIESREAD, or one whose
+/// position is fragmented by a tombstone. Reported to clients as a null entries-read/lag.
 pub const SCG_INVALID_ENTRIES_READ: i64 = -1;
 
 #[derive(Clone, Debug)]
@@ -187,7 +184,7 @@ pub struct ConsumerGroup {
     pub entries_read: i64,
 }
 
-/// Phase-B inline stream storage.
+/// Inline stream storage.
 ///
 /// `entries` is kept sorted by `id` ascending and is therefore
 /// binary-searchable. `last_id` is the largest id ever inserted; this
@@ -286,8 +283,7 @@ pub struct StreamLagView {
 }
 
 impl StreamLagView {
-    /// Port of `streamEstimateDistanceFromFirstEverEntry` (t_stream.c:1494):
-    /// the logical read counter of `id`, or `SCG_INVALID_ENTRIES_READ` when it
+    /// The logical read counter of `id`, or `SCG_INVALID_ENTRIES_READ` when it
     /// cannot be determined.
     pub fn estimate_entries_read(&self, id: StreamId) -> i64 {
         if self.entries_added == 0 {
@@ -322,8 +318,7 @@ impl StreamLagView {
         SCG_INVALID_ENTRIES_READ
     }
 
-    /// Port of `streamRangeHasTombstones` (t_stream.c:1407). `end == None`
-    /// means the open-ended upper bound (`UINT64_MAX`).
+    /// `end == None` means the open-ended upper bound (u64::MAX).
     pub fn range_has_tombstones(&self, start: StreamId, end: Option<StreamId>) -> bool {
         if self.length == 0 || self.max_deleted_id == StreamId::ZERO {
             return false;
@@ -332,8 +327,7 @@ impl StreamLagView {
         start <= self.max_deleted_id && self.max_deleted_id <= end_id
     }
 
-    /// Port of `streamReplyWithCGLag` (t_stream.c:1442): the group's lag, or
-    /// `None` when it cannot be determined (reported to clients as null).
+    /// The group's lag, or `None` when it cannot be determined (reported to clients as null).
     pub fn group_lag(&self, group_entries_read: i64, group_last_id: StreamId) -> Option<i64> {
         if self.entries_added == 0 {
             return Some(0);
@@ -351,10 +345,9 @@ impl StreamLagView {
     }
 
     /// Advance a group's read counter over a run of newly delivered entry IDs,
-    /// returning the updated `(entries_read, last_delivered_id)`. Port of the
-    /// per-entry maintenance in `streamReplyWithRange` (t_stream.c:1700): for
-    /// each ID past the group's last-delivered, increment the counter when it
-    /// is valid and unfragmented, otherwise re-estimate it.
+    /// returning the updated `(entries_read, last_delivered_id)`. For each ID
+    /// past the group's last-delivered, increment the counter when it is valid
+    /// and unfragmented, otherwise re-estimate it.
     pub fn advance_read_counter(
         &self,
         entries_read: i64,

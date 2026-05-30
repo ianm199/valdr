@@ -1,8 +1,5 @@
 //! Lock-free queue implementations: MPSC, SPMC, and SPSC.
 //!
-//! Ports `reference/valkey/src/queues.c` and `reference/valkey/src/queues.h`
-//! (295 + 141 lines, 16 functions).
-//!
 //! Three ring-buffer queue variants are provided:
 //!
 //! - [`MpscQueue`] – Multi-Producer Single-Consumer.
@@ -37,9 +34,7 @@
 //! false sharing. In Rust, `#[repr(align(N))]` applies to the *type*, so
 //! each logical "cache-line group" must be wrapped in a dedicated newtype.
 //! The per-queue structs below document the intended groupings in field-level
-//! comments. Phase B should introduce explicit cache-line-sized padding
-//! newtypes (or manual `_pad: [u8; N]` arrays) to replicate the C layout
-//! exactly.
+//! comments.
 
 use std::sync::atomic::{fence, AtomicPtr, AtomicUsize, Ordering};
 
@@ -54,8 +49,6 @@ pub const CACHE_LINE_SIZE: usize = 64;
 // ============================================================================
 
 /// Retry ticket saved by [`MpscQueue::enqueue`] when the queue is full.
-///
-/// C: `queues.h:37-39` (`mpscTicket`)
 ///
 /// If `enqueue` returns `false`, it stores the reserved slot index here.
 /// The caller must pass the same ticket on the next retry so the producer
@@ -82,14 +75,11 @@ impl Default for MpscTicket {
 
 /// Multi-Producer Single-Consumer lock-free ring-buffer queue.
 ///
-/// C: `queues.h:41-53` (`mpscQueue`), `queues.c:12-103`
-///
-/// PORT NOTE: The C buffer is `_Atomic(void *) *` allocated with `zmalloc`.
-/// We use `Vec<AtomicPtr<T>>` to express ownership and avoid manual allocation.
+/// PORT NOTE: We use `Vec<AtomicPtr<T>>` to express ownership and avoid manual allocation.
 /// `AtomicPtr<T>::load` returns `*mut T`; callers must not dereference without
 /// satisfying their own aliasing invariants (see module-level ownership note).
 ///
-/// PORT NOTE: Field comments mark the intended C cache-line groupings:
+/// PORT NOTE: Field comments mark the intended cache-line groupings:
 /// - "consumer cache line": `head` + `tail_cache`
 /// - "producer cache line": `tail` + `head_cache`
 /// - "buffer cache line":   `buffer` + `queue_size`
@@ -119,10 +109,7 @@ pub struct MpscQueue<T> {
 
 impl<T> MpscQueue<T> {
     /// Creates a new MPSC queue. `queue_size` must be a positive power of two.
-    ///
-    /// C: `queues.c:12-25`, `mpscInit`
     pub fn new(queue_size: usize) -> Self {
-        // C: assert((queue_size & (queue_size - 1)) == 0);
         debug_assert!(
             queue_size > 0 && (queue_size & (queue_size - 1)) == 0,
             "MpscQueue: queue_size must be a positive power of two"
@@ -141,13 +128,8 @@ impl<T> MpscQueue<T> {
         }
     }
 
-    /// Resets all queue indices to zero (equivalent to C `mpscFree` minus
-    /// the buffer deallocation, which is handled by `Drop`).
+    /// Resets all queue indices to zero (buffer deallocation handled by `Drop`).
     ///
-    /// C: `queues.c:27-36`, `mpscFree`
-    ///
-    /// PORT NOTE: The C function calls `zfree(q->buffer)` and NULLs the
-    /// pointer; Rust owns the buffer via `Vec` and drops it automatically.
     /// This method only resets the bookkeeping state; the buffer itself is
     /// re-zeroed so the queue can be reused.
     pub fn reset(&mut self) {
@@ -166,16 +148,12 @@ impl<T> MpscQueue<T> {
     /// `false` is returned. The caller must retry with the same `ticket` (and
     /// the same `data`) once space is available.
     ///
-    /// C: `queues.c:38-69`, `mpscEnqueue`
-    ///
     /// Takes `&self` so that multiple producer threads can call this
     /// concurrently; all mutations are performed through atomic operations.
     pub fn enqueue(&self, data: *mut T, ticket: &mut MpscTicket) -> bool {
-        // C: assert(data);
         debug_assert!(!data.is_null(), "MpscQueue::enqueue: data must not be null");
 
         // Reserve a slot, or reuse the existing reservation.
-        // C: tail = atomic_fetch_add_explicit(&q->tail, 1, memory_order_relaxed)
         let tail = if !ticket.has_reservation {
             self.tail.fetch_add(1, Ordering::Relaxed)
         } else {
@@ -183,11 +161,9 @@ impl<T> MpscQueue<T> {
         };
 
         // Fullness check using producer's cached head copy.
-        // C: head = atomic_load_explicit(&q->head_cache, memory_order_acquire)
         let head = self.head_cache.load(Ordering::Acquire);
         if tail.wrapping_sub(head) >= self.queue_size {
             // Cached limit reached — refresh from the true consumer head.
-            // C: head = atomic_load_explicit(&q->head, memory_order_acquire)
             let head = self.head.load(Ordering::Acquire);
             self.head_cache.store(head, Ordering::Release);
 
@@ -200,7 +176,6 @@ impl<T> MpscQueue<T> {
         }
 
         // Commit data to the reserved slot.
-        // C: atomic_store_explicit(&q->buffer[tail & (q->queue_size - 1)], data, memory_order_release)
         let slot = tail & (self.queue_size - 1);
         self.buffer[slot].store(data, Ordering::Release);
 
@@ -214,8 +189,6 @@ impl<T> MpscQueue<T> {
     /// Stops early if a slot was reserved by a producer but not yet written
     /// (data pointer is still null). This prevents reordering a later-written
     /// item ahead of an earlier reservation.
-    ///
-    /// C: `queues.c:71-103`, `mpscDequeueBatch`
     pub fn dequeue_batch(&mut self, jobs_out: &mut Vec<*mut T>, max_jobs: usize) -> usize {
         let mut popped_count = 0usize;
         let mut head = self.head.load(Ordering::Relaxed);
@@ -223,7 +196,6 @@ impl<T> MpscQueue<T> {
 
         // Refresh tail cache if the queue looks empty.
         if head == tail {
-            // C: tail = atomic_load_explicit(&q->tail, memory_order_acquire)
             tail = self.tail.load(Ordering::Acquire);
             self.tail_cache = tail;
             if head == tail {
@@ -236,7 +208,6 @@ impl<T> MpscQueue<T> {
 
         for _ in 0..limit {
             let slot = head & (self.queue_size - 1);
-            // C: data = atomic_load_explicit(&q->buffer[...], memory_order_relaxed)
             let data = self.buffer[slot].load(Ordering::Relaxed);
 
             // Stop if the producer has reserved this slot but not yet written.
@@ -251,10 +222,8 @@ impl<T> MpscQueue<T> {
         }
 
         if popped_count > 0 {
-            // C: atomic_store_explicit(&q->head, head, memory_order_release)
             self.head.store(head, Ordering::Release);
             // Ensure data visibility for the caller.
-            // C: atomic_thread_fence(memory_order_acquire)
             fence(Ordering::Acquire);
         }
 
@@ -268,8 +237,6 @@ impl<T> MpscQueue<T> {
 
 /// One ring-buffer cell for [`SpmcQueue`].
 ///
-/// C: `queues.h:73-77` (`spmcCell`)
-///
 /// PORT NOTE: In C, `data` is a plain `void *` field. Correctness relies on the
 /// release store to `sequence` (which the producer does after writing `data`)
 /// creating a happens-before edge that the consumer's acquire load on `sequence`
@@ -277,12 +244,8 @@ impl<T> MpscQueue<T> {
 /// `Sync` without an `unsafe impl`. This costs one extra atomic operation per
 /// enqueue/dequeue but avoids `UnsafeCell`.
 ///
-/// PERF(port): C uses a plain pointer write guarded by sequence ordering —
-/// profile whether the extra atomic operation on `data` is measurable in Phase B.
-///
-/// The `#[repr(align(64))]` mirrors `_Alignas(CACHE_LINE_SIZE)` on the C
-/// `sequence` field; padding each cell to a cache line prevents consumer
-/// false sharing.
+/// The `#[repr(align(64))]` provides cache-line alignment; padding each cell to
+/// a cache line prevents consumer false sharing.
 #[repr(align(64))]
 pub struct SpmcCell<T> {
     sequence: AtomicUsize,
@@ -291,9 +254,7 @@ pub struct SpmcCell<T> {
 
 /// Single-Producer Multi-Consumer lock-free ring-buffer queue.
 ///
-/// C: `queues.h:78-89` (`spmcQueue`), `queues.c:109-202`
-///
-/// PORT NOTE: Field comments mark the intended C cache-line groupings:
+/// PORT NOTE: Field comments mark the intended cache-line groupings:
 /// - "shared consumer cache line": `head`
 /// - "producer cache line":        `tail` + `head_cache`
 /// - "buffer cache line":          `buffer` + `queue_size`
@@ -319,10 +280,7 @@ pub struct SpmcQueue<T> {
 
 impl<T> SpmcQueue<T> {
     /// Creates a new SPMC queue. `queue_size` must be a positive power of two.
-    ///
-    /// C: `queues.c:109-122`, `spmcInit`
     pub fn new(queue_size: usize) -> Self {
-        // C: assert((queue_size & (queue_size - 1)) == 0);
         debug_assert!(
             queue_size > 0 && (queue_size & (queue_size - 1)) == 0,
             "SpmcQueue: queue_size must be a positive power of two"
@@ -330,7 +288,6 @@ impl<T> SpmcQueue<T> {
         let mut buffer: Vec<SpmcCell<T>> = Vec::with_capacity(queue_size);
         for i in 0..queue_size {
             buffer.push(SpmcCell {
-                // C: atomic_init(&q->buffer[i].sequence, i)
                 sequence: AtomicUsize::new(i),
                 data: AtomicPtr::new(std::ptr::null_mut()),
             });
@@ -346,12 +303,8 @@ impl<T> SpmcQueue<T> {
 
     /// Resets queue bookkeeping state (buffer deallocation handled by `Drop`).
     ///
-    /// C: `queues.c:124-132`, `spmcFree`
-    ///
-    /// PORT NOTE: Unlike `mpscQueue`, C's `spmcFree` does not reinitialise the
-    /// per-cell sequence numbers. A reset queue is not safe to use without
-    /// re-initialisation of the cells — consistent with C requiring `spmcInit`
-    /// again after `spmcFree`.
+    /// Note: A reset queue is not safe to use without re-initialisation of the
+    /// cells, consistent with re-initialization after a reset.
     pub fn reset(&mut self) {
         self.head.store(0, Ordering::Relaxed);
         self.tail = 0;
@@ -361,23 +314,18 @@ impl<T> SpmcQueue<T> {
     /// Returns `true` if the queue appears empty from the producer's view.
     ///
     /// May update `head_cache` on the slow path.
-    ///
-    /// C: `queues.c:134-145`, `spmcIsEmpty`
     pub fn is_empty(&mut self) -> bool {
         // Fast path: cached consumer position.
         if self.tail == self.head_cache {
             return true;
         }
         // Slow path: refresh atomic head.
-        // C: curr_head = atomic_load_explicit(&q->head, memory_order_acquire)
         let curr_head = self.head.load(Ordering::Acquire);
         self.head_cache = curr_head;
         self.tail == curr_head
     }
 
     /// Returns an approximate item count (may race with consumers).
-    ///
-    /// C: `queues.c:147-150`, `spmcSize`
     pub fn size(&self) -> usize {
         let head = self.head.load(Ordering::Relaxed);
         self.tail.saturating_sub(head)
@@ -385,17 +333,13 @@ impl<T> SpmcQueue<T> {
 
     /// Pushes `data` into the next slot. Returns `false` if the slot is
     /// occupied (queue full or consumer hasn't cleared the wrapping slot yet).
-    ///
-    /// C: `queues.c:152-170`, `spmcEnqueue`
     pub fn enqueue(&mut self, data: *mut T) -> bool {
         let slot = self.tail & (self.queue_size - 1);
         let cell = &self.buffer[slot];
-        // C: seq = atomic_load_explicit(&cell->sequence, memory_order_acquire)
         let seq = cell.sequence.load(Ordering::Acquire);
 
         // seq == tail: slot is empty and ready for this generation.
         // seq <  tail: slot still occupied by a consumer, or stale.
-        // C: if (unlikely(seq != q->tail)) return false;
         if seq != self.tail {
             return false;
         }
@@ -404,7 +348,6 @@ impl<T> SpmcQueue<T> {
 
         // Publish availability: advance sequence to (tail + 1) with release
         // so consumers' acquire load on sequence sees the data write.
-        // C: atomic_store_explicit(&cell->sequence, q->tail + 1, memory_order_release)
         cell.sequence.store(self.tail + 1, Ordering::Release);
         self.tail += 1;
 
@@ -416,9 +359,7 @@ impl<T> SpmcQueue<T> {
     /// Multiple consumers may call this concurrently; they compete via a
     /// weak CAS on `head`.
     ///
-    /// C: `queues.c:172-202`, `spmcDequeue`
-    ///
-    /// PORT NOTE: Returns `*mut T` to mirror C's `void *` return (null = empty).
+    /// PORT NOTE: Returns `*mut T` (null = empty).
     /// Callers need `unsafe` to dereference the returned pointer.
     ///
     /// Takes `&self` because all mutations are through atomics.
@@ -428,15 +369,12 @@ impl<T> SpmcQueue<T> {
         loop {
             let slot = head & (self.queue_size - 1);
             let cell = &self.buffer[slot];
-            // C: seq = atomic_load_explicit(&cell->sequence, memory_order_acquire)
             let seq = cell.sequence.load(Ordering::Acquire);
 
-            // C: intptr_t diff = (intptr_t)seq - (intptr_t)(head + 1);
             let diff = (seq as isize).wrapping_sub(head.wrapping_add(1) as isize);
 
             if diff == 0 {
                 // Slot has data; attempt to claim it via CAS on head.
-                // C: atomic_compare_exchange_weak_explicit(&q->head, &head, head+1, ...)
                 match self.head.compare_exchange_weak(
                     head,
                     head.wrapping_add(1),
@@ -446,7 +384,6 @@ impl<T> SpmcQueue<T> {
                     Ok(_) => {
                         let data = cell.data.load(Ordering::Relaxed);
                         // Mark slot empty for the next generation (head + queue_size).
-                        // C: atomic_store_explicit(&cell->sequence, head + q->queue_size, ...)
                         cell.sequence
                             .store(head.wrapping_add(self.queue_size), Ordering::Release);
                         return data;
@@ -461,7 +398,6 @@ impl<T> SpmcQueue<T> {
                 return std::ptr::null_mut();
             } else {
                 // diff > 0: our local `head` is stale; reload from the atomic.
-                // C: head = atomic_load_explicit(&q->head, memory_order_relaxed)
                 head = self.head.load(Ordering::Relaxed);
             }
         }
@@ -474,23 +410,14 @@ impl<T> SpmcQueue<T> {
 
 /// Single-Producer Single-Consumer lock-free ring-buffer queue with batching.
 ///
-/// C: `queues.h:108-122` (`spscQueue`), `queues.c:208-294`
-///
 /// The producer may enqueue multiple items with `commit = false` to batch them,
 /// then call [`SpscQueue::commit`] once to make them all visible to the consumer
 /// in a single atomic store.
 ///
-/// PORT NOTE: The C buffer is `void **` — a plain pointer array whose safety
-/// relies on the producer and consumer accessing disjoint slots (enforced by
-/// head/tail indices) with atomic head/tail providing the visibility barrier.
-/// We use `Vec<AtomicPtr<T>>` so the buffer is safe to share between the two
-/// logical sides without `UnsafeCell`.
+/// PORT NOTE: We use `Vec<AtomicPtr<T>>` so the buffer is safe to share between
+/// producer and consumer without `UnsafeCell`.
 ///
-/// PERF(port): Per-slot `AtomicPtr` is overkill for a true SPSC queue; plain
-/// `*mut T` in a `UnsafeCell<Vec<*mut T>>` with a documented SAFETY invariant
-/// would be more efficient. Defer to Phase B after architect approval.
-///
-/// PORT NOTE: Field comments mark the intended C cache-line groupings:
+/// PORT NOTE: Field comments mark the intended cache-line groupings:
 /// - "consumer cache line": `head` + `tail_cache`
 /// - "producer cache line": `tail` + `tail_local` + `head_cache`
 /// - "buffer cache line":   `buffer` + `queue_size`
@@ -516,10 +443,7 @@ pub struct SpscQueue<T> {
 
 impl<T> SpscQueue<T> {
     /// Creates a new SPSC queue. `queue_size` must be a positive power of two.
-    ///
-    /// C: `queues.c:208-218`, `spscInit`
     pub fn new(queue_size: usize) -> Self {
-        // C: assert((queue_size & (queue_size - 1)) == 0);
         debug_assert!(
             queue_size > 0 && (queue_size & (queue_size - 1)) == 0,
             "SpscQueue: queue_size must be a positive power of two"
@@ -540,8 +464,6 @@ impl<T> SpscQueue<T> {
     }
 
     /// Resets all queue state (buffer deallocation handled by `Drop`).
-    ///
-    /// C: `queues.c:220-230`, `spscFree`
     pub fn reset(&mut self) {
         self.head.store(0, Ordering::Relaxed);
         self.tail.store(0, Ordering::Relaxed);
@@ -554,18 +476,14 @@ impl<T> SpscQueue<T> {
     ///
     /// As a side-effect, may flush any pending batched enqueues to the consumer
     /// so that the consumer can advance its head before we declare "full".
-    ///
-    /// C: `queues.c:232-247`, `spscIsFull`
     pub fn is_full(&mut self) -> bool {
         let curr_tail = self.tail_local;
 
         if curr_tail.wrapping_sub(self.head_cache) >= self.queue_size {
-            // C: q->head_cache = atomic_load_explicit(&q->head, memory_order_acquire)
             self.head_cache = self.head.load(Ordering::Acquire);
 
             if curr_tail.wrapping_sub(self.head_cache) >= self.queue_size {
                 // Flush any pending batch before declaring full.
-                // C: if (q->tail_local != q->tail) atomic_store_explicit(...)
                 let committed = self.tail.load(Ordering::Relaxed);
                 if self.tail_local != committed {
                     self.tail.store(self.tail_local, Ordering::Release);
@@ -583,41 +501,32 @@ impl<T> SpscQueue<T> {
     /// item becomes visible to the consumer at once. If `false`, only
     /// `tail_local` advances (batching mode); call [`SpscQueue::commit`] to
     /// publish the batch.
-    ///
-    /// C: `queues.c:249-256`, `spscEnqueue`
     pub fn enqueue(&mut self, data: *mut T, commit: bool) {
         let slot = self.tail_local & (self.queue_size - 1);
         self.buffer[slot].store(data, Ordering::Relaxed);
         self.tail_local = self.tail_local.wrapping_add(1);
 
         if commit {
-            // C: atomic_store_explicit(&q->tail, q->tail_local, memory_order_release)
             self.tail.store(self.tail_local, Ordering::Release);
         }
     }
 
     /// Publishes any pending batched enqueues by advancing the shared tail to
     /// `tail_local`. A no-op if `tail_local` equals the already-committed tail.
-    ///
-    /// C: `queues.c:258-262`, `spscCommit`
     pub fn commit(&mut self) {
         let committed = self.tail.load(Ordering::Relaxed);
         if self.tail_local == committed {
             return;
         }
-        // C: atomic_store_explicit(&q->tail, q->tail_local, memory_order_release)
         self.tail.store(self.tail_local, Ordering::Release);
     }
 
     /// Pops up to `num_jobs` items into `jobs_out`. Returns the actual count.
-    ///
-    /// C: `queues.c:264-282`, `spscDequeueBatch`
     pub fn dequeue_batch(&mut self, jobs_out: &mut Vec<*mut T>, num_jobs: usize) -> usize {
         let curr_head = self.head.load(Ordering::Relaxed);
         let mut curr_tail_cache = self.tail_cache;
 
         if curr_head == curr_tail_cache {
-            // C: curr_tail_cache = atomic_load_explicit(&q->tail, memory_order_acquire)
             curr_tail_cache = self.tail.load(Ordering::Acquire);
             self.tail_cache = curr_tail_cache;
             if curr_head == curr_tail_cache {
@@ -630,11 +539,9 @@ impl<T> SpscQueue<T> {
 
         for i in 0..count {
             let slot = curr_head.wrapping_add(i) & (self.queue_size - 1);
-            // C: jobs_out[i] = q->buffer[(curr_head + i) & (q->queue_size - 1)]
             jobs_out.push(self.buffer[slot].load(Ordering::Relaxed));
         }
 
-        // C: atomic_store_explicit(&q->head, curr_head + count, memory_order_release)
         self.head
             .store(curr_head.wrapping_add(count), Ordering::Release);
         count
@@ -643,15 +550,12 @@ impl<T> SpscQueue<T> {
     /// Returns `true` if the queue is empty from the producer's perspective
     /// (compares `tail_local` against `head`, refreshing `head_cache` on the
     /// slow path).
-    ///
-    /// C: `queues.c:284-294`, `spscIsEmpty`
     pub fn is_empty(&mut self) -> bool {
         // Fast path: producer-local tail vs cached head.
         if self.tail_local == self.head_cache {
             return true;
         }
         // Slow path: refresh head.
-        // C: curr_head = atomic_load_explicit(&q->head, memory_order_acquire)
         let curr_head = self.head.load(Ordering::Acquire);
         self.head_cache = curr_head;
         self.tail_local == curr_head

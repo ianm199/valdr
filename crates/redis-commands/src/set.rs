@@ -2,16 +2,14 @@
 //!
 //! Covers the byte-exact wire surface of SADD, SREM, SMEMBERS, SISMEMBER,
 //! SMISMEMBER, SCARD, SPOP, SRANDMEMBER, SMOVE, SINTER, SINTERSTORE,
-//! SINTERCARD, SUNION, SUNIONSTORE, SDIFF, and SDIFFSTORE for Round 4.
-//!
-//! C source: `reference/valkey/src/t_set.c`
+//! SINTERCARD, SUNION, SUNIONSTORE, SDIFF, and SDIFFSTORE.
 //!
 //! # Storage shape
 //!
-//! Round 4 uses the pragmatic `ObjectKind::Set(SetEncoding::Inline(_))`
+//! Uses the pragmatic `ObjectKind::Set(SetEncoding::Inline(_))`
 //! encoding from `redis-core::object` — a `HashSet<RedisString>` providing
 //! O(1) membership, add, and remove. The real `ListPack` / `IntSet` /
-//! `HashTable` encodings land in Phase 4 when `redis-ds` exposes those
+//! `HashTable` encodings will be used when `redis-ds` exposes those
 //! types.
 //!
 //! # Architect items
@@ -26,7 +24,7 @@
 //! in-tree smoke tests but must land before the AOF / replication phases.
 //!
 //! TODO(architect): swap the `Inline` encoding for real `ListPack` /
-//! `IntSet` / `HashTable` types from `redis-ds` once Phase 4 makes them
+//! `IntSet` / `HashTable` types from `redis-ds` when making them
 //! usable.
 
 use std::collections::HashSet;

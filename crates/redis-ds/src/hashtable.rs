@@ -1,9 +1,7 @@
-//! `HashTable` — the newer SIMD-friendly open-addressed hash table.
+//! `HashTable` — SIMD-friendly open-addressed hash table.
 //!
-//! Source: `reference/valkey/src/hashtable.c` (and `hashtable.h`).
-//! Introduced as a faster alternative to `dict` for some keyspace
-//! workloads: open addressing with metadata bytes (a la swiss / F14).
-//! Coexists with the legacy `dict` during the transition.
+//! A faster alternative to `dict` for some workloads: open addressing with
+//! metadata bytes. Coexists with the legacy `dict` during the transition.
 
 use std::marker::PhantomData;
 
@@ -25,11 +23,11 @@ impl<K, V> HashTable<K, V> {
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        reference/valkey/src/hashtable.c
+//   source:        (open-addressed hash table, Redis stdlib)
 //   target_crate:  redis-ds
 //   confidence:    skeleton
 //   todos:         1
 //   port_notes:    0
 //   unsafe_blocks: 0
-//   notes:         stub awaiting Phase 4 translation
+//   notes:         stub awaiting translation
 // ──────────────────────────────────────────────────────────────────────────

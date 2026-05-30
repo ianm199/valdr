@@ -1,11 +1,8 @@
 //! Networking — port of `src/networking.c`.
 //!
-//! C source: `reference/valkey/src/networking.c` (6684 lines, ~100 functions)
-//!
 //! This module implements:
 //! * Client reply-buffer management — the `addReply*` family as free functions
-//!   operating on `Client` state, mirroring the C `client *c` convention for
-//!   Phase A; in Phase B these will migrate to `CommandContext` methods.
+//!   operating on `Client` state.
 //! * RESP protocol input parsing — inline (plain-text) and multibulk (RESP2/3).
 //! * Output-buffer lifecycle — encoded buffers with copy-avoidance, deferred-len
 //!   placeholders, and the writev scatter path.
@@ -15,18 +12,9 @@
 //! * Client eviction by output-buffer limits.
 //! * I/O thread hooks (`io_thread_read_query_from_client`, `io_thread_write_to_client`).
 //!
-//! # Phase A notes
-//!
-//! The encoded-buffer scheme (`PayloadHeader` / `BulkStrRef` / copy-avoidance)
-//! is translated structurally; low-level memory tricks (pointer arithmetic inside
-//! packed C structs, `_Atomic` inside `__packed__`) are flagged `TODO(architect)`.
-//! The pause, eviction, and client-filter logic is translated faithfully.
-//!
 //! # Canonical-type imports
 //!
 //! Types in `harness/type-vocabulary.tsv` are imported, not redefined.
-//!
-//! C: networking.c:30-49 (includes)
 
 // TODO(architect): add dep edge redis-core → redis-protocol for RespFrame.
 // TODO(architect): confirm Connection type for networking I/O abstraction.
@@ -43,45 +31,35 @@ use crate::server::RedisServer;
 // ── Protocol / buffer constants ─────────────────────────────────────────────
 
 /// Default reply-chunk allocation size (16 KiB).
-/// C: server.h PROTO_REPLY_CHUNK_BYTES
 pub const PROTO_REPLY_CHUNK_BYTES: usize = 16 * 1024;
 
 /// Minimum reply size for deferred replies (256 B).
-/// C: server.h PROTO_REPLY_MIN_BYTES
 pub const PROTO_REPLY_MIN_BYTES: usize = 256;
 
 /// I/O read-buffer size (16 KiB).
-/// C: server.h PROTO_IOBUF_LEN
 pub const PROTO_IOBUF_LEN: usize = 16 * 1024;
 
 /// Maximum inline-request size (64 KiB).
-/// C: server.h PROTO_INLINE_MAX_SIZE
 pub const PROTO_INLINE_MAX_SIZE: usize = 64 * 1024;
 
 /// Threshold above which bulk args are treated as "big" (32 KiB).
-/// C: server.h PROTO_MBULK_BIG_ARG
 pub const PROTO_MBULK_BIG_ARG: i64 = 32 * 1024;
 
 /// Shared-header length cut-off (use cached header strings below this).
-/// C: server.h OBJ_SHARED_BULKHDR_LEN
 pub const OBJ_SHARED_BULKHDR_LEN: i64 = 128;
 
 /// Max bytes written per event-loop iteration (64 MiB).
-/// C: server.h NET_MAX_WRITES_PER_EVENT
 pub const NET_MAX_WRITES_PER_EVENT: usize = 64 * 1024 * 1024;
 
 /// Minimum command-queue capacity.
-/// C: networking.c:168 COMMAND_QUEUE_MIN_CAPACITY
-#[allow(dead_code)] // C-source-referenced constant; used when command-queue sizing is wired
+#[allow(dead_code)]
 const COMMAND_QUEUE_MIN_CAPACITY: usize = 16;
 
 /// Maximum replica reads per I/O event.
-/// C: networking.c:4283 REPL_MAX_READS_PER_IO_EVENT
-#[allow(dead_code)] // C-source-referenced constant; used when replica I/O event loop is wired
+#[allow(dead_code)]
 const REPL_MAX_READS_PER_IO_EVENT: usize = 25;
 
 // ── Error flags (read_flags bitmask values) ──────────────────────────────────
-// C: server.h READ_FLAGS_* constants
 
 pub const READ_FLAGS_REPLICATED: u32 = 1 << 0;
 pub const READ_FLAGS_AUTH_REQUIRED: u32 = 1 << 1;
@@ -154,10 +132,8 @@ pub const PAUSE_ACTIONS_CLIENT_ALL_SET: u32 =
     PAUSE_ACTION_CLIENT_ALL | PAUSE_ACTION_EXPIRE | PAUSE_ACTION_EVICT | PAUSE_ACTION_REPLICA;
 
 // ── Payload type ─────────────────────────────────────────────────────────────
-// C: networking.c:106-110
 
 /// Discriminant for the two kinds of payload stored in an encoded reply buffer.
-/// C: `payloadType` enum (networking.c:107-110).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum PayloadType {
@@ -166,18 +142,13 @@ pub enum PayloadType {
 }
 
 // ── PayloadHeader ────────────────────────────────────────────────────────────
-// C: networking.c:116-127 (packed struct with bitfields + _Atomic field)
 
 /// Header prefixed before every payload chunk in an encoded reply buffer.
 ///
-/// The C definition uses `__attribute__((__packed__))`, C bitfields
-/// (`payload_type:1`, `track_bytes:1`, `reserved:6`), and an `_Atomic(uint8_t)`
-/// field. In Rust these are represented as regular fields; the packed layout
-/// is NOT preserved in Phase A because accessing fields of a `#[repr(packed)]`
+/// The C definition uses `__attribute__((__packed__))`, C bitfields, and an
+/// atomic field. In Rust these are represented as regular fields; the packed
+/// layout is not preserved because accessing fields of a `#[repr(packed)]`
 /// struct through references requires `unsafe`, which is banned in pilot crates.
-///
-/// `TODO(architect): PayloadHeader layout must match the C packed struct for
-/// any shared-memory or mmap path. Revisit in Phase B.`
 #[derive(Debug)]
 pub struct PayloadHeader {
     /// Length of the payload data that follows this header.
@@ -191,7 +162,6 @@ pub struct PayloadHeader {
     /// TODO(port): replace with accessor methods once layout is frozen.
     pub flags_byte: u8,
     /// Set to 1 once `reply_len` has been accounted for in `io_tracked_reply_len`.
-    /// C: `_Atomic(uint8_t) tracked_for_cob`.
     /// TODO(architect): AtomicU8 in a packed struct — safe only with align=1.
     pub tracked_for_cob: AtomicU8,
 }
@@ -211,10 +181,8 @@ impl PayloadHeader {
 }
 
 // ── BulkStrRef ───────────────────────────────────────────────────────────────
-// C: networking.c:131-134
 
 /// A reference to a string object used for copy-avoidance on the write path.
-/// C: `bulkStrRef` struct.
 ///
 /// In C this holds a raw `robj *obj` (for refcount management) and an `sds str`
 /// pointer into the object. In Rust, `Arc<RedisObject>` manages the lifetime and
@@ -230,10 +198,8 @@ pub struct BulkStrRef {
 }
 
 // ── ClientReplyBlock ─────────────────────────────────────────────────────────
-// C: server.h clientReplyBlock
 
 /// A block in the client's linked-list reply buffer.
-/// C: `clientReplyBlock` struct in server.h.
 #[derive(Debug)]
 pub struct ClientReplyBlock {
     /// Bytes used in `buf`.
@@ -263,10 +229,8 @@ impl ClientReplyBlock {
 }
 
 // ── ParsedCommand ────────────────────────────────────────────────────────────
-// C: server.h parsedCommand
 
 /// A fully parsed command in the pipeline queue.
-/// C: `parsedCommand` struct.
 #[derive(Debug, Default, Clone)]
 pub struct ParsedCommand {
     pub argc: usize,
@@ -275,17 +239,15 @@ pub struct ParsedCommand {
     pub argv_len_sum: usize,
     pub input_bytes: u64,
     pub read_flags: u32,
-    /// Cache: resolved command struct (pointer in C; deferred in Phase A).
+ /// Cache: resolved command struct (pointer in C; deferred later).
     /// TODO(architect): replace with Arc<CommandSpec> once registry is live.
     pub cmd_name: Option<RedisString>,
     pub slot: i16,
 }
 
 // ── CommandQueue ─────────────────────────────────────────────────────────────
-// C: server.h cmdQueue
 
 /// Pipeline queue of pre-parsed commands awaiting execution.
-/// C: `cmdQueue` struct.
 #[derive(Debug, Default)]
 pub struct CommandQueue {
     /// Parsed commands waiting for execution.
@@ -305,13 +267,9 @@ impl CommandQueue {
 
     /// Pop the next parsed command from the queue, returning ownership.
     ///
-    /// PORT NOTE: C uses a raw index (queue->off++) and never actually removes
-    /// elements until the queue is exhausted.  Rust's ownership model requires
-    /// returning an owned value here instead of a reference.  We use
-    /// `Vec::remove` which is O(n) — acceptable for the small queue sizes used
-    /// in practice.
-    /// PERF(port): C increment-and-pointer approach is O(1); replace with
-    /// a VecDeque or index-based approach in Phase B if profiling shows cost.
+    /// C uses a raw index and never removes elements until exhausted. Rust's
+    /// ownership model requires returning an owned value. We use `Vec::remove`
+    /// which is O(n) — acceptable for the small queue sizes used in practice.
     pub fn pop(&mut self) -> Option<ParsedCommand> {
         if self.off < self.cmds.len() {
             let p = self.cmds.remove(self.off);
@@ -331,10 +289,8 @@ impl CommandQueue {
 }
 
 // ── ClientFilter ─────────────────────────────────────────────────────────────
-// C: networking.c:54-101
 
 /// Filtering criteria for CLIENT KILL / CLIENT LIST operations.
-/// C: `clientFilter` typedef struct.
 ///
 /// Each field is `Option<T>` — `None` means "no filter on this attribute".
 /// The `not_*` variants invert the match.
@@ -423,10 +379,8 @@ impl ClientFilter {
 }
 
 // ── ParseResult ──────────────────────────────────────────────────────────────
-// C: networking.c:162-166
 
 /// Outcome of a single parse attempt.
-/// C: `parseResult` enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParseResult {
     Ok = 0,
@@ -435,7 +389,6 @@ pub enum ParseResult {
 }
 
 // ── PausePurpose ─────────────────────────────────────────────────────────────
-// C: server.h pause_purpose
 
 /// Reason a client-pause was initiated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -449,7 +402,6 @@ pub enum PausePurpose {
 }
 
 // ── PauseEvent ───────────────────────────────────────────────────────────────
-// C: server.h pause_event
 
 /// State for one pause purpose.
 #[derive(Debug, Default, Clone)]
@@ -461,14 +413,11 @@ pub struct PauseEvent {
 }
 
 // ── ReplyIOV / BufWriteMetadata ──────────────────────────────────────────────
-// C: networking.c:2532-2555
 
 /// Gathered-write IOV builder used by `writev_to_client`.
-/// C: `replyIOV` struct.
 ///
 /// TODO(architect): The C impl uses `struct iovec` arrays (OS-level vectored
-/// I/O). In Rust the equivalent is `std::io::IoSlice`. Phase B will wire this
-/// up to `tokio::io::AsyncWriteExt::write_vectored` or `connWritev`.
+/// I/O). In Rust the equivalent is `std::io::IoSlice`.
 #[derive(Debug)]
 pub struct ReplyIov {
     /// Total bytes referenced by all slices.
@@ -482,7 +431,6 @@ pub struct ReplyIov {
 }
 
 /// Metadata about one buffer segment scattered into a `ReplyIov`.
-/// C: `bufWriteMetadata` struct.
 #[derive(Debug, Default)]
 pub struct BufWriteMetadata {
     /// Start offset of this buffer segment in the reply list.
@@ -496,7 +444,6 @@ pub struct BufWriteMetadata {
 }
 
 // ── ClientIoState ────────────────────────────────────────────────────────────
-// C: server.h CLIENT_IDLE / CLIENT_PENDING_IO / CLIENT_COMPLETED_IO
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientIoState {
@@ -506,7 +453,6 @@ pub enum ClientIoState {
 }
 
 // ── IoLastWritten ────────────────────────────────────────────────────────────
-// C: io_last_written field in client struct (three sub-fields)
 
 /// Tracks the last buffer partially or completely written to the socket.
 #[derive(Debug, Default, Clone)]
@@ -521,20 +467,18 @@ pub struct IoLastWritten {
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Thread-local shared query buffer
-//  C: networking.c:160  _Thread_local sds thread_shared_qb = NULL;
 // ─────────────────────────────────────────────────────────────────────────────
 
-// PORT NOTE: C uses a thread-local sds pointer; Rust thread_local! wraps an
-// Option<Vec<u8>> instead. The shared-qb optimisation avoids allocating a new
-// query buffer for every client read; a client "takes ownership" by calling
-// init_shared_query_buf() when it needs to hold the data past a read().
+// Rust thread_local! wraps an Option<Vec<u8>>. The shared-qb optimisation
+// avoids allocating a new query buffer for every client read; a client "takes
+// ownership" by calling init_shared_query_buf() when it needs to hold the
+// data past a read().
 thread_local! {
     static THREAD_SHARED_QB: std::cell::RefCell<Option<Vec<u8>>> =
         const { std::cell::RefCell::new(None) };
 }
 
 /// Initialise (or re-initialise) the thread-local shared query buffer.
-/// C: networking.c:3381 `initSharedQueryBuf`
 pub fn init_shared_query_buf() {
     THREAD_SHARED_QB.with(|qb| {
         *qb.borrow_mut() = Some(Vec::with_capacity(PROTO_IOBUF_LEN));
@@ -542,7 +486,6 @@ pub fn init_shared_query_buf() {
 }
 
 /// Release the thread-local shared query buffer.
-/// C: networking.c:3385 `freeSharedQueryBuf`
 pub fn free_shared_query_buf() {
     THREAD_SHARED_QB.with(|qb| {
         *qb.borrow_mut() = None;
@@ -551,13 +494,11 @@ pub fn free_shared_query_buf() {
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Global: processing-events-while-blocked counter
-//  C: networking.c:159  int ProcessingEventsWhileBlocked = 0;
 // ─────────────────────────────────────────────────────────────────────────────
 
 // TODO(architect): global mutable state — needs single-threaded guarantee or
-// AtomicI32 in Phase 3 with I/O threads.
-// PORT NOTE: Using AtomicI32 here so the code compiles without unsafe even
-// though Phase 2 is single-threaded.
+// AtomicI32 with I/O threads. Using AtomicI32 here so the code compiles
+// without unsafe.
 static PROCESSING_EVENTS_WHILE_BLOCKED: AtomicI32 = AtomicI32::new(0);
 static PAUSE_POSTPONED_CLIENTS: AtomicUsize = AtomicUsize::new(0);
 
@@ -581,21 +522,16 @@ pub fn note_pause_resumed_client() {
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  get_string_object_sds_used_memory / get_string_object_len
-//  C: networking.c:172-189
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Returns the allocated memory consumed by a string object's payload.
 ///
-/// C: networking.c:172 `getStringObjectSdsUsedMemory`
-///
-/// TODO(port): depends on `RedisObject` encoding variants (Phase 4+).
+/// TODO(port): depends on `RedisObject` encoding variants.
 pub fn get_string_object_sds_used_memory(s: &RedisString) -> usize {
     s.as_bytes().len()
 }
 
 /// Returns the logical length of a string object's payload (excluding padding).
-///
-/// C: networking.c:182 `getStringObjectLen`
 ///
 /// TODO(port): integer-encoded objects have length 0 in the C version.
 pub fn get_string_object_len(s: &RedisString) -> usize {
@@ -604,15 +540,12 @@ pub fn get_string_object_len(s: &RedisString) -> usize {
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Client creation and authentication helpers
-//  C: networking.c:285-476
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Create a new client, optionally with a live connection.
 ///
 /// Passing `None` creates a "fake" (non-connected) client, useful for Lua and
 /// module contexts that need to run commands without a socket.
-///
-/// C: networking.c:285 `createClient`
 ///
 /// TODO(architect): Connection type is not yet defined; using `Option<()>` as
 /// placeholder for the connection handle.
@@ -625,14 +558,11 @@ pub fn create_client(server: &mut RedisServer, conn: Option<()>) -> Client {
     if conn.is_some() {
         // TODO(port): set read handler, link client into server.clients list,
         // insert into server.clients_index radix tree.
-        // C: connSetReadHandler(conn, readQueryFromClient); linkClient(c);
     }
     c
 }
 
 /// Link a client into the global client list and index.
-///
-/// C: networking.c:211 `linkClient`
 ///
 /// TODO(architect): server.clients linked-list and server.clients_index radix
 /// tree are not yet in the RedisServer stub.
@@ -642,8 +572,6 @@ pub fn link_client(_server: &mut RedisServer, _client_id: ClientId) {
 }
 
 /// Set authentication state on a client.
-///
-/// C: networking.c:232 `clientSetUser`
 pub fn client_set_user(_c: &mut Client, _user_name: &[u8], authenticated: bool) {
     // TODO(port): store user reference on Client once ACL types are available.
     let _ = authenticated;
@@ -651,8 +579,6 @@ pub fn client_set_user(_c: &mut Client, _user_name: &[u8], authenticated: bool) 
 }
 
 /// Returns true if authentication is required for this client.
-///
-/// C: networking.c:243 `authRequired`
 pub fn auth_required(_c: &Client) -> bool {
     // TODO(port): check DefaultUser flags and c->flag.authenticated.
     false
@@ -662,8 +588,6 @@ pub fn auth_required(_c: &Client) -> bool {
 ///
 /// Returns `Ok(())` if the caller may append to the output buffer, or
 /// `Err(RedisError::Closed)` if no data should be written to this client.
-///
-/// C: networking.c:446 `prepareClientToWrite`
 pub fn prepare_client_to_write(_c: &mut Client) -> Result<(), ()> {
     // TODO(port): check c->flag.script, c->flag.module, c->flag.close_asap,
     // c->flag.reply_off, c->flag.reply_skip, c->flag.primary, c->flag.fake.
@@ -672,22 +596,17 @@ pub fn prepare_client_to_write(_c: &mut Client) -> Result<(), ()> {
 }
 
 /// Returns true if the client has pending (unsent) replies.
-///
-/// C: networking.c:1756 `clientHasPendingReplies`
 pub fn client_has_pending_replies(c: &Client) -> bool {
     !c.reply_buf.is_empty()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Low-level reply helpers
-//  C: networking.c:538-761
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Append raw protocol bytes to the client's reply buffer.
 ///
 /// This is the innermost write path; all `addReply*` variants funnel through it.
-///
-/// C: networking.c:823 `addReplyProto`
 pub fn add_reply_proto(c: &mut Client, data: &[u8]) {
     if prepare_client_to_write(c).is_err() {
         return;
@@ -698,8 +617,6 @@ pub fn add_reply_proto(c: &mut Client, data: &[u8]) {
 /// Append a RESP error reply (`-ERR <msg>\r\n`) to the output buffer.
 ///
 /// If `msg` already starts with `-`, the caller-supplied error code is used.
-///
-/// C: networking.c:837 `addReplyErrorLength`
 pub fn add_reply_error_length(c: &mut Client, msg: &[u8]) {
     if msg.is_empty() || msg[0] != b'-' {
         add_reply_proto(c, b"-ERR ");
@@ -709,16 +626,12 @@ pub fn add_reply_error_length(c: &mut Client, msg: &[u8]) {
 }
 
 /// Append a RESP error reply from a byte-string message.
-///
-/// C: networking.c:981 `addReplyError`
 pub fn add_reply_error(c: &mut Client, msg: &[u8]) {
     add_reply_error_length(c, msg);
     // TODO(port): call afterErrorReply equivalent for stats/logging.
 }
 
-/// Append a formatted error reply (Rust format! equivalent of addReplyErrorFormat).
-///
-/// C: networking.c:1044 `addReplyErrorFormat`
+/// Append a formatted error reply.
 pub fn add_reply_error_format(c: &mut Client, msg: Vec<u8>) {
     let cleaned: Vec<u8> = msg
         .iter()
@@ -729,8 +642,6 @@ pub fn add_reply_error_format(c: &mut Client, msg: Vec<u8>) {
 }
 
 /// Send an "wrong number of arguments" error for the given command.
-///
-/// C: networking.c:1051 `addReplyErrorArity`
 pub fn add_reply_error_arity(c: &mut Client, cmd_name: &[u8]) {
     let mut msg = b"wrong number of arguments for '".to_vec();
     msg.extend_from_slice(cmd_name);
@@ -739,8 +650,6 @@ pub fn add_reply_error_arity(c: &mut Client, cmd_name: &[u8]) {
 }
 
 /// Send "invalid expire time" error for the given command.
-///
-/// C: networking.c:1055 `addReplyErrorExpireTime`
 pub fn add_reply_error_expire_time(c: &mut Client, cmd_name: &[u8]) {
     let mut msg = b"invalid expire time in '".to_vec();
     msg.extend_from_slice(cmd_name);
@@ -749,24 +658,18 @@ pub fn add_reply_error_expire_time(c: &mut Client, cmd_name: &[u8]) {
 }
 
 /// Append a RESP simple-string reply (`+<status>\r\n`).
-///
-/// C: networking.c:1059 `addReplyStatusLength`
 pub fn add_reply_status_length(c: &mut Client, status: &[u8]) {
     add_reply_proto(c, b"+");
     add_reply_proto(c, status);
     add_reply_proto(c, b"\r\n");
 }
 
-/// Append a RESP simple-string reply from a null-terminated-style byte slice.
-///
-/// C: networking.c:1065 `addReplyStatus`
+/// Append a RESP simple-string reply from a byte slice.
 pub fn add_reply_status(c: &mut Client, status: &[u8]) {
     add_reply_status_length(c, status);
 }
 
 /// Append a RESP integer reply (`:N\r\n`).
-///
-/// C: networking.c:1370 `addReplyLongLong`
 pub fn add_reply_long_long(c: &mut Client, ll: i64) {
     if prepare_client_to_write(c).is_err() {
         return;
@@ -782,8 +685,6 @@ pub fn add_reply_long_long(c: &mut Client, ll: i64) {
 }
 
 /// Append a RESP null reply (`$-1\r\n` for RESP2, `_\r\n` for RESP3).
-///
-/// C: networking.c:1426 `addReplyNull`
 pub fn add_reply_null(c: &mut Client, resp: u8) {
     if resp == 2 {
         add_reply_proto(c, b"$-1\r\n");
@@ -793,8 +694,6 @@ pub fn add_reply_null(c: &mut Client, resp: u8) {
 }
 
 /// Append a RESP boolean reply for RESP3; integer 0/1 for RESP2.
-///
-/// C: networking.c:1434 `addReplyBool`
 pub fn add_reply_bool(c: &mut Client, resp: u8, b: bool) {
     if resp == 2 {
         add_reply_long_long(c, if b { 1 } else { 0 });
@@ -804,8 +703,6 @@ pub fn add_reply_bool(c: &mut Client, resp: u8, b: bool) {
 }
 
 /// Append a null-array reply (`*-1\r\n` for RESP2, `_\r\n` for RESP3).
-///
-/// C: networking.c:1446 `addReplyNullArray`
 pub fn add_reply_null_array(c: &mut Client, resp: u8) {
     if resp == 2 {
         add_reply_proto(c, b"*-1\r\n");
@@ -815,8 +712,6 @@ pub fn add_reply_null_array(c: &mut Client, resp: u8) {
 }
 
 /// Append a RESP bulk-string reply (`$N\r\n<data>\r\n`).
-///
-/// C: networking.c:1494 `addReplyBulkCBuffer`
 pub fn add_reply_bulk(c: &mut Client, data: &[u8]) {
     if prepare_client_to_write(c).is_err() {
         return;
@@ -830,23 +725,17 @@ pub fn add_reply_bulk(c: &mut Client, data: &[u8]) {
 }
 
 /// Append a bulk-string reply for a `RedisString`.
-///
-/// C: networking.c:1472 `addReplyBulk` (object form)
 pub fn add_reply_bulk_string(c: &mut Client, s: &RedisString) {
     add_reply_bulk(c, s.as_bytes());
 }
 
 /// Append a bulk-long-long reply (integer as bulk string).
-///
-/// C: networking.c:1546 `addReplyBulkLongLong`
 pub fn add_reply_bulk_long_long(c: &mut Client, ll: i64) {
     let s = ll.to_string();
     add_reply_bulk(c, s.as_bytes());
 }
 
 /// Append an aggregate-length header (`prefix N\r\n`).
-///
-/// C: networking.c:1381 `addReplyAggregateLen`
 pub fn add_reply_aggregate_len(c: &mut Client, length: i64, prefix: u8) {
     debug_assert!(length >= 0);
     if prepare_client_to_write(c).is_err() {
@@ -859,15 +748,11 @@ pub fn add_reply_aggregate_len(c: &mut Client, length: i64, prefix: u8) {
 }
 
 /// Append a RESP array-length header.
-///
-/// C: networking.c:1387 `addReplyArrayLen`
 pub fn add_reply_array_len(c: &mut Client, length: i64) {
     add_reply_aggregate_len(c, length, b'*');
 }
 
 /// Append a RESP map-length header (RESP3: `%N`; RESP2: `*2N`).
-///
-/// C: networking.c:1397 `addReplyMapLen`
 pub fn add_reply_map_len(c: &mut Client, resp: u8, length: i64) {
     if resp == 2 {
         add_reply_aggregate_len(c, length * 2, b'*');
@@ -877,30 +762,22 @@ pub fn add_reply_map_len(c: &mut Client, resp: u8, length: i64) {
 }
 
 /// Append a RESP set-length header (RESP3: `~N`; RESP2: `*N`).
-///
-/// C: networking.c:1410 `addReplySetLen`
 pub fn add_reply_set_len(c: &mut Client, resp: u8, length: i64) {
     let prefix = if resp == 2 { b'*' } else { b'~' };
     add_reply_aggregate_len(c, length, prefix);
 }
 
 /// Append a RESP attribute-length header (RESP3 only, `|N`).
-///
-/// C: networking.c:1415 `addReplyAttributeLen`
 pub fn add_reply_attribute_len(c: &mut Client, length: i64) {
     add_reply_aggregate_len(c, length, b'|');
 }
 
 /// Append a RESP push-length header (RESP3 only, `>N`).
-///
-/// C: networking.c:1420 `addReplyPushLen`
 pub fn add_reply_push_len(c: &mut Client, length: i64) {
     add_reply_aggregate_len(c, length, b'>');
 }
 
 /// Append a big-number reply (`(N\r\n` for RESP3; bulk string for RESP2).
-///
-/// C: networking.c:1311 `addReplyBigNum`
 pub fn add_reply_big_num(c: &mut Client, resp: u8, num: &[u8]) {
     if resp == 2 {
         add_reply_bulk(c, num);
@@ -912,8 +789,6 @@ pub fn add_reply_big_num(c: &mut Client, resp: u8, num: &[u8]) {
 }
 
 /// Append a double reply (`,D\r\n` for RESP3; bulk string for RESP2).
-///
-/// C: networking.c:1276 `addReplyDouble`
 pub fn add_reply_double(c: &mut Client, resp: u8, d: f64) {
     if resp == 3 {
         let s = format!(",{}\r\n", d);
@@ -926,12 +801,7 @@ pub fn add_reply_double(c: &mut Client, resp: u8, d: f64) {
 
 /// Append a verbatim-string reply (`=N\r\next:...\r\n` for RESP3; bulk for RESP2).
 ///
-/// C: networking.c:1571 `addReplyVerbatim`
-/// Append a verbatim-string reply (`=N\r\next:...\r\n` for RESP3; bulk for RESP2).
-///
-/// C: networking.c:1571 `addReplyVerbatim`
-///
-/// PORT NOTE: format is `=<total_len>\r\n<3-char-ext>:<data>\r\n`
+/// Format is `=<total_len>\r\n<3-char-ext>:<data>\r\n`
 /// where total_len = len(data) + 4 (3 ext chars + colon separator).
 pub fn add_reply_verbatim(c: &mut Client, resp: u8, data: &[u8], ext: &[u8; 3]) {
     if resp == 2 {
@@ -949,17 +819,13 @@ pub fn add_reply_verbatim(c: &mut Client, resp: u8, data: &[u8], ext: &[u8; 3]) 
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Deferred-length ("aggregate header placeholder") system
-//  C: networking.c:1107-1263
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// A handle returned by `add_reply_deferred_len`.  The caller fills it in with
 /// `set_deferred_array_len` (or the appropriate variant) once the count is known.
 ///
-/// C: the returned `void *` is a `listNode *` in C; here it is a byte-offset
-/// into `client.reply_buf` where a placeholder was written.
-///
 /// TODO(port): full deferred-len scheme needs the reply-list (not a flat Vec<u8>).
-/// For Phase A this is a simple in-place index.
+/// For now this is a simple in-place index.
 #[derive(Debug, Clone, Copy)]
 pub struct DeferredLen {
     /// Byte offset in `Client::reply_buf` where the placeholder starts.
@@ -970,10 +836,8 @@ pub struct DeferredLen {
 
 /// Reserve space for an aggregate-length header to be filled in later.
 ///
-/// C: networking.c:1109 `addReplyDeferredLen`
-///
 /// TODO(port): the C implementation adds a NULL node to the reply list;
-/// our flat-buffer Phase A approximation reserves fixed space with spaces.
+/// our flat-buffer approximation reserves fixed space with spaces.
 pub fn add_reply_deferred_len(c: &mut Client) -> Option<DeferredLen> {
     if prepare_client_to_write(c).is_err() {
         return None;
@@ -988,9 +852,6 @@ pub fn add_reply_deferred_len(c: &mut Client) -> Option<DeferredLen> {
 }
 
 /// Fill in a previously reserved aggregate-length slot.
-///
-/// C: networking.c:1141 `setDeferredReply` (lower-level),
-///    networking.c:1207 `setDeferredAggregateLen` (higher-level)
 pub fn set_deferred_aggregate_len(
     c: &mut Client,
     node: Option<DeferredLen>,
@@ -1010,21 +871,16 @@ pub fn set_deferred_aggregate_len(
         let dest = &mut c.reply_buf[node.offset..end];
         let copy_len = hb.len().min(node.reserved);
         dest[..copy_len].copy_from_slice(&hb[..copy_len]);
-        // Left-shift the actual content to close the gap — simplistic Phase A impl.
         // TODO(port): use a proper reply-list with inline memmove as in C.
     }
 }
 
 /// Fill in a deferred array-length header.
-///
-/// C: networking.c:1240 `setDeferredArrayLen`
 pub fn set_deferred_array_len(c: &mut Client, node: Option<DeferredLen>, length: i64) {
     set_deferred_aggregate_len(c, node, length, b'*');
 }
 
 /// Fill in a deferred map-length header (RESP3: `%`; RESP2: `*`×2).
-///
-/// C: networking.c:1244 `setDeferredMapLen`
 pub fn set_deferred_map_len(c: &mut Client, resp: u8, node: Option<DeferredLen>, length: i64) {
     if resp == 2 {
         set_deferred_aggregate_len(c, node, length * 2, b'*');
@@ -1034,35 +890,26 @@ pub fn set_deferred_map_len(c: &mut Client, resp: u8, node: Option<DeferredLen>,
 }
 
 /// Fill in a deferred set-length header.
-///
-/// C: networking.c:1250 `setDeferredSetLen`
 pub fn set_deferred_set_len(c: &mut Client, resp: u8, node: Option<DeferredLen>, length: i64) {
     let prefix = if resp == 2 { b'*' } else { b'~' };
     set_deferred_aggregate_len(c, node, length, prefix);
 }
 
 /// Fill in a deferred attribute-length header (RESP3 only).
-///
-/// C: networking.c:1255 `setDeferredAttributeLen`
 pub fn set_deferred_attribute_len(c: &mut Client, node: Option<DeferredLen>, length: i64) {
     set_deferred_aggregate_len(c, node, length, b'|');
 }
 
 /// Fill in a deferred push-length header (RESP3 only).
-///
-/// C: networking.c:1260 `setDeferredPushLen`
 pub fn set_deferred_push_len(c: &mut Client, node: Option<DeferredLen>, length: i64) {
     set_deferred_aggregate_len(c, node, length, b'>');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Help / subcommand-syntax error reply helpers
-//  C: networking.c:1591-1639
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Send the standard RESP "unknown subcommand" error.
-///
-/// C: networking.c:1633 `addReplySubcommandSyntaxError`
 pub fn add_reply_subcommand_syntax_error(c: &mut Client, cmd_name: &[u8], sub_name: &[u8]) {
     let truncated_sub = if sub_name.len() > 128 {
         &sub_name[..128]
@@ -1079,9 +926,7 @@ pub fn add_reply_subcommand_syntax_error(c: &mut Client, cmd_name: &[u8], sub_na
     add_reply_error(c, &msg);
 }
 
-/// Emit a HELP array reply from a null-terminated string slice array.
-///
-/// C: networking.c:1626 `addReplyHelp`
+/// Emit a HELP array reply from a string slice array.
 pub fn add_reply_help(c: &mut Client, resp: u8, help: &[&[u8]]) {
     let count = help.len() + 2; // header line + HELP sub + footer lines
     let node = add_reply_deferred_len(c);
@@ -1099,38 +944,30 @@ pub fn add_reply_help(c: &mut Client, resp: u8, help: &[&[u8]]) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Output-buffer limits / deferred reply management
-//  C: networking.c:1641-1742
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Returns true if the deferred reply buffer is currently active.
 ///
-/// C: networking.c:1641 `isDeferredReplyEnabled`
-///
-/// TODO(port): Phase A uses only `reply_buf`; no separate deferred buffer.
+/// TODO(port): uses only `reply_buf`; no separate deferred buffer.
 pub fn is_deferred_reply_enabled(_c: &Client) -> bool {
     false
 }
 
 /// Move deferred reply into the main reply buffer and queue for writing.
 ///
-/// C: networking.c:1667 `commitDeferredReplyBuffer`
-///
-/// TODO(port): implement with full deferred-reply list in Phase B.
+/// TODO(port): implement with full deferred-reply list.
 pub fn commit_deferred_reply_buffer(_c: &mut Client, _skip_if_blocked: bool) {
-    // Phase A no-op: deferred reply not yet implemented.
+    // No-op: deferred reply not yet implemented.
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Protocol parsing — inline
-//  C: networking.c:3427-3510
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Parse one inline (non-RESP) command from `buf[pos..]`.
 ///
 /// Sets bits in `read_flags` to communicate the outcome.  If successful,
 /// `argv` and `argc` are populated.
-///
-/// C: networking.c:3427 `parseInlineBuffer`
 pub fn parse_inline_buffer(
     buf: &[u8],
     pos: &mut usize,
@@ -1176,7 +1013,6 @@ pub fn parse_inline_buffer(
 
     let argv_len_sum: usize = argv.iter().map(|a| a.as_bytes().len()).sum();
     let argc = argv.len();
-    // C: networking.c:3507 net_input_bytes_curr_cmd = argv_len_sum + (argc-1) + 2
     let net_input_bytes = (argv_len_sum + (argc.saturating_sub(1)) + 2) as u64;
 
     *read_flags |= READ_FLAGS_PARSING_COMPLETED;
@@ -1185,11 +1021,8 @@ pub fn parse_inline_buffer(
 
 /// Split an inline argument line into tokens, handling shell-style quoting.
 ///
-/// C: server.h sdsnsplitargs (implemented in sds.c, not networking.c).
-///
-/// TODO(port): this is a simplified version; the real sds split handles
-/// escaped chars and single/double quotes. Replace with the real implementation
-/// from `redis-types/src/sds_sds.rs` once it is available.
+/// TODO(port): this is a simplified version; the real implementation handles
+/// escaped chars and single/double quotes. Replace once available.
 pub fn split_inline_args(line: &[u8], read_flags: &mut u32) -> Vec<RedisString> {
     let mut result = Vec::new();
     let mut i = 0;
@@ -1226,11 +1059,9 @@ pub fn split_inline_args(line: &[u8], read_flags: &mut u32) -> Vec<RedisString> 
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Protocol parsing — multibulk (RESP)
-//  C: networking.c:3557-3824
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Internal multibulk parser state (per-client, carried across reads).
-/// C: fields on `client` struct: multibulklen, bulklen, reqtype.
 #[derive(Debug, Default)]
 pub struct MultibulkState {
     /// Remaining bulk arguments to read (> 0 means parse is in progress).
@@ -1243,8 +1074,6 @@ pub struct MultibulkState {
 ///
 /// Returns `(argv, net_input_bytes, read_flags_addend)`.
 /// The caller should OR the returned flags into `c->read_flags`.
-///
-/// C: networking.c:3616 `parseMultibulk` (the static inner function)
 pub fn parse_multibulk(
     buf: &[u8],
     pos: &mut usize,
@@ -1256,7 +1085,6 @@ pub fn parse_multibulk(
     argv_len_sum: &mut usize,
     net_input_bytes: &mut u64,
 ) -> u32 {
-    // C: networking.c:3628
     if state.multibulklen == 0 {
         // Parse the `*N\r\n` line.
         let slice = &buf[*pos..];
@@ -1300,7 +1128,6 @@ pub fn parse_multibulk(
         state.bulklen = -1;
         existing_argv.clear();
         *argv_len_sum = 0;
-        // C: net_input_bytes 1st component: multibulklen_slen + 3
         *net_input_bytes += (multibulklen_slen + 3) as u64;
     }
 
@@ -1348,7 +1175,6 @@ pub fn parse_multibulk(
             let bulklen_slen = bulklen_bytes.len();
             *pos += cr_pos + 2; // skip `$N\r\n`
             state.bulklen = ll;
-            // C: net_input_bytes 2nd component: bulklen_slen + 3
             *net_input_bytes += (bulklen_slen + 3) as u64;
         }
 
@@ -1374,7 +1200,6 @@ pub fn parse_multibulk(
     }
 
     if state.multibulklen == 0 {
-        // C: net_input_bytes 3rd+4th components: argv_len_sum + argc*2
         let argc = existing_argv.len();
         *net_input_bytes += (*argv_len_sum + argc * 2) as u64;
         return READ_FLAGS_PARSING_COMPLETED;
@@ -1383,7 +1208,6 @@ pub fn parse_multibulk(
 }
 
 /// Tiny helper: find first occurrence of `needle` in `haystack`.
-/// C: memchr from <string.h>.
 fn memchr(haystack: &[u8], needle: u8) -> Option<usize> {
     haystack.iter().position(|&b| b == needle)
 }
@@ -1418,12 +1242,9 @@ fn parse_i64(bytes: &[u8]) -> Option<i64> {
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  handleParseResults / handleParseError
-//  C: networking.c:3143-3232
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Map `read_flags` to a `ParseResult` and emit error replies if needed.
-///
-/// C: networking.c:3202 `handleParseResults`
 pub fn handle_parse_results(c: &mut Client, read_flags: u32, resp: u8) -> ParseResult {
     if is_parsing_error(read_flags) {
         handle_parse_error(c, read_flags, resp);
@@ -1443,15 +1264,11 @@ pub fn handle_parse_results(c: &mut Client, read_flags: u32, resp: u8) -> ParseR
 }
 
 /// Returns true if any error-flag is set in `read_flags`.
-///
-/// C: networking.c:3190 `isParsingError`
 pub fn is_parsing_error(read_flags: u32) -> bool {
     read_flags & READ_FLAGS_ALL_PARSE_ERRORS != 0
 }
 
 /// Emit the appropriate error reply for a parse-error `read_flags` bitmap.
-///
-/// C: networking.c:3143 `handleParseError`
 pub fn handle_parse_error(c: &mut Client, read_flags: u32, _resp: u8) {
     if read_flags & READ_FLAGS_ERROR_BIG_INLINE_REQUEST != 0 {
         add_reply_error(c, b"Protocol error: too big inline request");
@@ -1480,7 +1297,6 @@ pub fn handle_parse_error(c: &mut Client, read_flags: u32, _resp: u8) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  processInputBuffer
-//  C: networking.c:4146-4192
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Incrementally process the client's query buffer, parsing and executing
@@ -1488,8 +1304,6 @@ pub fn handle_parse_error(c: &mut Client, read_flags: u32, _resp: u8) {
 ///
 /// Returns `Ok(())` if processing should continue; `Err(RedisError::Closed)`
 /// if the client was freed as a side effect.
-///
-/// C: networking.c:4146 `processInputBuffer`
 ///
 /// TODO(port): the full implementation requires access to the server state
 /// (processCommand, etc.) and the client's multibulk state.  This is a
@@ -1553,7 +1367,7 @@ pub fn process_input_buffer(
         }
 
         // TODO(port): call processCommand(c, argv) here once server context
-        // is available. For Phase A we just store the parsed args.
+ // is available. For now we just store the parsed args.
         c.set_args(argv);
         // TODO(port): commandProcessed(c) — update replication offset, reset client.
         let _ = net_bytes;
@@ -1564,17 +1378,14 @@ pub fn process_input_buffer(
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Write path
-//  C: networking.c:2818-3079
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Write pending reply data from `client.reply_buf` to the socket.
 ///
 /// Returns `Ok(bytes_written)` or an I/O error.
 ///
-/// C: networking.c:3059 `writeToClient` (main-thread entry point)
-///
 /// TODO(architect): Connection type not defined; `writer` is a generic
-/// `std::io::Write` placeholder for Phase A.
+/// `std::io::Write` placeholder.
 pub fn write_to_client<W: std::io::Write>(
     c: &mut Client,
     writer: &mut W,
@@ -1591,16 +1402,12 @@ pub fn write_to_client<W: std::io::Write>(
 
 /// Mark a client as needing asynchronous close (add to clients_to_close list).
 ///
-/// C: networking.c:2226 `freeClientAsync`
-///
 /// TODO(port): server.clients_to_close list not yet in RedisServer stub.
 pub fn free_client_async(_server: &mut RedisServer, _client_id: ClientId) {
     // TODO(port): add to server.clients_to_close if not already present.
 }
 
 /// Reset client state between commands (clear argv, flags, slot, etc.).
-///
-/// C: networking.c:3318 `resetClient`
 pub fn reset_client(c: &mut Client) {
     c.reset_args();
     // TODO(port): reset all additional fields once Client is expanded:
@@ -1611,12 +1418,9 @@ pub fn reset_client(c: &mut Client) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Client peer-id / sockname helpers
-//  C: networking.c:4318-4366
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Get or cache the client's peer address string.
-///
-/// C: networking.c:4326 `getClientPeerId`
 ///
 /// TODO(architect): Connection type needed to call connFormatAddr.
 pub fn get_client_peer_id(_c: &Client) -> Vec<u8> {
@@ -1626,8 +1430,6 @@ pub fn get_client_peer_id(_c: &Client) -> Vec<u8> {
 
 /// Get or cache the client's local socket name string.
 ///
-/// C: networking.c:4340 `getClientSockname`
-///
 /// TODO(architect): Connection type needed to call connFormatAddr.
 pub fn get_client_sockname(_c: &Client) -> Vec<u8> {
     // TODO(port): call conn.format_addr(remote=false) and cache in c->sockname.
@@ -1636,12 +1438,9 @@ pub fn get_client_sockname(_c: &Client) -> Vec<u8> {
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  CLIENT sub-command implementations
-//  C: networking.c:5108-5746
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// CLIENT ID — return the client's numeric ID.
-///
-/// C: networking.c:5221 `clientIDCommand`
 pub fn client_id_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let id = ctx.client.id;
     add_reply_long_long(ctx.client, id as i64);
@@ -1649,8 +1448,6 @@ pub fn client_id_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// CLIENT INFO — return verbose info about the current connection.
-///
-/// C: networking.c:5225 `clientInfoCommand`
 pub fn client_info_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let info = cat_client_info_string(ctx.client, false);
     let mut full_info = info;
@@ -1661,8 +1458,6 @@ pub fn client_info_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
 /// CLIENT GETNAME — return the current connection name.
 ///
-/// C: networking.c:5452 `clientGetNameCommand`
-///
 /// TODO(port): client name stored on Client struct (not yet in pilot stub).
 pub fn client_get_name_command(ctx: &mut CommandContext) -> RedisResult<()> {
     // TODO(port): if c->name exists, addReplyBulk(c, c->name) else addReplyNull.
@@ -1671,8 +1466,6 @@ pub fn client_get_name_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// CLIENT SETNAME — set the current connection name.
-///
-/// C: networking.c:5446 `clientSetNameCommand`
 ///
 /// TODO(port): validate and store name on Client struct.
 pub fn client_set_name_command(ctx: &mut CommandContext) -> RedisResult<()> {
@@ -1690,8 +1483,6 @@ pub fn client_set_name_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// CLIENT REPLY ON|OFF|SKIP
-///
-/// C: networking.c:5261 `clientReplyCommand`
 ///
 /// TODO(port): set c->flag.reply_off / c->flag.reply_skip_next flags.
 pub fn client_reply_command(ctx: &mut CommandContext) -> RedisResult<()> {
@@ -1715,8 +1506,6 @@ pub fn client_reply_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// CLIENT NO-EVICT ON|OFF
-///
-/// C: networking.c:5277 `clientNoEvictCommand`
 pub fn client_no_evict_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let mode = ctx.arg(2)?;
     match mode.as_bytes() {
@@ -1736,8 +1525,6 @@ pub fn client_no_evict_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// CLIENT NO-TOUCH ON|OFF
-///
-/// C: networking.c:5704 `clientNoTouchCommand`
 pub fn client_no_touch_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let mode = ctx.arg(2)?;
     match mode.as_bytes() {
@@ -1757,8 +1544,6 @@ pub fn client_no_touch_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// CLIENT CAPA <option>… — declare client capabilities.
-///
-/// C: networking.c:5717 `clientCapaCommand`
 pub fn client_capa_command(ctx: &mut CommandContext) -> RedisResult<()> {
     // TODO(port): iterate argv[2..] and set c->capa bits.
     add_reply_status(ctx.client, b"OK");
@@ -1766,8 +1551,6 @@ pub fn client_capa_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// CLIENT IMPORT-SOURCE ON|OFF
-///
-/// C: networking.c:5726 `clientImportSourceCommand`
 pub fn client_import_source_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let mode = ctx.arg(2)?;
     match mode.as_bytes() {
@@ -1787,8 +1570,6 @@ pub fn client_import_source_command(ctx: &mut CommandContext) -> RedisResult<()>
 }
 
 /// CLIENT GETREDIR — return the redirection target ID.
-///
-/// C: networking.c:5632 `clientGetredirCommand`
 pub fn client_get_redir_command(ctx: &mut CommandContext) -> RedisResult<()> {
     // TODO(port): if c->flag.tracking { addReplyLongLong(c->pubsub_data->client_tracking_redirection) }
     add_reply_long_long(ctx.client, -1);
@@ -1796,8 +1577,6 @@ pub fn client_get_redir_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// CLIENT UNBLOCK <id> [TIMEOUT|ERROR]
-///
-/// C: networking.c:5412 `clientUnblockCommand`
 ///
 /// TODO(port): server client-index lookup not yet available.
 pub fn client_unblock_command(ctx: &mut CommandContext) -> RedisResult<()> {
@@ -1811,8 +1590,6 @@ pub fn client_unblock_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
 /// CLIENT KILL <addr> | CLIENT KILL <option> <value>…
 ///
-/// C: networking.c:5293 `clientKillCommand`
-///
 /// TODO(port): requires full server.clients iteration.
 pub fn client_kill_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if ctx.arg_count() < 3 {
@@ -1825,8 +1602,6 @@ pub fn client_kill_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
 /// CLIENT LIST
 ///
-/// C: networking.c:5232 `clientListCommand`
-///
 /// TODO(port): requires server.clients iteration and catClientInfoString.
 pub fn client_list_command(ctx: &mut CommandContext) -> RedisResult<()> {
     // TODO(port): getAllClientsInfoString / getAllFilteredClientsInfoString.
@@ -1838,8 +1613,6 @@ pub fn client_list_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// CLIENT PAUSE <timeout> [WRITE|ALL]
-///
-/// C: networking.c:5466 `clientPauseCommand`
 ///
 /// `CLIENT PAUSE <timeout-ms> [WRITE|ALL]` (default ALL). Sets the
 /// `ByClientCommand` pause event; `pause_clients_by_client` keeps the most
@@ -1886,8 +1659,7 @@ pub fn apply_client_pause(server: &RedisServer, end: i64, pause_all: bool) {
 
 /// CLIENT UNPAUSE
 ///
-/// C: networking.c:5460 `clientUnpauseCommand` — clears the client-command
-/// pause and (via the gate) resumes any postponed clients.
+/// Clears the client-command pause and (via the gate) resumes any postponed clients.
 pub fn client_unpause_command(ctx: &mut CommandContext) -> RedisResult<()> {
     {
         let mut events = ctx
@@ -1933,8 +1705,6 @@ pub fn pause_info(events: &[PauseEvent; 4], now: i64) -> (&'static str, &'static
 
 /// CLIENT TRACKING ON|OFF [REDIRECT <id>] [BCAST] [PREFIX <p>…] [OPTIN] [OPTOUT] [NOLOOP]
 ///
-/// C: networking.c:5484 `clientTrackingCommand`
-///
 /// TODO(port): enableTracking / disableTracking not yet available.
 pub fn client_tracking_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let mode = ctx.arg(2)?;
@@ -1955,8 +1725,6 @@ pub fn client_tracking_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// CLIENT CACHING YES|NO
-///
-/// C: networking.c:5600 `clientCachingCommand`
 pub fn client_caching_command(ctx: &mut CommandContext) -> RedisResult<()> {
     // TODO(port): check c->flag.tracking / tracking_optin / tracking_optout.
     let opt = ctx.arg(2)?;
@@ -1977,8 +1745,6 @@ pub fn client_caching_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// CLIENT TRACKINGINFO
-///
-/// C: networking.c:5641 `clientTrackingInfoCommand`
 pub fn client_tracking_info_command(ctx: &mut CommandContext) -> RedisResult<()> {
     // TODO(port): full tracking info requires pubsub_data and tracking prefixes.
     add_reply_map_len(ctx.client, 2, 3);
@@ -1993,8 +1759,6 @@ pub fn client_tracking_info_command(ctx: &mut CommandContext) -> RedisResult<()>
 }
 
 /// Top-level CLIENT dispatcher (falls through to subcommand-syntax error).
-///
-/// C: networking.c:5744 `clientCommand`
 pub fn client_command(ctx: &mut CommandContext) -> RedisResult<()> {
     // The subcommand table is generated; the top-level just errors.
     let subcommand = ctx
@@ -2006,8 +1770,6 @@ pub fn client_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// CLIENT SETINFO <attr> <value>
-///
-/// C: networking.c:5584 `clientSetinfoCommand`
 pub fn client_setinfo_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let attr = ctx.arg(2)?;
     let val = ctx.arg(3)?;
@@ -2046,12 +1808,9 @@ pub fn client_setinfo_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  QUIT, RESET, HELLO, security-warning commands
-//  C: networking.c:4613-5887
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// QUIT — close the connection after sending OK.
-///
-/// C: networking.c:4632 `quitCommand`
 pub fn quit_command(ctx: &mut CommandContext) -> RedisResult<()> {
     add_reply_status(ctx.client, b"OK");
     // TODO(port): c->flag.close_after_reply = 1;
@@ -2059,8 +1818,6 @@ pub fn quit_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// RESET — reset the client state to freshly-connected.
-///
-/// C: networking.c:4613 `resetCommand`
 pub fn reset_command_impl(ctx: &mut CommandContext) -> RedisResult<()> {
     // TODO(port): check replica/primary/module flags; call clearClientConnectionState.
     add_reply_status(ctx.client, b"RESET");
@@ -2068,8 +1825,6 @@ pub fn reset_command_impl(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// HELLO [<version> [AUTH <user> <pass>] [SETNAME <name>]]
-///
-/// C: networking.c:5748 `helloCommand`
 ///
 /// TODO(port): auth, setname, server.sentinel_mode, server.cluster_enabled,
 /// server.extended_redis_compat, and module list not yet wired in.
@@ -2111,18 +1866,16 @@ pub fn hello_command(ctx: &mut CommandContext) -> RedisResult<()> {
     add_reply_bulk(ctx.client, b"role");
     add_reply_bulk(ctx.client, b"master"); // TODO(port): check replication state
 
-    // "modules" array is omitted in Phase A (Phase 10).
+ // "modules" array is omitted later.
     // TODO(port): add_reply_bulk(b"modules"); addReplyLoadedModules(c);
 
     Ok(())
 }
 
 /// Handler for POST and "Host:" pseudo-commands (cross-protocol scripting guard).
-///
-/// C: networking.c:5864 `securityWarningCommand`
 pub fn security_warning_command(ctx: &mut CommandContext) -> RedisResult<()> {
     // TODO(port): log security warning with rate limiting; call freeClientAsync.
-    // For Phase A just close the client.
+ // For now just close the client.
     // TODO(architect): need server reference to call freeClientAsync.
     let _ = ctx;
     Ok(())
@@ -2130,34 +1883,25 @@ pub fn security_warning_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Client-filter helpers
-//  C: networking.c:4888-5105
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Validate that a client-attribute value contains only printable non-space bytes.
-///
-/// C: networking.c:4520 `validateClientAttr`
 pub fn validate_client_attr(val: &[u8]) -> bool {
     val.iter().all(|&b| (b'!'..=b'~').contains(&b))
 }
 
 /// Validate the flag-filter string: each byte must be a known CLIENT LIST flag char.
-///
-/// C: networking.c:4902 `validateClientFlagFilter`
 pub fn validate_client_flag_filter(filter: &[u8]) -> bool {
     const VALID: &[u8] = b"OSMPxbtRBdcuAUreTIiEN";
     filter.iter().all(|b| VALID.contains(b))
 }
 
 /// Validate the capa-filter string: currently only 'r' is defined.
-///
-/// C: networking.c:4888 `validateClientCapaFilter`
 pub fn validate_client_capa_filter(filter: &[u8]) -> bool {
     filter.iter().all(|&b| b == b'r')
 }
 
 /// Test whether a client's IP matches the filter string.
-///
-/// C: networking.c:4981 `clientMatchesIpFilter`
 pub fn client_matches_ip_filter(peer_id: &[u8], ip_filter: &[u8]) -> bool {
     let peer = if peer_id.first() == Some(&b'[') {
         &peer_id[1..] // IPv6
@@ -2178,12 +1922,9 @@ pub fn client_matches_ip_filter(peer_id: &[u8], ip_filter: &[u8]) -> bool {
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  catClientInfoString — CLIENT INFO / CLIENT LIST output
-//  C: networking.c:4370-4462
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Build the CLIENT INFO string for a client.
-///
-/// C: networking.c:4370 `catClientInfoString`
 ///
 /// TODO(port): most fields are placeholders until Client is expanded.
 pub fn cat_client_info_string(c: &Client, _hide_user_data: bool) -> Vec<u8> {
@@ -2199,12 +1940,9 @@ pub fn cat_client_info_string(c: &Client, _hide_user_data: bool) -> Vec<u8> {
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Output-buffer limit checking
-//  C: networking.c:6109-6210
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Check if a client's output buffer has exceeded soft or hard limits.
-///
-/// C: networking.c:6115 `checkClientOutputBufferLimits`
 ///
 /// TODO(port): server client_obuf_limits config not yet accessible here.
 pub fn check_client_output_buffer_limits(
@@ -2234,12 +1972,9 @@ pub fn check_client_output_buffer_limits(
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Client-type name mapping
-//  C: networking.c:6082-6107
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Map a client-type name string to its `CLIENT_TYPE_*` constant.
-///
-/// C: networking.c:6082 `getClientTypeByName`
 pub fn get_client_type_by_name(name: &[u8]) -> i32 {
     let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
     match lower.as_slice() {
@@ -2252,8 +1987,6 @@ pub fn get_client_type_by_name(name: &[u8]) -> i32 {
 }
 
 /// Map a `CLIENT_TYPE_*` constant to its display name.
-///
-/// C: networking.c:6097 `getClientTypeName`
 pub fn get_client_type_name(client_type: i32) -> Option<&'static [u8]> {
     match client_type {
         CLIENT_TYPE_NORMAL => Some(b"normal"),
@@ -2268,12 +2001,9 @@ pub fn get_client_type_name(client_type: i32) -> Option<&'static [u8]> {
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Pause / unpause
-//  C: networking.c:6246-6383
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Return the human-readable pause-reason string.
-///
-/// C: networking.c:6246 `getPausedReason`
 pub fn get_paused_reason(purpose: PausePurpose) -> &'static [u8] {
     match purpose {
         PausePurpose::ByClientCommand => b"client_pause",
@@ -2285,8 +2015,6 @@ pub fn get_paused_reason(purpose: PausePurpose) -> &'static [u8] {
 }
 
 /// Return the currently-paused action bitmask and timeout for `action`.
-///
-/// C: networking.c:6263 `getPausedActionTimeout`
 pub fn get_paused_action_timeout(
     events: &[PauseEvent; 4],
     action: u32,
@@ -2313,8 +2041,6 @@ pub fn get_paused_action_timeout(
 }
 
 /// Recompute the aggregate `paused_actions` bitmask from all purpose events.
-///
-/// C: networking.c:6278 `updatePausedActions`
 pub fn update_paused_actions(events: &[PauseEvent; 4], mstime: i64) -> u32 {
     let mut paused = 0u32;
     for p in events {
@@ -2350,8 +2076,6 @@ pub fn is_server_paused_for(server: &RedisServer, action: u32) -> bool {
 }
 
 /// Set pause for `PAUSE_BY_CLIENT_COMMAND` (CLIENT PAUSE implementation).
-///
-/// C: networking.c:6315 `pauseClientsByClient`
 pub fn pause_clients_by_client(events: &mut [PauseEvent; 4], end_time: i64, pause_all: bool) {
     let p = &mut events[PausePurpose::ByClientCommand as usize];
     let old_pause_all_is_active =
@@ -2367,8 +2091,6 @@ pub fn pause_clients_by_client(events: &mut [PauseEvent; 4], end_time: i64, paus
 }
 
 /// Apply a pause for the given purpose, end-time and action bitmask.
-///
-/// C: networking.c:6343 `pauseActions`
 pub fn pause_actions(events: &mut [PauseEvent; 4], purpose: PausePurpose, end: i64, actions: u32) {
     let p = &mut events[purpose as usize];
     p.paused_actions = actions;
@@ -2378,8 +2100,6 @@ pub fn pause_actions(events: &mut [PauseEvent; 4], purpose: PausePurpose, end: i
 }
 
 /// Clear a pause for the given purpose.
-///
-/// C: networking.c:6362 `unpauseActions`
 pub fn unpause_actions(events: &mut [PauseEvent; 4], purpose: PausePurpose) {
     let p = &mut events[purpose as usize];
     p.end = 0;
@@ -2387,20 +2107,15 @@ pub fn unpause_actions(events: &mut [PauseEvent; 4], purpose: PausePurpose) {
 }
 
 /// Check whether any of the `actions_bitmask` bits are currently paused.
-///
-/// C: networking.c:6368 `isPausedActions`
 pub fn is_paused_actions(paused: u32, actions_bitmask: u32) -> u32 {
     paused & actions_bitmask
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Client-argument rewriting helpers
-//  C: networking.c:5899-6020
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Returns true if argument `i` should be redacted in logs/commandlog.
-///
-/// C: networking.c:5939 `clientCommandArgShouldBeRedacted`
 pub fn client_command_arg_should_be_redacted(redact_bitmap: u32, arg_index: usize) -> bool {
     if arg_index < 1 {
         return false;
@@ -2412,8 +2127,6 @@ pub fn client_command_arg_should_be_redacted(redact_bitmap: u32, arg_index: usiz
 }
 
 /// Mark argument `argc` as redactable.
-///
-/// C: networking.c:5950 `redactClientCommandArgument`
 pub fn redact_client_command_argument(redact_bitmap: &mut u32, argc: usize) {
     debug_assert!(argc >= 1);
     if argc < 32 {
@@ -2425,12 +2138,9 @@ pub fn redact_client_command_argument(redact_bitmap: &mut u32, argc: usize) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  getClientEvictionLimit / evictClients
-//  C: networking.c:6500-6550
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Compute the effective client memory eviction limit.
-///
-/// C: networking.c:6502 `getClientEvictionLimit`
 pub fn get_client_eviction_limit(maxmemory_clients: i64, maxmemory: u64) -> usize {
     const MIN_LIMIT: usize = 128 * 1024;
     let raw = if maxmemory_clients < 0 && maxmemory > 0 {
@@ -2446,15 +2156,12 @@ pub fn get_client_eviction_limit(maxmemory_clients: i64, maxmemory: u64) -> usiz
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  I/O thread entry points
-//  C: networking.c:6554-6616
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Called from an I/O thread to read and parse a client's query buffer.
 ///
-/// C: networking.c:6554 `ioThreadReadQueryFromClient`
-///
-/// TODO(architect): I/O thread architecture (tokio vs. custom) is a Phase 3
-/// architect decision. This stub preserves the high-level control flow only.
+/// TODO(architect): I/O thread architecture is a future architect decision.
+/// This stub preserves the high-level control flow only.
 pub fn io_thread_read_query_from_client(
     _c: &mut Client,
     _mb_state: &mut MultibulkState,
@@ -2468,8 +2175,6 @@ pub fn io_thread_read_query_from_client(
 
 /// Called from an I/O thread to write a client's pending reply data.
 ///
-/// C: networking.c:6605 `ioThreadWriteToClient`
-///
 /// TODO(architect): see `io_thread_read_query_from_client`.
 pub fn io_thread_write_to_client(_c: &mut Client, _is_replica: bool) {
     // TODO(port): _writeToClient(c) or writeToReplica(c);
@@ -2479,15 +2184,11 @@ pub fn io_thread_write_to_client(_c: &mut Client, _is_replica: bool) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  processEventsWhileBlocked
-//  C: networking.c:6396-6435
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Process event-loop events while the server is blocked (e.g. in a Lua script).
 ///
-/// C: networking.c:6396 `processEventsWhileBlocked`
-///
-/// TODO(architect): event-loop integration (aeProcessEvents) is deferred to
-/// Phase 2/3 when the event-loop type is selected.
+/// TODO(architect): event-loop integration is deferred to a future phase.
 pub fn process_events_while_blocked() {
     PROCESSING_EVENTS_WHILE_BLOCKED.fetch_add(1, Ordering::Relaxed);
     // TODO(port): loop 4 times calling aeProcessEvents; whileBlockedCron();
@@ -2497,12 +2198,9 @@ pub fn process_events_while_blocked() {
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Aggregate output-buffer memory / CLIENT memory usage
-//  C: networking.c:6022-6080
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Estimate the total output-buffer memory for a client.
-///
-/// C: networking.c:6028 `getClientOutputBufferMemoryUsage`
 pub fn get_client_output_buffer_memory_usage(
     reply_buf_len: usize,
     reply_list_count: usize,

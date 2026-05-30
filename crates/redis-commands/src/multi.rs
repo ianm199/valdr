@@ -1,15 +1,11 @@
 //! MULTI/EXEC transaction block and WATCH/UNWATCH CAS implementation.
 //!
-//! C source: `reference/valkey/src/multi.c` (585 lines, 18 functions).
-//!
-//! Phase B integration (Round 8b)
-//! ------------------------------
-//! This module ships the five user-facing transaction commands wired through
-//! the same `dispatch` entrypoint used by every other command. Queueing is
-//! implemented by `dispatch::dispatch` itself — once `client.flag_multi()` is
-//! set, every subsequent command other than `MULTI`/`EXEC`/`DISCARD`/`WATCH`/
-//! `UNWATCH`/`RESET` is pushed onto `client.queued_argvs` and the client
-//! receives `+QUEUED\r\n`.
+//! The five user-facing transaction commands are wired through the same
+//! `dispatch` entrypoint used by every other command. Queueing is implemented
+//! by `dispatch::dispatch` itself — once `client.flag_multi()` is set, every
+//! subsequent command other than `MULTI`/`EXEC`/`DISCARD`/`WATCH`/`UNWATCH`/
+//! `RESET` is pushed onto `client.queued_argvs` and the client receives
+//! `+QUEUED\r\n`.
 //!
 //! Cross-connection WATCH invalidation goes through a process-wide index in
 //! `redis-core::db::watched_keys_index()`. WATCH registrations are keyed by
@@ -18,11 +14,10 @@
 //! consults the index at the top of its body, sees its own client id in the
 //! dirty set, and aborts with `*-1\r\n`.
 //!
-//! Architectural shortcut: the process-wide index lives behind a `OnceLock`
-//! because the current `RedisDb` does not own a reference back to
-//! `RedisServer`, and `RedisServer` does not own the live `Client` list.
-//! Once both are wired (Phase 3), the index can move onto `RedisServer` and
-//! the OnceLock can be retired.
+//! The process-wide index lives behind a `OnceLock` because the current
+//! `RedisDb` does not own a reference back to `RedisServer`, and `RedisServer`
+//! does not own the live `Client` list. In future, the index can move onto
+//! `RedisServer` and the OnceLock can be retired.
 
 use redis_core::client::Client;
 use redis_core::command_context::CommandContext;
@@ -103,7 +98,7 @@ pub fn reject_no_multi_command(name: &[u8]) -> RedisError {
 
 /// Mark the current MULTI block as failed due to a queue-time rejection.
 ///
-/// Mirrors C `multi.c::flagTransaction`: keep the client in MULTI so EXEC can
+/// Keep the client in MULTI so EXEC can
 /// return EXECABORT, but discard commands already queued for the doomed batch.
 pub fn flag_transaction_dirty_exec(client: &mut Client) {
     if !client.flag_multi() {

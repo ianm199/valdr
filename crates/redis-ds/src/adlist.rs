@@ -1,10 +1,6 @@
-//! `LinkedList` - Redis's generic doubly-linked list (`list` / `listNode`).
+//! `LinkedList` - Redis's generic doubly-linked list.
 //!
-//! Source: `reference/valkey/src/adlist.c` and `adlist.h`.
-//!
-//! Valkey's adlist exposes stable node pointers and optional dup/free/match
-//! callbacks. The Rust port keeps the observable collection behavior in a safe
-//! owner type backed by `VecDeque`: head/tail insertion, deletion, indexing,
+//! A safe owner type backed by `VecDeque`: head/tail insertion, deletion, indexing,
 //! search, forward/backward iteration, rotation, duplication, and join.
 
 use std::collections::{vec_deque, VecDeque};
@@ -489,17 +485,15 @@ mod tests {
     }
 }
 
-// --------------------------------------------------------------------------
+// ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        reference/valkey/src/adlist.c, reference/valkey/src/adlist.h
+//   source:        (doubly-linked list, Redis stdlib)
 //   target_crate:  redis-ds
 //   confidence:    high
 //   todos:         0
 //   port_notes:    3
 //   unsafe_blocks: 0
-//   notes:         Source-shaped safe owner implementation. C node-pointer
-//                  handles are collapsed into index/value APIs; C dup/free/
-//                  match callbacks map to Clone, Drop, PartialEq, or search_by.
-//                  listLinkNodeHead/Tail/listInitNode allocation hooks are not
-//                  exposed because Rust owns node storage internally.
-// --------------------------------------------------------------------------
+//   notes:         Safe owner implementation. Node handles are collapsed into
+//                  index/value APIs; callbacks map to Clone, Drop, PartialEq,
+//                  or search_by. Allocation hooks are not exposed.
+// ──────────────────────────────────────────────────────────────────────────

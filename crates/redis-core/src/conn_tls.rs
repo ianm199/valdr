@@ -1,7 +1,7 @@
 //! TLS connection-type backend (rustls).
 //!
 //! Structural port of `tls.c`'s `CT_TLS` vtable to `ConnectionTypeTrait`, with
-//! the crypto reimplemented on rustls (no OpenSSL). The mapping:
+//! crypto reimplemented on rustls (no OpenSSL). The mapping:
 //!
 //! | tls.c (OpenSSL)            | here (rustls)                          |
 //! |---------------------------|----------------------------------------|
@@ -10,9 +10,8 @@
 //! | `SSL_write`               | `writer().write()` → `write_tls()`     |
 //! | `WANT_READ`/`WANT_WRITE` flags + `updateSSLEvent` | `wants_read()` / `wants_write()` recomputed each pump |
 //!
-//! The OpenSSL flag bookkeeping (`TLS_CONN_FLAG_READ_WANT_WRITE` etc.) and the
-//! `last_failed_write_data_len` retry quirk disappear: rustls owns its
-//! plaintext/ciphertext buffers and exposes the desired interest directly.
+//! OpenSSL flag bookkeeping disappears: rustls owns its plaintext/ciphertext
+//! buffers and exposes the desired interest directly.
 
 use std::io::{self, IoSlice, Read};
 use std::sync::Arc;
@@ -48,7 +47,6 @@ impl TlsConnectionType {
 
     /// Create a server-side accepted TLS connection over `io`.
     ///
-    /// C: `createTLSConnectionAccepted` / `connCreateAcceptedTLS`. The owner loop
     /// (or a test) supplies the freshly-accepted ciphertext transport.
     pub fn accept_connection(&self, io: Box<dyn ConnIo>) -> Result<Connection, RedisError> {
         let mut session =
@@ -80,7 +78,6 @@ fn would_block(e: &io::Error) -> bool {
 /// the server's owner loop (which owns the `mio::TcpStream`) reuses the exact
 /// same, harness-tested pump as the backend.
 ///
-/// C: the `SSL_read`-side of `handleSSLReturnCode` + the BIO read.
 pub fn session_read_pump<S: io::Read>(
     session: &mut rustls::ServerConnection,
     stream: &mut S,
@@ -101,7 +98,6 @@ pub fn session_read_pump<S: io::Read>(
 
 /// Flush pending ciphertext from `session` to `stream`.
 ///
-/// C: `updateSSLEvent` / the `SSL_write` BIO-drain side.
 pub fn session_write_pump<S: io::Write>(
     session: &mut rustls::ServerConnection,
     stream: &mut S,
@@ -134,7 +130,7 @@ impl ConnectionTypeTrait for TlsConnectionType {
         Ok(())
     }
 
-    /// C: `connTLSAccept` — advance the handshake as far as the currently
+    /// advance the handshake as far as the currently
     /// available ciphertext allows. If complete, fire the accept handler;
     /// otherwise return (the event loop re-drives on the next readiness).
     fn accept(
@@ -170,7 +166,6 @@ impl ConnectionTypeTrait for TlsConnectionType {
         Ok(())
     }
 
-    /// C: `connTLSRead`.
     fn read(&self, conn: &mut Connection, buf: &mut [u8]) -> Result<usize, RedisError> {
         let tls = conn
             .io
@@ -197,7 +192,6 @@ impl ConnectionTypeTrait for TlsConnectionType {
         }
     }
 
-    /// C: `connTLSWrite`.
     fn write(&self, conn: &mut Connection, data: &[u8]) -> Result<usize, RedisError> {
         use std::io::Write;
         let tls = conn
@@ -216,7 +210,6 @@ impl ConnectionTypeTrait for TlsConnectionType {
         Ok(n)
     }
 
-    /// C: `connTLSWritev`.
     fn writev(&self, conn: &mut Connection, iov: &[IoSlice<'_>]) -> Result<usize, RedisError> {
         use std::io::Write;
         let tls = conn
@@ -273,7 +266,7 @@ impl ConnectionTypeTrait for TlsConnectionType {
         conn
     }
 
-    /// C: `connTLSClose` — send `close_notify`, flush, drop.
+    /// send `close_notify`, flush, drop.
     fn close(&self, conn: &mut Connection) {
         if let Some(tls) = conn.io.as_tls_mut() {
             tls.session.send_close_notify();

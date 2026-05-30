@@ -293,7 +293,7 @@ pub struct RdbCheckReport {
 /// Scan an RDB file the way `valkey-check-rdb` does: validate the signature and
 /// version, classify foreign (12-79) / future (>80) versions, walk every
 /// opcode/object tracking the byte offset, and report the first error or a
-/// final "RDB looks OK" line. Mirrors `valkey-check-rdb.c`.
+/// final "RDB looks OK" line.
 pub fn check_rdb_file(path: &Path) -> RdbCheckReport {
     let mut lines: Vec<String> = Vec::new();
     let data = match std::fs::read(path) {

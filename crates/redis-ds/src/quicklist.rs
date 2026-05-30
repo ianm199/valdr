@@ -1,6 +1,5 @@
 //! `QuickList` - listpack-backed node list used as Redis' list encoding.
 //!
-//! Source: `reference/valkey/src/quicklist.c` and `quicklist.h`.
 //! This is a bounded MVP of the upstream structure: node fill accounting,
 //! plain nodes for large elements, push/pop at both ends, index lookup,
 //! count, duplication, and owned iteration. LZF compression, bookmarks,
@@ -291,7 +290,6 @@ pub struct QuickList {
 }
 
 impl QuickList {
-    /// C: `quicklistCreate`.
     pub fn create() -> Self {
         Self {
             nodes: VecDeque::new(),
@@ -305,25 +303,21 @@ impl QuickList {
         Self::create()
     }
 
-    /// C: `quicklistNew`.
     pub fn with_options(fill: i32, compress: i32) -> Self {
         let mut quicklist = Self::create();
         quicklist.set_options(fill, compress);
         quicklist
     }
 
-    /// C: `quicklistSetCompressDepth`. Compression is recorded but not
-    /// applied by this MVP.
+    /// Compression is recorded but not applied by this MVP.
     pub fn set_compress_depth(&mut self, compress: i32) {
         self.compress = compress.clamp(0, COMPRESS_MAX as i32) as u32;
     }
 
-    /// C: `quicklistSetFill`.
     pub fn set_fill(&mut self, fill: i32) {
         self.fill = fill.clamp(FILL_MIN, FILL_MAX);
     }
 
-    /// C: `quicklistSetOptions`.
     pub fn set_options(&mut self, fill: i32, compress: i32) {
         self.set_fill(fill);
         self.set_compress_depth(compress);
@@ -337,7 +331,6 @@ impl QuickList {
         self.compress
     }
 
-    /// C: `quicklistCount`.
     pub fn count(&self) -> usize {
         self.count
     }
@@ -354,7 +347,7 @@ impl QuickList {
         self.nodes.len()
     }
 
-    /// C: `quicklistRelease`, adapted to reusable Rust-owned storage.
+    /// Adapted to reusable Rust-owned storage.
     pub fn clear(&mut self) {
         self.nodes.clear();
         self.count = 0;
@@ -364,7 +357,6 @@ impl QuickList {
         self.clear();
     }
 
-    /// C: `quicklistPushHead`.
     ///
     /// Returns true when a new head node was created, false when the existing
     /// head node absorbed the value or insertion failed.
@@ -390,7 +382,6 @@ impl QuickList {
         true
     }
 
-    /// C: `quicklistPushTail`.
     ///
     /// Returns true when a new tail node was created, false when the existing
     /// tail node absorbed the value or insertion failed.
@@ -416,7 +407,6 @@ impl QuickList {
         true
     }
 
-    /// C: `quicklistPush`.
     pub fn push(&mut self, value: &[u8], where_: i32) -> bool {
         match QuickListSide::from_where(where_) {
             Some(QuickListSide::Head) => self.push_head(value),
@@ -433,8 +423,7 @@ impl QuickList {
         Some(self.push_tail(value.get(..sz)?))
     }
 
-    /// C: `quicklistAppendListpack`, with empty listpacks ignored so the safe
-    /// owner never stores zero-count nodes.
+    /// Empty listpacks are ignored so the safe owner never stores zero-count nodes.
     pub fn append_listpack(&mut self, lp: ListPack) -> bool {
         let Some(node) = QuickListNode::from_listpack(lp) else {
             return false;
@@ -444,7 +433,6 @@ impl QuickList {
         true
     }
 
-    /// C: `quicklistAppendPlainNode`.
     pub fn append_plain_node(&mut self, data: Vec<u8>) {
         self.nodes.push_back(QuickListNode::plain(&data));
         self.count += 1;
@@ -458,7 +446,6 @@ impl QuickList {
         self.pop_side(QuickListSide::Tail)
     }
 
-    /// C: `quicklistPop`.
     pub fn pop(&mut self, where_: i32) -> Option<OwnedQuickListValue> {
         self.pop_side(QuickListSide::from_where(where_)?)
     }
@@ -486,7 +473,7 @@ impl QuickList {
         Some(value)
     }
 
-    /// C: `quicklistGetIteratorEntryAtIdx`, collapsed to direct owned lookup.
+    /// Collapsed to direct owned lookup.
     pub fn index(&self, index: i64) -> Option<OwnedQuickListValue> {
         let count = i64::try_from(self.count).ok()?;
         let normalized = if index < 0 {

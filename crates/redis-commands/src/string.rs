@@ -1,37 +1,30 @@
 //! String command implementations: SET, GET, INCR, APPEND, LCS, and friends.
 //!
-//! C source: `reference/valkey/src/t_string.c`  (1 056 lines, 29 functions)
-//! Crate: `redis-commands`  (pilot phase)
-//!
 //! All Redis data — keys, values, RESP payloads — uses `RedisString` /
-//! `&[u8]`.  `String` / `&str` / `from_utf8` are banned for stored Redis data
-//! per PORTING.md §1.  Transient number-parsing is the sole usage exception;
+//! `&[u8]`.  `String` / `&str` / `from_utf8` are banned for stored Redis data.
+//! Transient number-parsing is the sole usage exception;
 //! see `parse_float_from_object` and the `PORT NOTE` there.
 //!
-//! Commands follow PORTING.md §4.1:
-//!   `void fooCommand(client *c)` →
-//!   `pub fn foo_command(ctx: &mut CommandContext) -> Result<(), RedisError>`
-//!
-//! ## Architect items (Phase 3 / Phase 4)
+//! ## Architect items
 //!
 //! TODO(architect): `CommandContext::db()` / `db_mut()` — needs `&mut RedisServer`
-//! added to `CommandContext` in Phase 3 (redis-core architect packet).
+//! added to `CommandContext`.
 //!
 //! TODO(architect): `CommandContext::server_dirty_incr()` — increment server dirty
-//! counter; blocked on Phase 3 RedisServer access.
+//! counter; blocked on RedisServer access.
 //!
 //! TODO(architect): `CommandContext::notify_keyspace_event(event_type, event, key)`
-//! — keyspace event dispatch; blocked on Phase 3.
+//! — keyspace event dispatch; needs implementation.
 //!
 //! TODO(architect): `CommandContext::signal_modified_key(key)` — WATCH and
-//! client-tracking invalidation; blocked on Phase 3.
+//! client-tracking invalidation; needs implementation.
 //!
 //! TODO(architect): TTL management (`set_expire`, `remove_expire`,
-//! `check_already_expired`) — blocked on Phase 3 expiry layer.
+//! `check_already_expired`) — blocked on expiry layer.
 //!
 //! TODO(architect): Replication command rewriting (`rewrite_client_command_vector`,
 //! `rewrite_client_command_argument`, `replace_client_command_vector`) — blocked
-//! on Phase 3+ replication layer.
+//! on replication layer.
 //!
 //! TODO(architect): `CommandContext::command_time_snapshot() -> i64` — cached
 //! timestamp set at command-dispatch time; currently falls back to SystemTime.
@@ -56,7 +49,7 @@ use redis_core::object::{ObjectKind, RedisObject, StringEncoding};
 use redis_protocol::frame::RespFrame;
 use redis_types::{RedisError, RedisString};
 
-// ── SET / GETEX / MSETEX flag bits  (C: ARGS_* in server.h) ─────────────
+// ── SET / GETEX / MSETEX flag bits ─────────────
 // PORT NOTE: bit positions are local to this port; the C constants live in
 // server.h with their own values.  Only the bit semantics need to match.
 pub const SET_FLAG_NONE: u32 = 0;
@@ -72,7 +65,7 @@ pub const SET_FLAG_ARGV3: u32 = 1 << 8; // internal: value sits at argv[3]
 pub const SET_FLAG_IFEQ: u32 = 1 << 9; // IFEQ — only set if current == comparison
 pub const SET_FLAG_PERSIST: u32 = 1 << 10; // PERSIST — remove TTL (GETEX only)
 
-// ── setKey() hint bits  (C: SETKEY_* in server.h) ────────────────────────
+// ── setKey() hint bits ────────────────────────
 pub const SETKEY_KEEPTTL: u32 = 1 << 0;
 pub const SETKEY_DOESNT_EXIST: u32 = 1 << 1;
 pub const SETKEY_ALREADY_EXIST: u32 = 1 << 2;
@@ -100,7 +93,6 @@ pub const PROTO_MAX_BULK_LEN_DEFAULT: usize = 512 * 1024 * 1024;
 
 /// Expiry-time unit for SET / GETEX / MSETEX.
 ///
-/// C: `UNIT_SECONDS` = 0, `UNIT_MILLISECONDS` = 1 (server.h).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unit {
     Seconds,
@@ -110,7 +102,6 @@ pub enum Unit {
 /// Discriminator for `parse_extended_command_args` — controls which optional
 /// flags are legal.
 ///
-/// C: `COMMAND_SET` / `COMMAND_GET` / `COMMAND_MSET` enum values passed to
 /// `parseExtendedCommandArgumentsOrReply` in server.c.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandKind {
@@ -129,7 +120,6 @@ pub enum CommandKind {
 /// SET key value [NX|XX] [GET]
 ///     [EX s | PX ms | EXAT ts | PXAT ms-ts | KEEPTTL]
 ///
-/// C: `setCommand` (t_string.c:251).
 pub fn set_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let argc = ctx.arg_count();
     if argc < 3 {
@@ -363,7 +353,6 @@ fn reply_optional_bulk(ctx: &mut CommandContext, bytes: Option<Vec<u8>>) -> Resu
 /// Sets `key` to `value` only if `key` is not yet present. Replies `:1`
 /// when applied, `:0` when the key already existed.
 ///
-/// C: `setnxCommand` (t_string.c:267).
 pub fn setnx_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     if ctx.arg_count() != 3 {
         return Err(RedisError::wrong_number_of_args(b"setnx"));
@@ -390,7 +379,6 @@ pub fn setnx_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 /// seconds from now. Equivalent to `SET key value EX seconds`. Replies
 /// `+OK\r\n`.
 ///
-/// C: `setexCommand` (t_string.c:272).
 pub fn setex_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     setex_generic(ctx, b"setex", 1000)
 }
@@ -399,7 +387,6 @@ pub fn setex_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 ///
 /// Same as SETEX but with millisecond resolution. Replies `+OK\r\n`.
 ///
-/// C: `psetexCommand` (t_string.c:277).
 pub fn psetex_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     setex_generic(ctx, b"psetex", 1)
 }
@@ -457,7 +444,6 @@ fn setex_generic(ctx: &mut CommandContext, name: &[u8], multiplier: i64) -> Resu
 /// key was absent or its current value differs. WRONGTYPE if the key holds a
 /// non-string value.
 ///
-/// C: `delifeqCommand` (t_string.c:283).
 pub fn delifeq_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     if ctx.arg_count() != 3 {
         return Err(RedisError::wrong_number_of_args(b"delifeq"));
@@ -488,7 +474,6 @@ pub fn delifeq_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 /// Replies with the key's bulk-string value, the null bulk `$-1\r\n` if the
 /// key is absent, or `WRONGTYPE` if the key is not a string.
 ///
-/// C: `getCommand` (t_string.c:316).
 pub fn get_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     if ctx.arg_count() != 2 {
         return Err(RedisError::wrong_number_of_args(b"get"));
@@ -508,7 +493,6 @@ pub fn get_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 /// expire on the key. `EX|PX|EXAT|PXAT` set an absolute expire in seconds or
 /// milliseconds (relative or unix epoch).
 ///
-/// C: `getexCommand` (t_string.c:340).
 pub fn getex_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let argc = ctx.arg_count();
     if !(2..=4).contains(&argc) {
@@ -608,7 +592,6 @@ pub fn getex_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 /// Replies with the bulk-string value held by `key` and deletes the key.
 /// A missing key returns a null bulk; a non-string key yields WRONGTYPE.
 ///
-/// C: `getdelCommand` (t_string.c:395).
 pub fn getdel_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     if ctx.arg_count() != 2 {
         return Err(RedisError::wrong_number_of_args(b"getdel"));
@@ -643,7 +626,6 @@ pub fn getdel_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 /// missing key returns a null bulk and is created. A non-string previous
 /// value yields WRONGTYPE without modifying the keyspace.
 ///
-/// C: `getsetCommand` (t_string.c:408).
 pub fn getset_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     if ctx.arg_count() != 3 {
         return Err(RedisError::wrong_number_of_args(b"getset"));
@@ -675,7 +657,6 @@ pub fn getset_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 /// Rejects with the `proto-max-bulk-len` size error when the resulting
 /// length would exceed `PROTO_MAX_BULK_LEN_DEFAULT` (512 MiB).
 ///
-/// C: `setrangeCommand` (t_string.c:432).
 pub fn setrange_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     if ctx.arg_count() != 4 {
         return Err(RedisError::wrong_number_of_args(b"setrange"));
@@ -742,7 +723,6 @@ pub fn setrange_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 /// the end of the string. Missing keys reply with an empty bulk string;
 /// non-string values yield WRONGTYPE.
 ///
-/// C: `getrangeCommand` (t_string.c:489).
 pub fn getrange_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     if ctx.arg_count() != 4 {
         return Err(RedisError::wrong_number_of_args(b"getrange"));
@@ -787,7 +767,6 @@ pub fn getrange_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 /// at the corresponding key or null when the key is missing or holds a
 /// non-string value.
 ///
-/// C: `mgetCommand` (t_string.c:530).
 pub fn mget_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let argc = ctx.arg_count();
     if argc < 2 {
@@ -805,7 +784,6 @@ pub fn mget_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 /// Atomically sets every key-value pair. Always replies `+OK`. An odd
 /// number of key/value tokens yields a syntax error.
 ///
-/// C: `msetCommand` (t_string.c:592).
 pub fn mset_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let argc = ctx.arg_count();
     if argc < 3 || argc.is_multiple_of(2) {
@@ -833,7 +811,6 @@ pub fn mset_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 /// Sets every supplied pair only when none of the named keys already
 /// exists. Replies `:1` if applied, `:0` if any key existed.
 ///
-/// C: `msetnxCommand` (t_string.c:597).
 pub fn msetnx_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let argc = ctx.arg_count();
     if argc < 3 || argc.is_multiple_of(2) {
@@ -867,7 +844,6 @@ pub fn msetnx_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 
 /// MSETEX numkeys key value [key value …] [NX|XX] [EX s|PX ms|EXAT ts|PXAT ms-ts|KEEPTTL]
 ///
-/// C: `msetexCommand` (t_string.c:604).
 pub fn msetex_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let argc = ctx.arg_count();
     if argc < 4 {
@@ -1011,7 +987,6 @@ pub fn msetex_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 ///
 /// Real Redis rejects leading or trailing whitespace, embedded NUL, empty
 /// strings, and any non-decimal characters except an optional leading sign.
-/// This mirrors `string2ll` in util.c.
 fn parse_strict_i64(bytes: &[u8]) -> Option<i64> {
     let s = std::str::from_utf8(bytes).ok()?;
     s.parse::<i64>().ok()
@@ -1084,7 +1059,6 @@ fn incr_decr_apply(
 
 /// INCR key
 ///
-/// C: `incrCommand` (t_string.c:731).
 pub fn incr_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     if ctx.arg_count() != 2 {
         return Err(RedisError::wrong_number_of_args(b"incr"));
@@ -1101,7 +1075,6 @@ pub fn incr_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 
 /// DECR key
 ///
-/// C: `decrCommand` (t_string.c:735).
 pub fn decr_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     if ctx.arg_count() != 2 {
         return Err(RedisError::wrong_number_of_args(b"decr"));
@@ -1118,7 +1091,6 @@ pub fn decr_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 
 /// INCRBY key increment
 ///
-/// C: `incrbyCommand` (t_string.c:739).
 pub fn incrby_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     if ctx.arg_count() != 3 {
         return Err(RedisError::wrong_number_of_args(b"incrby"));
@@ -1137,7 +1109,6 @@ pub fn incrby_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 
 /// DECRBY key decrement
 ///
-/// C: `decrbyCommand` (t_string.c:746).
 pub fn decrby_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     if ctx.arg_count() != 3 {
         return Err(RedisError::wrong_number_of_args(b"decrby"));
@@ -1223,7 +1194,6 @@ fn parse_stored_float(bytes: &[u8]) -> Result<f64, RedisError> {
 /// `-ERR value is not a valid float` when either the stored value or the
 /// increment cannot be parsed.
 ///
-/// C: `incrbyfloatCommand` (t_string.c:758).
 pub fn incrbyfloat_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     if ctx.arg_count() != 3 {
         return Err(RedisError::wrong_number_of_args(b"incrbyfloat"));
@@ -1262,7 +1232,6 @@ pub fn incrbyfloat_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 /// and is a string, `value` is concatenated and the new length is returned.
 /// A non-string `key` yields `WRONGTYPE`.
 ///
-/// C: `appendCommand` (t_string.c:791).
 pub fn append_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     if ctx.arg_count() != 3 {
         return Err(RedisError::wrong_number_of_args(b"append"));
@@ -1302,7 +1271,6 @@ pub fn append_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 /// Returns the byte length of the string value at `key`, or `0` when the
 /// key is missing. WRONGTYPE if the existing value is not a string.
 ///
-/// C: `strlenCommand` (t_string.c:834).
 pub fn strlen_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     if ctx.arg_count() != 2 {
         return Err(RedisError::wrong_number_of_args(b"strlen"));
@@ -1348,7 +1316,6 @@ fn lcs_lookup(ctx: &mut CommandContext, key: &RedisString) -> Result<Vec<u8>, Re
 /// O(n·m) dynamic programming, then walks the table backward to recover the
 /// LCS string and (for `IDX`) the matching index ranges.
 ///
-/// C: `lcsCommand` (t_string.c:842).
 pub fn lcs_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     if ctx.arg_count() < 3 {
         return Err(RedisError::wrong_number_of_args(b"lcs"));

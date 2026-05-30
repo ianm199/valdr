@@ -1,13 +1,10 @@
-//! Port of `expire.c` and `expire.h` — incremental expiry of TTL keys and hash fields.
+//! Incremental expiry of TTL keys and hash fields.
 //!
 //! Covers:
 //! - Active expiration background cycle (`active_expire_cycle`).
 //! - EXPIRE, PEXPIRE, EXPIREAT, PEXPIREAT, PERSIST, TTL, PTTL, EXPIRETIME,
 //!   PEXPIRETIME, TOUCH command implementations.
 //! - Replica-local key expiry tracking for writable replicas.
-//!
-//! C source: `reference/valkey/src/expire.c` (1032 lines, 28 functions)
-//!           `reference/valkey/src/expire.h` (76 lines)
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
@@ -25,7 +22,7 @@ use crate::notify::{NOTIFY_EXPIRED, NOTIFY_GENERIC};
 use crate::object::RedisObject;
 use crate::server::RedisServer;
 
-// ── Public constants from expire.h ───────────────────────────────────────
+// ── Public constants ────────────────────────────────────────────────────────
 
 pub const EXPIRY_NONE: i64 = -1;
 
@@ -40,7 +37,7 @@ pub const EXPIRE_XX: i32 = 1 << 1;
 pub const EXPIRE_GT: i32 = 1 << 2;
 pub const EXPIRE_LT: i32 = 1 << 3;
 
-// ── Internal constants (expire.c:122-125) ────────────────────────────────
+// ── Internal constants ──────────────────────────────────────────────────────
 
 const ACTIVE_EXPIRE_CYCLE_KEYS_PER_LOOP: u64 = 20;
 const ACTIVE_EXPIRE_CYCLE_FAST_DURATION: i64 = 1000;
@@ -60,26 +57,25 @@ const PAUSE_ACTION_EXPIRE: u32 = 1 << 2;
 
 // ── Type aliases ─────────────────────────────────────────────────────────
 
-/// Millisecond Unix timestamp (C: mstime_t / long long).
+/// Millisecond Unix timestamp.
 pub type MsTime = i64;
 
-/// Microsecond duration (C: ustime_t).
+/// Microsecond duration.
 pub type UsTime = i64;
 
-/// Monotonic microsecond counter (C: monotime).
+/// Monotonic microsecond counter.
 pub type MonoTime = u64;
 
 // ── avg_ttl_factor table: pow(0.98, k) for k = 1..16 ────────────────────
-// C: expire.c:53-54 — used to compute running-average TTL with a closed-form
-// geometric series instead of a loop.
+// Used to compute running-average TTL with a closed-form geometric series.
 static AVG_TTL_FACTOR: [f64; 16] = [
     0.98, 0.9604, 0.941192, 0.922368, 0.903921, 0.885842, 0.868126, 0.850763, 0.833748, 0.817073,
     0.800731, 0.784717, 0.769022, 0.753642, 0.738569, 0.723798,
 ];
 
-// ── Public types from expire.h ───────────────────────────────────────────
+// ── Public types ────────────────────────────────────────────────────────────
 
-/// Return status from key-existence/expiry checks (C: keyStatus).
+/// Return status from key-existence/expiry checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyStatus {
     /// Key exists and is not logically expired, or does not exist at all.
@@ -90,7 +86,7 @@ pub enum KeyStatus {
     Deleted,
 }
 
-/// Policy returned by `get_expiration_policy_with_flags` (C: expirationPolicy).
+/// Policy returned by `get_expiration_policy_with_flags`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExpirationPolicy {
     /// Treat items as valid regardless of their expiry time.
@@ -101,7 +97,7 @@ pub enum ExpirationPolicy {
     DeleteExpired,
 }
 
-/// Selects which active expiry mechanism to run (C: enum activeExpiryType).
+/// Selects which active expiry mechanism to run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum ActiveExpiryType {
@@ -113,7 +109,7 @@ pub enum ActiveExpiryType {
 
 // ── Internal structs ─────────────────────────────────────────────────────
 
-// C: expire.c:128-139, expireScanData — per-scan accounting passed to callbacks.
+// Per-scan accounting passed to callbacks.
 #[allow(dead_code)] // active-expire-cycle scan-callback port; fields wired when kvstoreScan is ported
 struct ExpireScanData {
     db_id: u32,
@@ -126,15 +122,13 @@ struct ExpireScanData {
     has_more_expired_entries: bool,
 }
 
-/// Iterator state for field-level active expiry (C: activeExpireFieldIterator).
+/// Iterator state for field-level active expiry.
 pub struct ActiveExpireFieldIterator {
     pub current_db: i32,
     pub cursor: u64,
 }
 
 // Persistent per-job state across calls to active_expire_cycle_job.
-// PORT NOTE: C stores these as `static expireState _expire_state[2]` local to
-// activeExpireCycleJob(). Rust requires module-level statics.
 // TODO(architect): move into RedisServer fields to avoid module-level global state.
 #[derive(Clone, Copy)]
 struct ExpireState {
@@ -153,23 +147,20 @@ impl ExpireState {
 
 // ── Module-level global state ─────────────────────────────────────────────
 
-// C: expire.c:212, static expireState _expire_state[ACTIVE_EXPIRY_TYPE_COUNT]
 static ACTIVE_EXPIRE_STATE: Mutex<[ExpireState; ACTIVE_EXPIRY_TYPE_COUNT]> =
     Mutex::new([ExpireState::zeroed(); ACTIVE_EXPIRY_TYPE_COUNT]);
 
-// C: expire.c:544, dict *replicaKeysWithExpire — key → bitmask of db IDs.
+// Key → bitmask of db IDs.
 // TODO(architect): move into RedisServer to avoid module-level global state.
 static REPLICA_KEYS_WITH_EXPIRE: Mutex<Option<HashMap<RedisString, u64>>> = Mutex::new(None);
 
-// C: expire.c:475, static monotime last_fast_cycle_start_time
 static LAST_FAST_CYCLE_START: Mutex<MonoTime> = Mutex::new(0);
 
-// C: expire.c:489, static bool expireCycleStartWithFields
 static EXPIRE_CYCLE_START_WITH_FIELDS: Mutex<bool> = Mutex::new(false);
 
 // ── Timing helpers ────────────────────────────────────────────────────────
 
-// C: getMonotonicUs() — monotonically increasing microsecond counter.
+// Monotonically increasing microsecond counter.
 // TODO(port): Valkey uses CLOCK_MONOTONIC_RAW; Phase B should adopt the same source.
 fn get_monotonic_us() -> MonoTime {
     static EPOCH: OnceLock<std::time::Instant> = OnceLock::new();
@@ -177,12 +168,12 @@ fn get_monotonic_us() -> MonoTime {
     epoch.elapsed().as_micros() as u64
 }
 
-// C: elapsedUs(start) — microseconds since `start`.
+// Microseconds since `start`.
 fn elapsed_us(start: MonoTime) -> u64 {
     get_monotonic_us().saturating_sub(start)
 }
 
-// C: mstime() — current wall-clock time in milliseconds since Unix epoch.
+// Current wall-clock time in milliseconds since Unix epoch.
 fn ms_time_now() -> MsTime {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -191,7 +182,7 @@ fn ms_time_now() -> MsTime {
         .unwrap_or(0)
 }
 
-// ── expire.c:195-197, activeExpireEffort ─────────────────────────────────
+// ── activeExpireEffort ──────────────────────────────────────────────────────
 // Returns normalized 0-based effort level (0–9) from the server config (1–10).
 fn active_expire_effort(server: &RedisServer) -> i64 {
     // TODO(port): server.active_expire_effort not yet on RedisServer stub.
@@ -200,7 +191,7 @@ fn active_expire_effort(server: &RedisServer) -> i64 {
     0
 }
 
-// ── expire.c:66-80, activeExpireCycleTryExpire ───────────────────────────
+// ── activeExpireCycleTryExpire ──────────────────────────────────────────────
 /// Attempts to expire `val` if its TTL has elapsed. Returns `true` and removes
 /// the key from `db` when expired; returns `false` otherwise.
 pub fn active_expire_cycle_try_expire(
@@ -228,7 +219,7 @@ pub fn active_expire_cycle_try_expire(
     }
 }
 
-// ── expire.c:146-161, expireScanCallback ─────────────────────────────────
+// ── expireScanCallback ──────────────────────────────────────────────────────
 // Callback passed to kvstoreScan for key-level TTL expiry.
 // PORT NOTE: In C this is a `void (*)(void*, void*, int)` passed to kvstoreScan.
 // Defined here as a typed Rust function; the caller adapts it when kvstore is ported.
@@ -253,7 +244,7 @@ fn expire_scan_callback(
     data.sampled += 1;
 }
 
-// ── expire.c:165-177, fieldExpireScanCallback ─────────────────────────────
+// ── fieldExpireScanCallback ─────────────────────────────────────────────────
 // Callback passed to kvstoreScan for field-level TTL expiry inside hashes.
 #[allow(dead_code)] // active-expire-cycle scan-callback; wired when kvstoreScan (redis-ds) is ported
 fn field_expire_scan_callback(
@@ -272,7 +263,7 @@ fn field_expire_scan_callback(
     data.sampled += 1;
 }
 
-// ── expire.c:179-189, expireShouldSkipTableForSamplingCb ──────────────────
+// ── expireShouldSkipTableForSamplingCb ───────────────────────────────────────
 // Returns true when the hash table fill ratio is below 1%, making random-key
 // sampling too expensive relative to the number of hits found.
 // PORT NOTE: In C this takes `hashtable *ht`; caller extracts size/buckets.
@@ -282,7 +273,7 @@ fn expire_should_skip_table_for_sampling(num_keys: u64, num_buckets: u64) -> boo
     num_buckets > 0 && (num_keys * 100 / num_buckets) < 1
 }
 
-// ── expire.c:199-429, activeExpireCycleJob ────────────────────────────────
+// ── activeExpireCycleJob ────────────────────────────────────────────────────
 /// Runs one round of active expiration for `job_type` (KEYS or FIELDS).
 ///
 /// `cycle_type` is `ACTIVE_EXPIRE_CYCLE_SLOW` or `ACTIVE_EXPIRE_CYCLE_FAST`.
@@ -310,8 +301,7 @@ pub fn active_expire_cycle_job(
     // Using 0.0 placeholder so the fast-cycle guard below is never suppressed.
     let expired_stale_perc_now: f64 = 0.0;
 
-    // C: expire.c:225-229 — fast cycle: skip if prior cycle didn't time out
-    // and stale percentage is acceptable.
+    // Fast cycle: skip if prior cycle didn't time out and stale percentage is acceptable.
     if cycle_type == ACTIVE_EXPIRE_CYCLE_FAST {
         let should_skip = {
             let guard = ACTIVE_EXPIRE_STATE
@@ -325,7 +315,7 @@ pub fn active_expire_cycle_job(
         }
     }
 
-    // C: expire.c:239 — scan all DBs if last call hit the time limit.
+    // Scan all DBs if last call hit the time limit.
     let db_count = server.db_count();
     let dbs_per_call = {
         let guard = ACTIVE_EXPIRE_STATE
@@ -352,13 +342,13 @@ pub fn active_expire_cycle_job(
     let mut last_db_id: Option<u32> = None;
 
     let time_check_mask: i32 = match job_type {
-        // C: expire.c:280 — check every 16 iterations for regular keys.
+        // Check every 16 iterations for regular keys.
         ActiveExpiryType::Keys => 0xf,
-        // C: expire.c:288 — check every iteration for fields (more work per key).
+        // Check every iteration for fields (more work per key).
         ActiveExpiryType::Fields => 0x0,
     };
 
-    // C: expire.c:254-410, main loop over databases.
+    // Main loop over databases.
     let mut j: usize = 0;
     loop {
         let tl_exit = {
@@ -396,20 +386,17 @@ pub fn active_expire_cycle_job(
 
         // TODO(port): db->expires (kvstore) and db->keys_with_volatile_items
         // not yet on RedisDb stub. Count here is a placeholder.
-        // C: expire.c:296, if (db && kvstoreSize(kvs)) dbs_performed++;
         dbs_performed += 1;
 
         let db_done = false;
         let mut update_avg_ttl_times: i32 = 0;
 
-        // C: expire.c:301-409, inner do-while over the current database.
         loop {
             iteration += 1;
 
             // TODO(port): kvstoreSize(kvs) not yet available; placeholder 0 breaks immediately.
-            let num: u64 = 0; // C: num = kvstoreSize(kvs)
+            let num: u64 = 0;
             if num == 0 {
-                // C: db->expiry[jobType].avg_ttl = 0;
                 // TODO(port): db->expiry not yet on RedisDb stub.
                 // PORT NOTE: db_done = true removed here — assignment was dead (break follows immediately).
                 break;
@@ -424,11 +411,10 @@ pub fn active_expire_cycle_job(
             let checked_buckets: u64 = 0;
             let origin_ttl_samples = data.ttl_samples;
 
-            // C: expire.c:339-349, scan buckets until enough keys sampled.
+            // Scan buckets until enough keys sampled.
             while data.sampled < num && checked_buckets < max_buckets {
                 // TODO(port): kvstoreScan(kvs, cursor, -1, -1, scan_cb, skip_cb, &data)
                 // not yet ported. Cannot scan until kvstore lands in redis-ds.
-                // C: cursor = kvstoreScan(...); update db->expiry[jobType].cursor.
                 // PORT NOTE: checked_buckets += 1 removed — dead assignment before break.
                 break; // placeholder: nothing to scan yet
             }
@@ -440,7 +426,7 @@ pub fn active_expire_cycle_job(
                 update_avg_ttl_times += 1;
             }
 
-            // C: expire.c:359-361, repeat if stale percentage is still too high.
+            // Repeat if stale percentage is still too high.
             let repeat = if db_done {
                 false
             } else if data.sampled == 0 {
@@ -449,13 +435,13 @@ pub fn active_expire_cycle_job(
                 (data.expired * 100 / data.sampled) > config_cycle_acceptable_stale as u64
             };
 
-            // C: expire.c:366-399, update avg_ttl every 16 iterations or on exit.
+            // Update avg_ttl every 16 iterations or on exit.
             if ((iteration & 0xf) == 0 || !repeat)
                 && data.ttl_samples > 0
                 && matches!(job_type, ActiveExpiryType::Keys)
             {
                 let avg_ttl = data.ttl_sum / data.ttl_samples as i64;
-                // C: expire.c:379-395 — closed-form geometric series avg using AVG_TTL_FACTOR.
+                // closed-form geometric series avg using AVG_TTL_FACTOR.
                 // TODO(port): db->expiry[jobType].avg_ttl not yet on RedisDb stub.
                 // The formula: new_avg = avg_ttl + (old_avg - avg_ttl) * pow(0.98, n)
                 // where n = update_avg_ttl_times (clamped to 1..16).
@@ -466,7 +452,7 @@ pub fn active_expire_cycle_job(
                 data.ttl_samples = 0;
             }
 
-            // C: expire.c:401-408, enforce time limit.
+            // Enforce time limit.
             if (iteration & time_check_mask) == 0 && elapsed_us(start) > timelimit_us as u64 {
                 let mut guard = ACTIVE_EXPIRE_STATE
                     .lock()
@@ -490,7 +476,7 @@ pub fn active_expire_cycle_job(
     // "last db seen" idiom. Rust captures last_db_id instead.
     let _ = last_db_id;
 
-    // C: expire.c:421-427 — update stale-key percentage estimate (5% new, 95% old).
+    // Update stale-key percentage estimate (5% new, 95% old).
     // TODO(port): server.stat_expired_keys_stale_perc / stat_expired_keys_with_vola_stale_perc
     // not yet on RedisServer stub.
     let current_perc = if total_sampled > 0 {
@@ -503,12 +489,11 @@ pub fn active_expire_cycle_job(
     elapsed
 }
 
-// ── expire.c:459-507, activeExpireCycle ───────────────────────────────────
+// ── activeExpireCycle ───────────────────────────────────────────────────────
 /// Top-level active expiry entry point. Alternates KEYS/FIELDS priority each call.
 /// Returns total microseconds spent.
 pub fn active_expire_cycle(server: &mut RedisServer, cycle_type: i32) -> UsTime {
     // TODO(port): isPausedActionsWithUpdate(PAUSE_ACTION_EXPIRE) not yet ported.
-    // C: if (isPausedActionsWithUpdate(PAUSE_ACTION_EXPIRE)) return 0;
     let _ = PAUSE_ACTION_EXPIRE;
 
     let effort = active_expire_effort(server);
@@ -522,7 +507,7 @@ pub fn active_expire_cycle(server: &mut RedisServer, cycle_type: i32) -> UsTime 
             .lock()
             .unwrap_or_else(|e| e.into_inner());
 
-        // C: expire.c:476 — never repeat a fast cycle within its own duration window.
+        // never repeat a fast cycle within its own duration window.
         if (start as i64) < (last as i64 + config_cycle_fast_duration * 2) {
             return 0;
         }
@@ -544,7 +529,7 @@ pub fn active_expire_cycle(server: &mut RedisServer, cycle_type: i32) -> UsTime 
         .lock()
         .unwrap_or_else(|e| e.into_inner());
 
-    // C: expire.c:495-501 — alternate which expiry type gets priority.
+    // Alternate which expiry type gets priority.
     if start_with_fields {
         elapsed += active_expire_cycle_job(
             server,
@@ -583,7 +568,7 @@ pub fn active_expire_cycle(server: &mut RedisServer, cycle_type: i32) -> UsTime 
     elapsed
 }
 
-// ── expire.c:548-604, expireReplicaKeys ──────────────────────────────────
+// ── expireReplicaKeys ───────────────────────────────────────────────────────
 /// Scans `REPLICA_KEYS_WITH_EXPIRE` and expires keys whose TTL has passed.
 /// Runs at most 64 iterations or 1 ms, whichever comes first.
 pub fn expire_replica_keys(server: &mut RedisServer) {
@@ -602,8 +587,7 @@ pub fn expire_replica_keys(server: &mut RedisServer) {
     let start = ms_time_now();
 
     loop {
-        // C: dictGetRandomKey — pick a random entry. In Rust, use first entry as
-        // placeholder until a proper random-key helper is ported.
+        // Pick a random entry. Using first entry as placeholder for now.
         // PERF(port): C uses random selection to avoid hot-spot bias; first-entry is O(1) but biased.
         let entry = {
             let guard = REPLICA_KEYS_WITH_EXPIRE
@@ -622,7 +606,7 @@ pub fn expire_replica_keys(server: &mut RedisServer) {
         let mut remaining = dbids;
         let mut dbid: u32 = 0;
 
-        // C: expire.c:562-587 — check each db whose bit is set in the bitmap.
+        // Check each db whose bit is set in the bitmap.
         while remaining != 0 && (dbid as usize) < server.db_count() {
             if (remaining & 1) != 0 {
                 // TODO(port): getKVStoreIndexForKey not yet ported.
@@ -640,7 +624,7 @@ pub fn expire_replica_keys(server: &mut RedisServer) {
             remaining >>= 1;
         }
 
-        // C: expire.c:592-595 — update or remove the bitmap entry.
+        // Update or remove the bitmap entry.
         {
             let mut guard = REPLICA_KEYS_WITH_EXPIRE
                 .lock()
@@ -673,7 +657,7 @@ pub fn expire_replica_keys(server: &mut RedisServer) {
     }
 }
 
-// ── expire.c:609-634, rememberReplicaKeyWithExpire ────────────────────────
+// ── rememberReplicaKeyWithExpire ────────────────────────────────────────────
 /// Records that `key` in `db` may have a local expire set on this replica.
 ///
 /// Skips databases with id > 63 (only 64 bits in the bitmask).
@@ -696,12 +680,12 @@ pub fn remember_replica_key_with_expire(db: &RedisDb, key: &RedisObject) {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let h = guard.get_or_insert_with(HashMap::new);
-    // C: expire.c:621-629 — dictAddOrFind; if new entry, copy the SDS key and zero bitmap.
+    // If new entry, copy the SDS key and zero bitmap.
     let entry = h.entry(key_bytes).or_insert(0u64);
     *entry |= 1u64 << db.id;
 }
 
-// ── expire.c:637-640, getReplicaKeyWithExpireCount ────────────────────────
+// ── getReplicaKeyWithExpireCount ────────────────────────────────────────────
 /// Returns the number of keys currently tracked in the replica expire dict.
 pub fn get_replica_key_with_expire_count() -> usize {
     let guard = REPLICA_KEYS_WITH_EXPIRE
@@ -710,7 +694,7 @@ pub fn get_replica_key_with_expire_count() -> usize {
     guard.as_ref().map(|h| h.len()).unwrap_or(0)
 }
 
-// ── expire.c:650-659, flushReplicaKeysWithExpireList ─────────────────────
+// ── flushReplicaKeysWithExpireList ──────────────────────────────────────────
 /// Drops all replica expire tracking, optionally asynchronously.
 pub fn flush_replica_keys_with_expire_list(_async_free: bool) {
     // TODO(port): freeReplicaKeysWithExpireAsync not yet ported; always drop synchronously.
@@ -720,7 +704,7 @@ pub fn flush_replica_keys_with_expire_list(_async_free: bool) {
     *guard = None;
 }
 
-// ── expire.c:661-676, checkAlreadyExpired ─────────────────────────────────
+// ── checkAlreadyExpired ─────────────────────────────────────────────────────
 /// Returns `true` if `when` is already in the past and the server should immediately
 /// delete the key rather than storing it with the (past) expire time.
 ///
@@ -728,18 +712,16 @@ pub fn flush_replica_keys_with_expire_list(_async_free: bool) {
 /// migration — in those cases the key is stored anyway.
 pub fn check_already_expired(server: &RedisServer, when: MsTime) -> bool {
     // TODO(port): server.current_client / slot_migration_job not yet on stub.
-    // C: if (server.current_client && server.current_client->slot_migration_job) return 0;
 
     // TODO(port): commandTimeSnapshot not yet ported; using ms_time_now() approximation.
     // TODO(port): server.loading / server.primary_host not on stub.
-    // C: expire.c:675 — a primary in import-mode stores an already-expired key
-    // (with its past expire) instead of deleting it immediately, and waits for
-    // the import source to propagate the deletion.
+    // A primary in import-mode stores an already-expired key (with its past expire)
+    // instead of deleting it immediately, and waits for the import source to propagate it.
     let now = ms_time_now();
     when <= now && !server.live_config.import_mode()
 }
 
-// ── expire.c:686-722, parseExtendedExpireArgumentsOrReply ─────────────────
+// ── parseExtendedExpireArgumentsOrReply ────────────────────────────────────
 /// Parses optional NX / XX / GT / LT flags from command args starting at index 3.
 ///
 /// Updates `flags` in place. Returns `Err` on invalid or conflicting options.
@@ -791,7 +773,7 @@ pub fn parse_extended_expire_arguments(
     Ok(())
 }
 
-// ── expire.c:724-748, convertExpireArgumentToUnixTime ────────────────────
+// ── convertExpireArgumentToUnixTime ────────────────────────────────────────
 /// Parses `arg` as an integer, applies `unit` conversion, adds `basetime`,
 /// and returns the resulting absolute Unix millisecond timestamp.
 ///
@@ -826,7 +808,7 @@ pub fn convert_expire_argument_to_unix_time(
     Ok(when + basetime)
 }
 
-// ── expire.c:763-875, expireGenericCommand ────────────────────────────────
+// ── expireGenericCommand ────────────────────────────────────────────────────
 /// Generic implementation for EXPIRE / PEXPIRE / EXPIREAT / PEXPIREAT.
 ///
 /// `basetime`: 0 for *AT variants; `commandTimeSnapshot()` for relative variants.
@@ -900,8 +882,7 @@ pub fn expire_generic_command(
 ///
 /// Replicas and the AOF always receive an absolute millisecond timestamp so a
 /// key never outlives the primary's intent due to replication lag, and so the
-/// representation matches the RDB form. Mirrors `expireGenericCommand`'s
-/// `rewriteClientCommandVector` in `expire.c`.
+/// representation matches the RDB form.
 fn rewrite_expire_propagation_pexpireat(ctx: &mut CommandContext, key: &RedisString, when: MsTime) {
     ctx.client_mut().set_args(vec![
         RedisString::from_bytes(b"PEXPIREAT"),
@@ -940,7 +921,7 @@ pub fn pexpireat_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     expire_generic_command(ctx, 0, UNIT_MILLISECONDS)
 }
 
-// ── expire.c:897-920, ttlGenericCommand ──────────────────────────────────
+// ── ttlGenericCommand ────────────────────────────────────────────────────────
 /// Implements TTL, PTTL, EXPIRETIME, PEXPIRETIME.
 ///
 /// `output_ms`: reply in milliseconds when true, seconds when false.
@@ -1008,7 +989,7 @@ pub fn persist_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     }
 }
 
-// ── expire.c:968-975, timestampIsExpired ─────────────────────────────────
+// ── timestampIsExpired ──────────────────────────────────────────────────────
 /// Returns `true` if `when` represents an already-elapsed Unix millisecond timestamp.
 ///
 /// `now` should be `commandTimeSnapshot()` — passed explicitly to avoid
@@ -1020,28 +1001,14 @@ pub fn timestamp_is_expired(when: MsTime, now: MsTime) -> bool {
     now > when
 }
 
-// ── expire.c:980-1031, getExpirationPolicyWithFlags ───────────────────────
+// ── getExpirationPolicyWithFlags ────────────────────────────────────────────
 /// Returns the expiration policy appropriate for the current server state and flags.
 ///
 /// Used by key-lookup paths to decide whether to delete, keep, or ignore expired keys.
 pub fn get_expiration_policy_with_flags(server: &RedisServer, flags: i32) -> ExpirationPolicy {
     // TODO(port): server.loading not yet on RedisServer stub.
-    // C: if (server.loading) return POLICY_IGNORE_EXPIRE;
 
     // TODO(port): server.primary_host / server.current_client / server.import_mode not on stub.
-    // Full C logic preserved for Phase B reference:
-    //
-    // C: expire.c:995-1019
-    //   if primary_host != NULL:
-    //     if current_client.flag.primary: return POLICY_IGNORE_EXPIRE
-    //     if !(flags & EXPIRE_FORCE_DELETE_EXPIRED): return POLICY_KEEP_EXPIRED
-    //   else if current_client.slot_migration_job: return POLICY_IGNORE_EXPIRE
-    //   else if import_mode:
-    //     if current_client.flag.import_source: return POLICY_IGNORE_EXPIRE
-    //     if !(flags & EXPIRE_FORCE_DELETE_EXPIRED): return POLICY_KEEP_EXPIRED
-    //   if flags & EXPIRE_AVOID_DELETE_EXPIRED: return POLICY_KEEP_EXPIRED
-    //   if isPausedActionsWithUpdate(PAUSE_ACTION_EXPIRE): return POLICY_KEEP_EXPIRED
-    //   return POLICY_DELETE_EXPIRED
 
     // TODO(port): isPausedActionsWithUpdate not yet ported.
 
@@ -1052,9 +1019,6 @@ pub fn get_expiration_policy_with_flags(server: &RedisServer, flags: i32) -> Exp
 // ── Shared private helpers ────────────────────────────────────────────────
 
 /// Parse a Redis byte-string as a decimal `i64`.
-///
-/// Equivalent to the C `getLongLongFromObjectOrReply` fast path.
-/// PORT NOTE: should move to a shared `util` module in Phase B.
 fn parse_i64_from_redis_string(s: &RedisString) -> Result<i64, RedisError> {
     let bytes = s.as_bytes();
     if bytes.is_empty() {
@@ -1084,8 +1048,7 @@ fn parse_i64_from_redis_string(s: &RedisString) -> Result<i64, RedisError> {
 }
 
 /// Canonical "invalid expire time" error, matching the Redis wire format
-/// `ERR invalid expire time in '<cmd>' command`. The C macro
-/// `addReplyErrorExpireTime` embeds the command name in the same way.
+/// `ERR invalid expire time in '<cmd>' command`.
 fn expire_time_error(cmd_name: &[u8]) -> RedisError {
     let mut buf = Vec::with_capacity(
         b"ERR invalid expire time in '".len() + cmd_name.len() + b"' command".len(),
@@ -1104,18 +1067,11 @@ fn ascii_lower(bytes: &[u8]) -> Vec<u8> {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Phase-B active-expiration driver
+// Active-expiration background driver
 //
-// A minimal background thread that reaps TTL keys without depending on the
-// half-ported `active_expire_cycle_job` (which is blocked on kvstore). Real
-// Redis runs the equivalent of this from `serverCron` inside the event loop;
-// our thread polls every `1000ms / hz` and samples up to `20 * effort` keys
-// per tick. When the sample fills with expired entries (>25%) the thread
-// repeats without sleeping until the budget cap (~25 ms) is exhausted.
-//
-// Config is held in `ACTIVE_EXPIRE_CONFIG` as a pair of atomics so the
-// CONFIG SET path can flip values mid-flight without taking a Mutex on the
-// hot loop. The thread re-reads both atomics on every tick.
+// A minimal background thread that reaps TTL keys. Config is held in
+// `ACTIVE_EXPIRE_CONFIG` as a pair of atomics so the CONFIG SET path can flip
+// values mid-flight without taking a Mutex on the hot loop.
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Maximum wall-time budget for a single active-expire tick. The thread will

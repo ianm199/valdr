@@ -7,7 +7,6 @@
 //! delegates to ZADD logic; all other commands decode scores, perform
 //! geometric filtering, and format results.
 //!
-//! C source: src/geo.c (1022 lines, 21 functions), src/geo.h (25 lines).
 //! Geohash math lives in the sibling modules `geohash_geohash` and
 //! `geohash_geohash_helper`; only `GeoPoint` is new to this module.
 
@@ -40,13 +39,11 @@ const GEOSEARCH_FLAG: u32 = 1 << 3;
 const GEOSEARCHSTORE_FLAG: u32 = 1 << 4;
 
 /// Base-32 geohash alphabet.
-/// C: geo.c:899.
 const GEO_ALPHABET: &[u8] = b"0123456789bcdefghjkmnpqrstuvwxyz";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 /// A single GEO search result.
-/// C: `geoPoint` struct in geo.h:10-16.
 struct GeoPoint {
     longitude: f64,
     latitude: f64,
@@ -58,7 +55,6 @@ struct GeoPoint {
 // ── Decode helper ─────────────────────────────────────────────────────────────
 
 /// Decode a 52-bit geohash score to `[longitude, latitude]`.
-/// C: geo.c:100-103, decodeGeohash.
 fn decode_geohash(bits: f64) -> Option<[f64; 2]> {
     let hash = GeoHashBits {
         bits: bits as u64,
@@ -118,7 +114,6 @@ fn geo_member_decode_error(member: &[u8]) -> RedisError {
 }
 
 /// Parse longitude and latitude from two consecutive command arguments.
-/// C: geo.c:108-120, extractLongLatOrReply.
 fn extract_long_lat_or_reply(
     ctx: &mut CommandContext,
     arg_base: usize,
@@ -139,7 +134,6 @@ fn extract_long_lat_or_reply(
 }
 
 /// Parse a unit string and return metres-per-unit conversion factor.
-/// C: geo.c:145-160, extractUnitOrReply.
 fn extract_unit_or_reply(unit: &[u8]) -> Result<f64, RedisError> {
     if unit.eq_ignore_ascii_case(b"m") {
         Ok(1.0)
@@ -158,7 +152,6 @@ fn extract_unit_or_reply(unit: &[u8]) -> Result<f64, RedisError> {
 
 /// Parse `<number> <unit>` from two consecutive arguments.
 /// Returns `(metres_per_unit, distance_in_units)`.
-/// C: geo.c:166-185, extractDistanceOrReply.
 fn extract_distance_or_reply(
     ctx: &mut CommandContext,
     arg_base: usize,
@@ -175,7 +168,6 @@ fn extract_distance_or_reply(
 
 /// Parse `<width> <height> <unit>` from three consecutive arguments.
 /// Returns `(metres_per_unit, width, height)`.
-/// C: geo.c:191-212, extractBoxOrReply.
 fn extract_box_or_reply(
     ctx: &mut CommandContext,
     arg_base: usize,
@@ -193,7 +185,6 @@ fn extract_box_or_reply(
 }
 
 /// Format a distance to 4 decimal places as a bulk-string reply.
-/// C: geo.c:219-223, addReplyDoubleDistance.
 fn reply_double_distance(ctx: &mut CommandContext, d: f64) -> RedisResult<()> {
     let s = format!("{:.4}", d);
     ctx.reply_bulk(s.as_bytes())
@@ -201,7 +192,6 @@ fn reply_double_distance(ctx: &mut CommandContext, d: f64) -> RedisResult<()> {
 
 /// Format a coordinate using the same precision Redis uses (LD_STR_HUMAN):
 /// 17 significant decimal digits after the point, trailing zeros stripped.
-/// C: object.c:452 with LD_STR_HUMAN → `%.17Lf` then strip trailing zeros.
 fn format_coord(v: f64) -> Vec<u8> {
     let raw = format!("{:.17}", v);
     let bytes = raw.as_bytes();
@@ -220,7 +210,6 @@ fn format_coord(v: f64) -> Vec<u8> {
 
 /// Test whether a geohash score lies within `shape`.
 /// Returns `Some((xy, dist_m))` if inside, `None` otherwise.
-/// C: geo.c:239-258, geoWithinShape.
 fn geo_within_shape(shape: &GeoShape, score: f64) -> Option<([f64; 2], f64)> {
     let xy = decode_geohash(score)?;
     let distance = match &shape.kind {
@@ -251,7 +240,6 @@ fn geo_within_shape(shape: &GeoShape, score: f64) -> Option<([f64; 2], f64)> {
 /// Query a sorted set for all members with scores in `[min, max)`,
 /// filter by `shape`, and append matching points to `ga`.
 /// Returns the count of new points added.
-/// C: geo.c:272-333, geoGetPointsInRange.
 fn geo_get_points_in_range(
     zset: &InlineZSet,
     min: f64,
@@ -285,7 +273,6 @@ fn geo_get_points_in_range(
 }
 
 /// Compute the `[min, max)` score range covering a single geohash cell.
-/// C: geo.c:338-362, scoresOfGeoHashBox.
 fn scores_of_geohash_box(hash: GeoHashBits) -> (GeoHashFix52Bits, GeoHashFix52Bits) {
     let min = geohash_align_52_bits(hash);
     let mut hash_next = hash;
@@ -295,7 +282,6 @@ fn scores_of_geohash_box(hash: GeoHashBits) -> (GeoHashFix52Bits, GeoHashFix52Bi
 }
 
 /// Populate `ga` with all zset members inside a single geohash cell.
-/// C: geo.c:367-372, membersOfGeoHashBox.
 fn members_of_geohash_box(
     zset: &InlineZSet,
     hash: GeoHashBits,
@@ -309,7 +295,6 @@ fn members_of_geohash_box(
 
 /// Search across the centre geohash cell and all eight neighbours.
 /// Duplicate adjacent cells (large radii) are skipped.
-/// C: geo.c:375-428, membersOfAllNeighbors.
 fn members_of_all_neighbors(
     zset: &InlineZSet,
     n: &GeoHashRadius,
@@ -450,7 +435,6 @@ fn zadd_geo(
 // ── Commands ──────────────────────────────────────────────────────────────────
 
 /// GEOADD key [NX|XX] [CH] longitude latitude member [...]
-/// C: geo.c:452-513, geoaddCommand.
 pub fn geoadd_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let mut xx = false;
     let mut nx = false;
@@ -499,7 +483,6 @@ pub fn geoadd_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// Core implementation of GEORADIUS, GEORADIUSBYMEMBER, GEOSEARCH, GEOSEARCHSTORE.
-/// C: geo.c:533-864, georadiusGeneric.
 pub fn georadius_generic(
     ctx: &mut CommandContext,
     src_key_index: usize,
@@ -839,25 +822,21 @@ pub fn georadius_generic(
 }
 
 /// GEORADIUS key x y radius unit [options]
-/// C: geo.c:867-869.
 pub fn georadius_command(ctx: &mut CommandContext) -> RedisResult<()> {
     georadius_generic(ctx, 1, RADIUS_COORDS)
 }
 
 /// GEORADIUSBYMEMBER key member radius unit [options]
-/// C: geo.c:872-874.
 pub fn georadiusbymember_command(ctx: &mut CommandContext) -> RedisResult<()> {
     georadius_generic(ctx, 1, RADIUS_MEMBER)
 }
 
 /// GEORADIUS_RO — read-only variant.
-/// C: geo.c:877-879.
 pub fn georadiusro_command(ctx: &mut CommandContext) -> RedisResult<()> {
     georadius_generic(ctx, 1, RADIUS_COORDS | RADIUS_NOSTORE)
 }
 
 /// GEORADIUSBYMEMBER_RO — read-only variant.
-/// C: geo.c:882-884.
 pub fn georadiusbymemberro_command(ctx: &mut CommandContext) -> RedisResult<()> {
     georadius_generic(ctx, 1, RADIUS_MEMBER | RADIUS_NOSTORE)
 }
@@ -865,20 +844,17 @@ pub fn georadiusbymemberro_command(ctx: &mut CommandContext) -> RedisResult<()> 
 /// GEOSEARCH key [FROMMEMBER member|FROMLONLAT lon lat]
 ///              [BYRADIUS r unit|BYBOX w h unit|BYPOLYGON n ...]
 ///              [WITHCOORD] [WITHDIST] [WITHHASH] [COUNT count [ANY]] [ASC|DESC]
-/// C: geo.c:886-888.
 pub fn geosearch_command(ctx: &mut CommandContext) -> RedisResult<()> {
     georadius_generic(ctx, 1, GEOSEARCH_FLAG)
 }
 
 /// GEOSEARCHSTORE dest src [options] [STOREDIST]
-/// C: geo.c:890-892.
 pub fn geosearchstore_command(ctx: &mut CommandContext) -> RedisResult<()> {
     georadius_generic(ctx, 2, GEOSEARCH_FLAG | GEOSEARCHSTORE_FLAG)
 }
 
 /// GEOHASH key member [member ...]
 /// Returns an 11-character base-32 geohash string for each member.
-/// C: geo.c:898-954, geohashCommand.
 pub fn geohash_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let key = RedisString::from_bytes(ctx.arg(1)?.as_bytes());
 
@@ -957,7 +933,6 @@ pub fn geohash_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
 /// GEOPOS key member [member ...]
 /// Returns `[[longitude, latitude], ...]`; null array for missing members.
-/// C: geo.c:960-986, geoposCommand.
 pub fn geopos_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let key = RedisString::from_bytes(ctx.arg(1)?.as_bytes());
 
@@ -1010,7 +985,6 @@ pub fn geopos_command(ctx: &mut CommandContext) -> RedisResult<()> {
 /// GEODIST key member1 member2 [unit]
 /// Returns the great-circle distance in the requested unit, or null if either
 /// member is missing.
-/// C: geo.c:993-1022, geodistCommand.
 pub fn geodist_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.argc();
     let to_meter = if argc == 5 {

@@ -1,13 +1,10 @@
 //! `valkey-check-aof` utility — a dry-parse validator for AOF files.
 //!
-//! Faithful port of `reference/valkey/src/valkey-check-aof.c`. Invoked when the
-//! binary is run via the `valkey-check-aof` name (argv[0] dispatch in `main`).
-//! It does not mutate any keyspace — it walks the bytes of an AOF (or the files
-//! named by a manifest), tracking the last fully-parsed offset and line so it
-//! can report `ok_up_to_line` and decide validity, exactly like the C utility.
-//!
-//! Output strings match the upstream `printf`s verbatim because the upstream
-//! `integration/aof.tcl` suite `assert_match`es them.
+//! Invoked when the binary is run via the `valkey-check-aof` name (argv[0]
+//! dispatch in `main`). It does not mutate any keyspace — it walks the bytes of
+//! an AOF (or the files named by a manifest), tracking the last fully-parsed
+//! offset and line so it can report validity. Output strings match upstream
+//! validator format so test suites recognize the results.
 
 use std::path::{Path, PathBuf};
 
@@ -88,10 +85,9 @@ fn file_is_rdb(path: &Path) -> bool {
     bytes.len() >= 8 && &bytes[..5] == b"REDIS"
 }
 
-/// Mirrors C `fileIsManifest`: scans leading lines; a line beginning with
-/// `file` marks it a manifest, a comment is skipped, anything else stops the
-/// scan. So a RESP AOF (first byte `*`) is never mistaken for a manifest even
-/// if its payload contains the word "file".
+/// Scans leading lines; a line beginning with `file` marks it a manifest, a
+/// comment is skipped, anything else stops the scan. So a RESP AOF (first byte
+/// `*`) is never mistaken for a manifest even if its payload contains the word "file".
 fn file_is_manifest(path: &Path) -> bool {
     let content = match std::fs::read(path) {
         Ok(b) => b,
@@ -223,7 +219,7 @@ fn load_manifest(path: &Path) -> Result<Manifest, ()> {
 
 /// Walk a single AOF file, tracking the last fully-parsed byte offset (`pos`)
 /// and 1-based line counter. Returns Ok when fully parsed, Err when a trailing
-/// short/garbled record is found (the C utility then prints "is not valid").
+/// short/garbled record is found.
 fn check_single_aof(
     name: &str,
     path: &Path,
@@ -360,7 +356,7 @@ fn check_single_aof(
     Ok(AofCheck::Ok)
 }
 
-/// Byte cursor mirroring the C reader: `line` starts at 1 and increments once
+/// Byte cursor tracking state: `line` starts at 1 and increments once
 /// per consumed `\r\n`; `pos` is the read head, `committed_pos` the last
 /// offset that completed a full RESP record.
 struct Cursor<'a> {

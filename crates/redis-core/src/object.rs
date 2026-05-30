@@ -1,23 +1,19 @@
 //! `RedisObject` — runtime value types held in a Redis database slot.
 //!
-//! Translation of `src/object.c` (1931 lines, ~58 functions).
-//!
 //! The C `robj` struct uses embedded-memory tricks (hasembkey, hasembval, hasexpire)
 //! that are pure allocator optimizations. In Rust these collapse:
 //! - The key lives in the db `HashMap`, not inside the object.
 //! - The expire time lives in `RedisDb`'s expiry table, not inside the object.
 //! - The embedded value becomes the inner data of the enum variant.
 //! - `incrRefCount`/`decrRefCount`/`freeXxxObject` are replaced by Rust ownership + `Drop`.
-//! - `makeObjectShared` maps to `Arc<RedisObject>` (not yet introduced — Phase 3+).
+//! - `makeObjectShared` maps to `Arc<RedisObject>` (not yet introduced).
 //! - The small integer pool (`shared.integers[0..10000]`) needs a lazy-static Arc array;
 //!   see `TODO(architect)` on `create_string_object_from_long_long_with_options`.
 //!
 //! PORT NOTE: EMBSTR and RAW string encodings are layout-identical in Rust (`Vec<u8>`
 //! under the hood). The distinction is preserved as an enum variant tag because it affects
 //! the semantics of `try_object_encoding` (decides whether to re-encode) and is reported by
-//! `OBJECT ENCODING`. Phase 4 may collapse them if benchmarks show no benefit.
-
-// C: object.c:31-41 (includes)
+//! `OBJECT ENCODING`.
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
@@ -31,7 +27,6 @@ use crate::server::RedisServer;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants
-// C: server.h (various OBJ_* and related constants)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Sentinel expiry value meaning "no expiry". Matches C's `EXPIRY_NONE = -1`.
@@ -81,7 +76,6 @@ pub enum ObjectType {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Per-type encoding sub-variants
-// C: OBJ_ENCODING_* constants in server.h
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Encoding sub-variants for `RedisObject::String`.
@@ -103,16 +97,14 @@ pub enum StringEncoding {
 
 /// Encoding sub-variants for `RedisObject::List`.
 ///
-/// Phase 4 will replace `ListPack` and `QuickList` with real `redis_ds`
-/// types. Until then, list commands operate over `Inline`, a `VecDeque` of
-/// `RedisString` providing O(1) head/tail ops and trivial index access.
+/// List commands operate over `Inline`, a `VecDeque` of `RedisString` providing
+/// O(1) head/tail ops and trivial index access.
 #[derive(Debug, Clone)]
 pub enum ListEncoding {
     /// Pragmatic interim encoding used by the in-tree list commands.
     ///
     /// Provides O(1) push/pop on both ends and O(n) middle ops, which is
-    /// sufficient for byte-exact Redis semantics. Phase 4 replaces this with
-    /// the real ListPack/QuickList encodings once `redis-ds` is ready.
+    /// sufficient for byte-exact Redis semantics.
     Inline(VecDeque<RedisString>),
     /// Compact list-pack byte array (OBJ_ENCODING_LISTPACK).
     // TODO(architect): replace VecDeque with real encoding in Phase 4
@@ -260,18 +252,15 @@ impl InlineHash {
 
 /// Encoding sub-variants for `RedisObject::Set`.
 ///
-/// Phase 4 will replace `ListPack`, `IntSet`, and `HashTable` with real
-/// `redis_ds` encodings. Until then, set commands operate over `Inline`,
-/// a `HashSet<RedisString>` providing O(1) membership and add/remove.
+/// Set commands operate over `Inline`, a `HashSet<RedisString>` providing
+/// O(1) membership and add/remove.
 #[derive(Debug, Clone)]
 pub enum SetEncoding {
     /// Pragmatic interim encoding used by the in-tree set commands.
     ///
     /// Backed by `HashSet<RedisString>` for O(1) membership tests, adds,
     /// and removes, which is sufficient for byte-exact Redis semantics
-    /// across SADD/SREM/SMEMBERS/SINTER/SUNION/SDIFF and friends. Phase 4
-    /// swaps this for real ListPack / IntSet / HashTable encodings once
-    /// `redis-ds` ships the underlying datastructures.
+    /// across SADD/SREM/SMEMBERS/SINTER/SUNION/SDIFF and friends.
     Inline(InlineSet),
     /// Compact list-pack byte array (OBJ_ENCODING_LISTPACK).
     // TODO(architect): replace stub Vec with real listpack encoding in Phase 4
@@ -321,7 +310,7 @@ impl Ord for F64Ord {
     }
 }
 
-/// Pragmatic Phase-B sorted-set storage mirroring real Redis's dict + skiplist.
+/// Pragmatic sorted-set storage mirroring real Redis's dict + skiplist.
 ///
 /// The `by_member` map provides O(1) score lookup by member; the
 /// `by_order` set provides O(log N) ordered traversal in
@@ -403,9 +392,7 @@ pub enum ZSetEncoding {
     ///
     /// Mirrors real Redis's dict + zskiplist pair via `HashMap` for O(1)
     /// member-keyed score lookup and `BTreeSet` for O(log N) ordered
-    /// traversal. Phase 4 swaps this for the real `redis_ds::ZSet`
-    /// (skiplist + hashtable) once that crate ships the underlying
-    /// datastructures.
+    /// traversal.
     Inline(InlineZSet),
     /// Compact list-pack byte array (OBJ_ENCODING_LISTPACK).
     ListPack(Vec<u8>),
@@ -416,17 +403,14 @@ pub enum ZSetEncoding {
 
 /// Encoding sub-variants for `RedisObject::Hash`.
 ///
-/// Phase 4 will replace `ListPack` and `HashTable` with real `redis_ds`
-/// types. Until then, hash commands operate over `Inline`, a plain
-/// `InlineHash` providing the byte-exact semantics
-/// of every wire-level HASH operation.
+/// Hash commands operate over `Inline`, a plain `InlineHash` providing
+/// the byte-exact semantics of every wire-level HASH operation.
 #[derive(Debug, Clone)]
 pub enum HashEncoding {
     /// Pragmatic interim encoding used by the in-tree hash commands.
     ///
     /// Backed by `InlineHash` for field lookups, updates, and insertion-order
-    /// iteration. Phase 4 swaps this for real ListPack / HashTable
-    /// encodings once `redis-ds` ships the underlying datastructures.
+    /// iteration.
     Inline(InlineHash),
     /// Compact list-pack byte array (OBJ_ENCODING_LISTPACK).
     // TODO(architect): replace stub Vec with real listpack encoding in Phase 4
@@ -446,7 +430,6 @@ pub type LruClock = u32;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // RedisObject — the main enum (replaces the architect stub)
-// C: robj (typedef in server.h)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// The canonical Redis runtime value type.
@@ -457,8 +440,8 @@ pub type LruClock = u32;
 /// (originally stored directly in the robj's trailing memory in C).
 ///
 /// PORT NOTE: The architect stub stored `lru` and `expire` nowhere; this port
-/// adds them to the object. Phase 4 may move `expire` to a separate per-db
-/// expiry table (matching `redisDb.expires` in C) and remove it from here.
+/// adds them to the object. Future versions may move `expire` to a separate
+/// per-db expiry table (matching `redisDb.expires` in C) and remove it from here.
 #[derive(Debug, Clone)]
 pub struct RedisObject {
     /// LRU/LFU data (24 bits used). 0 = not initialised.
@@ -471,10 +454,9 @@ pub struct RedisObject {
 
 /// Encoding sub-variants for `RedisObject::Stream`.
 ///
-/// Round 9 introduces the pragmatic `Inline` encoding backed by
-/// `redis_ds::stream::InlineStream` (sorted Vec of entries). Phase 5
-/// will replace this with the real rax + listpack representation once
-/// those data structures ship.
+/// The pragmatic `Inline` encoding backed by `redis_ds::stream::InlineStream`
+/// (sorted Vec of entries). Future versions may replace this with the real
+/// rax + listpack representation once those data structures ship.
 #[derive(Debug, Clone)]
 pub enum StreamEncoding {
     Inline(InlineStream),
@@ -520,8 +502,8 @@ pub enum ObjectKind {
     Set(SetEncoding),
     ZSet(ZSetEncoding),
     Stream(StreamEncoding),
-    /// Phase 10: module-defined types.
-    // TODO(architect): replace with redis_modules::ModuleValue when Phase 10 lands
+    /// Module-defined types.
+    // TODO(architect): replace with redis_modules::ModuleValue when modules are available
     Module,
     /// RedisJSON: native JSON document type.
     ///
@@ -536,7 +518,6 @@ pub enum ObjectKind {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Memory overhead reporting (used by MEMORY STATS / MEMORY OVERHEAD)
-// C: struct serverMemOverhead in server.h
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Per-database memory breakdown (one entry per db, part of `ServerMemOverhead`).
@@ -550,7 +531,6 @@ pub struct DbOverhead {
 }
 
 /// Server-wide memory overhead report. Returned by `get_memory_overhead_data`.
-/// C: struct serverMemOverhead.
 #[derive(Debug, Default)]
 pub struct ServerMemOverhead {
     pub total_allocated: usize,
@@ -610,7 +590,6 @@ impl RedisObject {
     }
 
     /// Create a raw-string object (OBJ_ENCODING_RAW).
-    /// C: createRawStringObject(ptr, len) → object.c:139
     pub fn new_raw_string(bytes: &[u8]) -> Self {
         Self::bare(ObjectKind::String(StringEncoding::Raw(
             RedisString::from_bytes(bytes),
@@ -618,7 +597,7 @@ impl RedisObject {
     }
 
     /// Create an EMBSTR string object.
-    /// C: createEmbeddedStringObject(ptr, len) → object.c:225
+    ///
     /// PORT NOTE: EMBSTR and RAW are layout-identical in Rust. The tag is kept
     /// for semantic correctness (OBJECT ENCODING output, tryObjectEncoding logic).
     pub fn new_embstr(bytes: &[u8]) -> Self {
@@ -628,7 +607,6 @@ impl RedisObject {
     }
 
     /// Create a string object, choosing EMBSTR or RAW based on size heuristic.
-    /// C: createStringObject(ptr, len) → object.c:244
     pub fn new_string(bytes: &[u8]) -> Self {
         if should_embed_string(bytes.len()) {
             Self::new_embstr(bytes)
@@ -647,7 +625,6 @@ impl RedisObject {
     }
 
     /// Create an INT-encoded string object from an `i64`.
-    /// C: createObject(OBJ_STRING, NULL) + set encoding INT → object.c:414
     pub fn new_int_string(value: i64) -> Self {
         Self::bare(ObjectKind::String(StringEncoding::Int(value)))
     }
@@ -655,8 +632,6 @@ impl RedisObject {
     /// Create a string object, promoting to `Int` encoding when the bytes are
     /// the canonical decimal ASCII representation of an `i64`. Otherwise picks
     /// `Embstr`/`Raw` via the size threshold.
-    ///
-    /// C: createStringObject + tryObjectEncoding fast path (`t_string.c` SET).
     pub fn new_string_try_encoded(bytes: &[u8]) -> Self {
         if let Some(value) = parse_canonical_decimal_i64(bytes) {
             return Self::new_int_string(value);
@@ -672,24 +647,17 @@ impl RedisObject {
     }
 
     /// Create an empty list object with the pragmatic Inline encoding.
-    ///
-    /// Phase 4 will replace this with one of the real `redis-ds` encodings
-    /// (ListPack for small lists, QuickList for larger ones). For now the
-    /// `Inline` `VecDeque<RedisString>` is the single working encoding used
-    /// by every list command in the redis-commands crate.
     pub fn new_list() -> Self {
         Self::bare(ObjectKind::List(ListEncoding::Inline(VecDeque::new())))
     }
 
     /// Create a list object with QuickList encoding.
-    /// C: createQuicklistObject(fill, compress) → object.c:481
     pub fn new_quicklist(_fill: i32, _compress: i32) -> Self {
         // TODO(port): pass fill/compress to the real QuickList when redis-ds lands (Phase 4)
         Self::bare(ObjectKind::List(ListEncoding::QuickList(VecDeque::new())))
     }
 
     /// Create a list object with ListPack encoding.
-    /// C: createListListpackObject() → object.c:488
     pub fn new_list_listpack() -> Self {
         Self::bare(ObjectKind::List(ListEncoding::ListPack(Vec::new())))
     }
@@ -765,30 +733,21 @@ impl RedisObject {
     }
 
     /// Create a set object with full hash-table encoding.
-    /// C: createSetObject() → object.c:495
     pub fn new_set_hashtable() -> Self {
         Self::bare(ObjectKind::Set(SetEncoding::HashTable(HashSet::new())))
     }
 
     /// Create a set object with IntSet encoding.
-    /// C: createIntsetObject() → object.c:502
     pub fn new_intset() -> Self {
         Self::bare(ObjectKind::Set(SetEncoding::IntSet(Vec::new())))
     }
 
     /// Create a set object with ListPack encoding.
-    /// C: createSetListpackObject() → object.c:509
     pub fn new_set_listpack() -> Self {
         Self::bare(ObjectKind::Set(SetEncoding::ListPack(Vec::new())))
     }
 
     /// Create an empty set object with the pragmatic Inline encoding.
-    ///
-    /// Phase 4 will replace this with one of the real `redis-ds` encodings
-    /// (ListPack for small sets, IntSet for all-integer sets, HashTable
-    /// for larger ones). For now the `Inline` `HashSet<RedisString>` is
-    /// the single working encoding used by every set command in the
-    /// redis-commands crate.
     pub fn new_set() -> Self {
         Self::bare(ObjectKind::Set(SetEncoding::Inline(InlineSet::new())))
     }
@@ -840,7 +799,6 @@ impl RedisObject {
     }
 
     /// Create a hash object with ListPack encoding.
-    /// C: createHashObject() → object.c:516
     pub fn new_hash_listpack() -> Self {
         Self::bare(ObjectKind::Hash(HashEncoding::ListPack(Vec::new())))
     }
@@ -851,11 +809,6 @@ impl RedisObject {
     }
 
     /// Create an empty hash object with the pragmatic Inline encoding.
-    ///
-    /// Phase 4 will replace this with one of the real `redis-ds` encodings
-    /// (ListPack for small hashes, HashTable for larger ones). For now the
-    /// `Inline` `InlineHash` is the single working
-    /// encoding used by every hash command in the redis-commands crate.
     pub fn new_hash() -> Self {
         Self::bare(ObjectKind::Hash(HashEncoding::Inline(InlineHash::new())))
     }
@@ -902,23 +855,16 @@ impl RedisObject {
     }
 
     /// Create a sorted-set object with SkipList encoding.
-    /// C: createZsetObject() → object.c:523
     pub fn new_zset_skiplist() -> Self {
         Self::bare(ObjectKind::ZSet(ZSetEncoding::SkipList(Vec::new())))
     }
 
     /// Create a sorted-set object with ListPack encoding.
-    /// C: createZsetListpackObject() → object.c:534
     pub fn new_zset_listpack() -> Self {
         Self::bare(ObjectKind::ZSet(ZSetEncoding::ListPack(Vec::new())))
     }
 
     /// Create an empty sorted-set object with the pragmatic Inline encoding.
-    ///
-    /// Phase 4 will replace this with the real `redis-ds` encodings
-    /// (ListPack for small zsets, SkipList for larger ones). For now the
-    /// `Inline` `InlineZSet` is the single working encoding used by every
-    /// zset command in the redis-commands crate.
     pub fn new_zset() -> Self {
         Self::bare(ObjectKind::ZSet(ZSetEncoding::Inline(InlineZSet::new())))
     }
@@ -951,7 +897,6 @@ impl RedisObject {
     }
 
     /// Create a stream object with the pragmatic Inline encoding.
-    /// C: createStreamObject() → object.c:541
     pub fn new_stream() -> Self {
         Self::bare(ObjectKind::Stream(StreamEncoding::Inline(
             InlineStream::new(),
@@ -1067,7 +1012,6 @@ impl RedisObject {
     }
 
     /// Return the encoding name for `OBJECT ENCODING`.
-    /// C: strEncoding(encoding) → object.c:1171
     ///
     /// For the `Inline` interim encodings, the reported name follows the
     /// listpack→big-encoding crossover heuristics Valkey applies: small
@@ -1102,7 +1046,6 @@ impl RedisObject {
     }
 
     /// Return `true` if the object has a byte-string (RAW or EMBSTR) encoding.
-    /// C: sdsEncodedObject(o) macro → `o->encoding == OBJ_ENCODING_RAW || == OBJ_ENCODING_EMBSTR`
     pub fn is_sds_encoded(&self) -> bool {
         matches!(
             &self.kind,
@@ -1114,7 +1057,6 @@ impl RedisObject {
     // ── Expiry ────────────────────────────────────────────────────────────
 
     /// Return the expiry in milliseconds, or `None` if no expiry.
-    /// C: objectGetExpire(o) → object.c:299
     pub fn get_expire(&self) -> Option<i64> {
         if self.expire == EXPIRY_NONE {
             None
@@ -1124,7 +1066,6 @@ impl RedisObject {
     }
 
     /// Set the expiry in milliseconds. `None` clears it.
-    /// C: objectSetExpire(o, expire) → object.c:311
     pub fn set_expire(&mut self, expire: Option<i64>) {
         self.expire = expire.unwrap_or(EXPIRY_NONE);
     }
@@ -1134,7 +1075,6 @@ impl RedisObject {
     /// Return a decoded (byte-string) representation of a string object.
     /// For RAW/EMBSTR: borrows the inner `RedisString`.
     /// For INT: formats the integer and returns an owned `RedisString`.
-    /// C: getDecodedObject(o) → object.c:928
     pub fn decoded(&self) -> Result<Cow<'_, RedisString>, RedisError> {
         match &self.kind {
             ObjectKind::String(StringEncoding::Raw(s)) => Ok(Cow::Borrowed(s)),
@@ -1154,7 +1094,6 @@ impl RedisObject {
     /// Try to re-encode a string object to save memory.
     /// Converts `Raw`/`Embstr` → `Int` if the string is a valid long;
     /// Converts `Raw` → `Embstr` if the string is short enough.
-    /// C: tryObjectEncodingEx(o, try_trim) → object.c:865
     pub fn try_encode(mut self, try_trim: bool) -> Self {
         let ObjectKind::String(_) = &self.kind else {
             return self;
@@ -1205,7 +1144,6 @@ impl RedisObject {
     }
 
     /// Convenience wrapper: `try_encode(true)`.
-    /// C: tryObjectEncoding(o) → object.c:922
     pub fn try_object_encoding(self) -> Self {
         self.try_encode(true)
     }
@@ -1214,7 +1152,6 @@ impl RedisObject {
 
     /// Extract a `long long` (`i64`) from a string object.
     /// Returns `Err(RedisError::not_integer())` on failure.
-    /// C: getLongLongFromObject(o, target) → object.c:1092
     pub fn get_long_long(&self) -> Result<i64, RedisError> {
         match &self.kind {
             ObjectKind::String(StringEncoding::Int(n)) => Ok(*n),
@@ -1229,7 +1166,6 @@ impl RedisObject {
 
     /// Extract a `double` from a string object.
     /// Returns `Err(RedisError::not_float())` on failure.
-    /// C: getDoubleFromObject(o, target) → object.c:1026
     pub fn get_double(&self) -> Result<f64, RedisError> {
         match &self.kind {
             ObjectKind::String(StringEncoding::Int(n)) => Ok(*n as f64),
@@ -1241,18 +1177,16 @@ impl RedisObject {
     }
 
     /// Extract a `long double` as `f64` (Rust has no `long double` type).
-    /// C: getLongDoubleFromObject(o, target) → object.c:1059
+    ///
     /// PORT NOTE: C uses `long double` (80-bit extended precision on x86). Rust
     /// has no equivalent; we use `f64`. This may cause precision differences
     /// for INCRBYFLOAT/HINCRBYFLOAT at the extremes of the representable range.
-    /// TODO(port): evaluate f64 vs f128 (nightly) when Phase C oracle testing starts.
     pub fn get_long_double(&self) -> Result<f64, RedisError> {
         self.get_double()
     }
 
     /// Return the string length (number of bytes in the byte-string representation).
     /// For INT-encoded objects, returns the decimal digit count.
-    /// C: stringObjectLen(o) → object.c:1017
     pub fn string_len(&self) -> Result<usize, RedisError> {
         match &self.kind {
             ObjectKind::String(StringEncoding::Raw(s) | StringEncoding::Embstr(s)) => Ok(s.len()),
@@ -1264,7 +1198,6 @@ impl RedisObject {
     // ── String comparison ─────────────────────────────────────────────────
 
     /// Binary-compare two string objects. Returns `Ordering`.
-    /// C: compareStringObjects(a, b) → object.c:990
     pub fn compare_binary(&self, other: &Self) -> Result<Ordering, RedisError> {
         let a = self.decoded()?;
         let b = other.decoded()?;
@@ -1272,15 +1205,14 @@ impl RedisObject {
     }
 
     /// Locale-collation compare of two string objects.
-    /// C: collateStringObjects(a, b) → object.c:995
+    ///
     /// TODO(port): `strcoll` is locale-dependent; Rust std has no direct equivalent.
-    /// Using byte-wise ordering as a placeholder. Phase C+ must use the `locale` crate.
+    /// Using byte-wise ordering as a placeholder.
     pub fn compare_collate(&self, other: &Self) -> Result<Ordering, RedisError> {
         self.compare_binary(other)
     }
 
     /// Return `true` if two string objects have equal byte representations.
-    /// C: equalStringObjects(a, b) → object.c:1003
     pub fn equal_string(&self, other: &Self) -> bool {
         match (&self.kind, &other.kind) {
             (
@@ -1303,20 +1235,17 @@ impl RedisObject {
     // ── LRU / LFU ────────────────────────────────────────────────────────
 
     /// Return the LFU frequency byte from the LRU clock field.
-    /// C: objectGetLFUFrequency(o) → object.c:1645
     pub fn lfu_frequency(&self) -> u8 {
         // TODO(port): call lrulfu module's lfu_getFrequency when available
         (self.lru & 0xFF) as u8
     }
 
     /// Return the approximate LRU idle time in seconds.
-    /// C: objectGetLRUIdleSecs(o) → object.c:1652
     pub fn lru_idle_secs(&self) -> u32 {
         crate::lru_clock::current_lru_clock().wrapping_sub(self.lru)
     }
 
     /// Return an idleness measure (larger = more idle).
-    /// C: objectGetIdleness(o) → object.c:1657
     pub fn idleness(&self) -> u32 {
         self.lru_idle_secs()
     }
@@ -1459,13 +1388,9 @@ where
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Valkey quicklist negative-fill size tiers for `list-max-listpack-size`.
-///
-/// C: `quicklist.c` `optimization_level[]`.
 const LISTPACK_NEG_FILL_LIMITS: [usize; 5] = [4096, 8192, 16384, 32768, 65536];
 
 /// Safety cap used when `list-max-listpack-size` is a positive entry count.
-///
-/// C: `quicklist.c` `SIZE_SAFETY_LIMIT`.
 const LISTPACK_SIZE_SAFETY_LIMIT: usize = 8192;
 const LISTPACK_FIXED_OVERHEAD_BYTES: usize = 7;
 const LISTPACK_MIN_ENTRY_BYTES: usize = 2;
@@ -1903,7 +1828,7 @@ pub fn is_canonical_i64_ascii(bytes: &[u8]) -> bool {
 }
 
 /// Return `true` if a string of `len` bytes should use EMBSTR encoding.
-/// C: shouldEmbedStringObject(val_len, key, expire) → object.c:229
+///
 /// PORT NOTE: In C the threshold also accounts for key/expire embedded in the same
 /// allocation. In Rust these live elsewhere, so we only check the value length.
 /// A 64-byte threshold matches the C behaviour for the simple (no-key, no-expire) case.
@@ -1918,7 +1843,7 @@ fn should_embed_string(len: usize) -> bool {
 /// Parse a byte slice as an `i64`. Returns `None` if not a valid integer.
 /// Parse a decimal integer from a byte slice.
 ///
-/// Mirrors `string2ll` in `util.c`: rejects leading/trailing whitespace,
+/// Rejects leading/trailing whitespace,
 /// the leading `+` sign, and any non-digit bytes. An empty slice and any
 /// slice containing whitespace return `None`.
 fn parse_long_long(bytes: &[u8]) -> Option<i64> {
@@ -1931,7 +1856,7 @@ fn parse_long_long(bytes: &[u8]) -> Option<i64> {
 
 /// Strict canonical-decimal parser for promoting a SET value to `Int` encoding.
 ///
-/// Mirrors `string2ll` in `util.c`: rejects leading `+`, leading zeros (except
+/// Rejects leading `+`, leading zeros (except
 /// the single string `"0"`), `-0`, leading or trailing whitespace, and any
 /// value whose round-trip ASCII form does not match the input byte-for-byte.
 /// On success the returned value's `format!("{}")` equals the input bytes.
@@ -1970,13 +1895,12 @@ fn parse_double(bytes: &[u8]) -> Option<f64> {
 }
 
 /// Format an `i64` as a decimal byte string.
-/// C: ll2string(buf, sizeof(buf), value) → util.c
 fn format_long_long(value: i64) -> RedisString {
     RedisString::from_bytes(value.to_string().as_bytes())
 }
 
 /// Format an `f64` as a byte string, with optional human-friendly trimming.
-/// C: ld2string(buf, sizeof(buf), value, flag) → util.c
+///
 /// PORT NOTE: C uses `long double` and custom formatting. We use `f64` and Rust's
 /// default `f64` formatting, which may differ in edge cases.
 /// TODO(port): match C's ld2string exactly for wire-diff fidelity in INCRBYFLOAT.
@@ -1993,7 +1917,6 @@ fn format_double(value: f64, human_friendly: bool) -> RedisString {
 }
 
 /// Return the number of decimal digits needed to represent `n` (including '-' for negatives).
-/// C: sdigits10((long)objectGetVal(o)) → util.c
 fn decimal_digit_count(n: i64) -> usize {
     if n == 0 {
         return 1;
@@ -2012,7 +1935,6 @@ fn decimal_digit_count(n: i64) -> usize {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Create a raw-string object from a byte slice.
-/// C: createRawStringObject(ptr, len) → object.c:139
 pub fn create_raw_string_object(bytes: &[u8]) -> RedisObject {
     RedisObject::new_raw_string(bytes)
 }
@@ -2023,19 +1945,16 @@ pub fn create_embedded_string_object(bytes: &[u8]) -> RedisObject {
 }
 
 /// Create a string object, auto-selecting encoding based on size.
-/// C: createStringObject(ptr, len) → object.c:244
 pub fn create_string_object(bytes: &[u8]) -> RedisObject {
     RedisObject::new_string(bytes)
 }
 
 /// Create a string object from an existing `RedisString`.
-/// C: createStringObjectFromSds(s) → object.c:252
 pub fn create_string_object_from_sds(s: RedisString) -> RedisObject {
     RedisObject::new_string_from_redis_string(s)
 }
 
 /// Create a string object from a `long long`, with encoding control flags.
-/// C: createStringObjectFromLongLongWithOptions(value, flag) → object.c:407
 ///
 /// TODO(architect): `LL2STROBJ_AUTO` case needs the shared integer pool
 /// (`shared.integers[]`), which requires a lazy_static `Arc<RedisObject>` array.
@@ -2057,32 +1976,27 @@ pub fn create_string_object_from_long_long_with_options(value: i64, flag: i32) -
 }
 
 /// Create a string object from a `long long`, preferring shared integer pool.
-/// C: createStringObjectFromLongLong(value) → object.c:428
 pub fn create_string_object_from_long_long(value: i64) -> RedisObject {
     create_string_object_from_long_long_with_options(value, LL2STROBJ_AUTO)
 }
 
 /// Create a non-shared string object from a `long long`.
-/// C: createStringObjectFromLongLongForValue(value) → object.c:434
 pub fn create_string_object_from_long_long_for_value(value: i64) -> RedisObject {
     create_string_object_from_long_long_with_options(value, LL2STROBJ_NO_SHARED)
 }
 
 /// Create an EMBSTR or RAW string object from a `long long` (never INT-encoded).
-/// C: createStringObjectFromLongLongWithSds(value) → object.c:440
 pub fn create_string_object_from_long_long_with_sds(value: i64) -> RedisObject {
     create_string_object_from_long_long_with_options(value, LL2STROBJ_NO_INT_ENC)
 }
 
 /// Create a string object from a `f64`.
-/// C: createStringObjectFromLongDouble(value, humanfriendly) → object.c:450
 pub fn create_string_object_from_long_double(value: f64, human_friendly: bool) -> RedisObject {
     let s = format_double(value, human_friendly);
     create_string_object(s.as_bytes())
 }
 
 /// Duplicate a string object, preserving encoding.
-/// C: dupStringObject(o) → object.c:464
 pub fn dup_string_object(o: &RedisObject) -> Result<RedisObject, RedisError> {
     match &o.kind {
         ObjectKind::String(StringEncoding::Raw(s)) => Ok(create_raw_string_object(s.as_bytes())),
@@ -2097,55 +2011,46 @@ pub fn dup_string_object(o: &RedisObject) -> Result<RedisObject, RedisError> {
 }
 
 /// Create a QuickList list object.
-/// C: createQuicklistObject(fill, compress) → object.c:481
 pub fn create_quicklist_object(fill: i32, compress: i32) -> RedisObject {
     RedisObject::new_quicklist(fill, compress)
 }
 
 /// Create a ListPack list object.
-/// C: createListListpackObject() → object.c:488
 pub fn create_list_listpack_object() -> RedisObject {
     RedisObject::new_list_listpack()
 }
 
 /// Create a HashTable set object.
-/// C: createSetObject() → object.c:495
 pub fn create_set_object() -> RedisObject {
     RedisObject::new_set_hashtable()
 }
 
 /// Create an IntSet set object.
-/// C: createIntsetObject() → object.c:502
 pub fn create_intset_object() -> RedisObject {
     RedisObject::new_intset()
 }
 
 /// Create a ListPack set object.
-/// C: createSetListpackObject() → object.c:509
 pub fn create_set_listpack_object() -> RedisObject {
     RedisObject::new_set_listpack()
 }
 
 /// Create a ListPack hash object.
-/// C: createHashObject() → object.c:516
 pub fn create_hash_object() -> RedisObject {
     RedisObject::new_hash_listpack()
 }
 
 /// Create a SkipList zset object.
-/// C: createZsetObject() → object.c:523
 pub fn create_zset_object() -> RedisObject {
     RedisObject::new_zset_skiplist()
 }
 
 /// Create a ListPack zset object.
-/// C: createZsetListpackObject() → object.c:534
 pub fn create_zset_listpack_object() -> RedisObject {
     RedisObject::new_zset_listpack()
 }
 
 /// Create a stream object.
-/// C: createStreamObject() → object.c:541
 pub fn create_stream_object() -> RedisObject {
     RedisObject::new_stream()
 }
@@ -2156,7 +2061,6 @@ pub fn create_stream_object() -> RedisObject {
 
 /// Check that `obj` is of the expected type. Returns `Err(RedisError::wrong_type())`
 /// if it is not. `None` is treated as an empty key (always matches).
-/// C: checkType(c, o, type) → object.c:824
 pub fn check_type(obj: Option<&RedisObject>, expected: ObjectType) -> Result<(), RedisError> {
     match obj {
         None => Ok(()),
@@ -2170,7 +2074,6 @@ pub fn check_type(obj: Option<&RedisObject>, expected: ObjectType) -> Result<(),
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Return `Ok(())` if the byte string can be parsed as an `i64`, writing the value.
-/// C: isSdsRepresentableAsLongLong(s, llval) → object.c:833
 pub fn is_sds_representable_as_long_long(
     s: &RedisString,
     llval: &mut i64,
@@ -2185,7 +2088,6 @@ pub fn is_sds_representable_as_long_long(
 }
 
 /// Return `Ok(())` if the string object can be represented as an `i64`.
-/// C: isObjectRepresentableAsLongLong(o, llval) → object.c:837
 pub fn is_object_representable_as_long_long(
     o: &RedisObject,
     llval: &mut i64,
@@ -2207,7 +2109,6 @@ pub fn is_object_representable_as_long_long(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Extract a `f64` from a string object, or 0 if `o` is `None`.
-/// C: getDoubleFromObject(o, target) → object.c:1026
 pub fn get_double_from_object(o: Option<&RedisObject>) -> Result<f64, RedisError> {
     match o {
         None => Ok(0.0),
@@ -2216,7 +2117,6 @@ pub fn get_double_from_object(o: Option<&RedisObject>) -> Result<f64, RedisError
 }
 
 /// Extract a `f64`, mapping errors to a caller-supplied or default message.
-/// C: getDoubleFromObjectOrReply(c, o, target, msg) → object.c:1045
 pub fn get_double_from_object_or_reply(
     o: Option<&RedisObject>,
     msg: Option<&[u8]>,
@@ -2226,7 +2126,6 @@ pub fn get_double_from_object_or_reply(
 }
 
 /// Extract a `f64` (as long double) from a string object, or 0 if `o` is `None`.
-/// C: getLongDoubleFromObject(o, target) → object.c:1059
 pub fn get_long_double_from_object(o: Option<&RedisObject>) -> Result<f64, RedisError> {
     match o {
         None => Ok(0.0),
@@ -2235,7 +2134,6 @@ pub fn get_long_double_from_object(o: Option<&RedisObject>) -> Result<f64, Redis
 }
 
 /// Extract a long double, mapping errors to a caller-supplied or default message.
-/// C: getLongDoubleFromObjectOrReply(c, o, target, msg) → object.c:1078
 pub fn get_long_double_from_object_or_reply(
     o: Option<&RedisObject>,
     msg: Option<&[u8]>,
@@ -2245,7 +2143,6 @@ pub fn get_long_double_from_object_or_reply(
 }
 
 /// Extract an `i64` from a string object, or 0 if `o` is `None`.
-/// C: getLongLongFromObject(o, target) → object.c:1092
 pub fn get_long_long_from_object(o: Option<&RedisObject>) -> Result<i64, RedisError> {
     match o {
         None => Ok(0),
@@ -2254,7 +2151,6 @@ pub fn get_long_long_from_object(o: Option<&RedisObject>) -> Result<i64, RedisEr
 }
 
 /// Extract an `i64`, mapping errors to a caller-supplied or default message.
-/// C: getLongLongFromObjectOrReply(c, o, target, msg) → object.c:1111
 pub fn get_long_long_from_object_or_reply(
     o: Option<&RedisObject>,
     msg: Option<&[u8]>,
@@ -2264,7 +2160,6 @@ pub fn get_long_long_from_object_or_reply(
 }
 
 /// Extract a `long` as `i64`, checking it fits in `[i64::MIN, i64::MAX]`.
-/// C: getLongFromObjectOrReply(c, o, target, msg) → object.c:1125
 pub fn get_long_from_object_or_reply(
     o: Option<&RedisObject>,
     msg: Option<&[u8]>,
@@ -2274,7 +2169,6 @@ pub fn get_long_from_object_or_reply(
 }
 
 /// Extract an `i64` in the closed range `[min, max]`.
-/// C: getRangeLongFromObjectOrReply(c, o, min, max, target, msg) → object.c:1141
 pub fn get_range_long_from_object_or_reply(
     o: Option<&RedisObject>,
     min: i64,
@@ -2299,7 +2193,6 @@ pub fn get_range_long_from_object_or_reply(
 }
 
 /// Extract a non-negative `i64` (>= 0).
-/// C: getPositiveLongFromObjectOrReply(c, o, target, msg) → object.c:1154
 pub fn get_positive_long_from_object_or_reply(
     o: Option<&RedisObject>,
     msg: Option<&[u8]>,
@@ -2309,7 +2202,6 @@ pub fn get_positive_long_from_object_or_reply(
 }
 
 /// Extract an `i32` from an object, checking the range.
-/// C: getIntFromObjectOrReply(c, o, target, msg) → object.c:1162
 pub fn get_int_from_object_or_reply(
     o: Option<&RedisObject>,
     msg: Option<&[u8]>,
@@ -2324,7 +2216,6 @@ pub fn get_int_from_object_or_reply(
 
 /// Compare two string objects with explicit flags.
 /// Returns negative/zero/positive (like C's `strcmp`).
-/// C: compareStringObjectsWithFlags(a, b, flags) → object.c:957
 pub fn compare_string_objects_with_flags(
     a: &RedisObject,
     b: &RedisObject,
@@ -2347,13 +2238,11 @@ pub fn compare_string_objects_with_flags(
 }
 
 /// Binary comparison. Returns negative/zero/positive.
-/// C: compareStringObjects(a, b) → object.c:990
 pub fn compare_string_objects(a: &RedisObject, b: &RedisObject) -> Result<i64, RedisError> {
     compare_string_objects_with_flags(a, b, STRING_COMPARE_BINARY)
 }
 
 /// Collation-based comparison.
-/// C: collateStringObjects(a, b) → object.c:995
 pub fn collate_string_objects(a: &RedisObject, b: &RedisObject) -> Result<i64, RedisError> {
     compare_string_objects_with_flags(a, b, STRING_COMPARE_COLL)
 }
@@ -2376,7 +2265,7 @@ fn compare_bytes(a: &[u8], b: &[u8]) -> i64 {
 
 /// Set the LRU or LFU clock value on an object based on the current maxmemory policy.
 /// Returns `true` if the value was updated.
-/// C: objectSetLRUOrLFU(val, lfu_freq, lru_idle_secs) → object.c:1668
+///
 /// TODO(port): needs access to lrulfu module (lrulfu_isUsingLFU, lfu_import, lru_import).
 pub fn object_set_lru_or_lfu(obj: &mut RedisObject, lfu_freq: i64, lru_idle_secs: i64) -> bool {
     // TODO(port): check global maxmemory_policy once server state is accessible
@@ -2397,7 +2286,7 @@ pub fn object_set_lru_or_lfu(obj: &mut RedisObject, lfu_freq: i64, lru_idle_secs
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Estimate memory used by a key's value in bytes.
-/// C: objectComputeSize(key, o, sample_size, dbid) → object.c:1194
+///
 /// TODO(port): requires redis-ds type sizes (ListPack, QuickList, IntSet, ZSet, Stream rax).
 /// Returning a rough estimate for now.
 pub fn object_compute_size(
@@ -2484,20 +2373,20 @@ pub fn object_compute_size(
 }
 
 /// Build a memory overhead report for MEMORY STATS / MEMORY OVERHEAD.
-/// C: getMemoryOverheadData() → object.c:1368
+///
 /// TODO(port): requires full server state access (replication, AOF, cluster, etc.).
 /// Returning a default-zeroed stub.
 pub fn get_memory_overhead_data(_server: &RedisServer) -> ServerMemOverhead {
-    // TODO(port): implement full memory overhead calculation per object.c:1368-1480
+    // TODO(port): implement full memory overhead calculation
     // Blocked on: replication state, AOF state, cluster state, kvstore, client stats.
     ServerMemOverhead::default()
 }
 
 /// Build the MEMORY DOCTOR diagnostic report string.
-/// C: getMemoryDoctorReport() → object.c:1492
+///
 /// TODO(port): requires full getMemoryOverheadData() + server.replicas, server.clients.
 pub fn get_memory_doctor_report(_server: &RedisServer) -> RedisString {
-    // TODO(port): implement diagnostics per object.c:1492-1642
+    // TODO(port): implement diagnostics
     RedisString::from_bytes(
         b"Hi Sam, memory introspection is not yet fully ported. I will be back.\n",
     )
@@ -2505,12 +2394,10 @@ pub fn get_memory_doctor_report(_server: &RedisServer) -> RedisString {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // OBJECT command
-// C: objectCommand(client *c) → object.c:1698
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Implement the Redis `OBJECT` command.
 /// Subcommands: ENCODING, FREQ, IDLETIME, REFCOUNT, HELP.
-/// C: objectCommand(client *c) → object.c:1698
 pub fn object_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let subcmd = ctx.arg(1)?;
     let subcmd_bytes = subcmd.as_bytes().to_ascii_lowercase();
@@ -2587,12 +2474,10 @@ pub fn object_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MEMORY command
-// C: memoryCommand(client *c) → object.c:1748
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Implement the Redis `MEMORY` command.
 /// Subcommands: HELP, USAGE, STATS, MALLOC-STATS, DOCTOR, PURGE.
-/// C: memoryCommand(client *c) → object.c:1748
 pub fn memory_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let subcmd = ctx.arg(1)?;
     let subcmd_bytes = subcmd.as_bytes().to_ascii_lowercase();
@@ -2637,7 +2522,7 @@ pub fn memory_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
             }
         }
         // TODO(port): look up key in db and call object_compute_size
-        // Blocked on CommandContext having db access (Phase 3).
+ // Blocked on CommandContext having db access.
         // PORT NOTE: samples parsed above but not yet consumed — will be passed to object_compute_size.
         let _ = samples;
         ctx.reply_null_bulk()?;

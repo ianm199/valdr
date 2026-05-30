@@ -1,17 +1,12 @@
 //! Plain-TCP connection-type backend.
 //!
-//! Port of `socket.c`'s `CT_Socket` vtable to `ConnectionTypeTrait`. Translates
-//! the structure faithfully; the one representation change is that I/O goes
-//! through the connection's owned stream (`Connection::io`, a `dyn ConnIo`)
-//! instead of a raw `fd` + libc `read`/`write` — the safe-Rust handle model
-//! decided in `connection.rs`. The event-loop registration that C did via
-//! `aeCreateFileEvent`/`aeDeleteFileEvent` becomes interest derived from
-//! handler presence (`connHasReadHandler`/`connHasWriteHandler`), which the
-//! owner loop reads to drive `mio` — so this backend stays event-loop-agnostic.
+//! Structural port of `socket.c`'s `CT_Socket` vtable to `ConnectionTypeTrait`.
+//! I/O goes through the connection's owned stream (`Connection::io`, a `dyn ConnIo`)
+//! instead of a raw `fd` + libc `read`/`write`. Event-loop registration becomes
+//! interest derived from handler presence, which the owner loop reads to drive `mio`.
 //!
-//! Out of scope here (deferred per docs/TLS_FAITHFUL_PLAN.md): outbound
-//! `connect`/`blocking_connect`, `listen`/`close_listener` (the owner loop owns
-//! binding/accepting), and the `sync_*` blocking helpers (RDB/repl transfer).
+//! Out of scope here (deferred): outbound `connect`/`blocking_connect`, `listen`/`close_listener`,
+//! and the `sync_*` blocking helpers (RDB/repl transfer).
 
 use std::io::IoSlice;
 
@@ -24,7 +19,6 @@ use crate::connection::{
 
 /// The plain-TCP backend. Stateless: per-connection state lives on `Connection`.
 ///
-/// C: `static ConnectionType CT_Socket` in socket.c.
 #[derive(Debug, Default)]
 pub struct SocketConnectionType;
 
@@ -36,7 +30,6 @@ impl SocketConnectionType {
 
 /// Should a transport error transition a CONNECTED connection to ERROR?
 ///
-/// C: `if (errno != EINTR && conn->state == CONN_STATE_CONNECTED) state = ERROR`.
 /// `WouldBlock` (EAGAIN) and `Interrupted` (EINTR) are transient — never fatal.
 fn is_transient(kind: std::io::ErrorKind) -> bool {
     matches!(
@@ -54,7 +47,6 @@ impl ConnectionTypeTrait for SocketConnectionType {
         Ok(())
     }
 
-    /// C: `connSocketRead`. EOF (`0`) → state CLOSED; transient errors are
     /// returned as `Io(WouldBlock/Interrupted)` without changing state.
     fn read(&self, conn: &mut Connection, buf: &mut [u8]) -> Result<usize, RedisError> {
         let io = conn
@@ -77,7 +69,6 @@ impl ConnectionTypeTrait for SocketConnectionType {
         }
     }
 
-    /// C: `connSocketWrite`.
     fn write(&self, conn: &mut Connection, data: &[u8]) -> Result<usize, RedisError> {
         let io = conn
             .io
@@ -95,7 +86,6 @@ impl ConnectionTypeTrait for SocketConnectionType {
         }
     }
 
-    /// C: `connSocketWritev`.
     fn writev(&self, conn: &mut Connection, iov: &[IoSlice<'_>]) -> Result<usize, RedisError> {
         let io = conn
             .io
@@ -113,7 +103,6 @@ impl ConnectionTypeTrait for SocketConnectionType {
         }
     }
 
-    /// C: `connSocketAccept`. Transitions ACCEPTING → CONNECTED and fires the
     /// accept handler.
     fn accept(
         &self,
@@ -130,7 +119,6 @@ impl ConnectionTypeTrait for SocketConnectionType {
         Ok(())
     }
 
-    /// C: `connSocketSetReadHandler`. The `aeCreateFileEvent`/`aeDeleteFileEvent`
     /// step is the owner loop's job — it derives interest from handler presence.
     fn set_read_handler(
         &self,
@@ -141,7 +129,7 @@ impl ConnectionTypeTrait for SocketConnectionType {
         Ok(())
     }
 
-    /// C: `connSocketSetWriteHandler` — sets/clears the write barrier flag.
+    /// sets/clears the write barrier flag.
     fn set_write_handler(
         &self,
         conn: &mut Connection,
@@ -157,7 +145,6 @@ impl ConnectionTypeTrait for SocketConnectionType {
         Ok(())
     }
 
-    /// C: `connSocketGetLastError` (`strerror(conn->last_errno)`).
     fn get_last_error(&self, conn: &Connection) -> Option<Vec<u8>> {
         if conn.last_errno == 0 {
             None
@@ -176,13 +163,12 @@ impl ConnectionTypeTrait for SocketConnectionType {
         conn
     }
 
-    /// C: `connSocketClose` — drop the owned stream and mark closed.
+    /// drop the owned stream and mark closed.
     fn close(&self, conn: &mut Connection) {
         conn.io = crate::connection::ConnIoSlot::None;
         conn.state = ConnectionState::Closed;
     }
 
-    /// C: `connSocketShutdown` (`shutdown(fd, SHUT_RDWR)`). A half-shutdown on an
     /// owned stream is not separable here; treat as close for now.
     fn shutdown(&self, conn: &mut Connection) {
         self.close(conn);
@@ -300,7 +286,6 @@ pub fn socket_event_handler(conn: &mut Connection, readable: bool, writable: boo
 
 /// Register the socket backend in the global connection-type registry.
 ///
-/// C: `RedisRegisterConnectionTypeSocket` in socket.c.
 pub fn register_socket_connection_type() -> Result<(), RedisError> {
     crate::connection::conn_type_register(Box::new(SocketConnectionType::new()))
 }

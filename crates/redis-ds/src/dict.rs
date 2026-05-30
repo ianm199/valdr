@@ -1,10 +1,7 @@
-//! `Dict` — Redis's incrementally-rehashing hash table.
+//! `Dict` — incrementally-rehashing hash table.
 //!
-//! Source: `reference/valkey/src/dict.c` (and `dict.h`). The classic
-//! Redis dict: separate-chaining hash table with two underlying tables
-//! during incremental rehash, sized in powers of two, with per-type
-//! key/value callbacks. Used pervasively for the keyspace, expires,
-//! pubsub channels, command tables, and more.
+//! Separate-chaining hash table with two underlying tables during incremental
+//! rehash, sized in powers of two, with per-type key/value callbacks.
 
 use std::marker::PhantomData;
 
@@ -26,11 +23,11 @@ impl<K, V> Dict<K, V> {
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        reference/valkey/src/dict.c
+//   source:        (incrementally-rehashing dict, Redis stdlib)
 //   target_crate:  redis-ds
 //   confidence:    skeleton
 //   todos:         1
 //   port_notes:    0
 //   unsafe_blocks: 0
-//   notes:         stub awaiting Phase 4 translation
+//   notes:         stub awaiting translation
 // ──────────────────────────────────────────────────────────────────────────

@@ -1,10 +1,5 @@
 //! Replication command handlers: REPLICAOF / SLAVEOF, PSYNC, SYNC.
 //!
-//! Session 3A scope: just the master-side handshake accept path and the
-//! REPLICAOF toggle. The replica-side handshake (dialling the master, running
-//! PING / REPLCONF / PSYNC, applying the streamed RDB blob) is Wave C; the
-//! actual full-sync RDB transfer back to a freshly-attached replica is Wave B.
-//!
 //! All three handlers route through [`redis_core::replication`] for the
 //! global replication state. The pubsub registry is reused as the source of
 //! per-client outbound mpsc senders — the same writer-thread mechanism that
@@ -37,9 +32,7 @@ use redis_types::{RedisError, RedisResult, RedisString};
 ///
 /// `REPLICAOF NO ONE` cancels replica mode and becomes a standalone primary.
 /// `REPLICAOF <host> <port>` configures this server as a replica of the named
-/// master. The actual handshake — opening a TCP connection to the master and
-/// running PING / REPLCONF / PSYNC — is Wave C. Session 3A just records the
-/// target on [`ReplicationState`] and emits a TODO log.
+/// master. Records the target on [`ReplicationState`].
 pub fn replicaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ctx.arg_count() != 3 {
         return Err(RedisError::wrong_number_of_args(b"replicaof"));
@@ -337,12 +330,7 @@ fn is_no_one(host: &[u8], port: &[u8]) -> bool {
 /// Decides between partial resync (`+CONTINUE <runid>`) and full resync
 /// (`+FULLRESYNC <runid> <offset>`) based on whether the replica's claimed
 /// run id matches ours and its offset is still inside the live backlog
-/// window.
-///
-/// Session 3A wires the reply line correctly and registers a `ReplicaConn`
-/// entry in the global registry. The actual full-sync RDB transfer to the
-/// replica after `+FULLRESYNC` is a Wave B TODO — for now we just log that
-/// the master-side BGSAVE-for-replica path is not yet armed.
+/// window. Registers a `ReplicaConn` entry in the global registry.
 pub fn psync_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ctx.arg_count() != 3 {
         return Err(RedisError::wrong_number_of_args(b"psync"));
@@ -833,7 +821,6 @@ pub fn unblock_waitaof_role_change() {
 
 /// Ask attached replicas to report their current processed offset.
 ///
-/// C: `replicationRequestAckFromReplicas()` sends `REPLCONF GETACK *` after
 /// a client blocks in WAIT/WAITAOF. Without this prompt a caught-up replica may
 /// not send an ACK before the WAIT timeout, leaving tests stuck at zero acks.
 fn request_ack_from_replicas(repl: &ReplicationState) {
