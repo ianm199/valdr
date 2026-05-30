@@ -1,8 +1,6 @@
 //! RESP2/RESP3 parser and serializer.
-//!
 //! Owners (per `harness/type-vocabulary.tsv`):
-//!   - `RespFrame` — `src/frame.rs`
-//!
+//! - `RespFrame` — `src/frame.rs`
 //! Phase 2 of the pilot lives here.
 
 pub mod frame;

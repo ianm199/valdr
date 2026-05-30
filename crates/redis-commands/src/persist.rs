@@ -1,23 +1,19 @@
 //! Persistence commands: SAVE, BGSAVE.
-//!
 //! `SAVE` runs `rdb::save_rdb` synchronously in the calling thread and updates
 //! `last_save_unix` on success.
-//!
 //! `BGSAVE` on Unix uses `fork(2)` so the OS copy-on-write page mapping gives
 //! the child a frozen snapshot of the DB without any memory duplication:
-//!   1. fork — child sees the DB as it was at the instant of the fork.
-//!   2. Child writes the RDB file and calls `_exit(0)` (not `exit()` — skipping
-//!      atexit handlers that belong to the parent).
-//!   3. Parent records the child PID in `server.rdb_child_pid` and returns
-//!      `+Background saving started` immediately.
-//!   4. A background polling thread (spawned at server start) calls
-//!      `waitpid` every 500 ms to reap the child and update `last_save_unix`.
-//!
+//! 1. fork — child sees the DB as it was at the instant of the fork.
+//! 2. Child writes the RDB file and calls `_exit(0)` (not `exit` — skipping
+//! atexit handlers that belong to the parent).
+//! 3. Parent records the child PID in `server.rdb_child_pid` and returns
+//! `+Background saving started` immediately.
+//! 4. A background polling thread (spawned at server start) calls
+//! `waitpid` every 500 ms to reap the child and update `last_save_unix`.
 //! On non-Unix targets (Windows, WASM) the pre-fork thread-snapshot path is
-//! kept as the fallback. The fallback allocates a full in-memory clone of the
+//! kept as the fallback. The fallback allocates a full in-memory clone of
 //! DB before spawning the writer thread.
-//!
-//! The `unsafe` block that wraps `fork + _exit` is the single unsafe surface in
+//! The `unsafe` block that wraps `fork + _exit` is the single unsafe surface
 //! this crate: documented below with a SAFETY comment.
 
 use std::io::{Read, Write};
@@ -79,7 +75,6 @@ fn parse_i64_strict(bytes: &[u8]) -> Option<i64> {
 }
 
 /// `SAVE` — synchronous RDB save.
-///
 /// Writes the RDB file to `<dir>/<dbfilename>` and updates `last_save_unix`
 /// on success. Returns `+OK` on success or `-ERR` on failure.
 pub fn save_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
@@ -252,11 +247,10 @@ pub fn restore_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 
 /// Rewrite the propagated RESTORE so a relative TTL becomes an absolute
 /// millisecond timestamp with the `ABSTTL` flag appended.
-///
 /// Replicas and the AOF must receive an absolute expire so a restored key does
 /// not outlive the primary's intent due to replication lag. A RESTORE that was
 /// already `ABSTTL` (or had no TTL) is propagated verbatim. Mirrors
-/// `restoreCommand`'s argument rewrite in `cluster.c`.
+/// `restoreCommand`'s argument rewrite.
 fn rewrite_restore_propagation_absttl(
     ctx: &mut CommandContext<'_>,
     ttl: i64,
@@ -538,12 +532,11 @@ fn source_migrate_payload(
     Ok(Some((payload, ttl)))
 }
 
-/// `MIGRATE host port key db timeout [COPY] [REPLACE] [AUTH password] [KEYS key ...]`.
-///
+/// `MIGRATE host port key db timeout [COPY] [REPLACE] [AUTH password] [KEYS key...]`.
 /// This ports the single-node data path used by the upstream dump.tcl suite:
 /// serialize local keys with the existing DUMP/RDB payload encoder, send
 /// RESTORE to the target over RESP, then delete only keys the target accepted.
-/// Cluster-slot routing and the C connection-cache implementation are out of
+/// Cluster-slot routing and the C connection-cache implementation are out
 /// scope; INFO still exposes a short-lived cache count so the observable
 /// connection-cache lifecycle remains visible to tests and operators.
 pub fn migrate_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
@@ -602,14 +595,11 @@ pub fn migrate_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 }
 
 /// `BGSAVE [SCHEDULE]` — background RDB save.
-///
 /// On Unix, forks a child process that writes the RDB file using the OS
 /// copy-on-write snapshot visible at fork time, then `_exit`s. The parent
 /// returns `+Background saving started` immediately and records the child PID.
-///
 /// If a BGSAVE child is already running, returns an error immediately rather
 /// than starting a second concurrent save.
-///
 /// On non-Unix targets, falls back to the thread-snapshot approach.
 pub fn bgsave_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ctx.arg_count() > 2 {
@@ -634,12 +624,12 @@ pub fn bgsave_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         let server_arc = ctx.server_arc();
         let snapshot_for_child = snapshot.clone();
 
-        // SAFETY: fork(2) is the standard Unix mechanism for COW snapshot.
-        // All requirements (single-threaded child, async-signal-safe ops only)
-        // are met: child immediately writes RDB and _exits without running any
-        // parent atexit handlers. The parent half only stores the child PID into
-        // an atomic and returns — no Rust destructors of the shared state run in
-        // the child because _exit bypasses them.
+ // SAFETY: fork(2) is the standard Unix mechanism for COW snapshot.
+ // All requirements (single-threaded child, async-signal-safe ops only)
+ // are met: child immediately writes RDB and _exits without running any
+ // parent atexit handlers. The parent half only stores the child PID into
+ // an atomic and returns — no Rust destructors of the shared state run
+ // the child because _exit bypasses them.
         let pid = unsafe {
             let p = libc::fork();
             if p == 0 {
@@ -712,9 +702,9 @@ fn save_bgsave_child_databases(
 
     let delay_us = crate::connection::rdb_key_save_delay_us();
     if delay_us > 0 {
-        // Upstream's debug knob delays per key. For the shutdown frontier we
-        // need the same observable state: a live child with temp-<pid>.rdb
-        // present long enough for the parent to observe and clean it up.
+ // Upstream's debug knob delays per key. For the shutdown frontier we
+ // need the same observable state: a live child with temp-<pid>.rdb
+ // present long enough for the parent to observe and clean it up.
         thread::sleep(Duration::from_micros(delay_us.min(5_000_000)));
     }
 
@@ -722,13 +712,12 @@ fn save_bgsave_child_databases(
 }
 
 /// Outcome of `bgsave_for_replication`.
-///
 /// `Started` is the happy path: a child has been forked and the job has been
 /// installed on `ReplicationState`. `Skipped` means another full-sync BGSAVE
-/// was already running; the caller should append the new replica to the
+/// was already running; the caller should append the new replica to
 /// existing job's waiting list via `ReplicationState::enqueue_repl_waiter`.
 /// `Failed` indicates the fork itself failed and the caller should fall back
-/// to whatever degraded behaviour it prefers (Session 3B logs and drops the
+/// to whatever degraded behaviour it prefers (Session 3B logs and drops
 /// replica's pending state — Wave C handles retry).
 pub enum BgsaveForReplResult {
     Started,
@@ -737,18 +726,16 @@ pub enum BgsaveForReplResult {
 }
 
 /// Start a background RDB save destined for a freshly-attached replica.
-///
 /// Differs from [`bgsave_command`] in three ways:
-///   * Writes to a per-PID temp file `<dir>/temp-repl-<child-pid>.rdb` so the
-///     user-facing RDB (which `BGSAVE` populates) is left alone.
-///   * Records the child PID in `ReplicationState::repl_child_pid` (a separate
-///     slot from `RedisServer::rdb_child_pid`), letting a user `BGSAVE` and a
-///     full-sync BGSAVE coexist without colliding on either reaper.
-///   * Installs a `ReplBgsaveJob` on the replication state so the reaper can
-///     pick the temp file up, stream it to every waiting replica, then send
-///     the catch-up backlog window before marking each replica `Online`.
-///
-/// `requesting_client_id` is the first replica's id; it is recorded as the
+/// * Writes to a per-PID temp file `<dir>/temp-repl-<child-pid>.rdb` so
+/// user-facing RDB (which `BGSAVE` populates) is left alone.
+/// * Records the child PID in `ReplicationState::repl_child_pid` (a separate
+/// slot from `RedisServer::rdb_child_pid`), letting a user `BGSAVE` and a
+/// full-sync BGSAVE coexist without colliding on either reaper.
+/// * Installs a `ReplBgsaveJob` on the replication state so the reaper can
+/// pick the temp file up, stream it to every waiting replica, then send
+/// the catch-up backlog window before marking each replica `Online`.
+/// `requesting_client_id` is the first replica's id; it is recorded as
 /// initial waiter so the reaper knows where to ship the RDB. Additional
 /// replicas issuing PSYNC ? -1 while the child is still alive should call
 /// `ReplicationState::enqueue_repl_waiter` instead of starting a second BGSAVE.
@@ -836,13 +823,11 @@ pub fn bgsave_for_replication(
 }
 
 /// `BGREWRITEAOF` — background AOF rewrite.
-///
 /// The v1 implementation remains synchronous, but follows Valkey's multi-part
 /// AOF ordering: switch appends to a fresh INCR, write a new BASE, then persist
 /// a manifest naming the new BASE and active INCR. No child or thread renames
 /// over the active writer.
-///
-/// When AOF is not enabled the command still succeeds but is a no-op (the
+/// When AOF is not enabled the command still succeeds but is a no-op (
 /// canonical Valkey behaviour when appendonly=no).
 pub fn bgrewriteaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ctx.arg_count() != 1 {
@@ -930,7 +915,7 @@ fn snapshots_to_dbs(
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        src/rdb.c / src/aof.c persistence command integration
+//   source:        Valkey
 //   target_crate:  redis-commands
 //   confidence:    medium
 //   todos:         0

@@ -1,15 +1,13 @@
 //! RuntimeOwner mio readiness plain-TCP path.
-//!
-//! This module names the owner-loop vocabulary from
+//! This module names the owner-loop vocabulary
 //! `harness/architecture/object-vocabulary.tsv` and implements the bounded
 //! `mio` owner loop approved by
 //! `harness/architecture/decisions/runtime-ownership.md`.
-//!
 //! RuntimeOwner owns accepted plain-TCP sockets, client parser state, per-slot
 //! foreign payload receivers, ordinary reply flushing, and the live
 //! `Vec<RedisDb>` used by normal command execution. Commands still enter
 //! `redis_commands::dispatch` through `CommandContext`; the context DB-list
-//! route points at the owner-held DB slice instead of `global_databases()`.
+//! route points at the owner-held DB slice instead of `global_databases`.
 
 use std::collections::{HashSet, VecDeque};
 use std::io::{self, Read, Write};
@@ -74,7 +72,6 @@ impl SlotId {
 }
 
 /// Readiness-poller handle for the owner-loop path.
-///
 /// `runtime-owner-8-mio-poller-owner-loop` installs `mio` for plain TCP only.
 /// TLS remains on the existing thread-per-connection path, and raw platform
 /// poller code stays outside this packet.
@@ -111,8 +108,7 @@ impl PollDriverHandle {
 }
 
 /// Typed knobs for owner-loop experiments.
-///
-/// `enabled` defaults to false. Constructing this value does not change the
+/// `enabled` defaults to false. Constructing this value does not change
 /// accept loop, command dispatch, or database ownership in `main.rs`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RuntimeOwnerConfig {
@@ -258,10 +254,10 @@ pub struct ClientSlot {
     writable_interest: bool,
     closed: bool,
     close_after_flush: bool,
-    /// Present iff this is a TLS connection: the rustls server session layered
-    /// over `stream`. `None` for plain TCP (the untouched fast path).
+ /// Present iff this is a TLS connection: the rustls server session layered
+ /// over `stream`. `None` for plain TCP (the untouched fast path).
     tls: Option<Box<ServerConnection>>,
-    /// TLS handshake completed — only then is `stream` carrying app data.
+ /// TLS handshake completed — only then is `stream` carrying app data.
     tls_handshake_done: bool,
 }
 
@@ -737,16 +733,16 @@ pub struct RuntimeOwner {
     events: VecDeque<RuntimeEvent>,
     replica_apply_rx: Option<Receiver<redis_commands::replica_dialer::ReplicaApplyRequest>>,
     replica_apply_db_index: u32,
-    /// rustls server config for TLS listeners; `None` when TLS is disabled.
+ /// rustls server config for TLS listeners; `None` when TLS is disabled.
     tls_config: Option<Arc<ServerConfig>>,
-    /// First listener-token index that is a TLS listener. Tokens
-    /// `tls_listener_start..listeners.len()` accept TLS; below it, plain TCP.
+ /// First listener-token index that is a TLS listener. Tokens
+ /// `tls_listener_start..listeners.len` accept TLS; below it, plain TCP.
     tls_listener_start: usize,
 }
 
 impl RuntimeOwner {
-    /// `new` inlines the database-creation logic directly so there is no
-    /// separate free `create_databases` helper needed.
+ /// `new` inlines the database-creation logic directly so there is no
+ /// separate free `create_databases` helper needed.
     #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     pub fn new(config: RuntimeOwnerConfig) -> Self {
         let count = config.database_count().max(1);
@@ -891,8 +887,8 @@ impl RuntimeOwner {
             .into_iter()
             .map(MioTcpListener::from_std)
             .collect();
-        // TLS listeners follow the plain ones; their token indices are
-        // `plain_listener_count..listeners.len()`.
+ // TLS listeners follow the plain ones; their token indices are
+ // `plain_listener_count..listeners.len`.
         let plain_listener_count = listeners.len();
         let tls_listener_count = tls_listeners.len();
         for l in tls_listeners {
@@ -1122,8 +1118,8 @@ impl RuntimeOwner {
                         match redis_core::tls::current_server_config() {
                             Some(cfg) => match ServerConnection::new(cfg) {
                                 Ok(mut s) => {
-                                    // Unlimit rustls' plaintext buffer; app-layer
-                                    // client-query-buffer-limit is the real bound.
+ // Unlimit rustls' plaintext buffer; app-layer
+ // client-query-buffer-limit is the real bound.
                                     s.set_buffer_limit(None);
                                     Some(Box::new(s))
                                 }
@@ -1307,8 +1303,8 @@ impl RuntimeOwner {
                 let outcome = self.dispatch_slot_commands(idx, registry, server);
                 progressed |= outcome.progressed;
                 if self.slot_is_tls(idx) {
-                    // Flush handshake output and/or encrypted replies; the TLS
-                    // flush path owns interest recomputation.
+ // Flush handshake output and/or encrypted replies; the TLS
+ // flush path owns interest recomputation.
                     progressed |= self.flush_slot_pending_write(idx, poll_registry);
                 } else if outcome.queued_write {
                     progressed |= self.flush_slot_pending_write(idx, poll_registry);
@@ -1518,11 +1514,11 @@ impl RuntimeOwner {
         !client.reply_buf.starts_with(b"-")
     }
 
-    /// Load a full-resync RDB snapshot into the owned databases, replacing their
-    /// contents. The dialer ships the bytes off the master stream; the owner is
-    /// the only thread allowed to mutate `self.dbs`, so the load happens here.
-    /// The bytes are staged through a temp file because the RDB loader reads
-    /// from a path.
+ /// Load a full-resync RDB snapshot into the owned databases, replacing their
+ /// contents. The dialer ships the bytes off the master stream; the owner is
+ /// the only thread allowed to mutate `self.dbs`, so the load happens here.
+ /// The bytes are staged through a temp file because the RDB loader reads
+ /// from a path.
     fn load_replica_rdb(&mut self, bytes: &[u8]) -> bool {
         let temp_path =
             std::env::temp_dir().join(format!("valdr-replica-incoming-{}.rdb", std::process::id()));
@@ -1551,10 +1547,10 @@ impl RuntimeOwner {
             .is_some_and(|s| s.tls.is_some())
     }
 
-    /// TLS counterpart of `read_slot`: advance the rustls handshake first, then
-    /// deliver decrypted plaintext into the query buffer. Reuses the shared,
-    /// harness-tested `session_read_pump`/`session_write_pump`. All `slot`
-    /// mutations happen outside the `stream`/`session` borrow scope.
+ /// TLS counterpart of `read_slot`: advance the rustls handshake first, then
+ /// deliver decrypted plaintext into the query buffer. Reuses the shared,
+ /// harness-tested `session_read_pump`/`session_write_pump`. All `slot`
+ /// mutations happen outside the `stream`/`session` borrow scope.
     fn read_slot_tls(&mut self, idx: usize, read_buf: &mut [u8; READ_BUFFER_SIZE]) -> bool {
         let slot = match self.slots.get_mut(idx).and_then(Option::as_mut) {
             Some(slot) => slot,
@@ -1599,15 +1595,15 @@ impl RuntimeOwner {
             }
 
             if !errored && !still_handshaking {
-                // Interleaved drain+read+process. rustls' internal "received
-                // plaintext" queue has a finite ceiling — feeding ciphertext
-                // without draining decrypted plaintext between cycles makes
-                // read_tls return "received plaintext buffer full". Drain at
-                // the *start* of each iteration so any plaintext already
-                // queued (e.g. left by the handshake-side pump that read past
-                // ServerFinished into early app data) is consumed first.
+ // Interleaved drain+read+process. rustls' internal "received
+ // plaintext" queue has a finite ceiling — feeding ciphertext
+ // without draining decrypted plaintext between cycles makes
+ // read_tls return "received plaintext buffer full". Drain
+ // the *start* of each iteration so any plaintext already
+ // queued (e.g. left by the handshake-side pump that read past
+ // ServerFinished into early app data) is consumed first.
                 'pump: loop {
-                    // 1. drain any plaintext currently buffered in the session.
+ // 1. drain any plaintext currently buffered in the session.
                     loop {
                         match session.reader().read(read_buf) {
                             Ok(0) => {
@@ -1622,7 +1618,7 @@ impl RuntimeOwner {
                             }
                         }
                     }
-                    // 2. read more ciphertext, process, and loop (which drains).
+ // 2. read more ciphertext, process, and loop (which drains).
                     match session.read_tls(stream) {
                         Ok(0) => {
                             transport_closed = true;
@@ -1684,9 +1680,9 @@ impl RuntimeOwner {
         progressed
     }
 
-    /// TLS counterpart of `flush_slot_pending_write`: move plaintext replies into
-    /// the rustls session, flush ciphertext to the socket, and recompute Poll
-    /// interest from the session's write intent (the `updateSSLEvent` analog).
+ /// TLS counterpart of `flush_slot_pending_write`: move plaintext replies into
+ /// the rustls session, flush ciphertext to the socket, and recompute Poll
+ /// interest from the session's write intent (the `updateSSLEvent` analog).
     fn flush_slot_pending_write_tls(&mut self, idx: usize, poll_registry: &MioRegistry) -> bool {
         let slot = match self.slots.get_mut(idx).and_then(Option::as_mut) {
             Some(slot) => slot,
@@ -1708,7 +1704,7 @@ impl RuntimeOwner {
             let stream = slot.stream.as_mut().unwrap();
             let session = slot.tls.as_mut().unwrap().as_mut();
 
-            // 1. Encrypt as much queued plaintext as the session buffer accepts.
+ // 1. Encrypt as much queued plaintext as the session buffer accepts.
             let bytes = slot.write_buffer.as_bytes();
             if !bytes.is_empty() {
                 match session.writer().write(bytes) {
@@ -1717,7 +1713,7 @@ impl RuntimeOwner {
                     Err(_) => errored = true,
                 }
             }
-            // 2. Flush ciphertext (handshake output + encrypted replies).
+ // 2. Flush ciphertext (handshake output + encrypted replies).
             if !errored && session_write_pump(session, stream).is_err() {
                 errored = true;
             }
@@ -1735,8 +1731,8 @@ impl RuntimeOwner {
             return progressed;
         }
 
-        // 3. Recompute interest: WRITABLE iff there is unflushed ciphertext or
-        //    still-queued plaintext.
+ // 3. Recompute interest: WRITABLE iff there is unflushed ciphertext or
+ // still-queued plaintext.
         let want_write =
             !slot.write_buffer.is_empty() || slot.tls.as_ref().is_some_and(|s| s.wants_write());
         if want_write != slot.writable_interest {
@@ -1806,16 +1802,16 @@ impl RuntimeOwner {
                 break;
             }
             progressed = true;
-            // A read shorter than the buffer means the socket receive queue is
-            // now drained: a stream `read` returns everything available up to
-            // the buffer size, so `n < READ_BUFFER_SIZE` proves there is no
-            // more pending data. Under mio's edge-triggered kqueue/epoll the
-            // next arrival re-arms the readable event, so we can stop here
-            // without paying a second `read` syscall purely to observe
-            // `WouldBlock`. This matches Valkey's single read per readable
-            // event (its `ae` loop is level-triggered) and the userspace
-            // readiness optimization in tokio PR #4840. At pipeline=1 it halves
-            // the read syscalls per request, the dominant per-request overhead.
+ // A read shorter than the buffer means the socket receive queue is
+ // now drained: a stream `read` returns everything available up
+ // the buffer size, so `n < READ_BUFFER_SIZE` proves there is no
+ // more pending data. Under mio's edge-triggered kqueue/epoll
+ // next arrival re-arms the readable event, so we can stop here
+ // without paying a second `read` syscall purely to observe
+ // `WouldBlock`. This matches Valkey's single read per readable
+ // event (its `ae` loop is level-triggered) and the userspace
+ // readiness optimization in tokio PR #4840. At pipeline=1 it halves
+ // the read syscalls per request, the dominant per-request overhead.
             if n < read_buf.len() {
                 break;
             }
@@ -1952,8 +1948,8 @@ impl RuntimeOwner {
             }
         }
 
-        // Command dispatch has already applied CLIENT REPLY OFF/SKIP while
-        // retaining Pub/Sub push bytes in the shared reply buffer.
+ // Command dispatch has already applied CLIENT REPLY OFF/SKIP while
+ // retaining Pub/Sub push bytes in the shared reply buffer.
         let queued_write = slot.queue_client_reply_preserving_capacity();
         slot.refresh_client_memory_snapshot();
 
@@ -2181,14 +2177,14 @@ impl RuntimeOwner {
                     buffer.consume_front(n);
                     slot.client.net_output_bytes =
                         slot.client.net_output_bytes.saturating_add(n as u64);
-                    // `net_output_bytes` accrues on the client and is synced to
-                    // the observable registry by the end-of-dispatch
-                    // `update_client_info_snapshot` and the throttled memory
-                    // snapshot refresh. Taking the global `client_info_registry`
-                    // mutex on every successful write put a lock acquisition in
-                    // the per-request write path that Valkey's single-threaded
-                    // loop never pays; CLIENT LIST `tot-net-out` lagging by at
-                    // most one reply is invisible to callers.
+ // `net_output_bytes` accrues on the client and is synced
+ // the observable registry by the end-of-dispatch
+ // `update_client_info_snapshot` and the throttled memory
+ // snapshot refresh. Taking the global `client_info_registry`
+ // mutex on every successful write put a lock acquisition
+ // the per-request write path that Valkey's single-threaded
+ // loop never pays; CLIENT LIST `tot-net-out` lagging by
+ // most one reply is invisible to callers.
                     progressed = true;
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
@@ -2563,7 +2559,7 @@ mod tests {
 
 // --------------------------------------------------------------------------
 // PORT STATUS
-//   source:        src/server.c runtime-owner architecture packet
+//   source:        Valkey
 //   target_crate:  redis-server
 //   confidence:    high
 //   todos:         0

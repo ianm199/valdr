@@ -1,14 +1,10 @@
 //! Memory accounting helpers shared by INFO and eviction.
-//!
 //! The estimator approximates a database's in-memory footprint as
-//!
-//!   bytes_in_keys + bytes_in_values + dict.len() * 80
-//!
+//! bytes_in_keys + bytes_in_values + dict.len * 80
 //! per `docs/PATH_TO_DEF3.md` §Memory-estimator. The 80-byte-per-entry
 //! overhead approximates HashMap bucket plus per-object header overhead;
 //! non-string values contribute a coarse per-element estimate rather than an
 //! exact allocator walk.
-//!
 //! INFO reports the result as `used_memory_estimated`; the maxmemory eviction
 //! path (Round 16b+) compares it against `LiveConfig::maxmemory` to decide
 //! when to evict.
@@ -19,7 +15,6 @@ use crate::object::{
 };
 
 /// Estimate the in-memory footprint of `db` in bytes.
-///
 /// Single source of truth for the heuristic; both INFO and eviction call this.
 pub fn approximate_memory_used(db: &RedisDb) -> u64 {
     let mut bytes: u64 = 0;

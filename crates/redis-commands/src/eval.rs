@@ -1,22 +1,18 @@
 //! `EVAL` / `EVALSHA` / `SCRIPT` — server-side Lua scripting.
-//!
 //! Backed by `mlua` (bundled C Lua 5.1, matching real Redis). The runtime is
-//! constructed once per call so global state never leaks across scripts and
+//! constructed once per call so global state never leaks across scripts
 //! the dangerous portions of the stdlib (`os`, `io`, `debug`, `require`,
 //! `loadfile`, `dofile`, `package`, `print`) are removed before user code
 //! runs.
-//!
 //! `redis.call` / `redis.pcall` re-enter the command dispatch table by
 //! saving the client's argv and reply buffer, installing the synthetic
-//! argv, calling [`crate::dispatch::dispatch_command_name`], parsing the
-//! newly-written reply bytes back into a Lua value, then restoring the
+//! argv, calling [`crate::dispatch::dispatch_command_name`], parsing
+//! newly-written reply bytes back into a Lua value, then restoring
 //! caller's argv and the original reply buffer prefix.
-//!
 //! Script cache is a process-wide `Mutex<HashMap<sha1_hex, bytes>>` keyed
 //! by the lower-case 40-byte SHA-1 hex of the source bytes. `SCRIPT LOAD`
 //! inserts into the cache; `EVALSHA` looks up; `SCRIPT FLUSH` clears.
-//!
-//! See `docs/ADR_001_LUA_RUNTIME.md` for the runtime-choice rationale and
+//! See `docs/ADR_001_LUA_RUNTIME.md` for the runtime-choice rationale
 //! the full sandbox patch list.
 
 use std::borrow::Cow;
@@ -56,7 +52,6 @@ const LUA_REDIS_VERSION_NUM: i64 = 7 << 16;
 const EVAL_SCRIPT_CACHE_LIMIT: usize = 500;
 
 /// One captured reply from a `redis.call` re-entry.
-///
 /// Parsed from the RESP bytes the inner dispatch wrote into `reply_buf`.
 /// Used as an intermediate before the value is converted to a Lua value.
 #[derive(Debug, Clone)]
@@ -298,7 +293,7 @@ impl ParserCallbacks for ReplyBuilder {
 /// Lua integers, nil becomes Lua nil, errors become `{err = msg}`, arrays
 /// become 1-indexed Lua tables.
 /// The RESP version the running script asked `redis.call` to surface, set by
-/// `redis.setresp(n)` and stored in the Lua registry (default 2, as in
+/// `redis.setresp(n)` and stored in the Lua registry (default 2, as
 /// upstream). Controls whether map/set replies reach the script as RESP3
 /// `{map=...}`/`{set=...}` tables or as flat RESP2 arrays.
 fn script_resp_view(lua: &Lua) -> u8 {
@@ -397,7 +392,6 @@ fn reply_to_lua(lua: &Lua, value: &ReplyValue, resp_view: u8) -> mlua::Result<Lu
 }
 
 /// Encode a Lua value as a RESP frame on the wire.
-///
 /// Mirrors real Redis script-to-protocol conversion: nil → null bulk,
 /// integers / numbers → integer (numbers truncated), strings → bulk,
 /// booleans → `:1` / null, tables → status if `.ok`, error if `.err`,
@@ -753,7 +747,7 @@ fn create_sha1hex_function(lua: &Lua) -> mlua::Result<LuaFunction> {
 }
 
 /// Sandbox an `mlua::Lua` instance by removing globals that would let a
-/// user script reach the filesystem or the host process. Mirrors the
+/// user script reach the filesystem or the host process. Mirrors
 /// real-Redis sandbox.
 fn install_sandbox(lua: &Lua) -> mlua::Result<()> {
     let globals = lua.globals();
@@ -868,7 +862,7 @@ fn create_script_environment(lua: &Lua) -> mlua::Result<LuaTable> {
 
 /// Process-relative seconds for `os.clock`. Valkey's Lua sandbox keeps only
 /// `os.clock` from the standard `os` library, and every script uses it as a
-/// delta (`os.clock() - start`), so an arbitrary monotonic epoch is faithful.
+/// delta (`os.clock - start`), so an arbitrary monotonic epoch is faithful.
 fn os_clock_seconds() -> f64 {
     static EPOCH: OnceLock<Instant> = OnceLock::new();
     EPOCH.get_or_init(Instant::now).elapsed().as_secs_f64()
@@ -876,7 +870,7 @@ fn os_clock_seconds() -> f64 {
 
 /// Build the sandboxed `os` global. Valkey exposes a plain table holding only
 /// `os.clock`; every other `os.*` is absent, so a script calling e.g.
-/// `os.execute()` hits the Lua "attempt to call field 'execute' (a nil value)"
+/// `os.execute` hits the Lua "attempt to call field 'execute' (a nil value)"
 /// error the suite asserts. The table must stay a plain (non-proxy) table
 /// because the sandbox test iterates it with `pairs(os)`, which in Lua 5.1
 /// sees only raw keys.
@@ -1985,8 +1979,8 @@ fn install_cmsgpack(lua: &Lua) -> mlua::Result<()> {
 
 /// LuaBitOp `barg`: reduce a Lua number to its low 32 bits using the same
 /// magic-number conversion LuaBitOp performs for the double `lua_Number`
-/// build that Valkey ships (`deps/lua/src/lua_bit.c`): add `2^52 + 2^51`,
-/// then take the low 32 bits of the resulting double. mlua is built with the
+/// build that Valkey ships: add `2^52 + 2^51`,
+/// then take the low 32 bits of the resulting double. mlua is built with
 /// `lua51` feature, so every Lua number is a `f64`, matching upstream exactly.
 fn bit_barg(n: f64) -> u32 {
     const MAGIC: f64 = 6_755_399_441_055_744.0;
@@ -2014,9 +2008,9 @@ fn bit_fold(args: Variadic<f64>, op: impl Fn(u32, u32) -> u32) -> mlua::Result<f
     Ok(bit_bret(acc))
 }
 
-/// LuaBitOp `bit.tohex`, including the
-/// `INT32_MIN` guard that makes `bit.tohex(65535, -2147483648)` resolve to
-/// `0000FFFF` (uppercase, clamped to 8 digits) rather than hitting the
+/// LuaBitOp `bit.tohex`, including
+/// `INT32_MIN` guard that makes `bit.tohex(65535, -2147483648)` resolve
+/// `0000FFFF` (uppercase, clamped to 8 digits) rather than hitting
 /// undefined `-INT32_MIN` negation.
 fn bit_tohex(x: f64, n_arg: Option<f64>) -> String {
     let mut b = bit_barg(x);
@@ -2127,8 +2121,7 @@ fn install_bit(lua: &Lua) -> mlua::Result<()> {
 /// Execute one inner command for `redis.call` / `redis.pcall`, capturing
 /// the reply bytes the handler appended to `reply_buf` and parsing them
 /// back into a [`ReplyValue`].
-///
-/// Restores the caller's argv and reply prefix unconditionally so the
+/// Restores the caller's argv and reply prefix unconditionally so
 /// outer EVAL reply is unaffected by inner dispatch side-effects.
 fn run_inner_command(
     ctx: &mut CommandContext<'_>,
@@ -2299,7 +2292,7 @@ impl ScriptCache {
     }
 }
 
-/// Process-wide script cache. Keys are the 40-byte lowercase SHA-1 hex of
+/// Process-wide script cache. Keys are the 40-byte lowercase SHA-1 hex
 /// the source bytes. `EVAL` scripts are capped by a small LRU; `SCRIPT LOAD`
 /// entries are persistent and do not participate in that LRU, matching Valkey.
 fn script_cache() -> &'static Mutex<ScriptCache> {
@@ -2473,13 +2466,13 @@ fn active_function_call() -> mlua::Result<ActiveFunctionCall> {
 }
 
 fn active_function_dirty(active: ActiveFunctionCall) -> &'static Cell<bool> {
-    // The pointer is installed only for the duration of `CachedFunctionRuntime::call`
-    // and cleared by `ActiveFunctionCallGuard` before the stack frame exits.
+ // The pointer is installed only for the duration of `CachedFunctionRuntime::call`
+ // and cleared by `ActiveFunctionCallGuard` before the stack frame exits.
     unsafe { &*active.script_dirty }
 }
 
 fn active_function_error_recorded(active: ActiveFunctionCall) -> &'static Cell<bool> {
-    // See `active_function_dirty`; both cells live in the guarded call frame.
+ // See `active_function_dirty`; both cells live in the guarded call frame.
     unsafe { &*active.script_error_already_recorded }
 }
 
@@ -2487,9 +2480,9 @@ fn with_active_function_context<R>(
     f: impl FnOnce(&mut CommandContext<'static>, ActiveFunctionCall) -> mlua::Result<R>,
 ) -> mlua::Result<R> {
     let active = active_function_call()?;
-    // The cached Lua callbacks are process-static, but the command context is
-    // per-call. The guard above ensures this raw pointer is valid only while
-    // the callback is executing on the same thread.
+ // The cached Lua callbacks are process-static, but the command context is
+ // per-call. The guard above ensures this raw pointer is valid only while
+ // the callback is executing on the same thread.
     let ctx = unsafe { &mut *active.ctx };
     f(ctx, active)
 }
@@ -2779,8 +2772,7 @@ fn glob_match_ascii_ci(pattern: &[u8], text: &[u8]) -> bool {
 }
 
 /// `FUNCTION LOAD [REPLACE] <LIBRARY CODE>`.
-///
-/// Minimal Valkey-compatible function loader for Lua libraries. It accepts the
+/// Minimal Valkey-compatible function loader for Lua libraries. It accepts
 /// official `#!lua name=<library>` header, executes the library with only
 /// `redis/server.register_function` available, records registered callbacks,
 /// and stores the library source for later FCALL execution.
@@ -4793,8 +4785,7 @@ fn call_is_write_command(args: &[Vec<u8>]) -> bool {
         || ascii_eq_ci(name, b"FLUSHALL")
 }
 
-/// `EVAL script numkeys key [key ...] arg [arg ...]`.
-///
+/// `EVAL script numkeys key [key...] arg [arg...]`.
 /// Parses the argv, constructs a fresh sandboxed Lua instance, injects
 /// the `redis` table plus `KEYS` / `ARGV`, runs the script, and writes
 /// the result back as the outer RESP reply.
@@ -4843,8 +4834,7 @@ fn eval_command_impl(
     result
 }
 
-/// `EVALSHA sha1 numkeys key [key ...] arg [arg ...]`.
-///
+/// `EVALSHA sha1 numkeys key [key...] arg [arg...]`.
 /// Looks up the cached script bytes; falls through to `EVAL` on a hit, or
 /// returns the canonical `-NOSCRIPT` reply on a miss.
 pub fn evalsha_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
@@ -4921,7 +4911,7 @@ fn evalsha_command_impl(
 }
 
 /// Shared body of `EVAL` and `EVALSHA`. Creates a fresh Lua state, applies
-/// the sandbox, installs `redis`, `KEYS`, `ARGV`, runs the script, and
+/// the sandbox, installs `redis`, `KEYS`, `ARGV`, runs the script,
 /// converts the return value to a RESP frame written onto `reply_buf`.
 fn run_script(
     ctx: &mut CommandContext<'_>,
@@ -5372,7 +5362,7 @@ fn ascii_starts_with_ci(haystack: &[u8], needle: &[u8]) -> bool {
             .all(|(left, right)| ascii_lower(*left) == ascii_lower(*right))
 }
 
-/// Collect the variadic Lua arguments passed to `redis.call(cmd, ...)`
+/// Collect the variadic Lua arguments passed to `redis.call(cmd,...)`
 /// into a byte-string argv suitable for [`run_inner_command`].
 fn collect_call_args(args: MultiValue) -> Result<Vec<Vec<u8>>, LuaError> {
     let mut out: Vec<Vec<u8>> = Vec::with_capacity(args.len());
@@ -5609,7 +5599,7 @@ fn ascii_lower(b: u8) -> u8 {
 }
 
 /// Compute the lowercase 40-byte SHA-1 hex digest of `data` using a
-/// pure-Rust implementation. Stays inside this crate so we do not pull in
+/// pure-Rust implementation. Stays inside this crate so we do not pull
 /// a hash-crate dependency for a single use site.
 fn sha1_hex(data: &[u8]) -> [u8; 40] {
     let digest = sha1_digest(data);
@@ -5623,7 +5613,6 @@ fn sha1_hex(data: &[u8]) -> [u8; 40] {
 }
 
 /// Compute the raw 20-byte SHA-1 digest of `data`.
-///
 /// Direct translation of FIPS 180-4 §6.1.2; zero unsafe, no dependency.
 fn sha1_digest(data: &[u8]) -> [u8; 20] {
     let mut h0: u32 = 0x67452301;

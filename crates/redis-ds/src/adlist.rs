@@ -1,5 +1,4 @@
 //! `LinkedList` - Redis's generic doubly-linked list.
-//!
 //! A safe owner type backed by `VecDeque`: head/tail insertion, deletion, indexing,
 //! search, forward/backward iteration, rotation, duplication, and join.
 

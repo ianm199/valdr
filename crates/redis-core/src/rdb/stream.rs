@@ -1,65 +1,57 @@
 //! RDB stream type serialization — Round 23.
-//!
-//! Implements `save_stream_object` and `load_stream_object_{2,3}` for the
+//! Implements `save_stream_object` and `load_stream_object_{2,3}` for
 //! `RDB_TYPE_STREAM_LISTPACKS_{2,3}` wire forms. We always emit type 21
-//! (`_3`, with consumer `active_time`). On load we accept type 21 and
+//! (`_3`, with consumer `active_time`). On load we accept type 21
 //! type 19, mapping the missing `active_time` to `seen_time` for `_2`.
-//!
-//! Wire layout after the type byte (mirrors `rdbSaveObject` in rdb.c:1033–1142):
-//!
+//! Wire layout after the type byte (:1033–1142):
 //! 1. `save_len(listpacks_count)` — number of listpack nodes (= stream length)
 //! 2. For each listpack node:
-//!    - 16-byte raw stream ID written as an RDB string (`save_string`)
-//!    - the listpack blob written as an RDB string (`save_string`)
-//! 3. `save_len(length)`             — number of entries in the stream
-//! 4. `save_len(last_id.ms)`         — last ID, ms component
-//! 5. `save_len(last_id.seq)`        — last ID, seq component
-//! 6. `save_len(first_id.ms)`        — `_2`+ only
-//! 7. `save_len(first_id.seq)`       — `_2`+ only
-//! 8. `save_len(max_deleted_id.ms)`  — `_2`+ only
+//! - 16-byte raw stream ID written as an RDB string (`save_string`)
+//! - the listpack blob written as an RDB string (`save_string`)
+//! 3. `save_len(length)` — number of entries in the stream
+//! 4. `save_len(last_id.ms)` — last ID, ms component
+//! 5. `save_len(last_id.seq)` — last ID, seq component
+//! 6. `save_len(first_id.ms)` — `_2`+ only
+//! 7. `save_len(first_id.seq)` — `_2`+ only
+//! 8. `save_len(max_deleted_id.ms)` — `_2`+ only
 //! 9. `save_len(max_deleted_id.seq)` — `_2`+ only
-//! 10. `save_len(entries_added)`     — `_2`+ only
+//! 10. `save_len(entries_added)` — `_2`+ only
 //! 11. `save_len(num_groups)`
 //! 12. For each group:
-//!     - `save_string(name)`
-//!     - `save_len(last_delivered_id.ms)`
-//!     - `save_len(last_delivered_id.seq)`
-//!     - `save_len(entries_read)`    — `_2`+ only
-//!     - Group PEL:
-//!         - `save_len(pel_size)`
-//!         - per-entry: 16 raw bytes id + 8 LE bytes delivery_time + `save_len(delivery_count)`
-//!     - Consumers:
-//!         - `save_len(consumer_count)`
-//!         - per-consumer: `save_string(name)` + 8 LE bytes seen_time
-//!                       + 8 LE bytes active_time (`_3` only)
-//!                       + consumer PEL: `save_len(pel_size)` + N * 16 raw bytes id
-//!
+//! - `save_string(name)`
+//! - `save_len(last_delivered_id.ms)`
+//! - `save_len(last_delivered_id.seq)`
+//! - `save_len(entries_read)` — `_2`+ only
+//! - Group PEL:
+//! - `save_len(pel_size)`
+//! - per-entry: 16 raw bytes id + 8 LE bytes delivery_time + `save_len(delivery_count)`
+//! - Consumers:
+//! - `save_len(consumer_count)`
+//! - per-consumer: `save_string(name)` + 8 LE bytes seen_time
+//! + 8 LE bytes active_time (`_3` only)
+//! + consumer PEL: `save_len(pel_size)` + N * 16 raw bytes id
 //! Stream IDs in raw form are 16 bytes big-endian: `BE(ms) || BE(seq)`. This
-//! matches `streamEncodeID` in t_stream.c and is the rax key format used by
+//! matches `streamEncodeID` in and is the rax key format used by
 //! both per-listpack-node keys and PEL entry keys.
-//!
 //! Per-entry listpack layout (one entry per node — operator-confirmed MVP):
-//!   Primary master header entries (all listpack INTEGERS except field names):
-//!     count          int = 1
-//!     deleted        int = 0
-//!     num-fields N   int
-//!     field-name-1   string
-//!     ...
-//!     field-name-N   string
-//!     0              int (terminator)
-//!   Single entry record (`SAMEFIELDS` form):
-//!     flags          int = 0x02
-//!     ms-delta       int = 0
-//!     seq-delta      int = 0
-//!     value-1        string
-//!     ...
-//!     value-N        string
-//!     lp-count       int = N + 3
-//!
-//! On load we walk the listpack body, distinguishing the master header from
+//! Primary master header entries (all listpack INTEGERS except field names):
+//! count int = 1
+//! deleted int = 0
+//! num-fields N int
+//! field-name-1 string
+//! field-name-N string
+//! 0 int (terminator)
+//! Single entry record (`SAMEFIELDS` form):
+//! flags int = 0x02
+//! ms-delta int = 0
+//! seq-delta int = 0
+//! value-1 string
+//! value-N string
+//! lp-count int = N + 3
+//! On load we walk the listpack body, distinguishing the master header
 //! delta records via the count/deleted/num-fields prefix and reconstructing
 //! `StreamEntry` instances by applying ms-delta/seq-delta to the node's
-//! primary ID. Our save format always produces single-entry nodes, but the
+//! primary ID. Our save format always produces single-entry nodes, but
 //! decoder handles N-entry nodes for compatibility with files produced by
 //! real Valkey servers running with the default `stream-node-max-entries`.
 
@@ -82,10 +74,9 @@ const STREAM_ITEM_FLAG_DELETED: i64 = 1 << 0;
 const STREAM_ITEM_FLAG_SAMEFIELDS: i64 = 1 << 1;
 
 /// Serialize a stream `RedisObject` as `RDB_TYPE_STREAM_LISTPACKS_3`.
-///
 /// The caller writes the type byte and key beforehand; this function writes
 /// the value payload only. Empty streams (with or without groups) are
-/// preserved by emitting `listpacks_count = 0` and `length = 0`, then the
+/// preserved by emitting `listpacks_count = 0` and `length = 0`, then
 /// remaining metadata and groups exactly as for non-empty streams.
 pub fn save_stream_object(w: &mut impl Write, obj: &RedisObject) -> io::Result<()> {
     let s = obj.stream().ok_or_else(|| {
@@ -152,17 +143,16 @@ pub fn load_stream_object_3(r: &mut impl Read) -> io::Result<RedisObject> {
 }
 
 /// Load `RDB_TYPE_STREAM_LISTPACKS` (legacy Redis <= 6.2, rdb_ver < 10): no
-/// first_id / max_deleted_id / entries_added, no per-group entries_read, and
-/// no per-consumer active_time. Reuses the same listpack node decoder; the
+/// first_id / max_deleted_id / entries_added, no per-group entries_read,
+/// no per-consumer active_time. Reuses the same listpack node decoder;
 /// absent metadata is defaulted (see `load_stream_inner`).
 pub fn load_stream_object_legacy(r: &mut impl Read) -> io::Result<RedisObject> {
     load_stream_inner(r, false, false)
 }
 
 /// Load `RDB_TYPE_STREAM_LISTPACKS_2` (no consumer `active_time`).
-///
 /// `active_time` is initialised from `seen_time` on each consumer to match
-/// the fallback `rdbLoadObject` performs at rdb.c:2828.
+/// the fallback `rdbLoadObject` performs.
 pub fn load_stream_object_2(r: &mut impl Read) -> io::Result<RedisObject> {
     load_stream_inner(r, true, false)
 }
@@ -219,10 +209,10 @@ fn load_stream_inner(
         let (entries_added, _) = load_len(r)?;
         stream.entries_added = entries_added;
     } else {
-        // Legacy RDB_TYPE_STREAM_LISTPACKS (Redis <= 6.2, rdb_ver < 10) has no
-        // first_id / max_deleted_id / entries_added. Default the tombstone to
-        // 0-0 and seed entries_added from the current length, matching the
-        // legacy path in C `rdbLoadObject`.
+ // Legacy RDB_TYPE_STREAM_LISTPACKS (Redis <= 6.2, rdb_ver < 10) has no
+ // first_id / max_deleted_id / entries_added. Default the tombstone
+ // 0-0 and seed entries_added from the current length, matching
+ // legacy path in C `rdbLoadObject`.
         stream.max_deleted_id = StreamId::new(0, 0);
         stream.entries_added = stream.entries.len() as u64;
     }
@@ -306,7 +296,7 @@ fn load_stream_inner(
     Ok(make_stream_object(stream))
 }
 
-/// Encode a single `StreamEntry` as a 1-entry listpack node using the
+/// Encode a single `StreamEntry` as a 1-entry listpack node using
 /// `SAMEFIELDS` form. The resulting blob is suitable for use as a rax-node
 /// payload that C Valkey can load via `rdbLoadObject`.
 pub fn encode_entry_as_listpack(entry: &StreamEntry) -> Vec<u8> {

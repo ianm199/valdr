@@ -1,6 +1,5 @@
 //! `ZSkiplist` — the probabilistic skiplist used as the large-cardinality
 //! encoding for Redis sorted sets.
-//!
 //! A classic Pugh skiplist with a fixed max-level cap, used together
 //! with a backing dict (member → score) so range and rank queries run
 //! in O(log N).
@@ -18,7 +17,7 @@ impl ZSkiplist {
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        reference/valkey/src/t_zset.c
+//   source:        Valkey
 //   target_crate:  redis-ds
 //   confidence:    skeleton
 //   todos:         1

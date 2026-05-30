@@ -1,17 +1,11 @@
 //! Command log — slow query log and large request/reply log.
-//!
-//! Merges `src/commandlog.c` (276 lines, 8 functions) and `src/commandlog.h`.
-//!
 //! Records recent commands that exceeded configurable thresholds: execution
 //! time in microseconds (Slow), input payload size in bytes (LargeRequest),
 //! output payload size in bytes (LargeReply). Three independent logs share
 //! the same entry structure and differ only in the metric they track.
-//!
-//! Results are accessible via the `COMMANDLOG` command (all types) and the
+//! Results are accessible via the `COMMANDLOG` command (all types) and
 //! legacy `SLOWLOG` alias (slow-type only).
-//!
 //! ## Integration note
-//!
 //! The C code stores `server.commandlog[COMMANDLOG_TYPE_NUM]` on the global
 //! `redisServer` struct. In Rust, `RedisServer` is a canonical type owned by
 //! `crates/redis-core/src/server.rs`. Adding the `commandlog` field there is
@@ -24,7 +18,6 @@ use redis_types::{RedisError, RedisResult, RedisString};
 use std::collections::VecDeque;
 
 // ── Constants ─────────────────────────────────────────────────────────────
-// C: commandlog.h:35-36
 
 /// Maximum number of arguments stored per entry; excess args are replaced with
 /// a single truncation descriptor in the last slot.
@@ -35,16 +28,14 @@ pub const COMMANDLOG_ENTRY_MAX_ARGC: usize = 32;
 pub const COMMANDLOG_ENTRY_MAX_STRING: usize = 128;
 
 /// Value substituted for arguments that must be redacted (e.g., passwords).
-/// C: `shared.redacted` — a shared `robj` containing `(redacted)`.
+/// a shared `robj` containing `(redacted)`.
 /// TODO(port): wire up `clientCommandArgShouldBeRedacted` to actually use this.
 const REDACTED_MARKER: &[u8] = b"(redacted)";
 
 // ── CommandLogType ────────────────────────────────────────────────────────
 
 /// Category of a command log entry.
-///
-/// C: `COMMANDLOG_TYPE_SLOW` (0), `COMMANDLOG_TYPE_LARGE_REQUEST` (1),
-///    `COMMANDLOG_TYPE_LARGE_REPLY` (2), `COMMANDLOG_TYPE_NUM` (3).
+/// `COMMANDLOG_TYPE_LARGE_REPLY` (2), `COMMANDLOG_TYPE_NUM` (3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum CommandLogType {
@@ -54,19 +45,18 @@ pub enum CommandLogType {
 }
 
 impl CommandLogType {
-    /// Total number of log types; matches `COMMANDLOG_TYPE_NUM` in C.
+ /// Total number of log types; matches `COMMANDLOG_TYPE_NUM` in C.
     pub const NUM: usize = 3;
 
-    /// Convert the enum variant to its array index.
+ /// Convert the enum variant to its array index.
     #[inline]
     pub fn as_index(self) -> usize {
         self as usize
     }
 
-    /// Parse a log-type name from a byte string (case-insensitive).
-    /// Returns `None` for unrecognised names.
-    ///
-    /// C: `commandlogGetTypeOrReply` (commandlog.c:218-224) — type-parsing half.
+ /// Parse a log-type name from a byte string (case-insensitive).
+ /// Returns `None` for unrecognised names.
+ /// type-parsing half.
     fn from_bytes(s: &[u8]) -> Option<Self> {
         if s.eq_ignore_ascii_case(b"slow") {
             Some(Self::Slow)
@@ -83,79 +73,57 @@ impl CommandLogType {
 // ── CommandLogEntry ───────────────────────────────────────────────────────
 
 /// A single captured entry in the command log.
-///
-/// C: `commandlogEntry` (commandlog.h:39-47)
 #[derive(Debug, Clone)]
 pub struct CommandLogEntry {
-    /// Recorded command arguments, possibly truncated.
-    /// If truncated, `argv[COMMANDLOG_ENTRY_MAX_ARGC - 1]` is a descriptor
-    /// of the form `"... (N more arguments)"`.
+ /// Recorded command arguments, possibly truncated.
+ /// If truncated, `argv[COMMANDLOG_ENTRY_MAX_ARGC - 1]` is a descriptor
+ /// of the form `"... (N more arguments)"`.
     pub argv: Vec<RedisString>,
 
-    /// Unique monotonically increasing identifier within this log type.
-    ///
-    /// C: `ce->id` (`long long`)
+ /// Unique monotonically increasing identifier within this log type.
     pub id: u64,
 
-    /// Metric value:
-    /// - `Slow`: microseconds of execution time.
-    /// - `LargeRequest`: input bytes for the command.
-    /// - `LargeReply`: output bytes for the command.
-    ///
-    /// C: `ce->value` (`long long`)
+ /// Metric value:
+ /// - `Slow`: microseconds of execution time.
+ /// - `LargeRequest`: input bytes for the command.
+ /// - `LargeReply`: output bytes for the command.
     pub value: i64,
 
-    /// Unix timestamp (seconds since epoch) at which the command was recorded.
-    ///
-    /// C: `ce->time` (`time_t`)
+ /// Unix timestamp (seconds since epoch) at which the command was recorded.
     pub time: i64,
 
-    /// Connection name of the client (empty if unset).
-    ///
-    /// C: `ce->cname` (`sds`)
+ /// Connection name of the client (empty if unset).
     pub cname: RedisString,
 
-    /// Peer address string, e.g. `"127.0.0.1:12345"`.
-    ///
-    /// C: `ce->peerid` (`sds`)
+ /// Peer address string, e.g. `"127.0.0.1:12345"`.
     pub peerid: RedisString,
 }
 
 // ── CommandLog ────────────────────────────────────────────────────────────
 
 /// Per-type command log: a bounded ring of recent entries plus configuration.
-///
 /// Mirrors the anonymous struct used in the C `server.commandlog[]` array.
-///
 /// TODO(architect): add `commandlog: [CommandLog; CommandLogType::NUM]` to
-///   `RedisServer` in `crates/redis-core/src/server.rs`. Until that is done,
-///   callers must hold and pass this array explicitly.
+/// `RedisServer` in `crates/redis-core/src/server.rs`. Until that is done,
+/// callers must hold and pass this array explicitly.
 #[derive(Debug)]
 pub struct CommandLog {
-    /// Entries stored newest-first (front = most recent).
-    ///
-    /// C: `server.commandlog[type].entries` (`list *`)
+ /// Entries stored newest-first (front = most recent).
     pub entries: VecDeque<CommandLogEntry>,
 
-    /// Monotonically increasing counter that provides each entry's unique ID.
-    ///
-    /// C: `server.commandlog[type].entry_id`
+ /// Monotonically increasing counter that provides each entry's unique ID.
     pub entry_id: u64,
 
-    /// Entries with `value >= threshold` are recorded. Negative means disabled.
-    ///
-    /// C: `server.commandlog[type].threshold` (`long long`; -1 = disabled)
+ /// Entries with `value >= threshold` are recorded. Negative means disabled.
     pub threshold: i64,
 
-    /// Maximum number of entries retained (oldest are dropped). 0 means disabled.
-    ///
-    /// C: `server.commandlog[type].max_len`
+ /// Maximum number of entries retained (oldest are dropped). 0 means disabled.
     pub max_len: usize,
 }
 
 impl CommandLog {
-    /// Construct a new, empty command log. Thresholds must be configured
-    /// separately via the config layer before entries will be recorded.
+ /// Construct a new, empty command log. Thresholds must be configured
+ /// separately via the config layer before entries will be recorded.
     pub fn new() -> Self {
         Self {
             entries: VecDeque::new(),
@@ -176,46 +144,31 @@ impl Default for CommandLog {
 
 /// Snapshot of per-client metrics and identifiers needed when pushing a
 /// command log entry.
-///
 /// The C code reads directly from `client *c`. A snapshot struct decouples
 /// `commandlog.rs` from the still-evolving `Client` type.
-///
 /// PORT NOTE: introduced to avoid a hard dependency on `Client` fields that
 /// do not exist in the current Phase A stub (`duration`,
 /// `net_input_bytes_curr_cmd`, `net_output_bytes_curr_cmd`, `name`, `peerid`).
-///
 /// TODO(port): once `Client` gains those fields (Phase 3 networking), replace
-///   this struct with a direct `&Client` parameter and remove the snapshot.
+/// this struct with a direct `&Client` parameter and remove the snapshot.
 pub struct CommandLogClientInfo {
-    /// Command argument vector. If the client rewrote argv, this should be the
-    /// original pre-rewrite vector.
-    ///
-    /// C: `c->original_argv ? c->original_argv : c->argv`
+ /// Command argument vector. If the client rewrote argv, this should be
+ /// original pre-rewrite vector.
     pub argv: Vec<RedisString>,
 
-    /// Command execution duration in microseconds.
-    ///
-    /// C: `c->duration` (`long`)
+ /// Command execution duration in microseconds.
     pub duration: i64,
 
-    /// Network bytes received for this command.
-    ///
-    /// C: `c->net_input_bytes_curr_cmd` (`unsigned long long`)
+ /// Network bytes received for this command.
     pub net_input_bytes: u64,
 
-    /// Network bytes sent for this command.
-    ///
-    /// C: `c->net_output_bytes_curr_cmd` (`unsigned long long`)
+ /// Network bytes sent for this command.
     pub net_output_bytes: u64,
 
-    /// Client peer address (e.g., `"127.0.0.1:12345"`).
-    ///
-    /// C: `getClientPeerId(c)` → `sds`
+ /// Client peer address (e.g., `"127.0.0.1:12345"`).
     pub peerid: RedisString,
 
-    /// Client connection name (empty if unset).
-    ///
-    /// C: `c->name ? objectGetVal(c->name) : ""`
+ /// Client connection name (empty if unset).
     pub cname: RedisString,
 }
 
@@ -223,8 +176,7 @@ pub struct CommandLogClientInfo {
 
 /// Construct the initial array of command logs with disabled-by-default config.
 /// The caller stores this result on `RedisServer`.
-///
-/// C: `commandlogInit` (commandlog.c:94-100) — mutated `server.commandlog[]`
+/// mutated `server.commandlog[]`
 /// in-place. Rust returns the initialised array so the caller owns it.
 pub fn commandlog_init() -> [CommandLog; CommandLogType::NUM] {
     [CommandLog::new(), CommandLog::new(), CommandLog::new()]
@@ -232,20 +184,15 @@ pub fn commandlog_init() -> [CommandLog; CommandLogType::NUM] {
 
 /// Push a command log entry for the most recently executed command into each
 /// applicable log type.
-///
 /// Checks each log's threshold and only records entries that meet or exceed it.
 /// Safe to call for every command; disabled logs (`threshold < 0` or
 /// `max_len == 0`) return immediately.
-///
-/// C: `commandlogPushCurrentCommand` (commandlog.c:147-172)
-///
 /// TODO(port): `cmd->flags & CMD_SKIP_COMMANDLOG` is not checked — needs
-///   `CommandSpec` with flag bits surfaced through `CommandContext` (Phase 3).
-///
+/// `CommandSpec` with flag bits surfaced through `CommandContext` (Phase 3).
 /// TODO(port): `scriptIsRunning()` / `scriptGetCaller()` is not implemented —
-///   scripting is deferred to Phase 7. The script-caller substitution
-///   (using the outer caller's client info) is omitted; `info` must already
-///   reflect the correct client for script contexts.
+/// scripting is deferred to Phase 7. The script-caller substitution
+/// (using the outer caller's client info) is omitted; `info` must already
+/// reflect the correct client for script contexts.
 pub fn commandlog_push_current_command(
     logs: &mut [CommandLog; CommandLogType::NUM],
     info: &CommandLogClientInfo,
@@ -257,9 +204,9 @@ pub fn commandlog_push_current_command(
         info.peerid.clone(),
         info.cname.clone(),
     );
-    // PERF(port): net_input_bytes / net_output_bytes are u64; cast to i64 matches
-    // the C implicit truncation (unsigned long long → long long). Harmless in
-    // practice since byte counts won't realistically exceed i64::MAX.
+ // PERF(port): net_input_bytes / net_output_bytes are u64; cast to i64 matches
+ // the C implicit truncation (unsigned long long → long long). Harmless
+ // practice since byte counts won't realistically exceed i64::MAX.
     commandlog_push_entry_if_needed(
         &mut logs[CommandLogType::LargeRequest.as_index()],
         &info.argv,
@@ -277,21 +224,17 @@ pub fn commandlog_push_current_command(
 }
 
 /// Handle the `SLOWLOG` command — the legacy alias for the slow-execution log.
-///
 /// Accepted subcommands: `GET [count]`, `LEN`, `RESET`, `HELP`.
-///
-/// C: `slowlogCommand` (commandlog.c:176-216)
-///
 /// TODO(architect): the `logs` parameter must be threaded through
-///   `CommandContext` once `RedisServer` is wired into `CommandContext` in
-///   Phase 3. The current signature is a Phase A placeholder.
+/// `CommandContext` once `RedisServer` is wired into `CommandContext`
+/// Phase 3. The current signature is a Phase A placeholder.
 pub fn slowlog_command(
     ctx: &mut CommandContext,
     logs: &mut [CommandLog; CommandLogType::NUM],
 ) -> RedisResult<()> {
     let argc = ctx.arg_count();
 
-    // Clone subcommand bytes before any mutable borrows on ctx.
+ // Clone subcommand bytes before any mutable borrows on ctx.
     let subcmd = ctx.arg(1)?.clone();
     let subcmd_bytes = subcmd.as_bytes();
 
@@ -317,7 +260,7 @@ pub fn slowlog_command(
     } else if (argc == 2 || argc == 3) && subcmd_bytes.eq_ignore_ascii_case(b"get") {
         let mut count: i64 = 10;
         if argc == 3 {
-            // Clone arg(2) before the mutable ctx borrow in reply helpers.
+ // Clone arg(2) before the mutable ctx borrow in reply helpers.
             let count_arg = ctx.arg(2)?.clone();
             count = parse_range_long(count_arg.as_bytes(), -1, i64::MAX).ok_or_else(|| {
                 RedisError::runtime(b"count should be greater than or equal to -1")
@@ -328,7 +271,6 @@ pub fn slowlog_command(
         }
         commandlog_get_reply(ctx, &logs[CommandLogType::Slow.as_index()], count)?;
     } else {
-        // C: addReplySubcommandSyntaxError(c)
         return Err(RedisError::syntax(
             b"unknown subcommand or wrong number of arguments",
         ));
@@ -337,27 +279,22 @@ pub fn slowlog_command(
 }
 
 /// Handle the `COMMANDLOG` command — general log with subtype selection.
-///
 /// Accepted subcommands:
 /// - `GET <count> <type>` — return entries.
 /// - `LEN <type>` — return entry count.
 /// - `RESET <type>` — clear the log.
 /// - `HELP` — print usage.
-///
-/// `<type>` must be one of: `slow`, `large-request`, `large-reply`.
-///
-/// C: `commandlogCommand` (commandlog.c:228-275)
-///
+/// `<type>` must be one: `slow`, `large-request`, `large-reply`.
 /// TODO(architect): the `logs` parameter must be threaded through
-///   `CommandContext` once `RedisServer` is wired into `CommandContext` in
-///   Phase 3. The current signature is a Phase A placeholder.
+/// `CommandContext` once `RedisServer` is wired into `CommandContext`
+/// Phase 3. The current signature is a Phase A placeholder.
 pub fn commandlog_command(
     ctx: &mut CommandContext,
     logs: &mut [CommandLog; CommandLogType::NUM],
 ) -> RedisResult<()> {
     let argc = ctx.arg_count();
 
-    // Clone subcommand bytes before any mutable borrows on ctx.
+ // Clone subcommand bytes before any mutable borrows on ctx.
     let subcmd = ctx.arg(1)?.clone();
     let subcmd_bytes = subcmd.as_bytes();
 
@@ -389,7 +326,7 @@ pub fn commandlog_command(
         let len = logs[log_type.as_index()].entries.len();
         ctx.reply_integer(len as i64)?;
     } else if argc == 4 && subcmd_bytes.eq_ignore_ascii_case(b"get") {
-        // Clone both args before any mutable ctx borrows.
+ // Clone both args before any mutable ctx borrows.
         let count_arg = ctx.arg(2)?.clone();
         let type_arg = ctx.arg(3)?.clone();
         let mut count = parse_range_long(count_arg.as_bytes(), -1, i64::MAX)
@@ -400,7 +337,6 @@ pub fn commandlog_command(
         }
         commandlog_get_reply(ctx, &logs[log_type.as_index()], count)?;
     } else {
-        // C: addReplySubcommandSyntaxError(c)
         return Err(RedisError::syntax(
             b"unknown subcommand or wrong number of arguments",
         ));
@@ -411,16 +347,12 @@ pub fn commandlog_command(
 // ── Private helpers ───────────────────────────────────────────────────────
 
 /// Construct a single command log entry from a command's argument vector.
-///
 /// Applies two truncation policies:
 /// 1. If the argument count exceeds `COMMANDLOG_ENTRY_MAX_ARGC`, the last
-///    slot becomes `"... (N more arguments)"`.
+/// slot becomes `"... (N more arguments)"`.
 /// 2. If any individual argument exceeds `COMMANDLOG_ENTRY_MAX_STRING` bytes,
-///    it is truncated and suffixed with `"... (N more bytes)"`.
-///
+/// it is truncated and suffixed with `"... (N more bytes)"`.
 /// `next_id` is incremented to produce a monotonically unique entry ID.
-///
-/// C: `commandlogCreateEntry` (commandlog.c:31-75)
 fn commandlog_create_entry(
     argv: &[RedisString],
     value: i64,
@@ -433,30 +365,28 @@ fn commandlog_create_entry(
     let mut ce_argv: Vec<RedisString> = Vec::with_capacity(ceargc);
 
     for j in 0..ceargc {
-        // C: if (ceargc != argc && j == ceargc - 1) → truncation descriptor
+ // 1) → truncation descriptor
         if ceargc != argc && j == ceargc - 1 {
             let remaining = argc - ceargc + 1;
             let msg = format!("... ({} more arguments)", remaining);
             ce_argv.push(RedisString::from_bytes(msg.as_bytes()));
         } else {
             // TODO(port): clientCommandArgShouldBeRedacted(c, j) equivalent is
-            //   not yet ported. When it is, check here and push REDACTED_MARKER
-            //   for sensitive argument positions (e.g., passwords in AUTH).
+ // not yet ported. When it is, check here and push REDACTED_MARKER
+ // for sensitive argument positions (e.g., passwords in AUTH).
             let _ = REDACTED_MARKER; // suppress unused-constant warning until wired up
 
             let arg = &argv[j];
             if arg.len() > COMMANDLOG_ENTRY_MAX_STRING {
-                // C: sdsnewlen(ptr, COMMANDLOG_ENTRY_MAX_STRING)
-                //    + sdscatprintf("... (%lu more bytes)", extra)
+ // + sdscatprintf("... (%lu more bytes)", extra)
                 let extra = arg.len() - COMMANDLOG_ENTRY_MAX_STRING;
                 let mut truncated: Vec<u8> = arg.as_bytes()[..COMMANDLOG_ENTRY_MAX_STRING].to_vec();
                 let suffix = format!("... ({} more bytes)", extra);
                 truncated.extend_from_slice(suffix.as_bytes());
                 ce_argv.push(RedisString::from_vec(truncated));
             } else {
-                // C: argv[j]->refcount == OBJ_SHARED_REFCOUNT → reuse shared obj
-                //    else dupStringObject(argv[j])
-                // Rust: shared/refcount management is gone; clone owns the bytes.
+ // else dupStringObject(argv[j])
+ // Rust: shared/refcount management is gone; clone owns the bytes.
                 ce_argv.push(arg.clone());
             }
         }
@@ -465,7 +395,6 @@ fn commandlog_create_entry(
     let id = *next_id;
     *next_id = next_id.wrapping_add(1);
 
-    // C: ce->time = time(NULL)
     let time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -482,11 +411,8 @@ fn commandlog_create_entry(
 }
 
 /// Push a new entry into `log` if `value` meets the threshold; trim to max_len.
-///
 /// Returns immediately when the log is disabled (`threshold < 0` or
 /// `max_len == 0`).
-///
-/// C: `commandlogPushEntryIfNeeded` (commandlog.c:105-112)
 fn commandlog_push_entry_if_needed(
     log: &mut CommandLog,
     argv: &[RedisString],
@@ -498,33 +424,25 @@ fn commandlog_push_entry_if_needed(
         return;
     }
     if value >= log.threshold {
-        // C: listAddNodeHead — newest entry goes to the front.
+ // newest entry goes to the front.
         let entry = commandlog_create_entry(argv, value, &mut log.entry_id, peerid, cname);
         log.entries.push_front(entry);
     }
-    // C: while (listLength > max_len) listDelNode(listLast(...))
     while log.entries.len() > log.max_len {
         log.entries.pop_back();
     }
 }
 
 /// Clear all entries from a command log.
-///
-/// C: `commandlogReset` (commandlog.c:115-117)
 fn commandlog_reset(log: &mut CommandLog) {
-    // C: while (listLength > 0) listDelNode(listLast(...))
-    // VecDeque::clear is O(n) but equivalent; Drop handles element cleanup.
+ // VecDeque::clear is O(n) but equivalent; Drop handles element cleanup.
     log.entries.clear();
 }
 
 /// Write at most `count` command log entries to the client as a RESP array.
-///
 /// Each entry is a 6-element array:
 /// `[id, timestamp, value, [args...], peerid, cname]`
-///
 /// `count` must be >= 0; pass the log length to return all entries.
-///
-/// C: `commandlogGetReply` (commandlog.c:120-144)
 fn commandlog_get_reply(ctx: &mut CommandContext, log: &CommandLog, count: i64) -> RedisResult<()> {
     let actual_count = if count <= 0 {
         0_usize
@@ -532,35 +450,25 @@ fn commandlog_get_reply(ctx: &mut CommandContext, log: &CommandLog, count: i64) 
         (count as usize).min(log.entries.len())
     };
 
-    // C: addReplyArrayLen(c, count)
     ctx.reply_array_header(actual_count)?;
 
-    // C: listRewind + while (count--) { ln = listNext(&li); ce = ln->value; ... }
     for ce in log.entries.iter().take(actual_count) {
-        // C: addReplyArrayLen(c, 6)
         ctx.reply_array_header(6)?;
-        // C: addReplyLongLong(c, ce->id)
         ctx.reply_integer(ce.id as i64)?;
-        // C: addReplyLongLong(c, ce->time)
         ctx.reply_integer(ce.time)?;
-        // C: addReplyLongLong(c, ce->value)
         ctx.reply_integer(ce.value)?;
-        // C: addReplyArrayLen(c, ce->argc); for j: addReplyBulk(c, ce->argv[j])
         ctx.reply_array_header(ce.argv.len())?;
         for arg in &ce.argv {
             ctx.reply_bulk(arg.as_bytes())?;
         }
-        // C: addReplyBulkCBuffer(c, ce->peerid, sdslen(ce->peerid))
         ctx.reply_bulk(ce.peerid.as_bytes())?;
-        // C: addReplyBulkCBuffer(c, ce->cname, sdslen(ce->cname))
         ctx.reply_bulk(ce.cname.as_bytes())?;
     }
     Ok(())
 }
 
 /// Parse a log-type name from bytes, returning an error if unrecognised.
-///
-/// C: `commandlogGetTypeOrReply` (commandlog.c:218-224) — error-returning half.
+/// error-returning half.
 /// The function is split: parsing is here; error emission is done by `?`.
 fn commandlog_parse_type(type_bytes: &[u8]) -> Result<CommandLogType, RedisError> {
     CommandLogType::from_bytes(type_bytes).ok_or_else(|| {
@@ -571,10 +479,9 @@ fn commandlog_parse_type(type_bytes: &[u8]) -> Result<CommandLogType, RedisError
 }
 
 /// Emit a RESP array of bulk strings, one per help line.
-///
-/// Mirrors `addReplyHelp(c, help[])` from `server.c`.
+/// Mirrors `addReplyHelp(c, help[])`.
 /// TODO(port): move to `CommandContext::reply_help` once `addReplyHelp` is
-///   fully ported (it also handles RESP2 vs RESP3 formatting).
+/// fully ported (it also handles RESP2 vs RESP3 formatting).
 fn reply_help(ctx: &mut CommandContext, lines: &[&[u8]]) -> RedisResult<()> {
     ctx.reply_array_header(lines.len())?;
     for line in lines {
@@ -585,11 +492,9 @@ fn reply_help(ctx: &mut CommandContext, lines: &[&[u8]]) -> RedisResult<()> {
 
 /// Parse a decimal integer from bytes and validate it lies within `[min, max]`.
 /// Returns `None` if the bytes are not a valid integer or fall outside the range.
-///
-/// Approximates `getRangeLongFromObjectOrReply` from `util.c` (not yet ported).
-///
+/// Approximates `getRangeLongFromObjectOrReply` from (not yet ported).
 /// TODO(port): replace with `redis_core::util::get_range_long` once `util.c`
-///   is translated and available.
+/// is translated and available.
 fn parse_range_long(bytes: &[u8], min: i64, max: i64) -> Option<i64> {
     if bytes.is_empty() {
         return None;
@@ -775,7 +680,7 @@ mod tests {
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        src/commandlog.c  (276 lines, 8 functions) + commandlog.h
+//   source:        Valkey
 //   target_crate:  redis-core
 //   confidence:    medium
 //   todos:         7

@@ -23,13 +23,10 @@ little-endian-defined on all platforms — identical to what the C code
 produces on the LE path (which covers every Redis-supported server arch).
 */
 
-// C: siphash.c (373 lines, 3 public functions + test section)
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 /// Locale-free ASCII lowercase fold: A-Z → a-z; everything else unchanged.
-///
-/// C: `siptlw(int c)` (siphash.c:49-55)
 #[inline]
 fn sip_to_lower(c: u8) -> u8 {
     if (b'A'..=b'Z').contains(&c) {
@@ -40,22 +37,17 @@ fn sip_to_lower(c: u8) -> u8 {
 }
 
 /// Read 8 bytes from `p` as a little-endian `u64`.
-///
-/// C: `U8TO64_LE(p)` macro — portable (non-`UNALIGNED_LE_CPU`) path.
-///
+/// portable (non-`UNALIGNED_LE_CPU`) path.
 /// # Precondition
-/// `p.len() >= 8`. Caller guarantees this; see call sites.
+/// `p.len >= 8`. Caller guarantees this; see call sites.
 #[inline]
 fn u8_to_u64_le(p: &[u8]) -> u64 {
     u64::from_le_bytes([p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]])
 }
 
 /// Read 8 bytes from `p` as a little-endian `u64`, ASCII-lowercasing each byte.
-///
-/// C: `U8TO64_LE_NOCASE(p)` macro (siphash.c:97-105).
-///
 /// # Precondition
-/// `p.len() >= 8`. Caller guarantees this; see call sites.
+/// `p.len >= 8`. Caller guarantees this; see call sites.
 #[inline]
 fn u8_to_u64_le_nocase(p: &[u8]) -> u64 {
     u64::from_le_bytes([
@@ -71,8 +63,6 @@ fn u8_to_u64_le_nocase(p: &[u8]) -> u64 {
 }
 
 /// One SipRound: the 14-operation ARX permutation.
-///
-/// C: `SIPROUND` macro (siphash.c:107-123). All additions are wrapping mod 2⁶⁴.
 #[inline(always)]
 fn sip_round(v0: &mut u64, v1: &mut u64, v2: &mut u64, v3: &mut u64) {
     *v0 = v0.wrapping_add(*v1);
@@ -94,14 +84,9 @@ fn sip_round(v0: &mut u64, v1: &mut u64, v2: &mut u64, v3: &mut u64) {
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Compute the SipHash 1-2 of `data` using the 128-bit secret `key`.
-///
-/// Returns a `u64` hash value.  The result is little-endian-defined: it
+/// Returns a `u64` hash value. The result is little-endian-defined: it
 /// matches what the C implementation produces on x86/x86-64/arm64 hosts.
-///
-/// C: `siphash(const uint8_t *in, const size_t inlen, const uint8_t *k)`
-/// (siphash.c:126-183).
 pub fn siphash(data: &[u8], key: &[u8; 16]) -> u64 {
-    // C: siphash.c:126-183, siphash
     let mut v0: u64 = 0x736f6d6570736575;
     let mut v1: u64 = 0x646f72616e646f6d;
     let mut v2: u64 = 0x6c7967656e657261;
@@ -113,7 +98,7 @@ pub fn siphash(data: &[u8], key: &[u8; 16]) -> u64 {
     let inlen = data.len();
     let left = inlen & 7;
 
-    // Length is encoded in the high byte of the last block.
+ // Length is encoded in the high byte of the last block.
     let mut b: u64 = (inlen as u64) << 56;
 
     v3 ^= k1;
@@ -121,8 +106,7 @@ pub fn siphash(data: &[u8], key: &[u8; 16]) -> u64 {
     v1 ^= k1;
     v0 ^= k0;
 
-    // Compress 8-byte aligned blocks.
-    // C: `for (; in != end; in += 8) { m = U8TO64_LE(in); v3 ^= m; SIPROUND; v0 ^= m; }`
+ // Compress 8-byte aligned blocks.
     let body = &data[..inlen - left];
     for chunk in body.chunks_exact(8) {
         let m = u8_to_u64_le(chunk);
@@ -131,8 +115,7 @@ pub fn siphash(data: &[u8], key: &[u8; 16]) -> u64 {
         v0 ^= m;
     }
 
-    // Pack the remaining 0-7 bytes into `b`.
-    // C: switch (left) with fall-through (siphash.c:155-164).
+ // Pack the remaining 0-7 bytes into `b`.
     let tail = &data[inlen - left..];
     if left >= 7 {
         b |= (tail[6] as u64) << 48;
@@ -156,12 +139,12 @@ pub fn siphash(data: &[u8], key: &[u8; 16]) -> u64 {
         b |= tail[0] as u64;
     }
 
-    // Final block.
+ // Final block.
     v3 ^= b;
     sip_round(&mut v0, &mut v1, &mut v2, &mut v3);
     v0 ^= b;
 
-    // Finalisation (2 rounds).
+ // Finalisation (2 rounds).
     v2 ^= 0xff;
     sip_round(&mut v0, &mut v1, &mut v2, &mut v3);
     sip_round(&mut v0, &mut v1, &mut v2, &mut v3);
@@ -171,14 +154,9 @@ pub fn siphash(data: &[u8], key: &[u8; 16]) -> u64 {
 
 /// Compute the SipHash 1-2 of `data` using the 128-bit secret `key`,
 /// treating ASCII uppercase letters as lowercase before mixing.
-///
 /// This avoids a temporary buffer allocation for case-folding: each byte is
 /// lowercased during the 8-byte word assembly step.
-///
-/// C: `siphash_nocase(const uint8_t *in, const size_t inlen, const uint8_t *k)`
-/// (siphash.c:185-244).
 pub fn siphash_nocase(data: &[u8], key: &[u8; 16]) -> u64 {
-    // C: siphash.c:185-244, siphash_nocase
     let mut v0: u64 = 0x736f6d6570736575;
     let mut v1: u64 = 0x646f72616e646f6d;
     let mut v2: u64 = 0x6c7967656e657261;
@@ -197,7 +175,7 @@ pub fn siphash_nocase(data: &[u8], key: &[u8; 16]) -> u64 {
     v1 ^= k1;
     v0 ^= k0;
 
-    // Compress 8-byte aligned blocks with inline case-folding.
+ // Compress 8-byte aligned blocks with inline case-folding.
     let body = &data[..inlen - left];
     for chunk in body.chunks_exact(8) {
         let m = u8_to_u64_le_nocase(chunk);
@@ -206,8 +184,7 @@ pub fn siphash_nocase(data: &[u8], key: &[u8; 16]) -> u64 {
         v0 ^= m;
     }
 
-    // Pack the remaining 0-7 bytes (case-folded) into `b`.
-    // C: switch (left) with fall-through, siptlw applied per byte (siphash.c:216-225).
+ // Pack the remaining 0-7 bytes (case-folded) into `b`.
     let tail = &data[inlen - left..];
     if left >= 7 {
         b |= (sip_to_lower(tail[6]) as u64) << 48;
@@ -231,12 +208,12 @@ pub fn siphash_nocase(data: &[u8], key: &[u8; 16]) -> u64 {
         b |= sip_to_lower(tail[0]) as u64;
     }
 
-    // Final block.
+ // Final block.
     v3 ^= b;
     sip_round(&mut v0, &mut v1, &mut v2, &mut v3);
     v0 ^= b;
 
-    // Finalisation (2 rounds).
+ // Finalisation (2 rounds).
     v2 ^= 0xff;
     sip_round(&mut v0, &mut v1, &mut v2, &mut v3);
     sip_round(&mut v0, &mut v1, &mut v2, &mut v3);
@@ -250,15 +227,12 @@ pub fn siphash_nocase(data: &[u8], key: &[u8; 16]) -> u64 {
 mod tests {
     use super::*;
 
-    /// Reference test vectors for SipHash **2-4** (not 1-2).
-    ///
-    /// C: `vectors_sip64[64][8]` (siphash.c:251-316).
-    ///
-    /// PORT NOTE: The production functions use SipHash 1-2 (Redis trade-off for
-    /// speed vs. strength). These vectors are for the 2-4 reference variant.
-    /// They exist here for documentation and to validate a hypothetical 2-4
-    /// implementation. The `test_siphash_2_4_vectors` test is `#[ignore]`d by
-    /// default because the production implementation uses 1-2 rounds.
+ /// Reference test vectors for SipHash **2-4** (not 1-2).
+ /// PORT NOTE: The production functions use SipHash 1-2 (Redis trade-off for
+ /// speed vs. strength). These vectors are for the 2-4 reference variant.
+ /// They exist here for documentation and to validate a hypothetical 2-4
+ /// implementation. The `test_siphash_2_4_vectors` test is `#[ignore]`d by
+ /// default because the production implementation uses 1-2 rounds.
     #[rustfmt::skip]
     const VECTORS_SIP64: [[u8; 8]; 64] = [
         [0x31, 0x0e, 0x0e, 0xdd, 0x47, 0xdb, 0x6f, 0x72],
@@ -327,22 +301,20 @@ mod tests {
         [0x72, 0x45, 0x06, 0xeb, 0x4c, 0x32, 0x8a, 0x95],
     ];
 
-    /// Smoke-test: `siphash` on the empty input does not panic.
+ /// Smoke-test: `siphash` on the empty input does not panic.
     #[test]
     fn test_siphash_empty() {
         let key = [0u8; 16];
         let _ = siphash(&[], &key);
     }
 
-    /// Verify SipHash 2-4 test vectors.
-    ///
-    /// C: `siphash_test()` (siphash.c:325-360) — the vector portion.
-    ///
-    /// IMPORTANT: This test is `#[ignore]`d because the production
-    /// `siphash()` uses 1-2 rounds, not 2-4 rounds. Temporarily swap
-    /// `sip_round` call counts to 2 compression + 4 finalisation to verify
-    /// these vectors during development. See siphash.c:319-324 for the
-    /// original note.
+ /// Verify SipHash 2-4 test vectors.
+ /// the vector portion.
+ /// IMPORTANT: This test is `#[ignore]`d because the production
+ /// `siphash` uses 1-2 rounds, not 2-4 rounds. Temporarily swap
+ /// `sip_round` call counts to 2 compression + 4 finalisation to verify
+ /// these vectors during development. Seefor
+ /// original note.
     #[test]
     #[ignore = "vectors are for SipHash 2-4; production uses 1-2"]
     fn test_siphash_2_4_vectors() {
@@ -363,10 +335,8 @@ mod tests {
         }
     }
 
-    /// Case-insensitive variant: all-lowercase input must hash the same as
-    /// `siphash_nocase` on the same input.
-    ///
-    /// C: `siphash_test()` lines 346-348.
+ /// Case-insensitive variant: all-lowercase input must hash the same as
+ /// `siphash_nocase` on the same input.
     #[test]
     fn test_nocase_matches_lowercase() {
         let key = b"1234567812345678";
@@ -378,10 +348,8 @@ mod tests {
         );
     }
 
-    /// Case-insensitive variant: mixed-case input must hash the same as
-    /// its lowercase equivalent.
-    ///
-    /// C: `siphash_test()` lines 350-352.
+ /// Case-insensitive variant: mixed-case input must hash the same as
+ /// its lowercase equivalent.
     #[test]
     fn test_nocase_matches_uppercase_folded() {
         let key = b"1234567812345678";
@@ -393,9 +361,7 @@ mod tests {
         );
     }
 
-    /// Case-sensitive `siphash` must treat uppercase differently from lowercase.
-    ///
-    /// C: `siphash_test()` lines 354-356 (the `if (h1 == h2) fails++` case).
+ /// Case-sensitive `siphash` must treat uppercase differently from lowercase.
     #[test]
     fn test_case_sensitive_differs() {
         let key = b"1234567812345678";
@@ -407,7 +373,7 @@ mod tests {
         );
     }
 
-    /// `sip_to_lower` must fold A-Z only.
+ /// `sip_to_lower` must fold A-Z only.
     #[test]
     fn test_sip_to_lower() {
         assert_eq!(sip_to_lower(b'A'), b'a');
@@ -422,7 +388,7 @@ mod tests {
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        src/siphash.c  (373 lines, 3 public functions + test section)
+//   source:        Valkey
 //   target_crate:  redis-core
 //   confidence:    high
 //   todos:         0

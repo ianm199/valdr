@@ -1,11 +1,10 @@
-//! RDB length encoding — `rdbSaveLen` / `rdbLoadLen` (rdb.c:232–330).
-//!
+//! RDB length encoding — `rdbSaveLen` / `rdbLoadLen`.
 //! The top 2 bits of the first byte select the width:
-//!   00xxxxxx          — 6-bit length (0–63)
-//!   01xxxxxx xxxxxxxx — 14-bit length (64–16383), big-endian within field
-//!   10000000 + 4 bytes — 32-bit big-endian length
-//!   10000001 + 8 bytes — 64-bit big-endian length
-//!   11xxxxxx           — special encoding marker; low 6 bits are RDB_ENC_*
+//! 00xxxxxx — 6-bit length (0–63)
+//! 01xxxxxx xxxxxxxx — 14-bit length (64–16383), big-endian within field
+//! 10000000 + 4 bytes — 32-bit big-endian length
+//! 10000001 + 8 bytes — 64-bit big-endian length
+//! 11xxxxxx — special encoding marker; low 6 bits are RDB_ENC_*
 
 use std::io::{self, Read, Write};
 
@@ -23,8 +22,7 @@ pub const RDB_ENC_INT32: u8 = 2;
 pub const RDB_ENC_LZF: u8 = 3;
 
 /// Encode `len` using the RDB variable-length format and return the bytes.
-///
-/// Mirrors `rdbSaveLen` (rdb.c:232).
+///:232).
 pub fn save_len(len: u64) -> Vec<u8> {
     if len <= 63 {
         vec![(RDB_6BITLEN << 6) | (len as u8)]
@@ -44,12 +42,10 @@ pub fn save_len(len: u64) -> Vec<u8> {
 }
 
 /// Decode one length-encoded value from `reader`.
-///
-/// Returns `(length, is_encoded)`. When `is_encoded` is `true` the
-/// `length` field holds the low-6-bit `RDB_ENC_*` discriminant and the
+/// Returns `(length, is_encoded)`. When `is_encoded` is `true`
+/// `length` field holds the low-6-bit `RDB_ENC_*` discriminant and
 /// caller must handle the encoded-object branch.
-///
-/// Mirrors `rdbLoadLenByRef` (rdb.c:275).
+///:275).
 pub fn load_len(reader: &mut impl Read) -> io::Result<(u64, bool)> {
     let mut first = [0u8; 1];
     reader.read_exact(&mut first)?;

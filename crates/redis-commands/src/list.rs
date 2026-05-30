@@ -1,23 +1,17 @@
 //! List type and command implementations.
-//!
 //! Covers the byte-exact wire surface of LPUSH, RPUSH, LPUSHX, RPUSHX,
 //! LPOP, RPOP, LLEN, LRANGE, LINDEX, LSET, LREM, LTRIM, LINSERT, LMOVE,
 //! and RPOPLPUSH for Round 2.
-//!
-//!
 //! # Storage shape
-//!
 //! Uses the pragmatic `ObjectKind::List(ListEncoding::Inline(_))`
 //! encoding from `redis-core::object` — a `VecDeque<RedisString>` providing
 //! O(1) push/pop on both ends. The real `ListPack` / `QuickList` encodings
 //! are available when `redis-ds` exposes those types.
-//!
 //! # TODOs
-//!
 //! - Blocking variants (BLPOP, BRPOP, BLMOVE, BRPOPLPUSH, BLMPOP) need
-//!   the `blockForKeys` infrastructure from `redis-core/src/blocked.rs`.
-//! - Keyspace-event notifications, replication command rewriting, and
-//!   deferred-array-length protocol need implementation.
+//! the `blockForKeys` infrastructure from `redis-core/src/blocked.rs`.
+//! - Keyspace-event notifications, replication command rewriting,
+//! deferred-array-length protocol need implementation.
 
 use std::collections::VecDeque;
 
@@ -34,7 +28,6 @@ use redis_core::object::RedisObject;
 use redis_types::{RedisError, RedisResult, RedisString};
 
 /// Which end of the list to operate on.
-///
 /// Matches C's `LIST_HEAD` / `LIST_TAIL`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListPosition {
@@ -43,9 +36,8 @@ pub enum ListPosition {
 }
 
 /// Parse a `RedisString` as a base-10 `i64` using Redis' strict rules.
-///
 /// Rejects leading or trailing whitespace, embedded NUL bytes, and any
-/// non-ASCII-digit payload. Returns `Err(RedisError::not_integer())` on
+/// non-ASCII-digit payload. Returns `Err(RedisError::not_integer` on
 /// any failure to match real Redis' error reply.
 fn parse_strict_i64(bytes: &[u8]) -> Result<i64, RedisError> {
     if bytes.is_empty() {
@@ -59,7 +51,6 @@ fn parse_strict_i64(bytes: &[u8]) -> Result<i64, RedisError> {
 }
 
 /// Parse "LEFT" or "RIGHT" from a command argument (case-insensitive).
-///
 /// Mirrors C's `getListPositionFromObjectOrReply`.
 fn parse_list_position(arg: &[u8]) -> Result<ListPosition, RedisError> {
     if arg.eq_ignore_ascii_case(b"left") {
@@ -73,7 +64,6 @@ fn parse_list_position(arg: &[u8]) -> Result<ListPosition, RedisError> {
 
 /// Borrow the inner `VecDeque` of a list-encoded `RedisObject`, raising
 /// `WRONGTYPE` if `obj` is any other kind.
-///
 /// Returns `Ok(None)` if the key is absent so callers can preserve
 /// existence semantics without nesting `match` on the lookup result.
 fn as_list_ref(obj: Option<&RedisObject>) -> Result<Option<&VecDeque<RedisString>>, RedisError> {
@@ -85,8 +75,7 @@ fn as_list_ref(obj: Option<&RedisObject>) -> Result<Option<&VecDeque<RedisString
 
 
 /// Normalise a signed list index into `[0, len]` for read access.
-///
-/// Negative indexes count from the tail. Returns `None` when the
+/// Negative indexes count from the tail. Returns `None` when
 /// resulting index is out of range, matching `LINDEX` / `LSET` semantics.
 fn resolve_read_index(index: i64, len: usize) -> Option<usize> {
     let len_i = len as i64;
@@ -98,9 +87,8 @@ fn resolve_read_index(index: i64, len: usize) -> Option<usize> {
 }
 
 /// Resolve `start` / `stop` for range commands (`LRANGE`, `LTRIM`).
-///
 /// Returns `None` when the requested range is empty. Otherwise returns
-/// `Some((start, stop))` where both are clamped, non-negative, and
+/// `Some((start, stop))` where both are clamped, non-negative,
 /// `start <= stop < len`.
 fn resolve_range(start: i64, stop: i64, len: usize) -> Option<(usize, usize)> {
     let len_i = len as i64;
@@ -119,8 +107,7 @@ fn resolve_range(start: i64, stop: i64, len: usize) -> Option<(usize, usize)> {
 }
 
 /// Pop one element from `key`'s list at `side` (head or tail).
-///
-/// Returns `None` if the key is missing or holds an empty list. Deletes the
+/// Returns `None` if the key is missing or holds an empty list. Deletes
 /// key when the pop empties it so the wake loop terminates promptly.
 fn pop_one(db: &mut RedisDb, key: &RedisString, side: BlockedSide) -> Option<RedisString> {
     let popped = {
@@ -208,12 +195,10 @@ fn encode_bulk_reply(value: &RedisString) -> Vec<u8> {
 }
 
 /// Drain blocked waiters for `key` after a LPUSH / RPUSH / LMOVE landed data.
-///
 /// Each waiter pops one element off `key` according to its `BlockedAction`,
-/// receives the canonical reply through its mpsc sender, and is removed from
+/// receives the canonical reply through its mpsc sender, and is removed
 /// every queue it was parked on. Loop terminates when `key` becomes empty or
 /// no waiter remains.
-///
 /// Call sites inside EXEC drain should use `schedule_or_wake` instead so that
 /// wakes are deferred until after EXEC completes.
 /// Wake blocked list waiters for `key`; returns the number of elements consumed
@@ -270,8 +255,7 @@ fn take_list_waiter(key: &RedisString) -> Option<BlockedWaiter> {
 
 /// Rescan all globally blocked key names and wake list waiters whose key is
 /// ready in `db`.
-///
-/// This covers commands such as RENAME and SORT ... STORE, where a non-list
+/// This covers commands such as RENAME and SORT... STORE, where a non-list
 /// command can make a list key ready without going through the LPUSH/RPUSH
 /// command-local wake hook.
 pub fn wake_ready_list_keys(db: &mut RedisDb) {
@@ -292,12 +276,11 @@ pub fn wake_ready_list_keys(db: &mut RedisDb) {
 
 /// Defer waking blocked waiters for `key` until the current command's own
 /// effect has propagated.
-///
 /// The key is appended to `client.pending_wakes`; `dispatch` drains it after
 /// the command propagates (and `exec_command` drains it after a transaction).
 /// Deferring is what preserves cause-before-effect in the replication stream:
 /// the triggering write (e.g. `LPUSH`) propagates before the woken client's
-/// effect (e.g. `LPOP`). Mirrors C's `handleClientsBlockedOnKeys` running in
+/// effect (e.g. `LPOP`). Mirrors C's `handleClientsBlockedOnKeys` running
 /// `beforeSleep`, after the command unit.
 fn schedule_or_wake(ctx: &mut CommandContext, key: &RedisString) {
     if !blocked_keys_any() {
@@ -313,13 +296,11 @@ fn add_dirty_if_nonzero(ctx: &CommandContext, delta: i64) {
 }
 
 /// Pop one or more elements to satisfy `waiter` and ship the encoded reply.
-///
 /// For `BlockedAction::Pop` with `count == 0` (BLPOP / BRPOP shape), pops
 /// one element and replies `*2 [key, value]`. With `count >= 1` (BLMPOP
 /// shape), pops up to `count` elements and replies `*2 [key, *N [...]]`.
-///
 /// For BLMOVE/BRPOPLPUSH actions the destination type is verified at wake
-/// time: if it exists and is not a list, the source value is restored at the
+/// time: if it exists and is not a list, the source value is restored at
 /// same end it would have been popped from and the waiter receives a
 /// WRONGTYPE error. Returning the value to the source keeps the FIFO order
 /// invariant intact for the next waiter.
@@ -504,8 +485,7 @@ fn blocked_waiter_acl_error(key: &RedisString, waiter: &BlockedWaiter) -> Option
 }
 
 /// Implementation shared by LPUSH / RPUSH / LPUSHX / RPUSHX.
-///
-/// When `xx` is true (LPUSHX / RPUSHX), a missing key short-circuits to
+/// When `xx` is true (LPUSHX / RPUSHX), a missing key short-circuits
 /// `:0\r\n` without creating one. Otherwise the key is auto-created with
 /// the pragmatic Inline encoding before pushing.
 fn push_generic(ctx: &mut CommandContext, position: ListPosition, xx: bool) -> RedisResult<()> {
@@ -566,7 +546,6 @@ fn push_generic(ctx: &mut CommandContext, position: ListPosition, xx: bool) -> R
 }
 
 /// Implementation shared by LPOP / RPOP.
-///
 /// Without a count argument: replies a single bulk or `$-1\r\n` for an
 /// absent key. With a count: replies an array of up to `count` elements
 /// in pop order, or `$-1\r\n` (null array) if the key is absent. Deletes
@@ -674,22 +653,22 @@ fn pop_generic(ctx: &mut CommandContext, position: ListPosition) -> RedisResult<
     }
 }
 
-/// LPUSH key value [value ...]
+/// LPUSH key value [value...]
 pub fn lpush_command(ctx: &mut CommandContext) -> RedisResult<()> {
     push_generic(ctx, ListPosition::Head, false)
 }
 
-/// RPUSH key value [value ...]
+/// RPUSH key value [value...]
 pub fn rpush_command(ctx: &mut CommandContext) -> RedisResult<()> {
     push_generic(ctx, ListPosition::Tail, false)
 }
 
-/// LPUSHX key value [value ...]
+/// LPUSHX key value [value...]
 pub fn lpushx_command(ctx: &mut CommandContext) -> RedisResult<()> {
     push_generic(ctx, ListPosition::Head, true)
 }
 
-/// RPUSHX key value [value ...]
+/// RPUSHX key value [value...]
 pub fn rpushx_command(ctx: &mut CommandContext) -> RedisResult<()> {
     push_generic(ctx, ListPosition::Tail, true)
 }
@@ -803,7 +782,6 @@ pub fn lset_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// LREM key count element
-///
 /// Positive `count` scans from the head, negative scans from the tail,
 /// zero removes every match. Deletes the key when the list ends empty.
 pub fn lrem_command(ctx: &mut CommandContext) -> RedisResult<()> {
@@ -878,8 +856,7 @@ pub fn lrem_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// LTRIM key start stop
-///
-/// Trims the list to the inclusive range `[start, stop]`. Deletes the
+/// Trims the list to the inclusive range `[start, stop]`. Deletes
 /// key when the resulting list is empty.
 pub fn ltrim_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if ctx.arg_count() != 4 {
@@ -935,7 +912,6 @@ pub fn ltrim_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// LINSERT key BEFORE|AFTER pivot element
-///
 /// Returns the new list length on success, `:0\r\n` when the key is
 /// missing, and `:-1\r\n` when the pivot is not found.
 pub fn linsert_command(ctx: &mut CommandContext) -> RedisResult<()> {
@@ -990,7 +966,6 @@ pub fn linsert_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// Shared body of LMOVE / RPOPLPUSH.
-///
 /// Atomically pops from `src` and pushes onto `dst`. The pop side enforces
 /// `WRONGTYPE`; the push side does the same when `dst` exists.
 fn lmove_generic(
@@ -1113,12 +1088,10 @@ pub fn rpoplpush_command(ctx: &mut CommandContext) -> RedisResult<()> {
     )
 }
 
-/// LMPOP numkeys key [key ...] LEFT|RIGHT [COUNT count]
-///
+/// LMPOP numkeys key [key...] LEFT|RIGHT [COUNT count]
 /// Pops one or more elements from the first non-empty list among `numkeys`
 /// keys. Replies a two-element array of `[key, [popped elements]]`, or a
 /// null array if every key is missing or empty.
-///
 pub fn lmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
     if argc < 4 {
@@ -1221,15 +1194,12 @@ pub fn lmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// LPOS key element [RANK rank] [COUNT num-matches] [MAXLEN len]
-///
 /// Returns the index (or indices) of `element` in the list at `key`. With
 /// `RANK` negative, scans the list from tail to head. `COUNT 0` returns all
 /// matches; positive `COUNT n` caps the result at `n`. `MAXLEN n` limits how
 /// many list entries are examined (0 means unlimited).
-///
 /// Replies with `:integer` (single match), `*array` of indices (with COUNT),
 /// or `$-1` / `*0` for a no-match case.
-///
 pub fn lpos_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
     if argc < 3 {
@@ -1352,7 +1322,6 @@ pub fn lpos_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// Parse a BLPOP-style timeout value (decimal seconds, non-negative).
-///
 /// Real Redis accepts both integer and floating-point timeouts. A negative
 /// timeout is rejected with the canonical `ERR timeout is negative` error;
 /// non-numeric values are rejected with `ERR timeout is not a float or out
@@ -1410,10 +1379,9 @@ fn reply_waitaof_zero(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// Park the current client in the global blocked-keys index.
-///
 /// Sets `client.blocked_on_keys` so the per-connection loop knows the empty
 /// reply buffer is intentional, then registers a [`BlockedWaiter`] holding a
-/// clone of the client's outbound mpsc sender. Returns `Ok(())` with no
+/// clone of the client's outbound mpsc sender. Returns `Ok(` with no
 /// reply written when the registration succeeded, or an error reply when no
 /// sender is registered for this client (unit tests / pseudo-clients).
 fn park_blocked_client(
@@ -1493,8 +1461,7 @@ fn park_blocked_client(
 }
 
 /// Shared implementation for BLPOP / BRPOP.
-///
-/// Pops from the first non-empty key immediately. Otherwise registers the
+/// Pops from the first non-empty key immediately. Otherwise registers
 /// client in the global blocked-keys index and returns with no reply: a
 /// subsequent push (or the per-server timeout thread) wakes the client by
 /// shipping `*2 [key, value]` or `*-1` through the outbound mpsc.
@@ -1567,9 +1534,8 @@ fn bpop_generic(ctx: &mut CommandContext, position: ListPosition) -> RedisResult
     )
 }
 
-/// BLPOP key [key ...] timeout
-///
-/// Pops the head of the first non-empty key. If every key is empty the
+/// BLPOP key [key...] timeout
+/// Pops the head of the first non-empty key. If every key is empty
 /// client is parked in the global blocked-keys index until either a push
 /// arrives on one of the keys (replying `*2 [key, value]`) or the timeout
 /// elapses (replying `*-1`). A timeout of `0` blocks forever.
@@ -1577,13 +1543,12 @@ pub fn blpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
     bpop_generic(ctx, ListPosition::Head)
 }
 
-/// BRPOP key [key ...] timeout — tail variant of [`blpop_command`].
+/// BRPOP key [key...] timeout — tail variant of [`blpop_command`].
 pub fn brpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
     bpop_generic(ctx, ListPosition::Tail)
 }
 
 /// BLMOVE source destination LEFT|RIGHT LEFT|RIGHT timeout
-///
 /// Behaves like LMOVE when `source` has data. Otherwise parks the client on
 /// `source` only; a later push on `source` triggers an atomic pop-then-push
 /// (with the same direction pair) and replies with the moved bulk value.
@@ -1660,11 +1625,10 @@ pub fn brpoplpush_command(ctx: &mut CommandContext) -> RedisResult<()> {
     )
 }
 
-/// BLMPOP timeout numkeys key [key ...] LEFT|RIGHT [COUNT count]
-///
-/// When some key has data: pops up to `COUNT` (default 1) elements from the
-/// first non-empty key and replies `*2 [key, [popped]]`. Otherwise parks the
-/// client on every supplied key; a push on any one wakes the waiter and
+/// BLMPOP timeout numkeys key [key...] LEFT|RIGHT [COUNT count]
+/// When some key has data: pops up to `COUNT` (default 1) elements from
+/// first non-empty key and replies `*2 [key, [popped]]`. Otherwise parks
+/// client on every supplied key; a push on any one wakes the waiter
 /// satisfies the `count` argument back to one element (subsequent waiters
 /// share the rest in FIFO order). Timeout `0` blocks forever.
 pub fn blmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
@@ -1778,7 +1742,6 @@ pub fn blmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// Wake blocked clients that have keys in database `db_id`.
-///
 /// Acquires the database lock, iterates all blocked keys, and wakes any client
 /// whose blocking key is present in `db_id`. Called via the hook installed by
 /// `install_swapdb_wake_hook` for the database that is NOT the current
@@ -1806,7 +1769,7 @@ pub fn wake_blocked_after_swapdb(db_id: u32, _unused: u32) {
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        src/t_list.c
+//   source:        Valkey
 //   target_crate:  redis-commands
 //   confidence:    high
 //   todos:         3

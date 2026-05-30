@@ -3,25 +3,20 @@
 // THP, arm64 fork bug); to be wired at server startup in Phase B.
 #![allow(dead_code)]
 //! kernel and VM configuration (clocksource, overcommit, THP, arm64 fork bug).
-//!
-//! Corresponds to `src/syscheck.c` + `src/syscheck.h` (374 lines, 6 functions).
-//! Both the `.c` and its header are merged into this module per PORTING.md §"File location".
-//!
+//! The source and its header are merged into this module.
 //! All public check functions return [`CheckOutcome`] rather than the C int tri-state
-//! (`-1` / `0` / `1`).  Error message bytes exactly reproduce the C string literals so
+//! (`-1` / `0` / `1`). Error message bytes exactly reproduce the C string literals so
 //! operator-visible output is identical to Valkey.
-//!
 //! Linux-only functionality is gated with `#[cfg(target_os = "linux")]`.
 //! The arm64 MADV_FREE bug check is additionally gated on `#[cfg(target_arch = "aarch64")]`.
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
 /// The result of a single system check.
-///
 /// Maps to the C tri-state return convention:
-/// * `1`  → [`CheckOutcome::Pass`]
-/// * `0`  → [`CheckOutcome::Skip`]  (check could not be completed)
-/// * `-1` → [`CheckOutcome::Fail`]  (check detected a problem; includes message bytes)
+/// * `1` → [`CheckOutcome::Pass`]
+/// * `0` → [`CheckOutcome::Skip`] (check could not be completed)
+/// * `-1` → [`CheckOutcome::Fail`] (check detected a problem; includes message bytes)
 #[derive(Debug)]
 pub enum CheckOutcome {
     Pass,
@@ -31,12 +26,9 @@ pub enum CheckOutcome {
 
 // ── Linux-only helpers and checks ─────────────────────────────────────────────
 
-/// Read the first line from a sysfs/procfs pseudo-file and trim leading and
-/// trailing ASCII spaces and newlines.  Returns `None` if the file cannot be
+/// Read the first line from a sysfs/procfs pseudo-file and trim leading
+/// trailing ASCII spaces and newlines. Returns `None` if the file cannot be
 /// opened or contains no data.
-///
-/// C: `syscheck.c:50-62`, `read_sysfs_line` (static, Linux only).
-///
 /// PORT NOTE: `path` is `&str` (not `&[u8]`) because sysfs paths are Rust-side
 /// system path literals, not Redis data, and `std::fs::File::open` requires
 /// a `Path`-compatible type.
@@ -49,7 +41,7 @@ fn read_sysfs_line(path: &str) -> Option<Vec<u8>> {
     if n == 0 {
         return None;
     }
-    // sdstrim(res, " \n") — strip leading and trailing spaces / newlines
+ // sdstrim(res, " \n") — strip leading and trailing spaces / newlines
     let start = line
         .iter()
         .position(|&b| b != b' ' && b != b'\n')
@@ -66,33 +58,25 @@ fn read_sysfs_line(path: &str) -> Option<Vec<u8>> {
 }
 
 /// Verify that the system clocksource does not go through a kernel system call
-/// (i.e., it is backed by the vDSO).  A syscall-backed clocksource degrades
+/// (i.e., it is backed by the vDSO). A syscall-backed clocksource degrades
 /// server performance measurably.
-///
 /// The check busy-loops for `5 × (1_000_000 / system_hz)` µs while recording
-/// `getrusage` system-time before and after.  If more than 10% of elapsed
+/// `getrusage` system-time before and after. If more than 10% of elapsed
 /// process time was in kernel mode, the clocksource is considered slow.
-///
-/// C: `syscheck.c:66-118`, `checkClocksource` (static, Linux only).
-///
 /// TODO(architect): `sysconf(_SC_CLK_TCK)` and `getrusage(RUSAGE_SELF, …)` are
-/// POSIX libc calls with no safe Rust stdlib equivalent.  A `libc` dependency
+/// POSIX libc calls with no safe Rust stdlib equivalent. A `libc` dependency
 /// and a non-zero unsafe budget for `redis-core` are required to implement
-/// this check faithfully.  Until approved, returns [`CheckOutcome::Skip`].
+/// this check faithfully. Until approved, returns [`CheckOutcome::Skip`].
 #[cfg(target_os = "linux")]
 pub(crate) fn check_clocksource() -> CheckOutcome {
     CheckOutcome::Skip
 }
 
 /// Verify that the current clocksource is not `xen`.
-///
 /// The Xen hypervisor's default clocksource is slow; AWS ec2 recommends
 /// switching to `tsc` for Xen-based instances.
-///
-/// C: `syscheck.c:123-137`, `checkXenClocksource` (Linux only).
 #[cfg(target_os = "linux")]
 pub fn check_xen_clocksource() -> CheckOutcome {
-    // C: syscheck.c:123-137
     let curr =
         match read_sysfs_line("/sys/devices/system/clocksource/clocksource0/current_clocksource") {
             Some(v) => v,
@@ -113,15 +97,11 @@ performance."
 }
 
 /// Verify that `vm.overcommit_memory` is set to `1`.
-///
 /// When overcommit is disabled, Linux may OOM-kill the `bgsave` child process
-/// even though it only needs copy-on-write pages, not a full second copy of
+/// even though it only needs copy-on-write pages, not a full second copy
 /// all server memory.
-///
-/// C: `syscheck.c:143-168`, `checkOvercommit` (Linux only).
 #[cfg(target_os = "linux")]
 pub fn check_overcommit() -> CheckOutcome {
-    // C: syscheck.c:143-168
     let file = match File::open("/proc/sys/vm/overcommit_memory") {
         Ok(f) => f,
         Err(_) => return CheckOutcome::Skip,
@@ -133,8 +113,8 @@ pub fn check_overcommit() -> CheckOutcome {
         _ => {}
     }
 
-    // strtol(buf, NULL, 10) != 1
-    // The file contains a single ASCII decimal integer.
+ // strtol(buf, NULL, 10) != 1
+ // The file contains a single ASCII decimal integer.
     let value: i64 = line
         .iter()
         .take_while(|&&b| b.is_ascii_digit())
@@ -154,14 +134,10 @@ to take effect."
 }
 
 /// Verify that Transparent Huge Pages (THP) are not set to `always`.
-///
 /// When THP is `always`, copy-on-write during `fork` can double memory
 /// consumption and significantly hurt tail latency.
-///
-/// C: `syscheck.c:172-194`, `checkTHPEnabled` (Linux only).
 #[cfg(target_os = "linux")]
 pub fn check_thp_enabled() -> CheckOutcome {
-    // C: syscheck.c:172-194
     let file = match File::open("/sys/kernel/mm/transparent_hugepage/enabled") {
         Ok(f) => f,
         Err(_) => return CheckOutcome::Skip,
@@ -173,7 +149,7 @@ pub fn check_thp_enabled() -> CheckOutcome {
         _ => {}
     }
 
-    // strstr(buf, "[always]") != NULL
+ // strstr(buf, "[always]") != NULL
     if buf.windows(b"[always]".len()).any(|w| w == b"[always]") {
         CheckOutcome::Fail(
             b"You have Transparent Huge Pages (THP) support enabled in your kernel. \
@@ -211,16 +187,12 @@ fn parse_hex_usize(bytes: &[u8]) -> Option<usize> {
     Some(result)
 }
 
-/// Return the `Shared_Dirty` value (in kB) from `/proc/self/smaps` for the
+/// Return the `Shared_Dirty` value (in kB) from `/proc/self/smaps` for
 /// virtual-memory area that contains `addr`, or `None` on failure.
-///
-/// C: `syscheck.c:199-223`, `smapsGetSharedDirty` (static, arm64 + Linux only).
-///
 /// PORT NOTE: The C return is `int` with `-1` for error; Rust uses `Option<u32>`
 /// since valid values are always non-negative.
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 fn smaps_get_shared_dirty(addr: usize) -> Option<u32> {
-    // C: syscheck.c:199-223
     let file = File::open("/proc/self/smaps").ok()?;
     let reader = BufReader::new(file);
     let mut in_mapping = false;
@@ -228,8 +200,8 @@ fn smaps_get_shared_dirty(addr: usize) -> Option<u32> {
     for raw in reader.split(b'\n') {
         let line = raw.ok()?;
 
-        // VMA header lines always start with a hex digit: "address-address perms ..."
-        // Try to parse "from-to" hex pair to update in_mapping.
+ // VMA header lines always start with a hex digit: "address-address perms..."
+ // Try to parse "from-to" hex pair to update in_mapping.
         if line.first().map(|b| b.is_ascii_hexdigit()).unwrap_or(false) {
             if let Some(dash_pos) = line.iter().position(|&b| b == b'-') {
                 let from_hex = parse_hex_usize(&line[..dash_pos]);
@@ -243,7 +215,7 @@ fn smaps_get_shared_dirty(addr: usize) -> Option<u32> {
             }
         }
 
-        // "Shared_Dirty:   <value> kB"  — only relevant inside the target mapping
+ // "Shared_Dirty: <value> kB" — only relevant inside the target mapping
         if in_mapping && line.starts_with(b"Shared_Dirty:") {
             let rest = &line[b"Shared_Dirty:".len()..];
             let digits_start = rest
@@ -262,15 +234,11 @@ fn smaps_get_shared_dirty(addr: usize) -> Option<u32> {
 
 /// Check whether the arm64 kernel has the MADV_FREE + copy-on-write dirty-bit
 /// bug that can cause data corruption during background save.
-///
 /// The bug was fixed in kernel commit ff1712f9 ("arm64: pgtable: Ensure dirty
-/// bit is preserved across pte_wrprotect()").
-///
-/// C: `syscheck.c:231-321`, `checkLinuxMadvFreeForkBug` (arm64 + Linux only).
-///
+/// bit is preserved across pte_wrprotect").
 /// TODO(architect): the C implementation requires `mmap`, `mprotect`,
 /// `madvise`, `fork`, `pipe`, and `waitpid` — all POSIX syscalls that have no
-/// safe Rust stdlib equivalent and require `unsafe` blocks.  Until the
+/// safe Rust stdlib equivalent and require `unsafe` blocks. Until
 /// architect approves a `libc`/`nix` dependency and a non-zero unsafe budget
 /// for `redis-core`, this check returns [`CheckOutcome::Skip`].
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
@@ -281,12 +249,10 @@ pub fn check_linux_madv_free_fork_bug() -> CheckOutcome {
 // ── Dispatch helper ───────────────────────────────────────────────────────────
 
 /// Print the result of one check to stdout and update `all_passed`.
-///
-/// Output format mirrors the C `syscheck()` printf calls exactly:
+/// Output format mirrors the C `syscheck` printf calls exactly:
 /// `[<name>]...OK`, `[<name>]...skipped`, or `[<name>]...WARNING:\n<message>`.
-///
 /// PORT NOTE: `name` and message bytes are printed via `String::from_utf8_lossy`
-/// for display purposes only.  These are ASCII diagnostic labels and operator
+/// for display purposes only. These are ASCII diagnostic labels and operator
 /// messages — not Redis data — so the display conversion is acceptable here.
 fn run_check(name: &[u8], outcome: CheckOutcome, all_passed: &mut bool) {
     print!("[{}]...", String::from_utf8_lossy(name));
@@ -304,19 +270,14 @@ fn run_check(name: &[u8], outcome: CheckOutcome, all_passed: &mut bool) {
 // ── Public entry point ────────────────────────────────────────────────────────
 
 /// Run all applicable system checks, printing results to stdout.
-///
 /// Returns `true` if every check either passed or was skipped, `false` if any
-/// check reported a warning.  The caller (startup code) typically prints an
+/// check reported a warning. The caller (startup code) typically prints an
 /// additional advisory and continues anyway; the return value is informational.
-///
-/// C: `syscheck.c:353-374`, `syscheck`.
-///
 /// PORT NOTE: The C implementation uses a statically-initialised function-pointer
-/// table (`check checks[]`).  Rust has no idiomatic equivalent for
+/// table (`check checks[]`). Rust has no idiomatic equivalent for
 /// conditionally-populated static slices, so this function dispatches directly.
 /// Behavior is identical.
 pub fn syscheck() -> bool {
-    // C: syscheck.c:353-374
     let all_passed = true;
 
     #[cfg(target_os = "linux")]
@@ -339,7 +300,7 @@ pub fn syscheck() -> bool {
 
 // ──────────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        src/syscheck.c  (374 lines, 6 functions) + src/syscheck.h
+//   source:        Valkey
 //   target_crate:  redis-core
 //   confidence:    medium
 //   todos:         2

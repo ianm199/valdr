@@ -1,10 +1,8 @@
 //! Cross-cutting type vocabulary owned by `redis-types`.
-//!
 //! Owners (per `harness/type-vocabulary.tsv`):
-//!   - `RedisString` — `src/string.rs`
-//!   - `RedisError`  — `src/error.rs`
-//!
-//! Other vocabulary types live in other crates by design; see the
+//! - `RedisString` — `src/string.rs`
+//! - `RedisError` — `src/error.rs`
+//! Other vocabulary types live in other crates by design; see
 //! registry. This crate is the foundation: no dependencies on other
 //! port crates.
 

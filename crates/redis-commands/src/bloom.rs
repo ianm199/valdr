@@ -1,19 +1,15 @@
 //! Bloom filter commands: BF.RESERVE, BF.ADD, BF.MADD, BF.EXISTS, BF.MEXISTS,
 //! BF.INSERT, BF.INFO.
-//!
-//! Implements a standard single-layer Bloom filter using the
+//! Implements a standard single-layer Bloom filter using
 //! Kirsch-Mitzenmacher double-hashing technique with MurmurHash64A (same hash
 //! function used by the HyperLogLog implementation in hyperloglog.rs).
-//!
-//! Hash scheme: given item bytes, compute h1 = murmur(item, SEED1) and
+//! Hash scheme: given item bytes, compute h1 = murmur(item, SEED1)
 //! h2 = murmur(item, SEED2); the i-th probe position is
-//! `(h1 + i * h2) mod m` for i in 0..k, where m is the bit-array size and
+//! `(h1 + i * h2) mod m` for i in 0..k, where m is the bit-array size
 //! k is the number of hash functions.
-//!
 //! Bloom filter math (standard):
-//!   m = ceil(-n * ln(p) / ln(2)^2)
-//!   k = round(m/n * ln(2))
-//!
+//! m = ceil(-n * ln(p) / ln(2)^2)
+//! k = round(m/n * ln(2))
 //! Storage: `ObjectKind::Bloom(BloomFilter)` in redis-core/src/object.rs.
 
 use redis_core::command_context::CommandContext;
@@ -33,7 +29,6 @@ fn bloom_wrong_type_error() -> RedisError {
 }
 
 /// Compute Bloom filter parameters for a given capacity and error rate.
-///
 /// Returns `(bit_count, n_hashes)`.
 fn bloom_params(capacity: u64, error_rate: f64) -> (u64, u32) {
     let n = capacity as f64;
@@ -65,7 +60,6 @@ fn new_bloom_filter(
 }
 
 /// Test whether `item` is probably present in `bf`.
-///
 /// Returns `true` when all k bit positions derived from `item` are set.
 fn bloom_check(bf: &BloomFilter, item: &[u8]) -> bool {
     let m = bf.bit_count();
@@ -86,7 +80,6 @@ fn bloom_check(bf: &BloomFilter, item: &[u8]) -> bool {
 }
 
 /// Add `item` to `bf`.
-///
 /// Returns `true` when the item was newly inserted (all k positions were not
 /// already set), `false` when it was probably already present.
 fn bloom_add(bf: &mut BloomFilter, item: &[u8]) -> bool {
@@ -138,7 +131,6 @@ fn parse_u32_arg(bytes: &[u8]) -> Result<u32, RedisError> {
 }
 
 /// `BF.RESERVE key error_rate capacity [EXPANSION n] [NONSCALING]`
-///
 /// Create an empty Bloom filter at `key`. Returns an error when the key
 /// already exists (regardless of type).
 pub fn bf_reserve_command(ctx: &mut CommandContext) -> RedisResult<()> {
@@ -185,7 +177,6 @@ pub fn bf_reserve_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// `BF.ADD key item`
-///
 /// Add one item to the filter at `key`. Auto-creates the filter with default
 /// parameters when the key does not yet exist. Returns `:1` when newly added,
 /// `:0` when the item is probably already present.
@@ -216,8 +207,7 @@ pub fn bf_add_command(ctx: &mut CommandContext) -> RedisResult<()> {
     ctx.reply_integer(if added { 1 } else { 0 })
 }
 
-/// `BF.MADD key item [item ...]`
-///
+/// `BF.MADD key item [item...]`
 /// Add multiple items in one call. Returns an array reply: `:1` per newly
 /// added item, `:0` for items that were probably already present.
 pub fn bf_madd_command(ctx: &mut CommandContext) -> RedisResult<()> {
@@ -255,7 +245,6 @@ pub fn bf_madd_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// `BF.EXISTS key item`
-///
 /// Test whether `item` is probably present in the filter at `key`. Returns
 /// `:1` (probably present) or `:0` (definitely absent). Missing key → `:0`.
 pub fn bf_exists_command(ctx: &mut CommandContext) -> RedisResult<()> {
@@ -278,8 +267,7 @@ pub fn bf_exists_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
 }
 
-/// `BF.MEXISTS key item [item ...]`
-///
+/// `BF.MEXISTS key item [item...]`
 /// Test multiple items for probable presence. Returns an array of `:1`/`:0`
 /// replies in the same order as the arguments.
 pub fn bf_mexists_command(ctx: &mut CommandContext) -> RedisResult<()> {
@@ -315,7 +303,6 @@ pub fn bf_mexists_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// `BF.INSERT key [CAPACITY n] [ERROR rate] [EXPANSION n] [NONSCALING] [NOCREATE] ITEMS item [...]`
-///
 /// Combined reserve + add. Creates the filter when it does not yet exist
 /// (unless NOCREATE is given, which causes an error when the key is absent).
 pub fn bf_insert_command(ctx: &mut CommandContext) -> RedisResult<()> {
@@ -402,7 +389,6 @@ pub fn bf_insert_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// `BF.INFO key [CAPACITY|SIZE|FILTERS|ITEMS|EXPANSION]`
-///
 /// Return metadata about the filter. With no subfield, returns all fields as a
 /// flat alternating key/value array. With a subfield, returns only that value.
 pub fn bf_info_command(ctx: &mut CommandContext) -> RedisResult<()> {
@@ -458,7 +444,6 @@ pub fn bf_info_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// Ensure a Bloom filter exists at `key`, creating one with defaults if absent.
-///
 /// Returns a WRONGTYPE error when the key exists but holds a non-Bloom object.
 fn ensure_bloom_exists(ctx: &mut CommandContext, key: &RedisString) -> RedisResult<()> {
     match ctx.db_mut().lookup_key_write(key) {

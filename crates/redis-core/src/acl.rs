@@ -1,13 +1,11 @@
 //! Multi-user ACL state — per-user permission model.
-//!
 //! Implements the Redis 6+ ACL semantics:
-//!   - Multiple named users, each with passwords (SHA-256 hashed), enabled/disabled
-//!     flag, allowed commands (by category bitmask), key patterns, and channel patterns.
-//!   - The `default` user starts as `on nopass ~* &* +@all` for backwards compatibility.
-//!   - ACL state lives in a process-global `OnceLock<Arc<Mutex<AclState>>>`.
-//!
+//! - Multiple named users, each with passwords (SHA-256 hashed), enabled/disabled
+//! flag, allowed commands (by category bitmask), key patterns, and channel patterns.
+//! - The `default` user starts as `on nopass ~* &* +@all` for backwards compatibility.
+//! - ACL state lives in a process-global `OnceLock<Arc<Mutex<AclState>>>`.
 //! TODOs:
-//!   - ACL persistence to aclfile / `users` config section.
+//! - ACL persistence to aclfile / `users` config section.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,7 +27,6 @@ pub fn sha256_hash(password: &[u8]) -> PasswordHash {
 }
 
 /// Minimal pure-Rust SHA-256 implementation (no external crate needed).
-///
 /// Implements FIPS 180-4 SHA-256. Used only on the ACL write path (SETUSER),
 /// not in hot paths.
 fn sha256_raw(data: &[u8], out: &mut [u8; 32]) {
@@ -148,23 +145,23 @@ fn hex_digit(b: u8) -> Option<u8> {
 /// Bitmask flags on an ACL user.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AclUserFlags {
-    /// User is enabled (can authenticate and run commands).
+ /// User is enabled (can authenticate and run commands).
     pub enabled: bool,
-    /// No password required; any password (or none) is accepted.
+ /// No password required; any password (or none) is accepted.
     pub nopass: bool,
-    /// RESTORE payloads are sanitized by default.
+ /// RESTORE payloads are sanitized by default.
     pub sanitize_payload: bool,
-    /// Allow all commands regardless of `allowed_categories`.
+ /// Allow all commands regardless of `allowed_categories`.
     pub allcommands: bool,
-    /// Allow all keys (`~*`).
+ /// Allow all keys (`~*`).
     pub allkeys: bool,
-    /// Allow all channels (`&*`).
+ /// Allow all channels (`&*`).
     pub allchannels: bool,
-    /// Allow every logical database (`alldbs`).
+ /// Allow every logical database (`alldbs`).
     pub alldbs: bool,
 }
 
-/// ACL category bitmask constants (aligned with Valkey acl.c).
+/// ACL category bitmask constants.
 pub mod category {
     pub const KEYSPACE: u64 = 1 << 0;
     pub const READ: u64 = 1 << 1;
@@ -188,7 +185,7 @@ pub mod category {
     pub const TRANSACTION: u64 = 1 << 19;
     pub const SCRIPTING: u64 = 1 << 20;
 
-    /// All categories combined.
+ /// All categories combined.
     pub const ALL: u64 = KEYSPACE
         | READ
         | WRITE
@@ -331,28 +328,28 @@ pub struct AclLogEntry {
 pub struct AclUser {
     pub name: RedisString,
     pub flags: AclUserFlags,
-    /// SHA-256 hashed passwords.
+ /// SHA-256 hashed passwords.
     pub passwords: Vec<PasswordHash>,
-    /// Bitmask of allowed ACL categories.
+ /// Bitmask of allowed ACL categories.
     pub allowed_categories: u64,
-    /// Bitmask of explicitly denied ACL categories.
+ /// Bitmask of explicitly denied ACL categories.
     pub denied_categories: u64,
-    /// Explicitly allowed individual command names (lowercase).
+ /// Explicitly allowed individual command names (lowercase).
     pub allowed_commands: Vec<RedisString>,
-    /// Explicitly denied individual command names (lowercase).
+ /// Explicitly denied individual command names (lowercase).
     pub denied_commands: Vec<RedisString>,
-    /// Lossless command/category rule order for ACL GETUSER/LIST rendering.
+ /// Lossless command/category rule order for ACL GETUSER/LIST rendering.
     pub command_rules: Vec<RedisString>,
-    /// Key glob patterns allowed (`~pattern`).
+ /// Key glob patterns allowed (`~pattern`).
     pub key_patterns: Vec<RedisString>,
-    /// Key glob patterns with separate read/write permissions (`%R~pattern`).
+ /// Key glob patterns with separate read/write permissions (`%R~pattern`).
     pub key_permissions: Vec<AclKeyPattern>,
-    /// Channel glob patterns allowed (`&pattern`).
+ /// Channel glob patterns allowed (`&pattern`).
     pub channel_patterns: Vec<RedisString>,
-    /// Logical database ids allowed by `db=N` rules.
+ /// Logical database ids allowed by `db=N` rules.
     pub allowed_dbs: Vec<u32>,
-    /// ACL v2 selectors. Each selector is an independent rule set; permissions
-    /// from different selectors are intentionally not additive.
+ /// ACL v2 selectors. Each selector is an independent rule set; permissions
+ /// from different selectors are intentionally not additive.
     pub selectors: Vec<AclUser>,
 }
 
@@ -363,7 +360,7 @@ pub struct AclKeyPattern {
 }
 
 impl AclUser {
-    /// Create a new user in reset/deny-all state.
+ /// Create a new user in reset/deny-all state.
     pub fn new_reset(name: RedisString) -> Self {
         AclUser {
             name,
@@ -390,14 +387,14 @@ impl AclUser {
         }
     }
 
-    /// Create a selector rule set. Selectors share the same deny-all command,
-    /// no-key, no-channel defaults as reset users, but do not carry identity or
-    /// authentication state.
+ /// Create a selector rule set. Selectors share the same deny-all command,
+ /// no-key, no-channel defaults as reset users, but do not carry identity or
+ /// authentication state.
     pub fn new_selector() -> Self {
         AclUser::new_reset(RedisString::from_static(b""))
     }
 
-    /// Create the default user: `on nopass ~* &* +@all`.
+ /// Create the default user: `on nopass ~* &* +@all`.
     pub fn new_default() -> Self {
         AclUser {
             name: RedisString::from_bytes(b"default"),
@@ -424,13 +421,13 @@ impl AclUser {
         }
     }
 
-    /// Check whether this user can execute the given command name.
+ /// Check whether this user can execute the given command name.
     pub fn can_execute_command(&self, cmd_name: &[u8], cmd_categories: u64) -> bool {
         self.can_execute_command_with_arg(cmd_name, None, cmd_categories)
     }
 
-    /// Check whether this user can execute `cmd_name`, considering
-    /// first-argument ACL subcommand rules such as `+client|id`.
+ /// Check whether this user can execute `cmd_name`, considering
+ /// first-argument ACL subcommand rules such as `+client|id`.
     pub fn can_execute_command_with_arg(
         &self,
         cmd_name: &[u8],
@@ -469,14 +466,14 @@ impl AclUser {
         self.allowed_categories & cmd_categories != 0
     }
 
-    /// Check whether this user may access `key`.
+ /// Check whether this user may access `key`.
     pub fn can_access_key(&self, key: &[u8]) -> bool {
         self.can_access_key_for(key, ACL_KEY_READ_WRITE)
     }
 
-    /// Check whether this selector/user may access `key` with the requested
-    /// read/write mode. `ACL_KEY_ANY` is used for existence/cardinality-style
-    /// commands where Valkey accepts either read or write key permission.
+ /// Check whether this selector/user may access `key` with the requested
+ /// read/write mode. `ACL_KEY_ANY` is used for existence/cardinality-style
+ /// commands where Valkey accepts either read or write key permission.
     pub fn can_access_key_for(&self, key: &[u8], required: u8) -> bool {
         if self.flags.allkeys {
             return true;
@@ -501,7 +498,7 @@ impl AclUser {
         }
     }
 
-    /// Check whether this user may access `channel`.
+ /// Check whether this user may access `channel`.
     pub fn can_access_channel(&self, channel: &[u8]) -> bool {
         if self.flags.allchannels {
             return true;
@@ -511,10 +508,9 @@ impl AclUser {
             .any(|pat| string_match_len(pat.as_bytes(), channel, false))
     }
 
-    /// Check whether this user may subscribe to channel pattern `pattern`.
-    ///
-    /// Valkey matches PSUBSCRIBE patterns literally against ACL channel
-    /// patterns; normal channels use glob matching.
+ /// Check whether this user may subscribe to channel pattern `pattern`.
+ /// Valkey matches PSUBSCRIBE patterns literally against ACL channel
+ /// patterns; normal channels use glob matching.
     pub fn can_access_channel_pattern(&self, pattern: &[u8]) -> bool {
         if self.flags.allchannels {
             return true;
@@ -524,12 +520,12 @@ impl AclUser {
             .any(|pat| pat.as_bytes() == pattern)
     }
 
-    /// Check whether this user may access logical database `db`.
+ /// Check whether this user may access logical database `db`.
     pub fn can_access_db(&self, db: u32) -> bool {
         self.flags.alldbs || self.allowed_dbs.contains(&db)
     }
 
-    /// Check whether this user's password list contains the given cleartext password.
+ /// Check whether this user's password list contains the given cleartext password.
     pub fn check_password(&self, cleartext: &[u8]) -> bool {
         if self.flags.nopass {
             return true;
@@ -538,7 +534,7 @@ impl AclUser {
         self.passwords.contains(&hash)
     }
 
-    /// Render this user as an `ACL LIST` / `ACL SETUSER` rule string.
+ /// Render this user as an `ACL LIST` / `ACL SETUSER` rule string.
     pub fn to_rule_string(&self) -> Vec<u8> {
         let mut out: Vec<u8> = Vec::new();
         out.extend_from_slice(b"user ");
@@ -591,7 +587,7 @@ impl AclUser {
         out
     }
 
-    /// Return a string describing the commands permission state for GETUSER.
+ /// Return a string describing the commands permission state for GETUSER.
     pub fn commands_summary(&self) -> Vec<u8> {
         let mut out = if self.flags.allcommands {
             b"+@all".to_vec()
@@ -605,7 +601,7 @@ impl AclUser {
         out
     }
 
-    /// Render key patterns for GETUSER.
+ /// Render key patterns for GETUSER.
     pub fn keys_summary(&self) -> Vec<u8> {
         if self.flags.allkeys {
             return b"~*".to_vec();
@@ -648,7 +644,7 @@ impl AclUser {
             .collect()
     }
 
-    /// Render channel patterns for GETUSER.
+ /// Render channel patterns for GETUSER.
     pub fn channels_summary(&self) -> Vec<u8> {
         if self.flags.allchannels {
             return b"&*".to_vec();
@@ -680,7 +676,7 @@ impl AclUser {
         out
     }
 
-    /// Render database selectors for GETUSER/LIST.
+ /// Render database selectors for GETUSER/LIST.
     pub fn databases_summary(&self) -> Vec<u8> {
         if self.flags.alldbs {
             return b"alldbs".to_vec();
@@ -746,7 +742,7 @@ pub struct AclState {
 }
 
 impl AclState {
-    /// Initialise with just the `default` user.
+ /// Initialise with just the `default` user.
     pub fn new() -> Self {
         let mut users = HashMap::new();
         let default_user = AclUser::new_default();

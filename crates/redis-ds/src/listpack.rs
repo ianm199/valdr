@@ -1,7 +1,5 @@
 //! `ListPack` - compact contiguous-buffer encoding for collections.
-//!
 //! The blob layout: `[total-bytes:u32-le][element-count:u16-le][entry...][0xff]`.
-//!
 //! Each entry stores either compact integer bytes or string header+payload bytes
 //! followed by a reverse-encoded backlen. Public cursors are byte offsets into
 //! the encoded blob.
@@ -53,7 +51,7 @@ pub struct ListPack {
 }
 
 impl ListPack {
-    /// Create a new empty listpack with default capacity.
+ /// Create a new empty listpack with default capacity.
     pub fn new() -> Self {
         Self::with_capacity(LP_HDR_SIZE + 1)
     }
@@ -78,23 +76,23 @@ impl ListPack {
         &self.data
     }
 
-    /// Deep copy.
+ /// Deep copy.
     pub fn dup(&self) -> Self {
         self.clone()
     }
 
-    /// Shrink the buffer to fit current size.
+ /// Shrink the buffer to fit current size.
     pub fn shrink_to_fit(&mut self) {
         self.data.truncate(self.bytes_len());
         self.data.shrink_to_fit();
     }
 
-    /// Check if adding bytes would exceed maximum size.
+ /// Check if adding bytes would exceed maximum size.
     pub fn safe_to_add(&self, add: usize) -> bool {
         self.bytes_len().saturating_add(add) <= LISTPACK_MAX_SAFETY_SIZE
     }
 
-    /// Total byte length of the listpack.
+ /// Total byte length of the listpack.
     pub fn bytes_len(&self) -> usize {
         read_total_bytes(&self.data).unwrap_or(self.data.len() as u32) as usize
     }
@@ -103,7 +101,7 @@ impl ListPack {
         self.first().is_none()
     }
 
-    /// Count of elements (scans when cached count is unknown).
+ /// Count of elements (scans when cached count is unknown).
     pub fn len(&self) -> usize {
         match read_num_elements(&self.data) {
             Some(n) if n != LP_HDR_NUMELE_UNKNOWN => n as usize,
@@ -111,7 +109,7 @@ impl ListPack {
         }
     }
 
-    /// Count of elements, refreshing the cached header count.
+ /// Count of elements, refreshing the cached header count.
     pub fn length(&mut self) -> usize {
         let cached = read_num_elements(&self.data);
         if let Some(n) = cached {
@@ -127,7 +125,7 @@ impl ListPack {
         count
     }
 
-    /// Cursor to the first entry, or None if empty.
+ /// Cursor to the first entry, or None if empty.
     pub fn first(&self) -> Option<usize> {
         if !self.has_valid_header() {
             return None;
@@ -141,7 +139,7 @@ impl ListPack {
         }
     }
 
-    /// Cursor to the last entry, or None if empty.
+ /// Cursor to the last entry, or None if empty.
     pub fn last(&self) -> Option<usize> {
         let eof_pos = self.bytes_len().checked_sub(1)?;
         if self.data.get(eof_pos).copied() != Some(LP_EOF) {
@@ -150,7 +148,7 @@ impl ListPack {
         self.prev(eof_pos)
     }
 
-    /// Cursor to the next entry after pos, or None if at end.
+ /// Cursor to the next entry after pos, or None if at end.
     pub fn next(&self, pos: usize) -> Option<usize> {
         let total = self.bytes_len();
         if self.data.get(pos).copied() == Some(LP_EOF) {
@@ -169,7 +167,7 @@ impl ListPack {
         }
     }
 
-    /// Cursor to the previous entry before pos. Passing EOF returns the last entry.
+ /// Cursor to the previous entry before pos. Passing EOF returns the last entry.
     pub fn prev(&self, pos: usize) -> Option<usize> {
         let total = self.bytes_len();
         if pos <= LP_HDR_SIZE || pos >= total {
@@ -190,7 +188,7 @@ impl ListPack {
         }
     }
 
-    /// Cursor to the entry at index (supports negative indices).
+ /// Cursor to the entry at index (supports negative indices).
     pub fn seek(&self, mut index: i64) -> Option<usize> {
         let mut forward = true;
         match read_num_elements(&self.data) {
@@ -230,7 +228,7 @@ impl ListPack {
         }
     }
 
-    /// Get the value at pos.
+ /// Get the value at pos.
     pub fn get(&self, pos: usize) -> Option<ListPackValue<'_>> {
         decode_value(&self.data, pos).map(|decoded| decoded.value)
     }
@@ -242,7 +240,7 @@ impl ListPack {
         }
     }
 
-    /// Get the value at pos as a byte slice, using intbuf for integer conversion.
+ /// Get the value at pos as a byte slice, using intbuf for integer conversion.
     pub fn get_as_bytes<'a>(
         &'a self,
         pos: usize,
@@ -257,7 +255,7 @@ impl ListPack {
         }
     }
 
-    /// Check if the value at pos equals the given bytes.
+ /// Check if the value at pos equals the given bytes.
     pub fn compare(&self, pos: usize, value: &[u8]) -> bool {
         match self.get(pos) {
             Some(ListPackValue::Bytes(bytes)) => bytes == value,
@@ -266,7 +264,7 @@ impl ListPack {
         }
     }
 
-    /// Find the cursor to the next entry equal to value, skipping skip entries.
+ /// Find the cursor to the next entry equal to value, skipping skip entries.
     pub fn find(&self, start_pos: usize, value: &[u8], skip: usize) -> Option<usize> {
         let mut cursor = Some(start_pos);
         let mut skip_count = 0usize;
@@ -307,7 +305,7 @@ impl ListPack {
         None
     }
 
-    /// Append a byte string.
+ /// Append a byte string.
     pub fn append(&mut self, value: &[u8]) -> bool {
         let Some(eof_pos) = self.bytes_len().checked_sub(1) else {
             return false;
@@ -316,7 +314,7 @@ impl ListPack {
             .is_some()
     }
 
-    /// Append an integer.
+ /// Append an integer.
     pub fn append_integer(&mut self, value: i64) -> bool {
         let Some(eof_pos) = self.bytes_len().checked_sub(1) else {
             return false;
@@ -325,7 +323,7 @@ impl ListPack {
             .is_some()
     }
 
-    /// Prepend a byte string.
+ /// Prepend a byte string.
     pub fn prepend(&mut self, value: &[u8]) -> bool {
         match self.first() {
             Some(pos) => self
@@ -335,7 +333,7 @@ impl ListPack {
         }
     }
 
-    /// Prepend an integer.
+ /// Prepend an integer.
     pub fn prepend_integer(&mut self, value: i64) -> bool {
         match self.first() {
             Some(pos) => self
@@ -345,7 +343,7 @@ impl ListPack {
         }
     }
 
-    /// Insert a byte string at pos.
+ /// Insert a byte string at pos.
     pub fn insert_string(
         &mut self,
         value: &[u8],
@@ -356,13 +354,13 @@ impl ListPack {
         self.insert_content(&content, pos, where_).flatten()
     }
 
-    /// Insert an integer at pos.
+ /// Insert an integer at pos.
     pub fn insert_integer(&mut self, value: i64, pos: usize, where_: InsertWhere) -> Option<usize> {
         let content = encode_integer_content(value);
         self.insert_content(&content, pos, where_).flatten()
     }
 
-    /// Replace the entry at pos with a byte string.
+ /// Replace the entry at pos with a byte string.
     pub fn replace(&mut self, pos: &mut usize, value: &[u8]) -> bool {
         let Some(new_pos) = self.insert_string(value, *pos, InsertWhere::Replace) else {
             return false;
@@ -371,7 +369,7 @@ impl ListPack {
         true
     }
 
-    /// Replace the entry at pos with an integer.
+ /// Replace the entry at pos with an integer.
     pub fn replace_integer(&mut self, pos: &mut usize, value: i64) -> bool {
         let Some(new_pos) = self.insert_integer(value, *pos, InsertWhere::Replace) else {
             return false;
@@ -380,12 +378,12 @@ impl ListPack {
         true
     }
 
-    /// Delete the entry at pos, returning the cursor to the next entry or None.
+ /// Delete the entry at pos, returning the cursor to the next entry or None.
     pub fn delete(&mut self, pos: usize) -> Option<usize> {
         self.delete_internal(pos)?
     }
 
-    /// Delete num entries starting from pos.
+ /// Delete num entries starting from pos.
     pub fn delete_range_with_entry(&mut self, pos: &mut Option<usize>, num: usize) -> bool {
         if num == 0 {
             return true;
@@ -411,7 +409,7 @@ impl ListPack {
         true
     }
 
-    /// Delete num entries starting at index.
+ /// Delete num entries starting at index.
     pub fn delete_range(&mut self, index: i64, num: usize) -> bool {
         if num == 0 {
             return true;
@@ -420,7 +418,7 @@ impl ListPack {
         self.delete_range_with_entry(&mut cursor, num)
     }
 
-    /// Merge two listpacks, consuming both and returning the merged result.
+ /// Merge two listpacks, consuming both and returning the merged result.
     pub fn merge(first: Self, second: Self) -> Option<Self> {
         if !first.is_valid(true) || !second.is_valid(true) {
             return None;
@@ -453,7 +451,7 @@ impl ListPack {
         Self::from_raw_bytes(data)
     }
 
-    /// Estimate bytes needed to encode an integer repeated num times.
+ /// Estimate bytes needed to encode an integer repeated num times.
     pub fn estimate_bytes_repeated_integer(value: i64, repeat: usize) -> Option<usize> {
         let content = encode_integer_content(value);
         let backlen = encode_backlen_size(content.len())?;
@@ -462,7 +460,7 @@ impl ListPack {
             .checked_add(1)
     }
 
-    /// Same as `lpValidateFirst`, intentionally without entry validation.
+ /// Same as `lpValidateFirst`, intentionally without entry validation.
     pub fn validate_first(&self) -> Option<usize> {
         if self.data.get(LP_HDR_SIZE).copied() == Some(LP_EOF) {
             None
@@ -471,12 +469,12 @@ impl ListPack {
         }
     }
 
-    /// Validate and advance cursor to the next entry.
+ /// Validate and advance cursor to the next entry.
     pub fn validate_next(&self, cursor: &mut Option<usize>, lpbytes: usize) -> bool {
         validate_next_raw(&self.data, cursor, lpbytes)
     }
 
-    /// Validate a raw listpack blob.
+ /// Validate a raw listpack blob.
     pub fn validate_integrity(data: &[u8], deep: bool) -> bool {
         Self::validate_integrity_with(data, deep, None)
     }

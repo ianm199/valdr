@@ -1,16 +1,13 @@
 //! Global per-client metadata snapshot for cross-thread `CLIENT LIST` queries.
-//!
 //! Each connection thread registers itself on accept and periodically updates
 //! its entry after processing a read batch. The `CLIENT LIST` handler on any
 //! thread can read a consistent snapshot of all live connections without
 //! holding the db lock.
-//!
 //! Layout:
-//!   * `ClientSnapshot` — immutable view of one client's current state.
-//!   * `ClientInfoRegistry` — `ClientId → ClientSnapshot` map.
-//!   * `client_info_registry()` — process-wide singleton accessor.
-//!
-//! Fields intentionally kept minimal: only what `CLIENT LIST` actually needs to
+//! * `ClientSnapshot` — immutable view of one client's current state.
+//! * `ClientInfoRegistry` — `ClientId → ClientSnapshot` map.
+//! * `client_info_registry` — process-wide singleton accessor.
+//! Fields intentionally kept minimal: only what `CLIENT LIST` actually needs
 //! satisfy the upstream TCL test suite (id, addr, db, flags, cmd).
 
 use std::collections::{HashMap, HashSet};
@@ -72,7 +69,7 @@ impl ClientInfoRegistry {
         Self::default()
     }
 
-    /// Register a freshly accepted connection.
+ /// Register a freshly accepted connection.
     pub fn register(&mut self, id: ClientId, addr: String) {
         self.entries.insert(
             id,
@@ -114,12 +111,11 @@ impl ClientInfoRegistry {
         );
     }
 
-    /// Update the externally visible command/db/blocking snapshot for `id`.
-    ///
-    /// This is intentionally batch-oriented rather than called for every
-    /// command in a pipeline. `CLIENT LIST` observes the last command completed
-    /// by the connection, which is the useful stable state for diagnostics and
-    /// avoids pushing a global mutex into every GET/SET hot path.
+ /// Update the externally visible command/db/blocking snapshot for `id`.
+ /// This is intentionally batch-oriented rather than called for every
+ /// command in a pipeline. `CLIENT LIST` observes the last command completed
+ /// by the connection, which is the useful stable state for diagnostics
+ /// avoids pushing a global mutex into every GET/SET hot path.
     pub fn update_snapshot(&mut self, id: ClientId, cmd: &[u8], db_index: u32, blocked: bool) {
         if let Some(e) = self.entries.get_mut(&id) {
             e.cmd = cmd.iter().map(|b| b.to_ascii_lowercase() as char).collect();
@@ -128,8 +124,8 @@ impl ClientInfoRegistry {
         }
     }
 
-    /// Refresh the metadata fields that are not passed through the hot-path
-    /// `update_snapshot` call.
+ /// Refresh the metadata fields that are not passed through the hot-path
+ /// `update_snapshot` call.
     pub fn update_client_metadata(&mut self, client: &Client) {
         if let Some(e) = self.entries.get_mut(&client.id) {
             e.db_index = client.db_index;
@@ -187,45 +183,44 @@ impl ClientInfoRegistry {
         }
     }
 
-    /// Mark `id` as blocked (waiting on a blocking command).
+ /// Mark `id` as blocked (waiting on a blocking command).
     pub fn set_blocked(&mut self, id: ClientId, blocked: bool) {
         if let Some(e) = self.entries.get_mut(&id) {
             e.blocked = blocked;
         }
     }
 
-    /// Update `id`'s selected database index.
+ /// Update `id`'s selected database index.
     pub fn set_db(&mut self, id: ClientId, db_index: u32) {
         if let Some(e) = self.entries.get_mut(&id) {
             e.db_index = db_index;
         }
     }
 
-    /// Remove a connection that has disconnected.
+ /// Remove a connection that has disconnected.
     pub fn deregister(&mut self, id: ClientId) {
         self.entries.remove(&id);
         self.kill_marks.remove(&id);
     }
 
-    /// Mark a connection for asynchronous teardown.
-    ///
-    /// The command handler cannot directly own another connection's socket in
-    /// the thread-per-client runtime. Removing the snapshot makes CLIENT LIST
-    /// observe Valkey-like immediate disappearance; the kill mark is consumed
-    /// by the target connection loop before it processes the next read.
+ /// Mark a connection for asynchronous teardown.
+ /// The command handler cannot directly own another connection's socket
+ /// the thread-per-client runtime. Removing the snapshot makes CLIENT LIST
+ /// observe Valkey-like immediate disappearance; the kill mark is consumed
+ /// by the target connection loop before it processes the next read.
     pub fn mark_killed(&mut self, id: ClientId) {
         if self.entries.remove(&id).is_some() {
             self.kill_marks.insert(id);
         }
     }
 
-    /// Return and clear the pending kill bit for `id`.
+ /// Return and clear the pending kill bit for `id`.
     pub fn take_killed(&mut self, id: ClientId) -> bool {
         self.kill_marks.remove(&id)
     }
 
-    /// Remove pub/sub clients authenticated as `username` whose active
-    /// subscriptions are no longer allowed by `updated_user`.
+ /// Remove pub/sub clients authenticated as `username` whose active
+ /// subscriptions are no longer allowed by `updated_user`.
     pub fn deregister_revoked_pubsub_clients(
         &mut self,
         username: &RedisString,
@@ -244,7 +239,7 @@ impl ClientInfoRegistry {
         revoked
     }
 
-    /// Snapshot of all currently registered clients.
+ /// Snapshot of all currently registered clients.
     pub fn all(&self) -> Vec<ClientSnapshot> {
         let mut out: Vec<ClientSnapshot> = self.entries.values().cloned().collect();
         out.sort_by_key(|snap| snap.id);
@@ -275,7 +270,7 @@ pub fn client_info_registry() -> &'static Arc<Mutex<ClientInfoRegistry>> {
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        networking.c CLIENT LIST/INFO support state
+//   source:        Valkey
 //   target_crate:  redis-core
 //   confidence:    medium
 //   todos:         1

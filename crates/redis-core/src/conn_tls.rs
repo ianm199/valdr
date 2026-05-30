@@ -1,15 +1,12 @@
 //! TLS connection-type backend (rustls).
-//!
-//! Structural port of `tls.c`'s `CT_TLS` vtable to `ConnectionTypeTrait`, with
+//! Structural port of 's `CT_TLS` vtable to `ConnectionTypeTrait`, with
 //! crypto reimplemented on rustls (no OpenSSL). The mapping:
-//!
-//! | tls.c (OpenSSL)            | here (rustls)                          |
+//! | (OpenSSL) | here (rustls) |
 //! |---------------------------|----------------------------------------|
-//! | `SSL_accept`              | drive `read_tls`/`process_new_packets`/`write_tls` while `is_handshaking()` |
-//! | `SSL_read`                | `read_tls` → `process_new_packets` → `reader().read()` |
-//! | `SSL_write`               | `writer().write()` → `write_tls()`     |
-//! | `WANT_READ`/`WANT_WRITE` flags + `updateSSLEvent` | `wants_read()` / `wants_write()` recomputed each pump |
-//!
+//! | `SSL_accept` | drive `read_tls`/`process_new_packets`/`write_tls` while `is_handshaking` |
+//! | `SSL_read` | `read_tls` → `process_new_packets` → `reader.read` |
+//! | `SSL_write` | `writer.write` → `write_tls` |
+//! | `WANT_READ`/`WANT_WRITE` flags + `updateSSLEvent` | `wants_read` / `wants_write` recomputed each pump |
 //! OpenSSL flag bookkeeping disappears: rustls owns its plaintext/ciphertext
 //! buffers and exposes the desired interest directly.
 
@@ -25,39 +22,38 @@ use crate::connection::{
 use crate::tls::TlsConfig;
 
 /// The TLS backend. Holds the shared `rustls::ServerConfig` (backend-global,
-/// like C's `valkey_tls_ctx`); per-connection session state lives on the
+/// like C's `valkey_tls_ctx`); per-connection session state lives on
 /// `Connection`'s `ConnIoSlot::Tls`.
 pub struct TlsConnectionType {
     server_config: Arc<rustls::ServerConfig>,
 }
 
 impl TlsConnectionType {
-    /// Build from the project's `TlsConfig` (PEM-loaded cert/key/CA).
+ /// Build from the project's `TlsConfig` (PEM-loaded cert/key/CA).
     pub fn new(config: TlsConfig) -> Self {
         Self {
             server_config: config.server_config,
         }
     }
 
-    /// Build directly from a rustls server config (used by tests and the owner
-    /// loop once a config is in hand).
+ /// Build directly from a rustls server config (used by tests and the owner
+ /// loop once a config is in hand).
     pub fn from_server_config(server_config: Arc<rustls::ServerConfig>) -> Self {
         Self { server_config }
     }
 
-    /// Create a server-side accepted TLS connection over `io`.
-    ///
-    /// (or a test) supplies the freshly-accepted ciphertext transport.
+ /// Create a server-side accepted TLS connection over `io`.
+ /// (or a test) supplies the freshly-accepted ciphertext transport.
     pub fn accept_connection(&self, io: Box<dyn ConnIo>) -> Result<Connection, RedisError> {
         let mut session =
             rustls::ServerConnection::new(Arc::clone(&self.server_config)).map_err(|e| {
                 RedisError::runtime(format!("tls ServerConnection::new: {e}").into_bytes())
             })?;
-        // Unlimit rustls' internal plaintext buffer — the application layer
-        // already bounds incoming data via `client-query-buffer-limit` (1 GB by
-        // default). With rustls' default ~64 KB ceiling, `read_tls` errors with
-        // "received plaintext buffer full" on any client write large enough to
-        // produce more plaintext than the session can hold between drains.
+ // Unlimit rustls' internal plaintext buffer — the application layer
+ // already bounds incoming data via `client-query-buffer-limit` (1 GB by
+ // default). With rustls' default ~64 KB ceiling, `read_tls` errors with
+ // "received plaintext buffer full" on any client write large enough
+ // produce more plaintext than the session can hold between drains.
         session.set_buffer_limit(None);
         let mut conn = Connection::new(ConnectionTypeId::Tls, -1);
         conn.state = ConnectionState::Accepting;
@@ -75,9 +71,8 @@ fn would_block(e: &io::Error) -> bool {
 
 /// Pull available ciphertext from `stream` into `session` and process it.
 /// Returns `Ok(true)` if the transport hit EOF. Generic over the byte stream so
-/// the server's owner loop (which owns the `mio::TcpStream`) reuses the exact
+/// the server's owner loop (which owns the `mio::TcpStream`) reuses the
 /// same, harness-tested pump as the backend.
-///
 pub fn session_read_pump<S: io::Read>(
     session: &mut rustls::ServerConnection,
     stream: &mut S,
@@ -97,7 +92,6 @@ pub fn session_read_pump<S: io::Read>(
 }
 
 /// Flush pending ciphertext from `session` to `stream`.
-///
 pub fn session_write_pump<S: io::Write>(
     session: &mut rustls::ServerConnection,
     stream: &mut S,
@@ -130,9 +124,9 @@ impl ConnectionTypeTrait for TlsConnectionType {
         Ok(())
     }
 
-    /// advance the handshake as far as the currently
-    /// available ciphertext allows. If complete, fire the accept handler;
-    /// otherwise return (the event loop re-drives on the next readiness).
+ /// advance the handshake as far as the currently
+ /// available ciphertext allows. If complete, fire the accept handler;
+ /// otherwise return (the event loop re-drives on the next readiness).
     fn accept(
         &self,
         conn: &mut Connection,
@@ -157,7 +151,7 @@ impl ConnectionTypeTrait for TlsConnectionType {
                 conn.state = ConnectionState::Error;
                 return Err(RedisError::io(io::ErrorKind::UnexpectedEof));
             }
-            // Still negotiating; caller re-drives.
+ // Still negotiating; caller re-drives.
             return Ok(());
         }
 
@@ -266,7 +260,7 @@ impl ConnectionTypeTrait for TlsConnectionType {
         conn
     }
 
-    /// send `close_notify`, flush, drop.
+ /// send `close_notify`, flush, drop.
     fn close(&self, conn: &mut Connection) {
         if let Some(tls) = conn.io.as_tls_mut() {
             tls.session.send_close_notify();
@@ -280,7 +274,7 @@ impl ConnectionTypeTrait for TlsConnectionType {
         self.close(conn);
     }
 
-    // ── deferred / owner-loop-owned (per docs/TLS_FAITHFUL_PLAN.md) ──
+ // ── deferred / owner-loop-owned (per docs/TLS_FAITHFUL_PLAN.md) ──
 
     fn conn_create(&self) -> Connection {
         Connection::new(ConnectionTypeId::Tls, -1)
@@ -369,7 +363,7 @@ pub fn tls_event_handler(conn: &mut Connection, readable: bool, writable: bool) 
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        reference/valkey/src/tls.c (CT_TLS vtable)
+//   source:        Valkey
 //   target_crate:  redis-core
 //   confidence:    high (handshake/read/write/close); stubs for outbound/listen/sync
 //   todos:         outbound connect, mTLS peer-cert accessor, listen, sync_* (Phase 2+)

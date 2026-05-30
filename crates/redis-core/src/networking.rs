@@ -1,19 +1,16 @@
-//! Networking — port of `src/networking.c`.
-//!
+//! Networking — port.
 //! This module implements:
 //! * Client reply-buffer management — the `addReply*` family as free functions
-//!   operating on `Client` state.
+//! operating on `Client` state.
 //! * RESP protocol input parsing — inline (plain-text) and multibulk (RESP2/3).
 //! * Output-buffer lifecycle — encoded buffers with copy-avoidance, deferred-len
-//!   placeholders, and the writev scatter path.
+//! placeholders, and the writev scatter path.
 //! * CLIENT command subcommands (KILL, LIST, INFO, SETNAME, GETNAME, …).
 //! * HELLO / QUIT / RESET protocol commands.
 //! * Client pause and unpause mechanisms.
 //! * Client eviction by output-buffer limits.
 //! * I/O thread hooks (`io_thread_read_query_from_client`, `io_thread_write_to_client`).
-//!
 //! # Canonical-type imports
-//!
 //! Types in `harness/type-vocabulary.tsv` are imported, not redefined.
 
 // TODO(architect): add dep edge redis-core → redis-protocol for RespFrame.
@@ -144,24 +141,23 @@ pub enum PayloadType {
 // ── PayloadHeader ────────────────────────────────────────────────────────────
 
 /// Header prefixed before every payload chunk in an encoded reply buffer.
-///
 /// The C definition uses `__attribute__((__packed__))`, C bitfields, and an
 /// atomic field. In Rust these are represented as regular fields; the packed
 /// layout is not preserved because accessing fields of a `#[repr(packed)]`
 /// struct through references requires `unsafe`, which is banned in pilot crates.
 #[derive(Debug)]
 pub struct PayloadHeader {
-    /// Length of the payload data that follows this header.
+ /// Length of the payload data that follows this header.
     pub payload_len: usize,
-    /// Actual reply length for non-plain payloads (set lazily on write path).
+ /// Actual reply length for non-plain payloads (set lazily on write path).
     pub reply_len: usize,
-    /// Cluster slot for per-slot byte tracking; -1 means no tracking.
+ /// Cluster slot for per-slot byte tracking; -1 means no tracking.
     pub slot: i16,
-    /// Packed bitfield byte: bits [0] = payload_type, [1] = track_bytes,
-    /// [2..7] = reserved.
+ /// Packed bitfield byte: bits [0] = payload_type, [1] = track_bytes,
+ /// [2..7] = reserved.
     /// TODO(port): replace with accessor methods once layout is frozen.
     pub flags_byte: u8,
-    /// Set to 1 once `reply_len` has been accounted for in `io_tracked_reply_len`.
+ /// Set to 1 once `reply_len` has been accounted for in `io_tracked_reply_len`.
     /// TODO(architect): AtomicU8 in a packed struct — safe only with align=1.
     pub tracked_for_cob: AtomicU8,
 }
@@ -183,16 +179,14 @@ impl PayloadHeader {
 // ── BulkStrRef ───────────────────────────────────────────────────────────────
 
 /// A reference to a string object used for copy-avoidance on the write path.
-///
 /// In C this holds a raw `robj *obj` (for refcount management) and an `sds str`
-/// pointer into the object. In Rust, `Arc<RedisObject>` manages the lifetime and
+/// pointer into the object. In Rust, `Arc<RedisObject>` manages the lifetime
 /// `RedisString` is the byte value.
-///
 /// TODO(architect): RedisObject is in crates/redis-core/src/object.rs; need
 /// Arc-based interior mutability strategy before this is live.
 #[derive(Debug, Clone)]
 pub struct BulkStrRef {
-    /// Owned reference keeps the object alive while the write is in flight.
+ /// Owned reference keeps the object alive while the write is in flight.
     /// TODO(port): replace placeholder Vec<u8> with Arc<RedisObject>.
     pub data: RedisString,
 }
@@ -202,14 +196,14 @@ pub struct BulkStrRef {
 /// A block in the client's linked-list reply buffer.
 #[derive(Debug)]
 pub struct ClientReplyBlock {
-    /// Bytes used in `buf`.
+ /// Bytes used in `buf`.
     pub used: usize,
-    /// Whether the buffer contains encoded (PayloadHeader-prefixed) data.
+ /// Whether the buffer contains encoded (PayloadHeader-prefixed) data.
     pub buf_encoded: bool,
-    /// Last payload header written into `buf` (for in-place extension).
+ /// Last payload header written into `buf` (for in-place extension).
     /// TODO(port): raw pointer in C; use offset index for Phase A.
     pub last_header_offset: Option<usize>,
-    /// Payload bytes.
+ /// Payload bytes.
     pub buf: Vec<u8>,
 }
 
@@ -234,7 +228,7 @@ impl ClientReplyBlock {
 #[derive(Debug, Default, Clone)]
 pub struct ParsedCommand {
     pub argc: usize,
-    /// Argument strings (owned).
+ /// Argument strings (owned).
     pub argv: Vec<RedisString>,
     pub argv_len_sum: usize,
     pub input_bytes: u64,
@@ -250,9 +244,9 @@ pub struct ParsedCommand {
 /// Pipeline queue of pre-parsed commands awaiting execution.
 #[derive(Debug, Default)]
 pub struct CommandQueue {
-    /// Parsed commands waiting for execution.
+ /// Parsed commands waiting for execution.
     pub cmds: Vec<ParsedCommand>,
-    /// Index of the next command to pop.
+ /// Index of the next command to pop.
     pub off: usize,
 }
 
@@ -265,11 +259,10 @@ impl CommandQueue {
         self.off >= self.cmds.len()
     }
 
-    /// Pop the next parsed command from the queue, returning ownership.
-    ///
-    /// C uses a raw index and never removes elements until exhausted. Rust's
-    /// ownership model requires returning an owned value. We use `Vec::remove`
-    /// which is O(n) — acceptable for the small queue sizes used in practice.
+ /// Pop the next parsed command from the queue, returning ownership.
+ /// C uses a raw index and never removes elements until exhausted. Rust's
+ /// ownership model requires returning an owned value. We use `Vec::remove`
+ /// which is O(n) — acceptable for the small queue sizes used in practice.
     pub fn pop(&mut self) -> Option<ParsedCommand> {
         if self.off < self.cmds.len() {
             let p = self.cmds.remove(self.off);
@@ -291,69 +284,68 @@ impl CommandQueue {
 // ── ClientFilter ─────────────────────────────────────────────────────────────
 
 /// Filtering criteria for CLIENT KILL / CLIENT LIST operations.
-///
 /// Each field is `Option<T>` — `None` means "no filter on this attribute".
 /// The `not_*` variants invert the match.
 #[derive(Debug, Default)]
 pub struct ClientFilter {
-    /// Positive client-ID set filter.
+ /// Positive client-ID set filter.
     pub ids: Option<Vec<u64>>,
-    /// Negative client-ID set filter.
+ /// Negative client-ID set filter.
     pub not_ids: Option<Vec<u64>>,
-    /// Maximum age in seconds (connections younger than this do NOT match).
+ /// Maximum age in seconds (connections younger than this do NOT match).
     pub max_age: Option<i64>,
-    /// Positive peer-address filter.
+ /// Positive peer-address filter.
     pub addr: Option<Vec<u8>>,
-    /// Negative peer-address filter.
+ /// Negative peer-address filter.
     pub not_addr: Option<Vec<u8>>,
-    /// Positive local-address filter.
+ /// Positive local-address filter.
     pub laddr: Option<Vec<u8>>,
-    /// Negative local-address filter.
+ /// Negative local-address filter.
     pub not_laddr: Option<Vec<u8>>,
-    /// Positive user filter (ACL user name).
+ /// Positive user filter (ACL user name).
     pub user: Option<Vec<u8>>,
-    /// Negative user filter.
+ /// Negative user filter.
     pub not_user: Option<Vec<u8>>,
-    /// Positive client-type filter (`CLIENT_TYPE_*`). -1 = no filter.
+ /// Positive client-type filter (`CLIENT_TYPE_*`). -1 = no filter.
     pub client_type: i32,
-    /// Negative client-type filter. -1 = no filter.
+ /// Negative client-type filter. -1 = no filter.
     pub not_client_type: i32,
-    /// Skip the caller itself when iterating.
+ /// Skip the caller itself when iterating.
     pub skipme: bool,
-    /// Positive client-name filter.
+ /// Positive client-name filter.
     pub name: Option<Vec<u8>>,
-    /// Negative client-name filter.
+ /// Negative client-name filter.
     pub not_name: Option<Vec<u8>>,
-    /// Minimum idle time in seconds. 0 = no filter.
+ /// Minimum idle time in seconds. 0 = no filter.
     pub idle: i64,
-    /// Flag-string filter (each char is a flag letter from CLIENT LIST).
+ /// Flag-string filter (each char is a flag letter from CLIENT LIST).
     pub flags: Option<Vec<u8>>,
-    /// Negative flag-string filter.
+ /// Negative flag-string filter.
     pub not_flags: Option<Vec<u8>>,
-    /// Positive lib-name filter.
+ /// Positive lib-name filter.
     pub lib_name: Option<RedisString>,
-    /// Negative lib-name filter.
+ /// Negative lib-name filter.
     pub not_lib_name: Option<RedisString>,
-    /// Positive lib-ver filter.
+ /// Positive lib-ver filter.
     pub lib_ver: Option<RedisString>,
-    /// Negative lib-ver filter.
+ /// Negative lib-ver filter.
     pub not_lib_ver: Option<RedisString>,
-    /// Positive database-index filter. -1 = no filter.
+ /// Positive database-index filter. -1 = no filter.
     pub db_number: i32,
-    /// Negative database-index filter. -1 = no filter.
+ /// Negative database-index filter. -1 = no filter.
     pub not_db_number: i32,
-    /// Positive capa-string filter.
+ /// Positive capa-string filter.
     pub capa: Option<Vec<u8>>,
-    /// Negative capa-string filter.
+ /// Negative capa-string filter.
     pub not_capa: Option<Vec<u8>>,
-    /// Positive IP filter.
+ /// Positive IP filter.
     pub ip: Option<Vec<u8>>,
-    /// Negative IP filter.
+ /// Negative IP filter.
     pub not_ip: Option<Vec<u8>>,
 }
 
 impl ClientFilter {
-    /// Create a default filter: no restrictions, skipme = true.
+ /// Create a default filter: no restrictions, skipme = true.
     pub fn new_kill_default() -> Self {
         Self {
             client_type: -1,
@@ -365,7 +357,7 @@ impl ClientFilter {
         }
     }
 
-    /// Create a default filter for LIST: no restrictions, skipme = false.
+ /// Create a default filter for LIST: no restrictions, skipme = false.
     pub fn new_list_default() -> Self {
         Self {
             client_type: -1,
@@ -397,7 +389,7 @@ pub enum PausePurpose {
     DuringShutdown = 1,
     DuringFailover = 2,
     DuringSlotMigration = 3,
-    /// Sentinel: not paused.
+ /// Sentinel: not paused.
     NumPausePurposes = 4,
 }
 
@@ -406,40 +398,39 @@ pub enum PausePurpose {
 /// State for one pause purpose.
 #[derive(Debug, Default, Clone)]
 pub struct PauseEvent {
-    /// Bitmask of paused actions (`PAUSE_ACTION_*`).
+ /// Bitmask of paused actions (`PAUSE_ACTION_*`).
     pub paused_actions: u32,
-    /// Expiry time in milliseconds since epoch.
+ /// Expiry time in milliseconds since epoch.
     pub end: i64,
 }
 
 // ── ReplyIOV / BufWriteMetadata ──────────────────────────────────────────────
 
 /// Gathered-write IOV builder used by `writev_to_client`.
-///
 /// TODO(architect): The C impl uses `struct iovec` arrays (OS-level vectored
 /// I/O). In Rust the equivalent is `std::io::IoSlice`.
 #[derive(Debug)]
 pub struct ReplyIov {
-    /// Total bytes referenced by all slices.
+ /// Total bytes referenced by all slices.
     pub iov_len_total: usize,
-    /// Whether the iteration stopped early due to hitting a limit.
+ /// Whether the iteration stopped early due to hitting a limit.
     pub limit_reached: bool,
-    /// Bytes already written in a prior partial write (skip this many from buf start).
+ /// Bytes already written in a prior partial write (skip this many from buf start).
     pub last_written_len: usize,
-    /// Number of bulk-string prefix headers generated so far.
+ /// Number of bulk-string prefix headers generated so far.
     pub prefix_count: usize,
 }
 
 /// Metadata about one buffer segment scattered into a `ReplyIov`.
 #[derive(Debug, Default)]
 pub struct BufWriteMetadata {
-    /// Start offset of this buffer segment in the reply list.
+ /// Start offset of this buffer segment in the reply list.
     pub buf_offset: usize,
-    /// Number of bytes in this buffer up to `bufpos`.
+ /// Number of bytes in this buffer up to `bufpos`.
     pub bufpos: usize,
-    /// Actual wire bytes (differs from `bufpos` for encoded buffers).
+ /// Actual wire bytes (differs from `bufpos` for encoded buffers).
     pub data_len: usize,
-    /// Whether the entire buffer was scattered (vs. hitting limit mid-buffer).
+ /// Whether the entire buffer was scattered (vs. hitting limit mid-buffer).
     pub complete: bool,
 }
 
@@ -457,22 +448,22 @@ pub enum ClientIoState {
 /// Tracks the last buffer partially or completely written to the socket.
 #[derive(Debug, Default, Clone)]
 pub struct IoLastWritten {
-    /// Which reply-list node (by index) was last written. None = c->buf.
+ /// Which reply-list node (by index) was last written. None = c->buf.
     pub node_index: Option<usize>,
-    /// Position in that buffer at which writing was complete (0 = incomplete).
+ /// Position in that buffer at which writing was complete (0 = incomplete).
     pub bufpos: usize,
-    /// Actual data bytes written from that buffer.
+ /// Actual data bytes written from that buffer.
     pub data_len: usize,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Thread-local shared query buffer
+// Thread-local shared query buffer
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Rust thread_local! wraps an Option<Vec<u8>>. The shared-qb optimisation
 // avoids allocating a new query buffer for every client read; a client "takes
-// ownership" by calling init_shared_query_buf() when it needs to hold the
-// data past a read().
+// ownership" by calling init_shared_query_buf when it needs to hold
+// data past a read.
 thread_local! {
     static THREAD_SHARED_QB: std::cell::RefCell<Option<Vec<u8>>> =
         const { std::cell::RefCell::new(None) };
@@ -493,7 +484,7 @@ pub fn free_shared_query_buf() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Global: processing-events-while-blocked counter
+// Global: processing-events-while-blocked counter
 // ─────────────────────────────────────────────────────────────────────────────
 
 // TODO(architect): global mutable state — needs single-threaded guarantee or
@@ -521,49 +512,44 @@ pub fn note_pause_resumed_client() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  get_string_object_sds_used_memory / get_string_object_len
+// get_string_object_sds_used_memory / get_string_object_len
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Returns the allocated memory consumed by a string object's payload.
-///
 /// TODO(port): depends on `RedisObject` encoding variants.
 pub fn get_string_object_sds_used_memory(s: &RedisString) -> usize {
     s.as_bytes().len()
 }
 
 /// Returns the logical length of a string object's payload (excluding padding).
-///
 /// TODO(port): integer-encoded objects have length 0 in the C version.
 pub fn get_string_object_len(s: &RedisString) -> usize {
     s.as_bytes().len()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Client creation and authentication helpers
+// Client creation and authentication helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Create a new client, optionally with a live connection.
-///
-/// Passing `None` creates a "fake" (non-connected) client, useful for Lua and
+/// Passing `None` creates a "fake" (non-connected) client, useful for Lua
 /// module contexts that need to run commands without a socket.
-///
 /// TODO(architect): Connection type is not yet defined; using `Option<()>` as
 /// placeholder for the connection handle.
 pub fn create_client(server: &mut RedisServer, conn: Option<()>) -> Client {
     let id = server.alloc_client_id();
     let c = Client::new(id);
     // TODO(port): initialise all client fields once Client is expanded to hold
-    // the full state from server.h (querybuf, cmd_queue, flags, repl_data, …).
-    // Currently Client is a minimal pilot struct.
+ // the full state from (querybuf, cmd_queue, flags, repl_data, …).
+ // Currently Client is a minimal pilot struct.
     if conn.is_some() {
         // TODO(port): set read handler, link client into server.clients list,
-        // insert into server.clients_index radix tree.
+ // insert into server.clients_index radix tree.
     }
     c
 }
 
 /// Link a client into the global client list and index.
-///
 /// TODO(architect): server.clients linked-list and server.clients_index radix
 /// tree are not yet in the RedisServer stub.
 pub fn link_client(_server: &mut RedisServer, _client_id: ClientId) {
@@ -575,7 +561,7 @@ pub fn link_client(_server: &mut RedisServer, _client_id: ClientId) {
 pub fn client_set_user(_c: &mut Client, _user_name: &[u8], authenticated: bool) {
     // TODO(port): store user reference on Client once ACL types are available.
     let _ = authenticated;
-    // PORT NOTE: `ever_authenticated` flag set to avoid low-level output-buf limiting.
+ // PORT NOTE: `ever_authenticated` flag set to avoid low-level output-buf limiting.
 }
 
 /// Returns true if authentication is required for this client.
@@ -585,13 +571,12 @@ pub fn auth_required(_c: &Client) -> bool {
 }
 
 /// Prepare a client to write — install write handler if needed.
-///
-/// Returns `Ok(())` if the caller may append to the output buffer, or
+/// Returns `Ok(` if the caller may append to the output buffer, or
 /// `Err(RedisError::Closed)` if no data should be written to this client.
 pub fn prepare_client_to_write(_c: &mut Client) -> Result<(), ()> {
     // TODO(port): check c->flag.script, c->flag.module, c->flag.close_asap,
-    // c->flag.reply_off, c->flag.reply_skip, c->flag.primary, c->flag.fake.
-    // For the pilot all clients are writable.
+ // c->flag.reply_off, c->flag.reply_skip, c->flag.primary, c->flag.fake.
+ // For the pilot all clients are writable.
     Ok(())
 }
 
@@ -601,11 +586,10 @@ pub fn client_has_pending_replies(c: &Client) -> bool {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Low-level reply helpers
+// Low-level reply helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Append raw protocol bytes to the client's reply buffer.
-///
 /// This is the innermost write path; all `addReply*` variants funnel through it.
 pub fn add_reply_proto(c: &mut Client, data: &[u8]) {
     if prepare_client_to_write(c).is_err() {
@@ -615,7 +599,6 @@ pub fn add_reply_proto(c: &mut Client, data: &[u8]) {
 }
 
 /// Append a RESP error reply (`-ERR <msg>\r\n`) to the output buffer.
-///
 /// If `msg` already starts with `-`, the caller-supplied error code is used.
 pub fn add_reply_error_length(c: &mut Client, msg: &[u8]) {
     if msg.is_empty() || msg[0] != b'-' {
@@ -800,7 +783,6 @@ pub fn add_reply_double(c: &mut Client, resp: u8, d: f64) {
 }
 
 /// Append a verbatim-string reply (`=N\r\next:...\r\n` for RESP3; bulk for RESP2).
-///
 /// Format is `=<total_len>\r\n<3-char-ext>:<data>\r\n`
 /// where total_len = len(data) + 4 (3 ext chars + colon separator).
 pub fn add_reply_verbatim(c: &mut Client, resp: u8, data: &[u8], ext: &[u8; 3]) {
@@ -818,24 +800,22 @@ pub fn add_reply_verbatim(c: &mut Client, resp: u8, data: &[u8], ext: &[u8; 3]) 
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Deferred-length ("aggregate header placeholder") system
+// Deferred-length ("aggregate header placeholder") system
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// A handle returned by `add_reply_deferred_len`.  The caller fills it in with
+/// A handle returned by `add_reply_deferred_len`. The caller fills it in with
 /// `set_deferred_array_len` (or the appropriate variant) once the count is known.
-///
 /// TODO(port): full deferred-len scheme needs the reply-list (not a flat Vec<u8>).
 /// For now this is a simple in-place index.
 #[derive(Debug, Clone, Copy)]
 pub struct DeferredLen {
-    /// Byte offset in `Client::reply_buf` where the placeholder starts.
+ /// Byte offset in `Client::reply_buf` where the placeholder starts.
     pub offset: usize,
-    /// Number of bytes reserved for the length string (padded with spaces).
+ /// Number of bytes reserved for the length string (padded with spaces).
     pub reserved: usize,
 }
 
 /// Reserve space for an aggregate-length header to be filled in later.
-///
 /// TODO(port): the C implementation adds a NULL node to the reply list;
 /// our flat-buffer approximation reserves fixed space with spaces.
 pub fn add_reply_deferred_len(c: &mut Client) -> Option<DeferredLen> {
@@ -843,7 +823,7 @@ pub fn add_reply_deferred_len(c: &mut Client) -> Option<DeferredLen> {
         return None;
     }
     let offset = c.reply_buf.len();
-    // Reserve 16 bytes (enough for `*999999999\r\n`) filled with spaces.
+ // Reserve 16 bytes (enough for `*999999999\r\n`) filled with spaces.
     c.reply_buf.extend_from_slice(b"                ");
     Some(DeferredLen {
         offset,
@@ -865,7 +845,7 @@ pub fn set_deferred_aggregate_len(
     debug_assert!(length >= 0);
     let header = format!("{}{}\r\n", prefix as char, length);
     let hb = header.as_bytes();
-    // Overwrite the placeholder; pad with spaces if shorter.
+ // Overwrite the placeholder; pad with spaces if shorter.
     let end = node.offset + node.reserved;
     if end <= c.reply_buf.len() {
         let dest = &mut c.reply_buf[node.offset..end];
@@ -906,7 +886,7 @@ pub fn set_deferred_push_len(c: &mut Client, node: Option<DeferredLen>, length: 
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Help / subcommand-syntax error reply helpers
+// Help / subcommand-syntax error reply helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Send the standard RESP "unknown subcommand" error.
@@ -943,30 +923,27 @@ pub fn add_reply_help(c: &mut Client, resp: u8, help: &[&[u8]]) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Output-buffer limits / deferred reply management
+// Output-buffer limits / deferred reply management
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Returns true if the deferred reply buffer is currently active.
-///
 /// TODO(port): uses only `reply_buf`; no separate deferred buffer.
 pub fn is_deferred_reply_enabled(_c: &Client) -> bool {
     false
 }
 
 /// Move deferred reply into the main reply buffer and queue for writing.
-///
 /// TODO(port): implement with full deferred-reply list.
 pub fn commit_deferred_reply_buffer(_c: &mut Client, _skip_if_blocked: bool) {
-    // No-op: deferred reply not yet implemented.
+ // No-op: deferred reply not yet implemented.
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Protocol parsing — inline
+// Protocol parsing — inline
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Parse one inline (non-RESP) command from `buf[pos..]`.
-///
-/// Sets bits in `read_flags` to communicate the outcome.  If successful,
+/// Sets bits in `read_flags` to communicate the outcome. If successful,
 /// `argv` and `argc` are populated.
 pub fn parse_inline_buffer(
     buf: &[u8],
@@ -1020,7 +997,6 @@ pub fn parse_inline_buffer(
 }
 
 /// Split an inline argument line into tokens, handling shell-style quoting.
-///
 /// TODO(port): this is a simplified version; the real implementation handles
 /// escaped chars and single/double quotes. Replace once available.
 pub fn split_inline_args(line: &[u8], read_flags: &mut u32) -> Vec<RedisString> {
@@ -1058,20 +1034,19 @@ pub fn split_inline_args(line: &[u8], read_flags: &mut u32) -> Vec<RedisString> 
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Protocol parsing — multibulk (RESP)
+// Protocol parsing — multibulk (RESP)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Internal multibulk parser state (per-client, carried across reads).
 #[derive(Debug, Default)]
 pub struct MultibulkState {
-    /// Remaining bulk arguments to read (> 0 means parse is in progress).
+ /// Remaining bulk arguments to read (> 0 means parse is in progress).
     pub multibulklen: i64,
-    /// Expected length of the current bulk argument (-1 = not yet known).
+ /// Expected length of the current bulk argument (-1 = not yet known).
     pub bulklen: i64,
 }
 
 /// Parse one multibulk (RESP) command from `buf[pos..]`.
-///
 /// Returns `(argv, net_input_bytes, read_flags_addend)`.
 /// The caller should OR the returned flags into `c->read_flags`.
 pub fn parse_multibulk(
@@ -1086,7 +1061,7 @@ pub fn parse_multibulk(
     net_input_bytes: &mut u64,
 ) -> u32 {
     if state.multibulklen == 0 {
-        // Parse the `*N\r\n` line.
+ // Parse the `*N\r\n` line.
         let slice = &buf[*pos..];
         let cr_pos = match memchr(slice, b'\r') {
             Some(p) => p,
@@ -1105,7 +1080,7 @@ pub fn parse_multibulk(
             return READ_FLAGS_ERROR_INVALID_CRLF;
         }
 
-        // The first byte must be `*`.
+ // The first byte must be `*`.
         debug_assert_eq!(slice[0], b'*');
         let num_bytes = &slice[1..cr_pos];
         let ll = match parse_i64(num_bytes) {
@@ -1131,12 +1106,12 @@ pub fn parse_multibulk(
         *net_input_bytes += (multibulklen_slen + 3) as u64;
     }
 
-    // Read individual bulk arguments.
+ // Read individual bulk arguments.
     while state.multibulklen > 0 {
         let slice = &buf[*pos..];
 
         if state.bulklen == -1 {
-            // Parse `$N\r\n`
+ // Parse `$N\r\n`
             let cr_pos = match memchr(slice, b'\r') {
                 Some(p) => p,
                 None => {
@@ -1178,14 +1153,14 @@ pub fn parse_multibulk(
             *net_input_bytes += (bulklen_slen + 3) as u64;
         }
 
-        // Read the bulk data.
+ // Read the bulk data.
         let remaining = &buf[*pos..];
         let needed = (state.bulklen + 2) as usize; // data + \r\n
         if remaining.len() < needed {
             break; // need more data
         }
 
-        // Validate trailing CRLF.
+ // Validate trailing CRLF.
         let data_end = state.bulklen as usize;
         if remaining[data_end] != b'\r' || remaining[data_end + 1] != b'\n' {
             return READ_FLAGS_ERROR_INVALID_CRLF;
@@ -1241,7 +1216,7 @@ fn parse_i64(bytes: &[u8]) -> Option<i64> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  handleParseResults / handleParseError
+// handleParseResults / handleParseError
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Map `read_flags` to a `ParseResult` and emit error replies if needed.
@@ -1291,22 +1266,20 @@ pub fn handle_parse_error(c: &mut Client, read_flags: u32, _resp: u8) {
     } else if read_flags & READ_FLAGS_ERROR_INVALID_CRLF != 0 {
         add_reply_error(c, b"Protocol error: invalid CRLF in request");
     } else if read_flags & READ_FLAGS_ERROR_UNEXPECTED_INLINE_FROM_REPLICATED_CLIENT != 0 {
-        // logged by the caller; no RESP reply sent to a replica
+ // logged by the caller; no RESP reply sent to a replica
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  processInputBuffer
+// processInputBuffer
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Incrementally process the client's query buffer, parsing and executing
 /// commands until the buffer is exhausted or a blocking/error condition occurs.
-///
-/// Returns `Ok(())` if processing should continue; `Err(RedisError::Closed)`
+/// Returns `Ok(` if processing should continue; `Err(RedisError::Closed)`
 /// if the client was freed as a side effect.
-///
 /// TODO(port): the full implementation requires access to the server state
-/// (processCommand, etc.) and the client's multibulk state.  This is a
+/// (processCommand, etc.) and the client's multibulk state. This is a
 /// structural placeholder that captures the control flow.
 pub fn process_input_buffer(
     c: &mut Client,
@@ -1377,13 +1350,11 @@ pub fn process_input_buffer(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Write path
+// Write path
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Write pending reply data from `client.reply_buf` to the socket.
-///
 /// Returns `Ok(bytes_written)` or an I/O error.
-///
 /// TODO(architect): Connection type not defined; `writer` is a generic
 /// `std::io::Write` placeholder.
 pub fn write_to_client<W: std::io::Write>(
@@ -1401,7 +1372,6 @@ pub fn write_to_client<W: std::io::Write>(
 }
 
 /// Mark a client as needing asynchronous close (add to clients_to_close list).
-///
 /// TODO(port): server.clients_to_close list not yet in RedisServer stub.
 pub fn free_client_async(_server: &mut RedisServer, _client_id: ClientId) {
     // TODO(port): add to server.clients_to_close if not already present.
@@ -1411,17 +1381,16 @@ pub fn free_client_async(_server: &mut RedisServer, _client_id: ClientId) {
 pub fn reset_client(c: &mut Client) {
     c.reset_args();
     // TODO(port): reset all additional fields once Client is expanded:
-    // redact_arg_bitmap, cur_script, net_input_bytes_curr_cmd, slot,
-    // flag.executing_command, flag.replication_done, flag.buffered_reply,
-    // flag.keyspace_notified, net_output_bytes_curr_cmd, deferred_reply_errors.
+ // redact_arg_bitmap, cur_script, net_input_bytes_curr_cmd, slot,
+ // flag.executing_command, flag.replication_done, flag.buffered_reply,
+ // flag.keyspace_notified, net_output_bytes_curr_cmd, deferred_reply_errors.
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Client peer-id / sockname helpers
+// Client peer-id / sockname helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Get or cache the client's peer address string.
-///
 /// TODO(architect): Connection type needed to call connFormatAddr.
 pub fn get_client_peer_id(_c: &Client) -> Vec<u8> {
     // TODO(port): call conn.format_addr(remote=true) and cache in c->peerid.
@@ -1429,7 +1398,6 @@ pub fn get_client_peer_id(_c: &Client) -> Vec<u8> {
 }
 
 /// Get or cache the client's local socket name string.
-///
 /// TODO(architect): Connection type needed to call connFormatAddr.
 pub fn get_client_sockname(_c: &Client) -> Vec<u8> {
     // TODO(port): call conn.format_addr(remote=false) and cache in c->sockname.
@@ -1437,7 +1405,7 @@ pub fn get_client_sockname(_c: &Client) -> Vec<u8> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  CLIENT sub-command implementations
+// CLIENT sub-command implementations
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// CLIENT ID — return the client's numeric ID.
@@ -1457,7 +1425,6 @@ pub fn client_info_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// CLIENT GETNAME — return the current connection name.
-///
 /// TODO(port): client name stored on Client struct (not yet in pilot stub).
 pub fn client_get_name_command(ctx: &mut CommandContext) -> RedisResult<()> {
     // TODO(port): if c->name exists, addReplyBulk(c, c->name) else addReplyNull.
@@ -1466,7 +1433,6 @@ pub fn client_get_name_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// CLIENT SETNAME — set the current connection name.
-///
 /// TODO(port): validate and store name on Client struct.
 pub fn client_set_name_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let name = ctx.arg(2)?;
@@ -1483,7 +1449,6 @@ pub fn client_set_name_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// CLIENT REPLY ON|OFF|SKIP
-///
 /// TODO(port): set c->flag.reply_off / c->flag.reply_skip_next flags.
 pub fn client_reply_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let mode = ctx.arg(2)?;
@@ -1577,7 +1542,6 @@ pub fn client_get_redir_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// CLIENT UNBLOCK <id> [TIMEOUT|ERROR]
-///
 /// TODO(port): server client-index lookup not yet available.
 pub fn client_unblock_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let id_rs = ctx.arg(2)?;
@@ -1589,7 +1553,6 @@ pub fn client_unblock_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// CLIENT KILL <addr> | CLIENT KILL <option> <value>…
-///
 /// TODO(port): requires full server.clients iteration.
 pub fn client_kill_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if ctx.arg_count() < 3 {
@@ -1601,7 +1564,6 @@ pub fn client_kill_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// CLIENT LIST
-///
 /// TODO(port): requires server.clients iteration and catClientInfoString.
 pub fn client_list_command(ctx: &mut CommandContext) -> RedisResult<()> {
     // TODO(port): getAllClientsInfoString / getAllFilteredClientsInfoString.
@@ -1613,8 +1575,7 @@ pub fn client_list_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// CLIENT PAUSE <timeout> [WRITE|ALL]
-///
-/// `CLIENT PAUSE <timeout-ms> [WRITE|ALL]` (default ALL). Sets the
+/// `CLIENT PAUSE <timeout-ms> [WRITE|ALL]` (default ALL). Sets
 /// `ByClientCommand` pause event; `pause_clients_by_client` keeps the most
 /// restrictive action and the longest end time across overlapping calls.
 pub fn client_pause_command(ctx: &mut CommandContext) -> RedisResult<()> {
@@ -1658,7 +1619,6 @@ pub fn apply_client_pause(server: &RedisServer, end: i64, pause_all: bool) {
 }
 
 /// CLIENT UNPAUSE
-///
 /// Clears the client-command pause and (via the gate) resumes any postponed clients.
 pub fn client_unpause_command(ctx: &mut CommandContext) -> RedisResult<()> {
     {
@@ -1704,7 +1664,6 @@ pub fn pause_info(events: &[PauseEvent; 4], now: i64) -> (&'static str, &'static
 }
 
 /// CLIENT TRACKING ON|OFF [REDIRECT <id>] [BCAST] [PREFIX <p>…] [OPTIN] [OPTOUT] [NOLOOP]
-///
 /// TODO(port): enableTracking / disableTracking not yet available.
 pub fn client_tracking_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let mode = ctx.arg(2)?;
@@ -1760,7 +1719,7 @@ pub fn client_tracking_info_command(ctx: &mut CommandContext) -> RedisResult<()>
 
 /// Top-level CLIENT dispatcher (falls through to subcommand-syntax error).
 pub fn client_command(ctx: &mut CommandContext) -> RedisResult<()> {
-    // The subcommand table is generated; the top-level just errors.
+ // The subcommand table is generated; the top-level just errors.
     let subcommand = ctx
         .arg(1)
         .map(|s| s.as_bytes().to_vec())
@@ -1807,7 +1766,7 @@ pub fn client_setinfo_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  QUIT, RESET, HELLO, security-warning commands
+// QUIT, RESET, HELLO, security-warning commands
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// QUIT — close the connection after sending OK.
@@ -1825,9 +1784,8 @@ pub fn reset_command_impl(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// HELLO [<version> [AUTH <user> <pass>] [SETNAME <name>]]
-///
 /// TODO(port): auth, setname, server.sentinel_mode, server.cluster_enabled,
-/// server.extended_redis_compat, and module list not yet wired in.
+/// server.extended_redis_compat, and module list not yet wired.
 pub fn hello_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let mut ver: i64 = 0;
     if ctx.arg_count() >= 2 {
@@ -1842,7 +1800,7 @@ pub fn hello_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
 
     // TODO(port): full option parsing: AUTH, SETNAME, ACL authentication,
-    // module notification, sentinel mode, availability zone.
+ // module notification, sentinel mode, availability zone.
 
     let resp = if ver == 0 { 2u8 } else { ver as u8 };
 
@@ -1882,7 +1840,7 @@ pub fn security_warning_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Client-filter helpers
+// Client-filter helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Validate that a client-attribute value contains only printable non-space bytes.
@@ -1921,29 +1879,27 @@ pub fn client_matches_ip_filter(peer_id: &[u8], ip_filter: &[u8]) -> bool {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  catClientInfoString — CLIENT INFO / CLIENT LIST output
+// catClientInfoString — CLIENT INFO / CLIENT LIST output
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Build the CLIENT INFO string for a client.
-///
 /// TODO(port): most fields are placeholders until Client is expanded.
 pub fn cat_client_info_string(c: &Client, _hide_user_data: bool) -> Vec<u8> {
     let id = c.id;
     // TODO(port): fill in all fields: addr, laddr, fd, name, age, idle,
-    // flags, capa, db, sub, psub, ssub, multi, watch, qbuf, qbuf-free,
-    // argv-mem, multi-mem, rbs, rbp, obl, oll, omem, tot-mem, events,
-    // cmd, user, redir, resp, lib-name, lib-ver, tot-net-in, tot-net-out,
-    // tot-cmds.
+ // flags, capa, db, sub, psub, ssub, multi, watch, qbuf, qbuf-free,
+ // argv-mem, multi-mem, rbs, rbp, obl, oll, omem, tot-mem, events,
+ // cmd, user, redir, resp, lib-name, lib-ver, tot-net-, tot-net-out,
+ // tot-cmds.
     format!("id={} addr=?:0 laddr=?:0 fd=-1 name= age=0 idle=0 flags=N capa= db=0 sub=0 psub=0 ssub=0 multi=-1 watch=0 qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 rbs=0 rbp=0 obl=0 oll=0 omem=0 tot-mem=0 events= cmd=NULL user=(superuser) redir=-1 resp=2 lib-name= lib-ver= tot-net-in=0 tot-net-out=0 tot-cmds=0", id)
         .into_bytes()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Output-buffer limit checking
+// Output-buffer limit checking
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Check if a client's output buffer has exceeded soft or hard limits.
-///
 /// TODO(port): server client_obuf_limits config not yet accessible here.
 pub fn check_client_output_buffer_limits(
     reply_bytes: usize,
@@ -1971,7 +1927,7 @@ pub fn check_client_output_buffer_limits(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Client-type name mapping
+// Client-type name mapping
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Map a client-type name string to its `CLIENT_TYPE_*` constant.
@@ -2000,7 +1956,7 @@ pub fn get_client_type_name(client_type: i32) -> Option<&'static [u8]> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Pause / unpause
+// Pause / unpause
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Return the human-readable pause-reason string.
@@ -2112,7 +2068,7 @@ pub fn is_paused_actions(paused: u32, actions_bitmask: u32) -> u32 {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Client-argument rewriting helpers
+// Client-argument rewriting helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Returns true if argument `i` should be redacted in logs/commandlog.
@@ -2137,7 +2093,7 @@ pub fn redact_client_command_argument(redact_bitmap: &mut u32, argc: usize) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  getClientEvictionLimit / evictClients
+// getClientEvictionLimit / evictClients
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Compute the effective client memory eviction limit.
@@ -2155,11 +2111,10 @@ pub fn get_client_eviction_limit(maxmemory_clients: i64, maxmemory: u64) -> usiz
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  I/O thread entry points
+// I/O thread entry points
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Called from an I/O thread to read and parse a client's query buffer.
-///
 /// TODO(architect): I/O thread architecture is a future architect decision.
 /// This stub preserves the high-level control flow only.
 pub fn io_thread_read_query_from_client(
@@ -2169,25 +2124,23 @@ pub fn io_thread_read_query_from_client(
     _proto_max_bulk_len: i64,
 ) {
     // TODO(port): readToQueryBuf(c); parseInputBuffer(c); trimCommandQueue(c);
-    // prepareCommandQueue(c); trim querybuf; set io_read_state = CLIENT_COMPLETED_IO;
-    // sendToMainThread(c, JOB_RES_READ_CLIENT);
+ // prepareCommandQueue(c); trim querybuf; set io_read_state = CLIENT_COMPLETED_IO;
+ // sendToMainThread(c, JOB_RES_READ_CLIENT);
 }
 
 /// Called from an I/O thread to write a client's pending reply data.
-///
 /// TODO(architect): see `io_thread_read_query_from_client`.
 pub fn io_thread_write_to_client(_c: &mut Client, _is_replica: bool) {
     // TODO(port): _writeToClient(c) or writeToReplica(c);
-    // set io_write_state = CLIENT_COMPLETED_IO;
-    // sendToMainThread(c, JOB_RES_WRITE_CLIENT);
+ // set io_write_state = CLIENT_COMPLETED_IO;
+ // sendToMainThread(c, JOB_RES_WRITE_CLIENT);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  processEventsWhileBlocked
+// processEventsWhileBlocked
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Process event-loop events while the server is blocked (e.g. in a Lua script).
-///
 /// TODO(architect): event-loop integration is deferred to a future phase.
 pub fn process_events_while_blocked() {
     PROCESSING_EVENTS_WHILE_BLOCKED.fetch_add(1, Ordering::Relaxed);
@@ -2197,7 +2150,7 @@ pub fn process_events_while_blocked() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Aggregate output-buffer memory / CLIENT memory usage
+// Aggregate output-buffer memory / CLIENT memory usage
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Estimate the total output-buffer memory for a client.
@@ -2215,7 +2168,7 @@ pub fn get_client_output_buffer_memory_usage(
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        src/networking.c  (6684 lines, ~100 functions)
+//   source:        Valkey
 //   target_crate:  redis-core
 //   confidence:    medium
 //   todos:         97

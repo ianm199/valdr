@@ -1,17 +1,14 @@
 //! Fast in-memory iteration harness for the connection / TLS layer.
-//!
 //! Proves a non-blocking TLS state machine *deterministically* with no sockets,
-//! no tclsh, and no server process — the fast loop described in
+//! no tclsh, and no server process — the fast loop described
 //! `docs/TLS_FAITHFUL_PLAN.md` §11.
-//!
 //! The key tool is `TestPipe`: a scriptable in-memory non-blocking duplex you
 //! control byte-for-byte (deliver N bytes then `WouldBlock`, force short
 //! writes). The classic TLS-over-event-loop bugs — a record split across
-//! readiness events, WANT_WRITE during a read — reproduce here instantly and
+//! readiness events, WANT_WRITE during a read — reproduce here instantly
 //! deterministically, where a real socket reproduces them unreliably.
-//!
 //! Run just this loop:
-//!   cargo test -p redis-core --test conn_transport_kit
+//! cargo test -p redis-core --test conn_transport_kit
 
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
@@ -29,7 +26,7 @@ use redis_types::RedisError;
 
 type SharedBuf = Arc<Mutex<VecDeque<u8>>>;
 
-/// One end of an in-memory non-blocking duplex. Reads from `inbound`, writes to
+/// One end of an in-memory non-blocking duplex. Reads from `inbound`, writes
 /// `outbound`. `read_chunk` caps bytes returned per `read` (simulating record
 /// fragmentation); `write_chunk` caps bytes accepted per `write` (simulating
 /// short/partial socket writes). An empty inbound yields `WouldBlock`, exactly
@@ -67,7 +64,7 @@ impl Write for PipeEnd {
 }
 
 /// Create a cross-connected `(server_end, client_end)` duplex pair. `read_chunk`
-/// and `write_chunk` (>= 1) shape the fragmentation both ends see.
+/// and `write_chunk` (>= 1) shape the fragmentation both ends.
 fn pipe_pair(read_chunk: usize, write_chunk: usize) -> (PipeEnd, PipeEnd) {
     assert!(read_chunk >= 1 && write_chunk >= 1);
     let s2c: SharedBuf = Arc::new(Mutex::new(VecDeque::new()));
@@ -200,7 +197,7 @@ fn feed_tls(conn: &mut impl Pump, end: &mut PipeEnd) -> io::Result<bool> {
     Ok(moved)
 }
 
-/// Pump both connections to quiescence: flush ciphertext each way, feed it in,
+/// Pump both connections to quiescence: flush ciphertext each way, feed it,
 /// process, repeat until no progress. Bounded for safety.
 fn drive(
     server: &mut ServerConnection,
@@ -222,7 +219,7 @@ fn drive(
 }
 
 /// Minimal trait so the pump is generic over server/client connections without
-/// caring which side it is. The `p_`-prefixed names deliberately differ from
+/// caring which side it is. The `p_`-prefixed names deliberately differ
 /// rustls's inherent methods so the impls call the real rustls methods rather
 /// than recursing into themselves.
 trait Pump {
@@ -275,13 +272,13 @@ fn testpipe_fragments_reads_and_signals_wouldblock() {
     let (mut server, mut client) = pipe_pair(/* read_chunk */ 2, /* write_chunk */ 100);
     let mut buf = [0u8; 8];
 
-    // Empty inbound reads as WouldBlock, never as EOF.
+ // Empty inbound reads as WouldBlock, never as EOF.
     assert_eq!(
         server.read(&mut buf).unwrap_err().kind(),
         io::ErrorKind::WouldBlock
     );
 
-    // Client writes 5 bytes; server sees them in 2-byte fragments.
+ // Client writes 5 bytes; server sees them in 2-byte fragments.
     client.write_all(b"hello").unwrap();
     assert_eq!(server.read(&mut buf).unwrap(), 2);
     assert_eq!(&buf[..2], b"he");
@@ -298,7 +295,7 @@ fn testpipe_fragments_reads_and_signals_wouldblock() {
 #[test]
 fn testpipe_caps_short_writes() {
     let (mut server, mut _client) = pipe_pair(64, /* write_chunk */ 3);
-    // A single write() accepts at most write_chunk bytes.
+ // A single write accepts at most write_chunk bytes.
     assert_eq!(server.write(b"abcdef").unwrap(), 3);
 }
 
@@ -355,7 +352,7 @@ fn socket_backend_read_would_block_when_empty() {
         Err(RedisError::Io(kind)) => assert_eq!(kind, io::ErrorKind::WouldBlock),
         other => panic!("expected Io(WouldBlock), got {other:?}"),
     }
-    // A would-block must NOT transition a connected socket to error state.
+ // A would-block must NOT transition a connected socket to error state.
     assert_eq!(conn.state, ConnectionState::Connected);
 }
 
@@ -363,7 +360,7 @@ fn socket_backend_read_would_block_when_empty() {
 #[test]
 fn socket_backend_eof_marks_closed() {
     let ct = SocketConnectionType::new();
-    // A reader over an empty, permanently-closed source: a cursor at end.
+ // A reader over an empty, permanently-closed source: a cursor at end.
     let mut conn = Connection::new(ConnectionTypeId::Socket, 7)
         .with_stream(Box::new(io::Cursor::new(Vec::<u8>::new())));
     conn.state = ConnectionState::Connected;
@@ -381,7 +378,7 @@ fn rec_write(_c: &mut Connection) {
     EVENT_LOG.lock().unwrap().push("write");
 }
 
-/// Port of `connSocketEventHandler`: read fires before write normally, and the
+/// Port of `connSocketEventHandler`: read fires before write normally, and
 /// order inverts under the write barrier.
 #[test]
 fn socket_event_handler_orders_handlers_and_inverts_on_barrier() {
@@ -469,8 +466,7 @@ fn rustls_handshake_completes_one_byte_at_a_time() {
 }
 
 /// A large reply forces many `write_tls` records and many fragmented reads.
-///
-/// rustls's `writer()` has a bounded plaintext buffer, so a real server must
+/// rustls's `writer` has a bounded plaintext buffer, so a real server must
 /// interleave queueing plaintext with draining it via `write_tls` — it cannot
 /// dump an arbitrarily large reply in one shot. This test mirrors that
 /// streaming/backpressure pattern, which the eventual owner-loop integration
@@ -497,8 +493,8 @@ fn rustls_large_reply_streams_intact() {
     assert_eq!(got, payload);
 }
 
-/// Invariance under arbitrary fragmentation: for every chunk size, the
-/// handshake completes and an echo round-trips byte-identically. This is the
+/// Invariance under arbitrary fragmentation: for every chunk size,
+/// handshake completes and an echo round-trips byte-identically. This is
 /// "passes in dev, flakes under load" class, made deterministic.
 #[test]
 fn rustls_roundtrips_under_all_chunkings() {

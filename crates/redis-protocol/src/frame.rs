@@ -1,11 +1,9 @@
 //! `RespFrame` — Rust enum representing one RESP2/RESP3 wire frame.
-//!
 //! Per PORTING.md §2 #2. RESP2 variants land now (Simple, Error,
 //! Integer, Bulk, Array, Null). RESP3 variants stubbed; encoders /
-//! decoders for them are todo!() until Phase 2 protocol translation
+//! decoders for them are todo! until Phase 2 protocol translation
 //! packets land.
-//!
-//! `Bulk(None)` represents a RESP2 null bulk string (`$-1\r\n`); the
+//! `Bulk(None)` represents a RESP2 null bulk string (`$-1\r\n`);
 //! dedicated `Null` variant is the RESP3 null (`_\r\n`).
 
 use redis_types::RedisString;
@@ -15,38 +13,38 @@ use redis_types::RedisString;
 /// a HashMap key unless they exclude RESP3 Double frames.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RespFrame {
-    // ── RESP2 (Phase 2) ───────────────────────────────────────────
-    /// `+OK\r\n` — simple string. Bytes excluding the leading `+` and trailing CRLF.
+ // ── RESP2 (Phase 2) ───────────────────────────────────────────
+ /// `+OK\r\n` — simple string. Bytes excluding the leading `+` and trailing CRLF.
     Simple(RedisString),
-    /// `-ERR ...\r\n` — error line. Bytes excluding the leading `-` and trailing CRLF.
+ /// `-ERR...\r\n` — error line. Bytes excluding the leading `-` and trailing CRLF.
     Error(RedisString),
-    /// `:<n>\r\n` — integer.
+ /// `:<n>\r\n` — integer.
     Integer(i64),
-    /// `$<len>\r\n<bytes>\r\n` or `$-1\r\n` (None).
+ /// `$<len>\r\n<bytes>\r\n` or `$-1\r\n` (None).
     Bulk(Option<RedisString>),
-    /// `*<n>\r\n<frame>...` or `*-1\r\n` (None).
+ /// `*<n>\r\n<frame>...` or `*-1\r\n` (None).
     Array(Option<Vec<RespFrame>>),
 
-    // ── RESP3 (Phase 2 or later) ──────────────────────────────────
-    /// `_\r\n` — RESP3 explicit null.
+ // ── RESP3 (Phase 2 or later) ──────────────────────────────────
+ /// `_\r\n` — RESP3 explicit null.
     Null,
-    /// `#t\r\n` / `#f\r\n` — RESP3 boolean.
+ /// `#t\r\n` / `#f\r\n` — RESP3 boolean.
     Boolean(bool),
-    /// `,<repr>\r\n` — RESP3 double.
+ /// `,<repr>\r\n` — RESP3 double.
     Double(f64),
-    /// `(<digits>\r\n` — RESP3 big number.
+ /// `(<digits>\r\n` — RESP3 big number.
     BigNumber(RedisString),
-    /// `!<len>\r\n<msg>\r\n` — RESP3 bulk-style error.
+ /// `!<len>\r\n<msg>\r\n` — RESP3 bulk-style error.
     BulkError(RedisString),
-    /// `=<len>\r\n<3chars>:<bytes>\r\n` — RESP3 verbatim string with format tag.
+ /// `=<len>\r\n<3chars>:<bytes>\r\n` — RESP3 verbatim string with format tag.
     VerbatimString { format: [u8; 3], data: RedisString },
-    /// `%<n>\r\n<key>\r\n<value>\r\n...` — RESP3 map.
+ /// `%<n>\r\n<key>\r\n<value>\r\n...` — RESP3 map.
     Map(Vec<(RespFrame, RespFrame)>),
-    /// `~<n>\r\n<frame>...` — RESP3 set.
+ /// `~<n>\r\n<frame>...` — RESP3 set.
     Set(Vec<RespFrame>),
-    /// `|<n>\r\n<key>\r\n<value>\r\n...` — RESP3 attribute (out-of-band).
+ /// `|<n>\r\n<key>\r\n<value>\r\n...` — RESP3 attribute (out-of-band).
     Attribute(Vec<(RespFrame, RespFrame)>),
-    /// `><n>\r\n<frame>...` — RESP3 push (server-initiated).
+ /// `><n>\r\n<frame>...` — RESP3 push (server-initiated).
     Push(Vec<RespFrame>),
 }
 
@@ -81,7 +79,6 @@ impl RespFrame {
 }
 
 /// Encode a RespFrame onto the wire as RESP2 bytes.
-///
 /// RESP3-only variants are degraded to their nearest RESP2 equivalent
 /// (Null → `$-1`, Boolean → `:1`/`:0`, Double → bulk string, BigNumber → bulk
 /// string, BulkError → simple error, VerbatimString → bulk string, Map →
@@ -190,7 +187,6 @@ pub fn encode_resp2(frame: &RespFrame, buf: &mut Vec<u8>) {
 }
 
 /// Encode a RespFrame onto the wire as RESP3 bytes.
-///
 /// All RESP2 frame shapes are still valid RESP3 (RESP3 is a superset). The
 /// dedicated RESP3 frame variants emit their native wire form.
 pub fn encode_resp3(frame: &RespFrame, buf: &mut Vec<u8>) {
@@ -303,10 +299,9 @@ pub fn encode_resp3(frame: &RespFrame, buf: &mut Vec<u8>) {
 }
 
 /// Format an `f64` for textual RESP wire emission.
-///
 /// `inf`/`-inf`/`nan` map to the lowercase Redis spellings, integer-valued
 /// doubles within `i64` range render without a fractional part, and finite
-/// non-integer doubles use Rust's default `{}` representation. Mirrors the
+/// non-integer doubles use Rust's default `{}` representation. Mirrors
 /// `format_score` helper in the zset command surface.
 pub fn format_double_text(d: f64) -> Vec<u8> {
     if d.is_nan() {

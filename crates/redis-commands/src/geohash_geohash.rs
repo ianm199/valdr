@@ -1,23 +1,15 @@
 //! Geohash encoding and decoding for Redis GEO commands.
-//!
-//! Ported from `geohash.c` / `geohash.h` (291 lines C + 144 lines header).
-//!
-//! The geohash algorithm divides the world into a grid by interleaving the
+//! The geohash algorithm divides the world into a grid by interleaving
 //! bit representations of normalised longitude (x) and latitude (y) into a
-//! single 64-bit integer.  Encoding quantises a (lon, lat) pair into a
+//! single 64-bit integer. Encoding quantises a (lon, lat) pair into a
 //! `GeoHashBits` value; decoding recovers the bounding box of the cell;
 //! neighbour computation shifts the cell one step in any of the eight
 //! cardinal/diagonal directions.
-//!
 //! All public functions are pure (no Redis I/O, no `CommandContext`).
 //! The original C functions return `int` (0 = failure, 1 = success) through
 //! out-parameters; the Rust translation uses `Option<T>` instead.
-//!
-//! C source refs:
-//!   geohash.h:42-114  — constants, macros, type definitions
-//!   geohash.c:52-290  — function implementations
 
-// ── Constants (from geohash.h) ────────────────────────────────────────────
+// ── Constants ────────────────────────────────────────────
 
 /// Maximum step value: 26 steps × 2 bits = 52-bit precision.
 pub const GEO_STEP_MAX: u8 = 26;
@@ -35,11 +27,9 @@ pub const CIRCULAR_TYPE: i32 = 1;
 pub const RECTANGLE_TYPE: i32 = 2;
 pub const POLYGON_TYPE: i32 = 3;
 
-// ── Types (from geohash.h) ────────────────────────────────────────────────
+// ── Types ────────────────────────────────────────────────
 
 /// Cardinal / diagonal directions for geohash neighbour lookup.
-///
-/// C: `GeoDirection` enum in geohash.h:54-63.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GeoDirection {
     North = 0,
@@ -52,10 +42,8 @@ pub enum GeoDirection {
     NorthEast,
 }
 
-/// A raw geohash value: `bits` holds the interleaved lat/lon, `step` is the
+/// A raw geohash value: `bits` holds the interleaved lat/lon, `step` is
 /// precision (number of coordinate-pair bits on each axis, 1–32).
-///
-/// C: `GeoHashBits` struct in geohash.h:65-68.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct GeoHashBits {
     pub bits: u64,
@@ -63,8 +51,6 @@ pub struct GeoHashBits {
 }
 
 /// A continuous range [min, max] for a single geographic axis.
-///
-/// C: `GeoHashRange` struct in geohash.h:70-73.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct GeoHashRange {
     pub min: f64,
@@ -72,8 +58,6 @@ pub struct GeoHashRange {
 }
 
 /// The decoded bounding box of a geohash cell.
-///
-/// C: `GeoHashArea` struct in geohash.h:75-79.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct GeoHashArea {
     pub hash: GeoHashBits,
@@ -82,8 +66,6 @@ pub struct GeoHashArea {
 }
 
 /// The eight neighbouring cells of a geohash cell.
-///
-/// C: `GeoHashNeighbors` struct in geohash.h:81-90.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct GeoHashNeighbors {
     pub north: GeoHashBits,
@@ -97,39 +79,33 @@ pub struct GeoHashNeighbors {
 }
 
 /// The shape variant for a geo search region.
-///
 /// PORT NOTE: The C `GeoShape` struct uses an anonymous `union` discriminated
 /// by an `int type` field (`CIRCULAR_TYPE`, `RECTANGLE_TYPE`, `POLYGON_TYPE`).
 /// Rust's enum collapses both the discriminant and the payload; the `type`
 /// integer is no longer needed as a separate field.
-///
-/// C: `GeoShape` struct in geohash.h:95-114.
 #[derive(Debug, Clone, PartialEq)]
 pub enum GeoShapeKind {
-    /// `CIRCULAR_TYPE` — a circle with the given radius (in the unit set by
-    /// `conversion`; typically metres).
+ /// `CIRCULAR_TYPE` — a circle with the given radius (in the unit set by
+ /// `conversion`; typically metres).
     Circular { radius: f64 },
-    /// `RECTANGLE_TYPE` — an axis-aligned rectangle.
+ /// `RECTANGLE_TYPE` — an axis-aligned rectangle.
     Rectangle { height: f64, width: f64 },
-    /// `POLYGON_TYPE` — an arbitrary polygon.  Each element is `[lon, lat]`.
-    ///
-    /// PORT NOTE: The C `num_vertices` field is redundant with `points.len()`.
+ /// `POLYGON_TYPE` — an arbitrary polygon. Each element is `[lon, lat]`.
+ /// PORT NOTE: The C `num_vertices` field is redundant with `points.len`.
     Polygon { points: Vec<[f64; 2]> },
 }
 
-/// A geo-search shape with its centre point, unit conversion factor, and
+/// A geo-search shape with its centre point, unit conversion factor,
 /// pre-computed axis-aligned bounding box.
-///
-/// C: `GeoShape` struct in geohash.h:95-114.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GeoShape {
-    /// Search centre: `xy[0]` = longitude, `xy[1]` = latitude.
+ /// Search centre: `xy[0]` = longitude, `xy[1]` = latitude.
     pub xy: [f64; 2],
-    /// Unit conversion factor (e.g. 1000 for km→m).
+ /// Unit conversion factor (e.g. 1000 for km→m).
     pub conversion: f64,
-    /// Pre-computed AABB: `[min_lon, min_lat, max_lon, max_lat]`.
+ /// Pre-computed AABB: `[min_lon, min_lat, max_lon, max_lat]`.
     pub bounds: [f64; 4],
-    /// The actual shape kind and its parameters.
+ /// The actual shape kind and its parameters.
     pub kind: GeoShapeKind,
 }
 
@@ -137,10 +113,7 @@ pub struct GeoShape {
 
 /// Interleave the lower bits of `xlo` (even positions) and `ylo` (odd
 /// positions) into a single 64-bit integer.
-///
 /// Both inputs must be < 2³² (i.e. fit in 32 bits).
-///
-/// C: `interleave64` (static inline) — geohash.c:52-76.
 /// Algorithm: <https://graphics.stanford.edu/~seander/bithacks.html#InterleaveBMN>
 fn interleave64(xlo: u32, ylo: u32) -> u64 {
     const B: [u64; 5] = [
@@ -173,12 +146,10 @@ fn interleave64(xlo: u32, ylo: u32) -> u64 {
     x | (y << 1)
 }
 
-/// Reverse the interleave: recover the even-bit component (low 32 bits of
+/// Reverse the interleave: recover the even-bit component (low 32 bits
 /// result) and the odd-bit component (high 32 bits of result) from a 64-bit
 /// interleaved value.
-///
-/// C: `deinterleave64` (static inline) — geohash.c:81-108.
-/// Derived from: <http://stackoverflow.com/questions/4909263>
+/// Derived: <http://stackoverflow.com/questions/4909263>
 fn deinterleave64(interleaved: u64) -> u64 {
     const B: [u64; 6] = [
         0x5555_5555_5555_5555,
@@ -188,7 +159,7 @@ fn deinterleave64(interleaved: u64) -> u64 {
         0x0000_FFFF_0000_FFFF,
         0x0000_0000_FFFF_FFFF,
     ];
-    // S[0] = 0 intentionally: the first mask step needs no shift (x | x = x).
+ // S[0] = 0 intentionally: the first mask step needs no shift (x | x = x).
     const S: [u32; 6] = [0, 1, 2, 4, 8, 16];
 
     let mut x = interleaved;
@@ -217,8 +188,6 @@ fn deinterleave64(interleaved: u64) -> u64 {
 
 /// Shift the longitude (x) component of `hash` by one step in direction `d`
 /// (+1 = east, −1 = west, 0 = no-op).
-///
-/// C: `geohash_move_x` (static) — geohash.c:221-238.
 fn geohash_move_x(hash: &mut GeoHashBits, d: i8) {
     if d == 0 {
         return;
@@ -243,8 +212,6 @@ fn geohash_move_x(hash: &mut GeoHashBits, d: i8) {
 
 /// Shift the latitude (y) component of `hash` by one step in direction `d`
 /// (+1 = north, −1 = south, 0 = no-op).
-///
-/// C: `geohash_move_y` (static) — geohash.c:240-255.
 fn geohash_move_y(hash: &mut GeoHashBits, d: i8) {
     if d == 0 {
         return;
@@ -271,10 +238,7 @@ fn geohash_move_y(hash: &mut GeoHashBits, d: i8) {
 
 /// Return the standard WGS84-compatible coordinate ranges used by all Redis
 /// GEO commands (EPSG:900913 / EPSG:3785 / OSGEO:41001).
-///
 /// Returns `(long_range, lat_range)`.
-///
-/// C: `geohashGetCoordRange` — geohash.c:110-117.
 pub fn geohash_get_coord_range() -> (GeoHashRange, GeoHashRange) {
     let long_range = GeoHashRange {
         max: GEO_LONG_MAX,
@@ -289,10 +253,7 @@ pub fn geohash_get_coord_range() -> (GeoHashRange, GeoHashRange) {
 
 /// Encode `(longitude, latitude)` into a `GeoHashBits` with the given
 /// `step` precision using the supplied coordinate ranges.
-///
 /// Returns `None` if any argument is out of range or `step` is 0 or > 32.
-///
-/// C: `geohashEncode` — geohash.c:119-149.
 pub fn geohash_encode(
     long_range: &GeoHashRange,
     lat_range: &GeoHashRange,
@@ -300,7 +261,6 @@ pub fn geohash_encode(
     latitude: f64,
     step: u8,
 ) -> Option<GeoHashBits> {
-    // C: if (hash == NULL || step > 32 || step == 0 || RANGEPISZERO(lat_range) || RANGEPISZERO(long_range)) return 0;
     if step > 32
         || step == 0
         || (lat_range.max == 0.0 && lat_range.min == 0.0)
@@ -309,7 +269,6 @@ pub fn geohash_encode(
         return None;
     }
 
-    // C: if (longitude > GEO_LONG_MAX || longitude < GEO_LONG_MIN || ...) return 0;
     if !(GEO_LONG_MIN..=GEO_LONG_MAX).contains(&longitude)
         || !(GEO_LAT_MIN..=GEO_LAT_MAX).contains(&latitude)
     {
@@ -327,7 +286,7 @@ pub fn geohash_encode(
     let lat_offset = (latitude - lat_range.min) / (lat_range.max - lat_range.min);
     let long_offset = (longitude - long_range.min) / (long_range.max - long_range.min);
 
-    // Convert to fixed-point based on step size.
+ // Convert to fixed-point based on step size.
     let lat_fp = lat_offset * ((1u64 << step) as f64);
     let long_fp = long_offset * ((1u64 << step) as f64);
 
@@ -338,32 +297,24 @@ pub fn geohash_encode(
 }
 
 /// Encode using the default WGS84 coordinate ranges.
-///
-/// C: `geohashEncodeType` — geohash.c:151-155.
 pub fn geohash_encode_type(longitude: f64, latitude: f64, step: u8) -> Option<GeoHashBits> {
     let (long_range, lat_range) = geohash_get_coord_range();
     geohash_encode(&long_range, &lat_range, longitude, latitude, step)
 }
 
 /// Alias for `geohash_encode_type` (WGS84 is the only supported datum).
-///
-/// C: `geohashEncodeWGS84` — geohash.c:157-159.
 pub fn geohash_encode_wgs84(longitude: f64, latitude: f64, step: u8) -> Option<GeoHashBits> {
     geohash_encode_type(longitude, latitude, step)
 }
 
 /// Decode a `GeoHashBits` value into a `GeoHashArea` (bounding box) using
 /// the supplied coordinate ranges.
-///
 /// Returns `None` if `hash` is zero-valued or any range is zero.
-///
-/// C: `geohashDecode` — geohash.c:161-188.
 pub fn geohash_decode(
     long_range: GeoHashRange,
     lat_range: GeoHashRange,
     hash: GeoHashBits,
 ) -> Option<GeoHashArea> {
-    // C: HASHISZERO(hash): !(hash.bits) && !(hash.step)
     if (hash.bits == 0 && hash.step == 0)
         || (lat_range.max == 0.0 && lat_range.min == 0.0)
         || (long_range.max == 0.0 && long_range.min == 0.0)
@@ -372,13 +323,13 @@ pub fn geohash_decode(
     }
 
     let step = hash.step;
-    // hash = [LAT][LONG] after deinterleave
+ // hash = [LAT][LONG] after deinterleave
     let hash_sep = deinterleave64(hash.bits);
 
     let lat_scale = lat_range.max - lat_range.min;
     let long_scale = long_range.max - long_range.min;
 
-    // Low 32 bits = lat part; high 32 bits = long part.
+ // Low 32 bits = lat part; high 32 bits = long part.
     let ilato = hash_sep as u32;
     let ilono = (hash_sep >> 32) as u32;
 
@@ -400,25 +351,18 @@ pub fn geohash_decode(
 }
 
 /// Decode using the default WGS84 coordinate ranges.
-///
-/// C: `geohashDecodeType` — geohash.c:190-194.
 pub fn geohash_decode_type(hash: GeoHashBits) -> Option<GeoHashArea> {
     let (long_range, lat_range) = geohash_get_coord_range();
     geohash_decode(long_range, lat_range, hash)
 }
 
 /// Alias for `geohash_decode_type`.
-///
-/// C: `geohashDecodeWGS84` — geohash.c:196-198.
 pub fn geohash_decode_wgs84(hash: GeoHashBits) -> Option<GeoHashArea> {
     geohash_decode_type(hash)
 }
 
 /// Compute the centre point of a `GeoHashArea` and clamp it to valid bounds.
-///
 /// Returns `Some([longitude, latitude])`, or `None` if `area` is degenerate.
-///
-/// C: `geohashDecodeAreaToLongLat` — geohash.c:200-209.
 pub fn geohash_decode_area_to_long_lat(area: &GeoHashArea) -> Option<[f64; 2]> {
     let mut lon = (area.longitude.min + area.longitude.max) / 2.0;
     if lon > GEO_LONG_MAX {
@@ -440,25 +384,18 @@ pub fn geohash_decode_area_to_long_lat(area: &GeoHashArea) -> Option<[f64; 2]> {
 }
 
 /// Decode a hash to its centre `[longitude, latitude]` using WGS84 ranges.
-///
 /// Returns `None` if the hash is invalid.
-///
-/// C: `geohashDecodeToLongLatType` — geohash.c:211-215.
 pub fn geohash_decode_to_long_lat_type(hash: GeoHashBits) -> Option<[f64; 2]> {
     let area = geohash_decode_type(hash)?;
     geohash_decode_area_to_long_lat(&area)
 }
 
 /// Alias for `geohash_decode_to_long_lat_type`.
-///
-/// C: `geohashDecodeToLongLatWGS84` — geohash.c:217-219.
 pub fn geohash_decode_to_long_lat_wgs84(hash: GeoHashBits) -> Option<[f64; 2]> {
     geohash_decode_to_long_lat_type(hash)
 }
 
 /// Compute all eight neighbouring geohash cells of `hash`.
-///
-/// C: `geohashNeighbors` — geohash.c:257-290.
 pub fn geohash_neighbors(hash: &GeoHashBits) -> GeoHashNeighbors {
     let mut neighbors = GeoHashNeighbors {
         east: *hash,
@@ -523,7 +460,7 @@ mod tests {
         let hash = geohash_encode_wgs84(lon, lat, step).expect("encode should succeed");
         let decoded = geohash_decode_to_long_lat_wgs84(hash).expect("decode should succeed");
 
-        // Precision at step=26 is sub-millimetre; allow 1e-5 degree tolerance.
+ // Precision at step=26 is sub-millimetre; allow 1e-5 degree tolerance.
         assert!(
             (decoded[0] - lon).abs() < 1e-5,
             "lon mismatch: {} vs {}",
@@ -578,7 +515,7 @@ mod tests {
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        src/geohash.c  (291 lines, 10 functions)
+//   source:        Valkey
 //                  src/geohash.h  (144 lines, type + constant definitions)
 //   target_crate:  redis-commands
 //   confidence:    high

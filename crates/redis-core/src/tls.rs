@@ -1,28 +1,22 @@
 //! TLS configuration for the redis-server binary.
-//!
 //! Builds a `rustls::ServerConfig` from PEM-encoded certificate, private-key
 //! and (optional) CA certificate files. The resulting `TlsConfig` wraps an
 //! `Arc<ServerConfig>` so it is cheap to clone and share across the accept
 //! path.
-//!
 //! mTLS (mutual TLS / client certificate validation) is configured via a
 //! tri-state matching upstream Valkey's `tls-auth-clients` directive:
-//!
-//! | mode | meaning                                | rustls verifier                                                 |
+//! | mode | meaning | rustls verifier |
 //! |------|----------------------------------------|------------------------------------------------------------------|
-//! | 0    | `no`        — never ask for a cert     | `with_no_client_auth()`                                          |
-//! | 1    | `yes`       — require a valid cert     | `WebPkiClientVerifier::builder(roots).build()`                   |
-//! | 2    | `optional`  — accept either            | `WebPkiClientVerifier::builder(roots).allow_unauthenticated()`   |
-//!
+//! | 0 | `no` — never ask for a cert | `with_no_client_auth` |
+//! | 1 | `yes` — require a valid cert | `WebPkiClientVerifier::builder(roots).build` |
+//! | 2 | `optional` — accept either | `WebPkiClientVerifier::builder(roots).allow_unauthenticated` |
 //! `protocols` restricts the negotiable TLS versions. The empty string means
 //! "all rustls-supported" (TLS 1.2 + TLS 1.3). Non-empty values are tokenized
 //! on whitespace and matched against `TLSv1.2` / `TLSv1.3`. Older protocols
 //! (`SSLv3`, `TLSv1`, `TLSv1.1`) are not supported by rustls and produce an
-//! error — that is a security upgrade vs. upstream OpenSSL, documented at the
+//! error — that is a security upgrade vs. upstream OpenSSL, documented at
 //! site level.
-//!
 //! # Dynamic reconfiguration
-//!
 //! `CONFIG SET tls-port`, `tls-auth-clients`, `tls-protocols`,
 //! `tls-cert-file`, etc. all need to take effect on the next accepted
 //! connection without restarting the listener. They route through
@@ -75,7 +69,7 @@ pub fn set_current_server_config(cfg: Option<Arc<rustls::ServerConfig>>) {
 
 /// Install the runtime hook that rebuilds and swaps the TLS server config when
 /// `CONFIG SET` mutates any TLS directive. `main.rs` calls this exactly once
-/// after the plain TCP listener is bound. The hook captures the
+/// after the plain TCP listener is bound. The hook captures
 /// `Arc<LiveConfig>` it needs.
 pub fn install_tls_start_hook(hook: Box<dyn Fn(u16) + Send + Sync>) {
     let _ = TLS_START_HOOK.set(hook);
@@ -92,8 +86,7 @@ pub fn notify_tls_port_set(port: u16) {
 }
 
 /// Fully-built TLS server configuration.
-///
-/// Wraps an `Arc<rustls::ServerConfig>` so it can be cheaply cloned and
+/// Wraps an `Arc<rustls::ServerConfig>` so it can be cheaply cloned
 /// handed to each accept-loop thread without deep copying the crypto state.
 #[derive(Clone)]
 pub struct TlsConfig {
@@ -101,17 +94,16 @@ pub struct TlsConfig {
 }
 
 impl TlsConfig {
-    /// Build a `TlsConfig` from PEM files on disk and `LiveConfig`-style
-    /// directives.
-    ///
-    /// * `cert_path`         — PEM certificate chain (leaf first).
-    /// * `key_path`          — PEM private key matching the leaf cert.
-    /// * `ca_path`           — PEM CA bundle. Required when `auth_clients_mode`
-    ///                         is `1` (yes) or `2` (optional); ignored when `0`.
-    /// * `auth_clients_mode` — Tri-state from upstream's `tls-auth-clients`:
-    ///                         `0=no`, `1=yes`, `2=optional`.
-    /// * `protocols`         — Space-separated TLS version list (`"TLSv1.2"`,
-    ///                         `"TLSv1.3"`, both, or `""` for default).
+ /// Build a `TlsConfig` from PEM files on disk and `LiveConfig`-style
+ /// directives.
+ /// * `cert_path` — PEM certificate chain (leaf first).
+ /// * `key_path` — PEM private key matching the leaf cert.
+ /// * `ca_path` — PEM CA bundle. Required when `auth_clients_mode`
+ /// is `1` (yes) or `2` (optional); ignored when `0`.
+ /// * `auth_clients_mode` — Tri-state from upstream's `tls-auth-clients`:
+ /// `0=no`, `1=yes`, `2=optional`.
+ /// * `protocols` — Space-separated TLS version list (`"TLSv1.2"`,
+ /// `"TLSv1.3"`, both, or `""` for default).
     pub fn from_paths(
         cert_path: &Path,
         key_path: &Path,
@@ -202,7 +194,6 @@ pub fn rebuild_from_live(cfg: &LiveConfig) -> io::Result<Option<TlsConfig>> {
 
 /// Parse a space-separated TLS-version list into rustls's
 /// `&'static SupportedProtocolVersion` references.
-///
 /// Empty input yields an empty `Vec`, which the builder treats as "default
 /// (all rustls-supported)". `SSLv3`, `TLSv1`, `TLSv1.1` produce an error
 /// because rustls cannot negotiate them — refusing legacy versions is a

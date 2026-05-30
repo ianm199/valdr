@@ -1,5 +1,4 @@
 //! `RedisObject` — runtime value types held in a Redis database slot.
-//!
 //! The C `robj` struct uses embedded-memory tricks (hasembkey, hasembval, hasexpire)
 //! that are pure allocator optimizations. In Rust these collapse:
 //! - The key lives in the db `HashMap`, not inside the object.
@@ -9,7 +8,6 @@
 //! - `makeObjectShared` maps to `Arc<RedisObject>` (not yet introduced).
 //! - The small integer pool (`shared.integers[0..10000]`) needs a lazy-static Arc array;
 //!   see `TODO(architect)` on `create_string_object_from_long_long_with_options`.
-//!
 //! PORT NOTE: EMBSTR and RAW string encodings are layout-identical in Rust (`Vec<u8>`
 //! under the hood). The distinction is preserved as an enum variant tag because it affects
 //! the semantics of `try_object_encoding` (decides whether to re-encode) and is reported by
@@ -79,49 +77,44 @@ pub enum ObjectType {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Encoding sub-variants for `RedisObject::String`.
-///
-/// In C these correspond to `OBJ_ENCODING_RAW`, `OBJ_ENCODING_EMBSTR`, and
+/// In C these correspond to `OBJ_ENCODING_RAW`, `OBJ_ENCODING_EMBSTR`,
 /// `OBJ_ENCODING_INT`. In Rust, `Raw` and `Embstr` are layout-identical (`Vec<u8>`
 /// underneath); the distinction is semantic (re-encoding eligibility, `OBJECT ENCODING`
 /// output). `Int` stores the integer directly, avoiding a string allocation.
 #[derive(Debug, Clone)]
 pub enum StringEncoding {
-    /// Dynamically allocated byte string (OBJ_ENCODING_RAW).
+ /// Dynamically allocated byte string (OBJ_ENCODING_RAW).
     Raw(RedisString),
-    /// Immutably embedded byte string — in C allocated in the same chunk as robj
-    /// (OBJ_ENCODING_EMBSTR). In Rust, semantically equivalent to `Raw`.
+ /// Immutably embedded byte string — in C allocated in the same chunk as robj
+ /// (OBJ_ENCODING_EMBSTR). In Rust, semantically equivalent to `Raw`.
     Embstr(RedisString),
-    /// Integer stored as a tagged pointer (OBJ_ENCODING_INT).
+ /// Integer stored as a tagged pointer (OBJ_ENCODING_INT).
     Int(i64),
 }
 
 /// Encoding sub-variants for `RedisObject::List`.
-///
 /// List commands operate over `Inline`, a `VecDeque` of `RedisString` providing
 /// O(1) head/tail ops and trivial index access.
 #[derive(Debug, Clone)]
 pub enum ListEncoding {
-    /// Pragmatic interim encoding used by the in-tree list commands.
-    ///
-    /// Provides O(1) push/pop on both ends and O(n) middle ops, which is
-    /// sufficient for byte-exact Redis semantics.
+ /// Pragmatic interim encoding used by the in-tree list commands.
+ /// Provides O(1) push/pop on both ends and O(n) middle ops, which is
+ /// sufficient for byte-exact Redis semantics.
     Inline(VecDeque<RedisString>),
-    /// Compact list-pack byte array (OBJ_ENCODING_LISTPACK).
+ /// Compact list-pack byte array (OBJ_ENCODING_LISTPACK).
     // TODO(architect): replace VecDeque with real encoding in Phase 4
     ListPack(Vec<u8>),
-    /// Doubly-linked list of list-pack nodes (OBJ_ENCODING_QUICKLIST).
+ /// Doubly-linked list of list-pack nodes (OBJ_ENCODING_QUICKLIST).
     // TODO(architect): replace VecDeque with real encoding in Phase 4
     QuickList(VecDeque<RedisString>),
 }
 
 /// Sticky minimum encoding for an `InlineSet`.
-///
 /// Real Redis never automatically downgrades a set's encoding (e.g. once
 /// elements have caused a promotion from intset to listpack, removing those
 /// elements does not revert back to intset). `InlineSet` records the highest
 /// encoding the set ever reached so that `OBJECT ENCODING` reports a value
 /// consistent with real Redis's sticky-promotion behaviour.
-///
 /// Ordering matters: `Auto < ForcedListpack < ForcedHashtable`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum InlineSetEncoding {
@@ -161,7 +154,6 @@ impl InlineSet {
 }
 
 /// Order-preserving hash storage used by the interim hash implementation.
-///
 /// Valkey's compact hash encodings (`ziplist` historically, `listpack` today)
 /// preserve field insertion order for commands such as `HGETALL`. A plain Rust
 /// `HashMap` gives correct lookup semantics but loses that observable order,
@@ -251,30 +243,27 @@ impl InlineHash {
 }
 
 /// Encoding sub-variants for `RedisObject::Set`.
-///
 /// Set commands operate over `Inline`, a `HashSet<RedisString>` providing
 /// O(1) membership and add/remove.
 #[derive(Debug, Clone)]
 pub enum SetEncoding {
-    /// Pragmatic interim encoding used by the in-tree set commands.
-    ///
-    /// Backed by `HashSet<RedisString>` for O(1) membership tests, adds,
-    /// and removes, which is sufficient for byte-exact Redis semantics
-    /// across SADD/SREM/SMEMBERS/SINTER/SUNION/SDIFF and friends.
+ /// Pragmatic interim encoding used by the in-tree set commands.
+ /// Backed by `HashSet<RedisString>` for O(1) membership tests, adds,
+ /// and removes, which is sufficient for byte-exact Redis semantics
+ /// across SADD/SREM/SMEMBERS/SINTER/SUNION/SDIFF and friends.
     Inline(InlineSet),
-    /// Compact list-pack byte array (OBJ_ENCODING_LISTPACK).
+ /// Compact list-pack byte array (OBJ_ENCODING_LISTPACK).
     // TODO(architect): replace stub Vec with real listpack encoding in Phase 4
     ListPack(Vec<u8>),
-    /// Sorted integer array (OBJ_ENCODING_INTSET).
+ /// Sorted integer array (OBJ_ENCODING_INTSET).
     // TODO(architect): need dependency edge from redis-core to redis-ds for IntSet type
     IntSet(Vec<i64>),
-    /// Full hash table (OBJ_ENCODING_HASHTABLE).
+ /// Full hash table (OBJ_ENCODING_HASHTABLE).
     // TODO(architect): replace HashSet with real redis-ds hashtable in Phase 4
     HashTable(HashSet<RedisString>),
 }
 
 /// Total-ordering wrapper around `f64` for use in `BTreeSet` keys.
-///
 /// Redis rejects NaN scores at the parsing boundary so the wrapped value
 /// is always non-NaN by construction. Equality and ordering use
 /// `f64::total_cmp`, which provides a total order across `+/-0`, `inf`,
@@ -284,7 +273,7 @@ pub enum SetEncoding {
 pub struct F64Ord(pub f64);
 
 impl F64Ord {
-    /// Returns the wrapped score as an `f64`.
+ /// Returns the wrapped score as an `f64`.
     pub fn get(self) -> f64 {
         self.0
     }
@@ -311,50 +300,48 @@ impl Ord for F64Ord {
 }
 
 /// Pragmatic sorted-set storage mirroring real Redis's dict + skiplist.
-///
-/// The `by_member` map provides O(1) score lookup by member; the
-/// `by_order` set provides O(log N) ordered traversal in
-/// `(score, member)` lex order. All mutations must update both maps in
+/// The `by_member` map provides O(1) score lookup by member;
+/// `by_order` set provides O(log N) ordered traversal
+/// `(score, member)` lex order. All mutations must update both maps
 /// lockstep so the two views stay coherent.
 #[derive(Debug, Clone, Default)]
 pub struct InlineZSet {
-    /// Score keyed by member.
+ /// Score keyed by member.
     pub by_member: HashMap<RedisString, F64Ord>,
-    /// Lex-sorted `(score, member)` pairs for ordered range scans.
+ /// Lex-sorted `(score, member)` pairs for ordered range scans.
     pub by_order: BTreeSet<(F64Ord, RedisString)>,
 }
 
 impl InlineZSet {
-    /// Construct an empty sorted set.
+ /// Construct an empty sorted set.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Returns the number of members in the sorted set.
+ /// Returns the number of members in the sorted set.
     pub fn len(&self) -> usize {
         self.by_member.len()
     }
 
-    /// Returns `true` when the sorted set has no members.
+ /// Returns `true` when the sorted set has no members.
     pub fn is_empty(&self) -> bool {
         self.by_member.is_empty()
     }
 
-    /// Returns the score associated with `member`, if present.
+ /// Returns the score associated with `member`, if present.
     pub fn score(&self, member: &RedisString) -> Option<f64> {
         self.by_member.get(member).map(|s| s.get())
     }
 
-    /// Returns `true` when `member` is present in the sorted set.
+ /// Returns `true` when `member` is present in the sorted set.
     pub fn contains(&self, member: &RedisString) -> bool {
         self.by_member.contains_key(member)
     }
 
-    /// Insert or update `(member, score)`.
-    ///
-    /// Returns `(was_new, prev_score)` so callers can implement the
-    /// `ZADD CH` and `XX/NX/GT/LT` semantics by inspecting whether the
-    /// member existed and what its score was before the update.
+ /// Insert or update `(member, score)`.
+ /// Returns `(was_new, prev_score)` so callers can implement
+ /// `ZADD CH` and `XX/NX/GT/LT` semantics by inspecting whether
+ /// member existed and what its score was before the update.
     pub fn upsert(&mut self, member: RedisString, score: f64) -> (bool, Option<f64>) {
         let new = F64Ord(score);
         if let Some(prev) = self.by_member.get(&member).copied() {
@@ -372,14 +359,14 @@ impl InlineZSet {
         }
     }
 
-    /// Remove `member`, returning its score if it was present.
+ /// Remove `member`, returning its score if it was present.
     pub fn remove(&mut self, member: &RedisString) -> Option<f64> {
         let prev = self.by_member.remove(member)?;
         self.by_order.remove(&(prev, member.clone()));
         Some(prev.get())
     }
 
-    /// Iterate `(score, member)` pairs in ascending order.
+ /// Iterate `(score, member)` pairs in ascending order.
     pub fn iter_ascending(&self) -> impl DoubleEndedIterator<Item = (f64, &RedisString)> {
         self.by_order.iter().map(|(s, m)| (s.get(), m))
     }
@@ -388,34 +375,31 @@ impl InlineZSet {
 /// Encoding sub-variants for `RedisObject::ZSet`.
 #[derive(Debug, Clone)]
 pub enum ZSetEncoding {
-    /// Pragmatic interim encoding used by the in-tree zset commands.
-    ///
-    /// Mirrors real Redis's dict + zskiplist pair via `HashMap` for O(1)
-    /// member-keyed score lookup and `BTreeSet` for O(log N) ordered
-    /// traversal.
+ /// Pragmatic interim encoding used by the in-tree zset commands.
+ /// Mirrors real Redis's dict + zskiplist pair via `HashMap` for O(1)
+ /// member-keyed score lookup and `BTreeSet` for O(log N) ordered
+ /// traversal.
     Inline(InlineZSet),
-    /// Compact list-pack byte array (OBJ_ENCODING_LISTPACK).
+ /// Compact list-pack byte array (OBJ_ENCODING_LISTPACK).
     ListPack(Vec<u8>),
-    /// Skip-list + hash-table pair (OBJ_ENCODING_SKIPLIST).
+ /// Skip-list + hash-table pair (OBJ_ENCODING_SKIPLIST).
     // TODO(architect): replace inner Vec with redis_ds::ZSet (skiplist + hashtable) in Phase 4
     SkipList(Vec<(RedisString, f64)>),
 }
 
 /// Encoding sub-variants for `RedisObject::Hash`.
-///
 /// Hash commands operate over `Inline`, a plain `InlineHash` providing
 /// the byte-exact semantics of every wire-level HASH operation.
 #[derive(Debug, Clone)]
 pub enum HashEncoding {
-    /// Pragmatic interim encoding used by the in-tree hash commands.
-    ///
-    /// Backed by `InlineHash` for field lookups, updates, and insertion-order
-    /// iteration.
+ /// Pragmatic interim encoding used by the in-tree hash commands.
+ /// Backed by `InlineHash` for field lookups, updates, and insertion-order
+ /// iteration.
     Inline(InlineHash),
-    /// Compact list-pack byte array (OBJ_ENCODING_LISTPACK).
+ /// Compact list-pack byte array (OBJ_ENCODING_LISTPACK).
     // TODO(architect): replace stub Vec with real listpack encoding in Phase 4
     ListPack(Vec<u8>),
-    /// Full hash table (OBJ_ENCODING_HASHTABLE).
+ /// Full hash table (OBJ_ENCODING_HASHTABLE).
     // TODO(architect): replace InlineHash with real redis-ds hashtable in Phase 4
     HashTable(InlineHash),
 }
@@ -433,27 +417,24 @@ pub type LruClock = u32;
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// The canonical Redis runtime value type.
-///
 /// Replaces the architect stub with full encoding sub-variants per
 /// PORTING.md §2 #4. The `lru` field mirrors the C `robj.lru` 24-bit field
 /// used for LRU/LFU eviction. `expire` mirrors the embedded expiry field
 /// (originally stored directly in the robj's trailing memory in C).
-///
 /// PORT NOTE: The architect stub stored `lru` and `expire` nowhere; this port
 /// adds them to the object. Future versions may move `expire` to a separate
 /// per-db expiry table (matching `redisDb.expires` in C) and remove it from here.
 #[derive(Debug, Clone)]
 pub struct RedisObject {
-    /// LRU/LFU data (24 bits used). 0 = not initialised.
+ /// LRU/LFU data (24 bits used). 0 = not initialised.
     pub lru: LruClock,
-    /// Expiry time in milliseconds since epoch, or `EXPIRY_NONE` if no expiry.
+ /// Expiry time in milliseconds since epoch, or `EXPIRY_NONE` if no expiry.
     pub expire: i64,
-    /// The type + encoding + value.
+ /// The type + encoding + value.
     pub kind: ObjectKind,
 }
 
 /// Encoding sub-variants for `RedisObject::Stream`.
-///
 /// The pragmatic `Inline` encoding backed by `redis_ds::stream::InlineStream`
 /// (sorted Vec of entries). Future versions may replace this with the real
 /// rax + listpack representation once those data structures ship.
@@ -463,31 +444,30 @@ pub enum StreamEncoding {
 }
 
 /// Bloom filter data: a compact probabilistic set membership structure.
-///
 /// Implements a standard Bloom filter with the Kirsch-Mitzenmacher double-hashing
 /// technique. Items are never removed; existence tests may return false positives
 /// at the configured error rate, but never false negatives (a missing item is
 /// always absent).
 #[derive(Debug, Clone)]
 pub struct BloomFilter {
-    /// Bit array packed as bytes (`bits[i/8] >> (i%8) & 1`).
+ /// Bit array packed as bytes (`bits[i/8] >> (i%8) & 1`).
     pub bits: Vec<u8>,
-    /// Number of hash functions k.
+ /// Number of hash functions k.
     pub n_hashes: u32,
-    /// Maximum number of items before error rate degrades.
+ /// Maximum number of items before error rate degrades.
     pub capacity: u64,
-    /// Number of items added so far.
+ /// Number of items added so far.
     pub item_count: u64,
-    /// Target false-positive error rate (e.g. 0.01 = 1%).
+ /// Target false-positive error rate (e.g. 0.01 = 1%).
     pub error_rate: f64,
-    /// Expansion factor for future scaling layers (stored; scaling not yet implemented).
+ /// Expansion factor for future scaling layers (stored; scaling not yet implemented).
     pub expansion: u32,
-    /// When true, the filter does not scale; insertions beyond capacity degrade error rate.
+ /// When true, the filter does not scale; insertions beyond capacity degrade error rate.
     pub nonscaling: bool,
 }
 
 impl BloomFilter {
-    /// Total number of bits in the filter.
+ /// Total number of bits in the filter.
     pub fn bit_count(&self) -> u64 {
         self.bits.len() as u64 * 8
     }
@@ -502,17 +482,16 @@ pub enum ObjectKind {
     Set(SetEncoding),
     ZSet(ZSetEncoding),
     Stream(StreamEncoding),
-    /// Module-defined types.
+ /// Module-defined types.
     // TODO(architect): replace with redis_modules::ModuleValue when modules are available
     Module,
-    /// RedisJSON: native JSON document type.
-    ///
-    /// Stores an arbitrary JSON value (`serde_json::Value`) as the sole object
-    /// encoding. JSONPath queries evaluate against this value at command time.
-    /// No secondary index or encoded form is maintained — mutations deserialize,
-    /// modify, and re-serialize in place.
+ /// RedisJSON: native JSON document type.
+ /// Stores an arbitrary JSON value (`serde_json::Value`) as the sole object
+ /// encoding. JSONPath queries evaluate against this value at command time.
+ /// No secondary index or encoded form is maintained — mutations deserialize,
+ /// modify, and re-serialize in place.
     Json(serde_json::Value),
-    /// RedisBloom: native Bloom filter type (BF.* commands).
+ /// RedisBloom: native Bloom filter type (BF.* commands).
     Bloom(BloomFilter),
 }
 
@@ -524,9 +503,9 @@ pub enum ObjectKind {
 #[derive(Debug, Default, Clone)]
 pub struct DbOverhead {
     pub dbid: usize,
-    /// Memory used by the main key hashtable for this db.
+ /// Memory used by the main key hashtable for this db.
     pub overhead_ht_main: usize,
-    /// Memory used by the expiry hashtable for this db.
+ /// Memory used by the expiry hashtable for this db.
     pub overhead_ht_expires: usize,
 }
 
@@ -563,7 +542,7 @@ pub struct ServerMemOverhead {
     pub overhead_db_hashtable_lut: usize,
     pub overhead_db_hashtable_rehashing: usize,
     pub db_dict_rehashing_count: usize,
-    /// Per-database breakdowns.
+ /// Per-database breakdowns.
     pub db: Vec<DbOverhead>,
 }
 
@@ -578,9 +557,9 @@ impl ServerMemOverhead {
 // ─────────────────────────────────────────────────────────────────────────────
 
 impl RedisObject {
-    // ── Constructors ──────────────────────────────────────────────────────
+ // ── Constructors ──────────────────────────────────────────────────────
 
-    /// Create an object with no LRU init and no expire.
+ /// Create an object with no LRU init and no expire.
     fn bare(kind: ObjectKind) -> Self {
         Self {
             lru: 0,
@@ -589,24 +568,23 @@ impl RedisObject {
         }
     }
 
-    /// Create a raw-string object (OBJ_ENCODING_RAW).
+ /// Create a raw-string object (OBJ_ENCODING_RAW).
     pub fn new_raw_string(bytes: &[u8]) -> Self {
         Self::bare(ObjectKind::String(StringEncoding::Raw(
             RedisString::from_bytes(bytes),
         )))
     }
 
-    /// Create an EMBSTR string object.
-    ///
-    /// PORT NOTE: EMBSTR and RAW are layout-identical in Rust. The tag is kept
-    /// for semantic correctness (OBJECT ENCODING output, tryObjectEncoding logic).
+ /// Create an EMBSTR string object.
+ /// PORT NOTE: EMBSTR and RAW are layout-identical in Rust. The tag is kept
+ /// for semantic correctness (OBJECT ENCODING output, tryObjectEncoding logic).
     pub fn new_embstr(bytes: &[u8]) -> Self {
         Self::bare(ObjectKind::String(StringEncoding::Embstr(
             RedisString::from_bytes(bytes),
         )))
     }
 
-    /// Create a string object, choosing EMBSTR or RAW based on size heuristic.
+ /// Create a string object, choosing EMBSTR or RAW based on size heuristic.
     pub fn new_string(bytes: &[u8]) -> Self {
         if should_embed_string(bytes.len()) {
             Self::new_embstr(bytes)
@@ -624,14 +602,14 @@ impl RedisObject {
         Self::bare(kind)
     }
 
-    /// Create an INT-encoded string object from an `i64`.
+ /// Create an INT-encoded string object from an `i64`.
     pub fn new_int_string(value: i64) -> Self {
         Self::bare(ObjectKind::String(StringEncoding::Int(value)))
     }
 
-    /// Create a string object, promoting to `Int` encoding when the bytes are
-    /// the canonical decimal ASCII representation of an `i64`. Otherwise picks
-    /// `Embstr`/`Raw` via the size threshold.
+ /// Create a string object, promoting to `Int` encoding when the bytes are
+ /// the canonical decimal ASCII representation of an `i64`. Otherwise picks
+ /// `Embstr`/`Raw` via the size threshold.
     pub fn new_string_try_encoded(bytes: &[u8]) -> Self {
         if let Some(value) = parse_canonical_decimal_i64(bytes) {
             return Self::new_int_string(value);
@@ -646,40 +624,38 @@ impl RedisObject {
         Self::new_string_from_redis_string(s)
     }
 
-    /// Create an empty list object with the pragmatic Inline encoding.
+ /// Create an empty list object with the pragmatic Inline encoding.
     pub fn new_list() -> Self {
         Self::bare(ObjectKind::List(ListEncoding::Inline(VecDeque::new())))
     }
 
-    /// Create a list object with QuickList encoding.
+ /// Create a list object with QuickList encoding.
     pub fn new_quicklist(_fill: i32, _compress: i32) -> Self {
         // TODO(port): pass fill/compress to the real QuickList when redis-ds lands (Phase 4)
         Self::bare(ObjectKind::List(ListEncoding::QuickList(VecDeque::new())))
     }
 
-    /// Create a list object with ListPack encoding.
+ /// Create a list object with ListPack encoding.
     pub fn new_list_listpack() -> Self {
         Self::bare(ObjectKind::List(ListEncoding::ListPack(Vec::new())))
     }
 
-    /// Create an `Inline` list object pre-populated from an existing `VecDeque`.
-    ///
-    /// Used by the RDB loader (`rdb/list.rs`) to wrap a deserialized element
-    /// sequence into a fully-formed `RedisObject` without an intermediate
-    /// empty-then-push construction.
+ /// Create an `Inline` list object pre-populated from an existing `VecDeque`.
+ /// Used by the RDB loader (`rdb/list.rs`) to wrap a deserialized element
+ /// sequence into a fully-formed `RedisObject` without an intermediate
+ /// empty-then-push construction.
     pub fn new_list_from_vec(deque: VecDeque<RedisString>) -> Self {
         Self::bare(ObjectKind::List(ListEncoding::Inline(deque)))
     }
 
-    /// Create a `QuickList` list object pre-populated from an existing `VecDeque`.
+ /// Create a `QuickList` list object pre-populated from an existing `VecDeque`.
     pub fn new_quicklist_from_vec(deque: VecDeque<RedisString>) -> Self {
         Self::bare(ObjectKind::List(ListEncoding::QuickList(deque)))
     }
 
-    /// Borrow the inner list `VecDeque` for a list-encoded object.
-    ///
-    /// Returns `None` for non-list objects and for the stub `ListPack`
-    /// encoding that this round does not populate.
+ /// Borrow the inner list `VecDeque` for a list-encoded object.
+ /// Returns `None` for non-list objects and for the stub `ListPack`
+ /// encoding that this round does not populate.
     pub fn list(&self) -> Option<&VecDeque<RedisString>> {
         match &self.kind {
             ObjectKind::List(ListEncoding::Inline(d) | ListEncoding::QuickList(d)) => Some(d),
@@ -687,7 +663,7 @@ impl RedisObject {
         }
     }
 
-    /// Mutably borrow the inner list `VecDeque` for a list-encoded object.
+ /// Mutably borrow the inner list `VecDeque` for a list-encoded object.
     pub fn list_mut(&mut self) -> Option<&mut VecDeque<RedisString>> {
         match &mut self.kind {
             ObjectKind::List(ListEncoding::Inline(d) | ListEncoding::QuickList(d)) => Some(d),
@@ -695,13 +671,12 @@ impl RedisObject {
         }
     }
 
-    /// Promote an inline/listpack-shaped list to quicklist when a growing
-    /// operation would exceed Valkey's active `list-max-listpack-size`.
-    ///
-    /// This mirrors the `listTypeTryConversionAppend` call made by LPUSH/RPUSH,
-    /// LINSERT, LSET, and LMOVE before mutating a listpack. The payload still
-    /// lives in a `VecDeque`, but the explicit `QuickList` tag preserves the
-    /// same OBJECT ENCODING hysteresis as upstream.
+ /// Promote an inline/listpack-shaped list to quicklist when a growing
+ /// operation would exceed Valkey's active `list-max-listpack-size`.
+ /// This mirrors the `listTypeTryConversionAppend` call made by LPUSH/RPUSH,
+ /// LINSERT, LSET, and LMOVE before mutating a listpack. The payload still
+ /// lives in a `VecDeque`, but the explicit `QuickList` tag preserves
+ /// same OBJECT ENCODING hysteresis as upstream.
     pub fn list_try_promote_for_append(&mut self, values: &[RedisString]) {
         let should_promote = match &self.kind {
             ObjectKind::List(ListEncoding::Inline(d)) => listpack_growing_exceeds_limit(d, values),
@@ -716,8 +691,8 @@ impl RedisObject {
         }
     }
 
-    /// Demote a quicklist-shaped list back to inline/listpack after a shrinking
-    /// operation drops below Valkey's half-limit conversion threshold.
+ /// Demote a quicklist-shaped list back to inline/listpack after a shrinking
+ /// operation drops below Valkey's half-limit conversion threshold.
     pub fn list_try_demote_after_shrink(&mut self) {
         let should_demote = match &self.kind {
             ObjectKind::List(ListEncoding::QuickList(d)) => quicklist_fits_listpack_after_shrink(d),
@@ -732,41 +707,39 @@ impl RedisObject {
         }
     }
 
-    /// Create a set object with full hash-table encoding.
+ /// Create a set object with full hash-table encoding.
     pub fn new_set_hashtable() -> Self {
         Self::bare(ObjectKind::Set(SetEncoding::HashTable(HashSet::new())))
     }
 
-    /// Create a set object with IntSet encoding.
+ /// Create a set object with IntSet encoding.
     pub fn new_intset() -> Self {
         Self::bare(ObjectKind::Set(SetEncoding::IntSet(Vec::new())))
     }
 
-    /// Create a set object with ListPack encoding.
+ /// Create a set object with ListPack encoding.
     pub fn new_set_listpack() -> Self {
         Self::bare(ObjectKind::Set(SetEncoding::ListPack(Vec::new())))
     }
 
-    /// Create an empty set object with the pragmatic Inline encoding.
+ /// Create an empty set object with the pragmatic Inline encoding.
     pub fn new_set() -> Self {
         Self::bare(ObjectKind::Set(SetEncoding::Inline(InlineSet::new())))
     }
 
-    /// Create an `Inline` set object pre-populated from an existing `HashSet`.
-    ///
-    /// Used by the RDB loader (`rdb/set.rs`) to wrap a deserialized member
-    /// collection into a fully-formed `RedisObject` without an intermediate
-    /// empty-then-insert construction.
+ /// Create an `Inline` set object pre-populated from an existing `HashSet`.
+ /// Used by the RDB loader (`rdb/set.rs`) to wrap a deserialized member
+ /// collection into a fully-formed `RedisObject` without an intermediate
+ /// empty-then-insert construction.
     pub fn new_set_from_set(members: HashSet<RedisString>) -> Self {
         Self::bare(ObjectKind::Set(SetEncoding::Inline(
             InlineSet::from_hash_set(members),
         )))
     }
 
-    /// Borrow the inner member `HashSet` for a set-encoded object.
-    ///
-    /// Returns `None` for non-set objects and for the stub `ListPack` /
-    /// `IntSet` / `HashTable` encodings that this round does not populate.
+ /// Borrow the inner member `HashSet` for a set-encoded object.
+ /// Returns `None` for non-set objects and for the stub `ListPack` /
+ /// `IntSet` / `HashTable` encodings that this round does not populate.
     pub fn set(&self) -> Option<&HashSet<RedisString>> {
         match &self.kind {
             ObjectKind::Set(SetEncoding::Inline(s)) => Some(&s.data),
@@ -774,7 +747,7 @@ impl RedisObject {
         }
     }
 
-    /// Mutably borrow the inner member `HashSet` for a set-encoded object.
+ /// Mutably borrow the inner member `HashSet` for a set-encoded object.
     pub fn set_mut(&mut self) -> Option<&mut HashSet<RedisString>> {
         match &mut self.kind {
             ObjectKind::Set(SetEncoding::Inline(s)) => Some(&mut s.data),
@@ -782,7 +755,7 @@ impl RedisObject {
         }
     }
 
-    /// Borrow the `InlineSet` (data + sticky encoding) for a set-encoded object.
+ /// Borrow the `InlineSet` (data + sticky encoding) for a set-encoded object.
     pub fn inline_set(&self) -> Option<&InlineSet> {
         match &self.kind {
             ObjectKind::Set(SetEncoding::Inline(s)) => Some(s),
@@ -790,7 +763,7 @@ impl RedisObject {
         }
     }
 
-    /// Mutably borrow the `InlineSet` for a set-encoded object.
+ /// Mutably borrow the `InlineSet` for a set-encoded object.
     pub fn inline_set_mut(&mut self) -> Option<&mut InlineSet> {
         match &mut self.kind {
             ObjectKind::Set(SetEncoding::Inline(s)) => Some(s),
@@ -798,35 +771,33 @@ impl RedisObject {
         }
     }
 
-    /// Create a hash object with ListPack encoding.
+ /// Create a hash object with ListPack encoding.
     pub fn new_hash_listpack() -> Self {
         Self::bare(ObjectKind::Hash(HashEncoding::ListPack(Vec::new())))
     }
 
-    /// Create a hash object with HashTable encoding.
+ /// Create a hash object with HashTable encoding.
     pub fn new_hash_hashtable() -> Self {
         Self::bare(ObjectKind::Hash(HashEncoding::HashTable(InlineHash::new())))
     }
 
-    /// Create an empty hash object with the pragmatic Inline encoding.
+ /// Create an empty hash object with the pragmatic Inline encoding.
     pub fn new_hash() -> Self {
         Self::bare(ObjectKind::Hash(HashEncoding::Inline(InlineHash::new())))
     }
 
-    /// Create a hash object from an existing `HashMap`, using the Inline encoding.
-    ///
-    /// Used by the RDB loader to construct a hash object from a deserialized
-    /// field/value map without an intermediate empty-insert loop.
+ /// Create a hash object from an existing `HashMap`, using the Inline encoding.
+ /// Used by the RDB loader to construct a hash object from a deserialized
+ /// field/value map without an intermediate empty-insert loop.
     pub fn new_hash_from_map(map: HashMap<RedisString, RedisString>) -> Self {
         Self::bare(ObjectKind::Hash(HashEncoding::Inline(
             InlineHash::from_hash_map(map),
         )))
     }
 
-    /// Borrow the inner field/value hash for a hash-encoded object.
-    ///
-    /// Returns `None` for non-hash objects and for the stub `ListPack` /
-    /// `HashTable` encodings that this round does not populate.
+ /// Borrow the inner field/value hash for a hash-encoded object.
+ /// Returns `None` for non-hash objects and for the stub `ListPack` /
+ /// `HashTable` encodings that this round does not populate.
     pub fn hash(&self) -> Option<&InlineHash> {
         match &self.kind {
             ObjectKind::Hash(HashEncoding::Inline(h) | HashEncoding::HashTable(h)) => Some(h),
@@ -834,7 +805,7 @@ impl RedisObject {
         }
     }
 
-    /// Mutably borrow the inner field/value hash for a hash-encoded object.
+ /// Mutably borrow the inner field/value hash for a hash-encoded object.
     pub fn hash_mut(&mut self) -> Option<&mut InlineHash> {
         match &mut self.kind {
             ObjectKind::Hash(HashEncoding::Inline(h) | HashEncoding::HashTable(h)) => Some(h),
@@ -842,11 +813,10 @@ impl RedisObject {
         }
     }
 
-    /// Promote the interim inline hash map to the explicit hashtable variant.
-    ///
-    /// This preserves the same Rust `InlineHash` storage while making
-    /// `OBJECT ENCODING` report `"hashtable"` for cases where upstream
-    /// upgrades a hash out of listpack form.
+ /// Promote the interim inline hash map to the explicit hashtable variant.
+ /// This preserves the same Rust `InlineHash` storage while making
+ /// `OBJECT ENCODING` report `"hashtable"` for cases where upstream
+ /// upgrades a hash out of listpack form.
     pub fn promote_hash_to_hashtable(&mut self) {
         if let ObjectKind::Hash(HashEncoding::Inline(h)) = &mut self.kind {
             let map = std::mem::take(h);
@@ -854,33 +824,31 @@ impl RedisObject {
         }
     }
 
-    /// Create a sorted-set object with SkipList encoding.
+ /// Create a sorted-set object with SkipList encoding.
     pub fn new_zset_skiplist() -> Self {
         Self::bare(ObjectKind::ZSet(ZSetEncoding::SkipList(Vec::new())))
     }
 
-    /// Create a sorted-set object with ListPack encoding.
+ /// Create a sorted-set object with ListPack encoding.
     pub fn new_zset_listpack() -> Self {
         Self::bare(ObjectKind::ZSet(ZSetEncoding::ListPack(Vec::new())))
     }
 
-    /// Create an empty sorted-set object with the pragmatic Inline encoding.
+ /// Create an empty sorted-set object with the pragmatic Inline encoding.
     pub fn new_zset() -> Self {
         Self::bare(ObjectKind::ZSet(ZSetEncoding::Inline(InlineZSet::new())))
     }
 
-    /// Create a zset object from an existing `InlineZSet`, using the Inline encoding.
-    ///
-    /// Used by the RDB loader (`rdb/zset.rs`) to construct a zset object from a
-    /// deserialized member/score collection without an intermediate empty-insert loop.
+ /// Create a zset object from an existing `InlineZSet`, using the Inline encoding.
+ /// Used by the RDB loader (`rdb/zset.rs`) to construct a zset object from a
+ /// deserialized member/score collection without an intermediate empty-insert loop.
     pub fn new_zset_from_inline(zset: InlineZSet) -> Self {
         Self::bare(ObjectKind::ZSet(ZSetEncoding::Inline(zset)))
     }
 
-    /// Borrow the inner `InlineZSet` for a zset-encoded object.
-    ///
-    /// Returns `None` for non-zset objects and for the stub `ListPack` /
-    /// `SkipList` encodings that this round does not populate.
+ /// Borrow the inner `InlineZSet` for a zset-encoded object.
+ /// Returns `None` for non-zset objects and for the stub `ListPack` /
+ /// `SkipList` encodings that this round does not populate.
     pub fn zset(&self) -> Option<&InlineZSet> {
         match &self.kind {
             ObjectKind::ZSet(ZSetEncoding::Inline(z)) => Some(z),
@@ -888,7 +856,7 @@ impl RedisObject {
         }
     }
 
-    /// Mutably borrow the inner `InlineZSet` for a zset-encoded object.
+ /// Mutably borrow the inner `InlineZSet` for a zset-encoded object.
     pub fn zset_mut(&mut self) -> Option<&mut InlineZSet> {
         match &mut self.kind {
             ObjectKind::ZSet(ZSetEncoding::Inline(z)) => Some(z),
@@ -896,14 +864,14 @@ impl RedisObject {
         }
     }
 
-    /// Create a stream object with the pragmatic Inline encoding.
+ /// Create a stream object with the pragmatic Inline encoding.
     pub fn new_stream() -> Self {
         Self::bare(ObjectKind::Stream(StreamEncoding::Inline(
             InlineStream::new(),
         )))
     }
 
-    /// Borrow the inner `InlineStream` for a stream-encoded object.
+ /// Borrow the inner `InlineStream` for a stream-encoded object.
     pub fn stream(&self) -> Option<&InlineStream> {
         match &self.kind {
             ObjectKind::Stream(StreamEncoding::Inline(s)) => Some(s),
@@ -911,7 +879,7 @@ impl RedisObject {
         }
     }
 
-    /// Mutably borrow the inner `InlineStream` for a stream-encoded object.
+ /// Mutably borrow the inner `InlineStream` for a stream-encoded object.
     pub fn stream_mut(&mut self) -> Option<&mut InlineStream> {
         match &mut self.kind {
             ObjectKind::Stream(StreamEncoding::Inline(s)) => Some(s),
@@ -919,17 +887,17 @@ impl RedisObject {
         }
     }
 
-    /// Create a Bloom filter object wrapping an existing `BloomFilter`.
+ /// Create a Bloom filter object wrapping an existing `BloomFilter`.
     pub fn new_bloom_from_filter(bf: BloomFilter) -> Self {
         Self::bare(ObjectKind::Bloom(bf))
     }
 
-    /// Create a JSON-encoded object from a `serde_json::Value`.
+ /// Create a JSON-encoded object from a `serde_json::Value`.
     pub fn new_json(v: serde_json::Value) -> Self {
         Self::bare(ObjectKind::Json(v))
     }
 
-    /// Borrow the inner `serde_json::Value` for a JSON-encoded object.
+ /// Borrow the inner `serde_json::Value` for a JSON-encoded object.
     pub fn json(&self) -> Option<&serde_json::Value> {
         match &self.kind {
             ObjectKind::Json(v) => Some(v),
@@ -937,7 +905,7 @@ impl RedisObject {
         }
     }
 
-    /// Mutably borrow the inner `serde_json::Value` for a JSON-encoded object.
+ /// Mutably borrow the inner `serde_json::Value` for a JSON-encoded object.
     pub fn json_mut(&mut self) -> Option<&mut serde_json::Value> {
         match &mut self.kind {
             ObjectKind::Json(v) => Some(v),
@@ -945,7 +913,7 @@ impl RedisObject {
         }
     }
 
-    /// Borrow the inner `BloomFilter` if this object holds one.
+ /// Borrow the inner `BloomFilter` if this object holds one.
     pub fn bloom(&self) -> Option<&BloomFilter> {
         match &self.kind {
             ObjectKind::Bloom(bf) => Some(bf),
@@ -953,7 +921,7 @@ impl RedisObject {
         }
     }
 
-    /// Mutably borrow the inner `BloomFilter` if this object holds one.
+ /// Mutably borrow the inner `BloomFilter` if this object holds one.
     pub fn bloom_mut(&mut self) -> Option<&mut BloomFilter> {
         match &mut self.kind {
             ObjectKind::Bloom(bf) => Some(bf),
@@ -961,16 +929,16 @@ impl RedisObject {
         }
     }
 
-    // ── Back-compat shims for the architect stub ──────────────────────────
+ // ── Back-compat shims for the architect stub ──────────────────────────
 
-    /// Construct a `RedisObject::String(StringEncoding::Raw(...))` from a `RedisString`.
-    /// Kept for compatibility with db.rs tests that call `RedisObject::from_string(s)`.
+ /// Construct a `RedisObject::String(StringEncoding::Raw(...))` from a `RedisString`.
+ /// Kept for compatibility with db.rs tests that call `RedisObject::from_string(s)`.
     pub fn from_string(s: RedisString) -> Self {
         Self::bare(ObjectKind::String(StringEncoding::Raw(s)))
     }
 
-    /// Return a reference to the inner `RedisString` if this is a string-encoded object
-    /// (RAW or EMBSTR). Returns `None` for INT-encoded strings.
+ /// Return a reference to the inner `RedisString` if this is a string-encoded object
+ /// (RAW or EMBSTR). Returns `None` for INT-encoded strings.
     pub fn as_string(&self) -> Option<&RedisString> {
         match &self.kind {
             ObjectKind::String(StringEncoding::Raw(s)) => Some(s),
@@ -979,9 +947,9 @@ impl RedisObject {
         }
     }
 
-    // ── Type information ──────────────────────────────────────────────────
+ // ── Type information ──────────────────────────────────────────────────
 
-    /// Return the Redis type name used in protocol output.
+ /// Return the Redis type name used in protocol output.
     pub fn type_name(&self) -> &'static str {
         match &self.kind {
             ObjectKind::String(_) => "string",
@@ -996,7 +964,7 @@ impl RedisObject {
         }
     }
 
-    /// Return the `ObjectType` discriminant (used by `check_type`).
+ /// Return the `ObjectType` discriminant (used by `check_type`).
     pub fn object_type(&self) -> ObjectType {
         match &self.kind {
             ObjectKind::String(_) => ObjectType::String,
@@ -1011,15 +979,14 @@ impl RedisObject {
         }
     }
 
-    /// Return the encoding name for `OBJECT ENCODING`.
-    ///
-    /// For the `Inline` interim encodings, the reported name follows the
-    /// listpack→big-encoding crossover heuristics Valkey applies: small
-    /// collections that would fit in a listpack report `"listpack"` (or
-    /// `"intset"` for all-integer sets), and larger ones report the big
-    /// encoding (`"hashtable"`, `"quicklist"`, or `"skiplist"`). The
-    /// underlying storage is unchanged — this is a wire-level fiction
-    /// matching real Redis's reported encoding.
+ /// Return the encoding name for `OBJECT ENCODING`.
+ /// For the `Inline` interim encodings, the reported name follows
+ /// listpack→big-encoding crossover heuristics Valkey applies: small
+ /// collections that would fit in a listpack report `"listpack"` (or
+ /// `"intset"` for all-integer sets), and larger ones report the big
+ /// encoding (`"hashtable"`, `"quicklist"`, or `"skiplist"`). The
+ /// underlying storage is unchanged — this is a wire-level fiction
+ /// matching real Redis's reported encoding.
     pub fn encoding_name(&self) -> &'static str {
         match &self.kind {
             ObjectKind::String(StringEncoding::Raw(_)) => "raw",
@@ -1045,7 +1012,7 @@ impl RedisObject {
         }
     }
 
-    /// Return `true` if the object has a byte-string (RAW or EMBSTR) encoding.
+ /// Return `true` if the object has a byte-string (RAW or EMBSTR) encoding.
     pub fn is_sds_encoded(&self) -> bool {
         matches!(
             &self.kind,
@@ -1054,9 +1021,9 @@ impl RedisObject {
         )
     }
 
-    // ── Expiry ────────────────────────────────────────────────────────────
+ // ── Expiry ────────────────────────────────────────────────────────────
 
-    /// Return the expiry in milliseconds, or `None` if no expiry.
+ /// Return the expiry in milliseconds, or `None` if no expiry.
     pub fn get_expire(&self) -> Option<i64> {
         if self.expire == EXPIRY_NONE {
             None
@@ -1065,16 +1032,16 @@ impl RedisObject {
         }
     }
 
-    /// Set the expiry in milliseconds. `None` clears it.
+ /// Set the expiry in milliseconds. `None` clears it.
     pub fn set_expire(&mut self, expire: Option<i64>) {
         self.expire = expire.unwrap_or(EXPIRY_NONE);
     }
 
-    // ── Decoding ──────────────────────────────────────────────────────────
+ // ── Decoding ──────────────────────────────────────────────────────────
 
-    /// Return a decoded (byte-string) representation of a string object.
-    /// For RAW/EMBSTR: borrows the inner `RedisString`.
-    /// For INT: formats the integer and returns an owned `RedisString`.
+ /// Return a decoded (byte-string) representation of a string object.
+ /// For RAW/EMBSTR: borrows the inner `RedisString`.
+ /// For INT: formats the integer and returns an owned `RedisString`.
     pub fn decoded(&self) -> Result<Cow<'_, RedisString>, RedisError> {
         match &self.kind {
             ObjectKind::String(StringEncoding::Raw(s)) => Ok(Cow::Borrowed(s)),
@@ -1089,11 +1056,11 @@ impl RedisObject {
         }
     }
 
-    // ── Encoding optimisation ─────────────────────────────────────────────
+ // ── Encoding optimisation ─────────────────────────────────────────────
 
-    /// Try to re-encode a string object to save memory.
-    /// Converts `Raw`/`Embstr` → `Int` if the string is a valid long;
-    /// Converts `Raw` → `Embstr` if the string is short enough.
+ /// Try to re-encode a string object to save memory.
+ /// Converts `Raw`/`Embstr` → `Int` if the string is a valid long;
+ /// Converts `Raw` → `Embstr` if the string is short enough.
     pub fn try_encode(mut self, try_trim: bool) -> Self {
         let ObjectKind::String(_) = &self.kind else {
             return self;
@@ -1109,7 +1076,7 @@ impl RedisObject {
             _ => unreachable!(),
         };
 
-        // Attempt integer encoding when string is <= 20 bytes.
+ // Attempt integer encoding when string is <= 20 bytes.
         if bytes.len() <= 20 {
             if let Some(v) = parse_long(&bytes) {
                 return Self {
@@ -1120,7 +1087,7 @@ impl RedisObject {
             }
         }
 
-        // Attempt EMBSTR encoding when short enough.
+ // Attempt EMBSTR encoding when short enough.
         if should_embed_string(bytes.len()) {
             if matches!(&self.kind, ObjectKind::String(StringEncoding::Embstr(_))) {
                 return self;
@@ -1132,8 +1099,8 @@ impl RedisObject {
             };
         }
 
-        // PERF(port): C trims the SDS free-space here via sdsRemoveFreeSpace. In Rust
-        // Vec<u8> shrink_to_fit() is the equivalent; skipped for now.
+ // PERF(port): C trims the SDS free-space here via sdsRemoveFreeSpace. In Rust
+ // Vec<u8> shrink_to_fit is the equivalent; skipped for now.
         if try_trim {
             if let ObjectKind::String(StringEncoding::Raw(ref mut s)) = self.kind {
                 let _ = s; // PORT NOTE: trim_to_fit not yet implemented
@@ -1143,15 +1110,15 @@ impl RedisObject {
         self
     }
 
-    /// Convenience wrapper: `try_encode(true)`.
+ /// Convenience wrapper: `try_encode(true)`.
     pub fn try_object_encoding(self) -> Self {
         self.try_encode(true)
     }
 
-    // ── Numeric extraction ────────────────────────────────────────────────
+ // ── Numeric extraction ────────────────────────────────────────────────
 
-    /// Extract a `long long` (`i64`) from a string object.
-    /// Returns `Err(RedisError::not_integer())` on failure.
+ /// Extract a `long long` (`i64`) from a string object.
+ /// Returns `Err(RedisError::not_integer` on failure.
     pub fn get_long_long(&self) -> Result<i64, RedisError> {
         match &self.kind {
             ObjectKind::String(StringEncoding::Int(n)) => Ok(*n),
@@ -1164,8 +1131,8 @@ impl RedisObject {
         }
     }
 
-    /// Extract a `double` from a string object.
-    /// Returns `Err(RedisError::not_float())` on failure.
+ /// Extract a `double` from a string object.
+ /// Returns `Err(RedisError::not_float` on failure.
     pub fn get_double(&self) -> Result<f64, RedisError> {
         match &self.kind {
             ObjectKind::String(StringEncoding::Int(n)) => Ok(*n as f64),
@@ -1176,17 +1143,16 @@ impl RedisObject {
         }
     }
 
-    /// Extract a `long double` as `f64` (Rust has no `long double` type).
-    ///
-    /// PORT NOTE: C uses `long double` (80-bit extended precision on x86). Rust
-    /// has no equivalent; we use `f64`. This may cause precision differences
-    /// for INCRBYFLOAT/HINCRBYFLOAT at the extremes of the representable range.
+ /// Extract a `long double` as `f64` (Rust has no `long double` type).
+ /// PORT NOTE: C uses `long double` (80-bit extended precision on x86). Rust
+ /// has no equivalent; we use `f64`. This may cause precision differences
+ /// for INCRBYFLOAT/HINCRBYFLOAT at the extremes of the representable range.
     pub fn get_long_double(&self) -> Result<f64, RedisError> {
         self.get_double()
     }
 
-    /// Return the string length (number of bytes in the byte-string representation).
-    /// For INT-encoded objects, returns the decimal digit count.
+ /// Return the string length (number of bytes in the byte-string representation).
+ /// For INT-encoded objects, returns the decimal digit count.
     pub fn string_len(&self) -> Result<usize, RedisError> {
         match &self.kind {
             ObjectKind::String(StringEncoding::Raw(s) | StringEncoding::Embstr(s)) => Ok(s.len()),
@@ -1195,24 +1161,23 @@ impl RedisObject {
         }
     }
 
-    // ── String comparison ─────────────────────────────────────────────────
+ // ── String comparison ─────────────────────────────────────────────────
 
-    /// Binary-compare two string objects. Returns `Ordering`.
+ /// Binary-compare two string objects. Returns `Ordering`.
     pub fn compare_binary(&self, other: &Self) -> Result<Ordering, RedisError> {
         let a = self.decoded()?;
         let b = other.decoded()?;
         Ok(a.as_bytes().cmp(b.as_bytes()))
     }
 
-    /// Locale-collation compare of two string objects.
-    ///
+ /// Locale-collation compare of two string objects.
     /// TODO(port): `strcoll` is locale-dependent; Rust std has no direct equivalent.
-    /// Using byte-wise ordering as a placeholder.
+ /// Using byte-wise ordering as a placeholder.
     pub fn compare_collate(&self, other: &Self) -> Result<Ordering, RedisError> {
         self.compare_binary(other)
     }
 
-    /// Return `true` if two string objects have equal byte representations.
+ /// Return `true` if two string objects have equal byte representations.
     pub fn equal_string(&self, other: &Self) -> bool {
         match (&self.kind, &other.kind) {
             (
@@ -1232,20 +1197,20 @@ impl RedisObject {
         }
     }
 
-    // ── LRU / LFU ────────────────────────────────────────────────────────
+ // ── LRU / LFU ────────────────────────────────────────────────────────
 
-    /// Return the LFU frequency byte from the LRU clock field.
+ /// Return the LFU frequency byte from the LRU clock field.
     pub fn lfu_frequency(&self) -> u8 {
         // TODO(port): call lrulfu module's lfu_getFrequency when available
         (self.lru & 0xFF) as u8
     }
 
-    /// Return the approximate LRU idle time in seconds.
+ /// Return the approximate LRU idle time in seconds.
     pub fn lru_idle_secs(&self) -> u32 {
         crate::lru_clock::current_lru_clock().wrapping_sub(self.lru)
     }
 
-    /// Return an idleness measure (larger = more idle).
+ /// Return an idleness measure (larger = more idle).
     pub fn idleness(&self) -> u32 {
         self.lru_idle_secs()
     }
@@ -1256,39 +1221,36 @@ impl RedisObject {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Live encoding-threshold table.
-///
 /// Mirrors the CONFIG keys that Valkey accepts for the listpack/intset cutoffs.
 /// Every `*_inline_observed_encoding` function reads from this struct rather
 /// than the compile-time constants so that `CONFIG SET` takes effect
 /// immediately on subsequent `OBJECT ENCODING` calls.
-///
 /// TODO(architect): move to `RedisServer` when `CommandContext` threads a real
-/// `&mut RedisServer` reference through every command call, eliminating the
+/// `&mut RedisServer` reference through every command call, eliminating
 /// need for a process-wide global.
 #[derive(Debug, Clone)]
 pub struct EncodingThresholds {
-    /// `hash-max-listpack-entries` (default 128).
+ /// `hash-max-listpack-entries` (default 128).
     pub hash_max_listpack_entries: usize,
-    /// `hash-max-listpack-value` (default 64).
+ /// `hash-max-listpack-value` (default 64).
     pub hash_max_listpack_value: usize,
-    /// `list-max-listpack-size` (default -2).
-    ///
-    /// Negative values denote byte-size caps in real Valkey (-2 = 8 KiB per
-    /// node). For the `Inline(VecDeque)` encoding used here we only support an
-    /// entry-count cap. When the stored value is negative we fall back to
-    /// `LIST_LISTPACK_MAX_ENTRIES` (128); a positive value is used directly as
-    /// the entry-count threshold. This is a documented simplification for the
-    /// port's inline-list representation.
+ /// `list-max-listpack-size` (default -2).
+ /// Negative values denote byte-size caps in real Valkey (-2 = 8 KiB per
+ /// node). For the `Inline(VecDeque)` encoding used here we only support an
+ /// entry-count cap. When the stored value is negative we fall back
+ /// `LIST_LISTPACK_MAX_ENTRIES` (128); a positive value is used directly as
+ /// the entry-count threshold. This is a documented simplification for
+ /// port's inline-list representation.
     pub list_max_listpack_size: i64,
-    /// `set-max-listpack-entries` (default 128).
+ /// `set-max-listpack-entries` (default 128).
     pub set_max_listpack_entries: usize,
-    /// `set-max-listpack-value` (default 64).
+ /// `set-max-listpack-value` (default 64).
     pub set_max_listpack_value: usize,
-    /// `set-max-intset-entries` (default 512).
+ /// `set-max-intset-entries` (default 512).
     pub set_max_intset_entries: usize,
-    /// `zset-max-listpack-entries` (default 128).
+ /// `zset-max-listpack-entries` (default 128).
     pub zset_max_listpack_entries: usize,
-    /// `zset-max-listpack-value` (default 64).
+ /// `zset-max-listpack-value` (default 64).
     pub zset_max_listpack_value: usize,
 }
 
@@ -1308,13 +1270,11 @@ impl Default for EncodingThresholds {
 }
 
 /// Process-wide handle to the live config used by the encoding heuristics.
-///
-/// The accept loop calls [`install_live_config`] once at startup with the
+/// The accept loop calls [`install_live_config`] once at startup with
 /// `Arc<LiveConfig>` it shares with `RedisServer`. Encoding heuristics
 /// (`hash_inline_observed_encoding`, etc.) read thresholds through this
 /// handle, so `CONFIG SET hash-max-listpack-entries N` propagates to every
 /// `OBJECT ENCODING` call immediately.
-///
 /// Falls back to a defaulted `LiveConfig` when no install has happened yet
 /// (unit tests that exercise encoding helpers without a live server).
 static LIVE_CONFIG: OnceLock<Arc<crate::live_config::LiveConfig>> = OnceLock::new();
@@ -1332,7 +1292,6 @@ fn live_config_or_default() -> Arc<crate::live_config::LiveConfig> {
 }
 
 /// Snapshot the active encoding thresholds.
-///
 /// Reads each field from the registered `LiveConfig`. The returned struct is
 /// a value snapshot — mutating the returned `EncodingThresholds` does not
 /// affect the live state.
@@ -1351,9 +1310,8 @@ pub fn get_encoding_thresholds() -> EncodingThresholds {
 }
 
 /// Mutate the live encoding thresholds in place.
-///
 /// `updater` receives an `EncodingThresholds` initialised from the current
-/// live values; whatever fields it changes are written back through the
+/// live values; whatever fields it changes are written back through
 /// `LiveConfig` atomics. The default-only path (no install) is supported but
 /// has no observable effect because every command-handler `LiveConfig` read
 /// also falls back to the same default.
@@ -1693,7 +1651,6 @@ mod list_encoding_tests {
 }
 
 /// Encoding name reported for an `Inline`-encoded list.
-///
 /// Mirrors Valkey's listpack-to-quicklist conversion threshold: negative
 /// `list-max-listpack-size` values are byte-size caps, while non-negative
 /// values are entry-count caps guarded by the 8 KiB safety limit.
@@ -1717,7 +1674,6 @@ fn list_inline_observed_encoding(d: &VecDeque<RedisString>) -> &'static str {
 }
 
 /// Encoding name reported for an `Inline`-encoded hash.
-///
 /// Returns `"listpack"` when the entry count is at or below
 /// `hash-max-listpack-entries` and every field and value is at most
 /// `hash-max-listpack-value` bytes; `"hashtable"` otherwise. Both thresholds
@@ -1739,11 +1695,10 @@ fn hash_inline_observed_encoding(h: &InlineHash) -> &'static str {
 }
 
 /// Encoding name reported for an `Inline`-encoded set.
-///
 /// All-integer sets at or below `set-max-intset-entries` report `"intset"`.
 /// Otherwise mixed-content sets at or below `set-max-listpack-entries` with
 /// every member at most `set-max-listpack-value` bytes report `"listpack"`;
-/// anything larger reports `"hashtable"`. All thresholds are read from the
+/// anything larger reports `"hashtable"`. All thresholds are read from
 /// process-wide `ENCODING_THRESHOLDS` global so that `CONFIG SET` takes effect
 /// immediately.
 fn set_inline_observed_encoding(s: &InlineSet) -> &'static str {
@@ -1776,7 +1731,6 @@ fn set_inline_observed_encoding(s: &InlineSet) -> &'static str {
 }
 
 /// Encoding name reported for an `Inline`-encoded sorted set.
-///
 /// Returns `"listpack"` when the entry count is at or below
 /// `zset-max-listpack-entries` and every member is at most
 /// `zset-max-listpack-value` bytes; `"skiplist"` otherwise. Both thresholds
@@ -1797,7 +1751,7 @@ fn zset_inline_observed_encoding(z: &InlineZSet) -> &'static str {
 
 /// Returns `true` when `bytes` is the canonical decimal-ASCII form of an
 /// `i64` value (optional leading minus sign, no leading zeros except for
-/// the literal `"0"`, no whitespace, no leading `+`). Used by the
+/// the literal `"0"`, no whitespace, no leading `+`). Used by
 /// set-encoding heuristic to decide whether an `Inline` set qualifies for
 /// the `intset` label.
 pub fn is_canonical_i64_ascii(bytes: &[u8]) -> bool {
@@ -1828,21 +1782,19 @@ pub fn is_canonical_i64_ascii(bytes: &[u8]) -> bool {
 }
 
 /// Return `true` if a string of `len` bytes should use EMBSTR encoding.
-///
 /// PORT NOTE: In C the threshold also accounts for key/expire embedded in the same
 /// allocation. In Rust these live elsewhere, so we only check the value length.
 /// A 64-byte threshold matches the C behaviour for the simple (no-key, no-expire) case.
 #[inline]
 fn should_embed_string(len: usize) -> bool {
-    // SDS_TYPE_8 max is 255; the robj overhead is ~16 bytes in C; combined ≤ 128 bytes.
-    // In Rust, 44 bytes (like the original Redis EMBSTR_SIZE_LIMIT) is a common choice,
-    // but the C Valkey source uses a 128-byte ceiling. Use that for wire-diff fidelity.
+ // SDS_TYPE_8 max is 255; the robj overhead is ~16 bytes in C; combined ≤ 128 bytes.
+ // In Rust, 44 bytes (like the original Redis EMBSTR_SIZE_LIMIT) is a common choice,
+ // but the C Valkey source uses a 128-byte ceiling. Use that for wire-diff fidelity.
     len <= 44
 }
 
 /// Parse a byte slice as an `i64`. Returns `None` if not a valid integer.
 /// Parse a decimal integer from a byte slice.
-///
 /// Rejects leading/trailing whitespace,
 /// the leading `+` sign, and any non-digit bytes. An empty slice and any
 /// slice containing whitespace return `None`.
@@ -1855,7 +1807,6 @@ fn parse_long_long(bytes: &[u8]) -> Option<i64> {
 }
 
 /// Strict canonical-decimal parser for promoting a SET value to `Int` encoding.
-///
 /// Rejects leading `+`, leading zeros (except
 /// the single string `"0"`), `-0`, leading or trailing whitespace, and any
 /// value whose round-trip ASCII form does not match the input byte-for-byte.
@@ -1900,13 +1851,12 @@ fn format_long_long(value: i64) -> RedisString {
 }
 
 /// Format an `f64` as a byte string, with optional human-friendly trimming.
-///
 /// PORT NOTE: C uses `long double` and custom formatting. We use `f64` and Rust's
 /// default `f64` formatting, which may differ in edge cases.
 /// TODO(port): match C's ld2string exactly for wire-diff fidelity in INCRBYFLOAT.
 fn format_double(value: f64, human_friendly: bool) -> RedisString {
     let s = if human_friendly {
-        // Trim trailing zeros like C's LD_STR_HUMAN mode.
+ // Trim trailing zeros like C's LD_STR_HUMAN mode.
         let raw = format!("{:.17}", value);
         let trimmed = raw.trim_end_matches('0').trim_end_matches('.');
         trimmed.to_string()
@@ -1955,19 +1905,18 @@ pub fn create_string_object_from_sds(s: RedisString) -> RedisObject {
 }
 
 /// Create a string object from a `long long`, with encoding control flags.
-///
 /// TODO(architect): `LL2STROBJ_AUTO` case needs the shared integer pool
 /// (`shared.integers[]`), which requires a lazy_static `Arc<RedisObject>` array.
 /// Until that's available, this always creates a fresh object.
 pub fn create_string_object_from_long_long_with_options(value: i64, flag: i32) -> RedisObject {
     if flag == LL2STROBJ_NO_INT_ENC {
-        // Must produce an EMBSTR or RAW object, never INT.
+ // Must produce an EMBSTR or RAW object, never INT.
         let s = format_long_long(value);
         return create_string_object(s.as_bytes());
     }
 
     if flag != LL2STROBJ_NO_INT_ENC {
-        // INT encoding allowed.
+ // INT encoding allowed.
         return RedisObject::new_int_string(value);
     }
 
@@ -2059,7 +2008,7 @@ pub fn create_stream_object() -> RedisObject {
 // Type checking
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Check that `obj` is of the expected type. Returns `Err(RedisError::wrong_type())`
+/// Check that `obj` is of the expected type. Returns `Err(RedisError::wrong_type`
 /// if it is not. `None` is treated as an empty key (always matches).
 pub fn check_type(obj: Option<&RedisObject>, expected: ObjectType) -> Result<(), RedisError> {
     match obj {
@@ -2073,7 +2022,7 @@ pub fn check_type(obj: Option<&RedisObject>, expected: ObjectType) -> Result<(),
 // SDS / object representable as long long
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Return `Ok(())` if the byte string can be parsed as an `i64`, writing the value.
+/// Return `Ok(` if the byte string can be parsed as an `i64`, writing the value.
 pub fn is_sds_representable_as_long_long(
     s: &RedisString,
     llval: &mut i64,
@@ -2087,7 +2036,7 @@ pub fn is_sds_representable_as_long_long(
     }
 }
 
-/// Return `Ok(())` if the string object can be represented as an `i64`.
+/// Return `Ok(` if the string object can be represented as an `i64`.
 pub fn is_object_representable_as_long_long(
     o: &RedisObject,
     llval: &mut i64,
@@ -2164,7 +2113,7 @@ pub fn get_long_from_object_or_reply(
     o: Option<&RedisObject>,
     msg: Option<&[u8]>,
 ) -> Result<i64, RedisError> {
-    // On 64-bit systems, `long` and `long long` are both i64; no range check needed.
+ // On 64-bit systems, `long` and `long long` are both i64; no range check needed.
     get_long_long_from_object_or_reply(o, msg)
 }
 
@@ -2265,7 +2214,6 @@ fn compare_bytes(a: &[u8], b: &[u8]) -> i64 {
 
 /// Set the LRU or LFU clock value on an object based on the current maxmemory policy.
 /// Returns `true` if the value was updated.
-///
 /// TODO(port): needs access to lrulfu module (lrulfu_isUsingLFU, lfu_import, lru_import).
 pub fn object_set_lru_or_lfu(obj: &mut RedisObject, lfu_freq: i64, lru_idle_secs: i64) -> bool {
     // TODO(port): check global maxmemory_policy once server state is accessible
@@ -2286,7 +2234,6 @@ pub fn object_set_lru_or_lfu(obj: &mut RedisObject, lfu_freq: i64, lru_idle_secs
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Estimate memory used by a key's value in bytes.
-///
 /// TODO(port): requires redis-ds type sizes (ListPack, QuickList, IntSet, ZSet, Stream rax).
 /// Returning a rough estimate for now.
 pub fn object_compute_size(
@@ -2296,7 +2243,7 @@ pub fn object_compute_size(
     _dbid: u32,
 ) -> usize {
     // TODO(port): implement full size estimation per object.c:1194-1356
-    // Blocked on: ListPack, QuickList, IntSet, ZSet, Stream, rax types from redis-ds.
+ // Blocked on: ListPack, QuickList, IntSet, ZSet, Stream, rax types from redis-ds.
     match &o.kind {
         ObjectKind::String(StringEncoding::Raw(s)) => std::mem::size_of::<RedisObject>() + s.len(),
         ObjectKind::String(StringEncoding::Embstr(s)) => {
@@ -2373,17 +2320,15 @@ pub fn object_compute_size(
 }
 
 /// Build a memory overhead report for MEMORY STATS / MEMORY OVERHEAD.
-///
 /// TODO(port): requires full server state access (replication, AOF, cluster, etc.).
 /// Returning a default-zeroed stub.
 pub fn get_memory_overhead_data(_server: &RedisServer) -> ServerMemOverhead {
     // TODO(port): implement full memory overhead calculation
-    // Blocked on: replication state, AOF state, cluster state, kvstore, client stats.
+ // Blocked on: replication state, AOF state, cluster state, kvstore, client stats.
     ServerMemOverhead::default()
 }
 
 /// Build the MEMORY DOCTOR diagnostic report string.
-///
 /// TODO(port): requires full getMemoryOverheadData() + server.replicas, server.clients.
 pub fn get_memory_doctor_report(_server: &RedisServer) -> RedisString {
     // TODO(port): implement diagnostics
@@ -2523,7 +2468,7 @@ pub fn memory_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         }
         // TODO(port): look up key in db and call object_compute_size
  // Blocked on CommandContext having db access.
-        // PORT NOTE: samples parsed above but not yet consumed — will be passed to object_compute_size.
+ // PORT NOTE: samples parsed above but not yet consumed — will be passed to object_compute_size.
         let _ = samples;
         ctx.reply_null_bulk()?;
         return Ok(());
@@ -2560,17 +2505,15 @@ pub fn memory_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Back-compat shim layer
-//
 // Migration helpers that let callers written against the old flat-enum stub
-// (`RedisObject::String(s)`, `RedisObject::List(items)`, ...) compile against
+// (`RedisObject::String(s)`, `RedisObject::List(items)`,...) compile against
 // the full-port struct/enum split. See `harness/loop/MERGE_PLAN.md`.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Flat view of an object's variant for `matches!` macro use at call sites.
-///
 /// Migration shim — existing callers wrote `matches!(o, RedisObject::String(_))`
-/// against the old flat-enum stub. They are mechanically rewritten to
-/// `matches!(o.flat(), Flat::String)` or, equivalently, `o.is_string()`.
+/// against the old flat-enum stub. They are mechanically rewritten
+/// `matches!(o.flat, Flat::String)` or, equivalently, `o.is_string`.
 pub enum Flat<'a> {
     String(&'a StringEncoding),
     List(&'a ListEncoding),
@@ -2584,7 +2527,7 @@ pub enum Flat<'a> {
 }
 
 impl RedisObject {
-    /// Flat view of the object's variant — see [`Flat`].
+ /// Flat view of the object's variant — see [`Flat`].
     pub fn flat(&self) -> Flat<'_> {
         match &self.kind {
             ObjectKind::String(e) => Flat::String(e),
@@ -2624,23 +2567,22 @@ impl RedisObject {
         matches!(self.kind, ObjectKind::Bloom(_))
     }
 
-    /// Return the raw byte string if the object is `String(Raw|Embstr)`.
-    /// `None` for Int-encoded strings or non-strings.
+ /// Return the raw byte string if the object is `String(Raw|Embstr)`.
+ /// `None` for Int-encoded strings or non-strings.
     pub fn as_string_bytes(&self) -> Option<&[u8]> {
         self.as_string().map(|s| s.as_bytes())
     }
 
-    /// Byte view of the object's payload when string-encoded; empty slice for
-    /// every other variant. Migration shim for the architect-stub `as_bytes()`.
+ /// Byte view of the object's payload when string-encoded; empty slice for
+ /// every other variant. Migration shim for the architect-stub `as_bytes`.
     pub fn as_bytes(&self) -> &[u8] {
         self.as_string_bytes().unwrap_or(&[])
     }
 
-    /// Borrowed-or-owned view of the string payload regardless of encoding.
-    ///
-    /// `Raw`/`Embstr` borrow the underlying `RedisString`. `Int` formats the
-    /// integer as canonical ASCII decimal into an owned `Vec`. Non-string
-    /// variants borrow an empty slice.
+ /// Borrowed-or-owned view of the string payload regardless of encoding.
+ /// `Raw`/`Embstr` borrow the underlying `RedisString`. `Int` formats
+ /// integer as canonical ASCII decimal into an owned `Vec`. Non-string
+ /// variants borrow an empty slice.
     pub fn string_bytes(&self) -> std::borrow::Cow<'_, [u8]> {
         match &self.kind {
             ObjectKind::String(StringEncoding::Raw(s))
@@ -2654,11 +2596,10 @@ impl RedisObject {
         }
     }
 
-    /// Materialise the string payload as owned bytes regardless of encoding.
-    ///
-    /// `Raw`/`Embstr` clone the underlying `RedisString`. `Int` formats the
-    /// integer as canonical ASCII decimal. Non-string variants return an
-    /// empty `Vec`.
+ /// Materialise the string payload as owned bytes regardless of encoding.
+ /// `Raw`/`Embstr` clone the underlying `RedisString`. `Int` formats
+ /// integer as canonical ASCII decimal. Non-string variants return an
+ /// empty `Vec`.
     pub fn string_bytes_owned(&self) -> Vec<u8> {
         match &self.kind {
             ObjectKind::String(StringEncoding::Raw(s))
@@ -2668,8 +2609,8 @@ impl RedisObject {
         }
     }
 
-    /// Number of items in a List/Set/ZSet/Hash (best-effort across encodings).
-    /// Returns 0 for non-collection types.
+ /// Number of items in a List/Set/ZSet/Hash (best-effort across encodings).
+ /// Returns 0 for non-collection types.
     pub fn collection_len(&self) -> usize {
         match &self.kind {
             ObjectKind::List(ListEncoding::Inline(d)) => d.len(),
@@ -2689,8 +2630,7 @@ impl RedisObject {
         }
     }
 
-    /// Iterate List items as `&RedisString`.
-    ///
+ /// Iterate List items as `&RedisString`.
     /// TODO(port): Phase 4 — proper iter for ListPack encoding (yields empty today).
     pub fn iter_list(&self) -> Box<dyn Iterator<Item = &RedisString> + '_> {
         match &self.kind {
@@ -2700,8 +2640,7 @@ impl RedisObject {
         }
     }
 
-    /// Iterate Set members as `&RedisString`.
-    ///
+ /// Iterate Set members as `&RedisString`.
     /// TODO(port): Phase 4 — proper iter for IntSet and ListPack encodings (yields empty today).
     pub fn iter_set(&self) -> Box<dyn Iterator<Item = &RedisString> + '_> {
         match &self.kind {
@@ -2711,8 +2650,7 @@ impl RedisObject {
         }
     }
 
-    /// Iterate ZSet `(member, score)` pairs.
-    ///
+ /// Iterate ZSet `(member, score)` pairs.
     /// TODO(port): Phase 4 — proper iter for ListPack encoding (yields empty today).
     pub fn iter_zset(&self) -> Box<dyn Iterator<Item = (&RedisString, f64)> + '_> {
         match &self.kind {
@@ -2724,8 +2662,7 @@ impl RedisObject {
         }
     }
 
-    /// Iterate Hash `(field, value)` pairs.
-    ///
+ /// Iterate Hash `(field, value)` pairs.
     /// TODO(port): Phase 4 — proper iter for ListPack encoding (yields empty today).
     pub fn iter_hash(&self) -> Box<dyn Iterator<Item = (&RedisString, &RedisString)> + '_> {
         match &self.kind {
@@ -2736,8 +2673,8 @@ impl RedisObject {
         }
     }
 
-    /// Migration alias for the architect-stub `expire_ms()` accessor.
-    /// Returns the absolute expiry timestamp in ms, or `None` if no TTL.
+ /// Migration alias for the architect-stub `expire_ms` accessor.
+ /// Returns the absolute expiry timestamp in ms, or `None` if no TTL.
     pub fn expire_ms(&self) -> Option<i64> {
         self.get_expire()
     }
@@ -2757,7 +2694,7 @@ impl From<&[u8]> for RedisObject {
 
 // ──────────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        src/object.c  (1931 lines, ~58 functions)
+//   source:        Valkey
 //   target_crate:  redis-core
 //   confidence:    medium
 //   todos:         35

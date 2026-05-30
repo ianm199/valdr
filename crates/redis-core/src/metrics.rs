@@ -1,8 +1,6 @@
 //! Server-wide metrics — connection counts, command throughput, keyspace stats.
-//!
-//! All counters use `AtomicU64` with `Ordering::Relaxed` for throughput; exact
+//! All counters use `AtomicU64` with `Ordering::Relaxed` for throughput;
 //! consistency is not required since INFO is sampled at human timescales.
-//!
 //! Exposed via a process-global `OnceLock<Arc<ServerMetrics>>` so that
 //! `info.rs`, `db.rs`, and `main.rs` can all reach the same instance without
 //! threading the object through every call-site parameter list.
@@ -167,7 +165,6 @@ pub fn record_command_stat(name: &[u8], elapsed_us: u64, rejected_call: bool, fa
 }
 
 /// Mark an already-counted command as failed (increment `failed_calls` only).
-///
 /// Used when a blocked command — counted as a call when it first dispatched
 /// and parked — is later unblocked with an error reply. Incrementing `calls`
 /// again would double-count, so only `failed_calls` moves.
@@ -462,53 +459,53 @@ pub fn reset_error_stats() {
 
 /// Atomically tracked server-wide counters.
 pub struct ServerMetrics {
-    /// Unix milliseconds when the server process started.
+ /// Unix milliseconds when the server process started.
     pub start_time_ms: u64,
-    /// TCP port the server is bound to. Written once at startup.
+ /// TCP port the server is bound. Written once at startup.
     pub tcp_port: AtomicU16,
-    /// Number of clients whose TCP session is currently open.
+ /// Number of clients whose TCP session is currently open.
     pub connected_clients: AtomicU64,
-    /// Peak value of `connected_clients` ever observed.
+ /// Peak value of `connected_clients` ever observed.
     pub max_clients_seen: AtomicU64,
-    /// Total accepted connections since startup.
+ /// Total accepted connections since startup.
     pub total_connections_received: AtomicU64,
-    /// Total commands dispatched since startup.
+ /// Total commands dispatched since startup.
     pub total_commands_processed: AtomicU64,
-    /// Successful key lookups (key found, not expired).
+ /// Successful key lookups (key found, not expired).
     pub keyspace_hits: AtomicU64,
-    /// Failed key lookups (key absent or expired).
+ /// Failed key lookups (key absent or expired).
     pub keyspace_misses: AtomicU64,
-    /// Connections rejected because connected_clients >= maxclients.
+ /// Connections rejected because connected_clients >= maxclients.
     pub rejected_connections: AtomicU64,
-    /// ACL authentication denials.
+ /// ACL authentication denials.
     pub acl_access_denied_auth: AtomicU64,
-    /// ACL command denials.
+ /// ACL command denials.
     pub acl_access_denied_cmd: AtomicU64,
-    /// ACL key access denials.
+ /// ACL key access denials.
     pub acl_access_denied_key: AtomicU64,
-    /// ACL channel access denials.
+ /// ACL channel access denials.
     pub acl_access_denied_channel: AtomicU64,
-    /// ACL database access denials.
+ /// ACL database access denials.
     pub acl_access_denied_db: AtomicU64,
-    /// Keys removed by lazy or active expiration.
+ /// Keys removed by lazy or active expiration.
     pub expired_keys: AtomicU64,
-    /// Keys removed by the maxmemory eviction policy.
+ /// Keys removed by the maxmemory eviction policy.
     pub evicted_keys: AtomicU64,
-    /// Clients disconnected by maxmemory-clients eviction.
+ /// Clients disconnected by maxmemory-clients eviction.
     pub evicted_clients: AtomicU64,
-    /// Clients disconnected after exceeding `client-query-buffer-limit`.
+ /// Clients disconnected after exceeding `client-query-buffer-limit`.
     pub client_query_buffer_limit_disconnections: AtomicU64,
-    /// Clients disconnected after exceeding `client-output-buffer-limit`.
+ /// Clients disconnected after exceeding `client-output-buffer-limit`.
     pub client_output_buffer_limit_disconnections: AtomicU64,
-    /// Cumulative microseconds spent inside command dispatch on the main thread.
+ /// Cumulative microseconds spent inside command dispatch on the main thread.
     pub active_time_main_thread_us: AtomicU64,
-    /// Total error replies emitted since the last `CONFIG RESETSTAT`.
+ /// Total error replies emitted since the last `CONFIG RESETSTAT`.
     pub total_error_replies: AtomicU64,
-    /// Number of logical fork/background-persistence starts.
+ /// Number of logical fork/background-persistence starts.
     pub total_forks: AtomicU64,
-    /// Number of BGSAVE child processes that exited with status 0.
+ /// Number of BGSAVE child processes that exited with status 0.
     pub rdb_saves_succeeded: AtomicU64,
-    /// Number of BGSAVE child processes that exited with a non-zero status.
+ /// Number of BGSAVE child processes that exited with a non-zero status.
     pub rdb_saves_failed: AtomicU64,
 }
 
@@ -542,8 +539,8 @@ impl ServerMetrics {
         }
     }
 
-    /// Increment `connected_clients`, updating `max_clients_seen` if the new
-    /// value exceeds the recorded peak.
+ /// Increment `connected_clients`, updating `max_clients_seen` if the new
+ /// value exceeds the recorded peak.
     pub fn on_connect(&self) {
         let prev = self.connected_clients.fetch_add(1, Ordering::Relaxed);
         let new = prev + 1;
@@ -561,22 +558,21 @@ impl ServerMetrics {
         }
     }
 
-    /// Decrement `connected_clients` on disconnect.
+ /// Decrement `connected_clients` on disconnect.
     pub fn on_disconnect(&self) {
         self.connected_clients.fetch_sub(1, Ordering::Relaxed);
     }
 
-    /// Store the TCP port the server bound. Called once after `TcpListener::bind`
-    /// succeeds, before any connection is accepted.
+ /// Store the TCP port the server bound. Called once after `TcpListener::bind`
+ /// succeeds, before any connection is accepted.
     pub fn set_tcp_port(&self, port: u16) {
         self.tcp_port.store(port, Ordering::Relaxed);
     }
 
-    /// Reset all statistical counters to zero.
-    ///
-    /// Corresponds to `CONFIG RESETSTAT`. Preserves `start_time_ms`, `tcp_port`,
-    /// `connected_clients`, and `max_clients_seen` since those reflect live state
-    /// rather than historical counters.
+ /// Reset all statistical counters to zero.
+ /// Corresponds to `CONFIG RESETSTAT`. Preserves `start_time_ms`, `tcp_port`,
+ /// `connected_clients`, and `max_clients_seen` since those reflect live state
+ /// rather than historical counters.
     pub fn reset_stats(&self) {
         self.total_connections_received.store(0, Ordering::Relaxed);
         self.total_commands_processed.store(0, Ordering::Relaxed);
@@ -659,15 +655,13 @@ mod tests {
     }
 }
 
-/// Return the resident set size of this process in bytes, or `None` if the
+/// Return the resident set size of this process in bytes, or `None` if
 /// platform does not expose `/proc/self/statm` or reading it fails.
-///
 /// On Linux each field in `/proc/self/statm` is measured in pages. The second
 /// field is the resident set size. Multiply by `sysconf(_SC_PAGESIZE)` —
 /// approximated here as 4096 bytes because `libc::sysconf` would add a C FFI
 /// dependency. Real page sizes other than 4096 (e.g. huge-page kernels) will
 /// produce a proportional error, which is acceptable for the INFO estimator.
-///
 /// TODO(architect): replace the 4096 constant with a `sysconf(_SC_PAGESIZE)`
 /// call once we accept the `libc` dependency.
 pub fn rss_bytes() -> Option<u64> {

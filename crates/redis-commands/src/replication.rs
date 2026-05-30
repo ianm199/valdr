@@ -1,7 +1,6 @@
 //! Replication command handlers: REPLICAOF / SLAVEOF, PSYNC, SYNC.
-//!
-//! All three handlers route through [`redis_core::replication`] for the
-//! global replication state. The pubsub registry is reused as the source of
+//! All three handlers route through [`redis_core::replication`] for
+//! global replication state. The pubsub registry is reused as the source
 //! per-client outbound mpsc senders — the same writer-thread mechanism that
 //! PUBLISH and BLPOP wakes ride on.
 
@@ -29,7 +28,6 @@ use redis_protocol::frame::RespFrame;
 use redis_types::{RedisError, RedisResult, RedisString};
 
 /// `REPLICAOF host port` / `REPLICAOF NO ONE` (alias: `SLAVEOF`).
-///
 /// `REPLICAOF NO ONE` cancels replica mode and becomes a standalone primary.
 /// `REPLICAOF <host> <port>` configures this server as a replica of the named
 /// master. Records the target on [`ReplicationState`].
@@ -326,7 +324,6 @@ fn is_no_one(host: &[u8], port: &[u8]) -> bool {
 }
 
 /// `PSYNC <runid> <offset>` — master-side handshake accept.
-///
 /// Decides between partial resync (`+CONTINUE <runid>`) and full resync
 /// (`+FULLRESYNC <runid> <offset>`) based on whether the replica's claimed
 /// run id matches ours and its offset is still inside the live backlog
@@ -341,8 +338,7 @@ pub fn psync_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 }
 
 /// `SYNC` — legacy full-resync request.
-///
-/// This intentionally does not emit the `+FULLRESYNC ...` prelude. Upstream
+/// This intentionally does not emit the `+FULLRESYNC...` prelude. Upstream
 /// Valkey marks old `SYNC` clients as `pre_psync` and sends the RDB bulk
 /// payload directly; the Tcl test helper `attach_to_replication_stream`
 /// depends on that legacy wire shape.
@@ -353,16 +349,15 @@ pub fn sync_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     handle_psync(ctx, b"?", -1, false)
 }
 
-/// `REPLCONF <subcommand> [args ...]`
-///
+/// `REPLCONF <subcommand> [args...]`
 /// Multipurpose command for replica metadata exchange. Subcommands:
-///   * `listening-port <N>` — replica's listener port; stored in `ReplicaConn`.
-///   * `ip-address <ip>`   — replica's public IP (stored as a future-use note).
-///   * `capa <flag> …`     — capability flags; bits ORed into `ReplicaConn.capa_flags`.
-///   * `ACK <offset>`      — replica reports its current stream offset; wakes any
-///                           WAIT clients that are now satisfied.
-///   * `GETACK *`          — primary asks replica for an ACK; answered with `+OK` on
-///                           the master side (the replica-side handler is Wave C).
+/// * `listening-port <N>` — replica's listener port; stored in `ReplicaConn`.
+/// * `ip-address <ip>` — replica's public IP (stored as a future-use note).
+/// * `capa <flag> …` — capability flags; bits ORed into `ReplicaConn.capa_flags`.
+/// * `ACK <offset>` — replica reports its current stream offset; wakes any
+/// WAIT clients that are now satisfied.
+/// * `GETACK *` — primary asks replica for an ACK; answered with `+OK` on
+/// the master side (the replica-side handler is Wave C).
 pub fn replconf_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ctx.arg_count() < 2 {
         return Err(RedisError::wrong_number_of_args(b"replconf"));
@@ -458,12 +453,10 @@ pub fn replconf_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 }
 
 /// `WAIT numreplicas timeout`
-///
 /// Blocks until at least `numreplicas` replicas have acknowledged the current
-/// `master_repl_offset`, or until `timeout` ms elapses. Returns the count of
+/// `master_repl_offset`, or until `timeout` ms elapses. Returns the count
 /// replicas that acknowledged.
-///
-/// When `numreplicas` is 0 or when enough replicas are already caught up, the
+/// When `numreplicas` is 0 or when enough replicas are already caught up,
 /// reply is sent immediately with no blocking.
 pub fn wait_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ctx.arg_count() != 3 {
@@ -515,13 +508,13 @@ pub fn wait_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     };
 
     let timeout_secs = if timeout_ms == 0 && repl.connected_replicas() == 0 {
-        // RuntimeOwner currently disables the replica dialer until replica
-        // apply can target owner-owned DBs. In that state, WAIT 0 would block
-        // forever with no registered replicas and hide the upstream file behind
-        // a harness timeout. Keep the client visibly blocked, but give it a
-        // bounded timeout so the file becomes counted-red. Once the
-        // RuntimeOwner replica channel lands, remove this guard and let WAIT 0
-        // block for future replicas like C Valkey.
+ // RuntimeOwner currently disables the replica dialer until replica
+ // apply can target owner-owned DBs. In that state, WAIT 0 would block
+ // forever with no registered replicas and hide the upstream file behind
+ // a harness timeout. Keep the client visibly blocked, but give it a
+ // bounded timeout so the file becomes counted-red. Once
+ // RuntimeOwner replica channel lands, remove this guard and let WAIT 0
+ // block for future replicas like C Valkey.
         2.0
     } else if timeout_ms == 0 {
         0.0
@@ -555,8 +548,7 @@ pub fn wait_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 }
 
 /// `WAITAOF numlocal numreplicas timeout`
-///
-/// Wait until the local AOF and/or attached replicas have fsynced the
+/// Wait until the local AOF and/or attached replicas have fsynced
 /// caller's last write offset.
 pub fn waitaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ctx.arg_count() != 4 {
@@ -820,7 +812,6 @@ pub fn unblock_waitaof_role_change() {
 }
 
 /// Ask attached replicas to report their current processed offset.
-///
 /// a client blocks in WAIT/WAITAOF. Without this prompt a caught-up replica may
 /// not send an ACK before the WAIT timeout, leaving tests stuck at zero acks.
 fn request_ack_from_replicas(repl: &ReplicationState) {
@@ -837,10 +828,10 @@ fn request_ack_from_replicas(repl: &ReplicationState) {
         ReplicaState::from_u8(conn.state.load(Ordering::Acquire)) == ReplicaState::Online
     });
     if has_online {
-        // C Valkey sends GETACK through replicationFeedReplicas(-1), so the
-        // request itself is part of the replication stream and advances
-        // offsets. Keeping that invariant prevents an ACK for GETACK from
-        // jumping ahead of future writes.
+ // C Valkey sends GETACK through replicationFeedReplicas(-1), so
+ // request itself is part of the replication stream and advances
+ // offsets. Keeping that invariant prevents an ACK for GETACK
+ // jumping ahead of future writes.
         repl.append_to_backlog(&getack);
     }
     for conn in guard.values() {
@@ -857,11 +848,9 @@ fn request_ack_from_replicas(repl: &ReplicationState) {
 }
 
 /// Map a REPLCONF `capa` flag name to its bit position.
-///
 /// Known flags:
-///   * `eof`    — replica can receive the RDB blob without inline `$<len>` framing.
-///   * `psync2` — replica supports PSYNC2 (run-id propagation after partial resync).
-///
+/// * `eof` — replica can receive the RDB blob without inline `$<len>` framing.
+/// * `psync2` — replica supports PSYNC2 (run-id propagation after partial resync).
 /// Unknown flag names map to bit 31 as a catch-all so they are stored but do
 /// not collide with the defined bits.
 fn capa_flag_bit(name: &[u8]) -> u32 {
@@ -882,7 +871,7 @@ fn parse_i64(bytes: &[u8]) -> Result<i64, ()> {
         .ok_or(())
 }
 
-/// Shared body of `PSYNC` and `SYNC`. `provided_runid == b"?"` and
+/// Shared body of `PSYNC` and `SYNC`. `provided_runid == b"?"`
 /// `provided_offset == -1` is the canonical full-resync request.
 fn handle_psync(
     ctx: &mut CommandContext<'_>,
@@ -956,13 +945,12 @@ fn handle_psync(
 
 /// Either join an in-flight BGSAVE-for-replication job or kick off a new one
 /// so the freshly-attached replica eventually receives an RDB snapshot.
-///
 /// Behaviour:
-///   * If a BGSAVE-for-replication is already in progress, append the new
-///     replica's `client_id` to the same job's waiting list. Every replica
-///     that joins before the child exits receives the identical RDB snapshot
-///     and the same catch-up backlog window.
-///   * Otherwise call `bgsave_for_replication` to fork a fresh child.
+/// * If a BGSAVE-for-replication is already in progress, append the new
+/// replica's `client_id` to the same job's waiting list. Every replica
+/// that joins before the child exits receives the identical RDB snapshot
+/// and the same catch-up backlog window.
+/// * Otherwise call `bgsave_for_replication` to fork a fresh child.
 fn arm_full_sync_bgsave(
     ctx: &mut CommandContext<'_>,
     repl: &Arc<ReplicationState>,
@@ -1000,7 +988,7 @@ fn arm_full_sync_bgsave(
 }
 
 /// True when the replica's requested offset lies inside the live backlog
-/// window (lower bound is the backlog's `min_offset`, upper bound is the
+/// window (lower bound is the backlog's `min_offset`, upper bound is
 /// current master offset).
 fn partial_in_window(repl: &Arc<ReplicationState>, provided: i64, master_offset: i64) -> bool {
     if provided > master_offset {
@@ -1057,9 +1045,9 @@ fn parse_offset(bytes: &[u8]) -> RedisResult<i64> {
 fn parse_port(bytes: &[u8]) -> Option<u16> {
     let s = std::str::from_utf8(bytes).ok()?;
     let n: i64 = s.parse().ok()?;
-    // Valkey's REPLICAOF / REPLCONF parse the port via getRangeLongFromObject
-    // with bounds 0..=65535 — port 0 is accepted (e.g. `REPLICAOF host 0` to
-    // point at an unreachable primary).
+ // Valkey's REPLICAOF / REPLCONF parse the port via getRangeLongFromObject
+ // with bounds 0..=65535 — port 0 is accepted (e.g. `REPLICAOF host 0`
+ // point at an unreachable primary).
     if !(0..=65535).contains(&n) {
         return None;
     }
@@ -1258,7 +1246,7 @@ mod tests {
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        reference/valkey/src/replication.c (semantics reference)
+//   source:        Valkey
 //                  plus the architect packet for Session 3A.
 //   target_crate:  redis-commands
 //   confidence:    medium

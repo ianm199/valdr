@@ -1,29 +1,22 @@
 //! Latency monitor — sample collection, analysis, and the `LATENCY` command.
-//!
-//! Merges `src/latency.c` (777 lines, 12 functions) and `src/latency.h` (117 lines).
-//!
 //! The latency monitor records timing spikes from named event sources (fork, AOF
 //! writes, slow commands, …) in fixed-size circular ring buffers of 160 entries
 //! each. Spikes are exposed via the `LATENCY` command sub-commands:
-//!   - `HISTORY <event>`   — full ring-buffer sample list
-//!   - `LATEST`            — most-recent sample per event
-//!   - `DOCTOR`            — human-readable analysis with tuning advice
-//!   - `GRAPH <event>`     — ASCII sparkline graph
-//!   - `RESET [<event>…]`  — clear one or all event series
-//!   - `HISTOGRAM [cmd…]`  — per-command HdrHistogram CDF
-//!
+//! - `HISTORY <event>` — full ring-buffer sample list
+//! - `LATEST` — most-recent sample per event
+//! - `DOCTOR` — human-readable analysis with tuning advice
+//! - `GRAPH <event>` — ASCII sparkline graph
+//! - `RESET [<event>…]` — clear one or all event series
+//! - `HISTOGRAM [cmd…]` — per-command HdrHistogram CDF
 //! ## Integration note
-//!
 //! In C the event map lives on `server.latency_events` and the threshold on
 //! `server.latency_monitor_threshold`. In Rust these are owned by
 //! [`LatencyMonitor`], which must be a field on `RedisServer`.
-//!
 //! TODO(architect): add `pub latency: LatencyMonitor` and
-//!   `pub latency_monitor_threshold: i64` (milliseconds; 0 = disabled) to
-//!   `RedisServer` in `crates/redis-core/src/server.rs`.
-//!
+//! `pub latency_monitor_threshold: i64` (milliseconds; 0 = disabled)
+//! `RedisServer` in `crates/redis-core/src/server.rs`.
 //! TODO(architect): add `pub duration_stats: [DurationStats; EL_DURATION_TYPE_NUM]`
-//!   to `RedisServer` in `crates/redis-core/src/server.rs`.
+//! to `RedisServer` in `crates/redis-core/src/server.rs`.
 
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -33,7 +26,6 @@ use redis_types::RedisError;
 use crate::command_context::CommandContext;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-// C: latency.h:39
 
 /// Number of samples retained per event in the ring buffer.
 pub const LATENCY_TS_LEN: usize = 160;
@@ -42,35 +34,31 @@ pub const LATENCY_TS_LEN: usize = 160;
 pub const EL_DURATION_TYPE_NUM: usize = 4;
 
 /// Width in columns of the ASCII sparkline graph produced by LATENCY GRAPH.
-/// C: latency.c:629
 const LATENCY_GRAPH_COLS: usize = 80;
 
 // ── Monotonic time alias ──────────────────────────────────────────────────────
 
 /// Monotonic clock value (platform-specific; typically nanoseconds).
-/// C: `monotime` typedef in `monotonic.h`.
 // TODO(port): replace with the concrete type once `crates/redis-core/src/monotonic.rs` is ported.
 pub type MonoTime = u64;
 
 // ── DurationType ─────────────────────────────────────────────────────────────
-// C: `DurationType` enum in latency.h:105-113
 
 /// Categories of event-loop duration metrics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum DurationType {
-    /// Cumulative time for the whole event-loop iteration.
+ /// Cumulative time for the whole event-loop iteration.
     El = 0,
-    /// Cumulative time for executing commands.
+ /// Cumulative time for executing commands.
     Cmd = 1,
-    /// Cumulative time for flushing the AOF buffer in the event loop.
+ /// Cumulative time for flushing the AOF buffer in the event loop.
     Aof = 2,
-    /// Cumulative time for cron work (serverCron + beforeSleep, excluding I/O and AOF).
+ /// Cumulative time for cron work (serverCron + beforeSleep, excluding I/O and AOF).
     Cron = 3,
 }
 
 // ── DurationStats ─────────────────────────────────────────────────────────────
-// C: `durationStats` typedef in latency.h:99-103
 
 /// Accumulated timing statistics for one event-loop category.
 #[derive(Debug, Default, Clone)]
@@ -81,11 +69,9 @@ pub struct DurationStats {
 }
 
 // ── LatencySample ─────────────────────────────────────────────────────────────
-// C: `struct latencySample` in latency.h:47-50
 
 /// One latency observation: a Unix timestamp (seconds) and the observed latency
 /// in milliseconds.
-///
 /// `time` is `i32` rather than `time_t` to match the C layout comment: "We don't
 /// use time_t to force 4 bytes usage everywhere."
 #[derive(Debug, Clone, Copy, Default)]
@@ -95,21 +81,20 @@ pub struct LatencySample {
 }
 
 // ── LatencyTimeSeries ─────────────────────────────────────────────────────────
-// C: `struct latencyTimeSeries` in latency.h:53-59
 
 /// Ring-buffer time series for a single named latency event.
 pub struct LatencyTimeSeries {
-    /// Next write slot (wraps at `LATENCY_TS_LEN`).
+ /// Next write slot (wraps at `LATENCY_TS_LEN`).
     pub idx: usize,
-    /// All-time peak latency (ms) since the last reset.
+ /// All-time peak latency (ms) since the last reset.
     pub max: u32,
-    /// Running sum of all observed latencies (ms).
-    // PORT NOTE: C uses `uint32_t` for sum (overflow-prone); Rust uses u64.
+ /// Running sum of all observed latencies (ms).
+ // PORT NOTE: C uses `uint32_t` for sum (overflow-prone); Rust uses u64.
     pub sum: u64,
-    /// Running count of all observed samples (not just ring-buffer slots).
-    // PORT NOTE: C uses `uint32_t`; Rust uses u64 for safety.
+ /// Running count of all observed samples (not just ring-buffer slots).
+ // PORT NOTE: C uses `uint32_t`; Rust uses u64 for safety.
     pub cnt: u64,
-    /// Circular buffer of the most recent `LATENCY_TS_LEN` samples.
+ /// Circular buffer of the most recent `LATENCY_TS_LEN` samples.
     pub samples: [LatencySample; LATENCY_TS_LEN],
 }
 
@@ -129,57 +114,53 @@ impl Default for LatencyTimeSeries {
 }
 
 // ── LatencyStats ──────────────────────────────────────────────────────────────
-// C: `struct latencyStats` in latency.h:62-70
 
 /// Analysis results produced by [`LatencyMonitor::analyze_event`].
 #[derive(Debug, Default, Clone)]
 pub struct LatencyStats {
-    /// Absolute maximum latency since the last reset (ms).
+ /// Absolute maximum latency since the last reset (ms).
     pub all_time_high: u32,
-    /// Average of ring-buffer samples (ms).
+ /// Average of ring-buffer samples (ms).
     pub avg: u32,
-    /// Minimum of ring-buffer samples (ms).
+ /// Minimum of ring-buffer samples (ms).
     pub min: u32,
-    /// Maximum of ring-buffer samples (ms).
+ /// Maximum of ring-buffer samples (ms).
     pub max: u32,
-    /// Mean absolute deviation of ring-buffer samples (ms).
+ /// Mean absolute deviation of ring-buffer samples (ms).
     pub mad: u32,
-    /// Number of non-zero samples in the ring buffer.
+ /// Number of non-zero samples in the ring buffer.
     pub samples: u32,
-    /// Seconds elapsed between the oldest recorded event and now.
+ /// Seconds elapsed between the oldest recorded event and now.
     pub period: i64,
 }
 
 // ── LatencyReportConfig ───────────────────────────────────────────────────────
 
 /// Server configuration fields required by [`LatencyMonitor::create_report`].
-///
 /// Extracted so the report builder does not need a reference to the full
 /// `RedisServer` before those fields are added to it.
-///
 /// TODO(architect): replace with `&RedisServer` once all listed fields land on
-///   `RedisServer` in `crates/redis-core/src/server.rs`.
+/// `RedisServer` in `crates/redis-core/src/server.rs`.
 pub struct LatencyReportConfig {
-    /// `server.latency_monitor_threshold` (ms; 0 = monitoring disabled).
+ /// `server.latency_monitor_threshold` (ms; 0 = monitoring disabled).
     pub latency_monitor_threshold: i64,
-    /// `server.stat_fork_rate` (GB/sec; from the last fork timing).
+ /// `server.stat_fork_rate` (GB/sec; from the last fork timing).
     pub stat_fork_rate: f64,
-    /// `server.commandlog[COMMANDLOG_TYPE_SLOW].threshold` (µs; negative = disabled).
+ /// `server.commandlog[COMMANDLOG_TYPE_SLOW].threshold` (µs; negative = disabled).
     pub slowlog_threshold_us: i64,
-    /// `server.commandlog[COMMANDLOG_TYPE_SLOW].max_len` (0 = disabled).
+ /// `server.commandlog[COMMANDLOG_TYPE_SLOW].max_len` (0 = disabled).
     pub slowlog_max_len: i32,
-    /// `server.hz` (event-loop frequency in Hz).
+ /// `server.hz` (event-loop frequency in Hz).
     pub hz: i32,
-    /// Whether `server.aof_fsync == AOF_FSYNC_ALWAYS`.
+ /// Whether `server.aof_fsync == AOF_FSYNC_ALWAYS`.
     pub aof_fsync_always: bool,
 }
 
 // ── HdrHistogram placeholder ──────────────────────────────────────────────────
 
 /// Opaque placeholder for the HdrHistogram type used in `LATENCY HISTOGRAM`.
-///
 /// TODO(architect): add the `hdrhistogram` crate as a dependency of `redis-core`
-///   and replace this with `hdrhistogram::Histogram<u64>`.
+/// and replace this with `hdrhistogram::Histogram<u64>`.
 pub struct HdrHistogram {
     pub total_count: i64,
     // TODO(architect): full HdrHistogram fields — blocked on crate dependency.
@@ -188,10 +169,8 @@ pub struct HdrHistogram {
 // ── LatencyMonitor ────────────────────────────────────────────────────────────
 
 /// All latency event time-series indexed by event name (byte string).
-///
-/// Replaces the C `server.latency_events` dict.  The name is a byte string
+/// Replaces the C `server.latency_events` dict. The name is a byte string
 /// because Redis event names are ASCII identifiers passed as `const char *`.
-///
 /// TODO(architect): embed this as `pub latency: LatencyMonitor` on `RedisServer`.
 pub struct LatencyMonitor {
     events: HashMap<Vec<u8>, Box<LatencyTimeSeries>>,
@@ -209,20 +188,16 @@ fn unix_time_secs() -> i64 {
 /// Returns the size of `AnonHugePages` from `/proc/self/smaps` in bytes, or 0
 /// if unavailable. A non-zero return means THP is active and may cause latency
 /// spikes during fork/copy-on-write.
-///
-/// C: `THPGetAnonHugePagesSize` in latency.c:60.
 pub fn thp_get_anon_huge_pages_size() -> i64 {
-    // C: zmalloc_get_smap_bytes_by_field("AnonHugePages:", -1)
     // TODO(port): implement a proper /proc/self/smaps parser once
-    //   zmalloc.rs is ported. For now, return 0 (THP not detected).
+ // zmalloc.rs is ported. For now, return 0 (THP not detected).
     0
 }
 
 // ── LatencyMonitor impl ───────────────────────────────────────────────────────
 
 impl LatencyMonitor {
-    /// Create a new, empty latency monitor.
-    /// C: `latencyMonitorInit` in latency.c:69.
+ /// Create a new, empty latency monitor.
     pub fn new() -> Self {
         Self {
             events: HashMap::new(),
@@ -237,21 +212,19 @@ impl LatencyMonitor {
         self.events.is_empty()
     }
 
-    /// Fetch a time series by name, if it exists.
+ /// Fetch a time series by name, if it exists.
     pub fn get(&self, event: &[u8]) -> Option<&LatencyTimeSeries> {
         self.events.get(event).map(|b| b.as_ref())
     }
 
-    /// Iterate over all (event_name, time_series) pairs.
+ /// Iterate over all (event_name, time_series) pairs.
     pub fn iter(&self) -> impl Iterator<Item = (&Vec<u8>, &LatencyTimeSeries)> {
         self.events.iter().map(|(k, v)| (k, v.as_ref()))
     }
 
-    // C: latency.c:77-111, latencyAddSample
-    /// Record a latency observation for the named event.
-    ///
-    /// `latency_us` is microseconds of observed latency (the caller is
-    /// responsible for the `latencyAddSampleIfNeeded` threshold check).
+ /// Record a latency observation for the named event.
+ /// `latency_us` is microseconds of observed latency (the caller is
+ /// responsible for the `latencyAddSampleIfNeeded` threshold check).
     pub fn add_sample(&mut self, event: &[u8], latency_us: i64) {
         let latency = (latency_us / 1000) as u32;
         let now = unix_time_secs() as i32;
@@ -267,8 +240,8 @@ impl LatencyMonitor {
         ts.sum += latency as u64;
         ts.cnt += 1;
 
-        // If the previous sample is in the same second, update it in-place
-        // if this latency is higher; otherwise discard the new one.
+ // If the previous sample is in the same second, update it in-place
+ // if this latency is higher; otherwise discard the new one.
         let prev = (ts.idx + LATENCY_TS_LEN - 1) % LATENCY_TS_LEN;
         if ts.samples[prev].time == now {
             if latency > ts.samples[prev].latency {
@@ -285,10 +258,8 @@ impl LatencyMonitor {
         }
     }
 
-    // C: latency.c:118-134, latencyResetEvent
-    /// Reset one named event or (if `event_name` is `None`) all events.
-    ///
-    /// Returns the count of events actually removed.
+ /// Reset one named event or (if `event_name` is `None`) all events.
+ /// Returns the count of events actually removed.
     pub fn reset_event(&mut self, event_name: Option<&[u8]>) -> i32 {
         match event_name {
             None => {
@@ -297,7 +268,7 @@ impl LatencyMonitor {
                 n
             }
             Some(name) => {
-                // O(N) scan matching case-insensitively, matching C behaviour.
+ // O(N) scan matching case-insensitively, matching C behaviour.
                 let to_remove: Vec<Vec<u8>> = self
                     .events
                     .keys()
@@ -313,10 +284,8 @@ impl LatencyMonitor {
         }
     }
 
-    // C: latency.c:143-194, analyzeLatencyForEvent
-    /// Compute statistics for the named event's ring buffer.
-    ///
-    /// Returns a zeroed [`LatencyStats`] when the event has no data.
+ /// Compute statistics for the named event's ring buffer.
+ /// Returns a zeroed [`LatencyStats`] when the event has no data.
     pub fn analyze_event(&self, event: &[u8]) -> LatencyStats {
         let ts = match self.events.get(event) {
             Some(ts) => ts,
@@ -328,7 +297,7 @@ impl LatencyMonitor {
             ..Default::default()
         };
 
-        // First pass: min, max, sum, oldest-time (stored temporarily in period).
+ // First pass: min, max, sum, oldest-time (stored temporarily in period).
         let mut sum: u64 = 0;
         for sample in &ts.samples {
             if sample.time == 0 {
@@ -348,7 +317,7 @@ impl LatencyMonitor {
             }
             sum += sample.latency as u64;
 
-            // Track the oldest timestamp in ls.period (converted to age below).
+ // Track the oldest timestamp in ls.period (converted to age below).
             if ls.period == 0 || (sample.time as i64) < ls.period {
                 ls.period = sample.time as i64;
             }
@@ -362,7 +331,7 @@ impl LatencyMonitor {
             }
         }
 
-        // Second pass: mean absolute deviation.
+ // Second pass: mean absolute deviation.
         let mut mad_sum: u64 = 0;
         for sample in &ts.samples {
             if sample.time == 0 {
@@ -378,10 +347,8 @@ impl LatencyMonitor {
         ls
     }
 
-    // C: latency.c:197-496, createLatencyReport
-    /// Generate a human-readable latency analysis report (the LATENCY DOCTOR output).
-    ///
-    /// Returns the report as a `Vec<u8>` (ASCII text; no Redis binary data).
+ /// Generate a human-readable latency analysis report (the LATENCY DOCTOR output).
+ /// Returns the report as a `Vec<u8>` (ASCII text; no Redis binary data).
     pub fn create_report(&self, cfg: &LatencyReportConfig) -> Vec<u8> {
         let mut report: Vec<u8> = Vec::new();
 
@@ -423,8 +390,7 @@ impl LatencyMonitor {
                     .extend_from_slice(b"Latency spikes are observed in this Valkey instance.\n\n");
             }
 
-            // Per-event summary line.
-            // C: sdscatprintf with "%d. %s: %d latency spikes ..."
+ // Per-event summary line.
             let period_per_sample = if ls.samples > 0 {
                 ls.period as f64 / ls.samples as f64
             } else {
@@ -441,7 +407,7 @@ impl LatencyMonitor {
                 .as_bytes(),
             );
 
-            // Fork event advice.
+ // Fork event advice.
             if event.eq_ignore_ascii_case(b"fork") {
                 let fork_quality = if cfg.stat_fork_rate < 10.0 {
                     advise_better_vm = true;
@@ -465,7 +431,7 @@ impl LatencyMonitor {
                 );
             }
 
-            // Command event advice.
+ // Command event advice.
             if event.eq_ignore_ascii_case(b"command") {
                 if cfg.slowlog_threshold_us < 0 || cfg.slowlog_max_len == 0 {
                     advise_slowlog_enabled = true;
@@ -479,13 +445,13 @@ impl LatencyMonitor {
                 advices += 2;
             }
 
-            // Fast-command event advice.
+ // Fast-command event advice.
             if event.eq_ignore_ascii_case(b"fast-command") {
                 advise_scheduler = true;
                 advices += 1;
             }
 
-            // AOF write events.
+ // AOF write events.
             if event.eq_ignore_ascii_case(b"aof-write-pending-fsync") {
                 advise_local_disk = true;
                 advise_disk_contention = true;
@@ -531,14 +497,14 @@ impl LatencyMonitor {
                 advices += 4;
             }
 
-            // Expire cycle advice.
+ // Expire cycle advice.
             if event.eq_ignore_ascii_case(b"expire-cycle") {
                 advise_hz = true;
                 advise_large_objects = true;
                 advices += 2;
             }
 
-            // Eviction advice.
+ // Eviction advice.
             if event.eq_ignore_ascii_case(b"eviction-del") {
                 advise_large_objects = true;
                 advices += 1;
@@ -552,7 +518,7 @@ impl LatencyMonitor {
             report.push(b'\n');
         }
 
-        // Non-event-based advice: THP.
+ // Non-event-based advice: THP.
         if thp_get_anon_huge_pages_size() > 0 {
             advise_disable_thp = true;
             advices += 1;
@@ -745,70 +711,58 @@ impl Default for LatencyMonitor {
 
 // ── Command reply helpers ─────────────────────────────────────────────────────
 
-// C: latency.c:507-528, fillCommandCDF
 /// Reply with a two-key map `{ calls: <n>, histogram_usec: { <usec>: <count>, … } }`
 /// from an HdrHistogram.
-///
 /// TODO(architect): blocked on `hdrhistogram` crate dep. The HdrHistogram iterator
-///   (`hdr_iter_log_init` / `hdr_iter_next`) has no equivalent until the crate lands.
+/// (`hdr_iter_log_init` / `hdr_iter_next`) has no equivalent until the crate lands.
 /// TODO(port): `addReplyDeferredLen` / `setDeferredMapLen` pattern is not yet
-///   implemented on `CommandContext`. Needs deferred-length support.
+/// implemented on `CommandContext`. Needs deferred-length support.
 pub fn fill_command_cdf(
     ctx: &mut CommandContext,
     histogram: &HdrHistogram,
 ) -> Result<(), RedisError> {
-    // Stub: would emit a RESP3 map with call count and per-bucket usec counts.
-    // C: latency.c:507-528
+ // Stub: would emit a RESP3 map with call count and per-bucket usec counts.
     let _ = (ctx, histogram);
     // TODO(port): implement once CommandContext supports deferred-length RESP3 maps
-    //   and the hdrhistogram crate is added.
+ // and the hdrhistogram crate is added.
     Ok(())
 }
 
-// C: latency.c:532-549, latencyAllCommandsFillCDF
 /// Reply with per-command latency histograms for every command in the server's
 /// command table.
-///
 /// TODO(architect): needs `&HashMap<RedisString, ServerCommand>` (or equivalent)
-///   from `RedisServer::commands`, which does not yet exist on the Rust stub.
+/// from `RedisServer::commands`, which does not yet exist on the Rust stub.
 pub fn latency_all_commands_fill_cdf(
     ctx: &mut CommandContext,
     command_with_data: &mut i32,
 ) -> Result<(), RedisError> {
-    // Stub — command table iteration is deferred until ServerCommand type exists.
-    // C: latency.c:532-549
+ // Stub — command table iteration is deferred until ServerCommand type exists.
     let _ = (ctx, command_with_data);
     // TODO(port): iterate server.commands when ServerCommand type is defined.
     Ok(())
 }
 
-// C: latency.c:553-585, latencySpecificCommandsFillCDF
 /// Reply with per-command latency histograms for the commands named in argv[2..].
-///
 /// TODO(architect): needs `lookupCommandBySds` once the command registry is wired
-///   to `RedisServer` in Phase 3.
+/// to `RedisServer` in Phase 3.
 /// TODO(port): `addReplyDeferredLen` / `setDeferredMapLen` pattern not yet in
-///   `CommandContext`.
+/// `CommandContext`.
 fn latency_specific_commands_fill_cdf(ctx: &mut CommandContext) -> Result<(), RedisError> {
-    // Stub — deferred until command lookup is available.
-    // C: latency.c:553-585
+ // Stub — deferred until command lookup is available.
     let _ = ctx;
     // TODO(port): implement when lookupCommandBySds and deferred-len replies exist.
     Ok(())
 }
 
-// C: latency.c:589-603, latencyCommandReplyWithSamples
 /// Reply with the full ring-buffer sample list for a time series.
 /// Emits a deferred-length array of `[time, latency]` pairs.
-///
 /// TODO(port): deferred-length array (`addReplyDeferredLen` / `setDeferredArrayLen`)
-///   is not yet implemented on `CommandContext`.
+/// is not yet implemented on `CommandContext`.
 fn latency_command_reply_with_samples(
     ctx: &mut CommandContext,
     ts: &LatencyTimeSeries,
 ) -> Result<(), RedisError> {
-    // Iterate the ring buffer in insertion order (oldest first).
-    // C: for j in 0..LATENCY_TS_LEN: i = (ts.idx + j) % LATENCY_TS_LEN
+ // Iterate the ring buffer in insertion order (oldest first).
     let mut samples: Vec<(i64, i64)> = Vec::new();
     for j in 0..LATENCY_TS_LEN {
         let i = (ts.idx + j) % LATENCY_TS_LEN;
@@ -827,7 +781,6 @@ fn latency_command_reply_with_samples(
     Ok(())
 }
 
-// C: latency.c:607-627, latencyCommandReplyWithLatestEvents
 /// Reply for `LATENCY LATEST`: one array entry per event with
 /// `[name, last_time, last_latency, max, sum, cnt]`.
 fn latency_command_reply_with_latest_events(
@@ -848,17 +801,14 @@ fn latency_command_reply_with_latest_events(
     Ok(())
 }
 
-// C: latency.c:630-670, latencyCommandGenSparkeline
 /// Generate an ASCII sparkline graph for the named event's ring buffer.
-///
 /// Returns the graph as `Vec<u8>`.
-///
 /// TODO(port): `sparkline.c` is marked SKIP in `harness/file-deps.tsv`.
-///   This function cannot be implemented until a Rust sparkline renderer exists.
-///   Returns a placeholder notice for now.
+/// This function cannot be implemented until a Rust sparkline renderer exists.
+/// Returns a placeholder notice for now.
 fn latency_command_gen_sparkline(event: &[u8], ts: &LatencyTimeSeries) -> Vec<u8> {
-    // C: latency.c:630-670 — uses sparklineSequenceAddSample / sparklineRender
-    //   from sparkline.c (SKIP), so full implementation is deferred.
+ // uses sparklineSequenceAddSample / sparklineRender
+ // from (SKIP), so full implementation is deferred.
     let mut graph: Vec<u8> = Vec::new();
     graph.extend_from_slice(event);
     graph.extend_from_slice(
@@ -879,16 +829,13 @@ fn latency_command_gen_sparkline(event: &[u8], ts: &LatencyTimeSeries) -> Vec<u8
 
 // ── LATENCY command ───────────────────────────────────────────────────────────
 
-// C: latency.c:682-764, latencyCommand
 /// Entry point for the `LATENCY` command.
-///
-/// Dispatches to the appropriate sub-command handler.  `monitor` is the
+/// Dispatches to the appropriate sub-command handler. `monitor` is
 /// server's [`LatencyMonitor`] and `cfg` provides the config fields needed
 /// by LATENCY DOCTOR.
-///
 /// TODO(architect): when `RedisServer` gains `latency: LatencyMonitor` and
-///   `latency_monitor_threshold: i64`, the signature should change to accept
-///   `&mut RedisServer` (or `&mut CommandContext` once it bundles the server).
+/// `latency_monitor_threshold: i64`, the signature should change to accept
+/// `&mut RedisServer` (or `&mut CommandContext` once it bundles the server).
 pub fn latency_command(
     ctx: &mut CommandContext,
     monitor: &mut LatencyMonitor,
@@ -898,12 +845,12 @@ pub fn latency_command(
     let argc = ctx.arg_count();
 
     if subcommand.as_bytes().eq_ignore_ascii_case(b"history") && argc == 3 {
-        // LATENCY HISTORY <event>
+ // LATENCY HISTORY <event>
         let event = ctx.arg(2)?.clone();
         match monitor.get(event.as_bytes()) {
             None => ctx.reply_array_header(0)?,
             Some(ts) => {
-                // Safety: ts reference is valid; we cloned event to avoid borrow conflict.
+ // Safety: ts reference is valid; we cloned event to avoid borrow conflict.
                 let ts_owned: LatencyTimeSeries = LatencyTimeSeries {
                     idx: ts.idx,
                     max: ts.max,
@@ -915,7 +862,7 @@ pub fn latency_command(
             }
         }
     } else if subcommand.as_bytes().eq_ignore_ascii_case(b"graph") && argc == 3 {
-        // LATENCY GRAPH <event>
+ // LATENCY GRAPH <event>
         let event = ctx.arg(2)?.clone();
         let ts_opt = monitor.get(event.as_bytes());
         match ts_opt {
@@ -934,30 +881,28 @@ pub fn latency_command(
                     samples: ts.samples,
                 };
                 let graph = latency_command_gen_sparkline(event.as_bytes(), &ts_owned);
-                // C: addReplyVerbatim(c, graph, sdslen(graph), "txt")
                 // TODO(port): CommandContext does not yet have reply_verbatim().
-                //   For now, emit as a bulk string.
+ // For now, emit as a bulk string.
                 ctx.reply_bulk(&graph)?;
             }
         }
     } else if subcommand.as_bytes().eq_ignore_ascii_case(b"latest") && argc == 2 {
-        // LATENCY LATEST
-        // PORT NOTE: must re-borrow monitor immutably; clone to satisfy borrow checker.
+ // LATENCY LATEST
+ // PORT NOTE: must re-borrow monitor immutably; clone to satisfy borrow checker.
         latency_command_reply_with_latest_events(ctx, monitor)?;
     } else if subcommand.as_bytes().eq_ignore_ascii_case(b"doctor") && argc == 2 {
-        // LATENCY DOCTOR
+ // LATENCY DOCTOR
         let report = monitor.create_report(cfg);
-        // C: addReplyVerbatim(c, report, sdslen(report), "txt")
         // TODO(port): CommandContext does not yet have reply_verbatim(). Emit as bulk string.
         ctx.reply_bulk(&report)?;
     } else if subcommand.as_bytes().eq_ignore_ascii_case(b"reset") && argc >= 2 {
-        // LATENCY RESET [<event> …]
+ // LATENCY RESET [<event> …]
         if argc == 2 {
             let resets = monitor.reset_event(None);
             ctx.reply_integer(resets as i64)?;
         } else {
             let mut resets = 0i32;
-            // Collect arg bytes first to avoid holding borrows into ctx while mutating monitor.
+ // Collect arg bytes first to avoid holding borrows into ctx while mutating monitor.
             let mut events: Vec<Vec<u8>> = Vec::with_capacity(argc - 2);
             for j in 2..argc {
                 events.push(ctx.arg(j)?.as_bytes().to_vec());
@@ -968,17 +913,17 @@ pub fn latency_command(
             ctx.reply_integer(resets as i64)?;
         }
     } else if subcommand.as_bytes().eq_ignore_ascii_case(b"histogram") && argc >= 2 {
-        // LATENCY HISTOGRAM [command …]
+ // LATENCY HISTOGRAM [command …]
         if argc == 2 {
-            // All commands.
+ // All commands.
             let mut command_with_data = 0i32;
             latency_all_commands_fill_cdf(ctx, &mut command_with_data)?;
         } else {
-            // Specific commands named in argv[2..].
+ // Specific commands named in argv[2..].
             latency_specific_commands_fill_cdf(ctx)?;
         }
     } else if subcommand.as_bytes().eq_ignore_ascii_case(b"help") && argc == 2 {
-        // LATENCY HELP
+ // LATENCY HELP
         let help: &[&[u8]] = &[
             b"DOCTOR",
             b"    Return a human readable latency analysis report.",
@@ -1011,15 +956,12 @@ pub fn latency_command(
 
 // ── durationAddSample ─────────────────────────────────────────────────────────
 
-// C: latency.c:766-776, durationAddSample
 /// Record a duration observation into the appropriate slot of `stats`.
-///
 /// `dtype` is passed as a raw `i32` (matching the C `int type` parameter) so that
 /// callers that have not yet converted to the [`DurationType`] enum can still
 /// call this function.
-///
 /// TODO(architect): when `RedisServer` has `duration_stats`, make this a method
-///   on `RedisServer` (or on a `DurationStatsBank` wrapper) instead.
+/// on `RedisServer` (or on a `DurationStatsBank` wrapper) instead.
 pub fn duration_add_sample(stats: &mut [DurationStats], dtype: i32, duration: MonoTime) {
     let idx = dtype as usize;
     if idx >= EL_DURATION_TYPE_NUM {
@@ -1035,7 +977,7 @@ pub fn duration_add_sample(stats: &mut [DurationStats], dtype: i32, duration: Mo
 
 // ──────────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        src/latency.c (777 lines, 12 functions) + src/latency.h (117 lines)
+//   source:        Valkey
 //   target_crate:  redis-core
 //   confidence:    high
 //   todos:         12

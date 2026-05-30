@@ -1,17 +1,13 @@
-//! Fast in-memory POC: does a flat `Vec` (listpack-style) beat `HashMap` for the
+//! Fast in-memory POC: does a flat `Vec` (listpack-style) beat `HashMap` for
 //! small-collection hot path that the default benchmark hammers?
-//!
-//! The benchmark issues `SADD myset element:__rand_int__` / `HSET myhash ...`
+//! The benchmark issues `SADD myset element:__rand_int__` / `HSET myhash...`
 //! WITHOUT `-r`, so the member/field is the same literal every call: a
 //! ONE-ELEMENT collection that Valkey stores as a `listpack` (flat, no hashing)
 //! while we run it through `HashMap`/`HashSet` (SipHash + bucket touch per op).
-//!
 //! This compares the two representations head-to-head, in process, with no
 //! server — so we can validate the win and find the promotion threshold in <1s
 //! before changing any production code. Run:
-//!
-//!   cargo test --release -p redis-core --test small_encoding_poc -- --nocapture
-//!
+//! cargo test --release -p redis-core --test small_encoding_poc -- --nocapture
 //! The hot op is "operate on an EXISTING element" (SADD/HSET of a member that's
 //! already present — the steady state after the first call), measured both as a
 //! pure lookup and as an insert/replace.
@@ -96,8 +92,8 @@ fn small_encoding_poc() {
         let vec_get = time_op(iters, || {
             black_box(vm.get(black_box(&probe)));
         });
-        // Update-existing: both pay an identical key+value clone, so the delta
-        // is the lookup-and-replace cost (what HSET does in steady state).
+ // Update-existing: both pay an identical key+value clone, so the delta
+ // is the lookup-and-replace cost (what HSET does in steady state).
         let hm_upd = time_op(iters, || {
             black_box(hm.insert(probe.clone(), value.clone()));
         });

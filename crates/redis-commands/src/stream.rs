@@ -1,21 +1,15 @@
 //! Stream commands — byte-exact port with blocking extension.
-//!
 //! Implements: XADD, XLEN, XRANGE, XREVRANGE, XREAD (blocking + non-blocking),
 //! XDEL, XTRIM, XINFO STREAM (basic), XINFO GROUPS (empty).
-//!
 //! # Storage shape
-//!
 //! Uses the pragmatic `ObjectKind::Stream(StreamEncoding::Inline(_))`
-//! encoding from `redis-core::object` — a sorted `Vec<StreamEntry>` in
+//! encoding from `redis-core::object` — a sorted `Vec<StreamEntry>`
 //! `redis_ds::stream::InlineStream`. Real `rax` + `listpack` representation
 //! will be used when available.
-//!
 //! # Architect items
-//!
 //! TODO(architect): consumer-group commands XGROUP / XREADGROUP /
 //! XACK / XPENDING / XCLAIM / XAUTOCLAIM / XSETID / XINFO CONSUMERS
 //! require persistent PEL state and are deferred.
-//!
 //! TODO(architect): MAXLEN/MINID `~` approximate trimming behaves
 //! identically to `=` exact trimming for the inline encoding (no
 //! listpack-boundary quirks to honour).
@@ -45,7 +39,6 @@ enum BoundSide {
 }
 
 /// A range-bound parsed from XRANGE/XREVRANGE.
-///
 /// `Inclusive` covers both direct inclusive IDs and exclusive IDs that have
 /// been resolved to their adjacent neighbour (so `(3-0` becomes `Inclusive(3-1)`).
 /// `Min`/`Max` are the `-` / `+` sentinels.
@@ -98,14 +91,13 @@ fn parse_range_bound(arg: &[u8], side: BoundSide) -> Result<Bound, RedisError> {
 /// request auto-generation via the `<ms>-*` form.
 #[derive(Debug, Clone, Copy)]
 enum XaddIdSpec {
-    /// Fully-explicit `<ms>-<seq>` or bare `<ms>` (seq defaults to 0).
+ /// Fully-explicit `<ms>-<seq>` or bare `<ms>` (seq defaults to 0).
     Explicit(StreamId),
-    /// `<ms>-*` — ms is given; seq is auto-generated relative to `last_id`.
+ /// `<ms>-*` — ms is given; seq is auto-generated relative to `last_id`.
     Partial { ms: u64 },
 }
 
 /// Parse an XADD id argument: `*`, `<ms>`, `<ms>-<seq>`, or `<ms>-*`.
-///
 /// Returns `None` when the argument is the bare `*` auto-generate sentinel.
 fn parse_xadd_id_spec(arg: &[u8]) -> Result<Option<XaddIdSpec>, RedisError> {
     if arg == b"*" {
@@ -147,7 +139,6 @@ fn invalid_stream_id_err() -> RedisError {
 
 /// Resolve the half-open `[start_idx, end_idx)` slice of `stream.entries`
 /// covered by `start` and `end` inclusive-or-exclusive bounds.
-///
 /// Returns `None` if the requested range is empty (start > end after
 /// resolution, or the slice is empty).
 fn resolve_range(stream: &InlineStream, start: Bound, end: Bound) -> Option<(usize, usize)> {
@@ -199,7 +190,6 @@ fn as_stream_mut(obj: Option<&mut RedisObject>) -> Result<Option<&mut InlineStre
 const STREAM_NODE_MAX_ENTRIES: usize = 100;
 
 /// Synthetic radix-tree key count for `XINFO STREAM`.
-///
 /// Our stream uses inline (`Vec`) storage rather than a radix tree of listpack
 /// nodes, so there is no real `raxSize`. We report a plausible macro-node count
 /// (`ceil(len / node-max)`) so clients and tests that size the rax behave
@@ -210,7 +200,7 @@ fn synthetic_radix_keys(len: usize) -> i64 {
     len.div_ceil(STREAM_NODE_MAX_ENTRIES) as i64
 }
 
-/// Reply with a single stream entry as `[id, [f1, v1, f2, v2, ...]]`.
+/// Reply with a single stream entry as `[id, [f1, v1, f2, v2,...]]`.
 fn reply_entry(ctx: &mut CommandContext, entry: &StreamEntry) -> RedisResult<()> {
     ctx.reply_array_header(2usize)?;
     ctx.reply_bulk_string(RedisString::from_vec(entry.id.to_display_bytes()))?;
@@ -322,7 +312,7 @@ fn parse_add_options(ctx: &CommandContext) -> Result<(AddOptions, usize), RedisE
     Ok((opts, i))
 }
 
-/// Compute the auto-id for `XADD * ...`. Uses wall-clock ms and either
+/// Compute the auto-id for `XADD *...`. Uses wall-clock ms and either
 /// bumps the seq (same ms as last_id) or resets seq to 0 (new ms).
 /// Falls back to incrementing last_id when the clock has gone backwards.
 fn auto_next_id(last_id: StreamId) -> StreamId {
@@ -466,9 +456,9 @@ fn drain_front(stream: &mut InlineStream, count: usize) -> usize {
         return 0;
     }
     let count = count.min(stream.entries.len());
-    // Trimming (XTRIM / XADD MAXLEN|MINID) removes entries from the front but,
-    // unlike XDEL, does NOT advance max_deleted_entry_id. Only
-    // XDEL and XSETID move the tombstone.
+ // Trimming (XTRIM / XADD MAXLEN|MINID) removes entries from the front but,
+ // unlike XDEL, does NOT advance max_deleted_entry_id. Only
+ // XDEL and XSETID move the tombstone.
     stream.entries.drain(0..count);
     count
 }
@@ -488,7 +478,7 @@ fn parse_strict_i64(bytes: &[u8]) -> Result<i64, RedisError> {
 // XADD
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// XADD key [NOMKSTREAM] [MAXLEN|MINID [=|~] threshold [LIMIT count]] id|* field value ...
+/// XADD key [NOMKSTREAM] [MAXLEN|MINID [=|~] threshold [LIMIT count]] id|* field value...
 pub fn xadd_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if ctx.arg_count() < 5 {
         return Err(RedisError::wrong_number_of_args(b"xadd"));
@@ -611,9 +601,9 @@ pub fn xadd_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
     ctx.notify_keyspace_event(NOTIFY_STREAM, b"xadd", &key_for_wake);
 
-    // Propagate the auto-generated ID explicitly so replicas/AOF store the same
-    // ID rather than re-generating their own. Mirrors `rewriteClientCommandArgument`
-    // for the ID in `xaddCommand`.
+ // Propagate the auto-generated ID explicitly so replicas/AOF store the same
+ // ID rather than re-generating their own. Mirrors `rewriteClientCommandArgument`
+ // for the ID in `xaddCommand`.
     if id_autogen {
         let argc = ctx.arg_count();
         let mut new_argv: Vec<RedisString> = Vec::with_capacity(argc);
@@ -686,9 +676,8 @@ fn wake_blocked_for_stream_entry(key: &RedisString, new_entry: &StreamEntry) {
     }
 }
 
-/// Wake all XREAD BLOCK waiters on `key` whose `id_after` is behind the
+/// Wake all XREAD BLOCK waiters on `key` whose `id_after` is behind
 /// stream's current tail.
-///
 /// Unlike the list pop wake (FIFO, one pop per waiter), streams use broadcast
 /// semantics: every waiting reader receives a copy of the new entry. This
 /// mirrors real Redis's `signalKeyAsReady` / `serveClientsBlockedOnListOrZset`
@@ -749,12 +738,11 @@ fn encode_wrongtype_error() -> Vec<u8> {
 
 /// Wake all blocked XREADGROUP clients on `key` whose cursor is behind
 /// the stream's current tail and whose consumer group still exists.
-///
 /// For each waiter:
 /// - If the key is gone or not a stream → send WRONGTYPE or NOGROUP error.
 /// - If the group is gone → send NOGROUP error.
 /// - Otherwise → deliver the entry through the XREADGROUP state machine
-///   (advance `last_delivered_id`, add PEL entry unless NOACK, send reply).
+/// (advance `last_delivered_id`, add PEL entry unless NOACK, send reply).
 pub fn wake_blocked_xreadgroup_for_key(db: &mut RedisDb, key: &RedisString) {
     let latest_id = match as_stream_ref(db.lookup_key_read(key)) {
         Ok(Some(stream)) => stream.last_id,
@@ -770,12 +758,12 @@ pub fn wake_blocked_xreadgroup_for_key(db: &mut RedisDb, key: &RedisString) {
     if waiters.is_empty() {
         return;
     }
-    // A single new entry is delivered to at most one consumer per group: the
-    // first waiter (FIFO) whose group cursor is still behind the entry. Once a
-    // group's cursor advances past the entry, later waiters of that same group
-    // find no new data and must stay blocked — re-registered with their
-    // original deadline so their BLOCK timeout is preserved (matches the
-    // upstream "reprocessing" semantics in handleClientsBlockedOnKey).
+ // A single new entry is delivered to at most one consumer per group:
+ // first waiter (FIFO) whose group cursor is still behind the entry. Once a
+ // group's cursor advances past the entry, later waiters of that same group
+ // find no new data and must stay blocked — re-registered with their
+ // original deadline so their BLOCK timeout is preserved (matches
+ // upstream "reprocessing" semantics in handleClientsBlockedOnKey).
     let mut to_reblock: Vec<BlockedWaiter> = Vec::new();
     for waiter in waiters {
         let (group, consumer, id_after, count, noack) = match &waiter.action {
@@ -861,7 +849,6 @@ pub fn wake_blocked_xreadgroup_for_key(db: &mut RedisDb, key: &RedisString) {
 }
 
 /// Wake all blocked XREADGROUP clients on `key` with a NOGROUP error.
-///
 /// Used when the key is deleted (DEL, FLUSHDB) or the group is destroyed
 /// (XGROUP DESTROY), so every parked XREADGROUP client on that key receives
 /// the appropriate error response.
@@ -894,7 +881,6 @@ fn record_blocked_xreadgroup_error(reply: &[u8]) {
 }
 
 /// Wake all blocked XREADGROUP clients across all keys with NOGROUP errors.
-///
 /// Used by FLUSHDB / FLUSHALL where every stream key (and therefore every
 /// consumer group) is gone at once.
 pub fn wake_all_xreadgroup_with_nogroup() {
@@ -919,7 +905,6 @@ pub fn wake_all_xreadgroup_with_nogroup() {
 
 /// Wake blocked XREADGROUP clients on `dst_key` after RENAME moved a new
 /// stream into `dst_key`. Attempts to deliver new entries to each waiter.
-///
 /// If `dst_key` now holds a stream with the consumer group, entries after
 /// the waiter's cursor are delivered. Otherwise NOGROUP is sent.
 pub fn wake_xreadgroup_after_rename(db: &mut RedisDb, dst_key: &RedisString) {
@@ -1140,7 +1125,7 @@ pub fn xrevrange_command(ctx: &mut CommandContext) -> RedisResult<()> {
 // XDEL
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// XDEL key id [id ...]
+/// XDEL key id [id...]
 pub fn xdel_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if ctx.arg_count() < 3 {
         return Err(RedisError::wrong_number_of_args(b"xdel"));
@@ -1261,17 +1246,16 @@ pub fn xtrim_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
 #[derive(Debug, Clone, Copy)]
 enum ReadStartId {
-    /// `$` — only entries strictly after the current `last_id`.
+ /// `$` — only entries strictly after the current `last_id`.
     Now,
-    /// `+` — return the last entry in the stream (resolved to `last_id - 1`
-    /// so the XREAD "strictly greater than" logic includes the last entry).
+ /// `+` — return the last entry in the stream (resolved to `last_id - 1`
+ /// so the XREAD "strictly greater than" logic includes the last entry).
     LastEntry,
-    /// Explicit id; XREAD returns entries with id strictly greater than this.
+ /// Explicit id; XREAD returns entries with id strictly greater than this.
     After(StreamId),
 }
 
 /// Park an XREAD BLOCK client in the global blocked-keys index.
-///
 /// Registers one waiter per (key, id_after) pair so that the first XADD on
 /// any of those keys will wake this client. If the client lacks a sender
 /// (unit tests / pseudo-clients) the function returns `$-1\r\n` immediately.
@@ -1328,7 +1312,7 @@ fn park_xread_block(
     Ok(())
 }
 
-/// XREAD [COUNT n] [BLOCK ms] STREAMS key [key ...] id [id ...]
+/// XREAD [COUNT n] [BLOCK ms] STREAMS key [key...] id [id...]
 pub fn xread_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if ctx.arg_count() < 4 {
         return Err(RedisError::wrong_number_of_args(b"xread"));
@@ -1504,7 +1488,7 @@ pub fn xinfo_command(ctx: &mut CommandContext) -> RedisResult<()> {
                 return Err(RedisError::wrong_number_of_args(b"xinfo"));
             }
             let key = ctx.arg_owned(2usize)?;
-            // XINFO STREAM <key> [FULL [COUNT <n>]]
+ // XINFO STREAM <key> [FULL [COUNT <n>]]
             let argc = ctx.arg_count();
             if argc > 3 {
                 if ctx.arg(3)?.as_bytes().eq_ignore_ascii_case(b"FULL") {
@@ -1562,25 +1546,20 @@ pub fn xinfo_command(ctx: &mut CommandContext) -> RedisResult<()> {
 // ─────────────────────────────────────────────────────────────────────────────
 // CONSUMER GROUPS (Round 13c)
 // ─────────────────────────────────────────────────────────────────────────────
-//
 // Implements: XGROUP (CREATE/SETID/DESTROY/CREATECONSUMER/DELCONSUMER),
 // XREADGROUP, XACK, XPENDING (summary + extended), XCLAIM, XAUTOCLAIM,
 // XSETID, XINFO CONSUMERS, XINFO GROUPS.
-//
 // Storage extension lives in `redis_ds::stream::{ConsumerGroup, Consumer,
-// PelEntry}`. PEL entries are mirrored between `group.pel` and the
+// PelEntry}`. PEL entries are mirrored between `group.pel` and
 // matching `consumer.pel`; helpers below keep them consistent.
-//
 // TODO(architect): XREADGROUP BLOCK is unimplemented this round. Round
 // 13b wired XREAD BLOCK against the blocked-keys index with
 // `BlockedAction::Stream`; group-aware blocking needs an additional
 // per-group last-delivered cursor on the waker side. Behaviour right
 // now: BLOCK with no new entries returns `$-1` (nil bulk).
-//
 // TODO(architect): XAUTOCLAIM cursor pagination is implemented as a
-// simple ID cursor (next id to resume from). Valkey uses a more nuanced
+// simple ID cursor (next id to resume ). Valkey uses a more nuanced
 // rax-cursor; this is close-enough for the inline encoding.
-//
 // TODO(architect): XINFO STREAM FULL form is not implemented.
 
 fn no_such_key_or_group_err(key: &[u8], group: &[u8], cmd: &[u8]) -> RedisError {
@@ -1620,8 +1599,8 @@ fn touch_or_create_consumer(group: &mut ConsumerGroup, name: &RedisString, now_m
     let exists = group.consumers.contains_key(name);
     if !exists {
         let mut consumer = Consumer::new(name.clone(), now_ms);
-        // it only advances once the consumer actually receives entries, so
-        // XINFO `inactive` reports -1 until the first real delivery.
+ // it only advances once the consumer actually receives entries, so
+ // XINFO `inactive` reports -1 until the first real delivery.
         consumer.active_time_ms = -1;
         group.consumers.insert(name.clone(), consumer);
     } else if let Some(c) = group.consumers.get_mut(name) {
@@ -1965,14 +1944,14 @@ fn xgroup_delconsumer(ctx: &mut CommandContext) -> RedisResult<()> {
 
 #[derive(Debug, Clone, Copy)]
 enum GroupReadStartId {
-    /// `>` — deliver new entries with id > group.last_delivered_id.
+ /// `>` — deliver new entries with id > group.last_delivered_id.
     New,
-    /// Explicit id — re-read entries from the consumer PEL with id >= this.
+ /// Explicit id — re-read entries from the consumer PEL with id >= this.
     From(StreamId),
 }
 
 /// XREADGROUP GROUP <group> <consumer> [COUNT n] [BLOCK ms] [NOACK]
-///            STREAMS key [key ...] id [id ...]
+/// STREAMS key [key...] id [id...]
 pub fn xreadgroup_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
     if argc < 7 {
@@ -2085,7 +2064,7 @@ pub fn xreadgroup_command(ctx: &mut CommandContext) -> RedisResult<()> {
                     None => slice_len,
                     Some(n) => (n as usize).min(slice_len),
                 };
-                // seen-time) on every call, even when no new entries exist.
+ // seen-time) on every call, even when no new entries exist.
                 {
                     let group = stream
                         .groups
@@ -2106,7 +2085,7 @@ pub fn xreadgroup_command(ctx: &mut CommandContext) -> RedisResult<()> {
                     .groups
                     .get_mut(&group_name)
                     .expect("group existence checked above");
-                // active-time advances only on real delivery.
+ // active-time advances only on real delivery.
                 if let Some(consumer) = group.consumers.get_mut(&consumer_name) {
                     consumer.active_time_ms = now;
                 }
@@ -2317,7 +2296,7 @@ pub fn xreadgroup_command(ctx: &mut CommandContext) -> RedisResult<()> {
 // XACK
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// XACK key group id [id ...]
+/// XACK key group id [id...]
 pub fn xack_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if ctx.arg_count() < 4 {
         return Err(RedisError::wrong_number_of_args(b"xack"));
@@ -2526,8 +2505,8 @@ struct ClaimOptions {
     justid: bool,
 }
 
-/// XCLAIM key group consumer min-idle-time id [id ...]
-///        [IDLE ms] [TIME unix-ms] [RETRYCOUNT n] [FORCE] [JUSTID]
+/// XCLAIM key group consumer min-idle-time id [id...]
+/// [IDLE ms] [TIME unix-ms] [RETRYCOUNT n] [FORCE] [JUSTID]
 pub fn xclaim_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
     if argc < 6 {
@@ -2661,9 +2640,9 @@ pub fn xclaim_command(ctx: &mut CommandContext) -> RedisResult<()> {
         if in_pel && prev_idle < min_idle {
             continue;
         }
-        // Entry was trimmed/deleted from the stream: drop the NACK from the
-        // group + owning-consumer PEL and skip it (no reassign, absent from the
-        // reply). C: streamClaimEntry discards claims for vanished entries.
+ // Entry was trimmed/deleted from the stream: drop the NACK from
+ // group + owning-consumer PEL and skip it (no reassign, absent from
+ // reply). C: streamClaimEntry discards claims for vanished entries.
         if stream_entry.is_none() {
             pel_remove(group, id);
             continue;
@@ -2743,8 +2722,8 @@ pub fn xautoclaim_command(ctx: &mut CommandContext) -> RedisResult<()> {
                     return Err(RedisError::syntax(b"syntax error"));
                 }
                 let n = parse_strict_i64(ctx.arg(idx + 1)?.as_bytes())?;
-                // COUNT is bounded by LONG_MAX/16 so the
-                // internal `count * attempts_factor` scan budget cannot overflow.
+ // COUNT is bounded by LONG_MAX/16 so
+ // internal `count * attempts_factor` scan budget cannot overflow.
                 const MAX_COUNT: i64 = i64::MAX / 16;
                 if n <= 0 || n > MAX_COUNT {
                     return Err(RedisError::runtime(b"ERR COUNT must be > 0"));
@@ -2901,8 +2880,8 @@ pub fn xsetid_command(ctx: &mut CommandContext) -> RedisResult<()> {
                     return Err(RedisError::syntax(b"syntax error"));
                 }
                 let m = parse_explicit_id(ctx.arg(i + 1)?.as_bytes())?;
-                // the new last-id cannot be below the
-                // provided max_deleted_entry_id.
+ // the new last-id cannot be below
+ // provided max_deleted_entry_id.
                 if new_id < m {
                     return Err(RedisError::runtime(
                         b"ERR The ID specified in XSETID is smaller than the provided max_deleted_entry_id",
@@ -2918,8 +2897,8 @@ pub fn xsetid_command(ctx: &mut CommandContext) -> RedisResult<()> {
         Some(s) => s,
         None => return Err(RedisError::runtime(b"ERR no such key")),
     };
-    // new last-id cannot be below the current
-    // max_deleted_entry_id.
+ // new last-id cannot be below the current
+ // max_deleted_entry_id.
     if new_id < stream.max_deleted_id {
         return Err(RedisError::runtime(
             b"ERR The ID specified in XSETID is smaller than current max_deleted_entry_id",
@@ -2931,7 +2910,7 @@ pub fn xsetid_command(ctx: &mut CommandContext) -> RedisResult<()> {
                 b"ERR The ID specified in XSETID is smaller than the target stream top item",
             ));
         }
-        // entries_added (if provided) cannot be lower than the stream length.
+ // entries_added (if provided) cannot be lower than the stream length.
         if let Some(ea) = entries_added {
             if stream.entries.len() as u64 > ea {
                 return Err(RedisError::runtime(
@@ -3019,7 +2998,6 @@ fn xinfo_groups(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// XINFO STREAM <key> FULL [COUNT <n>]
-///
 /// 9-field stream map with inline `entries` and a nested `groups` array
 /// (each group carries its PEL + consumers, each consumer its own PEL).
 /// `count` limits the `entries` and pending arrays (0 = unlimited; the XINFO
@@ -3074,7 +3052,7 @@ fn xinfo_stream_full(ctx: &mut CommandContext, key: &RedisString, count: i64) ->
         let mut groups: Vec<GroupSnap> = Vec::with_capacity(group_names.len());
         for gname in group_names {
             let g = &stream.groups[gname];
-            // group PEL entry -> owning consumer (PelEntry has no consumer ref).
+ // group PEL entry -> owning consumer (PelEntry has no consumer ref).
             let mut gpel: Vec<(StreamId, RedisString, i64, u64)> = Vec::new();
             for pe in g.pel.iter().take(limit) {
                 let owner = g
@@ -3249,7 +3227,7 @@ fn xinfo_consumers(ctx: &mut CommandContext) -> RedisResult<()> {
     ctx.reply_array_header(snapshot.len())?;
     for (name, pending, seen, active) in &snapshot {
         let idle = (now - *seen).max(0);
-        // active < 0 is the never-delivered sentinel; XINFO reports -1.
+ // active < 0 is the never-delivered sentinel; XINFO reports -1.
         let inactive = if *active < 0 {
             -1
         } else {
@@ -3273,17 +3251,15 @@ fn xinfo_consumers(ctx: &mut CommandContext) -> RedisResult<()> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Install all stream-related hooks into `redis-core`'s hook slots.
-///
 /// Must be called once at server startup, before any connections are accepted.
-/// Subsequent calls are no-ops (each underlying `OnceLock` only accepts the
+/// Subsequent calls are no-ops (each underlying `OnceLock` only accepts
 /// first value).
-///
 /// The RENAME-completion wake is deliberately not installed here. It is owned
 /// by the runtime owner in `redis-server`, which registers a hook that defers
 /// the wake onto the owner thread's own database list. Installing a second
 /// rename hook from this layer would race the owner's hook for the single
-/// `STREAM_RENAME_HOOK` slot and, if it won, wake clients against the
-/// transitional `global_databases()` store instead of the owner's keyspace.
+/// `STREAM_RENAME_HOOK` slot, if it won, wake clients against
+/// transitional `global_databases` store instead of the owner's keyspace.
 pub fn install_stream_hooks() {
     redis_core::db::install_stream_key_deleted_hook(Box::new(|key| {
         wake_xreadgroup_with_nogroup(key);
@@ -3308,7 +3284,7 @@ pub fn install_stream_hooks() {
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        reference/valkey/src/t_stream.c
+//   source:        Valkey
 //   target_crate:  redis-commands
 //   confidence:    pragmatic Phase-B (inline storage, focused TCL parity)
 //   todos:         1

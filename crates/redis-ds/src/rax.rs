@@ -1,9 +1,8 @@
 //! `RadixTree` - Redis's radix tree (rax) behavior surface.
-//!
 //! Upstream rax is a packed compressed radix tree whose node layout stores edge
 //! bytes, child pointers, and optional value pointers in one allocation. This
 //! Rust owner intentionally preserves the byte-key map semantics first: owned
-//! byte keys, insert/try-insert/find/remove, size, prefix scans, and
+//! byte keys, insert/try-insert/find/remove, size, prefix scans,
 //! lexicographic seek/iteration. The packed-node representation is deferred
 //! until a later packet needs allocator parity or node-level introspection.
 
@@ -417,7 +416,7 @@ mod tests {
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        reference/valkey/src/rax.c, reference/valkey/src/rax.h
+//   source:        Valkey
 //   target_crate:  redis-ds
 //   confidence:    high
 //   todos:         0

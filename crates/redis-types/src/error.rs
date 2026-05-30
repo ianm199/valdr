@@ -1,5 +1,4 @@
 //! `RedisError` — the canonical Redis error type.
-//!
 //! Per PORTING.md §6: a byte-string-payloaded enum (Redis errors round-
 //! trip through RESP and may not be UTF-8 for user-supplied keys
 //! appearing in messages). Constructors per §6.1 match the verbatim
@@ -10,27 +9,27 @@ use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RedisError {
-    /// Generic runtime error with arbitrary message (the most common variant).
+ /// Generic runtime error with arbitrary message (the most common variant).
     Runtime(RedisString),
-    /// WRONGTYPE — operation against a key holding the wrong kind of value.
+ /// WRONGTYPE — operation against a key holding the wrong kind of value.
     WrongType,
-    /// `wrong number of arguments for '<cmd>' command`.
+ /// `wrong number of arguments for '<cmd>' command`.
     WrongNumberOfArgs(RedisString),
-    /// Syntax error in command arguments.
+ /// Syntax error in command arguments.
     Syntax(RedisString),
-    /// `LOADING Redis is loading the dataset in memory`.
+ /// `LOADING Redis is loading the dataset in memory`.
     Loading,
-    /// `NOAUTH Authentication required.`.
+ /// `NOAUTH Authentication required.`.
     NoAuth,
-    /// `NOPERM ...` — ACL deny, with scope detail.
+ /// `NOPERM...` — ACL deny, with scope detail.
     NoPerm(RedisString),
-    /// `value is out of range`.
+ /// `value is out of range`.
     OutOfRange,
-    /// `value is not an integer or out of range`.
+ /// `value is not an integer or out of range`.
     NotInteger,
-    /// `value is not a valid float`.
+ /// `value is not a valid float`.
     NotFloat,
-    /// I/O underneath (connection closed, write failure).
+ /// I/O underneath (connection closed, write failure).
     Io(std::io::ErrorKind),
 }
 
@@ -79,8 +78,8 @@ impl RedisError {
         RedisError::Io(kind)
     }
 
-    /// The RESP error-line bytes (without the leading `-` and trailing CRLF).
-    /// Used by the reply writer when serializing this error onto the wire.
+ /// The RESP error-line bytes (without the leading `-` and trailing CRLF).
+ /// Used by the reply writer when serializing this error onto the wire.
     pub fn to_resp_payload(&self) -> RedisString {
         use RedisError::*;
         let mut buf = Vec::new();

@@ -1,28 +1,24 @@
 //! Minimal listpack binary decoder — Round 21.
-//!
 //! Listpack is a compact serialization of a sequence of strings or integers.
 //! It is used as the payload of PACKED quicklist nodes in `RDB_TYPE_LIST_QUICKLIST_2`.
-//!
-//! Wire layout (from listpack.c LP_HDR_SIZE and entry encoding macros):
-//!   - `[total_bytes: u32-le]` — total blob length including header and EOF byte
-//!   - `[num_elements: u16-le]` — element count (UINT16_MAX means "unknown")
-//!   - Zero or more entries, each:
-//!       - 1-byte encoding prefix (defines type + inline value or length)
-//!       - optional extra bytes (value data or extended length)
-//!       - 1-byte backlen (number of bytes in the entry not counting backlen itself)
-//!   - `0xFF` end-of-listpack marker
-//!
-//! Entry encoding prefix rules (listpack.c lines 52–101):
-//!   - `0xxxxxxx` (bit 7 = 0) — 7-bit unsigned integer, value in bits [6:0]
-//!   - `10xxxxxx` (bits 7:6 = 0b10) — 6-bit string, length in bits [5:0], data follows
-//!   - `110xxxxx` (bits 7:5 = 0b110) — 13-bit signed integer across 2 bytes
-//!   - `1110xxxx` (bits 7:4 = 0b1110) — 12-bit string, length in low nibble + next byte, data follows
-//!   - `11110001` (0xF1) — 16-bit signed integer in next 2 bytes (little-endian)
-//!   - `11110010` (0xF2) — 24-bit signed integer in next 3 bytes (little-endian)
-//!   - `11110011` (0xF3) — 32-bit signed integer in next 4 bytes (little-endian)
-//!   - `11110100` (0xF4) — 64-bit signed integer in next 8 bytes (little-endian)
-//!   - `11110000` (0xF0) — 32-bit string, length in next 4 bytes (little-endian), data follows
-//!
+//! Wire layout:
+//! - `[total_bytes: u32-le]` — total blob length including header and EOF byte
+//! - `[num_elements: u16-le]` — element count (UINT16_MAX means "unknown")
+//! - Zero or more entries, each:
+//! - 1-byte encoding prefix (defines type + inline value or length)
+//! - optional extra bytes (value data or extended length)
+//! - 1-byte backlen (number of bytes in the entry not counting backlen itself)
+//! - `0xFF` end-of-listpack marker
+//! Entry encoding prefix rules:
+//! - `0xxxxxxx` (bit 7 = 0) — 7-bit unsigned integer, value in bits [6:0]
+//! - `10xxxxxx` (bits 7:6 = 0b10) — 6-bit string, length in bits [5:0], data follows
+//! - `110xxxxx` (bits 7:5 = 0b110) — 13-bit signed integer across 2 bytes
+//! - `1110xxxx` (bits 7:4 = 0b1110) — 12-bit string, length in low nibble + next byte, data follows
+//! - `11110001` (0xF1) — 16-bit signed integer in next 2 bytes (little-endian)
+//! - `11110010` (0xF2) — 24-bit signed integer in next 3 bytes (little-endian)
+//! - `11110011` (0xF3) — 32-bit signed integer in next 4 bytes (little-endian)
+//! - `11110100` (0xF4) — 64-bit signed integer in next 8 bytes (little-endian)
+//! - `11110000` (0xF0) — 32-bit string, length in next 4 bytes (little-endian), data follows
 //! All integers are returned as their decimal string representation to match
 //! how the C Redis server presents them to clients after loading.
 
@@ -45,8 +41,7 @@ const LP_ENCODING_12BIT_STR_MASK: u8 = 0xF0;
 const LP_ENCODING_32BIT_STR: u8 = 0xF0;
 
 /// Decode all entries from a raw listpack blob, returning each as a byte vector.
-///
-/// Integer entries are returned as decimal ASCII strings, matching the
+/// Integer entries are returned as decimal ASCII strings, matching
 /// representation Redis presents to clients. String entries are returned as
 /// their raw bytes.
 pub fn decode_listpack(blob: &[u8]) -> io::Result<Vec<Vec<u8>>> {
@@ -192,7 +187,7 @@ fn decode_entry(blob: &[u8], pos: usize) -> io::Result<EntryResult> {
 }
 
 /// Number of bytes the backlen field consumes for an entry whose
-/// `encoding+value` size is `l`. Matches `lpEncodeBacklen` in listpack.c.
+/// `encoding+value` size is `l`. Matches `lpEncodeBacklen`.
 fn backlen_byte_count(l: u64) -> usize {
     if l <= 127 {
         1
@@ -235,7 +230,6 @@ fn sign_extend_24bit(v: u32) -> i64 {
 }
 
 /// Incremental listpack encoder used by the stream RDB serializer.
-///
 /// Entries are appended one at a time as either integers (`append_int`) or
 /// raw byte strings (`append_string`). `finalize` produces the complete
 /// listpack blob with header, body, backlens, and `0xFF` EOF terminator
@@ -260,7 +254,7 @@ impl ListpackBuilder {
         }
     }
 
-    /// Append an integer entry using the smallest encoding that fits `v`.
+ /// Append an integer entry using the smallest encoding that fits `v`.
     pub fn append_int(&mut self, v: i64) {
         let mut enc_buf = [0u8; 9];
         let enc_len = encode_integer(v, &mut enc_buf);
@@ -271,7 +265,7 @@ impl ListpackBuilder {
         self.num_elements += 1;
     }
 
-    /// Append a byte-string entry using the smallest string encoding that fits.
+ /// Append a byte-string entry using the smallest string encoding that fits.
     pub fn append_string(&mut self, s: &[u8]) {
         let slen = s.len();
         if slen < 64 {
@@ -300,16 +294,15 @@ impl ListpackBuilder {
         self.num_elements += 1;
     }
 
-    /// Number of entries appended so far.
+ /// Number of entries appended so far.
     pub fn num_elements(&self) -> usize {
         self.num_elements
     }
 
-    /// Build the final blob: 6-byte header + entries + 0xFF EOF byte.
-    ///
-    /// `num_elements` is clamped to `UINT16_MAX` to match C's
-    /// `LP_HDR_NUMELE_UNKNOWN` sentinel; the loader treats values >= UINT16_MAX
-    /// as "unknown" and walks the body to count entries.
+ /// Build the final blob: 6-byte header + entries + 0xFF EOF byte.
+ /// `num_elements` is clamped to `UINT16_MAX` to match C's
+ /// `LP_HDR_NUMELE_UNKNOWN` sentinel; the loader treats values >= UINT16_MAX
+ /// as "unknown" and walks the body to count entries.
     pub fn finalize(self) -> Vec<u8> {
         let total = LP_HDR_SIZE + self.body.len() + 1;
         let mut out = Vec::with_capacity(total);
@@ -390,7 +383,6 @@ fn encode_integer(v: i64, buf: &mut [u8; 9]) -> usize {
 }
 
 /// Encode the backlen of an entry whose `encoding+value` size is `l`.
-///
 /// The encoded form is 1..=5 bytes. Every byte except the last has its
 /// top bit set; the last byte's top bit is clear. The most significant
 /// 7-bit chunk is written first.

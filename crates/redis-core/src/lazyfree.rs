@@ -1,16 +1,13 @@
 //! Lazy (background-thread) freeing of Redis objects and data structures.
-//!
 //! In Valkey, large data structures are handed off to a dedicated BIO
 //! (Background I/O) thread so that dropping a million-element hash map does
 //! not stall the main event loop. Two atomic counters track how many objects
 //! are queued (pending) and how many have been reclaimed (freed).
-//!
 //! Rust ownership and RAII replace manual `decrRefCount` / `sdsfree` calls;
 //! counter bookkeeping is preserved via `AtomicUsize`. The BIO thread
 //! integration (`crates/redis-core/src/bio.rs`) is deferred to a later stage —
 //! all async paths currently fall back to synchronous drop with
 //! `TODO(architect)` markers.
-//!
 //! Several C argument types (`kvstore *`, `rax *`, `list *`, `dict *`,
 //! `functionsLibCtx *`) have no Rust equivalent in the pilot crates yet.
 //! Each is represented by a local opaque placeholder struct, documented
@@ -34,36 +31,32 @@ static LAZYFREED_OBJECTS: AtomicUsize = AtomicUsize::new(0);
 const LAZYFREE_THRESHOLD: usize = 64;
 
 // ── Opaque placeholder types for deferred crates ───────────────────────────────
-//
-// These stand in for C pointer arguments whose canonical Rust types live in
+// These stand in for C pointer arguments whose canonical Rust types live
 // crates that are not yet in the pilot. They carry just enough metadata for
 // counter bookkeeping. Replace each with the canonical type when available.
 
 /// Placeholder for C's `kvstore *` (slot-addressed hash-table store).
-///
 /// TODO(architect): replace with `redis_ds::KvStore` once
 /// the canonical type lands.
 pub struct OpaqueKvStore {
-    /// Pre-computed key count, used to update the lazyfree counters.
+ /// Pre-computed key count, used to update the lazyfree counters.
     pub size: usize,
 }
 
 /// Placeholder for C's `rax *` (radix tree).
-///
 /// TODO(architect): replace with `redis_ds::RadixTree` once
 /// the canonical type lands.
 /// Do NOT rename to `RadixTree` — that name is reserved for the canonical
 /// redis-ds type per `harness/type-vocabulary.tsv`.
 pub struct OpaqueRax {
-    /// `rax::numnodes` — number of internal radix nodes (used to threshold
-    /// against LAZYFREE_THRESHOLD for tracking / error-stats trees).
+ /// `rax::numnodes` — number of internal radix nodes (used to threshold
+ /// against LAZYFREE_THRESHOLD for tracking / error-stats trees).
     pub numnodes: usize,
-    /// `rax::numele` — number of stored elements (used for counter updates).
+ /// `rax::numele` — number of stored elements (used for counter updates).
     pub numele: usize,
 }
 
 /// Placeholder for C's `list *` (adlist doubly-linked list).
-///
 /// TODO(architect): replace with `redis_ds::AdList` once
 /// `crates/redis-ds/src/adlist.rs` lands.
 pub struct OpaqueAdList {
@@ -71,7 +64,6 @@ pub struct OpaqueAdList {
 }
 
 /// Eval-scripts aggregate: scripts dict + LRU eviction list + engine callbacks.
-///
 /// TODO(architect): replace fields with concrete redis-scripting types once
 /// `crates/redis-scripting` lands (deferred phase).
 pub struct EvalScriptsCtx {
@@ -79,7 +71,6 @@ pub struct EvalScriptsCtx {
 }
 
 /// Placeholder for C's `functionsLibCtx *`.
-///
 /// TODO(architect): replace with `redis_scripting::FunctionsLibCtx` once
 /// `crates/redis-scripting/src/functions.rs` lands (deferred phase).
 pub struct OpaqueFunctionsLibCtx {
@@ -87,12 +78,10 @@ pub struct OpaqueFunctionsLibCtx {
 }
 
 // ── BIO-thread callback functions ──────────────────────────────────────────────
-//
 // In C these are registered with `bioCreateLazyFreeJob` and invoked from a
-// bio.c background thread. The Rust equivalents take typed owned arguments;
+// Background thread. The Rust equivalents take typed owned arguments;
 // Rust's drop semantics replace `decrRefCount` / the various `*Release`/
 // `*Free` calls.
-//
 // TODO(architect): wire each of these into `bio.rs` once the background-task
 // channel infrastructure is in place.
 
@@ -197,8 +186,7 @@ pub fn lazyfree_reset_stats() {
 // ── Free-effort estimation ─────────────────────────────────────────────────────
 
 /// Returns a number proportional to the amount of work required to free `obj`.
-///
-/// The C implementation distinguishes object *type* AND *encoding*: only the
+/// The C implementation distinguishes object *type* AND *encoding*: only
 /// "large" encodings (quicklist, hashtable, skiplist) return values > 1;
 /// small encodings (listpack, intset, ziplist) fall through to the default
 /// `return 1`. Because the current `RedisObject` enum does not yet carry
@@ -206,19 +194,16 @@ pub fn lazyfree_reset_stats() {
 /// directly, which may return values > 1 for objects that C would score as 1.
 /// This is a conservative overestimate: it may trigger async frees for small
 /// objects but never skips async frees for large ones.
-///
 /// `key` is included for the Module variant (it is unused for built-in types).
-///
 pub fn lazyfree_get_free_effort(key: &RedisObject, obj: &RedisObject, dbid: i32) -> usize {
-    //
-    // PORT NOTE: collapsed to `collection_len()` plus per-type tail cases. The
-    // collection-length shim covers List/Set/ZSet/Hash uniformly; Stream and
-    // String fall through to a constant.
+ // PORT NOTE: collapsed to `collection_len` plus per-type tail cases. The
+ // collection-length shim covers List/Set/ZSet/Hash uniformly; Stream
+ // String fall through to a constant.
     if obj.is_list() || obj.is_set() || obj.is_zset() || obj.is_hash() {
         return obj.collection_len();
     }
     if let Some(stream) = obj.stream() {
-        // Stream effort is based on rax nodes plus consumer-group metadata.
+ // Stream effort is based on rax nodes plus consumer-group metadata.
         let _ = (key, dbid); // silence unused-variable warnings
         let group_effort: usize = stream
             .groups
@@ -238,9 +223,9 @@ pub fn lazyfree_get_free_effort(key: &RedisObject, obj: &RedisObject, dbid: i32)
             .saturating_add(group_effort)
             .max(1);
     }
-    // String / Module fall here.
+ // String / Module fall here.
     // TODO(port): OBJ_MODULE → moduleGetFreeEffort(key, obj, dbid);
-    //   return ULONG_MAX if effort == 0. Blocked on Phase 10 modules.
+ // return ULONG_MAX if effort == 0. Blocked on Phase 10 modules.
     let _ = (key, dbid);
     1
 }
@@ -262,19 +247,16 @@ pub fn free_obj_async(key: &RedisObject, obj: RedisObject, dbid: i32) {
 
 /// Replace a database's three key stores with fresh, empty ones and schedule
 /// the old stores for lazy freeing.
-///
 /// TODO(architect): The current pilot `RedisDb` stores a single `HashMap`
 /// (`db.dict`). Full semantics require kvstore split.
 pub fn empty_db_async(db: &mut RedisDb) {
-    // Pilot approximation: synchronously clear the single backing dict.
+ // Pilot approximation: synchronously clear the single backing dict.
     db.clear();
 }
 
 /// Free the client key-tracking radix tree, asynchronously if it is large.
-///
 /// Note: the threshold is against `tracking->numnodes` (internal nodes),
 /// not `tracking->numele` (element count). The counter update uses `numele`.
-///
 /// TODO(architect): wire the BIO job once bio.rs lands.
 pub fn free_tracking_radix_tree_async(tracking: OpaqueRax) {
     if tracking.numnodes > LAZYFREE_THRESHOLD {
@@ -287,9 +269,7 @@ pub fn free_tracking_radix_tree_async(tracking: OpaqueRax) {
 }
 
 /// Free the error-stats radix tree, asynchronously if it is large.
-///
 /// Note: threshold is against `errors->numnodes`; counter update uses `numele`.
-///
 /// TODO(architect): wire the BIO job once bio.rs lands.
 pub fn free_errors_radix_tree_async(errors: OpaqueRax) {
     if errors.numnodes > LAZYFREE_THRESHOLD {
@@ -302,7 +282,6 @@ pub fn free_errors_radix_tree_async(errors: OpaqueRax) {
 }
 
 /// Free the eval-scripts context, asynchronously if the scripts dict is large.
-///
 /// TODO(architect): wire the BIO job once bio.rs lands.
 pub fn free_eval_scripts_async(ctx: EvalScriptsCtx) {
     let script_count = ctx.script_count;
@@ -316,7 +295,6 @@ pub fn free_eval_scripts_async(ctx: EvalScriptsCtx) {
 }
 
 /// Free a `functionsLibCtx`, asynchronously if it holds enough functions.
-///
 /// TODO(architect): wire the BIO job once bio.rs lands.
 pub fn free_functions_async(functions_lib_ctx: OpaqueFunctionsLibCtx) {
     let functions_len = functions_lib_ctx.functions_len;
@@ -331,7 +309,6 @@ pub fn free_functions_async(functions_lib_ctx: OpaqueFunctionsLibCtx) {
 
 /// Free the replication-backlog reference memory (blocks list + index rax),
 /// asynchronously if either structure is large.
-///
 /// TODO(architect): wire the BIO job once bio.rs lands.
 pub fn free_replication_backlog_ref_mem_async(blocks: OpaqueAdList, index: OpaqueRax) {
     if blocks.len > LAZYFREE_THRESHOLD || index.numele > LAZYFREE_THRESHOLD {
@@ -346,7 +323,6 @@ pub fn free_replication_backlog_ref_mem_async(blocks: OpaqueAdList, index: Opaqu
 }
 
 /// Free the `replicaKeysWithExpire` dict, asynchronously if it is large.
-///
 /// TODO(architect): wire the BIO job once bio.rs lands.
 pub fn free_replica_keys_with_expire_async(replica_keys_with_expire: HashMap<RedisString, i64>) {
     let len = replica_keys_with_expire.len();
@@ -360,7 +336,6 @@ pub fn free_replica_keys_with_expire_async(replica_keys_with_expire: HashMap<Red
 }
 
 /// Free the pending-replication-data blocks list, asynchronously if large.
-///
 /// TODO(architect): wire the BIO job once bio.rs lands.
 pub fn free_pending_repl_data_buf_async(pending_repl_data_blocks: OpaqueAdList) {
     let len = pending_repl_data_blocks.len;
@@ -375,7 +350,7 @@ pub fn free_pending_repl_data_buf_async(pending_repl_data_blocks: OpaqueAdList) 
 
 // ──────────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        src/lazyfree.c  (301 lines, 22 functions)
+//   source:        Valkey
 //   target_crate:  redis-core
 //   confidence:    medium
 //   todos:         18

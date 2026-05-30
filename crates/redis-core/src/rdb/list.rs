@@ -1,26 +1,21 @@
 //! RDB list type serialization — Round 21.
-//!
 //! Implements `save_list_object` / `load_list_object` for `RDB_TYPE_LIST` (type 0x01)
 //! and `load_quicklist2_object` for `RDB_TYPE_LIST_QUICKLIST_2` (type 0x12 = 18),
 //! which is the format that C Valkey always emits.
-//!
 //! Save wire layout (RDB_TYPE_LIST) after the type byte:
-//!   - `save_len(N)` — number of elements
-//!   - For each element: raw-byte string (length-prefixed)
-//!
+//! - `save_len(N)` — number of elements
+//! - For each element: raw-byte string (length-prefixed)
 //! Load wire layout (RDB_TYPE_LIST_QUICKLIST_2) after the type byte:
-//!   - `save_len(num_nodes)` — number of quicklist nodes
-//!   - For each node:
-//!     - `save_len(container)` — 1 = PLAIN, 2 = PACKED (listpack blob)
-//!     - raw-byte string: the element bytes (PLAIN) or listpack blob (PACKED)
-//!
+//! - `save_len(num_nodes)` — number of quicklist nodes
+//! - For each node:
+//! - `save_len(container)` — 1 = PLAIN, 2 = PACKED (listpack blob)
+//! - raw-byte string: the element bytes (PLAIN) or listpack blob (PACKED)
 //! PACKED nodes contain a listpack binary that holds one or more string/integer
-//! entries.  PLAIN nodes hold a single oversized element directly.
-//!
+//! entries. PLAIN nodes hold a single oversized element directly.
 //! Design decision: we emit `RDB_TYPE_LIST` on save because it is a simpler
 //! format that C Valkey loads without error (compatibility direction A: us → C).
 //! For direction B (C → us) we parse `RDB_TYPE_LIST_QUICKLIST_2` by decoding
-//! both PLAIN and PACKED nodes via the minimal listpack decoder in
+//! both PLAIN and PACKED nodes via the minimal listpack decoder
 //! `rdb/listpack.rs`.
 
 use std::collections::VecDeque;
@@ -38,7 +33,6 @@ const QUICKLIST_NODE_CONTAINER_PLAIN: u64 = 1;
 const QUICKLIST_NODE_CONTAINER_PACKED: u64 = 2;
 
 /// Serialize an `RDB_TYPE_LIST` value payload.
-///
 /// The type byte is written by the caller; this function writes the element
 /// count followed by each element as a raw-byte length-prefixed string.
 pub fn save_list_object(w: &mut impl Write, obj: &RedisObject) -> io::Result<()> {
@@ -56,7 +50,6 @@ pub fn save_list_object(w: &mut impl Write, obj: &RedisObject) -> io::Result<()>
 }
 
 /// Deserialize an `RDB_TYPE_LIST` value payload, producing a `RedisObject`.
-///
 /// Reads from `r` starting immediately after the type byte.
 pub fn load_list_object(r: &mut impl Read) -> io::Result<RedisObject> {
     let (n, _is_encoded) = load_len(r)?;
@@ -69,7 +62,6 @@ pub fn load_list_object(r: &mut impl Read) -> io::Result<RedisObject> {
 }
 
 /// Deserialize an `RDB_TYPE_LIST_QUICKLIST_2` value payload, producing a `RedisObject`.
-///
 /// C Valkey always emits this format for lists. Each node carries a container
 /// tag (1 = PLAIN, 2 = PACKED) followed by raw bytes. PLAIN nodes hold one
 /// oversized element directly. PACKED nodes hold a listpack binary with one
@@ -191,10 +183,10 @@ mod tests {
         }
     }
 
-    /// A crafted payload declares billions of elements but supplies no data.
-    /// Without the pre-allocation cap this would attempt a multi-gigabyte
-    /// `VecDeque` allocation and abort the process; with the cap it must fail
-    /// cleanly on the first absent element read instead.
+ /// A crafted payload declares billions of elements but supplies no data.
+ /// Without the pre-allocation cap this would attempt a multi-gigabyte
+ /// `VecDeque` allocation and abort the process; with the cap it must fail
+ /// cleanly on the first absent element read instead.
     #[test]
     fn hostile_length_prefix_errors_without_aborting() {
         let mut buf: Vec<u8> = Vec::new();

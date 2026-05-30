@@ -1,7 +1,6 @@
 //! Reply-adapter traits used by `CommandContext` reply builders.
-//!
 //! Extracted from `command_context.rs` by refactor/file-structure-splits.
-//! These trait + impl blocks define how `i64/usize/i32` widen into the
+//! These trait + impl blocks define how `i64/usize/i32` widen into
 //! reply-array-length argument, how `RedisError/&[u8]/&[u8; N]` adapt
 //! into error-reply payloads, and how `usize/i64/i32` index `argv`.
 
@@ -30,7 +29,6 @@ impl<const N: usize> ReplyErrorArg for &[u8; N] {
 }
 
 /// Flexible reply-array length argument.
-///
 /// Translated callers pass `usize`, `i64`, and `i32` interchangeably; this
 /// trait normalises them to `i64` for the underlying writer. Phase 3 may
 /// tighten this once we settle on a single int type for protocol sizes.
@@ -54,7 +52,7 @@ impl ReplyArrayLen for i32 {
     }
 }
 
-/// Flexible argv-index trait. Translated code mixes `usize`, `i32`, and
+/// Flexible argv-index trait. Translated code mixes `usize`, `i32`,
 /// arithmetic on `i64` for indexing into `client.argv`.
 pub trait ArgIndex {
     fn into_arg_index(self) -> RedisResult<usize>;

@@ -1,18 +1,15 @@
-//! CRC-64 (Jones variant) — direct port of `src/crc64.c`.
-//!
-//! The C code uses `crcspeed64native` which builds a lookup table from the
+//! CRC-64 (Jones variant) — direct port.
+//! The C code uses `crcspeed64native` which builds a lookup table from
 //! bit-by-bit `_crc64` reference implementation. `_crc64` processes each
 //! input byte LSB-first (ReflectIn=true), applies the Jones polynomial
 //! `0xad93d23594c935a9`, then reflects the entire 64-bit state at the end
 //! (ReflectOut=true). Initial state and XorOut are both 0.
-//!
 //! The efficient single-table implementation precomputes CRC values for each
 //! possible byte using the REFLECTED polynomial `0x95ac9329ac4bc9b5` (which is
 //! the bit-reversal of the Jones polynomial). The running state is updated by
 //! indexing the table with `(state ^ byte) & 0xff` and XOR-ing the result
 //! with `state >> 8`.
-//!
-//! Calling convention matches `crc64(crc, data, len)` in crc64.c:
+//! Calling convention matches `crc64(crc, data, len)`:
 //! pass `crc = 0` for the first call; the returned value can be passed back
 //! in for incremental updates.
 
@@ -41,10 +38,8 @@ const fn make_table() -> [u64; 256] {
 static CRC64_TABLE: [u64; 256] = make_table();
 
 /// Compute the running CRC-64 checksum.
-///
 /// `crc` is the running state (pass `0` for the first call). The returned
 /// value is the new state, which can be passed back for incremental updates.
-///
 /// Calling convention matches Valkey's `crc64(crc, data, len)`:
 /// `crc64(0, b"...")` produces the checksum of the given bytes.
 pub fn crc64(crc: u64, data: &[u8]) -> u64 {

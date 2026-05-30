@@ -1,23 +1,20 @@
 //! `redis-server` binary entry point — Wave A scaffolding.
-//!
 //! Plain TCP binds a port and runs through the `mio` readiness-backed
 //! `RuntimeOwner` loop: one owner accepts sockets, parses RESP requests,
 //! dispatches through `redis-commands`, and flushes replies.
-//!
-//! TLS transport migration is still human-gated. Once the owner loop owns the
+//! TLS transport migration is still human-gated. Once the owner loop owns
 //! live DB vector, this binary refuses to start the old TLS command path rather
 //! than letting TLS commands mutate a divergent global DB.
-//!
 //! Out of scope for Wave A:
-//!   * Tokio/raw pollers; plain TCP uses `mio`, TLS keeps the older path.
-//!   * Cluster, modules, and full TLS socket migration.
+//! * Tokio/raw pollers; plain TCP uses `mio`, TLS keeps the older path.
+//! * Cluster, modules, and full TLS socket migration.
 
 /// Use jemalloc as the process global allocator. Valkey ships jemalloc; this
-/// reference build falls back to libc malloc, and a default Rust binary uses the
-/// system allocator. jemalloc's thread-local arenas and size classes cut the
+/// reference build falls back to libc malloc, and a default Rust binary uses
+/// system allocator. jemalloc's thread-local arenas and size classes cut
 /// per-element heap-allocation cost that dominates collection-write commands
 /// (SADD/HSET/ZADD/SPOP/ZPOPMIN), where every member/field is its own
-/// `RedisString` allocation. The `unsafe impl GlobalAlloc` lives in the
+/// `RedisString` allocation. The `unsafe impl GlobalAlloc` lives in
 /// allocator crate, not here, so this stays within the crate unsafe budget.
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -373,9 +370,9 @@ fn main() {
         }
     }));
 
-    // Build the TLS listener(s) + rustls config from startup config (the same
-    // tls-* keys the upstream test harness passes). TLS connections are served
-    // by the same RuntimeOwner / DB as plain TCP (the divergent-DB path is gone).
+ // Build the TLS listener(s) + rustls config from startup config (the same
+ // tls-* keys the upstream test harness passes). TLS connections are served
+ // by the same RuntimeOwner / DB as plain TCP (the divergent-DB path is gone).
     let (tls_listeners, tls_config) = build_tls_startup(&args, &live_config);
 
     runtime_owner::RuntimeOwner::run_plain_tcp(
