@@ -123,100 +123,40 @@
   </p>
 
   <details>
-    <summary>Full per-row data (9 pipeline depths + 23 commands)</summary>
+    <summary>Full per-row data (auto-generated from the latest benchmark run)</summary>
 
-    <table class="perf-table">
-      <caption>vs Valkey 8.1.7</caption>
-      <thead>
-        <tr><th>Workload</th><th class="num">Valdr rps</th><th class="num">Valkey rps</th><th class="num">Ratio</th></tr>
-      </thead>
-      <tbody>
-        <tr class="group-head"><th colspan="4">Pipeline-depth · GET / PING_MBULK / SET · p = 1 / 16 / 100</th></tr>
-        <tr><td>GET p=1</td>     <td class="num">149,925</td>  <td class="num">157,233</td>  <td class="num ratio">0.954×</td></tr>
-        <tr><td>GET p=16</td>    <td class="num">2,202,643</td><td class="num">2,083,333</td><td class="num ratio">1.057×</td></tr>
-        <tr><td>GET p=100</td>   <td class="num">5,555,556</td><td class="num">4,201,680</td><td class="num ratio win">1.322×</td></tr>
-        <tr><td>PING p=1</td>    <td class="num">152,905</td>  <td class="num">160,514</td>  <td class="num ratio">0.953×</td></tr>
-        <tr><td>PING p=16</td>   <td class="num">2,267,574</td><td class="num">2,232,143</td><td class="num ratio">1.016×</td></tr>
-        <tr><td>PING p=100</td>  <td class="num">7,246,377</td><td class="num">5,102,041</td><td class="num ratio win">1.420×</td></tr>
-        <tr><td>SET p=1</td>     <td class="num">150,376</td>  <td class="num">159,236</td>  <td class="num ratio">0.944×</td></tr>
-        <tr><td>SET p=16</td>    <td class="num">1,941,748</td><td class="num">1,757,469</td><td class="num ratio">1.105×</td></tr>
-        <tr><td>SET p=100</td>   <td class="num">3,610,108</td><td class="num">2,695,418</td><td class="num ratio win">1.339×</td></tr>
-
-        <tr class="group-head"><th colspan="4">Default suite · pipeline = 100 · payload = 64 bytes</th></tr>
-        <tr><td>ping_inline</td>   <td class="num">5,263,158</td><td class="num">3,703,704</td><td class="num ratio win">1.421×</td></tr>
-        <tr><td>ping_mbulk</td>    <td class="num">7,142,857</td><td class="num">5,555,556</td><td class="num ratio win">1.286×</td></tr>
-        <tr><td>set</td>           <td class="num">3,703,704</td><td class="num">3,030,303</td><td class="num ratio win">1.222×</td></tr>
-        <tr><td>get</td>           <td class="num">4,761,905</td><td class="num">3,846,154</td><td class="num ratio win">1.238×</td></tr>
-        <tr><td>incr</td>          <td class="num">4,166,667</td><td class="num">4,000,000</td><td class="num ratio">1.042×</td></tr>
-        <tr><td>lpush</td>         <td class="num">2,777,778</td><td class="num">2,439,024</td><td class="num ratio">1.139×</td></tr>
-        <tr><td>rpush</td>         <td class="num">2,702,703</td><td class="num">2,702,703</td><td class="num ratio">1.000×</td></tr>
-        <tr><td>lpop</td>          <td class="num">2,564,102</td><td class="num">2,272,727</td><td class="num ratio">1.128×</td></tr>
-        <tr><td>rpop</td>          <td class="num">2,380,952</td><td class="num">2,500,000</td><td class="num ratio">0.952×</td></tr>
-        <tr><td>sadd</td>          <td class="num">2,380,952</td><td class="num">3,225,806</td><td class="num ratio behind">0.738×</td></tr>
-        <tr><td>hset</td>          <td class="num">1,724,138</td><td class="num">2,500,000</td><td class="num ratio behind">0.690×</td></tr>
-        <tr><td>spop</td>          <td class="num">2,857,143</td><td class="num">4,000,000</td><td class="num ratio behind">0.714×</td></tr>
-        <tr><td>zadd</td>          <td class="num">1,923,077</td><td class="num">2,439,024</td><td class="num ratio behind">0.788×</td></tr>
-        <tr><td>zpopmin</td>       <td class="num">2,857,143</td><td class="num">4,166,667</td><td class="num ratio behind">0.686×</td></tr>
-        <tr><td>lrange_100</td>    <td class="num">176,367</td>  <td class="num">129,032</td>  <td class="num ratio win">1.367×</td></tr>
-        <tr><td>lrange_300</td>    <td class="num">56,180</td>   <td class="num">38,971</td>   <td class="num ratio win">1.442×</td></tr>
-        <tr><td>lrange_500</td>    <td class="num">34,153</td>   <td class="num">23,175</td>   <td class="num ratio win">1.474×</td></tr>
-        <tr><td>lrange_600</td>    <td class="num">27,778</td>   <td class="num">18,685</td>   <td class="num ratio win">1.487×</td></tr>
-        <tr><td>mset</td>          <td class="num">636,943</td>  <td class="num">456,621</td>  <td class="num ratio win">1.395×</td></tr>
-        <tr><td>mget</td>          <td class="num">1,063,829</td><td class="num">847,457</td>  <td class="num ratio win">1.255×</td></tr>
-        <tr><td>xadd</td>          <td class="num">1,123,596</td><td class="num">1,388,889</td><td class="num ratio behind">0.809×</td></tr>
-        <tr><td>function_load</td> <td class="num">578,035</td>  <td class="num">58,893</td>   <td class="num ratio win">9.815×</td></tr>
-        <tr><td>fcall</td>         <td class="num">847,458</td>  <td class="num">1,428,571</td><td class="num ratio behind">0.593×</td></tr>
-      </tbody>
-    </table>
-
-    <table class="perf-table">
-      <caption>vs Valkey 9.1.0</caption>
-      <thead>
-        <tr><th>Workload</th><th class="num">Valdr rps</th><th class="num">Valkey rps</th><th class="num">Ratio</th></tr>
-      </thead>
-      <tbody>
-        <tr class="group-head"><th colspan="4">Pipeline-depth · GET / PING_MBULK / SET · p = 1 / 16 / 100</th></tr>
-        <tr><td>GET p=1</td>     <td class="num">161,551</td>  <td class="num">175,747</td>  <td class="num ratio">0.919×</td></tr>
-        <tr><td>GET p=16</td>    <td class="num">2,590,674</td><td class="num">2,304,148</td><td class="num ratio">1.124×</td></tr>
-        <tr><td>GET p=100</td>   <td class="num">6,024,096</td><td class="num">3,937,008</td><td class="num ratio win">1.530×</td></tr>
-        <tr><td>PING p=1</td>    <td class="num">179,533</td>  <td class="num">177,305</td>  <td class="num ratio">1.013×</td></tr>
-        <tr><td>PING p=16</td>   <td class="num">2,375,297</td><td class="num">2,331,002</td><td class="num ratio">1.019×</td></tr>
-        <tr><td>PING p=100</td>  <td class="num">7,407,407</td><td class="num">4,950,495</td><td class="num ratio win">1.496×</td></tr>
-        <tr><td>SET p=1</td>     <td class="num">165,016</td>  <td class="num">176,991</td>  <td class="num ratio">0.932×</td></tr>
-        <tr><td>SET p=16</td>    <td class="num">2,028,397</td><td class="num">1,607,717</td><td class="num ratio win">1.262×</td></tr>
-        <tr><td>SET p=100</td>   <td class="num">3,636,363</td><td class="num">2,347,418</td><td class="num ratio win">1.549×</td></tr>
-
-        <tr class="group-head"><th colspan="4">Default suite · pipeline = 100 · payload = 64 bytes</th></tr>
-        <tr><td>ping_inline</td>   <td class="num">5,263,158</td><td class="num">4,000,000</td><td class="num ratio win">1.316×</td></tr>
-        <tr><td>ping_mbulk</td>    <td class="num">7,142,857</td><td class="num">5,555,556</td><td class="num ratio win">1.286×</td></tr>
-        <tr><td>set</td>           <td class="num">3,846,154</td><td class="num">2,564,102</td><td class="num ratio win">1.500×</td></tr>
-        <tr><td>get</td>           <td class="num">4,545,454</td><td class="num">3,448,276</td><td class="num ratio win">1.318×</td></tr>
-        <tr><td>incr</td>          <td class="num">3,846,154</td><td class="num">3,571,428</td><td class="num ratio">1.077×</td></tr>
-        <tr><td>lpush</td>         <td class="num">2,564,102</td><td class="num">2,380,952</td><td class="num ratio">1.077×</td></tr>
-        <tr><td>rpush</td>         <td class="num">2,500,000</td><td class="num">2,777,778</td><td class="num ratio">0.900×</td></tr>
-        <tr><td>lpop</td>          <td class="num">2,500,000</td><td class="num">2,173,913</td><td class="num ratio">1.150×</td></tr>
-        <tr><td>rpop</td>          <td class="num">2,380,952</td><td class="num">2,439,024</td><td class="num ratio">0.976×</td></tr>
-        <tr><td>sadd</td>          <td class="num">2,325,581</td><td class="num">3,125,000</td><td class="num ratio behind">0.744×</td></tr>
-        <tr><td>hset</td>          <td class="num">1,754,386</td><td class="num">2,500,000</td><td class="num ratio behind">0.702×</td></tr>
-        <tr><td>spop</td>          <td class="num">2,857,143</td><td class="num">3,703,704</td><td class="num ratio behind">0.771×</td></tr>
-        <tr><td>zadd</td>          <td class="num">1,851,852</td><td class="num">2,222,222</td><td class="num ratio behind">0.833×</td></tr>
-        <tr><td>zpopmin</td>       <td class="num">2,702,703</td><td class="num">3,703,704</td><td class="num ratio behind">0.730×</td></tr>
-        <tr><td>lrange_100</td>    <td class="num">186,916</td>  <td class="num">114,943</td>  <td class="num ratio win">1.626×</td></tr>
-        <tr><td>lrange_300</td>    <td class="num">62,461</td>   <td class="num">37,722</td>   <td class="num ratio win">1.656×</td></tr>
-        <tr><td>lrange_500</td>    <td class="num">35,137</td>   <td class="num">21,777</td>   <td class="num ratio win">1.613×</td></tr>
-        <tr><td>lrange_600</td>    <td class="num">29,308</td>   <td class="num">18,123</td>   <td class="num ratio win">1.617×</td></tr>
-        <tr><td>mset</td>          <td class="num">628,931</td>  <td class="num">442,478</td>  <td class="num ratio win">1.421×</td></tr>
-        <tr><td>mget</td>          <td class="num">1,030,928</td><td class="num">740,741</td>  <td class="num ratio win">1.392×</td></tr>
-        <tr><td>xadd</td>          <td class="num">1,098,901</td><td class="num">1,408,451</td><td class="num ratio behind">0.780×</td></tr>
-        <tr><td>function_load</td> <td class="num">588,235</td>  <td class="num">56,593</td>   <td class="num ratio win">10.394×</td></tr>
-        <tr><td>fcall</td>         <td class="num">869,565</td>  <td class="num">1,351,351</td><td class="num ratio behind">0.643×</td></tr>
-      </tbody>
-    </table>
-
-    <p class="note">
-      Each adversary measured in its own run; Valdr-rps differs by ~3–8% between
-      runs (normal variance on un-quantized rps numbers).
-    </p>
+    <div id="perf-tables" class="perf-table-host">loading benchmark data…</div>
+    <p class="note" id="perf-meta"></p>
+    <script>
+      (function () {
+        var host = document.getElementById('perf-tables');
+        fetch('perf-data.json', { cache: 'no-store' })
+          .then(function (r) { return r.json(); })
+          .then(function (d) {
+            function cls(x) { return x < 1.0 ? 'ratio behind' : (x >= 1.10 ? 'ratio win' : 'ratio'); }
+            function fmt(n) { return n.toLocaleString('en-US'); }
+            function rows(arr) {
+              return arr.map(function (r) {
+                return '<tr><td>' + r.workload + '</td><td class="num">' + fmt(r.valdr_rps) +
+                  '</td><td class="num">' + fmt(r.valkey_rps) + '</td><td class="num ' + cls(r.ratio) +
+                  '">' + r.ratio.toFixed(3) + '×</td></tr>';
+              }).join('');
+            }
+            host.innerHTML =
+              '<table class="perf-table"><caption>vs ' + d.reference + '</caption>' +
+              '<thead><tr><th>Workload</th><th class="num">Valdr rps</th><th class="num">Valkey rps</th><th class="num">Ratio</th></tr></thead><tbody>' +
+              '<tr class="group-head"><th colspan="4">Pipeline-depth · GET / PING / SET / INCR · p = 1 / 16 / 100</th></tr>' +
+              rows(d.pipeline_depth) +
+              '<tr class="group-head"><th colspan="4">Default suite · pipeline = 100 · payload = 64 bytes</th></tr>' +
+              rows(d.default_suite) +
+              '</tbody></table>';
+            document.getElementById('perf-meta').textContent =
+              d.note + ' Measured ' + (d.measured_utc || '').slice(0, 10) + ' at commit ' +
+              d.source_commit + ' on ' + d.hardware + '.';
+          })
+          .catch(function () { host.textContent = 'benchmark data unavailable (perf-data.json)'; });
+      })();
+    </script>
   </details>
 
   <!-- ✍️ WRITE HERE (optional) — the honest perf story in your voice: fast on

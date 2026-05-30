@@ -92,6 +92,9 @@ bench-show: ## Reprint the most recent matrix. FORMAT=wide for all columns, json
 bench-release: ## The release-grade packet (warmup + all probes + Markdown bundle, ~90s)
 	bash harness/bench/official-warm-run.sh
 
+site-data: ## Regenerate docs/perf-data.json from the latest local benchmark artifacts (the site fetches this; commit it to update the site)
+	python3 harness/bench/build-site-data.py
+
 oracle: ## Tcl oracle vs our server. TIER=fast (~14s, default) | all; FILES=unit/type/string; FORMAT=json for raw
 	@python3 harness/oracle/tcl-survey.py --runner-id make --profile single-node-external \
 	  --timeout-s 180 --baseport 38000 --portcount 4000 --isolated-tests-copy --skip-build \
