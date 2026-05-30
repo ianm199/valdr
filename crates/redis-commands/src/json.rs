@@ -218,12 +218,6 @@ fn collect_recursive<'a>(
     }
 }
 
-/// Evaluate a JSONPath string against a JSON value.
-fn query_path<'a>(root: &'a Value, path: &str) -> Result<Vec<&'a Value>, RedisError> {
-    let tokens = lex_path(path)?;
-    Ok(eval_tokens(root, &tokens, 0))
-}
-
 /// Owned variant: clone all matched values.
 fn query_path_owned(root: &Value, path: &str) -> Result<Vec<Value>, RedisError> {
     let tokens = lex_path(path)?;

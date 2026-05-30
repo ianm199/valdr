@@ -161,6 +161,7 @@ pub(crate) enum BioJob {
 
 struct BioWorkerHandle {
     /// Thread title (for diagnostics / OS thread name).
+    #[allow(dead_code)] // faithful port of bio_worker_title; used when OS thread-name API is wired
     title: &'static str,
     /// Send side of the job channel; clone to create additional submitters.
     sender: Sender<BioJob>,

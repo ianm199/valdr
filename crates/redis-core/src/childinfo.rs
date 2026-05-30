@@ -1,4 +1,7 @@
 //! Child-info pipe — communicates RDB/AOF/replication progress from a
+// Deferred feature: BGSAVE COW-memory reporting pipe; wired when safe Unix pipe
+// abstraction (nix/os_pipe/std::pipe) is approved for the crate.
+#![allow(dead_code, private_interfaces)]
 //! forked child process to the parent via a non-blocking Unix pipe.
 //!
 //! C: `src/childinfo.c` (189 lines, 6 functions)

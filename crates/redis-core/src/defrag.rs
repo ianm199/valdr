@@ -1,4 +1,7 @@
 //! Active memory defragmentation.
+// Deferred feature: active-defrag engine; waiting on jemalloc internal extensions
+// per architecture decision. All items here are faithful ports, not dead code.
+#![allow(dead_code, private_interfaces)]
 //!
 //! Port of `src/defrag.c` (1357 lines, ~40 functions).
 //!

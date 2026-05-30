@@ -123,6 +123,7 @@ fn decode_length(buf: &[u8], offset: usize) -> Result<(u32, usize), RedisError> 
 /// The caller must ensure `buf` has sufficient capacity.
 ///
 /// C: zipmap.c:103-117 `zipmapEncodeLength`
+#[allow(dead_code)] // legacy zipmap RDB-format helper; kept for Phase-C RDB round-trip work
 fn encode_length(buf: &mut [u8], offset: usize, len: u32) -> usize {
     if len < ZIPMAP_BIGLEN as u32 {
         buf[offset] = len as u8;

@@ -1,4 +1,7 @@
 //! Memory-prefetch optimization for batched command processing.
+// Deferred feature: Valkey-8 batch dict-prefetch optimization; wired when
+// redis-ds hashtable and Client prefetch fields are ported (Phase B+).
+#![allow(dead_code)]
 //!
 //! Port of `src/memory_prefetch.c` (303 lines, 10 public / 7 private functions)
 //! and `src/memory_prefetch.h` (12 lines, 5 declarations).

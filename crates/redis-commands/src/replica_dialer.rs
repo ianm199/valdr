@@ -17,17 +17,12 @@
 
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
-use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::Duration;
 
-use redis_core::client::Client;
-use redis_core::command_context::CommandContext;
-use redis_core::db::RedisDb;
-use redis_core::pubsub_registry::PubSubRegistry;
 use redis_core::replication::{global_replication_state, repl_state_code, ReplicationState};
 use redis_core::server::RedisServer;
 use redis_types::RedisString;
@@ -249,104 +244,6 @@ fn run_replica_sink_loop(stream: &TcpStream, repl: &ReplicationState, dialer_epo
     }
 }
 
-/// The outer reconnect loop. Connects to the master, runs the handshake,
-/// applies commands, and restarts on any error.
-fn dialer_loop(
-    host: RedisString,
-    port: u16,
-    our_port: u16,
-    rdb_dir: String,
-    db: Arc<Mutex<RedisDb>>,
-    server: Arc<RedisServer>,
-) {
-    let repl = global_replication_state();
-    let dialer_epoch = repl.dialer_epoch.load(Ordering::SeqCst);
-
-    loop {
-        if repl.dialer_stop_flag.load(Ordering::SeqCst) {
-            return;
-        }
-
-        let host_str = String::from_utf8_lossy(host.as_bytes()).to_string();
-        let stream = match TcpStream::connect(format!("{}:{}", host_str, port)) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!(
-                    "redis-server: replica: connect {}:{} failed: {}",
-                    host_str, port, e
-                );
-                thread::sleep(Duration::from_secs(1));
-                continue;
-            }
-        };
-
-        if let Err(e) = stream.set_nodelay(true) {
-            eprintln!("redis-server: replica: set_nodelay failed: {}", e);
-        }
-
-        let initial_offset = match run_handshake(&stream, &repl, our_port) {
-            Ok(off) => off,
-            Err(e) => {
-                eprintln!("redis-server: replica: handshake failed: {}", e);
-                thread::sleep(Duration::from_secs(1));
-                continue;
-            }
-        };
-
-        if repl.dialer_stop_flag.load(Ordering::SeqCst) {
-            return;
-        }
-
-        let rdb_bytes = match read_fullresync_rdb(&stream) {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!("redis-server: replica: RDB read failed: {}", e);
-                thread::sleep(Duration::from_secs(1));
-                continue;
-            }
-        };
-
-        if let Err(e) = ingest_rdb(&rdb_bytes, &rdb_dir, &db) {
-            eprintln!("redis-server: replica: RDB ingest failed: {}", e);
-            thread::sleep(Duration::from_secs(1));
-            continue;
-        }
-
-        repl.master_repl_offset
-            .store(initial_offset, Ordering::SeqCst);
-        repl.repl_state
-            .store(repl_state_code::REPLICA_ONLINE, Ordering::SeqCst);
-        eprintln!("redis-server: replica: ONLINE at offset {}", initial_offset);
-
-        let ack_stream = match stream.try_clone() {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!(
-                    "redis-server: replica: try_clone for ACK thread failed: {}",
-                    e
-                );
-                repl.repl_state
-                    .store(repl_state_code::REPLICA_CONNECTING, Ordering::SeqCst);
-                thread::sleep(Duration::from_secs(1));
-                continue;
-            }
-        };
-        let repl_for_ack = Arc::clone(&repl);
-        let _ = thread::Builder::new()
-            .name("replica-ack".to_string())
-            .spawn(move || {
-                periodic_ack_loop(ack_stream, repl_for_ack, dialer_epoch);
-            });
-
-        run_command_apply_loop(&stream, &repl, &db, &server);
-
-        repl.repl_state
-            .store(repl_state_code::REPLICA_CONNECTING, Ordering::SeqCst);
-        eprintln!("redis-server: replica: disconnected, will reconnect");
-        thread::sleep(Duration::from_secs(1));
-    }
-}
-
 /// Execute the PING / REPLCONF / PSYNC handshake over `stream`.
 ///
 /// Returns the initial replication offset from the `+FULLRESYNC` reply.
@@ -487,85 +384,6 @@ fn read_fullresync_rdb(stream: &TcpStream) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// Write the RDB bytes to a temp file, then call `rdb::load_into`.
-fn ingest_rdb(rdb_bytes: &[u8], rdb_dir: &str, db: &Arc<Mutex<RedisDb>>) -> io::Result<()> {
-    let temp_path = PathBuf::from(rdb_dir).join("temp-incoming.rdb");
-    {
-        let mut f = std::fs::File::create(&temp_path)?;
-        f.write_all(rdb_bytes)?;
-        f.flush()?;
-    }
-
-    let result = {
-        let mut guard = lock_db(db)?;
-        *guard = RedisDb::new(0);
-        redis_core::rdb::load_into(&mut guard, &temp_path)
-    };
-
-    let _ = std::fs::remove_file(&temp_path);
-
-    match result {
-        Ok(msg) => {
-            eprintln!("redis-server: replica: RDB loaded: {}", msg);
-            Ok(())
-        }
-        Err(e) => Err(e),
-    }
-}
-
-/// The main command-apply loop. Reads one RESP frame per iteration, applies
-/// it to the local DB, and handles `REPLCONF GETACK *` by replying with
-/// our current offset. Exits on any read error or when the stop flag is set.
-fn run_command_apply_loop(
-    stream: &TcpStream,
-    repl: &ReplicationState,
-    db: &Arc<Mutex<RedisDb>>,
-    server: &Arc<RedisServer>,
-) {
-    let mut read_buf: Vec<u8> = Vec::new();
-    let mut tmp = [0u8; 8192];
-
-    loop {
-        if repl.dialer_stop_flag.load(Ordering::SeqCst) {
-            return;
-        }
-
-        let n = match stream_read(stream, &mut tmp) {
-            Ok(0) => return,
-            Ok(n) => n,
-            Err(_) => return,
-        };
-        read_buf.extend_from_slice(&tmp[..n]);
-
-        loop {
-            match redis_protocol::parse_inline_or_multibulk(&read_buf) {
-                Ok(Some((argv, consumed))) => {
-                    let offset_after = repl
-                        .master_repl_offset
-                        .fetch_add(consumed as i64, Ordering::SeqCst)
-                        .saturating_add(consumed as i64);
-                    read_buf.drain(..consumed);
-
-                    if argv.is_empty() {
-                        continue;
-                    }
-
-                    if is_getack(&argv) {
-                        let ack_msg = build_replconf_ack(offset_after);
-                        if stream_write(stream, &ack_msg).is_err() {
-                            return;
-                        }
-                    } else {
-                        apply_command_locally(&argv, db, server);
-                    }
-                }
-                Ok(None) => break,
-                Err(_) => return,
-            }
-        }
-    }
-}
-
 fn apply_command_via_runtime_owner(argv: Vec<RedisString>, offset_after: i64) -> bool {
     send_to_runtime_owner(ReplicaApplyKind::Command(argv), offset_after)
 }
@@ -605,57 +423,6 @@ fn is_getack(argv: &[RedisString]) -> bool {
     argv.len() >= 2
         && argv[0].as_bytes().eq_ignore_ascii_case(b"REPLCONF")
         && argv[1].as_bytes().eq_ignore_ascii_case(b"GETACK")
-}
-
-/// Apply a command received from the master to our local DB.
-///
-/// Uses a discarding `CommandContext` (replies written into a `Client` whose
-/// `reply_buf` is never flushed to a socket). The `replication_apply` flag
-/// allows ordinary writes through the replica read-only gate while suppressing
-/// re-propagation to downstream replicas.
-fn apply_command_locally(
-    argv: &[RedisString],
-    db: &Arc<Mutex<RedisDb>>,
-    server: &Arc<RedisServer>,
-) {
-    if argv.is_empty() {
-        return;
-    }
-    let name = argv[0].clone();
-    let mut client = Client::new(0);
-    client.replication_apply = true;
-    client.authenticated_user = Some(RedisString::from_bytes(b"default"));
-    client.set_args(argv.to_vec());
-
-    let registry = Arc::new(Mutex::new(PubSubRegistry::new()));
-    let result = match db.lock() {
-        Ok(mut guard) => {
-            let mut ctx = CommandContext::with_server(
-                &mut client,
-                &mut guard,
-                Arc::clone(server),
-                Arc::clone(&registry),
-            );
-            crate::dispatch::dispatch_command_name(&mut ctx, name.as_bytes())
-        }
-        Err(p) => {
-            let mut guard = p.into_inner();
-            let mut ctx = CommandContext::with_server(
-                &mut client,
-                &mut guard,
-                Arc::clone(server),
-                Arc::clone(&registry),
-            );
-            crate::dispatch::dispatch_command_name(&mut ctx, name.as_bytes())
-        }
-    };
-    if let Err(e) = result {
-        eprintln!(
-            "redis-server: replica: apply_command_locally({}) error: {:?}",
-            String::from_utf8_lossy(name.as_bytes()),
-            e
-        );
-    }
 }
 
 /// Periodically send `REPLCONF ACK <offset>` to the master every second.
@@ -757,10 +524,6 @@ fn read_exact_from_stream(stream: &TcpStream, buf: &mut [u8]) -> io::Result<()> 
     Ok(())
 }
 
-fn lock_db(db: &Arc<Mutex<RedisDb>>) -> io::Result<std::sync::MutexGuard<'_, RedisDb>> {
-    db.lock().map_err(|_| io::Error::other("DB mutex poisoned"))
-}
-
 fn stream_write(stream: &TcpStream, data: &[u8]) -> io::Result<()> {
     let mut s = stream
         .try_clone()
@@ -797,7 +560,9 @@ fn stream_read_slice(stream: &TcpStream, buf: &mut [u8]) -> io::Result<usize> {
 //   todos:         1
 //   port_notes:    1
 //   unsafe_blocks: 0
-//   notes:         Replica dialer is explicitly blocked after the owner-owned
+//   notes:         Deleted superseded dialer_loop/ingest_rdb/run_command_apply_loop/
+//                  apply_command_locally/lock_db (alternate apply loop, no caller).
+//                  Replica dialer is explicitly blocked after the owner-owned
 //                  DB flip until replication apply can route through
 //                  RuntimeOwner instead of a divergent global DB.
 // ──────────────────────────────────────────────────────────────────────────

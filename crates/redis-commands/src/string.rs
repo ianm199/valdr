@@ -55,7 +55,6 @@ use redis_core::notify::{NOTIFY_GENERIC, NOTIFY_NEW, NOTIFY_STRING};
 use redis_core::object::{ObjectKind, RedisObject, StringEncoding};
 use redis_protocol::frame::RespFrame;
 use redis_types::{RedisError, RedisString};
-use std::io::Write;
 
 // ── SET / GETEX / MSETEX flag bits  (C: ARGS_* in server.h) ─────────────
 // PORT NOTE: bit positions are local to this port; the C constants live in
@@ -121,45 +120,6 @@ pub enum CommandKind {
     Get,
     /// MSETEX: accepts NX, XX, EX, PX, EXAT, PXAT, KEEPTTL.
     Mset,
-}
-
-// ──────────────────────────────────────────────────────────────────────────
-// Private helpers
-// ──────────────────────────────────────────────────────────────────────────
-
-/// Return the byte slice of a `RedisObject::String`, or `None` if wrong type.
-///
-/// C: `objectGetVal(o)` when encoding is raw/embstr.
-fn object_as_bytes(obj: &RedisObject) -> Option<&[u8]> {
-    obj.as_string_bytes()
-}
-
-/// Return the length of a string object's value.
-///
-/// C: `stringObjectLen(o)`.
-fn string_object_len(obj: &RedisObject) -> usize {
-    object_as_bytes(obj).map_or(0, |b| b.len())
-}
-
-/// Format an `i64` as its decimal ASCII bytes.
-///
-/// C: `ll2string` / `createStringObjectFromLongLong`.
-fn long_long_to_bytes(n: i64) -> Vec<u8> {
-    let mut buf = Vec::new();
-    write!(buf, "{}", n).ok();
-    buf
-}
-
-/// Format an `f64` as decimal ASCII bytes.
-///
-/// TODO(port): C `ld2string` with `humanfriendly=1` trims trailing zeros
-/// and uses 17 significant digits for round-trip fidelity.  The Rust
-/// `{}` formatter may produce different representations for some values;
-/// verify against wire-diff oracle in Phase C.
-fn double_to_bytes(v: f64) -> Vec<u8> {
-    let mut buf = Vec::new();
-    write!(buf, "{}", v).ok();
-    buf
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -1731,6 +1691,7 @@ mod tests {
 //   todos:         15
 //   port_notes:    3
 //   unsafe_blocks: 0
-//   notes:         Phase A skeleton — all stubs; bodies added in subsequent edits.
+//   notes:         Deleted redundant converters object_as_bytes/string_object_len/
+//                  long_long_to_bytes/double_to_bytes (no callers).
 //                  db/server access blocked on Phase 3 architect packet.
 // ──────────────────────────────────────────────────────────────────────────

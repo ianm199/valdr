@@ -1,4 +1,7 @@
 //! Process-title manipulation for Linux and macOS.
+// Deferred feature: process-title (ps/cmdline) override; wired at startup once
+// the libc/unsafe budget for argv[0] manipulation is approved.
+#![allow(dead_code)]
 //!
 //! Ports `src/setproctitle.c` (332 lines, 6 functions), which implements
 //! `setproctitle(3)` for platforms that lack a native version. BSD-family OSes

@@ -54,10 +54,12 @@ const ACTIVE_EXPIRE_DBS_PER_STEP: usize = 16;
 pub struct SlotId(u32);
 
 impl SlotId {
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     pub const fn new(raw: u32) -> Self {
         Self(raw)
     }
 
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     pub const fn as_u32(self) -> u32 {
         self.0
     }
@@ -97,10 +99,12 @@ impl PollDriverHandle {
         }
     }
 
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     pub const fn is_installed(self) -> bool {
         self.installed
     }
 
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     pub const fn epoch(self) -> u64 {
         self.epoch
     }
@@ -126,14 +130,17 @@ impl RuntimeOwnerConfig {
         }
     }
 
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     pub const fn enabled(self) -> bool {
         self.enabled
     }
 
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     pub const fn database_count(self) -> u32 {
         self.database_count
     }
 
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     pub const fn max_pending_events(self) -> usize {
         self.max_pending_events
     }
@@ -148,6 +155,7 @@ impl RuntimeOwnerConfig {
         self
     }
 
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     pub const fn with_max_pending_events(mut self, max_pending_events: usize) -> Self {
         self.max_pending_events = max_pending_events;
         self
@@ -204,6 +212,7 @@ impl ClientWriteBuffer {
         &self.bytes[self.consumed..]
     }
 
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     pub fn take(&mut self) -> Vec<u8> {
         if self.consumed == 0 {
             return std::mem::take(&mut self.bytes);
@@ -316,10 +325,12 @@ impl ClientSlot {
         self.id
     }
 
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     pub fn client(&self) -> &Client {
         &self.client
     }
 
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     pub fn client_mut(&mut self) -> &mut Client {
         &mut self.client
     }
@@ -329,10 +340,12 @@ impl ClientSlot {
         self.last_client_activity = Instant::now();
     }
 
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     pub fn query_buffer(&self) -> &[u8] {
         &self.client.query_buf
     }
 
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     pub fn clear_query_buffer(&mut self) {
         self.client.query_buf.clear();
     }
@@ -356,10 +369,12 @@ impl ClientSlot {
         self.last_client_activity = Instant::now();
     }
 
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     pub fn stage_argv(&mut self, argv: Vec<RedisString>) {
         self.client.argv = argv;
     }
 
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     pub fn argv(&self) -> &[RedisString] {
         &self.client.argv
     }
@@ -389,6 +404,7 @@ impl ClientSlot {
         true
     }
 
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     pub fn pending_write_len(&self) -> usize {
         self.write_buffer.len()
     }
@@ -480,6 +496,7 @@ impl ClientSlot {
         }
     }
 
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     pub fn is_closed(&self) -> bool {
         self.closed
     }
@@ -637,12 +654,14 @@ impl ClientSlot {
         !self.closed && !self.close_after_flush && !self.client.flags.no_evict
     }
 
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     pub fn into_client(self) -> Client {
         self.client
     }
 }
 
 /// Single ordered event stream from background subsystems into the owner.
+#[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RuntimeEvent {
     Publish {
@@ -669,6 +688,7 @@ pub enum RuntimeEvent {
 }
 
 /// Outcome of one owner-loop command dispatch.
+#[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OwnerCommandResult {
     Replied { slot_id: SlotId },
@@ -678,6 +698,7 @@ pub enum OwnerCommandResult {
 }
 
 impl OwnerCommandResult {
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     pub fn slot_id(self) -> SlotId {
         match self {
             Self::Replied { slot_id }
@@ -687,6 +708,7 @@ impl OwnerCommandResult {
         }
     }
 
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Closed { .. })
     }
@@ -701,6 +723,7 @@ struct SlotDispatchOutcome {
 
 /// Owner of normal plain-TCP command execution for the mio readiness path.
 pub struct RuntimeOwner {
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     config: RuntimeOwnerConfig,
     poll_driver: PollDriverHandle,
     slots: Vec<Option<ClientSlot>>,
@@ -710,6 +733,7 @@ pub struct RuntimeOwner {
     dbs: Vec<RedisDb>,
     active_expire_cursor: usize,
     last_active_expire: Instant,
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     events: VecDeque<RuntimeEvent>,
     replica_apply_rx: Option<Receiver<redis_commands::replica_dialer::ReplicaApplyRequest>>,
     replica_apply_db_index: u32,
@@ -721,8 +745,12 @@ pub struct RuntimeOwner {
 }
 
 impl RuntimeOwner {
+    /// `new` inlines the database-creation logic directly so there is no
+    /// separate free `create_databases` helper needed.
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     pub fn new(config: RuntimeOwnerConfig) -> Self {
-        let dbs = create_databases(config.database_count());
+        let count = config.database_count().max(1);
+        let dbs: Vec<RedisDb> = (0..count).map(RedisDb::new).collect();
         Self::with_databases(config, dbs)
     }
 
@@ -751,26 +779,32 @@ impl RuntimeOwner {
         }
     }
 
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     pub fn disabled() -> Self {
         Self::new(RuntimeOwnerConfig::disabled())
     }
 
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     pub fn config(&self) -> RuntimeOwnerConfig {
         self.config
     }
 
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     pub fn poll_driver(&self) -> PollDriverHandle {
         self.poll_driver
     }
 
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     pub fn database_count(&self) -> usize {
         self.dbs.len()
     }
 
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     pub fn dbs(&self) -> &[RedisDb] {
         &self.dbs
     }
 
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     pub fn dbs_mut(&mut self) -> &mut [RedisDb] {
         &mut self.dbs
     }
@@ -779,14 +813,17 @@ impl RuntimeOwner {
         self.slots.iter().filter(|slot| slot.is_some()).count()
     }
 
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     pub fn event_queue_len(&self) -> usize {
         self.events.len()
     }
 
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     pub fn is_event_queue_empty(&self) -> bool {
         self.events.is_empty()
     }
 
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     pub fn queue_event(&mut self, event: RuntimeEvent) -> Result<(), RuntimeEvent> {
         if self.events.len() >= self.config.max_pending_events() {
             return Err(event);
@@ -795,10 +832,12 @@ impl RuntimeOwner {
         Ok(())
     }
 
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     pub fn pop_event(&mut self) -> Option<RuntimeEvent> {
         self.events.pop_front()
     }
 
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     pub fn insert_client(&mut self, client: Client) -> Option<SlotId> {
         if let Some(slot_id) = self.free_slots.pop() {
             let idx = slot_id.as_index();
@@ -1190,6 +1229,7 @@ impl RuntimeOwner {
         removed
     }
 
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     pub fn slot(&self, slot_id: SlotId) -> Option<&ClientSlot> {
         self.slots.get(slot_id.as_index())?.as_ref()
     }
@@ -1198,6 +1238,7 @@ impl RuntimeOwner {
         self.slots.get_mut(slot_id.as_index())?.as_mut()
     }
 
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     pub fn queue_write(&mut self, slot_id: SlotId, bytes: &[u8]) -> bool {
         let slot = match self.slot_mut(slot_id) {
             Some(slot) => slot,
@@ -1207,6 +1248,7 @@ impl RuntimeOwner {
         true
     }
 
+    #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     pub fn take_pending_write(&mut self, slot_id: SlotId) -> Option<Vec<u8>> {
         self.slot_mut(slot_id).map(ClientSlot::take_pending_write)
     }
@@ -2216,11 +2258,6 @@ impl RuntimeOwner {
     }
 }
 
-fn create_databases(count: u32) -> Vec<RedisDb> {
-    let count = count.max(1);
-    (0..count).map(RedisDb::new).collect()
-}
-
 fn token_for_slot(slot_id: SlotId) -> Token {
     Token(SLOT_TOKEN_BASE + slot_id.as_index())
 }
@@ -2530,8 +2567,11 @@ mod tests {
 //   target_crate:  redis-server
 //   confidence:    high
 //   todos:         0
-//   port_notes:    0
+//   port_notes:    1
 //   unsafe_blocks: 0
 //   notes:         Mio readiness plain-TCP owner loop with stable slot tokens
 //                  and owner-owned live DB storage for normal command dispatch.
+//                  Dead-code pass: create_databases free fn deleted (inlined
+//                  into RuntimeOwner::new); owner-loop vocabulary items
+//                  annotated with #[allow(dead_code)] per object-vocabulary.tsv.
 // --------------------------------------------------------------------------

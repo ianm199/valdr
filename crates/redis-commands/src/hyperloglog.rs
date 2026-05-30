@@ -1053,22 +1053,6 @@ pub fn is_hll_valid(buf: &[u8]) -> bool {
     true
 }
 
-/// Validate that a `RedisObject` contains a well-formed HLL string.
-/// Returns the underlying byte slice on success, Err with the HLL-specific
-/// WRONGTYPE message on failure.
-// C: hyperloglog.c:1633-1661, isHLLObjectOrReply
-// PORT NOTE: Reply is sent by the caller via `?`; this fn only validates.
-fn require_hll_object(obj: &RedisObject) -> Result<&[u8], RedisError> {
-    let bytes = obj.as_string_bytes().ok_or_else(|| {
-        RedisError::runtime(b"WRONGTYPE Key is not a valid HyperLogLog string value.")
-    })?;
-    if !is_hll_valid(bytes) {
-        return Err(RedisError::runtime(
-            b"WRONGTYPE Key is not a valid HyperLogLog string value.",
-        ));
-    }
-    Ok(bytes)
-}
 
 // ── Command entry points ──────────────────────────────────────────────────────
 
@@ -1504,7 +1488,8 @@ pub fn pfdebug_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 //   todos:         8
 //   port_notes:    4
 //   unsafe_blocks: 0   (must be 0 in pilot crates)
-//   notes:         Core algorithm fully translated (MurmurHash64A, pat_len, dense/sparse
+//   notes:         Deleted dead helper require_hll_object (superseded by require_hll_bytes).
+//                  Core algorithm fully translated (MurmurHash64A, pat_len, dense/sparse
 //                  encoding, sigma/tau estimator, merge, compress). PFDEBUG uses the
 //                  stored HLL bytes for GETREG, DECODE, ENCODING, and TODENSE. PFSELFTEST
 //                  exercises dense register access and approximation bounds. SIMD paths

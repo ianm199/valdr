@@ -72,10 +72,12 @@ pub const NET_MAX_WRITES_PER_EVENT: usize = 64 * 1024 * 1024;
 
 /// Minimum command-queue capacity.
 /// C: networking.c:168 COMMAND_QUEUE_MIN_CAPACITY
+#[allow(dead_code)] // C-source-referenced constant; used when command-queue sizing is wired
 const COMMAND_QUEUE_MIN_CAPACITY: usize = 16;
 
 /// Maximum replica reads per I/O event.
 /// C: networking.c:4283 REPL_MAX_READS_PER_IO_EVENT
+#[allow(dead_code)] // C-source-referenced constant; used when replica I/O event loop is wired
 const REPL_MAX_READS_PER_IO_EVENT: usize = 25;
 
 // ── Error flags (read_flags bitmask values) ──────────────────────────────────

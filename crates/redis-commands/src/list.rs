@@ -91,21 +91,6 @@ fn as_list_ref(obj: Option<&RedisObject>) -> Result<Option<&VecDeque<RedisString
     }
 }
 
-/// Mutable variant of `as_list_ref`.
-fn as_list_mut(
-    obj: Option<&mut RedisObject>,
-) -> Result<Option<&mut VecDeque<RedisString>>, RedisError> {
-    match obj {
-        None => Ok(None),
-        Some(o) => {
-            if o.is_list() {
-                Ok(o.list_mut())
-            } else {
-                Err(RedisError::wrong_type())
-            }
-        }
-    }
-}
 
 /// Normalise a signed list index into `[0, len]` for read access.
 ///
@@ -1837,7 +1822,8 @@ pub fn wake_blocked_after_swapdb(db_id: u32, _unused: u32) {
 //   todos:         3
 //   port_notes:    0
 //   unsafe_blocks: 0
-//   notes:         Round 2 byte-exact implementations for LPUSH, RPUSH,
+//   notes:         Deleted dead helper as_list_mut (no callers).
+//                  Round 2 byte-exact implementations for LPUSH, RPUSH,
 //                  LPUSHX, RPUSHX, LPOP, RPOP, LLEN, LRANGE, LINDEX,
 //                  LSET, LREM, LTRIM, LINSERT, LMOVE, RPOPLPUSH backed by
 //                  the pragmatic ListEncoding::Inline encoding from

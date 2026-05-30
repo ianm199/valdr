@@ -520,10 +520,12 @@ pub struct RedisDb {
 
     /// Keys with blocking clients (BLPOP / BRPOP / XREADGROUP).
     /// C: serverDb.blocking_keys — TODO(port): deferred to Phase 3.
+    #[allow(dead_code)] // C serverDb field; wired in Phase 3 when blocked-key unblock logic is ported
     blocking_keys: HashMap<RedisString, ()>,
 
     /// Keys signalled as ready to unblock a waiting client.
     /// C: serverDb.ready_keys — TODO(port): deferred to Phase 3.
+    #[allow(dead_code)] // C serverDb field; wired in Phase 3 when blocked-key unblock logic is ported
     ready_keys: HashSet<RedisString>,
 
     /// Keys being WATCHed by MULTI/EXEC clients.

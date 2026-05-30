@@ -76,6 +76,7 @@ use super::header::{read_rdb_string, write_rdb_string};
 use super::listpack::{decode_listpack, ListpackBuilder};
 use super::varint::{load_len, write_len};
 
+#[allow(dead_code)] // stream RDB format flag; used when full stream serialization is wired
 const STREAM_ITEM_FLAG_NONE: i64 = 0;
 const STREAM_ITEM_FLAG_DELETED: i64 = 1 << 0;
 const STREAM_ITEM_FLAG_SAMEFIELDS: i64 = 1 << 1;

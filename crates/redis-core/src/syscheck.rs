@@ -1,4 +1,7 @@
 //! System health checks run at startup to warn operators about suboptimal
+// Deferred feature: startup system-health warnings (clocksource, overcommit,
+// THP, arm64 fork bug); to be wired at server startup in Phase B.
+#![allow(dead_code)]
 //! kernel and VM configuration (clocksource, overcommit, THP, arm64 fork bug).
 //!
 //! Corresponds to `src/syscheck.c` + `src/syscheck.h` (374 lines, 6 functions).

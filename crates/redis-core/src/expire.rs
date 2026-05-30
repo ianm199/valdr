@@ -114,6 +114,7 @@ pub enum ActiveExpiryType {
 // ── Internal structs ─────────────────────────────────────────────────────
 
 // C: expire.c:128-139, expireScanData — per-scan accounting passed to callbacks.
+#[allow(dead_code)] // active-expire-cycle scan-callback port; fields wired when kvstoreScan is ported
 struct ExpireScanData {
     db_id: u32,
     now: MsTime,
@@ -231,6 +232,7 @@ pub fn active_expire_cycle_try_expire(
 // Callback passed to kvstoreScan for key-level TTL expiry.
 // PORT NOTE: In C this is a `void (*)(void*, void*, int)` passed to kvstoreScan.
 // Defined here as a typed Rust function; the caller adapts it when kvstore is ported.
+#[allow(dead_code)] // active-expire-cycle scan-callback; wired when kvstoreScan (redis-ds) is ported
 fn expire_scan_callback(
     data: &mut ExpireScanData,
     server: &mut RedisServer,
@@ -253,6 +255,7 @@ fn expire_scan_callback(
 
 // ── expire.c:165-177, fieldExpireScanCallback ─────────────────────────────
 // Callback passed to kvstoreScan for field-level TTL expiry inside hashes.
+#[allow(dead_code)] // active-expire-cycle scan-callback; wired when kvstoreScan (redis-ds) is ported
 fn field_expire_scan_callback(
     data: &mut ExpireScanData,
     _server: &RedisServer,
@@ -274,6 +277,7 @@ fn field_expire_scan_callback(
 // sampling too expensive relative to the number of hits found.
 // PORT NOTE: In C this takes `hashtable *ht`; caller extracts size/buckets.
 // Deferred until hashtable is ported; signature uses pre-extracted counts.
+#[allow(dead_code)] // active-expire-cycle scan-callback; wired when hashtable (redis-ds) is ported
 fn expire_should_skip_table_for_sampling(num_keys: u64, num_buckets: u64) -> bool {
     num_buckets > 0 && (num_keys * 100 / num_buckets) < 1
 }

@@ -112,19 +112,6 @@ fn bloom_add(bf: &mut BloomFilter, item: &[u8]) -> bool {
     was_new
 }
 
-/// Resolve a key to a mutable BloomFilter, returning a WRONGTYPE error when
-/// the key exists but is not a Bloom object.
-///
-/// Returns `Ok(None)` when the key does not exist.
-fn get_bloom_mut(obj: Option<&mut RedisObject>) -> Result<Option<&mut BloomFilter>, RedisError> {
-    match obj {
-        None => Ok(None),
-        Some(o) => match o.bloom_mut() {
-            Some(bf) => Ok(Some(bf)),
-            None => Err(bloom_wrong_type_error()),
-        },
-    }
-}
 
 /// Parse a float argument, returning a protocol-level error on failure.
 fn parse_float_arg(bytes: &[u8]) -> Result<f64, RedisError> {

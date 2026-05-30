@@ -1,4 +1,7 @@
 //! CPU affinity management for Valkey server threads.
+// Deferred feature: server.cpulist port of setcpuaffinity.c; fully ported, to be wired
+// at startup once the libc/unsafe budget is approved for this crate.
+#![allow(dead_code)]
 //!
 //! Port of `setcpuaffinity.c` (Valkey). Exposes [`set_cpu_affinity`] to pin
 //! the calling thread to a set of CPU cores described by a cpulist string

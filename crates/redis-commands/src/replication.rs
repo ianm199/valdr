@@ -647,52 +647,6 @@ pub fn waitaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     ctx.reply_integer(ackreplicas)
 }
 
-fn block_replica_waiter(
-    ctx: &mut CommandContext<'_>,
-    target_offset: i64,
-    numreplicas: usize,
-    timeout_secs: f64,
-) -> bool {
-    let registry = match ctx.pubsub.as_ref() {
-        Some(r) => r.clone(),
-        None => return false,
-    };
-    let sender = {
-        let guard = match registry.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        guard.sender_for(ctx.client_ref().id())
-    };
-    let sender = match sender {
-        Some(s) => s,
-        None => return false,
-    };
-
-    let sentinel_key = RedisString::from_bytes(b"__wait__");
-    let waiter = BlockedWaiter {
-        client_id: ctx.client_ref().id(),
-        sender,
-        keys: vec![sentinel_key],
-        action: BlockedAction::Wait {
-            target_offset,
-            numreplicas,
-        },
-        deadline_ms: deadline_from_timeout_secs(timeout_secs),
-        resp_proto: ctx.client_ref().resp_proto,
-        username: ctx.client_ref().authenticated_user.clone(),
-    };
-    {
-        let mut idx = match blocked_keys_index().lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        idx.add(waiter);
-    }
-    ctx.client_mut().blocked_on_keys = true;
-    true
-}
-
 fn block_waitaof_waiter(
     ctx: &mut CommandContext<'_>,
     target_offset: i64,
@@ -1324,6 +1278,7 @@ mod tests {
 //   todos:         3
 //   port_notes:    1
 //   unsafe_blocks: 0
-//   notes:         PSYNC/SYNC handshake accept; REPLICAOF toggle. Replica
+//   notes:         Deleted dead helper block_replica_waiter (no callers).
+//                  PSYNC/SYNC handshake accept; REPLICAOF toggle. Replica
 //                  dialer + RDB transfer are Wave B/C TODOs.
 // ──────────────────────────────────────────────────────────────────────────
