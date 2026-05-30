@@ -1,19 +1,17 @@
 //! Replica-side connection state machine — Wave C.
-//!
 //! When `REPLICAOF host port` is issued, `spawn_replica_dialer` launches a
 //! dedicated background thread that:
-//!
-//!  1. Connects to the master's TCP port.
-//!  2. Runs the PING / REPLCONF / PSYNC handshake.
-//!  3. Reads the `$<size>\r\n<rdb-bytes>` full-resync payload.
-//!  4. Drains the full-resync RDB payload. RuntimeOwner-backed loading is a
-//!     separate follow-up; the current frontier starts from empty replicas.
-//!  5. Enters the command-apply loop: reads one RESP frame per iteration,
-//!     applies it through the RuntimeOwner-owned DB queue, and responds to
-//!     `REPLCONF GETACK *` with `REPLCONF ACK <offset>`.
-//!  6. On any I/O error or EOF: sleeps briefly and restarts from step 1.
-//!  7. If `ReplicationState::dialer_stop_flag` is set (by `REPLICAOF NO ONE`),
-//!     exits immediately.
+//! 1. Connects to the master's TCP port.
+//! 2. Runs the PING / REPLCONF / PSYNC handshake.
+//! 3. Reads the `$<size>\r\n<rdb-bytes>` full-resync payload.
+//! 4. Drains the full-resync RDB payload. RuntimeOwner-backed loading is a
+//! separate follow-up; the current frontier starts from empty replicas.
+//! 5. Enters the command-apply loop: reads one RESP frame per iteration,
+//! applies it through the RuntimeOwner-owned DB queue, and responds
+//! `REPLCONF GETACK *` with `REPLCONF ACK <offset>`.
+//! 6. On any I/O error or EOF: sleeps briefly and restarts from step 1.
+//! 7. If `ReplicationState::dialer_stop_flag` is set (by `REPLICAOF NO ONE`),
+//! exits immediately.
 
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
@@ -34,7 +32,6 @@ static RUNTIME_APPLY_TX: OnceLock<Sender<ReplicaApplyRequest>> = OnceLock::new()
 
 /// Work the dialer thread hands to the runtime owner loop because the owner —
 /// not the dialer — owns the live DB slice.
-///
 /// `Command` is an ordinary replicated write parsed off the primary stream.
 /// `LoadRdb` is the full-resync snapshot the primary streams after `FULLRESYNC`;
 /// it must be loaded into the owned databases, replacing their contents. Routing
@@ -54,7 +51,6 @@ pub struct ReplicaApplyRequest {
 }
 
 /// Register the shared resources the dialer thread needs.
-///
 /// Called once from the binary's main before any `REPLICAOF` command can be
 /// issued. Subsequent calls are no-ops (OnceLock semantics).
 pub fn install_dialer_resources(server: Arc<RedisServer>, our_port: u16, rdb_dir: String) {
@@ -64,7 +60,6 @@ pub fn install_dialer_resources(server: Arc<RedisServer>, our_port: u16, rdb_dir
 }
 
 /// Install the RuntimeOwner-owned DB apply queue used by the replica dialer.
-///
 /// The dialer owns the master TCP stream and parses replication frames, but it
 /// cannot mutate the live keyspace directly because RuntimeOwner owns the DB
 /// slice. Applying through this queue keeps replica writes on the same thread
@@ -75,7 +70,6 @@ pub fn install_runtime_apply_sender(tx: Sender<ReplicaApplyRequest>) {
 
 /// Spawn a background dialer thread that implements the full replica state
 /// machine described in the module doc.
-///
 /// The function returns immediately; the spawned thread runs until
 /// `ReplicationState::dialer_stop_flag` is set to `true`. Returns an error
 /// when the dialer resources have not been installed.
@@ -103,7 +97,6 @@ pub fn spawn_replica_dialer(
 }
 
 /// RuntimeOwner-compatible replica dialer.
-///
 /// This performs the real TCP handshake so primaries observe an attached
 /// `flags=S` replica and stream bytes to it. Streamed write commands are routed
 /// back into RuntimeOwner so they mutate the live owner-owned DB list.
@@ -227,11 +220,11 @@ fn run_replica_sink_loop(stream: &TcpStream, repl: &ReplicationState, dialer_epo
                         if !repl.dialer_epoch_is_current(dialer_epoch) {
                             return;
                         }
-                        // C Valkey replicas periodically ACK their processed
-                        // offset even when the primary did not send GETACK.
-                        // This eager ACK keeps script WAIT's non-blocking
-                        // path accurate without adding a second timer thread
-                        // to the RuntimeOwner-compatible dialer.
+ // C Valkey replicas periodically ACK their processed
+ // offset even when the primary did not send GETACK.
+ // This eager ACK keeps script WAIT's non-blocking
+ // path accurate without adding a second timer thread
+ // to the RuntimeOwner-compatible dialer.
                         if stream_write(stream, &build_replconf_ack(offset_after)).is_err() {
                             return;
                         }
@@ -245,7 +238,6 @@ fn run_replica_sink_loop(stream: &TcpStream, repl: &ReplicationState, dialer_epo
 }
 
 /// Execute the PING / REPLCONF / PSYNC handshake over `stream`.
-///
 /// Returns the initial replication offset from the `+FULLRESYNC` reply.
 /// On `+CONTINUE` we return the current master offset (partial resync).
 fn run_handshake(stream: &TcpStream, repl: &ReplicationState, our_port: u16) -> io::Result<i64> {
@@ -331,8 +323,7 @@ fn run_handshake(stream: &TcpStream, repl: &ReplicationState, our_port: u16) -> 
 }
 
 /// Parse the `+FULLRESYNC <runid> <offset>` or `+CONTINUE <runid>` line.
-///
-/// Returns the initial offset the replica should track from.
+/// Returns the initial offset the replica should track.
 fn parse_psync_reply(line: &[u8]) -> io::Result<i64> {
     let s = std::str::from_utf8(line)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "non-UTF8 PSYNC reply"))?
@@ -426,7 +417,6 @@ fn is_getack(argv: &[RedisString]) -> bool {
 }
 
 /// Periodically send `REPLCONF ACK <offset>` to the master every second.
-///
 /// Exits when the stop flag is set or the write fails (master disconnected).
 fn periodic_ack_loop(mut stream: TcpStream, repl: Arc<ReplicationState>, dialer_epoch: u64) {
     loop {
@@ -484,7 +474,6 @@ fn build_multibulk(parts: &[&[u8]]) -> Vec<u8> {
 }
 
 /// Read a `\r\n`-terminated line from the stream.
-///
 /// Accumulates bytes until a CRLF is found. Returns the line bytes without
 /// the trailing `\r\n`. Standalone `\n` bytes (keepalive pings that Valkey
 /// masters send periodically) are skipped until a non-empty line arrives.
@@ -508,7 +497,7 @@ fn read_line(stream: &TcpStream) -> io::Result<Vec<u8>> {
     }
 }
 
-/// Read exactly `buf.len()` bytes from the stream.
+/// Read exactly `buf.len` bytes from the stream.
 fn read_exact_from_stream(stream: &TcpStream, buf: &mut [u8]) -> io::Result<()> {
     let mut filled = 0;
     while filled < buf.len() {
@@ -554,7 +543,7 @@ fn stream_read_slice(stream: &TcpStream, buf: &mut [u8]) -> io::Result<usize> {
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        valkey/src/replication.c (replica-side state machine)
+//   source:        Valkey
 //   target_crate:  redis-commands
 //   confidence:    medium
 //   todos:         1

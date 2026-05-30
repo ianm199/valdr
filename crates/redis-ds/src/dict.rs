@@ -1,5 +1,4 @@
 //! `Dict` — incrementally-rehashing hash table.
-//!
 //! Separate-chaining hash table with two underlying tables during incremental
 //! rehash, sized in powers of two, with per-type key/value callbacks.
 

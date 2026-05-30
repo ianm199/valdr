@@ -1,5 +1,4 @@
 //! `HashTable` — SIMD-friendly open-addressed hash table.
-//!
 //! A faster alternative to `dict` for some workloads: open addressing with
 //! metadata bytes. Coexists with the legacy `dict` during the transition.
 

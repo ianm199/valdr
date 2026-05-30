@@ -1,16 +1,10 @@
 //! Keyspace event notifications.
-//!
 //! Translates database operations into Pub/Sub messages on two channel families:
-//!
 //! - `__keyspace@<db>__:<key>` with the event name as the message payload
 //! - `__keyevent@<db>__:<event>` with the key name as the message payload
-//!
 //! Which families are active is controlled by `server.notify_keyspace_events`,
 //! a bitmask of the `NOTIFY_*` constants defined here.
-//!
 //! Reference: <https://valkey.io/topics/notifications>
-//!
-//! C source: `notify.c` (159 lines, 3 functions)
 
 use crate::client::Client;
 use crate::object::RedisObject;
@@ -19,7 +13,6 @@ use redis_types::error::RedisError;
 use redis_types::string::RedisString;
 
 // ── Notification-class flag constants ─────────────────────────────────────────
-// C: server.h:654-671, `NOTIFY_*` #defines
 
 /// Keyspace-channel prefix enabled (`K` in config string).
 pub const NOTIFY_KEYSPACE: i32 = 1 << 0;
@@ -53,11 +46,8 @@ pub const NOTIFY_MODULE: i32 = 1 << 13;
 pub const NOTIFY_NEW: i32 = 1 << 14;
 
 /// All standard notification classes combined.
-///
-/// The `A` shorthand in the config string maps to this mask.  Intentionally
+/// The `A` shorthand in the config string maps to this mask. Intentionally
 /// excludes `NOTIFY_KEY_MISS`, `NOTIFY_NEW`, and `NOTIFY_LOADED`.
-///
-/// C: server.h:669-671
 pub const NOTIFY_ALL: i32 = NOTIFY_GENERIC
     | NOTIFY_STRING
     | NOTIFY_LIST
@@ -73,12 +63,9 @@ pub const NOTIFY_ALL: i32 = NOTIFY_GENERIC
 
 /// Converts a notification-class config string (e.g. `b"KEA"`) to a bitmask
 /// of `NOTIFY_*` flags.
-///
 /// Returns `Err` on the first byte that does not correspond to a known
-/// notification-class character.  The C implementation returned `-1` in that
+/// notification-class character. The C implementation returned `-1` in that
 /// case; this translation uses `Result` instead.
-///
-/// C: notify.c:41-66, `keyspaceEventsStringToFlags`
 pub fn keyspace_events_string_to_flags(classes: &[u8]) -> Result<i32, RedisError> {
     let mut flags: i32 = 0;
     for &c in classes {
@@ -106,12 +93,9 @@ pub fn keyspace_events_string_to_flags(classes: &[u8]) -> Result<i32, RedisError
 
 /// Converts a bitmask of `NOTIFY_*` flags back to the canonical config-string
 /// representation.
-///
-/// The output is suitable for storage in `server.notify_keyspace_events` and
-/// for returning from `CONFIG GET notify-keyspace-events`.  The returned
+/// The output is suitable for storage in `server.notify_keyspace_events`
+/// for returning from `CONFIG GET notify-keyspace-events`. The returned
 /// `RedisString` is owned by the caller.
-///
-/// C: notify.c:72-95, `keyspaceEventsFlagsToString`
 pub fn keyspace_events_flags_to_string(flags: i32) -> RedisString {
     let mut res: Vec<u8> = Vec::with_capacity(16);
 
@@ -168,36 +152,28 @@ pub fn keyspace_events_flags_to_string(flags: i32) -> RedisString {
 
 /// Fires keyspace and/or keyevent Pub/Sub notifications for a single database
 /// operation.
-///
-/// `event_type` is one or more `NOTIFY_*` flags OR'd together representing the
-/// class of the triggering command (e.g. `NOTIFY_STRING` for `SET`).  `event`
-/// is the raw event-name bytes (e.g. `b"set"`, `b"del"`).  `key` is the
-/// `RedisObject` for the affected key.  `dbid` is the zero-based database
+/// `event_type` is one or more `NOTIFY_*` flags OR'd together representing
+/// class of the triggering command (e.g. `NOTIFY_STRING` for `SET`). `event`
+/// is the raw event-name bytes (e.g. `b"set"`, `b"del"`). `key` is
+/// `RedisObject` for the affected key. `dbid` is the zero-based database
 /// index.
-///
-/// The module notification system is called first, before the
+/// The module notification system is called first, before
 /// `notify_keyspace_events` config gate, so modules always receive events they
 /// subscribed to regardless of the server config.
-///
 /// PORT NOTE: The C implementation reads `server.executing_client` from a
-/// process-global.  This translation takes `executing_client` as an explicit
+/// process-global. This translation takes `executing_client` as an explicit
 /// `Option<&mut Client>` parameter to avoid global mutable state.
-///
 /// TODO(architect): `notify_keyspace_events` must be added as a field on
-/// `RedisServer` (or `ServerConfig`) and exposed via an accessor.  The current
-/// placeholder hard-codes `0` (no notifications), which causes the function to
+/// `RedisServer` (or `ServerConfig`) and exposed via an accessor. The current
+/// placeholder hard-codes `0` (no notifications), which causes the function
 /// always return early after the module hook.
-///
 /// TODO(architect): `pubsub_publish_message` lives in `redis-commands/pubsub`;
 /// a direct dep from `redis-core` → `redis-commands` would be circular.
 /// Options: move the publish primitive into `redis-core`, or accept a
-/// `fn(&RedisObject, &RedisObject) -> Result<(), RedisError>` callback.
+/// `fn(&RedisObject, &RedisObject) -> Result<, RedisError>` callback.
 /// Escalate before wiring the actual publish calls.
-///
 /// TODO(architect): `module_notify_keyspace_event` is a Phase-10 stub; wire
 /// it once `redis-modules` has a dep-edge into `redis-core`.
-///
-/// C: notify.c:105-159, `notifyKeyspaceEvent`
 pub fn notify_keyspace_event(
     server: &mut RedisServer,
     executing_client: Option<&mut Client>,
@@ -206,49 +182,45 @@ pub fn notify_keyspace_event(
     key: &RedisObject,
     dbid: i32,
 ) -> Result<(), RedisError> {
-    // C: notify.c:111-119
-    // debugServerAssert(moduleNotifyKeyspaceSubscribersCnt() == 0 || ...)
-    // This assertion guards that keyspace notifications from buffered-reply
-    // write commands are never sent before the reply is committed.  The Rust
-    // equivalent requires the module subscriber count and Client flag access;
-    // deferred to Phase B.
+ // debugServerAssert(moduleNotifyKeyspaceSubscribersCnt == 0 ||...)
+ // This assertion guards that keyspace notifications from buffered-reply
+ // write commands are never sent before the reply is committed. The Rust
+ // equivalent requires the module subscriber count and Client flag access;
+ // deferred to Phase B.
     // TODO(port): restore the debugServerAssert equivalent once Client flags
-    // (keyspace_notified, buffered_reply) and the module subscriber count are
-    // accessible.
+ // (keyspace_notified, buffered_reply) and the module subscriber count are
+ // accessible.
 
-    // Notify module subscribers before the config gate.  The module engine
-    // filters by subscribed event types internally.
-    // C: notify.c:124
+ // Notify module subscribers before the config gate. The module engine
+ // filters by subscribed event types internally.
     // TODO(port): module_notify_keyspace_event — Phase 10 stub; no-op for now.
 
     if let Some(client) = executing_client {
-        // C: notify.c:126 — c->flag.keyspace_notified = 1
+ // c->flag.keyspace_notified = 1
         // TODO(port): expose `keyspace_notified` flag on `Client`.
         let _ = client;
 
-        // C: notify.c:127 — commitDeferredReplyBuffer(c, 1)
+ // commitDeferredReplyBuffer(c, 1)
         // TODO(port): commit_deferred_reply_buffer — networking call into
-        // `redis-core/networking.rs`; wire once the signature is stable.
+ // `redis-core/networking.rs`; wire once the signature is stable.
     }
 
-    // Early exit if this event class is not enabled.
-    // C: notify.c:131 — if (!(server.notify_keyspace_events & type)) return;
-    //
+ // Early exit if this event class is not enabled.
+ // if (!(server.notify_keyspace_events & type)) return;
     // TODO(port): replace `notify_flags` placeholder with
-    // `server.notify_keyspace_events()` once that accessor exists.
+ // `server.notify_keyspace_events` once that accessor exists.
     let notify_flags: i32 = 0; // placeholder — see TODO(architect) above
     let _ = server;
     if notify_flags & event_type == 0 {
         return Ok(());
     }
 
-    // Render dbid as decimal ASCII bytes once; reused for both channel names.
-    // PORT NOTE: `format!` here converts an integer to ASCII digits, not Redis
-    // byte data; the UTF-8 ban on Redis data does not apply.
+ // Render dbid as decimal ASCII bytes once; reused for both channel names.
+ // PORT NOTE: `format!` here converts an integer to ASCII digits, not Redis
+ // byte data; the UTF-8 ban on Redis data does not apply.
     let dbid_bytes = format!("{}", dbid).into_bytes();
 
-    // ── __keyspace@<db>__:<key> <event> ──────────────────────────────────────
-    // C: notify.c:136-145
+ // ── __keyspace@<db>__:<key> <event> ──────────────────────────────────────
     if notify_flags & NOTIFY_KEYSPACE != 0 {
         let key_bytes = object_to_bytes(key)?;
         let mut chan: Vec<u8> = Vec::with_capacity(
@@ -267,8 +239,7 @@ pub fn notify_keyspace_event(
         let _ = (chan_obj, event_obj);
     }
 
-    // ── __keyevent@<db>__:<event> <key> ──────────────────────────────────────
-    // C: notify.c:148-157
+ // ── __keyevent@<db>__:<event> <key> ──────────────────────────────────────
     if notify_flags & NOTIFY_KEYEVENT != 0 {
         let mut chan: Vec<u8> = Vec::with_capacity(
             b"__keyevent@".len() + dbid_bytes.len() + b"__:".len() + event.len(),
@@ -280,7 +251,7 @@ pub fn notify_keyspace_event(
 
         let chan_obj = RedisObject::new_string(&chan);
 
-        // C: pubsubPublishMessage(chanobj, key, 0) — message payload is the key.
+ // message payload is the key.
         // TODO(port): pubsub_publish_message(&chan_obj, key, false)?;
         // Blocked on TODO(architect) dep-edge decision above.
         let _ = chan_obj;
@@ -292,20 +263,16 @@ pub fn notify_keyspace_event(
 // ── Private helpers ───────────────────────────────────────────────────────────
 
 /// Extracts the underlying byte slice from a `RedisObject::String`.
-///
-/// Returns `Err(RedisError::wrong_type())` if `obj` is not a string variant.
-///
-/// In C, `objectGetVal(obj)` performs an unchecked cast of `obj->ptr` to
+/// Returns `Err(RedisError::wrong_type` if `obj` is not a string variant.
+/// In C, `objectGetVal(obj)` performs an unchecked cast of `obj->ptr`
 /// `sds`; this helper adds an explicit type check.
-///
-/// C: cf. `objectGetVal` macro in `object.h`
 fn object_to_bytes(obj: &RedisObject) -> Result<&[u8], RedisError> {
     obj.as_string_bytes().ok_or_else(RedisError::wrong_type)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        notify.c (159 lines, 3 functions)
+//   source:        Valkey
 //   target_crate:  redis-core
 //   confidence:    medium
 //   todos:         10

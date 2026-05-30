@@ -1,26 +1,22 @@
 //! Fast in-memory iteration harness for the AOF persistence subsystem.
-//!
 //! This is the rung-2 inner loop for AOF work: append a write through the LIVE
 //! `AofWriter` encoder, replay the produced bytes back through the LIVE
-//! `replay_aof_databases_with_options` parser/dispatcher, and assert the
-//! reconstructed keyspace equals the original — all in a tmpdir, in
+//! `replay_aof_databases_with_options` parser/dispatcher, and assert
+//! reconstructed keyspace equals the original — all in a tmpdir,
 //! milliseconds, with no sockets, no server process, and no tclsh. It mirrors
 //! `harness/oracle/persistence-cycle.py` but runs deterministically as a unit
 //! test.
-//!
 //! House style is borrowed from `crates/redis-core/tests/conn_transport_kit.rs`:
 //! a small scriptable in-memory mechanism (here an append->replay cycle plus a
 //! `FailingSink` that returns ENOSPC on demand) that makes a durability /
 //! replay bug reproduce 100% of the time instead of "sometimes".
-//!
 //! Run just this loop:
-//!   cargo test -p redis-commands --test aof_correctness_kit
-//!
+//! cargo test -p redis-commands --test aof_correctness_kit
 //! Test taxonomy:
-//!   * GREEN ANCHOR  — `anchor_six_types_roundtrip_under_always` proves the
-//!     append->replay capture is faithful before any red test is trusted.
-//!   * RED           — reproduces a real audit bug on its documented assertion.
-//!   * GREEN-LOCK    — behavior is already correct; kept as a regression lock.
+//! * GREEN ANCHOR — `anchor_six_types_roundtrip_under_always` proves
+//! append->replay capture is faithful before any red test is trusted.
+//! * RED — reproduces a real audit bug on its documented assertion.
+//! * GREEN-LOCK — behavior is already correct; kept as a regression lock.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -97,7 +93,7 @@ fn snapshot(db: &RedisDb) -> DbSnapshot {
 }
 
 /// A canonical, order-independent string rendering of an object's value so two
-/// objects holding the same logical content compare equal regardless of
+/// objects holding the same logical content compare equal regardless
 /// encoding or internal ordering.
 fn render_value(obj: &RedisObject) -> String {
     use redis_core::object::{
@@ -178,9 +174,8 @@ fn replay_into_fresh(path: &Path, options: AofLoadOptions) -> io::Result<DbSnaps
 // ─── GREEN ANCHOR ────────────────────────────────────────────────────────────
 
 /// Build a source DB holding all six plain key types (one of them volatile),
-/// append the reconstruction commands through the LIVE `AofWriter`, replay the
+/// append the reconstruction commands through the LIVE `AofWriter`, replay
 /// produced bytes into a fresh DB, and assert the keyspaces are equal.
-///
 /// This is the faithfulness proof: a non-trivial assert that exercises the real
 /// encode -> file -> parse -> dispatch cycle for every type the kit later
 /// stresses. If this passes, the kit's capture mechanism is trustworthy.
@@ -190,15 +185,15 @@ fn anchor_six_types_roundtrip_under_always() {
     let aof_path = scratch.path("appendonly.aof");
     let writer = AofWriter::open(&aof_path, FSYNC_ALWAYS).expect("open aof");
 
-    // string
+ // string
     writer
         .append(&[rs(b"SET"), rs(b"k:str"), rs(b"hello world")])
         .unwrap();
-    // list
+ // list
     writer
         .append(&[rs(b"RPUSH"), rs(b"k:list"), rs(b"a"), rs(b"b"), rs(b"c")])
         .unwrap();
-    // hash
+ // hash
     writer
         .append(&[
             rs(b"HMSET"),
@@ -209,11 +204,11 @@ fn anchor_six_types_roundtrip_under_always() {
             rs(b"v2"),
         ])
         .unwrap();
-    // set
+ // set
     writer
         .append(&[rs(b"SADD"), rs(b"k:set"), rs(b"x"), rs(b"y"), rs(b"z")])
         .unwrap();
-    // zset
+ // zset
     writer
         .append(&[
             rs(b"ZADD"),
@@ -224,7 +219,7 @@ fn anchor_six_types_roundtrip_under_always() {
             rs(b"two"),
         ])
         .unwrap();
-    // volatile string (TTL ~1000s in the future)
+ // volatile string (TTL ~1000s in the future)
     let expire_at = current_ms() + 1_000_000;
     writer
         .append(&[rs(b"SET"), rs(b"k:vol"), rs(b"ephemeral")])
@@ -238,7 +233,7 @@ fn anchor_six_types_roundtrip_under_always() {
         .unwrap();
     writer.flush().unwrap();
 
-    // Build the expected DB independently (not from the AOF).
+ // Build the expected DB independently (not from the AOF).
     let mut expected = RedisDb::new(0);
     expected.insert(rs(b"k:str"), RedisObject::new_string(b"hello world"));
     let mut list = std::collections::VecDeque::new();
@@ -300,35 +295,33 @@ impl Write for FailingSink {
     }
 }
 
-/// Faithful reproduction of the production AOF-append swallow logic at
+/// Faithful reproduction of the production AOF-append swallow logic
 /// `dispatch.rs:749-758`:
-///
 /// ```ignore
 /// if let Some(aof) = aof {
-///     if let Some(argv) = argv_snapshot.as_ref() {
-///         if let Err(e) = aof.append_selected(...) {
-///             eprintln!("redis-server: AOF append failed: {}", e);   // <-- swallowed
-///         } else { ... }
-///     }
+/// if let Some(argv) = argv_snapshot.as_ref {
+/// if let Err(e) = aof.append_selected(...) {
+/// eprintln!("redis-server: AOF append failed: {}", e); // <-- swallowed
+/// } else {... }
+/// }
 /// }
 /// ```
-///
 /// The append result is logged and dropped; `aof_last_write_status` is never
 /// touched and the client is still acked success. `AofWriter`'s file field is
 /// private, so this kit cannot inject `FailingSink` into the live writer
 /// without a production hook (documented in the kit notes). Instead it
-/// reproduces the exact control flow against a real `PersistenceState`: the
+/// reproduces the exact control flow against a real `PersistenceState`:
 /// append errors (ENOSPC), the production handler swallows it, and we observe
 /// the resulting status. Valkey would instead `flagAofError` →
 /// `aof_last_write_status = ERR` and stop acking. This is the bug.
 fn production_append_swallow(_persistence: &PersistenceState, append_result: io::Result<()>) {
     if let Err(e) = append_result {
-        // VERBATIM from dispatch.rs:752 — the only thing the prod code does.
-        // The `_persistence` arg is deliberately untouched: that absence (the
-        // missing `set_aof_last_write_status(Err)`) IS the bug.
+ // VERBATIM from dispatch.rs:752 — the only thing the prod code does.
+ // The `_persistence` arg is deliberately untouched: that absence (
+ // missing `set_aof_last_write_status(Err)`) IS the bug.
         eprintln!("redis-server: AOF append failed: {}", e);
     }
-    // dispatch.rs never touches aof_last_write_status here; the client is acked.
+ // dispatch.rs never touches aof_last_write_status here; the client is acked.
 }
 
 #[test]
@@ -336,7 +329,7 @@ fn disk_full_append_failure_is_swallowed_status_stays_ok() {
     let persistence = PersistenceState::new();
     assert_eq!(persistence.aof_last_write_status(), PersistenceStatus::Ok);
 
-    // The write genuinely fails ENOSPC through the failing sink.
+ // The write genuinely fails ENOSPC through the failing sink.
     let mut sink = FailingSink;
     let encoded = encode_resp_command(&[rs(b"SET"), rs(b"k"), rs(b"v")]);
     let append_result = sink.write_all(&encoded);
@@ -345,12 +338,12 @@ fn disk_full_append_failure_is_swallowed_status_stays_ok() {
         "FailingSink must produce the ENOSPC error"
     );
 
-    // Run the production swallow logic over that failure.
+ // Run the production swallow logic over that failure.
     production_append_swallow(&persistence, append_result);
 
-    // EXPECTED (Valkey): a swallowed durability failure must flip the write
-    // status to ERR (and the command must not be acked as durable). The
-    // production code never does this, so this assertion fails and pins the bug.
+ // EXPECTED (Valkey): a swallowed durability failure must flip the write
+ // status to ERR (and the command must not be acked as durable). The
+ // production code never does this, so this assertion fails and pins the bug.
     assert_eq!(
         persistence.aof_last_write_status(),
         PersistenceStatus::Err,
@@ -363,8 +356,8 @@ fn disk_full_append_failure_is_swallowed_status_stays_ok() {
 
 /// Under each fsync policy, the appended bytes must replay into an identical
 /// keyspace. An injectable clock drives the everysec window deterministically:
-/// instead of waiting one real second, we call `fsync_if_due()` (the exact
-/// drain the everysec background thread performs) to force the pending bytes to
+/// instead of waiting one real second, we call `fsync_if_due` (the
+/// drain the everysec background thread performs) to force the pending bytes
 /// disk, then replay. This proves the policy choice does not change replayed
 /// content.
 #[test]
@@ -384,8 +377,8 @@ fn fsync_policies_all_replay_identically() {
         for (k, v) in &payload {
             writer.append(&[rs(b"SET"), k.clone(), rs(v)]).unwrap();
         }
-        // Deterministic everysec window: force the once-per-second drain now,
-        // rather than sleeping. For NO/ALWAYS this is a harmless flush.
+ // Deterministic everysec window: force the once-per-second drain now,
+ // rather than sleeping. For NO/ALWAYS this is a harmless flush.
         writer.fsync_if_due().expect("fsync_if_due drain");
         writer.flush().unwrap();
 
@@ -400,7 +393,7 @@ fn fsync_policies_all_replay_identically() {
             "policy {label} produced a divergent replay"
         );
     }
-    // Sanity: the reference actually has the three keys.
+ // Sanity: the reference actually has the three keys.
     assert_eq!(reference.entries.len(), 3);
 }
 
@@ -411,11 +404,10 @@ fn fsync_policies_all_replay_identically() {
 /// must replay into the exact keyspace. MULTI/EXEC records bracket the inner
 /// commands; the replayer must consume them (Valkey loads MULTI/EXEC as a
 /// no-op transaction frame) and apply the inner commands.
-///
 /// RED FINDING: the replayer (`replay_aof_databases_with_options` →
 /// `dispatch_replay_command`, aof.rs) has NO special case for `MULTI`/`EXEC`.
 /// They fall through to `dispatch_via_handler`, where `EXEC` returns
-/// "ERR EXEC without MULTI" (no transaction state exists during replay) and the
+/// "ERR EXEC without MULTI" (no transaction state exists during replay) and
 /// whole load aborts with an `io::Error`. So any AOF written by
 /// `append_transaction_commands_to_aof` for a multi-command transaction is
 /// unreplayable — a durability/replay divergence from Valkey.
@@ -425,7 +417,7 @@ fn multi_exec_envelope_replays_keyspace_exactly() {
     let aof_path = scratch.path("appendonly.aof");
     let writer = AofWriter::open(&aof_path, FSYNC_ALWAYS).expect("open aof");
 
-    // Faithful copy of append_transaction_commands_to_aof's multi-command arm.
+ // Faithful copy of append_transaction_commands_to_aof's multi-command arm.
     writer.append_raw(&[rs(b"MULTI")]).unwrap();
     writer
         .append_selected(0, &[rs(b"SET"), rs(b"tx:a"), rs(b"1")])
@@ -449,9 +441,9 @@ fn multi_exec_envelope_replays_keyspace_exactly() {
     hs.insert(rs(b"m"));
     expected.insert(rs(b"tx:s"), RedisObject::new_set_from_set(hs));
 
-    // Capture the replay outcome explicitly so the failure lands on the
-    // documented assertion (replay must succeed and reconstruct the keyspace),
-    // not on an unwrap panic.
+ // Capture the replay outcome explicitly so the failure lands on
+ // documented assertion (replay must succeed and reconstruct the keyspace),
+ // not on an unwrap panic.
     let replayed = replay_into_fresh(&aof_path, AofLoadOptions::default());
     assert_eq!(
         replayed.map_err(|e| e.to_string()),
@@ -472,15 +464,15 @@ fn truncated_tail_loads_prefix_only_when_allowed() {
     let scratch = Scratch::new("trunc");
     let aof_path = scratch.path("appendonly.aof");
 
-    // Two complete commands, then a deliberately truncated third (header claims
-    // a 3-element array but the bytes stop mid-command).
+ // Two complete commands, then a deliberately truncated third (header claims
+ // a 3-element array but the bytes stop mid-command).
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&encode_resp_command(&[rs(b"SET"), rs(b"good1"), rs(b"v1")]));
     bytes.extend_from_slice(&encode_resp_command(&[rs(b"SET"), rs(b"good2"), rs(b"v2")]));
     bytes.extend_from_slice(b"*3\r\n$3\r\nSET\r\n$4\r\ngo"); // truncated tail
     std::fs::write(&aof_path, &bytes).unwrap();
 
-    // load_truncated=yes → valid prefix replays, no error.
+ // load_truncated=yes → valid prefix replays, no error.
     let mut opts_yes = AofLoadOptions::default();
     opts_yes.load_truncated = true;
     let replayed = replay_into_fresh(&aof_path, opts_yes).expect("truncated tail tolerated");
@@ -493,7 +485,7 @@ fn truncated_tail_loads_prefix_only_when_allowed() {
         "load_truncated=yes must replay the valid prefix and drop the torn tail"
     );
 
-    // load_truncated=no → error.
+ // load_truncated=no → error.
     let mut dbs = vec![RedisDb::new(0)];
     let err = replay_aof_databases_with_options(&aof_path, &mut dbs, AofLoadOptions::default())
         .expect_err("load_truncated=no must reject a torn tail");
@@ -504,10 +496,9 @@ fn truncated_tail_loads_prefix_only_when_allowed() {
 }
 
 // ─── audit finding 5: MANIFEST round-trip + validation (GREEN-LOCK) ──────────
-//
 // `encode_aof_manifest` / `load_aof_manifest` are private to aof.rs, so this
 // kit cannot call them directly without a production visibility change. Instead
-// it drives the public `load_append_only_files` entry point, which parses the
+// it drives the public `load_append_only_files` entry point, which parses
 // manifest with the same strict rules. A well-formed manifest must load its
 // BASE+INCR; a malformed manifest (duplicate base / non-monotonic incr seq)
 // must error with the exact Valkey message. See kit notes for the visibility
@@ -529,7 +520,7 @@ fn manifest_well_formed_round_trips_and_loads() {
     let appendfile = "appendonly.aof";
     let appenddir = "appendonlydir";
 
-    // BASE holds a SET; INCR holds another SET.
+ // BASE holds a SET; INCR holds another SET.
     let dir = scratch.path(appenddir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(

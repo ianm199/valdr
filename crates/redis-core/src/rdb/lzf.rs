@@ -1,25 +1,22 @@
-//! LZF decompression — direct port of `lzf_d.c` from the Valkey/liblzf source.
-//!
+//! LZF decompression — direct port of from the Valkey/liblzf source.
 //! LZF is the stream format used by Redis/Valkey when `rdbcompression yes`
-//! (the default) and a string value exceeds 20 bytes.  The decompressor is a
+//! (the default) and a string value exceeds 20 bytes. The decompressor is a
 //! single-pass byte scanner: each control byte selects either a literal run
-//! (copy N following bytes verbatim) or a back-reference (copy N+2 bytes from
+//! (copy N following bytes verbatim) or a back-reference (copy N+2 bytes
 //! a position up to 8192 bytes behind the current output pointer).
-//!
 //! Wire format consumed by `lzf_decompress`:
-//!   literal run   — ctrl in 0..=31: copy (ctrl + 1) bytes verbatim.
-//!   back-reference — ctrl in 32..=255:
-//!       len    = ctrl >> 5                  (3 bits)
-//!       offset = ((ctrl & 0x1f) << 8) + 1  (high bits, before adding low byte)
-//!       if len == 7: len += next_byte       (extended length)
-//!       offset += next_byte                 (low 8 bits)
-//!       copy (len + 2) bytes from output[op - offset ..]
-//!       (self-referential / overlapping copies are intentional RLE)
+//! literal run — ctrl in 0..=31: copy (ctrl + 1) bytes verbatim.
+//! back-reference — ctrl in 32..=255:
+//! len = ctrl >> 5 (3 bits)
+//! offset = ((ctrl & 0x1f) << 8) + 1 (high bits, before adding low byte)
+//! if len == 7: len += next_byte (extended length)
+//! offset += next_byte (low 8 bits)
+//! copy (len + 2) bytes from output[op - offset..]
+//! (self-referential / overlapping copies are intentional RLE)
 
 use std::io;
 
 /// Decompress `input` into a buffer of exactly `output_len` bytes.
-///
 /// Returns `Err(InvalidData)` when the compressed stream is malformed or when
 /// the actual decompressed length differs from `output_len`.
 pub fn lzf_decompress(input: &[u8], output_len: usize) -> io::Result<Vec<u8>> {

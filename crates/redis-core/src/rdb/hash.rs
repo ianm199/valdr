@@ -1,25 +1,20 @@
 //! RDB hash type serialization — Round 20.
-//!
 //! Implements `save_hash_object` and `load_hash_object` for `RDB_TYPE_HASH`
 //! (the HASHTABLE wire form, type byte 0x04).
-//!
 //! Wire layout after the type byte:
-//!   - `save_len(num_fields)` — number of field/value pairs
-//!   - For each pair: field bytes (length-prefixed), value bytes (length-prefixed)
-//!
+//! - `save_len(num_fields)` — number of field/value pairs
+//! - For each pair: field bytes (length-prefixed), value bytes (length-prefixed)
 //! Design decision: we always emit `RDB_TYPE_HASH` regardless of hash size.
 //! C Valkey loads this form for hashes of any size without error. The
 //! `RDB_TYPE_HASH_LISTPACK` form (type 16) that C Valkey emits for small hashes
 //! is NOT emitted by us in Phase 1; instead we document below how to force C
 //! Valkey into HASHTABLE mode for oracle corpus tests by setting
 //! `hash-max-listpack-entries 0` before SAVE.
-//!
 //! Load compatibility:
-//!   - `RDB_TYPE_HASH` (4)         — fully handled
-//!   - `RDB_TYPE_HASH_ZIPLIST` (13) — graceful error: not yet implemented
-//!   - `RDB_TYPE_HASH_LISTPACK` (16) — graceful error: not yet implemented
-//!   - `RDB_TYPE_HASH_2` (22)       — graceful error: field-level expiry not yet implemented
-//!
+//! - `RDB_TYPE_HASH` (4) — fully handled
+//! - `RDB_TYPE_HASH_ZIPLIST` (13) — graceful error: not yet implemented
+//! - `RDB_TYPE_HASH_LISTPACK` (16) — graceful error: not yet implemented
+//! - `RDB_TYPE_HASH_2` (22) — graceful error: field-level expiry not yet implemented
 //! When the oracle corpus test uses `CONFIG SET hash-max-listpack-entries 0`
 //! before saving, C Valkey emits `RDB_TYPE_HASH` and round-trip passes
 //! without implementing the listpack binary parser.
@@ -36,7 +31,6 @@ use super::listpack::decode_listpack;
 use super::varint::{load_len, write_len};
 
 /// Serialize an `RDB_TYPE_HASH` value payload.
-///
 /// The type byte is written by the caller; this function writes the count
 /// followed by alternating raw-byte field and value strings.
 pub fn save_hash_object(w: &mut impl Write, obj: &RedisObject) -> io::Result<()> {
@@ -55,7 +49,6 @@ pub fn save_hash_object(w: &mut impl Write, obj: &RedisObject) -> io::Result<()>
 }
 
 /// Deserialize an `RDB_TYPE_HASH` value payload, producing a `RedisObject`.
-///
 /// Reads from `r` starting immediately after the type byte.
 pub fn load_hash_object(r: &mut impl Read) -> io::Result<RedisObject> {
     let (n, _is_encoded) = load_len(r)?;
@@ -156,7 +149,7 @@ fn zipmap_len(blob: &[u8], p: usize) -> io::Result<(usize, usize)> {
 
 /// Deserialize an `RDB_TYPE_HASH_ZIPMAP` value: the oldest small-hash encoding
 /// (Redis 2.6). Layout after a 1-byte entry-count hint: repeated
-/// `<klen><key><vlen><free><value>` with a `0xFF` terminator; `free` is the
+/// `<klen><key><vlen><free><value>` with a `0xFF` terminator; `free` is
 /// number of trailing padding bytes after the value.
 pub fn load_hash_zipmap_object(r: &mut impl Read) -> io::Result<RedisObject> {
     let blob = read_rdb_string(r)?;
@@ -220,7 +213,6 @@ pub fn load_hash_zipmap_object(r: &mut impl Read) -> io::Result<RedisObject> {
 }
 
 /// Write a raw byte slice as a length-prefixed string (no integer encoding).
-///
 /// Used for hash field and value bytes where we carry `Vec<u8>` without
 /// separate integer-encoding metadata, so we always emit the raw form.
 fn save_raw_field(w: &mut impl Write, bytes: &[u8]) -> io::Result<()> {

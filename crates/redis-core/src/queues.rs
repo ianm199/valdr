@@ -1,34 +1,25 @@
 //! Lock-free queue implementations: MPSC, SPMC, and SPSC.
-//!
 //! Three ring-buffer queue variants are provided:
-//!
 //! - [`MpscQueue`] – Multi-Producer Single-Consumer.
-//!   Producers atomically reserve ring-buffer slots; a single consumer drains
-//!   in batch. Producers that hit a full queue save their reservation in an
-//!   [`MpscTicket`] and retry later.
-//!
+//! Producers atomically reserve ring-buffer slots; a single consumer drains
+//! in batch. Producers that hit a full queue save their reservation in an
+//! [`MpscTicket`] and retry later.
 //! - [`SpmcQueue`] – Single-Producer Multi-Consumer.
-//!   Sequence-number cells; consumers CAS-compete to claim populated slots.
-//!   Each cell is cache-line padded to reduce false sharing.
-//!
+//! Sequence-number cells; consumers CAS-compete to claim populated slots.
+//! Each cell is cache-line padded to reduce false sharing.
 //! - [`SpscQueue`] – Single-Producer Single-Consumer.
-//!   Supports batched enqueue with a deferred tail commit for amortised
-//!   visibility flushes.
-//!
+//! Supports batched enqueue with a deferred tail commit for amortised
+//! visibility flushes.
 //! # Ownership model
-//!
 //! All three queue types store type-erased raw pointers (`*mut T`). The queues
 //! do **not** dereference stored pointers; callers are responsible for pointer
 //! lifetime and aliasing discipline.
-//!
 //! TODO(architect): Decide whether these queues should hold `Arc<T>` (safe,
 //! cheaper caller API) or remain raw-pointer queues with documented ownership
 //! discipline. Raw-pointer queues are the direct C translation, but they push
-//! `unsafe` to every call site. A typed `Arc`-based wrapper could live in the
+//! `unsafe` to every call site. A typed `Arc`-based wrapper could live in
 //! same module once the policy is decided.
-//!
 //! # Cache-line alignment
-//!
 //! PORT NOTE: The C structs use `_Alignas(CACHE_LINE_SIZE)` on individual
 //! *fields* to partition hot data across separate cache lines and prevent
 //! false sharing. In Rust, `#[repr(align(N))]` applies to the *type*, so
@@ -39,8 +30,7 @@
 use std::sync::atomic::{fence, AtomicPtr, AtomicUsize, Ordering};
 
 /// Cache-line size assumed for alignment commentary and assertions.
-///
-/// Corresponds to `CACHE_LINE_SIZE` in Valkey's `config.h` (typically 64 on
+/// Corresponds to `CACHE_LINE_SIZE` in Valkey's (typically 64 on
 /// x86-64 and AArch64).
 pub const CACHE_LINE_SIZE: usize = 64;
 
@@ -49,7 +39,6 @@ pub const CACHE_LINE_SIZE: usize = 64;
 // ============================================================================
 
 /// Retry ticket saved by [`MpscQueue::enqueue`] when the queue is full.
-///
 /// If `enqueue` returns `false`, it stores the reserved slot index here.
 /// The caller must pass the same ticket on the next retry so the producer
 /// fills its reserved slot rather than reserving a second one.
@@ -74,41 +63,39 @@ impl Default for MpscTicket {
 }
 
 /// Multi-Producer Single-Consumer lock-free ring-buffer queue.
-///
 /// PORT NOTE: We use `Vec<AtomicPtr<T>>` to express ownership and avoid manual allocation.
 /// `AtomicPtr<T>::load` returns `*mut T`; callers must not dereference without
 /// satisfying their own aliasing invariants (see module-level ownership note).
-///
 /// PORT NOTE: Field comments mark the intended cache-line groupings:
 /// - "consumer cache line": `head` + `tail_cache`
 /// - "producer cache line": `tail` + `head_cache`
-/// - "buffer cache line":   `buffer` + `queue_size`
+/// - "buffer cache line": `buffer` + `queue_size`
 pub struct MpscQueue<T> {
-    // --- consumer cache line ---
-    /// Monotonically-increasing dequeue cursor (atomic; shared with producers
-    /// for fullness checks via `head_cache`).
+ // --- consumer cache line ---
+ /// Monotonically-increasing dequeue cursor (atomic; shared with producers
+ /// for fullness checks via `head_cache`).
     head: AtomicUsize,
-    /// Consumer-local cached copy of `tail`; avoids an atomic load on the
-    /// fast dequeue path.
+ /// Consumer-local cached copy of `tail`; avoids an atomic load on
+ /// fast dequeue path.
     tail_cache: usize,
 
-    // --- producer cache line ---
-    /// Monotonically-increasing enqueue slot counter (atomic; incremented by
-    /// each producer to claim a slot).
+ // --- producer cache line ---
+ /// Monotonically-increasing enqueue slot counter (atomic; incremented by
+ /// each producer to claim a slot).
     tail: AtomicUsize,
-    /// Producer-local cached copy of `head` (atomic so multiple producers can
-    /// update it safely); avoids repeated `head` loads on the enqueue path.
+ /// Producer-local cached copy of `head` (atomic so multiple producers can
+ /// update it safely); avoids repeated `head` loads on the enqueue path.
     head_cache: AtomicUsize,
 
-    // --- buffer ---
-    /// Ring buffer; a `null` entry means the slot is empty (not yet written
-    /// or already consumed).
+ // --- buffer ---
+ /// Ring buffer; a `null` entry means the slot is empty (not yet written
+ /// or already consumed).
     buffer: Vec<AtomicPtr<T>>,
     queue_size: usize,
 }
 
 impl<T> MpscQueue<T> {
-    /// Creates a new MPSC queue. `queue_size` must be a positive power of two.
+ /// Creates a new MPSC queue. `queue_size` must be a positive power of two.
     pub fn new(queue_size: usize) -> Self {
         debug_assert!(
             queue_size > 0 && (queue_size & (queue_size - 1)) == 0,
@@ -128,10 +115,9 @@ impl<T> MpscQueue<T> {
         }
     }
 
-    /// Resets all queue indices to zero (buffer deallocation handled by `Drop`).
-    ///
-    /// This method only resets the bookkeeping state; the buffer itself is
-    /// re-zeroed so the queue can be reused.
+ /// Resets all queue indices to zero (buffer deallocation handled by `Drop`).
+ /// This method only resets the bookkeeping state; the buffer itself is
+ /// re-zeroed so the queue can be reused.
     pub fn reset(&mut self) {
         self.head.store(0, Ordering::Relaxed);
         self.tail.store(0, Ordering::Relaxed);
@@ -142,40 +128,38 @@ impl<T> MpscQueue<T> {
         }
     }
 
-    /// Pushes `data` into the queue. Returns `true` on success.
-    ///
-    /// If the queue is full, the slot reservation is recorded in `ticket` and
-    /// `false` is returned. The caller must retry with the same `ticket` (and
-    /// the same `data`) once space is available.
-    ///
-    /// Takes `&self` so that multiple producer threads can call this
-    /// concurrently; all mutations are performed through atomic operations.
+ /// Pushes `data` into the queue. Returns `true` on success.
+ /// If the queue is full, the slot reservation is recorded in `ticket`
+ /// `false` is returned. The caller must retry with the same `ticket` (
+ /// the same `data`) once space is available.
+ /// Takes `&self` so that multiple producer threads can call this
+ /// concurrently; all mutations are performed through atomic operations.
     pub fn enqueue(&self, data: *mut T, ticket: &mut MpscTicket) -> bool {
         debug_assert!(!data.is_null(), "MpscQueue::enqueue: data must not be null");
 
-        // Reserve a slot, or reuse the existing reservation.
+ // Reserve a slot, or reuse the existing reservation.
         let tail = if !ticket.has_reservation {
             self.tail.fetch_add(1, Ordering::Relaxed)
         } else {
             ticket.index
         };
 
-        // Fullness check using producer's cached head copy.
+ // Fullness check using producer's cached head copy.
         let head = self.head_cache.load(Ordering::Acquire);
         if tail.wrapping_sub(head) >= self.queue_size {
-            // Cached limit reached — refresh from the true consumer head.
+ // Cached limit reached — refresh from the true consumer head.
             let head = self.head.load(Ordering::Acquire);
             self.head_cache.store(head, Ordering::Release);
 
             if tail.wrapping_sub(head) >= self.queue_size {
-                // Queue is full; save reservation so the caller can retry.
+ // Queue is full; save reservation so the caller can retry.
                 ticket.index = tail;
                 ticket.has_reservation = true;
                 return false;
             }
         }
 
-        // Commit data to the reserved slot.
+ // Commit data to the reserved slot.
         let slot = tail & (self.queue_size - 1);
         self.buffer[slot].store(data, Ordering::Release);
 
@@ -183,18 +167,17 @@ impl<T> MpscQueue<T> {
         true
     }
 
-    /// Drains up to `max_jobs` items into `jobs_out`. Returns the number of
-    /// items actually popped.
-    ///
-    /// Stops early if a slot was reserved by a producer but not yet written
-    /// (data pointer is still null). This prevents reordering a later-written
-    /// item ahead of an earlier reservation.
+ /// Drains up to `max_jobs` items into `jobs_out`. Returns the number
+ /// items actually popped.
+ /// Stops early if a slot was reserved by a producer but not yet written
+ /// (data pointer is still null). This prevents reordering a later-written
+ /// item ahead of an earlier reservation.
     pub fn dequeue_batch(&mut self, jobs_out: &mut Vec<*mut T>, max_jobs: usize) -> usize {
         let mut popped_count = 0usize;
         let mut head = self.head.load(Ordering::Relaxed);
         let mut tail = self.tail_cache;
 
-        // Refresh tail cache if the queue looks empty.
+ // Refresh tail cache if the queue looks empty.
         if head == tail {
             tail = self.tail.load(Ordering::Acquire);
             self.tail_cache = tail;
@@ -210,7 +193,7 @@ impl<T> MpscQueue<T> {
             let slot = head & (self.queue_size - 1);
             let data = self.buffer[slot].load(Ordering::Relaxed);
 
-            // Stop if the producer has reserved this slot but not yet written.
+ // Stop if the producer has reserved this slot but not yet written.
             if data.is_null() {
                 break;
             }
@@ -223,7 +206,7 @@ impl<T> MpscQueue<T> {
 
         if popped_count > 0 {
             self.head.store(head, Ordering::Release);
-            // Ensure data visibility for the caller.
+ // Ensure data visibility for the caller.
             fence(Ordering::Acquire);
         }
 
@@ -236,15 +219,13 @@ impl<T> MpscQueue<T> {
 // ============================================================================
 
 /// One ring-buffer cell for [`SpmcQueue`].
-///
-/// PORT NOTE: In C, `data` is a plain `void *` field. Correctness relies on the
+/// PORT NOTE: In C, `data` is a plain `void *` field. Correctness relies on
 /// release store to `sequence` (which the producer does after writing `data`)
 /// creating a happens-before edge that the consumer's acquire load on `sequence`
 /// observes. We promote `data` to `AtomicPtr<T>` so that `SpmcCell<T>` is
 /// `Sync` without an `unsafe impl`. This costs one extra atomic operation per
 /// enqueue/dequeue but avoids `UnsafeCell`.
-///
-/// The `#[repr(align(64))]` provides cache-line alignment; padding each cell to
+/// The `#[repr(align(64))]` provides cache-line alignment; padding each cell
 /// a cache line prevents consumer false sharing.
 #[repr(align(64))]
 pub struct SpmcCell<T> {
@@ -253,33 +234,32 @@ pub struct SpmcCell<T> {
 }
 
 /// Single-Producer Multi-Consumer lock-free ring-buffer queue.
-///
 /// PORT NOTE: Field comments mark the intended cache-line groupings:
 /// - "shared consumer cache line": `head`
-/// - "producer cache line":        `tail` + `head_cache`
-/// - "buffer cache line":          `buffer` + `queue_size`
+/// - "producer cache line": `tail` + `head_cache`
+/// - "buffer cache line": `buffer` + `queue_size`
 pub struct SpmcQueue<T> {
-    // --- shared consumer cache line (high contention) ---
-    /// Atomic dequeue cursor; consumers CAS this to claim a slot.
+ // --- shared consumer cache line (high contention) ---
+ /// Atomic dequeue cursor; consumers CAS this to claim a slot.
     head: AtomicUsize,
 
-    // --- producer cache line ---
-    /// Producer-local monotonically-increasing enqueue index (non-atomic;
-    /// only the single producer writes this).
+ // --- producer cache line ---
+ /// Producer-local monotonically-increasing enqueue index (non-atomic;
+ /// only the single producer writes this).
     tail: usize,
-    /// Producer-local cached consumer position; avoids loading `head` atomically
-    /// on every enqueue.
+ /// Producer-local cached consumer position; avoids loading `head` atomically
+ /// on every enqueue.
     head_cache: usize,
 
-    // --- buffer ---
-    /// Ring buffer; cells are individually cache-line padded via `SpmcCell`'s
-    /// `#[repr(align(64))]`.
+ // --- buffer ---
+ /// Ring buffer; cells are individually cache-line padded via `SpmcCell`'s
+ /// `#[repr(align(64))]`.
     buffer: Vec<SpmcCell<T>>,
     queue_size: usize,
 }
 
 impl<T> SpmcQueue<T> {
-    /// Creates a new SPMC queue. `queue_size` must be a positive power of two.
+ /// Creates a new SPMC queue. `queue_size` must be a positive power of two.
     pub fn new(queue_size: usize) -> Self {
         debug_assert!(
             queue_size > 0 && (queue_size & (queue_size - 1)) == 0,
@@ -301,68 +281,63 @@ impl<T> SpmcQueue<T> {
         }
     }
 
-    /// Resets queue bookkeeping state (buffer deallocation handled by `Drop`).
-    ///
-    /// Note: A reset queue is not safe to use without re-initialisation of the
-    /// cells, consistent with re-initialization after a reset.
+ /// Resets queue bookkeeping state (buffer deallocation handled by `Drop`).
+ /// Note: A reset queue is not safe to use without re-initialisation of
+ /// cells, consistent with re-initialization after a reset.
     pub fn reset(&mut self) {
         self.head.store(0, Ordering::Relaxed);
         self.tail = 0;
         self.head_cache = 0;
     }
 
-    /// Returns `true` if the queue appears empty from the producer's view.
-    ///
-    /// May update `head_cache` on the slow path.
+ /// Returns `true` if the queue appears empty from the producer's view.
+ /// May update `head_cache` on the slow path.
     pub fn is_empty(&mut self) -> bool {
-        // Fast path: cached consumer position.
+ // Fast path: cached consumer position.
         if self.tail == self.head_cache {
             return true;
         }
-        // Slow path: refresh atomic head.
+ // Slow path: refresh atomic head.
         let curr_head = self.head.load(Ordering::Acquire);
         self.head_cache = curr_head;
         self.tail == curr_head
     }
 
-    /// Returns an approximate item count (may race with consumers).
+ /// Returns an approximate item count (may race with consumers).
     pub fn size(&self) -> usize {
         let head = self.head.load(Ordering::Relaxed);
         self.tail.saturating_sub(head)
     }
 
-    /// Pushes `data` into the next slot. Returns `false` if the slot is
-    /// occupied (queue full or consumer hasn't cleared the wrapping slot yet).
+ /// Pushes `data` into the next slot. Returns `false` if the slot is
+ /// occupied (queue full or consumer hasn't cleared the wrapping slot yet).
     pub fn enqueue(&mut self, data: *mut T) -> bool {
         let slot = self.tail & (self.queue_size - 1);
         let cell = &self.buffer[slot];
         let seq = cell.sequence.load(Ordering::Acquire);
 
-        // seq == tail: slot is empty and ready for this generation.
-        // seq <  tail: slot still occupied by a consumer, or stale.
+ // seq == tail: slot is empty and ready for this generation.
+ // seq < tail: slot still occupied by a consumer, or stale.
         if seq != self.tail {
             return false;
         }
 
         cell.data.store(data, Ordering::Relaxed);
 
-        // Publish availability: advance sequence to (tail + 1) with release
-        // so consumers' acquire load on sequence sees the data write.
+ // Publish availability: advance sequence to (tail + 1) with release
+ // so consumers' acquire load on sequence sees the data write.
         cell.sequence.store(self.tail + 1, Ordering::Release);
         self.tail += 1;
 
         true
     }
 
-    /// Pops and returns the next item, or a null pointer if the queue is empty.
-    ///
-    /// Multiple consumers may call this concurrently; they compete via a
-    /// weak CAS on `head`.
-    ///
-    /// PORT NOTE: Returns `*mut T` (null = empty).
-    /// Callers need `unsafe` to dereference the returned pointer.
-    ///
-    /// Takes `&self` because all mutations are through atomics.
+ /// Pops and returns the next item, or a null pointer if the queue is empty.
+ /// Multiple consumers may call this concurrently; they compete via a
+ /// weak CAS on `head`.
+ /// PORT NOTE: Returns `*mut T` (null = empty).
+ /// Callers need `unsafe` to dereference the returned pointer.
+ /// Takes `&self` because all mutations are through atomics.
     pub fn dequeue(&self) -> *mut T {
         let mut head = self.head.load(Ordering::Relaxed);
 
@@ -374,7 +349,7 @@ impl<T> SpmcQueue<T> {
             let diff = (seq as isize).wrapping_sub(head.wrapping_add(1) as isize);
 
             if diff == 0 {
-                // Slot has data; attempt to claim it via CAS on head.
+ // Slot has data; attempt to claim it via CAS on head.
                 match self.head.compare_exchange_weak(
                     head,
                     head.wrapping_add(1),
@@ -383,21 +358,21 @@ impl<T> SpmcQueue<T> {
                 ) {
                     Ok(_) => {
                         let data = cell.data.load(Ordering::Relaxed);
-                        // Mark slot empty for the next generation (head + queue_size).
+ // Mark slot empty for the next generation (head + queue_size).
                         cell.sequence
                             .store(head.wrapping_add(self.queue_size), Ordering::Release);
                         return data;
                     }
                     Err(actual) => {
-                        // CAS failed; another consumer advanced head. Retry.
+ // CAS failed; another consumer advanced head. Retry.
                         head = actual;
                     }
                 }
             } else if diff < 0 {
-                // Producer hasn't filled this slot yet — queue is empty.
+ // Producer hasn't filled this slot yet — queue is empty.
                 return std::ptr::null_mut();
             } else {
-                // diff > 0: our local `head` is stale; reload from the atomic.
+ // diff > 0: our local `head` is stale; reload from the atomic.
                 head = self.head.load(Ordering::Relaxed);
             }
         }
@@ -409,40 +384,37 @@ impl<T> SpmcQueue<T> {
 // ============================================================================
 
 /// Single-Producer Single-Consumer lock-free ring-buffer queue with batching.
-///
 /// The producer may enqueue multiple items with `commit = false` to batch them,
 /// then call [`SpscQueue::commit`] once to make them all visible to the consumer
 /// in a single atomic store.
-///
 /// PORT NOTE: We use `Vec<AtomicPtr<T>>` so the buffer is safe to share between
 /// producer and consumer without `UnsafeCell`.
-///
 /// PORT NOTE: Field comments mark the intended cache-line groupings:
 /// - "consumer cache line": `head` + `tail_cache`
 /// - "producer cache line": `tail` + `tail_local` + `head_cache`
-/// - "buffer cache line":   `buffer` + `queue_size`
+/// - "buffer cache line": `buffer` + `queue_size`
 pub struct SpscQueue<T> {
-    // --- consumer cache line ---
-    /// Shared dequeue cursor (atomic; advanced by consumer after each batch).
+ // --- consumer cache line ---
+ /// Shared dequeue cursor (atomic; advanced by consumer after each batch).
     head: AtomicUsize,
-    /// Consumer-local cached tail; avoids an atomic load on the hot dequeue path.
+ /// Consumer-local cached tail; avoids an atomic load on the hot dequeue path.
     tail_cache: usize,
 
-    // --- producer cache line ---
-    /// Shared enqueue cursor (atomic; committed view visible to the consumer).
+ // --- producer cache line ---
+ /// Shared enqueue cursor (atomic; committed view visible to the consumer).
     tail: AtomicUsize,
-    /// Producer-local write index; may be ahead of `tail` during batching.
+ /// Producer-local write index; may be ahead of `tail` during batching.
     tail_local: usize,
-    /// Producer-local cached head; avoids an atomic load on the fullness check.
+ /// Producer-local cached head; avoids an atomic load on the fullness check.
     head_cache: usize,
 
-    // --- buffer ---
+ // --- buffer ---
     buffer: Vec<AtomicPtr<T>>,
     queue_size: usize,
 }
 
 impl<T> SpscQueue<T> {
-    /// Creates a new SPSC queue. `queue_size` must be a positive power of two.
+ /// Creates a new SPSC queue. `queue_size` must be a positive power of two.
     pub fn new(queue_size: usize) -> Self {
         debug_assert!(
             queue_size > 0 && (queue_size & (queue_size - 1)) == 0,
@@ -463,7 +435,7 @@ impl<T> SpscQueue<T> {
         }
     }
 
-    /// Resets all queue state (buffer deallocation handled by `Drop`).
+ /// Resets all queue state (buffer deallocation handled by `Drop`).
     pub fn reset(&mut self) {
         self.head.store(0, Ordering::Relaxed);
         self.tail.store(0, Ordering::Relaxed);
@@ -472,10 +444,9 @@ impl<T> SpscQueue<T> {
         self.tail_local = 0;
     }
 
-    /// Returns `true` if the queue is full from the producer's perspective.
-    ///
-    /// As a side-effect, may flush any pending batched enqueues to the consumer
-    /// so that the consumer can advance its head before we declare "full".
+ /// Returns `true` if the queue is full from the producer's perspective.
+ /// As a side-effect, may flush any pending batched enqueues to the consumer
+ /// so that the consumer can advance its head before we declare "full".
     pub fn is_full(&mut self) -> bool {
         let curr_tail = self.tail_local;
 
@@ -483,7 +454,7 @@ impl<T> SpscQueue<T> {
             self.head_cache = self.head.load(Ordering::Acquire);
 
             if curr_tail.wrapping_sub(self.head_cache) >= self.queue_size {
-                // Flush any pending batch before declaring full.
+ // Flush any pending batch before declaring full.
                 let committed = self.tail.load(Ordering::Relaxed);
                 if self.tail_local != committed {
                     self.tail.store(self.tail_local, Ordering::Release);
@@ -494,13 +465,12 @@ impl<T> SpscQueue<T> {
         false
     }
 
-    /// Enqueues `data`. The caller must ensure the queue is not full by calling
-    /// [`SpscQueue::is_full`] first.
-    ///
-    /// If `commit` is `true`, the shared tail is updated immediately and the
-    /// item becomes visible to the consumer at once. If `false`, only
-    /// `tail_local` advances (batching mode); call [`SpscQueue::commit`] to
-    /// publish the batch.
+ /// Enqueues `data`. The caller must ensure the queue is not full by calling
+ /// [`SpscQueue::is_full`] first.
+ /// If `commit` is `true`, the shared tail is updated immediately and
+ /// item becomes visible to the consumer at once. If `false`, only
+ /// `tail_local` advances (batching mode); call [`SpscQueue::commit`]
+ /// publish the batch.
     pub fn enqueue(&mut self, data: *mut T, commit: bool) {
         let slot = self.tail_local & (self.queue_size - 1);
         self.buffer[slot].store(data, Ordering::Relaxed);
@@ -511,8 +481,8 @@ impl<T> SpscQueue<T> {
         }
     }
 
-    /// Publishes any pending batched enqueues by advancing the shared tail to
-    /// `tail_local`. A no-op if `tail_local` equals the already-committed tail.
+ /// Publishes any pending batched enqueues by advancing the shared tail
+ /// `tail_local`. A no-op if `tail_local` equals the already-committed tail.
     pub fn commit(&mut self) {
         let committed = self.tail.load(Ordering::Relaxed);
         if self.tail_local == committed {
@@ -521,7 +491,7 @@ impl<T> SpscQueue<T> {
         self.tail.store(self.tail_local, Ordering::Release);
     }
 
-    /// Pops up to `num_jobs` items into `jobs_out`. Returns the actual count.
+ /// Pops up to `num_jobs` items into `jobs_out`. Returns the actual count.
     pub fn dequeue_batch(&mut self, jobs_out: &mut Vec<*mut T>, num_jobs: usize) -> usize {
         let curr_head = self.head.load(Ordering::Relaxed);
         let mut curr_tail_cache = self.tail_cache;
@@ -547,15 +517,15 @@ impl<T> SpscQueue<T> {
         count
     }
 
-    /// Returns `true` if the queue is empty from the producer's perspective
-    /// (compares `tail_local` against `head`, refreshing `head_cache` on the
-    /// slow path).
+ /// Returns `true` if the queue is empty from the producer's perspective
+ /// (compares `tail_local` against `head`, refreshing `head_cache` on
+ /// slow path).
     pub fn is_empty(&mut self) -> bool {
-        // Fast path: producer-local tail vs cached head.
+ // Fast path: producer-local tail vs cached head.
         if self.tail_local == self.head_cache {
             return true;
         }
-        // Slow path: refresh head.
+ // Slow path: refresh head.
         let curr_head = self.head.load(Ordering::Acquire);
         self.head_cache = curr_head;
         self.tail_local == curr_head
@@ -564,7 +534,7 @@ impl<T> SpscQueue<T> {
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        src/queues.c  (295 lines, 16 functions)
+//   source:        Valkey
 //                  src/queues.h  (141 lines, 3 structs + mpscTicket)
 //   target_crate:  redis-core
 //   confidence:    high

@@ -1,7 +1,6 @@
 //! `valkey-check-aof` utility — a dry-parse validator for AOF files.
-//!
 //! Invoked when the binary is run via the `valkey-check-aof` name (argv[0]
-//! dispatch in `main`). It does not mutate any keyspace — it walks the bytes of
+//! dispatch in `main`). It does not mutate any keyspace — it walks the bytes
 //! an AOF (or the files named by a manifest), tracking the last fully-parsed
 //! offset and line so it can report validity. Output strings match upstream
 //! validator format so test suites recognize the results.
@@ -44,7 +43,7 @@ pub(crate) fn run_check_aof(args: &[String]) -> i32 {
         InputFileType::Resp => check_old_style_aof(path, fix, false),
         InputFileType::RdbPreamble => check_old_style_aof(path, fix, true),
     }
-    // The check functions terminate the process via `std::process::exit`.
+ // The check functions terminate the process via `std::process::exit`.
     0
 }
 
@@ -180,7 +179,7 @@ struct Manifest {
 }
 
 /// Strict manifest parse mirroring `aofLoadManifestFromDisk`'s structural rules.
-/// Any malformed line yields `Err(())`, which the caller reports as
+/// Any malformed line yields `Err(`, which the caller reports as
 /// "Invalid AOF manifest file format".
 fn load_manifest(path: &Path) -> Result<Manifest, ()> {
     let content = std::fs::read(path).map_err(|_| ())?;
@@ -242,8 +241,8 @@ fn check_single_aof(
     let mut cur = Cursor::new(&bytes);
 
     if preamble {
-        // The RDB-preamble occupies the head of the file. Validate it via the
-        // shared RDB checker; the AOF tail (if any) begins after the RDB EOF.
+ // The RDB-preamble occupies the head of the file. Validate it via
+ // shared RDB checker; the AOF tail (if any) begins after the RDB EOF.
         match redis_core::rdb::load::check_rdb_file(path) {
             report if report.ok => {
                 println!("RDB preamble is OK, proceeding with AOF tail...");
@@ -253,10 +252,10 @@ fn check_single_aof(
                 std::process::exit(1);
             }
         }
-        // We cannot currently resume RESP parsing after the RDB section without
-        // the loader reporting its consumed length; treat a clean RDB preamble
-        // as a valid base (the common multi-part case where the base is a pure
-        // RDB snapshot and the tail lives in the INCR file).
+ // We cannot currently resume RESP parsing after the RDB section without
+ // the loader reporting its consumed length; treat a clean RDB preamble
+ // as a valid base (the common multi-part case where the base is a pure
+ // RDB snapshot and the tail lives in the INCR file).
         return Ok(AofCheck::Ok);
     }
 
@@ -275,7 +274,7 @@ fn check_single_aof(
             break; // EOF
         };
         if first == b'#' {
-            // Timestamp annotation line; consume to end of line.
+ // Timestamp annotation line; consume to end of line.
             if !cur.skip_annotation() {
                 break;
             }
@@ -387,7 +386,7 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    /// Read a `<prefix><number>\r\n` header. Returns the number.
+ /// Read a `<prefix><number>\r\n` header. Returns the number.
     fn read_long(&mut self, prefix: u8) -> Option<i64> {
         if self.bytes.get(self.pos) != Some(&prefix) {
             return None;
@@ -407,7 +406,7 @@ impl<'a> Cursor<'a> {
         Some(num)
     }
 
-    /// Read a `$<len>\r\n<bytes>\r\n` bulk string, discarding its content.
+ /// Read a `$<len>\r\n<bytes>\r\n` bulk string, discarding its content.
     fn read_string(&mut self) -> Result<Vec<u8>, ()> {
         let len = self.read_long(b'$').ok_or(())?;
         if len < 0 {
@@ -425,8 +424,8 @@ impl<'a> Cursor<'a> {
         Ok(s)
     }
 
-    /// Decode one RESP array, tracking MULTI/EXEC nesting. Returns Ok(false) on
-    /// a clean short read (incomplete trailing record), Err on a malformed one.
+ /// Decode one RESP array, tracking MULTI/EXEC nesting. Returns Ok(false) on
+ /// a clean short read (incomplete trailing record), Err on a malformed one.
     fn process_resp(&mut self, multi: &mut i64) -> Result<bool, String> {
         let argc = match self.read_long(b'*') {
             Some(n) => n,
@@ -454,7 +453,7 @@ impl<'a> Cursor<'a> {
         Ok(true)
     }
 
-    /// Consume a `#...\r\n` annotation line.
+ /// Consume a `#...\r\n` annotation line.
     fn skip_annotation(&mut self) -> bool {
         while self.pos < self.bytes.len() && self.bytes[self.pos] != b'\n' {
             self.pos += 1;
@@ -472,7 +471,7 @@ impl<'a> Cursor<'a> {
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        valkey-check-aof.c
+//   source:        Valkey
 //   target_crate:  redis-server
 //   confidence:    partial
 //   todos:         2

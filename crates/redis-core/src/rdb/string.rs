@@ -1,19 +1,16 @@
 //! RDB string type serialization — Round 19a.
-//!
-//! Implements `save_string_object` and `load_string_object`, replacing the
+//! Implements `save_string_object` and `load_string_object`, replacing
 //! Round 18 empty-payload placeholder for `RDB_TYPE_STRING`.
-//!
 //! Save encoding rules (mirroring `rdbSaveRawString` / `rdbSaveLongLongAsStringObject`):
-//!   - `StringEncoding::Int(n)`: emit `RDB_ENCVAL | RDB_ENC_INT8/16/32` + little-endian
-//!     bytes when `n` fits in i8/i16/i32; fall through to decimal text for larger values.
-//!   - `StringEncoding::Embstr(bytes)` and `StringEncoding::Raw(bytes)`: emit
-//!     `save_len(bytes.len())` followed by the raw bytes. LZF compression is deferred to
-//!     Round 27.
-//!
+//! - `StringEncoding::Int(n)`: emit `RDB_ENCVAL | RDB_ENC_INT8/16/32` + little-endian
+//! bytes when `n` fits in i8/i16/i32; fall through to decimal text for larger values.
+//! - `StringEncoding::Embstr(bytes)` and `StringEncoding::Raw(bytes)`: emit
+//! `save_len(bytes.len` followed by the raw bytes. LZF compression is deferred
+//! Round 27.
 //! Load encoding rules (mirroring `rdbLoadEncodedStringObject` + `tryObjectEncoding`):
-//!   - `is_encoded` flag from `load_len`: dispatch on `RDB_ENC_INT8/16/32` →
-//!     `StringEncoding::Int(n as i64)`. `RDB_ENC_LZF` → error (Round 27).
-//!   - Raw byte payload: `len <= 44` → `StringEncoding::Embstr`, else `StringEncoding::Raw`.
+//! - `is_encoded` flag from `load_len`: dispatch on `RDB_ENC_INT8/16/32` →
+//! `StringEncoding::Int(n as i64)`. `RDB_ENC_LZF` → error (Round 27).
+//! - Raw byte payload: `len <= 44` → `StringEncoding::Embstr`, else `StringEncoding::Raw`.
 
 use std::io::{self, Read, Write};
 
@@ -28,7 +25,6 @@ use super::varint::{
 const EMBSTR_LIMIT: usize = 44;
 
 /// Serialize a `RDB_TYPE_STRING` value payload for `obj`.
-///
 /// The type byte itself is written by the caller; this function writes only
 /// the value payload that follows it.
 pub fn save_string_object(w: &mut impl Write, obj: &RedisObject) -> io::Result<()> {
@@ -44,7 +40,6 @@ pub fn save_string_object(w: &mut impl Write, obj: &RedisObject) -> io::Result<(
 }
 
 /// Deserialize a `RDB_TYPE_STRING` value payload, producing a `RedisObject`.
-///
 /// Reads from `r` starting immediately after the type byte.
 pub fn load_string_object(r: &mut impl Read) -> io::Result<RedisObject> {
     let (len, is_encoded) = load_len(r)?;

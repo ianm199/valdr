@@ -47,16 +47,14 @@ use crate::live_config_handle;
 use crate::shutdown_signals::*;
 
 /// `COMMAND` / `COMMAND COUNT` / `COMMAND GETKEYS` / `COMMAND GETKEYSANDFLAGS`.
-///
 /// `COMMAND` (no args) replies with an array of bulk-string command names
 /// drawn from the dispatch table. This stub omits the per-command metadata
 /// (arity/flags/key-positions/etc.); `redis-cli` accepts a names-only reply.
-///
 /// `COMMAND COUNT` replies with the integer length of the dispatch table.
 /// `COMMAND LIST` returns the generated command and subcommand names, including
 /// `parent|subcommand` full names for source-shaped upstream introspection
 /// tests.
-/// `COMMAND INFO` returns a compact command-info array; currently the
+/// `COMMAND INFO` returns a compact command-info array; currently
 /// load-bearing field is index 2, the flags list.
 /// `COMMAND GETKEYS` replies with keys derived from generated command metadata,
 /// with SORT/SORT_RO/SET matching their upstream variable key parsing.

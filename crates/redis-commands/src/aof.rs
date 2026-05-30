@@ -1,15 +1,12 @@
 //! Append-Only File (AOF) persistence.
-//!
-//! `AofWriter` encodes every write command as a RESP multibulk array and
-//! appends it to the AOF file. The fsync policy is governed by the
+//! `AofWriter` encodes every write command as a RESP multibulk array
+//! appends it to the AOF file. The fsync policy is governed by
 //! `appendfsync` config key: `always` (sync after every append), `everysec`
 //! (background sync thread fsyncs once per second), or `no` (OS decides).
-//!
 //! `BGREWRITEAOF` walks the current DB and emits the minimal command sequence
 //! needed to reconstruct each key. In the manifest layout it switches appends
 //! to a new INCR file before writing the new BASE, then persists a manifest
 //! naming the new BASE plus active INCR.
-//!
 //! Replay on startup: `replay_aof` reads RESP commands using the same parser as
 //! the network path. Malformed input and unsupported commands are fatal unless
 //! the caller explicitly allows a truncated tail.
@@ -52,11 +49,11 @@ pub fn fsync_policy_str(code: u8) -> &'static str {
 /// Options controlling AOF replay strictness.
 #[derive(Clone, Debug, Default)]
 pub struct AofLoadOptions {
-    /// Accept an incomplete final command and replay the valid prefix.
+ /// Accept an incomplete final command and replay the valid prefix.
     pub load_truncated: bool,
-    /// Accept an RDB preamble before RESP commands. Placeholder for the
-    /// manifest/RDB-preamble packet; legacy single-file AOF currently rejects
-    /// preambles even when this is true.
+ /// Accept an RDB preamble before RESP commands. Placeholder for
+ /// manifest/RDB-preamble packet; legacy single-file AOF currently rejects
+ /// preambles even when this is true.
     pub allow_rdb_preamble: bool,
 }
 
@@ -179,7 +176,7 @@ pub struct AofWriter {
 }
 
 impl AofWriter {
-    /// Open (or create) the AOF file at `path`.
+ /// Open (or create) the AOF file at `path`.
     pub fn open(path: &Path, fsync_policy: u8) -> io::Result<Self> {
         let file = OpenOptions::new().create(true).append(true).open(path)?;
         Ok(Self {
@@ -193,7 +190,7 @@ impl AofWriter {
         })
     }
 
-    /// Create or truncate an AOF file, then reopen it in append mode.
+ /// Create or truncate an AOF file, then reopen it in append mode.
     pub fn open_truncate(path: &Path, fsync_policy: u8) -> io::Result<Self> {
         OpenOptions::new()
             .create(true)
@@ -203,30 +200,27 @@ impl AofWriter {
         Self::open(path, fsync_policy)
     }
 
-    /// Encode `argv` as a RESP multibulk command and append it to the file.
-    ///
-    /// When the fsync policy is `FSYNC_ALWAYS`, flushes and fsyncs before
-    /// returning. Otherwise the everysec background thread or the OS handles
-    /// durability.
+ /// Encode `argv` as a RESP multibulk command and append it to the file.
+ /// When the fsync policy is `FSYNC_ALWAYS`, flushes and fsyncs before
+ /// returning. Otherwise the everysec background thread or the OS handles
+ /// durability.
     pub fn append(&self, argv: &[RedisString]) -> io::Result<()> {
         self.append_selected(0, argv)
     }
 
-    /// Append a command without inserting an implicit SELECT record.
-    ///
-    /// MULTI/EXEC transaction envelopes use this; commands inside the envelope
-    /// still call `append_selected` so DB selection is represented inside the
-    /// transaction.
+ /// Append a command without inserting an implicit SELECT record.
+ /// MULTI/EXEC transaction envelopes use this; commands inside the envelope
+ /// still call `append_selected` so DB selection is represented inside
+ /// transaction.
     pub fn append_raw(&self, argv: &[RedisString]) -> io::Result<()> {
         let encoded = encode_resp_command(argv);
         self.append_encoded(&encoded)
     }
 
-    /// Append a command that was executed against logical DB `db_id`.
-    ///
-    /// Mirrors Valkey `feedAppendOnlyFile`: a SELECT record is inserted when
-    /// the target DB differs from the previous AOF record, then the command is
-    /// appended in the same RESP multibulk format used by replication.
+ /// Append a command that was executed against logical DB `db_id`.
+ /// Mirrors Valkey `feedAppendOnlyFile`: a SELECT record is inserted when
+ /// the target DB differs from the previous AOF record, then the command is
+ /// appended in the same RESP multibulk format used by replication.
     pub fn append_selected(&self, db_id: u32, argv: &[RedisString]) -> io::Result<()> {
         let mut encoded = Vec::with_capacity(64);
         {
@@ -268,9 +262,8 @@ impl AofWriter {
         Ok(())
     }
 
-    /// Flush the BufWriter and fsync to disk if there are pending bytes.
-    ///
-    /// Called by the everysec background thread.
+ /// Flush the BufWriter and fsync to disk if there are pending bytes.
+ /// Called by the everysec background thread.
     pub fn fsync_if_due(&self) -> io::Result<()> {
         if self.pending_bytes.load(Ordering::Relaxed) == 0 {
             return Ok(());
@@ -289,12 +282,11 @@ impl AofWriter {
         Ok(())
     }
 
-    /// Record the replication offset covered by the most recent AOF append.
-    ///
-    /// Upstream Valkey tracks `server.fsynced_reploff` rather than raw file
-    /// byte offsets. WAITAOF waits on that replication offset, so the Rust AOF
-    /// writer remembers the highest replication offset whose command bytes
-    /// have been appended, then publishes it after a successful fsync.
+ /// Record the replication offset covered by the most recent AOF append.
+ /// Upstream Valkey tracks `server.fsynced_reploff` rather than raw file
+ /// byte offsets. WAITAOF waits on that replication offset, so the Rust AOF
+ /// writer remembers the highest replication offset whose command bytes
+ /// have been appended, then publishes it after a successful fsync.
     pub fn note_repl_offset(&self, offset: i64) {
         if offset < 0 {
             return;
@@ -317,7 +309,7 @@ impl AofWriter {
         self.fsynced_repl_offset.store(offset, Ordering::Release);
     }
 
-    /// Flush the buffer without fsyncing. Used during clean shutdown.
+ /// Flush the buffer without fsyncing. Used during clean shutdown.
     pub fn flush(&self) -> io::Result<()> {
         let mut guard = match self.file.lock() {
             Ok(g) => g,
@@ -326,19 +318,18 @@ impl AofWriter {
         guard.flush()
     }
 
-    /// Atomically replace the AOF file with a freshly-rewritten version at
-    /// `new_path` by renaming `new_path` over `self.path`.
+ /// Atomically replace the AOF file with a freshly-rewritten version
+ /// `new_path` by renaming `new_path` over `self.path`.
     pub fn rewrite_swap(&self, new_path: &Path) -> io::Result<()> {
         std::fs::rename(new_path, &self.path)
     }
 
-    /// Blocking, single-file AOF rewrite used until manifest-style rewrite
-    /// finalization lands.
-    ///
-    /// The writer mutex is held for the full rewrite so no acknowledged command
-    /// can append to the old file and then be hidden by the final rename. This
-    /// is deliberately conservative: `BGREWRITEAOF` is not truly background
-    /// while this path is active, but it preserves the no-write-loss invariant.
+ /// Blocking, single-file AOF rewrite used until manifest-style rewrite
+ /// finalization lands.
+ /// The writer mutex is held for the full rewrite so no acknowledged command
+ /// can append to the old file and then be hidden by the final rename. This
+ /// is deliberately conservative: `BGREWRITEAOF` is not truly background
+ /// while this path is active, but it preserves the no-write-loss invariant.
     pub fn rewrite_from_dbs_blocking(&self, dbs: &[RedisDb], tmp_path: &Path) -> io::Result<()> {
         let mut active = match self.file.lock() {
             Ok(g) => g,
@@ -403,7 +394,7 @@ pub fn encode_resp_command(argv: &[RedisString]) -> Vec<u8> {
     out
 }
 
-/// Spawn the everysec fsync background thread. The thread runs until the
+/// Spawn the everysec fsync background thread. The thread runs until
 /// process exits. When `appendonly` is disabled the thread simply sleeps.
 pub fn spawn_fsync_thread() {
     std::thread::Builder::new()
@@ -431,25 +422,23 @@ pub fn spawn_fsync_thread() {
 }
 
 /// Write the minimum command sequence to reconstruct `db` into `file`.
-///
 /// String → SET / SETEX
-/// List   → RPUSH (batched ≤ 64 elements)
-/// Hash   → HMSET (batched ≤ 64 field/value pairs)
-/// Set    → SADD (batched ≤ 64 members)
-/// ZSet   → ZADD (batched ≤ 64 score/member pairs)
+/// List → RPUSH (batched ≤ 64 elements)
+/// Hash → HMSET (batched ≤ 64 field/value pairs)
+/// Set → SADD (batched ≤ 64 members)
+/// ZSet → ZADD (batched ≤ 64 score/member pairs)
 /// Stream → XADD per entry, XSETID to lock last_id / max_deleted_id /
-///          entries_added, XGROUP CREATE per group, XGROUP CREATECONSUMER
-///          per consumer, and XCLAIM JUSTID FORCE per PEL entry. Streams
-///          with no entries but at least one group emit a placeholder
-///          XADD + XDEL pair followed by XSETID to recreate the key.
-///          Truly-empty streams (no entries and no groups) are skipped —
-///          replay won't recreate the key. XCLAIM is emitted with FORCE
-///          so the PEL entry is created during replay even though the
-///          consumer's PEL is empty at that point. JUSTID preserves the
-///          previous `delivery_count` slot in our codebase (zero), so
-///          original per-PEL `delivery_count` and `delivery_time_ms` are
-///          not restored exactly — they reset to zero / replay-time.
-///
+/// entries_added, XGROUP CREATE per group, XGROUP CREATECONSUMER
+/// per consumer, and XCLAIM JUSTID FORCE per PEL entry. Streams
+/// with no entries but at least one group emit a placeholder
+/// XADD + XDEL pair followed by XSETID to recreate the key.
+/// Truly-empty streams (no entries and no groups) are skipped —
+/// replay won't recreate the key. XCLAIM is emitted with FORCE
+/// so the PEL entry is created during replay even though
+/// consumer's PEL is empty at that point. JUSTID preserves
+/// previous `delivery_count` slot in our codebase (zero), so
+/// original per-PEL `delivery_count` and `delivery_time_ms` are
+/// not restored exactly — they reset to zero / replay-time.
 /// After the data command each key with a TTL gets PEXPIREAT.
 pub fn write_aof_rewrite<W: Write>(db: &RedisDb, writer: &mut W) -> io::Result<()> {
     write_aof_rewrite_for_dbs(std::slice::from_ref(db), writer)
@@ -620,11 +609,10 @@ fn write_pexpireat<W: Write>(writer: &mut W, key: &RedisString, expire: i64) -> 
 
 /// Emit the per-stream command sequence: XADD per entry, XSETID, then per
 /// group XGROUP CREATE + XGROUP CREATECONSUMER + XCLAIM JUSTID FORCE.
-///
 /// For empty-but-existing streams (no entries, has at least one group), a
 /// placeholder `XADD <key> 1-1 _ _` followed by `XDEL <key> 1-1` is emitted
 /// so the key exists before the XGROUP commands run; the trailing XSETID
-/// then restores the original `last_id`, `entries_added`, and
+/// then restores the original `last_id`, `entries_added`,
 /// `max_deleted_id`.
 fn write_stream_rewrite<W: Write>(
     writer: &mut W,
@@ -740,17 +728,14 @@ fn format_score(score: f64) -> String {
 
 /// Replay an AOF file into `db` by parsing each RESP command and dispatching
 /// it through the handler table.
-///
 /// Commands that fail to parse are skipped with a warning. Commands that
 /// return errors are also skipped (e.g. SETEX with already-expired TTL).
-///
 /// Returns the number of commands successfully replayed.
 pub fn replay_aof(path: &Path, db: &mut RedisDb) -> io::Result<usize> {
     replay_aof_databases(path, std::slice::from_mut(db))
 }
 
 /// Replay an AOF file into an owner-provided logical DB vector.
-///
 /// SELECT commands update the replay target. This is used during startup
 /// before `RuntimeOwner` begins polling sockets, so it mutates only the DB
 /// vector that will become the owner-owned live keyspace.
@@ -857,10 +842,9 @@ pub fn replay_aof_databases_with_options(
 }
 
 /// Load Valkey multi-part AOF files or fall back to the legacy single AOF.
-///
 /// When `<dir>/<appenddirname>/<appendfilename>.manifest` exists, the manifest
 /// is parsed with Valkey's strict startup rules and the BASE plus ordered INCR
-/// files it names are loaded from `appenddirname`. When no manifest exists, the
+/// files it names are loaded from `appenddirname`. When no manifest exists,
 /// old `<dir>/<appendfilename>` file remains the compatibility input.
 pub fn load_append_only_files(
     dir: &Path,
@@ -891,10 +875,9 @@ pub fn load_append_only_files(
 }
 
 /// Open the active writer using Valkey's multi-part manifest layout.
-///
 /// Startup and `CONFIG SET appendonly yes` both call this after any existing
 /// AOF state has been loaded into `dbs`. It creates `appenddirname`, creates a
-/// BASE file plus current INCR when the manifest has no writable entries, and
+/// BASE file plus current INCR when the manifest has no writable entries,
 /// opens the last/current INCR with append semantics.
 pub fn open_manifest_current_incr_writer(
     dir: &Path,
@@ -951,10 +934,9 @@ pub fn open_manifest_current_incr_writer(
 }
 
 /// Rewrite a Valkey multi-part AOF manifest while keeping appends on an INCR.
-///
 /// This is synchronous for now, but follows the parent-side ordering that
 /// matters for correctness: publish a new active INCR first, write and rename a
-/// durable BASE file, then persist a manifest naming only the new BASE and the
+/// durable BASE file, then persist a manifest naming only the new BASE and
 /// current INCR. History deletion and failed-rewrite INCR accumulation are
 /// intentionally left out of this v1 path.
 pub fn rewrite_manifest_aof_from_dbs(
@@ -1484,7 +1466,6 @@ fn manifest_error_at(msg: &'static str, line_num: usize, line: &[u8]) -> io::Err
 }
 
 /// Route `argv` through the full command-dispatch machinery against `db`.
-///
 /// Constructs a minimal synthetic client (no live transport, authenticated as
 /// the default user) and calls [`crate::dispatch::dispatch_command_name`].
 /// Errors and unknown commands are returned as replay failures.
@@ -1528,9 +1509,8 @@ fn dispatch_via_handler(argv: &[RedisString], db: &mut RedisDb) -> io::Result<()
 /// Dispatch a single replayed command against `db` without a real client
 /// context. Implements a minimal subset covering the commands emitted by
 /// `write_aof_rewrite` and normal write operations.
-///
 /// Unknown or unsupported commands during replay are fatal. The small direct
-/// cases keep common replay hot paths simple; other commands fall through to
+/// cases keep common replay hot paths simple; other commands fall through
 /// the real command handler with AOF propagation suppressed.
 fn dispatch_replay_command(argv: &[RedisString], db: &mut RedisDb) -> io::Result<()> {
     use redis_core::object::{ObjectKind, RedisObject, EXPIRY_NONE};
@@ -1768,7 +1748,7 @@ fn parse_usize_ascii(bytes: &[u8]) -> Option<usize> {
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        reference/valkey/src/aof.c feedAppendOnlyFile/replay path
+//   source:        Valkey
 //   target_crate:  redis-commands
 //   confidence:    medium
 //   todos:         0

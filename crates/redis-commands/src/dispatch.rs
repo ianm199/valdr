@@ -1,16 +1,13 @@
 //! Command dispatch table — maps argv[0] (case-insensitive) to a handler fn.
-//!
 //! Wave A wires up the *lookup* side only. Most handler bodies are still
-//! `todo!()`; this module just routes the call. Handler bodies land in Waves
+//! `todo!`; this module just routes the call. Handler bodies land in Waves
 //! B/C/D.
-//!
 //! Two-layer lookup:
-//!
 //! 1. The generated registry in `generated::COMMANDS` is the source of truth
-//!    for command metadata (arity, flags, ACL category).
-//! 2. A small static `HANDLERS` table maps an uppercase ASCII command name to
-//!    a Rust function. Commands with no handler yet are intentionally absent;
-//!    callers receive an `unknown command` error.
+//! for command metadata (arity, flags, ACL category).
+//! 2. A small static `HANDLERS` table maps an uppercase ASCII command name
+//! a Rust function. Commands with no handler yet are intentionally absent;
+//! callers receive an `unknown command` error.
 
 use std::borrow::Cow;
 use std::cmp::Ordering;
@@ -40,14 +37,13 @@ pub type Handler = fn(&mut CommandContext) -> RedisResult<()>;
 
 /// One entry in the static dispatch table.
 pub struct DispatchEntry {
-    /// Uppercase ASCII name (e.g. `b"PING"`). Compared case-insensitively.
+ /// Uppercase ASCII name (e.g. `b"PING"`). Compared case-insensitively.
     pub name: &'static [u8],
-    /// Handler function pointer.
+ /// Handler function pointer.
     pub handler: Handler,
 }
 
 /// Command metadata used by the hot dispatch path.
-///
 /// The generated `COMMANDS` registry is still the source of truth. We compress
 /// the handful of fields dispatch needs into this small value so each command
 /// does one generated-registry scan instead of separate scans for WRITE,
@@ -108,7 +104,6 @@ struct CommandRename {
 }
 
 /// Apply a Valkey `rename-command <current-name> <new-name>` directive.
-///
 /// The directive renames the currently visible external command name while ACL
 /// rules and dispatch metadata continue to use the original canonical command.
 pub fn apply_command_rename(current_name: &[u8], new_name: &[u8]) -> Result<(), Vec<u8>> {
@@ -198,7 +193,6 @@ fn lower_command_name(name: &[u8]) -> Vec<u8> {
 }
 
 /// Look up the handler for `name` (case-insensitive ASCII).
-///
 /// Returns `Some(entry)` if a handler is registered, `None` otherwise.
 pub fn lookup_command(name: &[u8]) -> Option<&'static DispatchEntry> {
     lookup_runtime_command(name).map(|row| row.entry)
@@ -404,14 +398,12 @@ fn runtime_dispatch_index() -> &'static RuntimeDispatchIndex {
 }
 
 /// Dispatch one command using `ctx.client.argv[0]` as the command name.
-///
 /// Returns an error if argv is empty or the command is unknown. The handler's
 /// result is returned verbatim — handlers may write a reply *and* return `Ok`,
-/// or return `Err` (which the I/O layer renders as a `-ERR ...` reply).
-///
-/// When the client is inside a MULTI block (`client.flag_multi()` is true)
+/// or return `Err` (which the I/O layer renders as a `-ERR...` reply).
+/// When the client is inside a MULTI block (`client.flag_multi` is true)
 /// every command except the transaction-control set (MULTI / EXEC / DISCARD /
-/// WATCH / UNWATCH / RESET) is appended to `client.queued_argvs` and the
+/// WATCH / UNWATCH / RESET) is appended to `client.queued_argvs` and
 /// client receives `+QUEUED\r\n` instead of executing immediately.
 pub fn dispatch(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     ctx.client_mut().prevent_propagation = false;
@@ -555,10 +547,9 @@ impl StackCommandName {
 }
 
 /// Dispatch using an externally-supplied command name.
-///
 /// Skips the MULTI-queueing pre-check. Used by `EXEC` to drain each queued
 /// argv without re-entering the queue logic. Times the handler execution when
-/// the live slowlog gate can consume a duration, and records an entry when the
+/// the live slowlog gate can consume a duration, and records an entry when
 /// measured duration meets the threshold.
 pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> RedisResult<()> {
     let resolved_name = match resolve_command_name(name) {
@@ -652,10 +643,10 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
         crate::connection::feed_monitors(ctx, &ctx.client_ref().argv);
     }
 
-    // C: db.c:2126/2144 + getExpirationPolicyWithFlags — a primary in
-    // import-mode lets an import-source client see otherwise-expired keys, and
-    // keeps expired keys (no lazy delete) for everyone else. Refresh the
-    // selected DB's per-command flags before the handler runs.
+ // a primary
+ // import-mode lets an import-source client see otherwise-expired keys,
+ // keeps expired keys (no lazy delete) for everyone else. Refresh
+ // selected DB's per-command flags before the handler runs.
     let import_mode = ctx.live_config().import_mode();
     let import_source_active = ctx.client_ref().import_source && import_mode;
     let pause_expire = is_server_paused_for(ctx.server(), PAUSE_ACTION_EXPIRE);
@@ -843,7 +834,7 @@ fn should_feed_monitor_before(
 
 /// Wake blocked clients on keys that the just-completed command made ready,
 /// after that command has propagated its own effect. Running this here (rather
-/// than synchronously inside the write handler) keeps the replication stream in
+/// than synchronously inside the write handler) keeps the replication stream
 /// causal order: the triggering write propagates before each woken client's
 /// effect. `exec_command` performs the equivalent drain for transactions.
 fn drain_pending_wakes(ctx: &mut CommandContext<'_>) {
@@ -985,7 +976,6 @@ fn should_propagate_write_command(ctx: &CommandContext<'_>, original_name: &[u8]
 }
 
 /// Return the combined hot-path metadata for a named command.
-///
 /// Multiple generated specs can share the same command name for subcommand
 /// inheritance. Dispatch keeps the same OR-style behavior the previous helper
 /// functions used, but computes all fields in one pass.
@@ -1129,11 +1119,11 @@ fn command_metadata_table() -> &'static [(&'static [u8], CommandMetadata)] {
     COMMAND_METADATA_TABLE.get_or_init(|| {
         let mut rows: Vec<(&'static [u8], CommandMetadata)> = Vec::new();
         for spec in COMMANDS.iter() {
-            // Container subcommands (e.g. CONFIG GET, SLOWLOG GET) share a bare
-            // name with unrelated top-level commands (the string GET). Folding
-            // their flags into the top-level metadata is incorrect — it made the
-            // string GET inherit CONFIG GET's STALE/ADMIN. The top-level command
-            // metadata is keyed by bare name, so subcommands must not contribute.
+ // Container subcommands (e.g. CONFIG GET, SLOWLOG GET) share a bare
+ // name with unrelated top-level commands (the string GET). Folding
+ // their flags into the top-level metadata is incorrect — it made
+ // string GET inherit CONFIG GET's STALE/ADMIN. The top-level command
+ // metadata is keyed by bare name, so subcommands must not contribute.
             if spec.container.is_some() {
                 continue;
             }
@@ -1261,7 +1251,6 @@ fn acl_category_bits(cat: crate::generated::AclCategory) -> u64 {
 }
 
 /// ACL gate: check that the current client is authenticated and allowed to run `name`.
-///
 /// Returns `Some(reply_bytes)` to short-circuit dispatch with the encoded error.
 /// Returns `None` when the command should proceed.
 fn enforce_acl_gate(ctx: &CommandContext<'_>, name: &[u8], cmd_categories: u64) -> Option<Vec<u8>> {
@@ -2015,9 +2004,8 @@ fn acl_known_container_subcommand(parent: &[u8], sub: &[u8]) -> bool {
         .any(|candidate| candidate.eq_ignore_ascii_case(&sub_lower))
 }
 
-/// Return `true` for commands that any authenticated user may run regardless of
+/// Return `true` for commands that any authenticated user may run regardless
 /// their command permissions.
-///
 /// `ACL WHOAMI` and `ACL HELP` are informational connection-level queries that
 /// do not expose sensitive data and do not mutate state. Real Redis allows these
 /// for any authenticated user.
@@ -2034,14 +2022,12 @@ fn is_always_allowed_for_authenticated(ctx: &CommandContext<'_>, name: &[u8]) ->
 
 /// Reject write commands from regular clients when we are operating as a
 /// replica (`repl_state != MASTER`).
-///
 /// Commands that arrive on the master-to-replica stream are applied via
 /// `apply_command_locally` in the dialer thread, which sets `client.is_replica
 /// = true` before calling `dispatch_command_name`. Those calls are therefore
 /// exempt — the `is_replica` flag already causes `propagate_write_to_replicas`
 /// to be skipped, and here we only block clients whose `is_replica` is false
 /// (i.e. normal user connections).
-///
 /// `REPLICAOF` itself is always allowed so the operator can promote the server.
 fn enforce_replica_readonly_gate(
     ctx: &CommandContext<'_>,
@@ -2056,13 +2042,13 @@ fn enforce_replica_readonly_gate(
     if ctx.client_ref().is_replica || ctx.client_ref().replication_apply {
         return None;
     }
-    // Commands executing inside EXEC run via the transaction path, the way
-    // Valkey's exec loop calls `call()` directly rather than re-entering
-    // processCommand. The read-only-replica gate is applied once at queue time
-    // (flag_deny_blocking is false then), so a client that was already a replica
-    // cannot queue a write; but if a queued REPLICAOF demotes us mid-EXEC, the
-    // remaining queued writes must still execute (they are simply not
-    // propagated). flag_deny_blocking marks that in-EXEC execution context.
+ // Commands executing inside EXEC run via the transaction path, the way
+ // Valkey's exec loop calls `call` directly rather than re-entering
+ // processCommand. The read-only-replica gate is applied once at queue time
+ // (flag_deny_blocking is false then), so a client that was already a replica
+ // cannot queue a write; but if a queued REPLICAOF demotes us mid-EXEC,
+ // remaining queued writes must still execute (they are simply not
+ // propagated). flag_deny_blocking marks that in-EXEC execution context.
     if ctx.client_ref().flag_deny_blocking() {
         return None;
     }
@@ -2076,8 +2062,8 @@ fn enforce_replica_readonly_gate(
     if !is_write_command {
         return None;
     }
-    // A writable replica (`replica-read-only no`) accepts writes directly;
-    // mirrors Valkey's `server.repl_replica_ro` guard in processCommand.
+ // A writable replica (`replica-read-only no`) accepts writes directly;
+ // mirrors Valkey's `server.repl_replica_ro` guard in processCommand.
     if !ctx.live_config().slave_read_only() {
         return None;
     }
@@ -2113,11 +2099,10 @@ fn script_command_has_runtime_readonly_flags(name: &[u8]) -> bool {
 }
 
 /// Pre-handler maxmemory enforcement.
-///
-/// Returns `Some(reply_bytes)` when the command must be rejected because the
+/// Returns `Some(reply_bytes)` when the command must be rejected because
 /// server is over its `maxmemory` budget and the configured eviction policy
 /// either cannot or refuses to recover memory. Returns `None` when dispatch
-/// should proceed (either we were under the limit, or eviction trimmed the
+/// should proceed (either we were under the limit, or eviction trimmed
 /// keyspace back under it, or the command is exempt from DENYOOM).
 pub(crate) fn enforce_maxmemory_gate(
     ctx: &mut CommandContext<'_>,
@@ -2259,7 +2244,6 @@ pub(crate) fn execabort_from_error_reply(reply: &[u8]) -> Vec<u8> {
 }
 
 /// Append `argv` to the replication backlog and fan out to all online replicas.
-///
 /// Called from `dispatch_command_name` after every successful write command
 /// executed by a non-replica client. Failures to deliver to a specific
 /// replica are logged and skipped; they are non-fatal because the replica
@@ -2305,7 +2289,7 @@ fn propagate_write_to_replicas(
 }
 
 /// Feed a synthesized write command to the replication stream from outside a
-/// `CommandContext` — a blocked client (BLPOP/BLMPOP/BZPOPMIN) served via the
+/// `CommandContext` — a blocked client (BLPOP/BLMPOP/BZPOPMIN) served via
 /// deferred wake path, where the pop has no dispatch-time argv to rewrite.
 /// Because `dispatch` drains pending wakes after propagating the triggering
 /// command, this lands in causal order. No-ops when propagation is disabled.
@@ -2318,7 +2302,6 @@ pub fn propagate_command_from_wake(selected_db: u32, argv: &[RedisString]) -> i6
 }
 
 /// Append a synthesized write command to replication without an implicit SELECT.
-///
 /// EXEC uses this for the MULTI/EXEC envelope; commands inside the envelope
 /// still go through `propagate_command_from_wake` so DB selection is preserved.
 pub fn propagate_command_raw(argv: &[RedisString]) -> i64 {
@@ -2368,7 +2351,7 @@ fn replication_select_bytes_if_needed(
 
 /// Commands a replica client is allowed to issue back to the master after
 /// the PSYNC handshake. Real Redis treats the replica link as outbound-only
-/// from the master's perspective; the only frames the master expects from
+/// from the master's perspective; the only frames the master expects
 /// the replica are REPLCONF ACK heartbeats and the occasional PING.
 fn is_replica_allowed_command(name: &[u8]) -> bool {
     ascii_eq_ignore_case(name, b"REPLCONF")
@@ -2418,8 +2401,7 @@ fn ascii_lower_vec(bytes: &[u8]) -> Vec<u8> {
 }
 
 /// Wave A placeholder handler that returns `Err(RedisError::runtime(b"ERR …"))`.
-///
-/// Handler bodies in Waves B/C/D will replace these one by one. Routing to
+/// Handler bodies in Waves B/C/D will replace these one by one. Routing
 /// the stub proves the table is wired correctly. Retained for new commands
 /// scaffolded but not yet implemented.
 #[allow(dead_code)]
@@ -2436,15 +2418,13 @@ fn unimplemented_handler(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 }
 
 /// Static dispatch table.
-///
-/// Only includes commands whose handlers exist in this crate (even if the
-/// handler body is `todo!()`). Wave B fills in PING + ECHO bodies; Wave C
+/// Only includes commands whose handlers exist in this crate (even if
+/// handler body is `todo!`). Wave B fills in PING + ECHO bodies; Wave C
 /// fills in SET/GET/DEL/EXISTS/INCR.
-///
 /// PORT NOTE: For Wave A we route every entry to `unimplemented_handler`
-/// rather than the real handler. The Wave B agent flips PING/ECHO over to
+/// rather than the real handler. The Wave B agent flips PING/ECHO over
 /// `crate::connection::ping_command` / `echo_command` once those exist;
-/// Wave C does the same for string commands. This avoids `todo!()` panics
+/// Wave C does the same for string commands. This avoids `todo!` panics
 /// crashing the server during Wave A smoke testing.
 pub static HANDLERS: &[DispatchEntry] = &[
     DispatchEntry {
@@ -2539,7 +2519,7 @@ pub static HANDLERS: &[DispatchEntry] = &[
         name: b"DECRBY",
         handler: crate::string::decrby_command,
     },
-    // ── GENERIC-KEY-OPS (Round 1, agent E2) ────────────────────────────────
+ // ── GENERIC-KEY-OPS (Round 1, agent E2) ────────────────────────────────
     DispatchEntry {
         name: b"TYPE",
         handler: redis_core::db::type_command,
@@ -2592,7 +2572,7 @@ pub static HANDLERS: &[DispatchEntry] = &[
         name: b"SWAPDB",
         handler: redis_core::db::swapdb_command,
     },
-    // ── STRING (Round 1, agent E1) ─────────────────────────────────────────
+ // ── STRING (Round 1, agent E1) ─────────────────────────────────────────
     DispatchEntry {
         name: b"APPEND",
         handler: crate::string::append_command,
@@ -2665,7 +2645,7 @@ pub static HANDLERS: &[DispatchEntry] = &[
         name: b"LCS",
         handler: crate::string::lcs_command,
     },
-    // ── LIST (Round 2) ─────────────────────────────────────────────────────
+ // ── LIST (Round 2) ─────────────────────────────────────────────────────
     DispatchEntry {
         name: b"LPUSH",
         handler: crate::list::lpush_command,
@@ -2754,7 +2734,7 @@ pub static HANDLERS: &[DispatchEntry] = &[
         name: b"BLMPOP",
         handler: crate::list::blmpop_command,
     },
-    // ── HASH (Round 3) ─────────────────────────────────────────────────────
+ // ── HASH (Round 3) ─────────────────────────────────────────────────────
     DispatchEntry {
         name: b"HSET",
         handler: crate::hash::hset_command,
@@ -2863,7 +2843,7 @@ pub static HANDLERS: &[DispatchEntry] = &[
         name: b"HRANDFIELD",
         handler: crate::hash::hrandfield_command,
     },
-    // ── SET (Round 4) ──────────────────────────────────────────────────────
+ // ── SET (Round 4) ──────────────────────────────────────────────────────
     DispatchEntry {
         name: b"SADD",
         handler: crate::set::sadd_command,
@@ -2928,7 +2908,7 @@ pub static HANDLERS: &[DispatchEntry] = &[
         name: b"SDIFFSTORE",
         handler: crate::set::sdiffstore_command,
     },
-    // ── TTL / EXPIRATION (Round 6) ─────────────────────────────────────────
+ // ── TTL / EXPIRATION (Round 6) ─────────────────────────────────────────
     DispatchEntry {
         name: b"EXPIRE",
         handler: redis_core::expire::expire_command,
@@ -2969,7 +2949,7 @@ pub static HANDLERS: &[DispatchEntry] = &[
         name: b"OBJECT",
         handler: redis_core::object::object_command,
     },
-    // ── ZSET (Round 5) ─────────────────────────────────────────────────────
+ // ── ZSET (Round 5) ─────────────────────────────────────────────────────
     DispatchEntry {
         name: b"ZADD",
         handler: crate::zset::zadd_command,
@@ -3038,7 +3018,7 @@ pub static HANDLERS: &[DispatchEntry] = &[
         name: b"ZREMRANGEBYSCORE",
         handler: crate::zset::zremrangebyscore_command,
     },
-    // ── SCAN + ZSET-EXTRAS (Round 7) ───────────────────────────────────────
+ // ── SCAN + ZSET-EXTRAS (Round 7) ───────────────────────────────────────
     DispatchEntry {
         name: b"SCAN",
         handler: redis_core::db::scan_command,
@@ -3123,7 +3103,7 @@ pub static HANDLERS: &[DispatchEntry] = &[
         name: b"BZMPOP",
         handler: crate::zset::bzmpop_command,
     },
-    // ── BITMAP (Round 8c) ──────────────────────────────────────────────────
+ // ── BITMAP (Round 8c) ──────────────────────────────────────────────────
     DispatchEntry {
         name: b"SETBIT",
         handler: crate::bitops::setbit_command,
@@ -3152,7 +3132,7 @@ pub static HANDLERS: &[DispatchEntry] = &[
         name: b"BITFIELD_RO",
         handler: crate::bitops::bitfield_ro_command,
     },
-    // ── TRANSACTIONS (Round 8b) ────────────────────────────────────────────
+ // ── TRANSACTIONS (Round 8b) ────────────────────────────────────────────
     DispatchEntry {
         name: b"MULTI",
         handler: crate::multi::multi_command,
@@ -3173,7 +3153,7 @@ pub static HANDLERS: &[DispatchEntry] = &[
         name: b"UNWATCH",
         handler: crate::multi::unwatch_command,
     },
-    // ── TCL HARNESS STUBS (Round 9) ────────────────────────────────────────
+ // ── TCL HARNESS STUBS (Round 9) ────────────────────────────────────────
     DispatchEntry {
         name: b"FUNCTION",
         handler: crate::connection::function_command,
@@ -3198,7 +3178,7 @@ pub static HANDLERS: &[DispatchEntry] = &[
         name: b"MODULE",
         handler: crate::connection::module_command,
     },
-    // ── PUB/SUB (Round 8a) ─────────────────────────────────────────────────
+ // ── PUB/SUB (Round 8a) ─────────────────────────────────────────────────
     DispatchEntry {
         name: b"SUBSCRIBE",
         handler: crate::pubsub::subscribe_command,
@@ -3235,7 +3215,7 @@ pub static HANDLERS: &[DispatchEntry] = &[
         name: b"PUBSUB",
         handler: crate::connection::pubsub_command,
     },
-    // ── HYPERLOGLOG (Round 9 HLL) ──────────────────────────────────────────
+ // ── HYPERLOGLOG (Round 9 HLL) ──────────────────────────────────────────
     DispatchEntry {
         name: b"PFADD",
         handler: crate::hyperloglog::pfadd_command,
@@ -3256,7 +3236,7 @@ pub static HANDLERS: &[DispatchEntry] = &[
         name: b"PFSELFTEST",
         handler: crate::hyperloglog::pfselftest_command,
     },
-    // ── SORT (TCL frontier) ───────────────────────────────────────────────
+ // ── SORT (TCL frontier) ───────────────────────────────────────────────
     DispatchEntry {
         name: b"SORT",
         handler: crate::sort::sort_command,
@@ -3265,7 +3245,7 @@ pub static HANDLERS: &[DispatchEntry] = &[
         name: b"SORT_RO",
         handler: crate::sort::sort_ro_command,
     },
-    // ── INTROSPECTION (Round 9 INFO/CONFIG) ────────────────────────────────
+ // ── INTROSPECTION (Round 9 INFO/CONFIG) ────────────────────────────────
     DispatchEntry {
         name: b"INFO",
         handler: crate::info::info_command,
@@ -3274,7 +3254,7 @@ pub static HANDLERS: &[DispatchEntry] = &[
         name: b"LASTSAVE",
         handler: crate::info::lastsave_command,
     },
-    // ── STREAMS (Round 9) ──────────────────────────────────────────────────
+ // ── STREAMS (Round 9) ──────────────────────────────────────────────────
     DispatchEntry {
         name: b"XADD",
         handler: crate::stream::xadd_command,
@@ -3307,7 +3287,7 @@ pub static HANDLERS: &[DispatchEntry] = &[
         name: b"XINFO",
         handler: crate::stream::xinfo_command,
     },
-    // ── STREAM CONSUMER GROUPS (Round 13c) ─────────────────────────────────
+ // ── STREAM CONSUMER GROUPS (Round 13c) ─────────────────────────────────
     DispatchEntry {
         name: b"XGROUP",
         handler: crate::stream::xgroup_command,
@@ -3336,7 +3316,7 @@ pub static HANDLERS: &[DispatchEntry] = &[
         name: b"XSETID",
         handler: crate::stream::xsetid_command,
     },
-    // ── SLOWLOG / LATENCY (OV-2) ───────────────────────────────────────────────
+ // ── SLOWLOG / LATENCY (OV-2) ───────────────────────────────────────────────
     DispatchEntry {
         name: b"SLOWLOG",
         handler: crate::slowlog_cmd::slowlog_command,
@@ -3353,7 +3333,7 @@ pub static HANDLERS: &[DispatchEntry] = &[
         name: b"MONITOR",
         handler: crate::connection::monitor_command,
     },
-    // ── PERSISTENCE (Round 18) ─────────────────────────────────────────────
+ // ── PERSISTENCE (Round 18) ─────────────────────────────────────────────
     DispatchEntry {
         name: b"DUMP",
         handler: crate::persist::dump_command,
@@ -3382,7 +3362,7 @@ pub static HANDLERS: &[DispatchEntry] = &[
         name: b"BGREWRITEAOF",
         handler: crate::persist::bgrewriteaof_command,
     },
-    // ── GEO (Session 1B) ───────────────────────────────────────────────────
+ // ── GEO (Session 1B) ───────────────────────────────────────────────────
     DispatchEntry {
         name: b"GEOADD",
         handler: crate::geo::geoadd_command,
@@ -3423,7 +3403,7 @@ pub static HANDLERS: &[DispatchEntry] = &[
         name: b"GEORADIUSBYMEMBER_RO",
         handler: crate::geo::georadiusbymemberro_command,
     },
-    // ── EVAL / SCRIPTING (Session 1A) ──────────────────────────────────────
+ // ── EVAL / SCRIPTING (Session 1A) ──────────────────────────────────────
     DispatchEntry {
         name: b"EVAL",
         handler: crate::eval::eval_command,
@@ -3444,7 +3424,7 @@ pub static HANDLERS: &[DispatchEntry] = &[
         name: b"SCRIPT",
         handler: crate::eval::script_command,
     },
-    // ── REPLICATION (Session 3A / 3B) ─────────────────────────────────────
+ // ── REPLICATION (Session 3A / 3B) ─────────────────────────────────────
     DispatchEntry {
         name: b"REPLICAOF",
         handler: crate::replication::replicaof_command,
@@ -3477,7 +3457,7 @@ pub static HANDLERS: &[DispatchEntry] = &[
         name: b"WAITAOF",
         handler: crate::replication::waitaof_command,
     },
-    // ── BLOOM FILTER (RedisBloom BF.* — overnight agent) ──────────────────
+ // ── BLOOM FILTER (RedisBloom BF.* — overnight agent) ──────────────────
     DispatchEntry {
         name: b"BF.RESERVE",
         handler: crate::bloom::bf_reserve_command,
@@ -3506,7 +3486,7 @@ pub static HANDLERS: &[DispatchEntry] = &[
         name: b"BF.INFO",
         handler: crate::bloom::bf_info_command,
     },
-    // ── RedisJSON (Overnight 1) ────────────────────────────────────────────
+ // ── RedisJSON (Overnight 1) ────────────────────────────────────────────
     DispatchEntry {
         name: b"JSON.SET",
         handler: crate::json::json_set_command,

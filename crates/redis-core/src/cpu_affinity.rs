@@ -1,35 +1,27 @@
 //! CPU affinity management for Valkey server threads.
-// Deferred feature: server.cpulist port of setcpuaffinity.c; fully ported, to be wired
+// Deferred feature: server.cpulist port; fully ported, to be wired
 // at startup once the libc/unsafe budget is approved for this crate.
 #![allow(dead_code)]
-//!
-//! Port of `setcpuaffinity.c` (Valkey). Exposes [`set_cpu_affinity`] to pin
+//! Exposes [`set_cpu_affinity`] to pin
 //! the calling thread to a set of CPU cores described by a cpulist string
 //! such as `"0,2,3"`, `"0,2-3"`, or `"0-20:2"` (same format as `taskset`).
-//!
 //! The parsing logic is fully translated into safe Rust. The final OS
 //! syscalls (Linux `sched_setaffinity`, FreeBSD `cpuset_setaffinity`,
 //! DragonFly/NetBSD `pthread_setaffinity_np`) require `unsafe` FFI and are
 //! stubbed with `TODO(architect)` until the `libc` dependency and an unsafe
 //! budget entry are approved for this crate.
-//!
-//! Compile-time enablement mirrors the C `#ifdef USE_SETCPUAFFINITY` via the
+//! Compile-time enablement mirrors the C `#ifdef USE_SETCPUAFFINITY` via
 //! Cargo feature `"cpu-affinity"`.
-//!
-//! C source: `src/setcpuaffinity.c` — Copyright (C) 2020 zhenwei pi, MIT.
 
 use redis_types::error::RedisError;
 
 // ── internal parsing helpers ────────────────────────────────────────────────
 
-/// Advance `input` past the first occurrence of `sep` and return the
+/// Advance `input` past the first occurrence of `sep` and return
 /// remaining slice. Returns `None` when `sep` is absent.
-///
-/// Identical semantics to the C helper: returns the character *after* the
+/// Identical semantics to the C helper: returns the character *after*
 /// separator, or `None` (`NULL` in C) if the separator is not found.
-///
-/// C: `static const char *next_token(const char *q, int sep)`,
-/// `setcpuaffinity.c:50-57`
+/// ``
 fn next_token(input: &[u8], sep: u8) -> Option<&[u8]> {
     input
         .iter()
@@ -38,12 +30,9 @@ fn next_token(input: &[u8], sep: u8) -> Option<&[u8]> {
 }
 
 /// Parse a decimal integer from the start of `input`. Returns
-/// `Ok((value, rest))` where `rest` is the unparsed suffix, or `Err(())`
+/// `Ok((value, rest))` where `rest` is the unparsed suffix, or `Err(`
 /// when no leading ASCII digit is present (mirrors the C -1 / 0 return).
-///
-/// C: `static int next_num(const char *str, char **end, int *result)`,
-/// `setcpuaffinity.c:59-68`
-///
+/// ``
 /// PERF(port): C uses `strtoul` (base 10); this uses a fold — profile if hot.
 fn next_num(input: &[u8]) -> Result<(i32, &[u8]), ()> {
     if input.is_empty() || !input[0].is_ascii_digit() {
@@ -54,8 +43,8 @@ fn next_num(input: &[u8]) -> Result<(i32, &[u8]), ()> {
         .position(|&b| !b.is_ascii_digit())
         .unwrap_or(input.len());
     // TODO(port): C uses `unsigned long` (64-bit on Linux); very large numbers
-    // saturate to i32::MAX here which is still an invalid CPU index and will
-    // produce a benign out-of-range error from the OS call.
+ // saturate to i32::MAX here which is still an invalid CPU index and will
+ // produce a benign out-of-range error from the OS call.
     let n: u64 = input[..end].iter().fold(0u64, |acc, &b| {
         acc.saturating_mul(10).saturating_add(u64::from(b - b'0'))
     });
@@ -64,39 +53,37 @@ fn next_num(input: &[u8]) -> Result<(i32, &[u8]), ()> {
 
 /// Parse one comma-separated segment of a cpulist into a `(start, end, step)`
 /// triple. The segment must not contain commas (callers split beforehand).
-///
 /// In the original C, pointer comparisons (`c1 < c2`) guard against '-' or
 /// ':' belonging to the *next* comma-separated token. Because we pre-split by
 /// comma, those comparisons always favour the local match, reducing to simple
-/// `Option::is_some()` checks.
-///
-/// Mirrors the per-token parsing block in `setcpuaffinity()`,
-/// `setcpuaffinity.c:97-134`.
+/// `Option::is_some` checks.
+/// Mirrors the per-token parsing block in `setcpuaffinity`,
+/// ``.
 fn parse_segment(segment: &[u8]) -> Result<(i32, i32, i32), ()> {
     let (a, rest) = next_num(segment)?;
     let mut b = a;
     let mut s: i32 = 1;
 
     if let Some(after_dash) = next_token(rest, b'-') {
-        // Range: `a-b` or `a-b:s`
+ // Range: `a-b` or `a-b:s`
         let (range_end, rest2) = next_num(after_dash)?;
         b = range_end;
 
         if !rest2.is_empty() {
             if let Some(after_colon) = next_token(rest2, b':') {
-                // Step: `a-b:s`
+ // Step: `a-b:s`
                 let (step, tail) = next_num(after_colon)?;
                 if step == 0 || !tail.is_empty() {
                     return Err(());
                 }
                 s = step;
             } else {
-                // Trailing garbage after range-end digit (no colon found).
+ // Trailing garbage after range-end digit (no colon found).
                 return Err(());
             }
         }
     } else if !rest.is_empty() {
-        // Trailing garbage after a single CPU number.
+ // Trailing garbage after a single CPU number.
         return Err(());
     }
 
@@ -108,15 +95,11 @@ fn parse_segment(segment: &[u8]) -> Result<(i32, i32, i32), ()> {
 }
 
 /// Parse a cpulist string into an ordered list of CPU indices.
-///
 /// Accepted formats:
 /// - `"0,2,3"` — individual CPUs
 /// - `"0,2-3"` — individual CPU plus a contiguous range
 /// - `"0-20:2"` — range with explicit step
-///
-/// Returns `Err(())` on any malformed input.
-///
-/// C: cpulist parsing loop in `setcpuaffinity()`, `setcpuaffinity.c:95-138`
+/// Returns `Err(` on any malformed input.
 fn parse_cpulist(cpulist: &[u8]) -> Result<Vec<i32>, ()> {
     if cpulist.is_empty() {
         return Ok(Vec::new());
@@ -126,7 +109,7 @@ fn parse_cpulist(cpulist: &[u8]) -> Result<Vec<i32>, ()> {
 
     for segment in cpulist.split(|&b| b == b',') {
         if segment.is_empty() {
-            // Trailing comma or `,,` — treat as garbage, matching C behaviour.
+ // Trailing comma or `,,` — treat as garbage, matching C behaviour.
             return Err(());
         }
         let (start, end, step) = parse_segment(segment)?;
@@ -134,8 +117,8 @@ fn parse_cpulist(cpulist: &[u8]) -> Result<Vec<i32>, ()> {
         while cpu <= end {
             cpus.push(cpu);
             // TODO(port): saturating_add prevents wrapping if step is large,
-            // but any wrapped value would be invalid and the while condition
-            // would eventually terminate; profile to confirm no infinite loop.
+ // but any wrapped value would be invalid and the while condition
+ // would eventually terminate; profile to confirm no infinite loop.
             cpu = cpu.saturating_add(step);
         }
     }
@@ -146,22 +129,18 @@ fn parse_cpulist(cpulist: &[u8]) -> Result<Vec<i32>, ()> {
 // ── platform-specific affinity application ──────────────────────────────────
 
 /// Apply `cpus` as the CPU affinity mask for the calling thread.
-///
 /// TODO(architect): every platform path needs `unsafe` libc FFI:
-///   - Linux:     `sched_setaffinity(0, size_of::<cpu_set_t>(), &cpuset)`
-///                via `<sched.h>` / `libc::sched_setaffinity`
-///   - FreeBSD:   `cpuset_setaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, …)`
-///                via `<sys/cpuset.h>` / `libc`
-///   - DragonFly: `pthread_setaffinity_np(pthread_self(), …)`
-///                via `<pthread_np.h>` / `libc`
-///   - NetBSD:    `pthread_setaffinity_np(pthread_self(), cpuset_size(c), c)`
-///                via `<pthread.h>` + `<sched.h>` / `libc`
-///
+/// - Linux: `sched_setaffinity(0, size_of::<cpu_set_t>, &cpuset)`
+/// via `<>` / `libc::sched_setaffinity`
+/// - FreeBSD: `cpuset_setaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, …)`
+/// via `<sys/>` / `libc`
+/// - DragonFly: `pthread_setaffinity_np(pthread_self, …)`
+/// via `<>` / `libc`
+/// - NetBSD: `pthread_setaffinity_np(pthread_self, cpuset_size(c), c)`
+/// via `<>` + `<>` / `libc`
 /// Pilot crate `redis-core` has `unsafe` budget 0 (`harness/unsafe-budgets.toml`).
-/// This stub returns `Ok(())` without touching the OS until the architect
+/// This stub returns `Ok(` without touching the OS until the architect
 /// approves the `libc` dependency and a non-zero budget entry.
-///
-/// C: `setcpuaffinity.c:140-152`
 #[cfg(any(
     target_os = "linux",
     target_os = "freebsd",
@@ -170,15 +149,15 @@ fn parse_cpulist(cpulist: &[u8]) -> Result<Vec<i32>, ()> {
 ))]
 fn apply_affinity(cpus: &[i32]) -> Result<(), RedisError> {
     // TODO(architect): unsafe FFI required — see doc-comment above.
-    // Implementation sketch (Linux path):
-    //   let mut cpuset: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-    //   for &cpu in cpus {
-    //       unsafe { libc::CPU_SET(cpu as usize, &mut cpuset); }
-    //   }
-    //   let rc = unsafe {
-    //       libc::sched_setaffinity(0, std::mem::size_of_val(&cpuset), &cpuset)
-    //   };
-    //   if rc != 0 { return Err(RedisError::runtime(b"sched_setaffinity failed")); }
+ // Implementation sketch (Linux path):
+ // let mut cpuset: libc::cpu_set_t = unsafe { std::mem::zeroed };
+ // for &cpu in cpus {
+ // unsafe { libc::CPU_SET(cpu as usize, &mut cpuset); }
+ // }
+ // let rc = unsafe {
+ // libc::sched_setaffinity(0, std::mem::size_of_val(&cpuset), &cpuset)
+ // };
+ // if rc != 0 { return Err(RedisError::runtime(b"sched_setaffinity failed")); }
     let _ = cpus;
     Ok(())
 }
@@ -198,22 +177,17 @@ fn apply_affinity(_cpus: &[i32]) -> Result<(), RedisError> {
 // ── public API ───────────────────────────────────────────────────────────────
 
 /// Set the CPU affinity of the calling thread to the CPUs described by
-/// `cpulist`. Returns `Ok(())` on success.
-///
+/// `cpulist`. Returns `Ok(` on success.
 /// On an empty `cpulist` the function is a no-op, matching the C
 /// `if (!cpulist) return;` null-pointer guard.
-///
 /// PORT NOTE: The C source gates the entire function body on
 /// `#ifdef USE_SETCPUAFFINITY`. Here that maps to the Cargo feature
 /// `"cpu-affinity"`. The `#[cfg(not(feature = …))]` variant is a no-op so
 /// the symbol is always present for callers.
-///
 /// PORT NOTE: The C function returns `void` and silently ignores parse
-/// errors. Rust surfaces them as `Err(RedisError)` so callers can log the
+/// errors. Rust surfaces them as `Err(RedisError)` so callers can log
 /// problem; callers that want the C silent-ignore behaviour may use
 /// `let _ = set_cpu_affinity(list);`.
-///
-/// C: `void setcpuaffinity(const char *cpulist)`, `setcpuaffinity.c:73-153`
 // TODO(port): feature name "cpu-affinity" is a guess — align with the
 // Cargo.toml feature chosen for USE_SETCPUAFFINITY when the manifest is
 // finalised.
@@ -297,7 +271,7 @@ mod tests {
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        src/setcpuaffinity.c  (156 lines, 3 functions)
+//   source:        Valkey
 //   target_crate:  redis-core
 //   confidence:    high
 //   todos:         5

@@ -1,18 +1,16 @@
 //! `redis-ds` — data-structure encodings.
-//!
 //! Owners:
-//!   - `ListPack`    — `src/listpack.rs`
-//!   - `QuickList`   — `src/quicklist.rs`
-//!   - `IntSet`      — `src/intset.rs`
-//!   - `RadixTree`   — `src/rax.rs`
-//!   - `StreamId`    — `src/stream.rs`
-//!   - `Dict`        — `src/dict.rs`
-//!   - `LinkedList`  — `src/adlist.rs`
-//!   - `ZSkiplist`   — `src/zskiplist.rs`
-//!   - `HashTable`   — `src/hashtable.rs`
-//!   - `Kvstore`     — `src/kvstore.rs`
-//!   - `Ziplist`     — `src/ziplist.rs`
-//!
+//! - `ListPack` — `src/listpack.rs`
+//! - `QuickList` — `src/quicklist.rs`
+//! - `IntSet` — `src/intset.rs`
+//! - `RadixTree` — `src/rax.rs`
+//! - `StreamId` — `src/stream.rs`
+//! - `Dict` — `src/dict.rs`
+//! - `LinkedList` — `src/adlist.rs`
+//! - `ZSkiplist` — `src/zskiplist.rs`
+//! - `HashTable` — `src/hashtable.rs`
+//! - `Kvstore` — `src/kvstore.rs`
+//! - `Ziplist` — `src/ziplist.rs`
 //! All modules in this crate are skeleton stubs awaiting translation.
 
 pub mod adlist;

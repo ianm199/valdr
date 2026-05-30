@@ -1,5 +1,4 @@
 //! `IntSet` - sorted contiguous-buffer encoding for integer sets.
-//!
 //! The blob layout is byte-compatible: `[encoding:u32-le][length:u32-le][contents...]`,
 //! where each content value is a signed little-endian 16-, 32-, or 64-bit integer
 //! and the array is sorted.
@@ -59,7 +58,7 @@ pub struct IntSet {
 }
 
 impl IntSet {
-    /// Create a new empty intset with the default 16-bit encoding.
+ /// Create a new empty intset with the default 16-bit encoding.
     pub fn new() -> Self {
         let mut buf = vec![0; HEADER_LEN];
         write_u32_le(&mut buf, 0, INTSET_ENC_INT16);
@@ -67,7 +66,7 @@ impl IntSet {
         Self { buf }
     }
 
-    /// Insert `value`. Returns `true` when the value was added.
+ /// Insert `value`. Returns `true` when the value was added.
     pub fn add(&mut self, value: i64) -> bool {
         let value_encoding = Encoding::for_value(value);
         let current_encoding = self.encoding();
@@ -109,13 +108,13 @@ impl IntSet {
         true
     }
 
-    /// Source-draft compatibility alias. Prefer `add` in new code.
+ /// Source-draft compatibility alias. Prefer `add` in new code.
     pub fn insert(mut self, value: i64) -> (Self, bool) {
         let added = self.add(value);
         (self, added)
     }
 
-    /// Remove `value`. Returns `true` when an existing value was removed.
+ /// Remove `value`. Returns `true` when an existing value was removed.
     pub fn remove(&mut self, value: i64) -> bool {
         let value_encoding = Encoding::for_value(value);
         let current_encoding = self.encoding();
@@ -150,7 +149,7 @@ impl IntSet {
         true
     }
 
-    /// Determine whether `value` belongs to this intset.
+ /// Determine whether `value` belongs to this intset.
     pub fn find(&self, value: i64) -> bool {
         if Encoding::for_value(value) > self.encoding() {
             return false;
@@ -158,7 +157,7 @@ impl IntSet {
         self.search(value).0
     }
 
-    /// Return a pseudo-random member, or `None` for an empty intset.
+ /// Return a pseudo-random member, or `None` for an empty intset.
     pub fn random(&self) -> Option<i64> {
         let len = self.len_u32();
         if len == 0 {
@@ -168,7 +167,7 @@ impl IntSet {
         self.get(idx)
     }
 
-    /// Return the largest member, or `None` when empty.
+ /// Return the largest member, or `None` when empty.
     pub fn max(&self) -> Option<i64> {
         let len = self.len_u32();
         if len == 0 {
@@ -178,12 +177,12 @@ impl IntSet {
         }
     }
 
-    /// Return the smallest member, or `None` when empty.
+ /// Return the smallest member, or `None` when empty.
     pub fn min(&self) -> Option<i64> {
         self.get(0)
     }
 
-    /// Return the value at `pos`, or `None` when out of range.
+ /// Return the value at `pos`, or `None` when out of range.
     pub fn get(&self, pos: u32) -> Option<i64> {
         if pos >= self.len_u32() {
             return None;
@@ -191,7 +190,7 @@ impl IntSet {
         read_value(&self.buf, pos as usize, self.encoding())
     }
 
-    /// Number of elements in the intset.
+ /// Number of elements in the intset.
     pub fn len(&self) -> usize {
         self.len_u32() as usize
     }
@@ -200,12 +199,12 @@ impl IntSet {
         self.len_u32() == 0
     }
 
-    /// Total byte length of the encoded blob.
+ /// Total byte length of the encoded blob.
     pub fn blob_len(&self) -> usize {
         self.buf.len()
     }
 
-    /// Validate a raw intset blob.
+ /// Validate a raw intset blob.
     pub fn validate_integrity(data: &[u8], deep: bool) -> bool {
         if data.len() < HEADER_LEN {
             return false;
@@ -227,8 +226,8 @@ impl IntSet {
             return false;
         }
 
-        // Empty live intsets are valid during construction, but empty serialized
-        // payloads are rejected.
+ // Empty live intsets are valid during construction, but empty serialized
+ // payloads are rejected.
         if count == 0 {
             return false;
         }
@@ -253,7 +252,7 @@ impl IntSet {
         true
     }
 
-    /// Construct an intset from a raw blob after deep validation.
+ /// Construct an intset from a raw blob after deep validation.
     pub fn from_raw_bytes(buf: Vec<u8>) -> Option<Self> {
         if Self::validate_integrity(&buf, true) {
             Some(Self { buf })
@@ -266,7 +265,7 @@ impl IntSet {
         &self.buf
     }
 
-    /// Deep-copy helper.
+ /// Deep-copy helper.
     pub fn dup(&self) -> Self {
         self.clone()
     }

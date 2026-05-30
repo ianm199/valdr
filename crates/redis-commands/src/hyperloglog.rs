@@ -1,32 +1,26 @@
 //! HyperLogLog probabilistic cardinality estimation: PFADD, PFCOUNT, PFMERGE.
-//!
 //! Implements the HyperLogLog algorithm using 16384 6-bit registers in a
 //! compact binary format. Two on-disk representations are supported:
-//!
 //! - **Dense**: 12288 bytes of 6-bit-packed registers (fixed size).
 //! - **Sparse**: run-length encoded opcodes (ZERO/XZERO/VAL) efficient for
-//!   low-cardinality sets; auto-promotes to dense when space exceeds a threshold.
-//!
+//! low-cardinality sets; auto-promotes to dense when space exceeds a threshold.
 //! Hash function: MurmurHash2, 64-bit endian-neutral variant.
 //! Cardinality estimator: Ertl's improved estimator using sigma/tau corrections
 //! (arXiv:1702.01284).
-//!
 //! ## SIMD
 //! AVX2 and ARM-NEON paths are intentionally omitted — they require `unsafe`
 //! SIMD intrinsics which are banned in pilot crates. The scalar fallback path
 //! is used unconditionally.
-//!
 //! ## HLL header layout (16 bytes)
 //! ```text
-//! [0..4]   magic   = "HYLL"
-//! [4]      encoding (HLL_DENSE | HLL_SPARSE)
-//! [5..8]   notused  (3 bytes, reserved, must be zero)
-//! [8..16]  card     (cached cardinality, little-endian u64; MSB set = invalid)
-//! [16..]   registers (dense packed or sparse opcodes)
+//! [0..4] magic = "HYLL"
+//! [4] encoding (HLL_DENSE | HLL_SPARSE)
+//! [5..8] notused (3 bytes, reserved, must be zero)
+//! [8..16] card (cached cardinality, little-endian u64; MSB set = invalid)
+//! [16..] registers (dense packed or sparse opcodes)
 //! ```
-//!
 //! All Redis data (keys, values, element bytes) is `&[u8]` / `Vec<u8>` /
-//! `RedisString`.  `String` / `&str` / `from_utf8` are banned per PORTING.md §1.
+//! `RedisString`. `String` / `&str` / `from_utf8` are banned.
 
 use redis_core::command_context::CommandContext;
 use redis_core::object::RedisObject;
@@ -41,7 +35,6 @@ fn hll_wrong_type_error() -> RedisError {
 }
 
 /// Validate `obj` as a HyperLogLog string and return an owned copy of its bytes.
-///
 /// Returns `Err` with the HLL-specific WRONGTYPE message if `obj` is not a
 /// string-encoded value carrying a well-formed `HYLL` header. The bytes are
 /// cloned so the caller can mutate them without holding a borrow on the DB.
@@ -177,11 +170,10 @@ fn hll_card_write(buf: &mut [u8], card: u64) {
 }
 
 // ── Dense register get/set ────────────────────────────────────────────────────
-//
-// Registers are packed at 6 bits each.  Register `regnum` spans bytes:
-//   b0 = regnum * 6 / 8
-//   b1 = b0 + 1
-//   fb = regnum * 6 % 8  (first bit offset within b0)
+// Registers are packed at 6 bits each. Register `regnum` spans bytes:
+// b0 = regnum * 6 / 8
+// b1 = b0 + 1
+// fb = regnum * 6 % 8 (first bit offset within b0)
 
 #[inline]
 pub fn hll_dense_get_register(registers: &[u8], regnum: usize) -> u8 {
@@ -189,8 +181,8 @@ pub fn hll_dense_get_register(registers: &[u8], regnum: usize) -> u8 {
     let fb = (regnum * HLL_BITS as usize) & 7;
     let fb8 = 8 - fb;
     let b0 = registers[byte_idx] as u32;
-    // C reads the byte after the last packed register and relies on SDS's
-    // implicit NUL terminator. Rust slices do not include that sentinel.
+ // C reads the byte after the last packed register and relies on SDS's
+ // implicit NUL terminator. Rust slices do not include that sentinel.
     let b1 = registers.get(byte_idx + 1).copied().unwrap_or(0) as u32;
     ((b0 >> fb | b1 << fb8) & HLL_REGISTER_MAX as u32) as u8
 }
@@ -268,7 +260,7 @@ pub fn murmur_hash64a(key: &[u8], seed: u32) -> u64 {
     let chunks = len / 8;
     for i in 0..chunks {
         let base = i * 8;
-        // Endian-neutral: read byte-by-byte as little-endian
+ // Endian-neutral: read byte-by-byte as little-endian
         let mut k = key[base] as u64;
         k |= (key[base + 1] as u64) << 8;
         k |= (key[base + 2] as u64) << 16;
@@ -354,8 +346,8 @@ pub fn hll_pat_len(ele: &[u8]) -> (u8, usize) {
     let index = (hash & HLL_P_MASK) as usize;
     let mut hash = hash >> HLL_P;
     hash |= 1u64 << HLL_Q;
-    // Count trailing zeros + 1 (the terminating '1' bit is included in count)
-    // PERF(port): C uses builtin_ctzll; trailing_zeros() is the equivalent.
+ // Count trailing zeros + 1 (the terminating '1' bit is included in count)
+ // PERF(port): C uses builtin_ctzll; trailing_zeros is the equivalent.
     let count = (hash.trailing_zeros() + 1) as u8;
     (count, index)
 }
@@ -388,7 +380,7 @@ pub(crate) fn hll_dense_add(registers: &mut [u8], ele: &[u8]) -> bool {
 // HLL_REGISTERS==16384 && HLL_BITS==6.
 pub fn hll_dense_reg_histo(registers: &[u8], reghisto: &mut [i32; 64]) {
     if HLL_REGISTERS == 16384 && HLL_BITS == 6 {
-        // Fast path: process 16 registers (12 bytes) per iteration, 1024 iterations.
+ // Fast path: process 16 registers (12 bytes) per iteration, 1024 iterations.
         for chunk in registers.chunks_exact(12) {
             let r0 = (chunk[0] as u32 & 63) as usize;
             let r1 = ((chunk[0] as u32 >> 6 | (chunk[1] as u32) << 2) & 63) as usize;
@@ -424,7 +416,7 @@ pub fn hll_dense_reg_histo(registers: &[u8], reghisto: &mut [i32; 64]) {
             reghisto[r15] += 1;
         }
     } else {
-        // Generic path (non-standard register/bit counts).
+ // Generic path (non-standard register/bit counts).
         for j in 0..HLL_REGISTERS {
             let reg = hll_dense_get_register(registers, j) as usize;
             reghisto[reg] += 1;
@@ -443,7 +435,7 @@ pub fn hll_sparse_to_dense(buf: &mut Vec<u8>) -> Result<(), RedisError> {
     }
 
     let mut dense = vec![0u8; HLL_DENSE_SIZE];
-    // Copy the header (magic, encoding, notused, card) then set encoding to DENSE.
+ // Copy the header (magic, encoding, notused, card) then set encoding to DENSE.
     dense[..HLL_HDR_SIZE].copy_from_slice(&buf[..HLL_HDR_SIZE]);
     hll_set_encoding(&mut dense, HLL_DENSE);
 
@@ -508,14 +500,14 @@ pub(crate) fn hll_sparse_set(
     count: u8,
     sparse_max_bytes: usize,
 ) -> Result<bool, RedisError> {
-    // Immediate promotion when count exceeds sparse representable range.
+ // Immediate promotion when count exceeds sparse representable range.
     if count > HLL_SPARSE_VAL_MAX_VALUE {
         return hll_promote_to_dense(buf, index, count);
     }
 
-    // Greedy pre-allocation to amortize future reallocations.
-    // PERF(port): C uses sdsResize with a "double or +300" greedy strategy.
-    // Vec::reserve provides a similar amortised guarantee.
+ // Greedy pre-allocation to amortize future reallocations.
+ // PERF(port): C uses sdsResize with a "double or +300" greedy strategy.
+ // Vec::reserve provides a similar amortised guarantee.
     {
         let avail = buf.capacity().saturating_sub(buf.len());
         if buf.capacity() < sparse_max_bytes && avail < 3 {
@@ -531,7 +523,7 @@ pub(crate) fn hll_sparse_set(
     let data_start = HLL_HDR_SIZE;
     let data_end = buf.len();
 
-    // Step 1: locate the opcode covering register `index`.
+ // Step 1: locate the opcode covering register `index`.
     let mut pos = data_start;
     let mut prev_pos: Option<usize> = None;
     let mut first: usize = 0;
@@ -547,7 +539,7 @@ pub(crate) fn hll_sparse_set(
             span = sparse_val_len(b);
             oplen = 1;
         } else {
-            // XZERO: 2-byte opcode
+ // XZERO: 2-byte opcode
             if pos + 1 >= data_end {
                 return Err(RedisError::runtime(INVALID_HLL_ERR));
             }
@@ -566,7 +558,7 @@ pub(crate) fn hll_sparse_set(
         return Err(RedisError::runtime(INVALID_HLL_ERR));
     }
 
-    // Position immediately after the current opcode (None if this is the last).
+ // Position immediately after the current opcode (None if this is the last).
     let next_pos_opt: Option<usize> = {
         let next = pos + if sparse_is_xzero(buf[pos]) { 2 } else { 1 };
         if next < data_end {
@@ -576,7 +568,7 @@ pub(crate) fn hll_sparse_set(
         }
     };
 
-    // Cache opcode type and run length.
+ // Cache opcode type and run length.
     let b = buf[pos];
     let is_zero = sparse_is_zero(b);
     let is_xzero = sparse_is_xzero(b);
@@ -592,25 +584,25 @@ pub(crate) fn hll_sparse_set(
         sparse_val_len(b)
     };
 
-    // Case A: VAL already has a value >= count; no update needed.
+ // Case A: VAL already has a value >= count; no update needed.
     if is_val && sparse_val_value(b) >= count {
         return Ok(false);
     }
 
-    // Step 2: determine which update case applies.
+ // Step 2: determine which update case applies.
 
     if (is_val && run_len == 1) || (is_zero && run_len == 1) {
-        // Cases B and C: single-register replacement — trivial in-place set.
+ // Cases B and C: single-register replacement — trivial in-place set.
         sparse_val_set(&mut buf[pos], count, 1);
-        // Fall through to merge step below.
+ // Fall through to merge step below.
     } else {
-        // Case D: must split the opcode covering multiple registers.
+ // Case D: must split the opcode covering multiple registers.
         let last = first + span - 1;
         let mut seq = [0u8; 5];
         let mut seq_len: usize = 0;
 
         if is_zero || is_xzero {
-            // Split ZERO or XZERO around the target register.
+ // Split ZERO or XZERO around the target register.
             if index != first {
                 let len = index - first;
                 if len > HLL_SPARSE_ZERO_MAX_LEN {
@@ -638,7 +630,7 @@ pub(crate) fn hll_sparse_set(
                 }
             }
         } else {
-            // Split VAL opcode; preserve surrounding registers at current value.
+ // Split VAL opcode; preserve surrounding registers at current value.
             let cur_val = sparse_val_value(b);
             if index != first {
                 let len = index - first;
@@ -654,18 +646,18 @@ pub(crate) fn hll_sparse_set(
             }
         }
 
-        // Step 3: substitute the new sequence for the old opcode.
+ // Step 3: substitute the new sequence for the old opcode.
         let old_oplen: usize = if is_xzero { 2 } else { 1 };
         let delta: isize = seq_len as isize - old_oplen as isize;
 
-        // If the buffer would exceed the sparse size limit, promote to dense.
+ // If the buffer would exceed the sparse size limit, promote to dense.
         if delta > 0 && buf.len() as isize + delta > sparse_max_bytes as isize {
             return hll_promote_to_dense(buf, index, count);
         }
 
         debug_assert!((buf.len() as isize + delta) <= buf.capacity() as isize);
 
-        // Splice: shift bytes after `pos` by `delta` and copy new sequence.
+ // Splice: shift bytes after `pos` by `delta` and copy new sequence.
         if delta != 0 {
             let old_len = buf.len();
             if delta > 0 {
@@ -685,7 +677,7 @@ pub(crate) fn hll_sparse_set(
         buf[pos..pos + seq_len].copy_from_slice(&seq[..seq_len]);
     }
 
-    // Step 4: merge adjacent VAL opcodes (scan up to 5 opcodes from prev).
+ // Step 4: merge adjacent VAL opcodes (scan up to 5 opcodes from prev).
     let scan_start = prev_pos.unwrap_or(data_start);
     let mut scan_pos = scan_start;
     let mut scan_remaining: i32 = 5;
@@ -701,19 +693,19 @@ pub(crate) fn hll_sparse_set(
             scan_pos += 1;
             continue;
         }
-        // VAL: attempt to merge with an immediately following VAL of equal value.
+ // VAL: attempt to merge with an immediately following VAL of equal value.
         if scan_pos + 1 < buf.len() && sparse_is_val(buf[scan_pos + 1]) {
             let v1 = sparse_val_value(buf[scan_pos]);
             let v2 = sparse_val_value(buf[scan_pos + 1]);
             if v1 == v2 {
                 let merged = sparse_val_len(buf[scan_pos]) + sparse_val_len(buf[scan_pos + 1]);
                 if merged <= HLL_SPARSE_VAL_MAX_LEN {
-                    // Write merged value at scan_pos+1, then shift-delete scan_pos.
+ // Write merged value at scan_pos+1, then shift-delete scan_pos.
                     sparse_val_set(&mut buf[scan_pos + 1], v1, merged);
                     let cur_len = buf.len();
                     buf.copy_within(scan_pos + 1..cur_len, scan_pos);
                     buf.truncate(cur_len - 1);
-                    // Reiterate without advancing scan_pos.
+ // Reiterate without advancing scan_pos.
                     continue;
                 }
             }
@@ -874,7 +866,7 @@ pub fn hll_count(buf: &[u8]) -> Result<u64, RedisError> {
         return Err(RedisError::runtime(INVALID_HLL_ERR));
     }
 
-    // Ertl improved estimator.
+ // Ertl improved estimator.
     let mut z = m * hll_tau((m - reghisto[HLL_Q as usize + 1] as f64) / m);
     let mut j = HLL_Q as usize;
     while j >= 1 {
@@ -923,7 +915,7 @@ pub fn hll_merge(max: &mut [u8], hll_buf: &[u8]) -> Result<(), RedisError> {
     if hll_encoding(hll_buf) == HLL_DENSE {
         hll_merge_dense(max, &hll_buf[HLL_HDR_SIZE..]);
     } else {
-        // Sparse: decode opcodes and update max[] registers.
+ // Sparse: decode opcodes and update max[] registers.
         let mut pos = HLL_HDR_SIZE;
         let end = hll_buf.len();
         let mut i: usize = 0;
@@ -987,11 +979,11 @@ pub fn create_hll_object() -> Vec<u8> {
     let sparselen = HLL_HDR_SIZE + xzero_count * 2;
     let mut buf = vec![0u8; sparselen];
 
-    // Write "HYLL" magic and SPARSE encoding.
+ // Write "HYLL" magic and SPARSE encoding.
     buf[HDR_MAGIC_OFF..HDR_MAGIC_OFF + 4].copy_from_slice(b"HYLL");
     buf[HDR_ENCODING_OFF] = HLL_SPARSE;
 
-    // Populate with XZERO opcodes covering all registers.
+ // Populate with XZERO opcodes covering all registers.
     let mut aux = HLL_REGISTERS;
     let mut p = HLL_HDR_SIZE;
     while aux > 0 {
@@ -1098,8 +1090,7 @@ fn pfdebug_decode_sparse(buf: &[u8]) -> Result<Vec<u8>, RedisError> {
     Ok(decoded)
 }
 
-/// PFADD key element [element ...]
-///
+/// PFADD key element [element...]
 /// Adds elements to the HyperLogLog stored at `key`, creating a fresh sparse
 /// HLL when the key is missing. Replies `:1` when any register was updated
 /// (i.e. the cardinality estimate changed), `:0` otherwise. Returns WRONGTYPE
@@ -1141,13 +1132,11 @@ pub fn pfadd_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     }
 }
 
-/// PFCOUNT key [key ...]
-///
+/// PFCOUNT key [key...]
 /// Returns the approximate cardinality of the HyperLogLog at `key`. With more
 /// than one key the cardinality of the union of all source HLLs is reported.
 /// Missing keys are treated as empty HLLs (their registers are all zero).
 /// Returns WRONGTYPE if any supplied key holds a non-HLL value.
-///
 /// The single-key path mirrors the C source's cache-write optimisation: on a
 /// cache miss the freshly-computed cardinality is written back into the HLL
 /// header so subsequent reads are O(1).
@@ -1204,13 +1193,12 @@ pub fn pfcount_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     ctx.reply_integer(card as i64)
 }
 
-/// PFMERGE dest src1 [src2 ...]
-///
-/// Merges the HyperLogLog values stored at `src1`, `src2`, ... and the
+/// PFMERGE dest src1 [src2...]
+/// Merges the HyperLogLog values stored at `src1`, `src2`,... and
 /// existing value at `dest` into a single HLL written back to `dest`. The
 /// merge takes the maximum value for each of the 16384 registers. When no
 /// source keys are provided this still produces a valid HLL at `dest`
-/// (either created empty or left untouched). The destination is promoted to
+/// (either created empty or left untouched). The destination is promoted
 /// dense encoding whenever any participating HLL is already dense.
 pub fn pfmerge_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     if ctx.arg_count() < 2 {
@@ -1289,7 +1277,7 @@ pub fn pfselftest_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         return Err(RedisError::wrong_number_of_args(b"pfselftest"));
     }
 
-    // Test 1: Dense register get/set round-trip.
+ // Test 1: Dense register get/set round-trip.
     let mut dense_buf = vec![0u8; HLL_DENSE_SIZE];
     dense_buf[HDR_MAGIC_OFF..HDR_MAGIC_OFF + 4].copy_from_slice(b"HYLL");
     dense_buf[HDR_ENCODING_OFF] = HLL_DENSE;
@@ -1375,7 +1363,7 @@ pub fn pfdebug_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let subcmd = ctx.arg_owned(1usize)?;
     let subcmd_bytes = subcmd.as_bytes();
 
-    // SIMD subcommand: toggle/report SIMD usage.
+ // SIMD subcommand: toggle/report SIMD usage.
     if subcmd_bytes.eq_ignore_ascii_case(b"simd") {
         if argc != 3 {
             return Err(pfdebug_arity_error(subcmd_bytes));
@@ -1388,11 +1376,11 @@ pub fn pfdebug_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         } else {
             return Err(RedisError::runtime(b"ERR Argument must be ON or OFF"));
         }
-        // SIMD always "disabled" in this port (no SIMD paths yet).
+ // SIMD always "disabled" in this port (no SIMD paths yet).
         return ctx.reply_simple_string(b"disabled");
     }
 
-    // All other subcommands require a key as argv[2].
+ // All other subcommands require a key as argv[2].
     if argc != 3 {
         return Err(pfdebug_arity_error(subcmd_bytes));
     }
@@ -1448,7 +1436,7 @@ pub fn pfdebug_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 
 // ──────────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        src/hyperloglog.c  (2107 lines, 27 functions)
+//   source:        Valkey
 //   target_crate:  redis-commands
 //   confidence:    medium
 //   todos:         8

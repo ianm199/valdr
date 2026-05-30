@@ -1,6 +1,5 @@
 //! Bit operations: SETBIT, GETBIT, BITOP, BITCOUNT, BITPOS, BITFIELD, BITFIELD_RO.
-//!
-//! Port of `src/bitops.c`. Storage uses `ObjectKind::String(StringEncoding::Raw)`.
+//! Storage uses `ObjectKind::String(StringEncoding::Raw)`.
 //! Bit numbering follows Redis convention: bit 0 is the MSB of byte 0.
 
 use redis_core::command_context::CommandContext;
@@ -45,7 +44,6 @@ pub(crate) fn server_popcount(data: &[u8]) -> i64 {
 }
 
 /// Return the position of the first bit equal to `bit` within `data[..count]`.
-///
 /// If `bit == 0` and no clear bit is found, returns `count * 8` (zero-padded right).
 /// If `bit == 1` and no set bit is found, returns `-1`.
 pub(crate) fn server_bitpos(data: &[u8], count: usize, bit: i32) -> i64 {
@@ -116,7 +114,6 @@ pub(crate) fn get_signed_bitfield(p: &[u8], offset: u64, bits: u64) -> i64 {
 }
 
 /// Check unsigned bitfield overflow, returning `(direction, wrapped_value)`.
-///
 /// `direction` is `0` (none), `1` (overflow), or `-1` (underflow).
 pub(crate) fn check_unsigned_bitfield_overflow(
     value: u64,
@@ -292,7 +289,6 @@ fn get_bitfield_type_from_arg(arg: &[u8]) -> Result<(bool, u32), RedisError> {
 }
 
 /// Read the current string bytes for `key`, preserving the missing-key distinction.
-///
 /// Returns `Err(WrongType)` if the key exists and holds a non-string value.
 fn lookup_string_bytes(
     ctx: &CommandContext,
@@ -930,12 +926,12 @@ fn bitfield_generic(ctx: &mut CommandContext, readonly: bool) -> RedisResult<()>
 }
 
 /// BITFIELD key [GET type offset | SET type offset value | INCRBY type offset increment]
-///            [OVERFLOW WRAP|SAT|FAIL]
+/// [OVERFLOW WRAP|SAT|FAIL]
 pub fn bitfield_command(ctx: &mut CommandContext) -> RedisResult<()> {
     bitfield_generic(ctx, false)
 }
 
-/// BITFIELD_RO key [GET type offset ...]
+/// BITFIELD_RO key [GET type offset...]
 pub fn bitfield_ro_command(ctx: &mut CommandContext) -> RedisResult<()> {
     bitfield_generic(ctx, true)
 }
@@ -1206,7 +1202,7 @@ mod tests {
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        src/bitops.c  (1431 lines, bitmap commands and helpers)
+//   source:        Valkey
 //   target_crate:  redis-commands
 //   confidence:    medium
 //   todos:         0

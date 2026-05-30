@@ -1,13 +1,10 @@
 //! RDB load path — `load_into` reads an RDB file and populates a `RedisDb`.
-//!
 //! Round 19a: `RDB_TYPE_STRING` is now loaded with full encoding fidelity via
 //! `load_string_object` — producing `StringEncoding::Int`, `Embstr`, or `Raw`
-//! depending on the wire encoding. The `OBJECT ENCODING` command will report the
+//! depending on the wire encoding. The `OBJECT ENCODING` command will report
 //! correct encoding after a round-trip.
-//!
 //! Framework opcodes handled: SELECTDB, RESIZEDB, AUX, EXPIRETIME_MS,
 //! EXPIRETIME, IDLE, FREQ, EOF. Unknown type bytes are rejected.
-//!
 //! The CRC64 trailer is verified when present and non-zero.
 
 use std::io::{self, BufReader, Cursor, Read};
@@ -56,7 +53,6 @@ use super::varint::load_len;
 use super::zset::{load_zset_object, load_zset_v1_object};
 
 /// Options controlling whole-RDB load behavior.
-///
 /// `allow_dup` and `aof_preamble` are represented now so command paths can
 /// carry the same intent as upstream even though the current HashMap-backed
 /// loader naturally overwrites duplicate keys and the RDB preamble path uses
@@ -125,7 +121,6 @@ fn skip_rdb_string(reader: &mut impl Read) -> io::Result<()> {
 }
 
 /// Load an RDB file at `path` into `db`, returning a human-readable log line.
-///
 /// On success the loaded key count and (if known) source version are returned
 /// in the `Ok` string for the caller to log. On failure an `io::Error` is
 /// returned; the caller should log and continue without crashing.
@@ -134,10 +129,9 @@ pub fn load_into(db: &mut RedisDb, path: &Path) -> io::Result<String> {
 }
 
 /// Load an RDB file at `path` into the supplied logical DB vector.
-///
 /// `SELECTDB` opcodes switch the destination DB, matching Valkey startup load
 /// into `server.db[]`. The caller owns the DB vector; this helper does not
-/// touch `global_databases()`.
+/// touch `global_databases`.
 pub fn load_into_dbs(dbs: &mut [RedisDb], path: &Path) -> io::Result<String> {
     load_into_dbs_with_options(dbs, path, RdbLoadOptions::default())
 }
@@ -290,7 +284,7 @@ pub struct RdbCheckReport {
     pub ok: bool,
 }
 
-/// Scan an RDB file the way `valkey-check-rdb` does: validate the signature and
+/// Scan an RDB file the way `valkey-check-rdb` does: validate the signature
 /// version, classify foreign (12-79) / future (>80) versions, walk every
 /// opcode/object tracking the byte offset, and report the first error or a
 /// final "RDB looks OK" line.
@@ -350,10 +344,10 @@ pub fn check_rdb_file(path: &Path) -> RdbCheckReport {
         ));
     }
 
-    // Scan the whole file: the RDB_OPCODE_EOF marker is the true end of the
-    // object stream. Any trailing CRC64 (present only for rdb_ver >= 5) follows
-    // EOF and is simply never read — and old versions (e.g. RDB v4) have no CRC
-    // at all, so stripping a fixed 8-byte footer would truncate real data.
+ // Scan the whole file: the RDB_OPCODE_EOF marker is the true end of
+ // object stream. Any trailing CRC64 (present only for rdb_ver >= 5) follows
+ // EOF and is simply never read — and old versions (e.g. RDB v4) have no CRC
+ // at all, so stripping a fixed 8-byte footer would truncate real data.
     let mut reader = Cursor::new(&data[..]);
     reader.set_position(9);
 
@@ -434,7 +428,6 @@ pub fn check_rdb_file(path: &Path) -> RdbCheckReport {
 }
 
 /// Load the value payload for a given RDB type byte, returning a `RedisObject`.
-///
 /// `RDB_TYPE_STRING` uses the encoding-aware `load_string_object`.
 /// `RDB_TYPE_HASH` uses `load_hash_object` (flat field/value pairs).
 /// `RDB_TYPE_HASH_ZIPLIST`, `RDB_TYPE_HASH_LISTPACK`, and `RDB_TYPE_HASH_2`
@@ -478,7 +471,6 @@ pub fn load_value_payload(
 }
 
 /// Verify a `DUMP` payload footer and return the embedded RDB version.
-///
 /// Layout: `<type byte><object payload><u16 RDB version LE><u64 CRC64 LE>`.
 /// Strict mode rejects future versions other than Valkey's current no-magic
 /// DUMP version; relaxed mode accepts them, matching
@@ -537,8 +529,7 @@ pub fn load_dump_payload(
 }
 
 /// Deserialize a `ObjectKind::Json` value from a length-prefixed UTF-8 JSON string.
-///
-/// Wire format: `read_rdb_string()` → UTF-8 bytes → `serde_json::from_slice`.
+/// Wire format: `read_rdb_string` → UTF-8 bytes → `serde_json::from_slice`.
 fn load_json_object(reader: &mut impl Read) -> io::Result<crate::object::RedisObject> {
     let bytes = read_rdb_string(reader)?;
     let value: serde_json::Value = serde_json::from_slice(&bytes)
@@ -548,15 +539,14 @@ fn load_json_object(reader: &mut impl Read) -> io::Result<crate::object::RedisOb
 
 /// Deserialize a `ObjectKind::Bloom` value from the fixed binary record written by
 /// `save_bloom_object`.
-///
 /// Wire format (all integers little-endian):
-///   capacity    u64  (8 bytes)
-///   item_count  u64  (8 bytes)
-///   n_hashes    u32  (4 bytes)
-///   error_rate  f64  (8 bytes, IEEE 754)
-///   expansion   u32  (4 bytes)
-///   nonscaling  u8   (1 byte, 0 or 1)
-///   bits        read_rdb_string() → Vec<u8>
+/// capacity u64 (8 bytes)
+/// item_count u64 (8 bytes)
+/// n_hashes u32 (4 bytes)
+/// error_rate f64 (8 bytes, IEEE 754)
+/// expansion u32 (4 bytes)
+/// nonscaling u8 (1 byte, 0 or 1)
+/// bits read_rdb_string → Vec<u8>
 fn load_bloom_object(reader: &mut impl Read) -> io::Result<crate::object::RedisObject> {
     let mut buf8 = [0u8; 8];
     let mut buf4 = [0u8; 4];
@@ -595,7 +585,7 @@ fn load_bloom_object(reader: &mut impl Read) -> io::Result<crate::object::RedisO
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        reference/valkey/src/rdb.c SELECTDB load semantics
+//   source:        Valkey
 //   target_crate:  redis-core
 //   confidence:    medium
 //   todos:         0

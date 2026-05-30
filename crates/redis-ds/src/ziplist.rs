@@ -1,5 +1,4 @@
 //! `Ziplist` - legacy compact list/hash encoding superseded by listpack.
-//!
 //! Ziplists remain relevant for backward-compatible RDB loading: older RDB
 //! files can store small lists and hashes as contiguous ziplist blobs. This
 //! module owns a safe, read-only byte-buffer decoder for those legacy blobs.
@@ -82,7 +81,7 @@ pub struct Ziplist {
 }
 
 impl Ziplist {
-    /// Create a new empty ziplist.
+ /// Create a new empty ziplist.
     pub fn new() -> Self {
         let size = ZIPLIST_HEADER_SIZE + ZIPLIST_END_SIZE;
         let mut data = vec![0; size];
@@ -93,10 +92,9 @@ impl Ziplist {
         Self { data }
     }
 
-    /// Build a `Ziplist` from a raw Valkey ziplist blob.
-    ///
-    /// The blob must pass deep integrity validation. This keeps all public
-    /// cursor APIs non-panicking even when the caller is loading old RDB bytes.
+ /// Build a `Ziplist` from a raw Valkey ziplist blob.
+ /// The blob must pass deep integrity validation. This keeps all public
+ /// cursor APIs non-panicking even when the caller is loading old RDB bytes.
     pub fn from_raw_bytes(data: Vec<u8>) -> Option<Self> {
         if Self::validate_integrity(&data, true) {
             Some(Self { data })
@@ -123,8 +121,8 @@ impl Ziplist {
         self.first().is_none()
     }
 
-    /// This read-only variant scans when the cached length is `u16::MAX`
-    /// instead of mutating through an immutable receiver.
+ /// This read-only variant scans when the cached length is `u16::MAX`
+ /// instead of mutating through an immutable receiver.
     pub fn len(&self) -> usize {
         match read_u16_le(&self.data, 8) {
             Some(count) if count != u16::MAX => count as usize,
@@ -132,8 +130,8 @@ impl Ziplist {
         }
     }
 
-    /// Source-shaped `ziplistLen` variant: scans and refreshes the cached
-    /// header count when it fits in the 16-bit header field.
+ /// Source-shaped `ziplistLen` variant: scans and refreshes the cached
+ /// header count when it fits in the 16-bit header field.
     pub fn length(&mut self) -> usize {
         if let Some(count) = read_u16_le(&self.data, 8) {
             if count != u16::MAX {
@@ -148,7 +146,7 @@ impl Ziplist {
         count
     }
 
-    /// Return the offset of the first entry, or `None` for an empty list.
+ /// Return the offset of the first entry, or `None` for an empty list.
     pub fn first(&self) -> Option<usize> {
         let end = self.end_offset()?;
         if self.data.get(ZIPLIST_HEADER_SIZE).copied()? == ZIP_END {
@@ -161,7 +159,7 @@ impl Ziplist {
             .map(|entry| entry.offset)
     }
 
-    /// Return the offset of the last entry, or `None` for an empty list.
+ /// Return the offset of the last entry, or `None` for an empty list.
     pub fn last(&self) -> Option<usize> {
         let end = self.end_offset()?;
         let tail = read_u32_le(&self.data, 4)? as usize;
@@ -174,7 +172,7 @@ impl Ziplist {
         decode_entry(&self.data, self.blob_len(), tail, true).map(|entry| entry.offset)
     }
 
-    /// Return the entry offset at a positive or negative zero-based index.
+ /// Return the entry offset at a positive or negative zero-based index.
     pub fn index(&self, index: isize) -> Option<usize> {
         if index >= 0 {
             let mut cursor = self.first()?;
@@ -219,7 +217,7 @@ impl Ziplist {
         decode_entry(&self.data, self.blob_len(), next, true).map(|entry| entry.offset)
     }
 
-    /// Passing the EOF offset returns the tail entry.
+ /// Passing the EOF offset returns the tail entry.
     pub fn prev(&self, offset: usize) -> Option<usize> {
         let end = self.end_offset()?;
         if offset == end || self.data.get(offset).copied()? == ZIP_END {
@@ -334,12 +332,12 @@ impl Ziplist {
         Self::validate_integrity_sized(data, data.len(), deep)
     }
 
-    /// Sized variant matching the C API's explicit allocation size argument.
+ /// Sized variant matching the C API's explicit allocation size argument.
     pub fn validate_integrity_sized(data: &[u8], size: usize, deep: bool) -> bool {
         validate_integrity_sized_with(data, size, deep, |_, _| true)
     }
 
-    /// Deep validation with the C entry-callback shape adapted to safe offsets.
+ /// Deep validation with the C entry-callback shape adapted to safe offsets.
     pub fn validate_integrity_with<F>(data: &[u8], deep: bool, entry_cb: F) -> bool
     where
         F: FnMut(usize, u16) -> bool,
@@ -1096,7 +1094,7 @@ mod tests {
 
 // --------------------------------------------------------------------------
 // PORT STATUS
-//   source:        reference/valkey/src/ziplist.c, reference/valkey/src/ziplist.h
+//   source:        Valkey
 //   target_crate:  redis-ds
 //   confidence:    high
 //   todos:         0

@@ -1,5 +1,4 @@
 //! `QuickList` - listpack-backed node list used as Redis' list encoding.
-//!
 //! This is a bounded MVP of the upstream structure: node fill accounting,
 //! plain nodes for large elements, push/pop at both ends, index lookup,
 //! count, duplication, and owned iteration. LZF compression, bookmarks,
@@ -309,7 +308,7 @@ impl QuickList {
         quicklist
     }
 
-    /// Compression is recorded but not applied by this MVP.
+ /// Compression is recorded but not applied by this MVP.
     pub fn set_compress_depth(&mut self, compress: i32) {
         self.compress = compress.clamp(0, COMPRESS_MAX as i32) as u32;
     }
@@ -347,7 +346,7 @@ impl QuickList {
         self.nodes.len()
     }
 
-    /// Adapted to reusable Rust-owned storage.
+ /// Adapted to reusable Rust-owned storage.
     pub fn clear(&mut self) {
         self.nodes.clear();
         self.count = 0;
@@ -357,9 +356,8 @@ impl QuickList {
         self.clear();
     }
 
-    ///
-    /// Returns true when a new head node was created, false when the existing
-    /// head node absorbed the value or insertion failed.
+ /// Returns true when a new head node was created, false when the existing
+ /// head node absorbed the value or insertion failed.
     pub fn push_head(&mut self, value: &[u8]) -> bool {
         if is_large_element(value.len(), self.fill) {
             self.nodes.push_front(QuickListNode::plain(value));
@@ -382,9 +380,8 @@ impl QuickList {
         true
     }
 
-    ///
-    /// Returns true when a new tail node was created, false when the existing
-    /// tail node absorbed the value or insertion failed.
+ /// Returns true when a new tail node was created, false when the existing
+ /// tail node absorbed the value or insertion failed.
     pub fn push_tail(&mut self, value: &[u8]) -> bool {
         if is_large_element(value.len(), self.fill) {
             self.nodes.push_back(QuickListNode::plain(value));
@@ -423,7 +420,7 @@ impl QuickList {
         Some(self.push_tail(value.get(..sz)?))
     }
 
-    /// Empty listpacks are ignored so the safe owner never stores zero-count nodes.
+ /// Empty listpacks are ignored so the safe owner never stores zero-count nodes.
     pub fn append_listpack(&mut self, lp: ListPack) -> bool {
         let Some(node) = QuickListNode::from_listpack(lp) else {
             return false;
@@ -473,7 +470,7 @@ impl QuickList {
         Some(value)
     }
 
-    /// Collapsed to direct owned lookup.
+ /// Collapsed to direct owned lookup.
     pub fn index(&self, index: i64) -> Option<OwnedQuickListValue> {
         let count = i64::try_from(self.count).ok()?;
         let normalized = if index < 0 {
@@ -882,7 +879,7 @@ mod tests {
 
 // --------------------------------------------------------------------------
 // PORT STATUS
-//   source:        reference/valkey/src/quicklist.c, reference/valkey/src/quicklist.h
+//   source:        Valkey
 //   target_crate:  redis-ds
 //   confidence:    high
 //   todos:         0

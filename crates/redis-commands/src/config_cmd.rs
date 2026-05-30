@@ -154,7 +154,7 @@ pub fn default_config_pairs() -> &'static [(&'static str, &'static str)] {
     ]
 }
 
-/// Build the full CONFIG GET parameter list reading every live value from
+/// Build the full CONFIG GET parameter list reading every live value
 /// the supplied `LiveConfig`. Static pairs in `default_config_pairs` are
 /// reproduced verbatim for keys with no behavioural backing.
 pub fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
@@ -671,7 +671,6 @@ pub fn validate_config_set_pair(key: &[u8], value: &[u8]) -> RedisResult<()> {
 }
 
 /// Apply a single `CONFIG SET key value` pair to the `LiveConfig`.
-///
 /// Unknown keys are silently ignored so the TCL test harness can issue
 /// arbitrary `CONFIG SET` calls without aborting. Values that cannot be
 /// parsed are also silently ignored — the existing value remains in effect.
@@ -926,10 +925,10 @@ pub fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
             }
         }
         b"tls-ciphers" | b"tls-ciphersuites" | b"tls-prefer-server-ciphers" => {
-            // Accepted for upstream-config compatibility but inert: rustls
-            // refuses CBC suites and always prefers server ciphers, so these
-            // OpenSSL knobs have no effect. Documented as a deliberate
-            // security-upgrade divergence on the site.
+ // Accepted for upstream-config compatibility but inert: rustls
+ // refuses CBC suites and always prefers server ciphers, so these
+ // OpenSSL knobs have no effect. Documented as a deliberate
+ // security-upgrade divergence on the site.
         }
         b"tls-port" => {
             if let Some(n) = parse_usize_strict(value) {
@@ -1057,7 +1056,7 @@ pub fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
 }
 
 /// Parse a Redis memory-size literal: bare digits or a digit run followed by
-/// `b`, `k`/`kb`, `m`/`mb`, `g`/`gb` (case-insensitive). Suffixes follow the
+/// `b`, `k`/`kb`, `m`/`mb`, `g`/`gb` (case-insensitive). Suffixes follow
 /// upstream Valkey convention of base-2 multipliers (1k = 1024). Returns
 /// `None` on any parse failure so callers can preserve the prior value.
 pub fn parse_memsize(bytes: &[u8]) -> Option<u64> {

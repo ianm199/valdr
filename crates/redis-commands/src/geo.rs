@@ -1,13 +1,11 @@
 //! GEO command family: GEOADD, GEODIST, GEOHASH, GEOPOS, GEOSEARCH,
 //! GEOSEARCHSTORE, GEORADIUS, GEORADIUSBYMEMBER, GEORADIUS_RO,
 //! GEORADIUSBYMEMBER_RO.
-//!
 //! Geo data is stored as a sorted set whose scores are 52-bit WGS84 geohash
-//! encodings of (longitude, latitude).  GEOADD encodes coordinates and
+//! encodings of (longitude, latitude). GEOADD encodes coordinates
 //! delegates to ZADD logic; all other commands decode scores, perform
 //! geometric filtering, and format results.
-//!
-//! Geohash math lives in the sibling modules `geohash_geohash` and
+//! Geohash math lives in the sibling modules `geohash_geohash`
 //! `geohash_geohash_helper`; only `GeoPoint` is new to this module.
 
 use redis_core::command_context::CommandContext;
@@ -350,7 +348,7 @@ fn sort_gp_desc(a: &GeoPoint, b: &GeoPoint) -> std::cmp::Ordering {
 
 // ── ZSet accessors ────────────────────────────────────────────────────────────
 
-/// Borrow the `InlineZSet` from a `RedisObject`, returning `WRONGTYPE` if the
+/// Borrow the `InlineZSet` from a `RedisObject`, returning `WRONGTYPE` if
 /// object exists but is not a sorted set, or `None` if the key is absent.
 fn as_zset(obj: Option<&RedisObject>) -> RedisResult<Option<&InlineZSet>> {
     match obj {
@@ -371,7 +369,7 @@ fn zset_score_from_obj(obj: &RedisObject, member: &[u8]) -> RedisResult<f64> {
 // ── ZADD helper ───────────────────────────────────────────────────────────────
 
 /// Insert or update `(score, member)` pairs into the sorted set at `key`.
-/// Applies NX / XX / CH semantics.  Returns the integer reply value.
+/// Applies NX / XX / CH semantics. Returns the integer reply value.
 /// Used internally by GEOADD.
 fn zadd_geo(
     ctx: &mut CommandContext,
@@ -842,8 +840,8 @@ pub fn georadiusbymemberro_command(ctx: &mut CommandContext) -> RedisResult<()> 
 }
 
 /// GEOSEARCH key [FROMMEMBER member|FROMLONLAT lon lat]
-///              [BYRADIUS r unit|BYBOX w h unit|BYPOLYGON n ...]
-///              [WITHCOORD] [WITHDIST] [WITHHASH] [COUNT count [ANY]] [ASC|DESC]
+/// [BYRADIUS r unit|BYBOX w h unit|BYPOLYGON n...]
+/// [WITHCOORD] [WITHDIST] [WITHHASH] [COUNT count [ANY]] [ASC|DESC]
 pub fn geosearch_command(ctx: &mut CommandContext) -> RedisResult<()> {
     georadius_generic(ctx, 1, GEOSEARCH_FLAG)
 }
@@ -853,7 +851,7 @@ pub fn geosearchstore_command(ctx: &mut CommandContext) -> RedisResult<()> {
     georadius_generic(ctx, 2, GEOSEARCH_FLAG | GEOSEARCHSTORE_FLAG)
 }
 
-/// GEOHASH key member [member ...]
+/// GEOHASH key member [member...]
 /// Returns an 11-character base-32 geohash string for each member.
 pub fn geohash_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let key = RedisString::from_bytes(ctx.arg(1)?.as_bytes());
@@ -931,8 +929,8 @@ pub fn geohash_command(ctx: &mut CommandContext) -> RedisResult<()> {
     Ok(())
 }
 
-/// GEOPOS key member [member ...]
-/// Returns `[[longitude, latitude], ...]`; null array for missing members.
+/// GEOPOS key member [member...]
+/// Returns `[[longitude, latitude],...]`; null array for missing members.
 pub fn geopos_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let key = RedisString::from_bytes(ctx.arg(1)?.as_bytes());
 
@@ -1063,7 +1061,7 @@ pub fn geodist_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
 // ──────────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        src/geo.c  (1022 lines, 21 functions)
+//   source:        Valkey
 //                  src/geo.h  (25 lines)
 //   target_crate:  redis-commands
 //   confidence:    high

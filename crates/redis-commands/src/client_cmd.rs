@@ -739,9 +739,9 @@ pub fn current_client_matches_filters(
         }
     }
     if let Some(_idle) = filters.idle {
-        // The current client snapshot does not yet track second-granularity
-        // idle time. Treat the filter as satisfied; the other supplied filters
-        // still narrow the target set and CLIENT LIST continues to render idle=0.
+ // The current client snapshot does not yet track second-granularity
+ // idle time. Treat the filter as satisfied; the other supplied filters
+ // still narrow the target set and CLIENT LIST continues to render idle=0.
     }
     if let Some(expected) = &filters.flags {
         let actual = client_flags_vec(client);
@@ -888,9 +888,9 @@ pub fn snapshot_matches_filters(
         }
     }
     if let Some(_idle) = filters.idle {
-        // See current-client path above: idle accounting is not yet persisted
-        // in the cross-thread snapshot, so we preserve filter syntax and let
-        // the other predicates define the matched set.
+ // See current-client path above: idle accounting is not yet persisted
+ // in the cross-thread snapshot, so we preserve filter syntax and let
+ // the other predicates define the matched set.
     }
     if let Some(expected) = &filters.flags {
         let actual = snapshot_flags_vec(snap);
@@ -968,14 +968,13 @@ pub fn snapshot_matches_filters(
 }
 
 /// `CLIENT <subcommand> [args]`.
-///
 /// Pilot subset:
-///   * `CLIENT ID` — integer reply of the client's connection id.
-///   * `CLIENT GETNAME` — bulk reply of the stored name (nil bulk when unset).
-///   * `CLIENT SETNAME name` — store the name; replies `+OK\r\n`.
-///   * `CLIENT NO-EVICT ON|OFF` — no-op, replies `+OK\r\n`.
-///   * `CLIENT NO-TOUCH ON|OFF` — no-op, replies `+OK\r\n`.
-///   * `CLIENT LIST` — single-line description of the current client.
+/// * `CLIENT ID` — integer reply of the client's connection id.
+/// * `CLIENT GETNAME` — bulk reply of the stored name (nil bulk when unset).
+/// * `CLIENT SETNAME name` — store the name; replies `+OK\r\n`.
+/// * `CLIENT NO-EVICT ON|OFF` — no-op, replies `+OK\r\n`.
+/// * `CLIENT NO-TOUCH ON|OFF` — no-op, replies `+OK\r\n`.
+/// * `CLIENT LIST` — single-line description of the current client.
 pub fn client_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ctx.arg_count() < 2 {
         return Err(RedisError::wrong_number_of_args(b"client"));

@@ -1,26 +1,20 @@
 //! RESP2 incremental request parser.
-//!
 //! Parses bytes flowing from a client to the server. Supports the two
 //! historical request encodings used by Redis clients:
-//!
 //! * **Inline** — whitespace-separated tokens terminated by `\r\n`. Used by
-//!   telnet/`redis-cli` for quick tests.
+//! telnet/`redis-cli` for quick tests.
 //! * **Multibulk** — RESP2 array of bulk strings: `*N\r\n$L\r\n<bytes>\r\n…`.
-//!   The wire encoding used by every modern client library.
-//!
-//! C reference: `networking.c::processInlineBuffer` and
-//! `networking.c::processMultibulkBuffer`.
-//!
+//! The wire encoding used by every modern client library.
+//! C reference: `processInlineBuffer`
+//! `processMultibulkBuffer`.
 //! # Contract
-//!
 //! [`parse_inline_or_multibulk`] is the entry point. It returns:
-//!
 //! * `Ok(Some((argv, consumed)))` — a complete command was parsed. `consumed`
-//!   is the number of bytes from `buf` that should be drained.
+//! is the number of bytes from `buf` that should be drained.
 //! * `Ok(None)` — the buffer holds a partial command; the caller should keep
-//!   reading and call again.
-//! * `Err(RedisError)` — a protocol error. The caller should close the
-//!   connection.
+//! reading and call again.
+//! * `Err(RedisError)` — a protocol error. The caller should close
+//! connection.
 
 use redis_types::{RedisError, RedisString};
 
@@ -36,7 +30,6 @@ pub const PROTO_REQ_MULTIBULK_MAX_LEN: i64 = 1_000_000;
 pub const PROTO_MAX_BULK_LEN: i64 = 512 * 1024 * 1024;
 
 /// Parse one complete RESP2 request from `buf`.
-///
 /// Sniffs the first byte: `*` selects the multibulk path, anything else falls
 /// through to inline. Returns `Ok(None)` if the buffer does not yet hold a
 /// complete frame.
@@ -54,8 +47,7 @@ pub fn parse_inline_or_multibulk(
 }
 
 /// Parse one complete RESP2 request from `buf`, reusing `out` as argv storage.
-///
-/// This is the hot-path variant used by the live server. It preserves the
+/// This is the hot-path variant used by the live server. It preserves
 /// public [`parse_inline_or_multibulk`] contract but avoids allocating a fresh
 /// argv vector for every pipelined command. Argument byte strings are still
 /// owned `RedisString`s; moving those to borrowed slices is a larger command
@@ -73,7 +65,6 @@ pub fn parse_inline_or_multibulk_into(
 
 /// Parse one request into `out` without clearing partial argv on incomplete
 /// input.
-///
 /// This variant is for live client parser scratch storage: partial arguments
 /// are not visible to command dispatch, so keeping them lets the next parse
 /// reuse already-allocated argument buffers instead of freeing them.
@@ -91,8 +82,6 @@ pub fn parse_inline_or_multibulk_into_retaining_partial(
 }
 
 /// Parse a multibulk request: `*N\r\n$L\r\n<bytes>\r\n…`.
-///
-/// C: `networking.c::processMultibulkBuffer`.
 fn parse_multibulk(buf: &[u8]) -> Result<Option<(Vec<RedisString>, usize)>, RedisError> {
     let mut pos: usize = 1;
 
@@ -234,8 +223,6 @@ fn parse_multibulk_into(
 }
 
 /// Parse an inline command: whitespace-separated tokens ending in `\r\n` or `\n`.
-///
-/// C: `networking.c::processInlineBuffer`.
 fn parse_inline(buf: &[u8]) -> Result<Option<(Vec<RedisString>, usize)>, RedisError> {
     let newline = match buf.iter().position(|&b| b == b'\n') {
         Some(n) => n,
@@ -271,42 +258,34 @@ fn parse_inline_into(buf: &[u8], out: &mut Vec<RedisString>) -> Result<Option<us
 }
 
 /// Read a multibulk array count (`*N`) terminated by `\r\n` starting at `pos`.
-///
 /// Returns `Ok(Some((value, new_pos)))` on success, `Ok(None)` if incomplete,
 /// or `Err` with `"Protocol error: invalid multibulk length"` when the integer
 /// field contains non-digit bytes — matching Valkey's `string2ll` failure path
 /// that sets `READ_FLAGS_ERROR_INVALID_MULTIBULK_LEN`.
-///
-/// C: `parseMultibulk` — `string2ll` on the `*` count field.
+/// `string2ll` on the `*` count field.
 fn read_multibulk_count(buf: &[u8], pos: usize) -> Result<Option<(i64, usize)>, RedisError> {
     read_resp_integer(buf, pos, b"Protocol error: invalid multibulk length")
 }
 
 /// Read a bulk-string length (`$N`) terminated by `\r\n` starting at `pos`.
-///
 /// Returns `Ok(Some((value, new_pos)))` on success, `Ok(None)` if incomplete,
 /// or `Err` with `"Protocol error: invalid bulk length"` when the integer
 /// field contains non-digit bytes — matching Valkey's `string2ll` failure path
 /// that sets `READ_FLAGS_ERROR_MBULK_INVALID_BULK_LEN`.
-///
-/// C: `parseMultibulk` — `string2ll` on the `$` length field.
+/// `string2ll` on the `$` length field.
 fn read_bulk_length(buf: &[u8], pos: usize) -> Result<Option<(i64, usize)>, RedisError> {
     read_resp_integer(buf, pos, b"Protocol error: invalid bulk length")
 }
 
-/// Shared RESP integer-line reader used by both [`read_multibulk_count`] and
+/// Shared RESP integer-line reader used by both [`read_multibulk_count`]
 /// [`read_bulk_length`].
-///
 /// Locates the `\r\n` terminator and parses digits in the same scan.
 /// `err_msg` is the context-specific error text emitted when the digit field
 /// is invalid — this lets callers produce the exact Valkey wire text.
-///
 /// When no `\r` is found and the remaining buffer exceeds `PROTO_INLINE_MAX_SIZE`
 /// the field is clearly malformed; returns `err_msg` immediately. This matches
 /// Valkey's `READ_FLAGS_ERROR_BIG_BULK_COUNT` / `READ_FLAGS_ERROR_BIG_MULTIBULK`
 /// size guards in `parseMultibulk`.
-///
-/// C: common `string2ll` + CRLF check pattern in `parseMultibulk`.
 fn read_resp_integer(
     buf: &[u8],
     pos: usize,
@@ -363,28 +342,22 @@ fn read_resp_integer(
 }
 
 /// Split an inline command line into argv tokens.
-///
-/// Ports Valkey's `sdsnsplitargs` / `sdsparsearg` from `sds.c`. Handles:
-///
+/// Ports Valkey's `sdsnsplitargs` / `sdsparsearg`. Handles:
 /// - Bare (unquoted) tokens terminated by ASCII whitespace.
 /// - Double-quoted strings (`"…"`) with `\n`, `\r`, `\t`, `\b`, `\a`,
-///   `\\`, `\"`, and `\xHH` escape sequences.
+/// `\\`, `\"`, and `\xHH` escape sequences.
 /// - Single-quoted strings (`'…'`) with `\'` as the only escape.
 /// - Adjacent quoted/unquoted segments are concatenated into one token,
-///   e.g. `"foo"bar` → `foobar` (Valkey behaviour).
-///
+/// e.g. `"foo"bar` → `foobar` (Valkey behaviour).
 /// Returns `Err` with `"Protocol error: unbalanced quotes in request"` when
 /// quotes are not properly closed or when a closed-quote is immediately
 /// followed by a non-space character (e.g. `"foo"bar` is actually NOT an
 /// error in Valkey — adjacent is allowed, but `"foo"'bar` transitions work
 /// because after `"` closes, the outer loop either hits whitespace and ends
 /// the token, OR hits another quote character and opens a new quote context).
-///
 /// Matches Valkey's `sdsnsplitargs_internal` returning `NULL` on parse failure,
 /// which maps to `READ_FLAGS_ERROR_UNBALANCED_QUOTES` →
 /// `"Protocol error: unbalanced quotes in request"`.
-///
-/// C: `sds.c:sdsnsplitargs_internal` + `sdsparsearg`.
 fn split_inline_tokens(line: &[u8]) -> Result<Vec<RedisString>, RedisError> {
     let mut argv: Vec<RedisString> = Vec::new();
     let mut i = 0;
@@ -611,7 +584,7 @@ mod tests {
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        networking.c::processInlineBuffer + processMultibulkBuffer
+//   source:        Valkey
 //                  sds.c::sdsnsplitargs_internal + sdsparsearg
 //   target_crate:  redis-protocol
 //   confidence:    high

@@ -1,20 +1,16 @@
 //! SLOWLOG and LATENCY command handlers with global ring-buffer state.
-//!
 //! Wraps the fully-ported `redis_core::commandlog` and `redis_core::latency`
 //! modules behind a pair of `OnceLock<Arc<Mutex<_>>>` globals so the stateless
 //! `Handler` function-pointer signature required by `dispatch.rs` can reach
 //! persistent state without threading it through `CommandContext`.
-//!
 //! SLOWLOG global state:
-//!   - Ring buffer of at most `slowlog_max_len` entries (default 128).
-//!   - Records commands whose execution time exceeds `threshold_micros`
-//!     (default 10 000 µs; -1 disables recording entirely).
-//!
+//! - Ring buffer of at most `slowlog_max_len` entries (default 128).
+//! - Records commands whose execution time exceeds `threshold_micros`
+//! (default 10 000 µs; -1 disables recording entirely).
 //! LATENCY global state:
-//!   - Per-event ring buffers exposed by `LatencyMonitor`.
-//!   - No internal collection hooks for Phase B; the in-memory map is
-//!     populated only via the public `report_latency_event` API.
-//!
+//! - Per-event ring buffers exposed by `LatencyMonitor`.
+//! - No internal collection hooks for Phase B; the in-memory map is
+//! populated only via the public `report_latency_event` API.
 //! The timing wrap that feeds SLOWLOG entries is in `dispatch.rs`'s
 //! `dispatch_timed` function, which records duration post-handler and calls
 //! `record_slowlog_entry` defined here.
@@ -278,7 +274,6 @@ fn blocked_slowlog_pending() -> Arc<Mutex<HashMap<u64, PendingBlockedSlowlogEntr
 }
 
 /// Record one command execution into the slowlog if `duration_micros` meets the threshold.
-///
 /// Acquires the global lock, checks the threshold and max-len, then pushes a
 /// new entry at the front of the deque (newest-first) and trims the tail.
 /// Called from `dispatch_timed` in `dispatch.rs` after every command completes.
@@ -350,8 +345,7 @@ pub fn record_slowlog_entry(
 }
 
 /// Remember a blocked command's original argv until the wake path completes it.
-///
-/// C Valkey skips commandlog emission while `call()` leaves the client blocked
+/// C Valkey skips commandlog emission while `call` leaves the client blocked
 /// and records the command from the unblock/reprocess path instead.
 pub fn remember_blocked_slowlog_entry(
     argv: Vec<RedisString>,
@@ -688,7 +682,6 @@ fn render_percentile_name(value: f64) -> String {
 }
 
 /// Update the latency-monitor threshold in milliseconds.
-///
 /// Valkey treats 0 as disabled; internal event hooks should only add samples
 /// when their measured duration is at least this threshold.
 pub fn set_latency_monitor_threshold(ms: i64) {
@@ -700,7 +693,6 @@ pub fn latency_monitor_threshold() -> i64 {
 }
 
 /// Update the slowlog threshold in microseconds.
-///
 /// Called from `CONFIG SET slowlog-log-slower-than <value>`.
 pub fn set_slowlog_threshold(micros: i64) {
     let handle = global_slowlog();
@@ -712,7 +704,6 @@ pub fn set_slowlog_threshold(micros: i64) {
 }
 
 /// Update the slowlog maximum length.
-///
 /// Called from `CONFIG SET slowlog-max-len <value>`.
 pub fn set_slowlog_max_len(max: usize) {
     let handle = global_slowlog();
@@ -1096,7 +1087,6 @@ pub fn global_latency() -> Arc<Mutex<LatencyMonitor>> {
 }
 
 /// Report a latency event observation (milliseconds) into the global monitor.
-///
 /// Phase B: no internal callers; exposed for future integration with expire-cycle,
 /// fork, AOF-write, and other latency hooks.
 pub fn report_latency_event(event_name: &[u8], latency_ms: u64) {

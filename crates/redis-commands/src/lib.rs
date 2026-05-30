@@ -1,12 +1,9 @@
 //! Command registry and command implementations.
-//!
 //! Owners (per `harness/type-vocabulary.tsv`):
-//!   - `CommandSpec` (spec.rs)
-//!
+//! - `CommandSpec` (spec.rs)
 //! The command table is generated from `reference/valkey/src/commands/*.json`
 //! by `harness/gen-command-registry.py` (TODO). The generator's output
 //! lives at `src/generated.rs` and must not be hand-edited.
-//!
 //! Pilot commands: PING, ECHO, HELLO, COMMAND (Phase 2); SET, GET, DEL,
 //! EXISTS, INCR (Phase 3).
 
@@ -54,7 +51,6 @@ use std::sync::{Arc, OnceLock};
 use redis_core::live_config::LiveConfig;
 
 /// Process-wide handle to the live config, registered once at startup.
-///
 /// `connection::config_command` writes through this handle so CONFIG SET takes
 /// effect immediately even when the writing connection is not the one reading
 /// (live state is shared, not per-context). The accept loop installs the same

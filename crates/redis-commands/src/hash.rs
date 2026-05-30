@@ -1,24 +1,18 @@
 //! Hash type and command implementations.
-//!
 //! Covers the byte-exact wire surface of HSET, HSETNX, HGET, HGETDEL, HDEL,
 //! HEXISTS, HLEN, HSTRLEN, HGETALL, HKEYS, HVALS, HMGET, HMSET, HINCRBY,
 //! HINCRBYFLOAT, and HRANDFIELD for Round 3.
-//!
-//!
 //! # Storage shape
-//!
 //! Uses the pragmatic `ObjectKind::Hash(HashEncoding::Inline(_))`
 //! encoding from `redis-core::object` — an insertion-order `InlineHash`
 //! providing field lookups and updates. The real
 //! `ListPack` / `HashTable` encodings are available when `redis-ds`
 //! exposes those types.
-//!
 //! # TODOs
-//!
 //! - HSCAN cursor iteration depends on cursor support from redis-ds.
 //! - HRANDFIELD currently iterates the underlying HashMap in arbitrary order.
 //! - HINCRBYFLOAT formats with Rust's default f64 `{}` formatter; tighter
-//!   formatting may be needed for byte-exact diffs on large magnitudes.
+//! formatting may be needed for byte-exact diffs on large magnitudes.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -41,8 +35,8 @@ struct HashFieldExpiryKey {
 static HASH_FIELD_EXPIRES: OnceLock<Mutex<HashMap<HashFieldExpiryKey, i64>>> = OnceLock::new();
 
 /// Conservative "have any hash-field expiries ever been created?" gate. Set
-/// true at every site that can grow `HASH_FIELD_EXPIRES`; never reset. Lets the
-/// per-write `purge_expired_hash_fields` skip its clock read + global lock +
+/// true at every site that can grow `HASH_FIELD_EXPIRES`; never reset. Lets
+/// per-write `purge_expired_hash_fields` skip its clock read + global lock
 /// scan on the overwhelmingly common path where no field has a TTL (which is
 /// also every HSET in the default benchmark). Worst case it stays true after
 /// the last expiry is removed and we take the correct slow path — it never
@@ -272,9 +266,9 @@ fn field_expiry_ms(dbid: u32, key: &RedisString, field: &RedisString) -> Option<
 }
 
 fn purge_expired_hash_fields(ctx: &mut CommandContext, key: &RedisString) -> RedisResult<()> {
-    // Fast path: when no hash-field TTL has ever been created, there is nothing
-    // to purge — skip the clock read, the global HASH_FIELD_EXPIRES lock, and
-    // the full-index scan that would otherwise run on every hash write.
+ // Fast path: when no hash-field TTL has ever been created, there is nothing
+ // to purge — skip the clock read, the global HASH_FIELD_EXPIRES lock,
+ // the full-index scan that would otherwise run on every hash write.
     if !HASH_FIELD_EXPIRES_PRESENT.load(Ordering::Relaxed) {
         return Ok(());
     }
@@ -403,9 +397,8 @@ pub fn run_active_hash_field_expire_tick_on_db(db: &mut RedisDb, effort: u8) -> 
 }
 
 /// Parse a `RedisString` as a base-10 `i64` using Redis' strict rules.
-///
 /// Rejects leading or trailing whitespace, embedded NUL bytes, and any
-/// non-ASCII-digit payload. Returns `Err(RedisError::not_integer())` on
+/// non-ASCII-digit payload. Returns `Err(RedisError::not_integer` on
 /// any failure to match real Redis' error reply.
 fn parse_strict_i64(bytes: &[u8]) -> Result<i64, RedisError> {
     if bytes.is_empty() {
@@ -419,7 +412,6 @@ fn parse_strict_i64(bytes: &[u8]) -> Result<i64, RedisError> {
 }
 
 /// Parse a `RedisString` as an `f64` for HINCRBYFLOAT.
-///
 /// Rejects whitespace, NaN, and infinity to match the C implementation's
 /// `getLongDoubleFromObject` rules.
 fn parse_strict_f64(bytes: &[u8]) -> Result<f64, RedisError> {
@@ -439,7 +431,7 @@ fn parse_strict_f64(bytes: &[u8]) -> Result<f64, RedisError> {
 
 /// Parse an HINCRBYFLOAT increment. Unlike [`parse_strict_f64`], a parseable
 /// `nan`/`inf`/`+inf` is returned rather than rejected as "not a valid float";
-/// the caller reports the upstream `value is NaN or Infinity` error so the
+/// the caller reports the upstream `value is NaN or Infinity` error so
 /// increment-argument case is distinguished from a
 /// genuinely-unparseable value.
 fn parse_incr_f64(bytes: &[u8]) -> Result<f64, RedisError> {
@@ -455,7 +447,6 @@ fn parse_incr_f64(bytes: &[u8]) -> Result<f64, RedisError> {
 
 /// Borrow the inner hash `HashMap` of a hash-encoded `RedisObject`,
 /// raising `WRONGTYPE` if `obj` is any other kind.
-///
 /// Returns `Ok(None)` if the key is absent so callers can preserve
 /// existence semantics without nesting `match` on the lookup result.
 fn as_hash_ref(obj: Option<&RedisObject>) -> Result<Option<&InlineHash>, RedisError> {
@@ -485,7 +476,6 @@ fn long_long_to_bytes(n: i64) -> Vec<u8> {
 }
 
 /// Format an `f64` for HINCRBYFLOAT replies, matching Redis wire output.
-///
 /// Rust's `Display` for `f64` uses the shortest round-trip decimal, which
 /// matches Redis for most values. Scientific notation (e.g. `1e10`) is
 /// converted to fixed-point by stripping trailing zeros from a 17-decimal
@@ -842,11 +832,10 @@ fn reply_optional_values(
     Ok(())
 }
 
-/// HSET key field value [field value ...]
-///
+/// HSET key field value [field value...]
 /// Returns the number of fields newly added (excludes updates). Creates
 /// the hash with the Inline encoding when the key is missing. Errors with
-/// `WRONGTYPE` if the key exists but is not a hash, and with the
+/// `WRONGTYPE` if the key exists but is not a hash, and with
 /// wrong-arity error when the trailing field/value pairs are unbalanced.
 pub fn hset_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
@@ -903,9 +892,8 @@ pub fn hset_command(ctx: &mut CommandContext) -> RedisResult<()> {
     ctx.reply_integer(added)
 }
 
-/// HMSET key field value [field value ...]
-///
-/// Deprecated alias of HSET that replies `+OK\r\n` instead of the
+/// HMSET key field value [field value...]
+/// Deprecated alias of HSET that replies `+OK\r\n` instead of
 /// new-field count.
 pub fn hmset_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
@@ -953,7 +941,6 @@ pub fn hmset_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// HSETNX key field value
-///
 /// Sets the field only when it does not exist yet. Replies `:1\r\n` on
 /// insert, `:0\r\n` when the field already has a value.
 pub fn hsetnx_command(ctx: &mut CommandContext) -> RedisResult<()> {
@@ -999,7 +986,6 @@ pub fn hsetnx_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// HGET key field
-///
 /// Replies with the field's bulk-string value, or `$-1\r\n` when the key
 /// or field is absent.
 pub fn hget_command(ctx: &mut CommandContext) -> RedisResult<()> {
@@ -1019,8 +1005,7 @@ pub fn hget_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
 }
 
-/// HMGET key field [field ...]
-///
+/// HMGET key field [field...]
 /// Returns an array with one element per requested field. Each element is
 /// either a bulk-string value or a nil bulk when the field is missing.
 pub fn hmget_command(ctx: &mut CommandContext) -> RedisResult<()> {
@@ -1057,8 +1042,7 @@ pub fn hmget_command(ctx: &mut CommandContext) -> RedisResult<()> {
     Ok(())
 }
 
-/// HDEL key field [field ...]
-///
+/// HDEL key field [field...]
 /// Removes the listed fields and replies with the deletion count. Deletes
 /// the key itself when the last field is removed.
 pub fn hdel_command(ctx: &mut CommandContext) -> RedisResult<()> {
@@ -1103,8 +1087,7 @@ pub fn hdel_command(ctx: &mut CommandContext) -> RedisResult<()> {
     ctx.reply_integer(removed)
 }
 
-/// HGETDEL key FIELDS num field [field ...]
-///
+/// HGETDEL key FIELDS num field [field...]
 /// Returns an array of the previous values for the requested fields, using nil
 /// bulk replies for missing fields, and removes fields that existed. Deletes
 /// the hash key when the last field is removed.
@@ -1180,7 +1163,7 @@ fn reply_hgetdel_values(
 }
 
 /// HGETEX key [EX seconds|PX milliseconds|EXAT seconds|PXAT milliseconds|PERSIST]
-///        FIELDS num field [field ...]
+/// FIELDS num field [field...]
 pub fn hgetex_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if ctx.arg_count() < 5 {
         return Err(RedisError::wrong_number_of_args(b"hgetex"));
@@ -1249,7 +1232,7 @@ pub fn hgetex_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// HSETEX key [NX|XX] [FNX|FXX] [EX seconds|PX milliseconds|EXAT seconds|
-/// PXAT milliseconds|KEEPTTL] FIELDS num field value [field value ...]
+/// PXAT milliseconds|KEEPTTL] FIELDS num field value [field value...]
 pub fn hsetex_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if ctx.arg_count() < 5 {
         return Err(RedisError::wrong_number_of_args(b"hsetex"));
@@ -1357,7 +1340,6 @@ pub fn hsetex_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// HEXISTS key field
-///
 /// Replies `:1\r\n` if the field is present, `:0\r\n` otherwise.
 pub fn hexists_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if ctx.arg_count() != 3 {
@@ -1374,8 +1356,7 @@ pub fn hexists_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// HLEN key
-///
-/// Replies with the number of fields stored under the key, `:0\r\n` if the
+/// Replies with the number of fields stored under the key, `:0\r\n` if
 /// key is missing.
 pub fn hlen_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if ctx.arg_count() != 2 {
@@ -1391,7 +1372,6 @@ pub fn hlen_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// HSTRLEN key field
-///
 /// Replies with the byte length of the field's value, `:0\r\n` if the key
 /// or field is absent.
 pub fn hstrlen_command(ctx: &mut CommandContext) -> RedisResult<()> {
@@ -1412,7 +1392,6 @@ pub fn hstrlen_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// HGETALL key
-///
 /// Replies with a flat array of alternating field, value bulk strings.
 /// `*0\r\n` for a missing key. The emission order follows the underlying
 /// `HashMap` iteration order, which the wire-diff oracle treats as
@@ -1437,7 +1416,6 @@ pub fn hgetall_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// HKEYS key
-///
 /// Replies with the array of field names, `*0\r\n` if the key is absent.
 pub fn hkeys_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if ctx.arg_count() != 2 {
@@ -1457,7 +1435,6 @@ pub fn hkeys_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// HVALS key
-///
 /// Replies with the array of field values, `*0\r\n` if the key is absent.
 pub fn hvals_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if ctx.arg_count() != 2 {
@@ -1477,11 +1454,10 @@ pub fn hvals_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// HINCRBY key field delta
-///
 /// Reads the field as a strict `i64`, adds the signed delta with overflow
-/// checking, stores the result back as ASCII decimal, and replies with the
+/// checking, stores the result back as ASCII decimal, and replies with
 /// new value. Missing fields start at 0; non-integer existing values raise
-/// the canonical Redis error, mirroring t_string.c's incr family.
+/// the canonical Redis errors incr family.
 pub fn hincrby_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if ctx.arg_count() != 4 {
         return Err(RedisError::wrong_number_of_args(b"hincrby"));
@@ -1526,7 +1502,6 @@ pub fn hincrby_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// HINCRBYFLOAT key field delta
-///
 /// Reads the field as a strict `f64`, adds the delta, stores the result
 /// back formatted, and replies with the new value as a bulk string.
 pub fn hincrbyfloat_command(ctx: &mut CommandContext) -> RedisResult<()> {
@@ -1537,8 +1512,8 @@ pub fn hincrbyfloat_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let key = ctx.arg_owned(1usize)?;
     let field = ctx.arg_owned(2usize)?;
     let delta = parse_incr_f64(ctx.arg(3)?.as_bytes())?;
-    // reject a NaN/Inf increment before touching the key, so
-    // `HINCRBYFLOAT k f +inf` errors and leaves the key uncreated.
+ // reject a NaN/Inf increment before touching the key, so
+ // `HINCRBYFLOAT k f +inf` errors and leaves the key uncreated.
     if delta.is_nan() || delta.is_infinite() {
         return Err(RedisError::runtime(b"ERR value is NaN or Infinity"));
     }
@@ -1577,8 +1552,7 @@ pub fn hincrbyfloat_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// Parse an HRANDFIELD count argument, applying the Redis range rules.
-///
-/// Redis uses `getRangeLongFromObjectOrReply(c, argv, -LONG_MAX, LONG_MAX, ...)`
+/// Redis uses `getRangeLongFromObjectOrReply(c, argv, -LONG_MAX, LONG_MAX,...)`
 /// which excludes `i64::MIN` (equal to `LONG_MIN`, one below `-LONG_MAX`).
 /// Values inside that range are accepted as-is.
 fn parse_hrandfield_count(bytes: &[u8]) -> Result<i64, RedisError> {
@@ -1590,8 +1564,7 @@ fn parse_hrandfield_count(bytes: &[u8]) -> Result<i64, RedisError> {
 }
 
 /// Derive a pseudo-random seed from wall-clock nanoseconds and a client id.
-///
-/// This is a cheap xorshift mix — not cryptographic, but good enough to
+/// This is a cheap xorshift mix — not cryptographic, but good enough
 /// spread access across all hash fields within a test run. The per-call
 /// clock read ensures the same client gets a different seed on every call.
 fn pseudo_random_seed(client_id: u64) -> u64 {
@@ -1627,7 +1600,7 @@ fn hrandfield_duplicate_emit_cap(
         .iter()
         .map(|(f, v)| {
             if with_values && resp3 {
-                // Two-element array header plus field and value bulks.
+ // Two-element array header plus field and value bulks.
                 4 + hrandfield_bulk_len(f) + hrandfield_bulk_len(v)
             } else if with_values {
                 hrandfield_bulk_len(f) + hrandfield_bulk_len(v)
@@ -1642,7 +1615,6 @@ fn hrandfield_duplicate_emit_cap(
 }
 
 /// HRANDFIELD key [count [WITHVALUES]]
-///
 /// Without count: replies a single random field bulk, or `$-1\r\n` when
 /// the key is absent. With count: replies an array. Positive counts emit
 /// up to `count` distinct fields, negative counts emit `|count|` fields
@@ -1955,13 +1927,11 @@ fn reply_integer_array(ctx: &mut CommandContext, values: &[i64]) -> RedisResult<
 }
 
 /// HSCAN key cursor [MATCH pattern] [COUNT count] [NOVALUES]
-///
 /// Linear-cursor iteration over the field/value pairs of a hash. Matches
 /// real Redis's reply shape — a two-element array of `[next_cursor, items]`
 /// — but uses the simplified Phase-B cursor scheme (a `u64` offset into a
 /// snapshot). `NOVALUES` (Redis 7.4+) emits only the field bulks instead
 /// of interleaved field/value pairs.
-///
 /// TODO(architect): swap for the resize-safe reverse-binary cursor once
 /// the kvstore primitive lands.
 pub fn hscan_command(ctx: &mut CommandContext) -> RedisResult<()> {
@@ -2190,7 +2160,7 @@ mod tests {
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        src/t_hash.c
+//   source:        Valkey
 //   target_crate:  redis-commands
 //   confidence:    medium
 //   todos:         3

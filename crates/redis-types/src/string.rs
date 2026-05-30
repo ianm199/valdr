@@ -1,10 +1,8 @@
 //! `RedisString` — the canonical byte-string type for Redis keys,
 //! values, and RESP payloads.
-//!
 //! Per PORTING.md §2 #3: a Vec<u8> newtype for now. Cheap interning
 //! and Arc backing are architect decisions deferred until we measure
 //! actual allocation pressure in Phase 4 (data-structure encodings).
-//!
 //! NEVER use `String` / `&str` / `from_utf8` for Redis data. Keys
 //! and values are byte strings and must round-trip arbitrary bytes
 //! through RESP.
@@ -68,18 +66,18 @@ impl RedisString {
         self.0.clear()
     }
 
-    /// Byte-slice view (alias of `as_bytes`, named for compatibility with
-    /// `Vec<u8>::as_slice` callers in translated command code).
+ /// Byte-slice view (alias of `as_bytes`, named for compatibility with
+ /// `Vec<u8>::as_slice` callers in translated command code).
     pub fn as_slice(&self) -> &[u8] {
         &self.0
     }
 
-    /// Owned `Vec<u8>` copy of the bytes.
+ /// Owned `Vec<u8>` copy of the bytes.
     pub fn to_vec(&self) -> Vec<u8> {
         self.0.clone()
     }
 
-    /// Iterator over the bytes (alias of `as_bytes().iter()`).
+ /// Iterator over the bytes (alias of `as_bytes.iter`).
     pub fn iter(&self) -> std::slice::Iter<'_, u8> {
         self.0.iter()
     }

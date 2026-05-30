@@ -1,28 +1,21 @@
 //! Set type and command implementations.
-//!
 //! Covers the byte-exact wire surface of SADD, SREM, SMEMBERS, SISMEMBER,
 //! SMISMEMBER, SCARD, SPOP, SRANDMEMBER, SMOVE, SINTER, SINTERSTORE,
 //! SINTERCARD, SUNION, SUNIONSTORE, SDIFF, and SDIFFSTORE.
-//!
 //! # Storage shape
-//!
 //! Uses the pragmatic `ObjectKind::Set(SetEncoding::Inline(_))`
 //! encoding from `redis-core::object` — a `HashSet<RedisString>` providing
 //! O(1) membership, add, and remove. The real `ListPack` / `IntSet` /
 //! `HashTable` encodings will be used when `redis-ds` exposes those
 //! types.
-//!
 //! # Architect items
-//!
 //! TODO(architect): SPOP/SRANDMEMBER currently return deterministic
 //! members (first-iter-order). Real Redis randomises element selection.
 //! Wire-diff fidelity requires plumbing a seeded RNG once the random
 //! infrastructure lands.
-//!
 //! TODO(architect): keyspace-event notifications and replication command
-//! rewriting are stubbed — they have no observable wire effect for the
+//! rewriting are stubbed — they have no observable wire effect for
 //! in-tree smoke tests but must land before the AOF / replication phases.
-//!
 //! TODO(architect): swap the `Inline` encoding for real `ListPack` /
 //! `IntSet` / `HashTable` types from `redis-ds` when making them
 //! usable.
@@ -40,7 +33,6 @@ use redis_types::{RedisError, RedisResult, RedisString};
 
 /// Advance the sticky encoding on an `InlineSet` to the minimum encoding
 /// required by its current members and the active configuration thresholds.
-///
 /// Real Redis promotes set encoding (intset → listpack → hashtable) but never
 /// automatically demotes it. After every SADD we call this to record any
 /// promotion so that subsequent SREM calls do not reset the observed encoding.
@@ -120,7 +112,6 @@ fn update_sticky_encoding_after_insert(
 }
 
 /// Return a seed derived from the current system time in nanoseconds.
-///
 /// Used to bootstrap the xorshift64 PRNG in SRANDMEMBER and SPOP so that
 /// element selection is non-deterministic across commands. The seed is not
 /// cryptographically strong but is sufficient for the statistical distribution
@@ -144,9 +135,8 @@ fn xorshift64(state: &mut u64) -> u64 {
 }
 
 /// Parse a `RedisString` as a base-10 `i64` using Redis' strict rules.
-///
 /// Rejects leading or trailing whitespace, embedded NUL bytes, and any
-/// non-ASCII-digit payload. Returns `Err(RedisError::not_integer())` on
+/// non-ASCII-digit payload. Returns `Err(RedisError::not_integer` on
 /// any failure to match real Redis' error reply.
 fn parse_strict_i64(bytes: &[u8]) -> Result<i64, RedisError> {
     if bytes.is_empty() {
@@ -161,7 +151,6 @@ fn parse_strict_i64(bytes: &[u8]) -> Result<i64, RedisError> {
 
 /// Borrow the inner `HashSet` of a set-encoded `RedisObject`, raising
 /// `WRONGTYPE` if `obj` is any other kind.
-///
 /// Returns `Ok(None)` if the key is absent so callers can preserve
 /// existence semantics without nesting `match` on the lookup result.
 fn as_set_ref(obj: Option<&RedisObject>) -> Result<Option<&HashSet<RedisString>>, RedisError> {
@@ -189,10 +178,9 @@ fn as_set_mut(
 
 /// Snapshot a set's members into an owned `HashSet`, returning `None`
 /// when the key is absent and `Err(WRONGTYPE)` when the key is not a set.
-///
 /// Used by the read-only multi-key set algebra commands (`SINTER`,
 /// `SUNION`, `SDIFF`) and their `*STORE` variants to side-step lifetime
-/// issues stemming from borrowing the same database mutably during the
+/// issues stemming from borrowing the same database mutably during
 /// store phase.
 fn snapshot_set(
     ctx: &CommandContext,
@@ -204,8 +192,7 @@ fn snapshot_set(
     }
 }
 
-/// SADD key member [member ...]
-///
+/// SADD key member [member...]
 /// Returns the number of new members added (duplicates do not count).
 /// Creates the key with the pragmatic Inline encoding when absent.
 pub fn sadd_command(ctx: &mut CommandContext) -> RedisResult<()> {
@@ -263,8 +250,7 @@ pub fn sadd_command(ctx: &mut CommandContext) -> RedisResult<()> {
     ctx.reply_integer(added)
 }
 
-/// SREM key member [member ...]
-///
+/// SREM key member [member...]
 /// Returns the number of members actually removed. Deletes the key when
 /// the resulting set is empty.
 pub fn srem_command(ctx: &mut CommandContext) -> RedisResult<()> {
@@ -307,7 +293,6 @@ pub fn srem_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// SMEMBERS key
-///
 /// Returns every member of the set in unspecified order. Replies with an
 /// empty array if the key is absent.
 pub fn smembers_command(ctx: &mut CommandContext) -> RedisResult<()> {
@@ -327,7 +312,6 @@ pub fn smembers_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// SISMEMBER key member
-///
 /// Returns `:1\r\n` if `member` is in the set, `:0\r\n` otherwise.
 pub fn sismember_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if ctx.arg_count() != 3 {
@@ -342,9 +326,8 @@ pub fn sismember_command(ctx: &mut CommandContext) -> RedisResult<()> {
     ctx.reply_integer(present as i64)
 }
 
-/// SMISMEMBER key member [member ...]
-///
-/// Returns an array of `:0\r\n` / `:1\r\n` flags matching the order of the
+/// SMISMEMBER key member [member...]
+/// Returns an array of `:0\r\n` / `:1\r\n` flags matching the order of
 /// queried members.
 pub fn smismember_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
@@ -368,7 +351,6 @@ pub fn smismember_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// SCARD key
-///
 /// Returns the set cardinality, or `:0\r\n` when the key is absent.
 pub fn scard_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if ctx.arg_count() != 2 {
@@ -383,7 +365,6 @@ pub fn scard_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// SPOP key [count]
-///
 /// Without `count`: replies with a single random member as a bulk string,
 /// or `$-1\r\n` when the key is absent. With `count`: replies with an
 /// array of up to `count` distinct members in unspecified order. Deletes
@@ -469,7 +450,6 @@ pub fn spop_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// SRANDMEMBER key [count]
-///
 /// Without `count`: replies with a single random member as a bulk string,
 /// or `$-1\r\n` when the key is absent. With a positive `count`: replies
 /// with an array of up to `count` distinct members. With a negative
@@ -540,7 +520,6 @@ pub fn srandmember_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// SMOVE source destination member
-///
 /// Atomically moves `member` from `source` to `destination`. Returns
 /// `:1\r\n` on success and `:0\r\n` when `member` is not in `source`.
 /// Raises `WRONGTYPE` if either key holds a non-set value. Deletes
@@ -696,7 +675,7 @@ fn store_set(ctx: &mut CommandContext, dst: RedisString, members: HashSet<RedisS
     len
 }
 
-/// SINTER key [key ...]
+/// SINTER key [key...]
 pub fn sinter_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
     if argc < 2 {
@@ -707,7 +686,7 @@ pub fn sinter_command(ctx: &mut CommandContext) -> RedisResult<()> {
     reply_member_array(ctx, result)
 }
 
-/// SINTERSTORE destination key [key ...]
+/// SINTERSTORE destination key [key...]
 pub fn sinterstore_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
     if argc < 3 {
@@ -721,8 +700,7 @@ pub fn sinterstore_command(ctx: &mut CommandContext) -> RedisResult<()> {
     ctx.reply_integer(stored)
 }
 
-/// SINTERCARD numkeys key [key ...] [LIMIT limit]
-///
+/// SINTERCARD numkeys key [key...] [LIMIT limit]
 /// Returns the cardinality of the intersection of the supplied sets,
 /// optionally capped at `limit`. A `limit` of `0` means "no cap".
 pub fn sintercard_command(ctx: &mut CommandContext) -> RedisResult<()> {
@@ -769,7 +747,7 @@ pub fn sintercard_command(ctx: &mut CommandContext) -> RedisResult<()> {
     ctx.reply_integer(card)
 }
 
-/// SUNION key [key ...]
+/// SUNION key [key...]
 pub fn sunion_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
     if argc < 2 {
@@ -780,7 +758,7 @@ pub fn sunion_command(ctx: &mut CommandContext) -> RedisResult<()> {
     reply_member_array(ctx, result)
 }
 
-/// SUNIONSTORE destination key [key ...]
+/// SUNIONSTORE destination key [key...]
 pub fn sunionstore_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
     if argc < 3 {
@@ -794,7 +772,7 @@ pub fn sunionstore_command(ctx: &mut CommandContext) -> RedisResult<()> {
     ctx.reply_integer(stored)
 }
 
-/// SDIFF key [key ...]
+/// SDIFF key [key...]
 pub fn sdiff_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
     if argc < 2 {
@@ -805,7 +783,7 @@ pub fn sdiff_command(ctx: &mut CommandContext) -> RedisResult<()> {
     reply_member_array(ctx, result)
 }
 
-/// SDIFFSTORE destination key [key ...]
+/// SDIFFSTORE destination key [key...]
 pub fn sdiffstore_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
     if argc < 3 {
@@ -820,10 +798,8 @@ pub fn sdiffstore_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// SSCAN key cursor [MATCH pattern] [COUNT count]
-///
 /// Snapshot iteration over the members of a set. Returns a two-element reply
 /// `[next_cursor, members]`, matching real Redis's wire shape.
-///
 /// PORT NOTE: until the real kvstore/reverse-binary cursor primitive lands,
 /// SSCAN replies with every currently matching member in one call and cursor
 /// `0`. Redis/Valkey only treats COUNT as a work hint, so returning the full
@@ -905,7 +881,7 @@ fn parse_u64_cursor(bytes: &[u8]) -> Result<u64, RedisError> {
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        src/t_set.c
+//   source:        Valkey
 //   target_crate:  redis-commands
 //   confidence:    high
 //   todos:         3

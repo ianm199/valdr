@@ -1,10 +1,8 @@
 //! `StreamId` + inline stream storage.
-//!
 //! A stream ID is a 128-bit composite: the upper 64 bits are a
 //! millisecond unix timestamp, the lower 64 bits a per-ms sequence
-//! counter. IDs are totally ordered and printed as `<ms>-<seq>` on the
+//! counter. IDs are totally ordered and printed as `<ms>-<seq>` on
 //! wire.
-//!
 //! The pragmatic `InlineStream` storage mirrors
 //! the LIST/HASH/SET/ZSET inline encodings: entries kept in a sorted
 //! `Vec<StreamEntry>` for binary-searchable range queries. A later phase
@@ -14,7 +12,6 @@ use redis_types::RedisString;
 use std::collections::HashMap;
 
 /// 128-bit composite stream identifier `(ms, seq)`.
-///
 /// Ordering is lexicographic on `(ms, seq)` and the wire format is
 /// `<ms>-<seq>`. `parse` accepts `<ms>` (seq defaults), `<ms>-<seq>`,
 /// `-` (alias for the minimum sentinel used by XRANGE), and `+` (alias
@@ -36,18 +33,18 @@ impl StreamId {
         Self { ms, seq }
     }
 
-    /// Format as `<ms>-<seq>` into a freshly allocated `String`.
+ /// Format as `<ms>-<seq>` into a freshly allocated `String`.
     pub fn to_display_string(&self) -> String {
         format!("{}-{}", self.ms, self.seq)
     }
 
-    /// Return the bytes of `<ms>-<seq>` for direct use in RESP bulk replies.
+ /// Return the bytes of `<ms>-<seq>` for direct use in RESP bulk replies.
     pub fn to_display_bytes(&self) -> Vec<u8> {
         self.to_display_string().into_bytes()
     }
 
-    /// Increment by one with wrap-around to the next `(ms, 0)` slot.
-    /// Returns `None` if the id is already `MAX`.
+ /// Increment by one with wrap-around to the next `(ms, 0)` slot.
+ /// Returns `None` if the id is already `MAX`.
     pub fn checked_succ(&self) -> Option<StreamId> {
         if self.seq == u64::MAX {
             if self.ms == u64::MAX {
@@ -65,8 +62,8 @@ impl StreamId {
         }
     }
 
-    /// Decrement by one with wrap-around to the previous `(ms-1, MAX)` slot.
-    /// Returns `None` if the id is already `ZERO`.
+ /// Decrement by one with wrap-around to the previous `(ms-1, MAX)` slot.
+ /// Returns `None` if the id is already `ZERO`.
     pub fn checked_pred(&self) -> Option<StreamId> {
         if self.seq == 0 {
             if self.ms == 0 {
@@ -88,15 +85,14 @@ impl StreamId {
 /// Errors returned by `StreamId::parse`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamIdParseError {
-    /// Input was empty or contained non-ASCII-digit characters in the
-    /// `<ms>` or `<seq>` slots.
+ /// Input was empty or contained non-ASCII-digit characters in
+ /// `<ms>` or `<seq>` slots.
     Malformed,
 }
 
 /// Parse an ID literal `<ms>[-<seq>]` where missing seq is treated as
-/// the `default_seq` value (typically 0 for start-of-range and
+/// the `default_seq` value (typically 0 for start-of-range
 /// `u64::MAX` for end-of-range).
-///
 /// This is the building block; the higher-level XRANGE parser handles
 /// the `-` / `+` / `(` prefixes on top.
 pub fn parse_stream_id(input: &[u8], default_seq: u64) -> Result<StreamId, StreamIdParseError> {
@@ -141,7 +137,6 @@ pub struct StreamEntry {
 }
 
 /// One entry in a Pending Entry List (PEL).
-///
 /// Records the entry id, when it was last delivered (unix ms) and how
 /// many times it has been delivered. Group-level and per-consumer PELs
 /// hold separate `PelEntry` copies that are kept in lock-step.
@@ -153,7 +148,6 @@ pub struct PelEntry {
 }
 
 /// One consumer inside a consumer group.
-///
 /// `pel` is sorted by `entry_id` ascending. `seen_time_ms` updates on any
 /// XREADGROUP/XCLAIM touch (even with no entries delivered); `active_time_ms`
 /// only updates when at least one entry was delivered or claimed.
@@ -166,9 +160,8 @@ pub struct Consumer {
 }
 
 /// One consumer group.
-///
 /// `pel` is the group-wide PEL: it is the union of the per-consumer PELs
-/// and is also sorted by `entry_id`. Helpers on `InlineStream` keep the
+/// and is also sorted by `entry_id`. Helpers on `InlineStream` keep
 /// two views consistent so callers can scan either side cheaply.
 /// Sentinel for a consumer group whose logical read counter is unknown, e.g.
 /// a group created behind existing entries without ENTRIESREAD, or one whose
@@ -185,13 +178,11 @@ pub struct ConsumerGroup {
 }
 
 /// Inline stream storage.
-///
 /// `entries` is kept sorted by `id` ascending and is therefore
 /// binary-searchable. `last_id` is the largest id ever inserted; this
 /// is what auto-id generation (`*`) compares against and is preserved
 /// across delete/trim operations to match real Redis semantics.
-///
-/// Approximate trim behavior is implemented above this storage layer by the
+/// Approximate trim behavior is implemented above this storage layer by
 /// command crate. The inline store deliberately exposes only ordered entries
 /// plus stream counters; it does not pretend to model upstream radix-tree
 /// listpack node boundaries.
@@ -217,25 +208,25 @@ impl InlineStream {
         self.entries.is_empty()
     }
 
-    /// Index of the first entry with `id >= target`.
+ /// Index of the first entry with `id >= target`.
     pub fn lower_bound(&self, target: &StreamId) -> usize {
         self.entries.partition_point(|e| e.id < *target)
     }
 
-    /// Index of the first entry with `id > target`.
+ /// Index of the first entry with `id > target`.
     pub fn upper_bound(&self, target: &StreamId) -> usize {
         self.entries.partition_point(|e| e.id <= *target)
     }
 
-    /// Append `entry` whose id must be strictly greater than `last_id`.
-    /// Updates `last_id` and `entries_added` on success.
+ /// Append `entry` whose id must be strictly greater than `last_id`.
+ /// Updates `last_id` and `entries_added` on success.
     pub fn append(&mut self, entry: StreamEntry) {
         self.last_id = entry.id;
         self.entries_added += 1;
         self.entries.push(entry);
     }
 
-    /// Delete the entry with id `target`. Returns `true` if removed.
+ /// Delete the entry with id `target`. Returns `true` if removed.
     pub fn delete(&mut self, target: &StreamId) -> bool {
         let idx = self.lower_bound(target);
         if idx < self.entries.len() && self.entries[idx].id == *target {
@@ -248,16 +239,15 @@ impl InlineStream {
         false
     }
 
-    /// ID of the first surviving entry, or `0-0` for an empty stream.
-    /// Mirrors `stream->first_id` after `streamGetEdgeID(s, 1, 1, ...)`.
+ /// ID of the first surviving entry, or `0-0` for an empty stream.
+ /// Mirrors `stream->first_id` after `streamGetEdgeID(s, 1, 1,...)`.
     pub fn first_id(&self) -> StreamId {
         self.entries.first().map(|e| e.id).unwrap_or(StreamId::ZERO)
     }
 
-    /// Snapshot the stream-level scalars consumer-group lag math depends on.
-    ///
-    /// Taken before mutating a group so the read counter can be advanced in
-    /// place without aliasing the stream (the snapshot is `Copy`).
+ /// Snapshot the stream-level scalars consumer-group lag math depends on.
+ /// Taken before mutating a group so the read counter can be advanced
+ /// place without aliasing the stream (the snapshot is `Copy`).
     pub fn lag_view(&self) -> StreamLagView {
         StreamLagView {
             entries_added: self.entries_added,
@@ -270,9 +260,9 @@ impl InlineStream {
 }
 
 /// A `Copy` snapshot of the stream-level scalars used to compute a consumer
-/// group's `entries-read` and `lag`. Mirrors the inputs of
-/// `streamEstimateDistanceFromFirstEverEntry`, `streamRangeHasTombstones`, and
-/// `streamReplyWithCGLag` (t_stream.c).
+/// group's `entries-read` and `lag`. Mirrors the inputs
+/// `streamEstimateDistanceFromFirstEverEntry`, `streamRangeHasTombstones`,
+/// `streamReplyWithCGLag`.
 #[derive(Clone, Copy, Debug)]
 pub struct StreamLagView {
     pub entries_added: u64,
@@ -283,8 +273,8 @@ pub struct StreamLagView {
 }
 
 impl StreamLagView {
-    /// The logical read counter of `id`, or `SCG_INVALID_ENTRIES_READ` when it
-    /// cannot be determined.
+ /// The logical read counter of `id`, or `SCG_INVALID_ENTRIES_READ` when it
+ /// cannot be determined.
     pub fn estimate_entries_read(&self, id: StreamId) -> i64 {
         if self.entries_added == 0 {
             return 0;
@@ -318,7 +308,7 @@ impl StreamLagView {
         SCG_INVALID_ENTRIES_READ
     }
 
-    /// `end == None` means the open-ended upper bound (u64::MAX).
+ /// `end == None` means the open-ended upper bound (u64::MAX).
     pub fn range_has_tombstones(&self, start: StreamId, end: Option<StreamId>) -> bool {
         if self.length == 0 || self.max_deleted_id == StreamId::ZERO {
             return false;
@@ -327,7 +317,7 @@ impl StreamLagView {
         start <= self.max_deleted_id && self.max_deleted_id <= end_id
     }
 
-    /// The group's lag, or `None` when it cannot be determined (reported to clients as null).
+ /// The group's lag, or `None` when it cannot be determined (reported to clients as null).
     pub fn group_lag(&self, group_entries_read: i64, group_last_id: StreamId) -> Option<i64> {
         if self.entries_added == 0 {
             return Some(0);
@@ -344,10 +334,10 @@ impl StreamLagView {
         None
     }
 
-    /// Advance a group's read counter over a run of newly delivered entry IDs,
-    /// returning the updated `(entries_read, last_delivered_id)`. For each ID
-    /// past the group's last-delivered, increment the counter when it is valid
-    /// and unfragmented, otherwise re-estimate it.
+ /// Advance a group's read counter over a run of newly delivered entry IDs,
+ /// returning the updated `(entries_read, last_delivered_id)`. For each ID
+ /// past the group's last-delivered, increment the counter when it is valid
+ /// and unfragmented, otherwise re-estimate it.
     pub fn advance_read_counter(
         &self,
         entries_read: i64,
@@ -383,12 +373,12 @@ impl Consumer {
         }
     }
 
-    /// Index of the first PEL entry with `entry_id >= target`.
+ /// Index of the first PEL entry with `entry_id >= target`.
     pub fn pel_lower_bound(&self, target: &StreamId) -> usize {
         self.pel.partition_point(|e| e.entry_id < *target)
     }
 
-    /// Find a PEL entry by id; returns the slot index if present.
+ /// Find a PEL entry by id; returns the slot index if present.
     pub fn pel_find(&self, target: &StreamId) -> Option<usize> {
         let idx = self.pel_lower_bound(target);
         if idx < self.pel.len() && self.pel[idx].entry_id == *target {
@@ -410,12 +400,12 @@ impl ConsumerGroup {
         }
     }
 
-    /// Index of the first PEL entry with `entry_id >= target`.
+ /// Index of the first PEL entry with `entry_id >= target`.
     pub fn pel_lower_bound(&self, target: &StreamId) -> usize {
         self.pel.partition_point(|e| e.entry_id < *target)
     }
 
-    /// Find a PEL entry by id; returns the slot index if present.
+ /// Find a PEL entry by id; returns the slot index if present.
     pub fn pel_find(&self, target: &StreamId) -> Option<usize> {
         let idx = self.pel_lower_bound(target);
         if idx < self.pel.len() && self.pel[idx].entry_id == *target {
@@ -425,8 +415,8 @@ impl ConsumerGroup {
         }
     }
 
-    /// Insert or update a group PEL entry for `entry_id`, keeping the
-    /// sorted order. Used by `pel_add` and `pel_claim`.
+ /// Insert or update a group PEL entry for `entry_id`, keeping
+ /// sorted order. Used by `pel_add` and `pel_claim`.
     pub fn pel_upsert(&mut self, entry: PelEntry) {
         let idx = self.pel_lower_bound(&entry.entry_id);
         if idx < self.pel.len() && self.pel[idx].entry_id == entry.entry_id {
@@ -436,7 +426,7 @@ impl ConsumerGroup {
         }
     }
 
-    /// Remove a group PEL entry by id. Returns the removed entry.
+ /// Remove a group PEL entry by id. Returns the removed entry.
     pub fn pel_remove(&mut self, target: &StreamId) -> Option<PelEntry> {
         let idx = self.pel_lower_bound(target);
         if idx < self.pel.len() && self.pel[idx].entry_id == *target {
@@ -449,7 +439,7 @@ impl ConsumerGroup {
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        reference/valkey/src/stream.h + t_stream.c
+//   source:        Valkey
 //   target_crate:  redis-ds
 //   confidence:    pragmatic Phase-B (inline encoding)
 //   todos:         0

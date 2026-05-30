@@ -1,22 +1,19 @@
 //! Minimal ziplist binary decoder — the pre-listpack compact encoding used by
 //! `RDB_TYPE_{HASH,ZSET,LIST}_ZIPLIST` and the nodes of `RDB_TYPE_LIST_QUICKLIST`.
-//!
-//! Wire layout (ziplist.c):
-//!   - `[zlbytes: u32-le]` total blob length including header and the end byte
-//!   - `[zltail: u32-le]` offset of the last entry
-//!   - `[zllen: u16-le]` entry count (0xFFFF means "scan to find")
-//!   - zero or more entries, each:
-//!       - prevlen: 1 byte if `< 0xFE`, else `0xFE` + 4-byte little-endian length
-//!       - encoding byte (+ optional extra length/value bytes)
-//!       - string data for string entries
-//!   - `0xFF` end-of-ziplist marker
-//!
+//! Wire layout:
+//! - `[zlbytes: u32-le]` total blob length including header and the end byte
+//! - `[zltail: u32-le]` offset of the last entry
+//! - `[zllen: u16-le]` entry count (0xFFFF means "scan to find")
+//! - zero or more entries, each:
+//! - prevlen: 1 byte if `< 0xFE`, else `0xFE` + 4-byte little-endian length
+//! - encoding byte (+ optional extra length/value bytes)
+//! - string data for string entries
+//! - `0xFF` end-of-ziplist marker
 //! Encoding byte rules:
-//!   - top 2 bits != 0b11 → string: `00` 6-bit len, `01` 14-bit len, `10` (0x80)
-//!     32-bit big-endian len
-//!   - `0xC0` int16-le, `0xD0` int32-le, `0xE0` int64-le, `0xF0` int24-le,
-//!     `0xFE` int8, `0xF1..=0xFD` 4-bit immediate (value = low nibble - 1)
-//!
+//! - top 2 bits != 0b11 → string: `00` 6-bit len, `01` 14-bit len, `10` (0x80)
+//! 32-bit big-endian len
+//! - `0xC0` int16-le, `0xD0` int32-le, `0xE0` int64-le, `0xF0` int24-le,
+//! `0xFE` int8, `0xF1..=0xFD` 4-bit immediate (value = low nibble - 1)
 //! Integers are returned as decimal ASCII strings, matching `decode_listpack`.
 
 use std::io;
@@ -166,7 +163,7 @@ mod tests {
     use super::*;
 
     fn build_ziplist(entries: &[&[u8]]) -> Vec<u8> {
-        // Build a minimal ziplist with 6-bit string entries and 1-byte prevlens.
+ // Build a minimal ziplist with 6-bit string entries and 1-byte prevlens.
         let mut body: Vec<u8> = Vec::new();
         let mut prevlen = 0u8;
         for e in entries {

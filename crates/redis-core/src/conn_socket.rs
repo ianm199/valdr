@@ -1,10 +1,8 @@
 //! Plain-TCP connection-type backend.
-//!
-//! Structural port of `socket.c`'s `CT_Socket` vtable to `ConnectionTypeTrait`.
+//! Structural port of 's `CT_Socket` vtable to `ConnectionTypeTrait`.
 //! I/O goes through the connection's owned stream (`Connection::io`, a `dyn ConnIo`)
 //! instead of a raw `fd` + libc `read`/`write`. Event-loop registration becomes
 //! interest derived from handler presence, which the owner loop reads to drive `mio`.
-//!
 //! Out of scope here (deferred): outbound `connect`/`blocking_connect`, `listen`/`close_listener`,
 //! and the `sync_*` blocking helpers (RDB/repl transfer).
 
@@ -18,7 +16,6 @@ use crate::connection::{
 };
 
 /// The plain-TCP backend. Stateless: per-connection state lives on `Connection`.
-///
 #[derive(Debug, Default)]
 pub struct SocketConnectionType;
 
@@ -29,7 +26,6 @@ impl SocketConnectionType {
 }
 
 /// Should a transport error transition a CONNECTED connection to ERROR?
-///
 /// `WouldBlock` (EAGAIN) and `Interrupted` (EINTR) are transient — never fatal.
 fn is_transient(kind: std::io::ErrorKind) -> bool {
     matches!(
@@ -47,7 +43,7 @@ impl ConnectionTypeTrait for SocketConnectionType {
         Ok(())
     }
 
-    /// returned as `Io(WouldBlock/Interrupted)` without changing state.
+ /// returned as `Io(WouldBlock/Interrupted)` without changing state.
     fn read(&self, conn: &mut Connection, buf: &mut [u8]) -> Result<usize, RedisError> {
         let io = conn
             .io
@@ -103,7 +99,7 @@ impl ConnectionTypeTrait for SocketConnectionType {
         }
     }
 
-    /// accept handler.
+ /// accept handler.
     fn accept(
         &self,
         conn: &mut Connection,
@@ -119,7 +115,7 @@ impl ConnectionTypeTrait for SocketConnectionType {
         Ok(())
     }
 
-    /// step is the owner loop's job — it derives interest from handler presence.
+ /// step is the owner loop's job — it derives interest from handler presence.
     fn set_read_handler(
         &self,
         conn: &mut Connection,
@@ -129,7 +125,7 @@ impl ConnectionTypeTrait for SocketConnectionType {
         Ok(())
     }
 
-    /// sets/clears the write barrier flag.
+ /// sets/clears the write barrier flag.
     fn set_write_handler(
         &self,
         conn: &mut Connection,
@@ -163,13 +159,13 @@ impl ConnectionTypeTrait for SocketConnectionType {
         conn
     }
 
-    /// drop the owned stream and mark closed.
+ /// drop the owned stream and mark closed.
     fn close(&self, conn: &mut Connection) {
         conn.io = crate::connection::ConnIoSlot::None;
         conn.state = ConnectionState::Closed;
     }
 
-    /// owned stream is not separable here; treat as close for now.
+ /// owned stream is not separable here; treat as close for now.
     fn shutdown(&self, conn: &mut Connection) {
         self.close(conn);
     }
@@ -249,12 +245,11 @@ impl ConnectionTypeTrait for SocketConnectionType {
 /// Port of `connSocketEventHandler` — the `ae_handler`. Given a readiness
 /// notification (the owner loop translates a `mio` event into `readable` /
 /// `writable`), fire the connect/read/write handlers in the right order.
-///
 /// Mirrors the upstream ordering: read before write normally, inverted under
 /// `CONN_FLAG_WRITE_BARRIER`.
 pub fn socket_event_handler(conn: &mut Connection, readable: bool, writable: bool) {
-    // Outbound connect completion. We only do inbound today, but the shape is
-    // faithful so the path exists when `connect` lands.
+ // Outbound connect completion. We only do inbound today, but the shape is
+ // faithful so the path exists when `connect` lands.
     if conn.state == ConnectionState::Connecting && writable {
         if let Some(handler) = conn.conn_handler.take() {
             conn.state = ConnectionState::Connected;
@@ -285,14 +280,13 @@ pub fn socket_event_handler(conn: &mut Connection, readable: bool, writable: boo
 }
 
 /// Register the socket backend in the global connection-type registry.
-///
 pub fn register_socket_connection_type() -> Result<(), RedisError> {
     crate::connection::conn_type_register(Box::new(SocketConnectionType::new()))
 }
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        reference/valkey/src/socket.c (CT_Socket vtable)
+//   source:        Valkey
 //   target_crate:  redis-core
 //   confidence:    high (I/O methods); stubs for outbound/listen/sync (deferred)
 //   todos:         outbound connect, listen/close_listener, sync_* (Phase 2+)

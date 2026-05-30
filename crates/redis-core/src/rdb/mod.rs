@@ -1,12 +1,10 @@
 //! RDB persistence framework — Round 18 scaffold.
-//!
 //! Submodules:
-//!   - `crc`    — CRC-64 (Jones polynomial) checksum
-//!   - `varint` — RDB variable-length integer encoding/decoding
-//!   - `header` — magic header, AUX fields, opcode constants
-//!   - `save`   — `save_rdb` writes a complete RDB file
-//!   - `load`   — `load_into` reads an RDB file into a `RedisDb`
-//!
+//! - `crc` — CRC-64 (Jones polynomial) checksum
+//! - `varint` — RDB variable-length integer encoding/decoding
+//! - `header` — magic header, AUX fields, opcode constants
+//! - `save` — `save_rdb` writes a complete RDB file
+//! - `load` — `load_into` reads an RDB file into a `RedisDb`
 //! Re-exported entry points: `save_rdb`, `save_rdb_databases`, `load_into`,
 //! `load_into_dbs`.
 
@@ -42,11 +40,10 @@ pub fn rdb_path(dir: &str, filename: &str) -> PathBuf {
 
 /// Upper bound on how many elements an untrusted RDB/RESTORE length prefix may
 /// pre-allocate.
-///
 /// A malformed or hostile payload (a crafted `RESTORE`, or a corrupt RDB on
 /// disk) can declare an enormous element count in a length field. Passing that
 /// count straight to `with_capacity` makes the loader attempt a multi-gigabyte
-/// allocation and abort the process before the element-read loop reaches the
+/// allocation and abort the process before the element-read loop reaches
 /// (absent) data. Clamping the pre-allocation removes the abort: collections
 /// still grow naturally past this bound for genuinely large, well-formed
 /// payloads, and a short hostile payload fails cleanly on the next element read.

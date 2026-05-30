@@ -1,16 +1,14 @@
 //! Global LRU clock — coarse seconds-since-startup counter used to score
 //! `RedisObject.lru` for the `allkeys-lru` eviction policy.
-//!
-//! Approximation vs upstream: real Valkey ticks `server.lruclock` at
+//! Approximation vs upstream: real Valkey ticks `server.lruclock`
 //! `server.hz` from `serverCron` and stores it in the 24-bit `robj.lru`
-//! field. This port ticks once per wall-clock second from
+//! field. This port ticks once per wall-clock second
 //! [`spawn_lru_clock_thread`] and exposes the value through
 //! [`current_lru_clock`]. Wraparound handling is intentionally omitted —
 //! a `u32` ticking once per second wraps after ~136 years.
-//!
-//! Round 16b introduces this module so the eviction sampler in
+//! Round 16b introduces this module so the eviction sampler
 //! `eviction.rs` has a monotonically-increasing per-object age signal
-//! without having to take a `SystemTime::now()` per touch.
+//! without having to take a `SystemTime::now` per touch.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -27,7 +25,6 @@ pub fn lru_clock_handle() -> &'static Arc<AtomicU32> {
 }
 
 /// Read the current LRU clock value.
-///
 /// Returns `0` before [`spawn_lru_clock_thread`] has run a single tick;
 /// callers who use this for ordering should treat the value as opaque
 /// other than "larger means more recent".
@@ -45,7 +42,6 @@ pub fn tick_lru_clock() -> LruClock {
 
 /// Spawn a 1Hz background thread that increments the LRU clock once per
 /// second. Returns the join handle so the caller can store it for shutdown.
-///
 /// The thread runs until the process exits.
 pub fn spawn_lru_clock_thread() -> thread::JoinHandle<()> {
     let clock = Arc::clone(lru_clock_handle());

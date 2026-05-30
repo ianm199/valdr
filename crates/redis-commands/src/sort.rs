@@ -1,17 +1,14 @@
 //! SORT / SORT_RO command implementations.
-//!
 //! Implements the SORT and SORT_RO commands, which are the most complex
-//! commands in Valkey.  Supports BY-pattern weighted sorts, GET-pattern
+//! commands in Valkey. Supports BY-pattern weighted sorts, GET-pattern
 //! value retrieval, LIMIT offset/count, ASC/DESC, ALPHA, and STORE.
-//!
 //! Key structural changes:
 //! - The `sortCompare` comparator receives `SortParams` value explicitly
-//!   so there is no global state.
+//! so there is no global state.
 //! - `serverSortObject.u` is a C union; here this is `SortScore`, a plain enum.
 //! - `pqsort` (partial quicksort for LIMIT) is replaced by a full sort
-//!   with a PERF note; a proper partial-sort optimisation can be added later.
+//! with a PERF note; a proper partial-sort optimisation can be added later.
 //! - Ref-count management is eliminated; Rust ownership handles it.
-//!
 //! TODO(architect): ACL check helper
 //! `acl_user_check_cmd_with_unrestricted_key_access(...)` — blocked on ACL
 //! layer (later phase).
@@ -28,7 +25,7 @@ use redis_types::{RedisError, RedisString};
 // Sort operation types
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Corresponds to `SORT_OP_GET` in C (`server.h`).
+/// Corresponds to `SORT_OP_GET` in C.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SortOpType {
     Get,
@@ -36,10 +33,9 @@ pub(crate) enum SortOpType {
 
 /// One GET (or future DEL/INCR/DECR) operation to apply to each sorted
 /// element.
-///
 pub(crate) struct SortOperation {
     pub op_type: SortOpType,
-    /// The pattern string, e.g. `weight_*` or `obj_*->field`.
+ /// The pattern string, e.g. `weight_*` or `obj_*->field`.
     pub pattern: RedisObject,
 }
 
@@ -48,18 +44,16 @@ pub(crate) struct SortOperation {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// The sort score associated with one element.
-///
 pub(crate) enum SortScore {
-    /// Numeric sort: pre-computed float score.
+ /// Numeric sort: pre-computed float score.
     Numeric(f64),
-    /// Alpha sort by-pattern: decoded string object for locale comparison.
+ /// Alpha sort by-pattern: decoded string object for locale comparison.
     Alpha(Option<RedisObject>),
 }
 
 /// One element in the sort vector.
-///
 pub(crate) struct SortObject {
-    /// The element value from the source collection.
+ /// The element value from the source collection.
     pub obj: RedisObject,
     pub score: SortScore,
 }
@@ -69,9 +63,8 @@ pub(crate) struct SortObject {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Carries all parameters needed by the comparison function.
-///
 /// In C these live on the global `server` struct so that the qsort
-/// comparator (which has a fixed signature) can read them.  In Rust we pass
+/// comparator (which has a fixed signature) can read them. In Rust we pass
 /// them explicitly via a closure / reference.
 struct SortParams {
     desc: bool,
@@ -85,7 +78,6 @@ struct SortParams {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Returns `true` when `pattern` is exactly the byte string `#`.
-///
 fn is_return_subst_pattern(pattern: &[u8]) -> bool {
     pattern == b"#"
 }
@@ -95,7 +87,6 @@ fn is_return_subst_pattern(pattern: &[u8]) -> bool {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Allocates a new `SortOperation`.
-///
 fn create_sort_operation(op_type: SortOpType, pattern: RedisObject) -> SortOperation {
     SortOperation { op_type, pattern }
 }
@@ -104,27 +95,23 @@ fn create_sort_operation(op_type: SortOpType, pattern: RedisObject) -> SortOpera
 // Pattern lookup
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Returns the value associated with the key whose name is derived from
+/// Returns the value associated with the key whose name is
 /// `pattern` by substituting `*` with the bytes of `subst`.
-///
 /// Rules (same as C):
 /// 1. If `pattern` is `#`, return `subst` itself (clone).
 /// 2. Locate the first `*` in `pattern`; build the key name as
-///    `prefix + subst + suffix`.
+/// `prefix + subst + suffix`.
 /// 3. If the suffix contains `->field`, dereference that hash field.
 /// 4. Return `None` if no `*`, the key does not exist, or the type is wrong.
-///
-///
 /// TODO(port): The C version returns a `robj *` with refcount incremented by
-/// 1.  In Rust we return `Option<RedisObject>` (owned clone).  Callers that
+/// 1. In Rust we return `Option<RedisObject>` (owned clone). Callers that
 /// previously `decrRefCount`'d the return value should just drop it.
-///
 fn lookup_key_by_pattern(
     ctx: &mut CommandContext,
     pattern: &RedisObject,
     subst: &RedisObject,
 ) -> Result<Option<RedisObject>, RedisError> {
-    // pattern == "#" short-circuit.
+ // pattern == "#" short-circuit.
     let pat_cow = pattern.string_bytes();
     let pat_bytes: &[u8] = pat_cow.as_ref();
 
@@ -132,15 +119,15 @@ fn lookup_key_by_pattern(
         return Ok(Some(subst.clone()));
     }
 
-    // decode `subst` to a raw byte string.
-    // PORT NOTE: `getDecodedObject` in C either returns `subst` with
-    // incremented refcount (for string objects) or a freshly-created decoded
-    // clone.  Here we call `string_bytes` which handles both cases including
-    // Int-encoded values.
+ // decode `subst` to a raw byte string.
+ // PORT NOTE: `getDecodedObject` in C either returns `subst` with
+ // incremented refcount (for string objects) or a freshly-created decoded
+ // clone. Here we call `string_bytes` which handles both cases including
+ // Int-encoded values.
     let sub_cow = subst.string_bytes();
     let sub_bytes: &[u8] = sub_cow.as_ref();
 
-    // find '*' in pattern.
+ // find '*' in pattern.
     let star_pos = match pat_bytes.iter().position(|&b| b == b'*') {
         Some(pos) => pos,
         None => return Ok(None),
@@ -149,7 +136,7 @@ fn lookup_key_by_pattern(
     let prefix = &pat_bytes[..star_pos];
     let after_star = &pat_bytes[star_pos + 1..];
 
-    // detect hash-dereference `->field`.
+ // detect hash-dereference `->field`.
     let (postfix, field_name): (&[u8], Option<&[u8]>) = if let Some(arrow) = find_arrow(after_star)
     {
         let field = &after_star[arrow + 2..];
@@ -162,19 +149,19 @@ fn lookup_key_by_pattern(
         (after_star, None)
     };
 
-    // build substituted key name.
+ // build substituted key name.
     let mut key_bytes: Vec<u8> = Vec::with_capacity(prefix.len() + sub_bytes.len() + postfix.len());
     key_bytes.extend_from_slice(prefix);
     key_bytes.extend_from_slice(sub_bytes);
     key_bytes.extend_from_slice(postfix);
 
-    // lookup key in db.
+ // lookup key in db.
     let obj: Option<RedisObject> = ctx.lookup_key_read_by_bytes(&key_bytes)?;
 
     match (obj, field_name) {
         (None, _) => Ok(None),
 
-        // hash dereference.
+ // hash dereference.
         (Some(o), Some(field)) => {
             if !o.is_hash() {
                 return Ok(None);
@@ -183,7 +170,7 @@ fn lookup_key_by_pattern(
             Ok(val)
         }
 
-        // plain string value.
+ // plain string value.
         (Some(o), None) => {
             if !o.is_string() {
                 return Ok(None);
@@ -203,11 +190,8 @@ fn find_arrow(haystack: &[u8]) -> Option<usize> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Compares two sort-vector entries under `params`.
-///
 /// `server` struct; here the same data is in `params`.
-///
 /// Returns `std::cmp::Ordering`.
-///
 /// TODO(port): `strcoll` (locale-aware string comparison) in C's alpha,
 /// non-store path is replaced by a plain lexicographic byte comparison here.
 /// Locale-aware collation is not available in safe Rust without an OS binding;
@@ -216,7 +200,7 @@ fn sort_compare(a: &SortObject, b: &SortObject, params: &SortParams) -> std::cmp
     use std::cmp::Ordering;
 
     let cmp = if !params.alpha {
-        // numeric comparison.
+ // numeric comparison.
         let sa = match &a.score {
             SortScore::Numeric(f) => *f,
             SortScore::Alpha(_) => 0.0,
@@ -227,11 +211,11 @@ fn sort_compare(a: &SortObject, b: &SortObject, params: &SortParams) -> std::cmp
         };
         match sa.partial_cmp(&sb) {
             Some(ord) if ord != Ordering::Equal => ord,
-            // tie-break lexicographically for determinism.
+ // tie-break lexicographically for determinism.
             _ => compare_string_objects(&a.obj, &b.obj),
         }
     } else if params.by_pattern {
-        // alpha sort by external pattern value.
+ // alpha sort by external pattern value.
         let ca = match &a.score {
             SortScore::Alpha(opt) => opt.as_ref(),
             SortScore::Numeric(_) => None,
@@ -248,14 +232,14 @@ fn sort_compare(a: &SortObject, b: &SortObject, params: &SortParams) -> std::cmp
                 if params.store {
                     compare_string_objects(oa, ob)
                 } else {
-                    // strcoll path.
- // PERF(port): strcoll() — replace with locale binding later.
+ // strcoll path.
+ // PERF(port): strcoll — replace with locale binding later.
                     collate_string_objects(oa, ob)
                 }
             }
         }
     } else {
-        // alpha, no by-pattern.
+ // alpha, no by-pattern.
         if params.store {
             compare_string_objects(&a.obj, &b.obj)
         } else {
@@ -271,14 +255,12 @@ fn sort_compare(a: &SortObject, b: &SortObject, params: &SortParams) -> std::cmp
 }
 
 /// Byte-level lexicographic comparison of two `RedisObject` string values.
-///
-/// compares the raw bytes of the
+/// compares the raw bytes of
 /// objects' string representations.
-///
 /// TODO(port): `compareStringObjects` in C handles integer-encoded objects
-/// by comparing the integer values numerically rather than by string.  This
+/// by comparing the integer values numerically rather than by string. This
 /// implementation compares the byte representations, which gives the same
-/// result for equal-length decimal strings but not in general.  Phase B
+/// result for equal-length decimal strings but not in general. Phase B
 /// should call the real `compare_string_objects` from `redis-core`.
 fn compare_string_objects(a: &RedisObject, b: &RedisObject) -> std::cmp::Ordering {
     let ca = a.string_bytes();
@@ -287,18 +269,15 @@ fn compare_string_objects(a: &RedisObject, b: &RedisObject) -> std::cmp::Orderin
 }
 
 /// Locale-aware collation of two `RedisObject` string values.
-///
 /// calls `strcoll`.
-///
-/// PORT NOTE: Rust has no stdlib locale/collation support.  We fall back to
-/// byte-level comparison.  A proper implementation requires linking against
+/// PORT NOTE: Rust has no stdlib locale/collation support. We fall back
+/// byte-level comparison. A proper implementation requires linking against
 /// the C `strcoll` function or a Rust collation crate, which is an architect
 /// decision.
-///
 /// TODO(architect): decide whether to call `libc::strcoll` here (requires
 /// `unsafe`) or use a Rust collation crate.
 fn collate_string_objects(a: &RedisObject, b: &RedisObject) -> std::cmp::Ordering {
-    // PERF(port): strcoll() — locale-aware collation omitted; using byte cmp.
+ // PERF(port): strcoll — locale-aware collation omitted; using byte cmp.
     compare_string_objects(a, b)
 }
 
@@ -307,14 +286,11 @@ fn collate_string_objects(a: &RedisObject, b: &RedisObject) -> std::cmp::Orderin
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Parses a float score from a `RedisObject`.
-///
 /// Returns `Ok(f64)` on success, `Err` when the value cannot be converted.
-///
 /// inline strtod and integer-encoding fast path.
-///
 fn parse_score_from_object(obj: &RedisObject) -> Result<f64, ()> {
-    // sdsEncodedObject path. Int-encoded strings are
-    // converted to ASCII via `string_bytes` to keep the parser uniform.
+ // sdsEncodedObject path. Int-encoded strings are
+ // converted to ASCII via `string_bytes` to keep the parser uniform.
     if !obj.is_string() {
         return Err(());
     }
@@ -467,23 +443,18 @@ fn object_to_list_value(obj: &RedisObject) -> RedisString {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Generic SORT implementation shared by `sort_command` and `sort_ro_command`.
-///
 /// When `readonly` is `true`, the STORE option is rejected (SORT_RO).
-///
-///
 /// TODO(port): This translation follows the C logic closely but relies on
-/// several `CommandContext` and `RedisDb` methods that do not yet exist in
+/// several `CommandContext` and `RedisDb` methods that do not yet exist
 /// Phase A.  Every such call site is marked TODO(architect).
-///
 /// TODO(port): Cluster-mode hash-slot validation for BY and GET patterns
-/// requires `server.cluster_enabled` and
+/// requires `server.cluster_enabled`
 /// `patternHashSlot` / `getKeySlot`.  Skipped; mark TODO.
-///
 /// TODO(port): The `pqsort` partial quicksort (C: sort.c:516) is replaced by
-/// a full `sort_unstable_by`.  For large result sets with a small LIMIT this
-/// is O(N log N) instead of O(N + K log K).  Flag for PERF review.
+/// a full `sort_unstable_by`. For large result sets with a small LIMIT this
+/// is O(N log N) instead of O(N + K log K). Flag for PERF review.
 pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<(), RedisError> {
-    // ── Parse options ────────────────────────────────────────────────────────
+ // ── Parse options ────────────────────────────────────────────────────────
     let argc = ctx.argc();
 
     let mut desc = false;
@@ -519,7 +490,7 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
         } else if arg.eq_ignore_ascii_case(b"by") && leftargs >= 1 {
             let by_arg = ctx.arg_bytes(j + 1)?;
             if !by_arg.contains(&b'*') {
-                // Constant BY pattern — skip sorting entirely.
+ // Constant BY pattern — skip sorting entirely.
                 dontsort = true;
             } else {
                 // TODO(port): cluster-mode slot check omitted.
@@ -544,13 +515,13 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
             getop += 1;
             j += 1;
         } else {
-            // shared.syntaxerr.
+ // shared.syntaxerr.
             return Err(RedisError::syntax(b"syntax error"));
         }
         j += 1;
     }
 
-    // ── Lookup the key to sort ───────────────────────────────────────────────
+ // ── Lookup the key to sort ───────────────────────────────────────────────
 
     let key_bytes = ctx.arg_bytes(1)?.to_owned();
     let sortval_opt: Option<RedisObject> = ctx.lookup_key_read_by_bytes(&key_bytes)?;
@@ -562,23 +533,23 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
         _ => {}
     }
 
-    // if key is absent, treat as empty list.
-    // PORT NOTE: We represent an absent key as an empty Vec<RedisObject>
-    // for the list path; there is no "empty quicklist object" in Rust.
+ // if key is absent, treat as empty list.
+ // PORT NOTE: We represent an absent key as an empty Vec<RedisObject>
+ // for the list path; there is no "empty quicklist object" in Rust.
 
-    // ── Compute vector length ────────────────────────────────────────────────
+ // ── Compute vector length ────────────────────────────────────────────────
     let vectorlen_base: i64 = match &sortval_opt {
         None => 0,
         Some(o) if o.is_list() || o.is_set() || o.is_zset() => o.collection_len() as i64,
         Some(_) => {
             // TODO(architect): handle unknown object type.
-            // serverPanic.
+ // serverPanic.
             // TODO(architect): is panic correct here?
             0
         }
     };
 
-    // ── dontsort override for Set in scripting/store context ─────────────────
+ // ── dontsort override for Set in scripting/store context ─────────────────
     let (mut dontsort, mut alpha, mut sortby) = (dontsort, alpha, sortby);
     if dontsort
         && sortval_opt.as_ref().is_some_and(|o| o.is_set())
@@ -589,7 +560,7 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
         sortby = None;
     }
 
-    // ── LIMIT sanity check ───────────────────────────────────────────────────
+ // ── LIMIT sanity check ───────────────────────────────────────────────────
     let vlen = vectorlen_base;
     let start = (limit_start.max(0)).min(vlen);
     let limit_count = limit_count.max(-1).min(vlen);
@@ -608,7 +579,7 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
         end = vlen - 1;
     }
 
-    // LIMIT optimisation for sorted set / list + dontsort.
+ // LIMIT optimisation for sorted set / list + dontsort.
     let mut vectorlen = vlen;
     if sortval_opt
         .as_ref()
@@ -619,28 +590,27 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
         vectorlen = end - start + 1;
     }
 
-    // ── Build sort vector ────────────────────────────────────────────────────
-    //
+ // ── Build sort vector ────────────────────────────────────────────────────
     // TODO(port): All collection iteration below depends on the runtime
-    // representation of `RedisObject::List`, `Set`, and `ZSet` variants.
-    // These are stubbed with empty iterators until the data-structure crates
- // are wired later+.
+ // representation of `RedisObject::List`, `Set`, and `ZSet` variants.
+ // These are stubbed with empty iterators until the data-structure crates
+ // are wired later.
 
     let mut vector: Vec<SortObject> = Vec::with_capacity(vectorlen as usize);
 
-    // PORT NOTE: collection iteration goes through the `iter_list/iter_set/
-    // iter_zset` shims on `RedisObject`. Today those yield empty iterators for
-    // non-default encodings (IntSet, ListPack, QuickList byte-form).
+ // PORT NOTE: collection iteration goes through the `iter_list/iter_set/
+ // iter_zset` shims on `RedisObject`. Today those yield empty iterators for
+ // non-default encodings (IntSet, ListPack, QuickList byte-form).
     // TODO(port): Phase 4 — proper iter for IntSet / ListPack encodings.
     match &sortval_opt {
         None => {
-            // Absent key — empty vector; nothing to do.
+ // Absent key — empty vector; nothing to do.
         }
 
         Some(o) if o.is_list() && dontsort => {
-            // list + dontsort; iterate in output order.
-            // PORT NOTE: DESC reversal and LIMIT slicing are handled by
-            // choosing the right sub-slice of the list.
+ // list + dontsort; iterate in output order.
+ // PORT NOTE: DESC reversal and LIMIT slicing are handled by
+ // choosing the right sub-slice of the list.
             let mut values: Vec<RedisString> = o.iter_list().cloned().collect();
             if desc {
                 values.reverse();
@@ -657,13 +627,13 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
                     score: SortScore::Numeric(0.0),
                 });
             }
-            // fix start/end after optimisation.
+ // fix start/end after optimisation.
             end -= start;
             start = 0;
         }
 
         Some(o) if o.is_list() => {
-            // plain list iteration.
+ // plain list iteration.
             for rs in o.iter_list() {
                 vector.push(SortObject {
                     obj: RedisObject::from_string(rs.clone()),
@@ -673,7 +643,7 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
         }
 
         Some(o) if o.is_set() => {
-            // set iteration.
+ // set iteration.
             for rs in o.iter_set() {
                 vector.push(SortObject {
                     obj: RedisObject::from_string(rs.clone()),
@@ -683,11 +653,11 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
         }
 
         Some(o) if o.is_zset() && dontsort => {
-            // sorted set + dontsort; respect internal order.
+ // sorted set + dontsort; respect internal order.
             // TODO(port): Skiplist traversal with start/rank offset.
-            // The C path calls `zslGetElementByRank` and walks forward/backward.
-            // We fall back to collecting all elements sorted by score then
-            // applying the direction, flagging for Phase B.
+ // The C path calls `zslGetElementByRank` and walks forward/backward.
+ // We fall back to collecting all elements sorted by score then
+ // applying the direction, flagging for Phase B.
             let mut items: Vec<(f64, RedisObject)> = o
                 .iter_zset()
                 .map(|(member, score)| (score, RedisObject::from_string(member.clone())))
@@ -708,13 +678,13 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
                     score: SortScore::Numeric(0.0),
                 });
             }
-            // fix start/end.
+ // fix start/end.
             end -= start;
             start = 0;
         }
 
         Some(o) if o.is_zset() => {
-            // sorted set without dontsort: iterate ht.
+ // sorted set without dontsort: iterate ht.
             for (member, _score) in o.iter_zset() {
                 vector.push(SortObject {
                     obj: RedisObject::from_string(member.clone()),
@@ -725,26 +695,26 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
 
         Some(_) => {
             // TODO(port): unreachable after the type guard above; left for
-            // completeness.
+ // completeness.
         }
     }
 
-    // PORT NOTE: with iter_* yielding empty for non-default encodings, the
-    // vector may legitimately be shorter than `vectorlen_base`. The downstream
-    // `outputlen` math already tolerates a smaller `vector.len()`, so we relax
-    // the equality assertion to upper-bound it.
+ // PORT NOTE: with iter_* yielding empty for non-default encodings,
+ // vector may legitimately be shorter than `vectorlen_base`. The downstream
+ // `outputlen` math already tolerates a smaller `vector.len`, so we relax
+ // the equality assertion to upper-bound it.
     debug_assert!(vector.len() as i64 <= vectorlen);
 
-    // ── Load scores ──────────────────────────────────────────────────────────
+ // ── Load scores ──────────────────────────────────────────────────────────
     let mut int_conversion_error = false;
 
     if !dontsort {
         for entry in vector.iter_mut() {
             let byval: Option<RedisObject> = if let Some(by) = &sortby {
-                // lookup weight key.
+ // lookup weight key.
                 lookup_key_by_pattern(ctx, by, &entry.obj)?
             } else {
-                // use object itself.
+ // use object itself.
                 Some(entry.obj.clone())
             };
 
@@ -755,13 +725,13 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
 
             if alpha {
                 if sortby.is_some() {
-                    // store decoded object for comparison.
-                    // PORT NOTE: `getDecodedObject` — clone is equivalent for
-                    // string objects; integer-encoded objects need decoding.
+ // store decoded object for comparison.
+ // PORT NOTE: `getDecodedObject` — clone is equivalent for
+ // string objects; integer-encoded objects need decoding.
                     entry.score = SortScore::Alpha(Some(byval));
                 }
             } else {
-                // numeric conversion.
+ // numeric conversion.
                 match parse_score_from_object(&byval) {
                     Ok(f) => {
                         entry.score = SortScore::Numeric(f);
@@ -773,7 +743,7 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
             }
         }
 
-        // sort the vector.
+ // sort the vector.
         let params = SortParams {
             desc,
             alpha,
@@ -782,13 +752,13 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
         };
 
         if vectorlen > 0 {
-            // PERF(port): pqsort (partial quicksort for LIMIT).
-            // Using full sort; replace with partial sort later for perf.
+ // PERF(port): pqsort (partial quicksort for LIMIT).
+ // Using full sort; replace with partial sort later for perf.
             vector.sort_unstable_by(|a, b| sort_compare(a, b, &params));
         }
     }
 
-    // ── Compute output length ────────────────────────────────────────────────
+ // ── Compute output length ────────────────────────────────────────────────
     let range_len = if end >= start {
         (end - start + 1) as usize
     } else {
@@ -800,7 +770,7 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
         range_len
     };
 
-    // ── Send reply or store ──────────────────────────────────────────────────
+ // ── Send reply or store ──────────────────────────────────────────────────
     if int_conversion_error {
         return Err(RedisError::runtime(
             b"ERR One or more scores can't be converted into double",
@@ -808,7 +778,7 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
     }
 
     if storekey.is_none() {
-        // send array reply to client.
+ // send array reply to client.
         ctx.reply_array_header(outputlen as i64)?;
 
         for idx in start..=end {
@@ -824,13 +794,13 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
                         Some(v) => ctx.reply_bulk_object(&v)?,
                     }
                 } else {
-                    // "Always fails".
+ // "Always fails".
                     debug_assert!(false, "only SORT_OP_GET is supported");
                 }
             }
         }
     } else {
-        // STORE path.
+ // STORE path.
         let store_key = storekey.as_ref().expect("storekey present").clone();
 
         let mut result_list: VecDeque<RedisString> = VecDeque::with_capacity(outputlen);
@@ -845,7 +815,7 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
                     if op.op_type == SortOpType::Get {
                         let v = match val {
                             Some(v) => object_to_list_value(&v),
-                            // empty string placeholder.
+ // empty string placeholder.
                             None => RedisString::from_bytes(b""),
                         };
                         result_list.push_back(v);
@@ -868,7 +838,7 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
         ctx.reply_integer(outputlen as i64)?;
     }
 
-    // Cleanup is implicit: `vector`, `operations`, `sortval_opt` are dropped.
+ // Cleanup is implicit: `vector`, `operations`, `sortval_opt` are dropped.
     Ok(())
 }
 
@@ -877,20 +847,18 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// SORT command entry point (read-write).
-///
 pub fn sort_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     sort_command_generic(ctx, false)
 }
 
 /// SORT_RO command entry point (read-only; STORE option is refused).
-///
 pub fn sort_ro_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     sort_command_generic(ctx, true)
 }
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        src/sort.c  (622 lines, 5 functions)
+//   source:        Valkey
 //   target_crate:  redis-commands
 //   confidence:    medium
 //   todos:         19

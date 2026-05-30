@@ -1,24 +1,18 @@
 //! Monotonic clock abstraction for Valkey/Redis.
-//!
-//! C source: `monotonic.c` / `monotonic.h` (198 lines, 8 functions combined)
-//!
 //! Provides a microsecond-resolution, always-increasing clock used throughout
 //! the server for relative timing (latency tracking, expiry, event scheduling).
 //! The concrete implementation is selected once at startup via
 //! [`monotonic_init`]:
-//!
 //! 1. x86_64 + Linux (default): TSC-based via `RDTSC` instruction
 //! 2. aarch64 (default): ARM virtual counter (`CNTVCT_EL0`)
 //! 3. POSIX fallback (all platforms): `clock_gettime(CLOCK_MONOTONIC, …)`
-//!    implemented here via `std::time::Instant`
-//!
+//! implemented here via `std::time::Instant`
 //! Build with feature `no_processor_clock` to force the POSIX path everywhere,
 //! mirroring the C `CFLAGS="-DNO_PROCESSOR_CLOCK"` option.
-//!
-//! PORT NOTE: `monotonic.h` defines inline helpers (`elapsedStart`,
+//! PORT NOTE: defines inline helpers (`elapsedStart`,
 //! `elapsedUs`, `elapsedMs`); they are included here as free functions rather
 //! than in a separate `.rs` file, since header contents merge into the consuming
-//! `.rs` per PORTING.md §1.
+//! `.rs`.
 
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -26,35 +20,29 @@ use std::time::Instant;
 // ── Public types ─────────────────────────────────────────────────────────────
 
 /// A counter in microseconds relative to an arbitrary monotonic reference.
-///
 /// Use only for measuring elapsed time; never compare to wall-clock values.
-///
-/// C: `typedef uint64_t monotime;`  (monotonic.h)
 pub type MonoTime = u64;
 
 /// Identifies which underlying clock source is active.
-///
-/// C: `enum monotonic_clock_type`  (monotonic.h)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MonotonicClockType {
-    /// POSIX `clock_gettime(CLOCK_MONOTONIC, …)`.
+ /// POSIX `clock_gettime(CLOCK_MONOTONIC, …)`.
     Posix,
-    /// Hardware counter: TSC on x86, CNTVCT on ARM.
+ /// Hardware counter: TSC on x86, CNTVCT on ARM.
     HardwareCounter,
 }
 
 // ── Internal clock state ─────────────────────────────────────────────────────
 
 /// All mutable clock globals consolidated into a single `OnceLock`.
-///
 /// C equivalents:
-///   `monotime (*getMonotonicUs)(void)`   — the `get_us` field
-///   `static char monotonic_info_string[32]` — the `info` / `info_len` fields
+/// `monotime (*getMonotonicUs)(void)` — the `get_us` field
+/// `static char monotonic_info_string[32]` — the `info` / `info_len` fields
 struct ClockState {
     kind: MonotonicClockType,
-    /// Hot-path reader: the selected read-clock function.
+ /// Hot-path reader: the selected read-clock function.
     get_us: fn() -> MonoTime,
-    /// NUL-padded info string matching C's fixed `char[32]` buffer.
+ /// NUL-padded info string matching C's fixed `char[32]` buffer.
     info: [u8; 32],
     info_len: usize,
 }
@@ -65,10 +53,9 @@ struct ClockState {
 static CLOCK_STATE: OnceLock<ClockState> = OnceLock::new();
 
 /// Baseline `Instant` for the POSIX implementation.
-///
 /// PORT NOTE: C's POSIX path returns the raw `CLOCK_MONOTONIC` value in µs
-/// (seconds-since-boot on Linux).  Rust `Instant` has no stable API to read
-/// an absolute value, so we fix a process-lifetime origin here.  All
+/// (seconds-since-boot on Linux). Rust `Instant` has no stable API to read
+/// an absolute value, so we fix a process-lifetime origin here. All
 /// *differences* between two `MonoTime` values are bit-identical to the C
 /// behavior; only the absolute base differs.
 static POSIX_BASELINE: OnceLock<Instant> = OnceLock::new();
@@ -76,11 +63,10 @@ static POSIX_BASELINE: OnceLock<Instant> = OnceLock::new();
 // ── x86_64 TSC path ──────────────────────────────────────────────────────────
 
 /// x86_64 + Linux TSC implementation block.
-///
 /// Gated on `#[cfg(...)]` mirroring the C preprocessor guard:
 /// ```c
 /// #if defined(USE_PROCESSOR_CLOCK) && defined(__x86_64__)
-///     && defined(__linux__) && defined(__SIZEOF_INT128__)
+/// && defined(__linux__) && defined(__SIZEOF_INT128__)
 /// ```
 /// PORT NOTE: `__SIZEOF_INT128__` check dropped — Rust `u128` is always
 /// available on supported targets.
@@ -95,60 +81,48 @@ mod x86_tsc {
 
     use super::{ClockState, MonoTime, MonotonicClockType};
 
-    /// Fixed-point multiplier: `(1 << MONO_FPMULT_SHIFT) / ticks_per_us`.
-    ///
-    /// Initialized to `u64::MAX` (sentinel = "not yet calibrated").
-    ///
-    /// C: `static uint64_t mono_ticks_speed = UINT64_MAX;`
+ /// Fixed-point multiplier: `(1 << MONO_FPMULT_SHIFT) / ticks_per_us`.
+ /// Initialized to `u64::MAX` (sentinel = "not yet calibrated").
     pub(super) static MONO_TICKS_SPEED: AtomicU64 = AtomicU64::new(u64::MAX);
 
-    /// Fractional bits in the fixed-point representation.
-    /// C: `#define MONO_FPMULT_SHIFT 24`
+ /// Fractional bits in the fixed-point representation.
     pub(super) const MONO_FPMULT_SHIFT: u32 = 24;
 
-    /// Number of TSC calibration rounds.
-    /// C: `#define TSC_CALIBRATION_ITERATIONS 3`
+ /// Number of TSC calibration rounds.
     pub(super) const TSC_CALIBRATION_ITERATIONS: usize = 3;
 
-    /// Read the processor TSC counter.
-    ///
+ /// Read the processor TSC counter.
     /// TODO(architect): unsafe needed — `core::arch::x86_64::_rdtsc()` must
-    /// be called inside `unsafe { }`.  This placeholder returns 0 until the
-    /// architect approves the unsafe budget and adds the real call.
-    ///
-    /// C: `__rdtsc()` from `<x86intrin.h>`
+ /// be called inside `unsafe { }`. This placeholder returns 0 until
+ /// architect approves the unsafe budget and adds the real call.
     pub(super) fn rdtsc() -> u64 {
         // TODO(port): replace with `unsafe { core::arch::x86_64::_rdtsc() }`
-        // once the architect grants unsafe access for this module.
+ // once the architect grants unsafe access for this module.
         0
     }
 
-    /// TSC-based clock reader.
-    ///
-    /// C: `getMonotonicUs_x86`
-    /// ```c
-    /// return ((__uint128_t)__rdtsc() * mono_ticks_speed) >> MONO_FPMULT_SHIFT;
-    /// ```
-    /// PORT NOTE: Rust `u128` is used for the intermediate product, matching
-    /// the C `__uint128_t` — no overflow possible.
+ /// TSC-based clock reader.
+ /// ```c
+ /// return ((__uint128_t)__rdtsc * mono_ticks_speed) >> MONO_FPMULT_SHIFT;
+ /// ```
+ /// PORT NOTE: Rust `u128` is used for the intermediate product, matching
+ /// the C `__uint128_t` — no overflow possible.
     pub(super) fn get_monotonic_us_x86() -> MonoTime {
         let tsc = rdtsc();
         let speed = MONO_TICKS_SPEED.load(Ordering::Relaxed);
-        // C: (__uint128_t)tsc * speed >> SHIFT — Rust u128 is identical.
+ // Rust u128 is identical.
         ((tsc as u128).wrapping_mul(speed as u128) >> MONO_FPMULT_SHIFT) as MonoTime
     }
 
-    /// Calibrate the TSC and verify `constant_tsc`; returns `ClockState` on
-    /// success or `None` if the CPU is unsuitable.
-    ///
-    /// C: `monotonicInit_x86linux`
+ /// Calibrate the TSC and verify `constant_tsc`; returns `ClockState` on
+ /// success or `None` if the CPU is unsuitable.
     pub(super) fn init() -> Option<ClockState> {
-        // C: t_string.c:61-82 — TSC_CALIBRATION_ITERATIONS calibration rounds.
+ // TSC_CALIBRATION_ITERATIONS calibration rounds.
         for _ in 0..TSC_CALIBRATION_ITERATIONS {
             let wall_start = Instant::now();
             let tsc_start = rdtsc();
 
-            // C: usleep(10000) — 10 ms sample window.
+ // 10 ms sample window.
             std::thread::sleep(std::time::Duration::from_millis(10));
 
             let tsc_end = rdtsc();
@@ -162,8 +136,7 @@ mod x86_tsc {
             let sample_ticks_per_us = tsc_elapsed as f64 / elapsed_us as f64;
             let sample_mult = ((1u64 << MONO_FPMULT_SHIFT) as f64 / sample_ticks_per_us) as u64;
 
-            // C: pick minimum across iterations (mono_ticks_speed is inverse
-            // of ticks_per_us, so smaller mult = higher speed = more accurate).
+ // of ticks_per_us, so smaller mult = higher speed = more accurate).
             let prev = MONO_TICKS_SPEED.load(Ordering::Relaxed);
             if sample_mult < prev {
                 MONO_TICKS_SPEED.store(sample_mult, Ordering::Relaxed);
@@ -176,7 +149,6 @@ mod x86_tsc {
             return None;
         }
 
-        // C: verify constant_tsc flag in /proc/cpuinfo.
         if !check_constant_tsc() {
             eprintln!("monotonic: x86 linux, 'constant_tsc' flag not present");
             return None;
@@ -184,8 +156,7 @@ mod x86_tsc {
 
         let ticks_per_us = (1u64 << MONO_FPMULT_SHIFT) as f64 / speed as f64;
 
-        // C: snprintf(monotonic_info_string, 32, "X86 TSC @ %.2f ticks/us", …)
-        // Using format! to build the string then encoding as bytes.
+ // Using format! to build the string then encoding as bytes.
         let msg = format!("X86 TSC @ {:.2} ticks/us", ticks_per_us);
         let mut info = [0u8; 32];
         let bytes = msg.as_bytes();
@@ -200,13 +171,10 @@ mod x86_tsc {
         })
     }
 
-    /// Scan `/proc/cpuinfo` for the `constant_tsc` CPU flag.
-    ///
-    /// C: POSIX regex `"^flags\\s+:.* constant_tsc"` via `regcomp`/`regexec`.
-    ///
+ /// Scan `/proc/cpuinfo` for the `constant_tsc` CPU flag.
     /// TODO(port): C uses compiled regex; this uses a simple byte-pattern
-    /// search.  Functionally equivalent for well-formed /proc/cpuinfo.
-    /// Consider the `regex` crate in Phase B if edge cases arise.
+ /// search. Functionally equivalent for well-formed /proc/cpuinfo.
+ /// Consider the `regex` crate in Phase B if edge cases arise.
     fn check_constant_tsc() -> bool {
         let Ok(cpuinfo) = std::fs::read("/proc/cpuinfo") else {
             return false;
@@ -223,7 +191,6 @@ mod x86_tsc {
 // ── aarch64 ARM CNT path ─────────────────────────────────────────────────────
 
 /// aarch64 virtual counter implementation block.
-///
 /// Mirrors the C guard:
 /// ```c
 /// #if defined(USE_PROCESSOR_CLOCK) && defined(__aarch64__)
@@ -234,18 +201,14 @@ mod aarch64_cnt {
 
     use super::{ClockState, MonoTime, MonotonicClockType};
 
-    /// Ticks per microsecond derived from `CNTFRQ_EL0`.
-    ///
-    /// C: `static long mono_ticksPerMicrosecond = 0;`
+ /// Ticks per microsecond derived from `CNTFRQ_EL0`.
     pub(super) static MONO_TICKS_PER_US: AtomicI64 = AtomicI64::new(0);
 
-    /// Read the ARM virtual counter register `CNTVCT_EL0`.
-    ///
-    /// C: `__asm__ volatile("mrs %0, cntvct_el0" : "=r"(virtual_timer_value));`
+ /// Read the ARM virtual counter register `CNTVCT_EL0`.
     pub(super) fn cntvct() -> u64 {
         let value: u64;
-        // SAFETY: This reads the architectural virtual counter register. It
-        // does not touch memory, dereference pointers, or alter control flow.
+ // SAFETY: This reads the architectural virtual counter register. It
+ // does not touch memory, dereference pointers, or alter control flow.
         unsafe {
             core::arch::asm!(
                 "mrs {value}, cntvct_el0",
@@ -256,13 +219,11 @@ mod aarch64_cnt {
         value
     }
 
-    /// Read the CNT frequency register `CNTFRQ_EL0`.
-    ///
-    /// C: `__asm__ volatile("mrs %0, cntfrq_el0" : "=r"(virtual_freq_value));`
+ /// Read the CNT frequency register `CNTFRQ_EL0`.
     pub(super) fn cntfrq_hz() -> u32 {
         let value: u64;
-        // SAFETY: This reads the architectural counter-frequency register.
-        // The instruction is side-effect-free with respect to Rust memory.
+ // SAFETY: This reads the architectural counter-frequency register.
+ // The instruction is side-effect-free with respect to Rust memory.
         unsafe {
             core::arch::asm!(
                 "mrs {value}, cntfrq_el0",
@@ -270,16 +231,13 @@ mod aarch64_cnt {
                 options(nomem, nostack)
             );
         }
-        // C: top 32 bits of cntfrq_el0 are reserved; cast to u32.
         value as u32
     }
 
-    /// ARM CNT-based clock reader.
-    ///
-    /// C: `getMonotonicUs_aarch64`
-    /// ```c
-    /// return __cntvct() / mono_ticksPerMicrosecond;
-    /// ```
+ /// ARM CNT-based clock reader.
+ /// ```c
+ /// return __cntvct / mono_ticksPerMicrosecond;
+ /// ```
     pub(super) fn get_monotonic_us_aarch64() -> MonoTime {
         let ticks = cntvct();
         let per_us = MONO_TICKS_PER_US.load(Ordering::Relaxed);
@@ -289,11 +247,8 @@ mod aarch64_cnt {
         ticks / per_us as u64
     }
 
-    /// Initialize the aarch64 hardware counter path.
-    ///
-    /// C: `monotonicInit_aarch64`
+ /// Initialize the aarch64 hardware counter path.
     pub(super) fn init() -> Option<ClockState> {
-        // C: mono_ticksPerMicrosecond = (long)cntfrq_hz() / 1000L / 1000L;
         let ticks_per_us = cntfrq_hz() as i64 / 1_000 / 1_000;
         if ticks_per_us == 0 {
             eprintln!("monotonic: aarch64, unable to determine clock rate");
@@ -301,7 +256,6 @@ mod aarch64_cnt {
         }
         MONO_TICKS_PER_US.store(ticks_per_us, Ordering::Relaxed);
 
-        // C: snprintf(monotonic_info_string, 32, "ARM CNTVCT @ %ld ticks/us", …)
         let msg = format!("ARM CNTVCT @ {} ticks/us", ticks_per_us);
         let mut info = [0u8; 32];
         let bytes = msg.as_bytes();
@@ -320,30 +274,24 @@ mod aarch64_cnt {
 // ── POSIX fallback ────────────────────────────────────────────────────────────
 
 /// POSIX monotonic clock reader.
-///
-/// C: `getMonotonicUs_posix`
 /// ```c
 /// struct timespec ts;
 /// clock_gettime(CLOCK_MONOTONIC, &ts);
 /// return ((uint64_t)ts.tv_sec) * 1000000 + ts.tv_nsec / 1000;
 /// ```
-///
 /// PORT NOTE: `std::time::Instant` wraps `CLOCK_MONOTONIC` on Linux/macOS.
 /// Since Rust provides no stable API to read the absolute counter value,
 /// elapsed µs are measured from `POSIX_BASELINE` (fixed at `monotonic_init`
-/// time).  Relative differences are bit-identical to the C implementation.
+/// time). Relative differences are bit-identical to the C implementation.
 fn get_monotonic_us_posix() -> MonoTime {
     let baseline = POSIX_BASELINE.get_or_init(Instant::now);
     baseline.elapsed().as_micros() as MonoTime
 }
 
 /// Initialize the POSIX fallback; always succeeds.
-///
-/// C: `monotonicInit_posix`
 fn init_posix() -> ClockState {
-    // C: asserts clock_gettime(CLOCK_MONOTONIC, …) returns 0.
-    // In Rust, Instant::now() always succeeds on supported platforms;
-    // if CLOCK_MONOTONIC were unavailable, the stdlib would panic at startup.
+ // In Rust, Instant::now always succeeds on supported platforms;
+ // if CLOCK_MONOTONIC were unavailable, the stdlib would panic at startup.
     POSIX_BASELINE.get_or_init(Instant::now);
 
     const INFO: &[u8] = b"POSIX clock_gettime";
@@ -361,13 +309,11 @@ fn init_posix() -> ClockState {
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Retrieve the current monotonic time in microseconds.
-///
-/// Must be called after [`monotonic_init`]; if called before, falls back to
+/// Must be called after [`monotonic_init`]; if called before, falls back
 /// the POSIX path (safe but sets a different baseline than `monotonic_init`
 /// would have chosen).
-///
-/// C: `monotime (*getMonotonicUs)(void)` — global function pointer called
-/// directly at call sites.  In Rust this is a regular function that
+/// global function pointer called
+/// directly at call sites. In Rust this is a regular function that
 /// dispatches through the stored pointer in `CLOCK_STATE`.
 pub fn get_monotonic_us() -> MonoTime {
     match CLOCK_STATE.get() {
@@ -377,14 +323,10 @@ pub fn get_monotonic_us() -> MonoTime {
 }
 
 /// Initialize the monotonic clock (call once at startup; idempotent).
-///
-/// Tries platform-optimized paths in priority order, then falls back to the
-/// POSIX implementation.  Returns a static byte slice naming the active clock.
-///
-/// C: `const char *monotonicInit(void)` → returns `monotonic_info_string`
+/// Tries platform-optimized paths in priority order, then falls back to
+/// POSIX implementation. Returns a static byte slice naming the active clock.
 pub fn monotonic_init() -> &'static [u8] {
     let state = CLOCK_STATE.get_or_init(|| {
-        // C: #if x86_64 + linux
         #[cfg(all(
             not(feature = "no_processor_clock"),
             target_arch = "x86_64",
@@ -394,13 +336,11 @@ pub fn monotonic_init() -> &'static [u8] {
             return s;
         }
 
-        // C: #if aarch64
         #[cfg(all(not(feature = "no_processor_clock"), target_arch = "aarch64"))]
         if let Some(s) = aarch64_cnt::init() {
             return s;
         }
 
-        // C: POSIX fallback
         init_posix()
     });
 
@@ -408,8 +348,6 @@ pub fn monotonic_init() -> &'static [u8] {
 }
 
 /// Return a static byte slice naming the active clock source.
-///
-/// C: `const char *monotonicInfoString(void)`
 pub fn monotonic_info_string() -> &'static [u8] {
     CLOCK_STATE
         .get()
@@ -418,8 +356,6 @@ pub fn monotonic_info_string() -> &'static [u8] {
 }
 
 /// Return which clock type is currently active.
-///
-/// C: `monotonic_clock_type monotonicGetType(void)`
 pub fn monotonic_get_type() -> MonotonicClockType {
     CLOCK_STATE
         .get()
@@ -427,38 +363,31 @@ pub fn monotonic_get_type() -> MonotonicClockType {
         .unwrap_or(MonotonicClockType::Posix)
 }
 
-// ── Elapsed-time helpers (monotonic.h inline functions) ──────────────────────
+// ── Elapsed-time helpers ──────────────────────
 
 /// Record the current monotonic time as a measurement start point.
-///
-/// C: `static inline void elapsedStart(monotime *start_time)` (monotonic.h)
-///
 /// PORT NOTE: C writes through a pointer; Rust returns the value instead,
-/// matching safe-Rust idioms.  Call sites store the return value.
+/// matching safe-Rust idioms. Call sites store the return value.
 pub fn elapsed_start() -> MonoTime {
     get_monotonic_us()
 }
 
 /// Microseconds elapsed since `start_time`.
-///
-/// C: `static inline uint64_t elapsedUs(monotime start_time)` (monotonic.h)
 pub fn elapsed_us(start_time: MonoTime) -> u64 {
-    // PERF(port): C subtracts two u64s directly; saturating_sub adds one
-    // branch.  Profile in Phase B — the clock should never go backward, so
-    // wrapping_sub might be substituted after verification.
+ // PERF(port): C subtracts two u64s directly; saturating_sub adds one
+ // branch. Profile in Phase B — the clock should never go backward, so
+ // wrapping_sub might be substituted after verification.
     get_monotonic_us().saturating_sub(start_time)
 }
 
 /// Milliseconds elapsed since `start_time`.
-///
-/// C: `static inline uint64_t elapsedMs(monotime start_time)` (monotonic.h)
 pub fn elapsed_ms(start_time: MonoTime) -> u64 {
     elapsed_us(start_time) / 1_000
 }
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        src/monotonic.c + src/monotonic.h  (198 + 61 = 259 lines,
+//   source:        Valkey
 //                  8 functions: getMonotonicUs_x86, monotonicInit_x86linux,
 //                  __cntvct, cntfrq_hz, getMonotonicUs_aarch64,
 //                  monotonicInit_aarch64, getMonotonicUs_posix,

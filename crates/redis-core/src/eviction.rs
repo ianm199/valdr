@@ -1,22 +1,20 @@
 //! Sampling-based maxmemory enforcement — coarse Rust-native replacement for
 //! the C-shaped skeleton in `evict.rs`.
-//!
 //! Algorithm sketch (intentional simplifications vs upstream):
-//!   - Memory usage is whatever [`approximate_memory_used`] returns; the C
-//!     allocator-tracked `zmalloc_used_memory` is not faithfully ported.
-//!   - Candidate selection is N-of-K sampling over the main dict's iteration
-//!     order rather than the C eviction pool sorted by idle time. K is
-//!     `maxmemory-samples` (default 5) and the oldest/lowest-scored sample
-//!     is evicted.
-//!   - All eight maxmemory policies are implemented: `noeviction`,
-//!     `allkeys-lru`, `allkeys-lfu`, `allkeys-random`, `volatile-lru`,
-//!     `volatile-lfu`, `volatile-random`, `volatile-ttl`.
-//!
+//! - Memory usage is whatever [`approximate_memory_used`] returns; the C
+//! allocator-tracked `zmalloc_used_memory` is not faithfully ported.
+//! - Candidate selection is N-of-K sampling over the main dict's iteration
+//! order rather than the C eviction pool sorted by idle time. K is
+//! `maxmemory-samples` (default 5) and the oldest/lowest-scored sample
+//! is evicted.
+//! - All eight maxmemory policies are implemented: `noeviction`,
+//! `allkeys-lru`, `allkeys-lfu`, `allkeys-random`, `volatile-lru`,
+//! `volatile-lfu`, `volatile-random`, `volatile-ttl`.
 //! LFU counter encoding in `RedisObject.lru` (same 24-bit field as LRU):
-//!   - bits  7..0  (low  8 bits): logarithmic frequency counter (0–255)
-//!   - bits 23..8  (next 16 bits): last-decrement timestamp in minutes
-//!     (truncated from the real clock, wraps after ~45 days)
-//!   Initial value for new objects: low-8 = LFU_INIT_VAL (5), high-16 = now_minutes.
+//! - bits 7..0 (low 8 bits): logarithmic frequency counter (0–255)
+//! - bits 23..8 (next 16 bits): last-decrement timestamp in minutes
+//! (truncated from the real clock, wraps after ~45 days)
+//! Initial value for new objects: low-8 = LFU_INIT_VAL (5), high-16 = now_minutes.
 
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -30,36 +28,34 @@ use crate::metrics::server_metrics;
 use crate::object::{RedisObject, EXPIRY_NONE};
 
 /// Maximum number of evictions to attempt in a single dispatch-gate call.
-///
 /// Caps the worst-case work done before the gate gives up and returns
 /// [`EvictionOutcome::StillOver`]. Tuned to "small enough that one slow
 /// command does not stall the server, large enough that any realistic
 /// per-command memory growth can be absorbed".
 const MAX_EVICTIONS_PER_CALL: usize = 100;
 
-/// Default `maxmemory-samples` per upstream config. Controls the K in
+/// Default `maxmemory-samples` per upstream config. Controls the K
 /// "sample K keys, evict the oldest/least-frequently-used".
 const DEFAULT_MAXMEMORY_SAMPLES: usize = 5;
 
 /// Initial LFU counter assigned to newly-created objects.
-/// Matches `LFU_INIT_VAL` in Valkey's `server.h`.
+/// Matches `LFU_INIT_VAL` in Valkey's.
 const LFU_INIT_VAL: u8 = 5;
 
 /// Outcome of a single eviction attempt.
 #[derive(Debug, PartialEq, Eq)]
 pub enum EvictionOutcome {
-    /// `approximate_memory_used` was already below `target_bytes` on entry.
+ /// `approximate_memory_used` was already below `target_bytes` on entry.
     Sufficient,
-    /// Evicted these keys and is now under `target_bytes`.
+ /// Evicted these keys and is now under `target_bytes`.
     Evicted(Vec<RedisString>),
-    /// Evicted these keys but remained over the limit.
+ /// Evicted these keys but remained over the limit.
     StillOver(Vec<RedisString>),
 }
 
 /// Drive eviction until either `approximate_memory_used(db) <= target_bytes`,
-/// the per-call budget is exhausted, or the configured policy refuses to
+/// the per-call budget is exhausted, or the configured policy refuses
 /// evict anything.
-///
 /// The eviction policy is consulted on every iteration so that a runtime
 /// CONFIG SET seen mid-loop is honoured immediately.
 pub fn try_evict_to_fit(
@@ -248,7 +244,6 @@ fn sample_volatile_ttl(db: &RedisDb, samples: usize) -> Option<RedisString> {
 }
 
 /// Return current Unix time truncated to whole minutes, wrapping to u32.
-///
 /// Used to track the last-decrement timestamp in the LFU counter's high 16 bits.
 fn now_minutes() -> u32 {
     let secs = SystemTime::now()
@@ -259,7 +254,6 @@ fn now_minutes() -> u32 {
 }
 
 /// Initialise the LFU field of a freshly-created `RedisObject`.
-///
 /// Packs `LFU_INIT_VAL` into bits 7..0 and the current minute clock into
 /// bits 23..8 so the first decay calculation has a valid baseline.
 pub fn lfu_init(obj: &mut RedisObject) {
@@ -268,10 +262,8 @@ pub fn lfu_init(obj: &mut RedisObject) {
 }
 
 /// Probabilistically increment the LFU counter and refresh the decay timestamp.
-///
 /// Formula from Valkey's `LFULogIncr`:
-///   `counter += 1` with probability `1 / ((counter - LFU_INIT_VAL) * log_factor + 1)`
-///
+/// `counter += 1` with probability `1 / ((counter - LFU_INIT_VAL) * log_factor + 1)`
 /// Decay is applied first: for every `decay_time` minutes elapsed since the last
 /// decrement the counter is decremented by 1 (down to 0).
 pub fn lfu_update(obj: &mut RedisObject, log_factor: u32, decay_time: u32) {
@@ -309,7 +301,6 @@ pub fn lfu_update(obj: &mut RedisObject, log_factor: u32, decay_time: u32) {
 }
 
 /// Deterministic pseudo-random f64 in [0.0, 1.0) derived from a seed.
-///
 /// Uses a simple xorshift64 step so there is no external `rand` dependency
 /// and no mutable global state.
 fn pseudo_random_f64(seed: u64) -> f64 {
@@ -324,7 +315,6 @@ fn pseudo_random_f64(seed: u64) -> f64 {
 }
 
 /// Build the canonical error bytes for the -OOM case.
-///
 /// Called by the dispatch gate when the policy refused to evict anything
 /// (e.g. `noeviction`, or `volatile-*` with no TTL'd candidates).
 pub fn oom_error_reply() -> Vec<u8> {

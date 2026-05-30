@@ -1,27 +1,22 @@
 //! `RedisDb` — one logical database (keyspace) and C-level DB API.
-//!
-//! Translation of `src/db.c` (~2850 lines, ~80 functions).
-//!
+//! Translation of (~2850 lines, ~80 functions).
 //! Phase-A model:
-//!   - `dict`    → `HashMap<RedisString, RedisObject>`.
-//!   - Expiry    → stored in `RedisObject.expire` per `object.rs`; mirrors C robj embed.
-//!     A secondary `db->expires` index for active-expiry scanning is deferred to Phase 4.
+//! - `dict` → `HashMap<RedisString, RedisObject>`.
+//! - Expiry → stored in `RedisObject.expire` per `object.rs`; mirrors C robj embed.
+//! A secondary `db->expires` index for active-expiry scanning is deferred to Phase 4.
 //!   - kvstore / cluster-slot routing → TODO(port): deferred to Phase 4.
-//!   - `blocking_keys`, `ready_keys`, `watched_keys` → stub HashMaps (Phase 3 / Phase 5).
+//! - `blocking_keys`, `ready_keys`, `watched_keys` → stub HashMaps (Phase 3 / Phase 5).
 //!   - Lazy-free (async delete) → synchronous in Phase A; TODO(port) marked.
-//!   - `signalModifiedKey`, `notifyKeyspaceEvent`, `trackingInvalidateKey` → no-ops in Phase A.
-//!
-//! PORT NOTE: C embeds the key inside the robj value (hasembkey). Rust uses only the
+//! - `signalModifiedKey`, `notifyKeyspaceEvent`, `trackingInvalidateKey` → no-ops in Phase A.
+//! PORT NOTE: C embeds the key inside the robj value (hasembkey). Rust uses only
 //! HashMap key — the object does not carry a copy of its own key.
-//!
-//! PORT NOTE: `ctx.db()` / `ctx.db_mut()` now expose the selected DB, and
+//! PORT NOTE: `ctx.db` / `ctx.db_mut` now expose the selected DB,
 //! `CommandContext` carries a DB-list route for staged cross-DB migration.
 //! Cross-DB commands use that route instead of naming the transitional global
 //! database store directly.
-//!
-//! PORT NOTE: C stringmatchlen (util.c) is exposed through the local
-//! `glob_match` wrapper so db.c call sites stay source-shaped while sharing
-//! the faithful util.c implementation.
+//! PORT NOTE: C stringmatchlen is exposed through the local
+//! `glob_match` wrapper so call sites stay source-shaped while sharing
+//! the faithful implementation.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -39,13 +34,11 @@ use crate::object::{ObjectKind, RedisObject, EXPIRY_NONE};
 use crate::pubsub_registry::PubSubRegistry;
 
 /// Global cross-connection MULTI/WATCH support.
-///
 /// `watched`: every WATCH-registered `(db_id, key)` maps to the set of client
 /// ids that asked to be notified. `dirty`: every client id whose watched set
 /// has been touched since the last EXEC. WATCH adds to `watched`; UNWATCH/EXEC
 /// clears the client from `watched`; `set_key`/`sync_delete` adds to `dirty`;
 /// EXEC reads-and-clears `dirty` for its own client id.
-///
 /// PORT NOTE: deliberate architectural shortcut for Phase B. Real Redis stores
 /// the per-key watcher list on `serverDb.watched_keys` and mutates each
 /// watching `client` directly via the global client list. Until `RedisServer`
@@ -64,7 +57,6 @@ type SwapDbWakeFn = dyn Fn(u32) + Send + Sync;
 static SWAPDB_WAKE_HOOK: OnceLock<Box<SwapDbWakeFn>> = OnceLock::new();
 
 /// Install the SWAPDB wake hook.
-///
 /// The hook receives a single database index and wakes any clients blocked on
 /// keys that exist in that database. It acquires the database lock internally.
 /// Installed once at startup from `redis-commands`; subsequent calls are
@@ -79,9 +71,8 @@ pub use crate::stream_hooks::{
     install_stream_key_overwritten_hook, install_stream_rename_hook,
 };
 
-/// Carry-all for the components needed to fire keyspace notifications from
+/// Carry-all for the components needed to fire keyspace notifications
 /// code paths that do not have a `CommandContext` (lazy expiry, active expiry).
-///
 /// Installed once at server startup via `install_global_notify_handle`.
 pub struct GlobalNotifyHandle {
     pub pubsub: Arc<Mutex<PubSubRegistry>>,
@@ -91,7 +82,6 @@ pub struct GlobalNotifyHandle {
 static GLOBAL_NOTIFY_HANDLE: OnceLock<Arc<GlobalNotifyHandle>> = OnceLock::new();
 
 /// Install the global notification handle used by lazy/active expiry paths.
-///
 /// Should be called once during server initialisation, before any connection
 /// is accepted. Subsequent calls are no-ops (OnceLock semantics).
 pub fn install_global_notify_handle(
@@ -105,8 +95,7 @@ pub fn install_global_notify_handle(
 }
 
 /// Publish a keyspace notification from a code path that has no `CommandContext`.
-///
-/// `event_type` is a `NOTIFY_*` flag from `crate::notify`. `event` is the
+/// `event_type` is a `NOTIFY_*` flag from `crate::notify`. `event` is
 /// raw event-name bytes. `key` is the affected key. `dbid` is the database
 /// index. Returns immediately when no handle is installed (unit tests) or
 /// when the configured flags do not include `event_type`.
@@ -233,7 +222,6 @@ fn glob_match_ascii_ci_db(pattern: &[u8], text: &[u8]) -> bool {
 }
 
 /// Install or fetch the global watched-keys index.
-///
 /// First caller installs an empty index; subsequent callers receive the same
 /// `Arc`. Safe to call from the binary entry point and from per-command
 /// handlers without synchronisation concerns beyond the inner `Mutex`.
@@ -242,7 +230,6 @@ pub fn watched_keys_index() -> &'static Arc<Mutex<WatchedKeysIndex>> {
 }
 
 /// True when any client has at least one WATCH registration.
-///
 /// This is a fast-path mirror of the global watched-key index. The index
 /// mutex remains authoritative for exact key/client membership.
 pub fn watched_keys_any() -> bool {
@@ -250,8 +237,7 @@ pub fn watched_keys_any() -> bool {
 }
 
 /// Return `(unique_watching_clients, total_watched_key_registrations)`.
-///
-/// C exposes these through INFO as `watching_clients` and
+/// C exposes these through INFO as `watching_clients`
 /// `total_watched_keys`. The global index is authoritative because WATCH state
 /// is cross-connection, while `WATCHED_KEYS_REGISTRATIONS` is only the fast
 /// non-zero mirror used by write paths.
@@ -317,8 +303,6 @@ pub fn watched_keys_index_remove_client(client_id: ClientId) {
 }
 
 /// Mark every client watching `key` in database `db_id` as dirty.
-///
-/// C: db.c → multi.c::touchWatchedKey. Called after every write to `key`.
 pub fn watched_keys_touch(db_id: u32, key: &RedisString) {
     if !watched_keys_any() {
         return;
@@ -348,10 +332,8 @@ pub fn watched_keys_take_dirty(client_id: ClientId) -> bool {
     guard.dirty.remove(&client_id)
 }
 
-/// Mark WATCH clients dirty for every watched key in `emptied` that exists in
+/// Mark WATCH clients dirty for every watched key in `emptied` that exists
 /// either the old keyspace or the replacement keyspace.
-///
-/// C: multi.c::touchAllWatchedKeysInDb. Used by FLUSH/SWAP-style operations
 /// where the watched-key ownership remains attached to the logical DB id while
 /// the keyspace contents are replaced.
 fn watched_keys_touch_all_in_db(emptied: &RedisDb, replaced_with: Option<&RedisDb>) {
@@ -380,7 +362,7 @@ fn watched_keys_touch_all_in_db(emptied: &RedisDb, replaced_with: Option<&RedisD
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Lookup flags  (C: server.h LOOKUP_*)
+// Lookup flags
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub const LOOKUP_NONE: u32 = 0;
@@ -410,7 +392,7 @@ pub const DB_FLAG_KEY_OVERWRITE: u32 = 1 << 2;
 const DEFAULT_SCAN_COUNT: i64 = 10;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// KeyStatus  (C: keyStatus in server.h)
+// KeyStatus
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -421,22 +403,22 @@ pub enum KeyStatus {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ScanOptions  (C: scanOptions struct, db.c:1151)
+// ScanOptions
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct ScanOptions {
     pub count: i64,
-    /// Pattern bytes, or `None` for '*' (match all).
+ /// Pattern bytes, or `None` for '*' (match all).
     pub pat: Option<Vec<u8>>,
     pub use_pattern: bool,
-    /// Slot derived from pattern hashtag in cluster mode; -1 if none.
+ /// Slot derived from pattern hashtag in cluster mode; -1 if none.
     pub match_slot: i32,
-    /// Object type filter; `i64::MAX` means no filter.
+ /// Object type filter; `i64::MAX` means no filter.
     pub type_filter: i64,
-    /// Explicit slot from SLOT option (CLUSTERSCAN only); -1 if none.
+ /// Explicit slot from SLOT option (CLUSTERSCAN only); -1 if none.
     pub input_slot: i32,
-    /// Return only keys, not field+value pairs (NOVALUES / NOSCORES).
+ /// Return only keys, not field+value pairs (NOVALUES / NOSCORES).
     pub only_keys: bool,
 }
 
@@ -455,7 +437,7 @@ impl Default for ScanOptions {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// KeyReference + GetKeysResult  (C: keyReference / getKeysResult, server.h)
+// KeyReference + GetKeysResult
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Position + access-flags for one key argument inside a command's argv[].
@@ -466,7 +448,6 @@ pub struct KeyReference {
 }
 
 /// Heap-backed result of `get_keys_from_command` and family.
-///
 /// PORT NOTE: C uses a 16-slot on-stack buffer to avoid heap allocation for
 /// most commands. Phase A uses `Vec`; revisit in Phase B if profiling shows cost.
 #[derive(Debug, Default, Clone)]
@@ -483,19 +464,18 @@ impl GetKeysResult {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ScanData  (C: scanData typedef, db.c:983)
+// ScanData
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Accumulator passed to hashtable scan callbacks during SCAN / HSCAN / SSCAN / ZSCAN.
-///
 /// TODO(port): full implementation requires kvstore / vector / listpack / skiplist
 /// integration — deferred to Phase 4.
 #[derive(Debug, Default)]
 pub struct ScanData {
-    /// Collected (key, optional_value) byte pairs.
+ /// Collected (key, optional_value) byte pairs.
     pub result: Vec<(Vec<u8>, Option<Vec<u8>>)>,
     pub db_id: u32,
-    /// `i64::MAX` = no filter.
+ /// `i64::MAX` = no filter.
     pub type_filter: i64,
     pub pattern: Option<Vec<u8>>,
     pub sampled: i64,
@@ -503,55 +483,54 @@ pub struct ScanData {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// RedisDb struct  (C: serverDb in server.h)
+// RedisDb struct
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// One logical Redis database (keyspace).
-///
 /// Phase-A implementation: HashMap-backed. kvstore, cluster-slot addressing,
 /// and secondary expires dict land in Phase 4.
 #[derive(Debug, Default)]
 pub struct RedisDb {
-    /// Database index.
+ /// Database index.
     pub id: u32,
 
-    /// Main keyspace. C: serverDb.keys (kvstore).
+ /// Main keyspace. C: serverDb.keys (kvstore).
     dict: HashMap<RedisString, RedisObject>,
 
-    /// Keys with blocking clients (BLPOP / BRPOP / XREADGROUP).
+ /// Keys with blocking clients (BLPOP / BRPOP / XREADGROUP).
     /// C: serverDb.blocking_keys — TODO(port): deferred to Phase 3.
     #[allow(dead_code)] // C serverDb field; wired in Phase 3 when blocked-key unblock logic is ported
     blocking_keys: HashMap<RedisString, ()>,
 
-    /// Keys signalled as ready to unblock a waiting client.
+ /// Keys signalled as ready to unblock a waiting client.
     /// C: serverDb.ready_keys — TODO(port): deferred to Phase 3.
     #[allow(dead_code)] // C serverDb field; wired in Phase 3 when blocked-key unblock logic is ported
     ready_keys: HashSet<RedisString>,
 
-    /// Keys being WATCHed by MULTI/EXEC clients.
+ /// Keys being WATCHed by MULTI/EXEC clients.
     /// C: serverDb.watched_keys — TODO(port): deferred to Phase 5.
     watched_keys: HashMap<RedisString, ()>,
 
-    /// Average TTL for INFO keyspace stats.
+ /// Average TTL for INFO keyspace stats.
     /// C: serverDb.avg_ttl — TODO(port): active-expiry cycle (Phase 3).
     pub avg_ttl: i64,
 
-    /// When true, lazy expiration is suppressed and expired keys stay visible
-    /// to lookups and key iteration. Set per-command by the dispatcher when a
-    /// primary is in `import-mode` and the calling client is in import-source
-    /// state. C: `server.current_client->flag.import_source` consulted by
-    /// `keyIsExpired` / `objectIsExpired` (db.c:2126/2144).
+ /// When true, lazy expiration is suppressed and expired keys stay visible
+ /// to lookups and key iteration. Set per-command by the dispatcher when a
+ /// primary is in `import-mode` and the calling client is in import-source
+ /// state. C: `server.current_client->flag.import_source` consulted by
+ /// `keyIsExpired` / `objectIsExpired`.
     import_source_active: bool,
 
-    /// When true (a primary in `import-mode`), an expired key is still reported
-    /// as expired to non-import clients but is NOT lazily deleted — the server
-    /// waits for an explicit DEL from the import source. C: the `KEEP_EXPIRED`
-    /// branch of `getExpirationPolicyWithFlags` (expire.c:995-1019).
+ /// When true (a primary in `import-mode`), an expired key is still reported
+ /// as expired to non-import clients but is NOT lazily deleted — the server
+ /// waits for an explicit DEL from the import source. C: the `KEEP_EXPIRED`
+ /// branch of `getExpirationPolicyWithFlags`.
     import_mode_keep: bool,
 
-    /// When true, CLIENT PAUSE is suppressing physical expiry. Expired keys
-    /// remain logically expired for normal lookups but are not deleted and can
-    /// still be sampled by RANDOMKEY, matching Valkey's PAUSE_ACTION_EXPIRE.
+ /// When true, CLIENT PAUSE is suppressing physical expiry. Expired keys
+ /// remain logically expired for normal lookups but are not deleted and can
+ /// still be sampled by RANDOMKEY, matching Valkey's PAUSE_ACTION_EXPIRE.
     pause_expire_keep: bool,
 }
 
@@ -567,10 +546,9 @@ impl RedisDb {
         }
     }
 
-    /// Construct a `RedisDb` from a snapshot of (key, object) pairs.
-    ///
-    /// Used by BGSAVE to build a throwaway DB containing only the entries
-    /// captured at snapshot time. The id is set to 0.
+ /// Construct a `RedisDb` from a snapshot of (key, object) pairs.
+ /// Used by BGSAVE to build a throwaway DB containing only the entries
+ /// captured at snapshot time. The id is set to 0.
     pub fn from_snapshot(entries: Vec<(RedisString, crate::object::RedisObject)>) -> Self {
         let mut db = Self::new(0);
         for (k, v) in entries {
@@ -579,9 +557,9 @@ impl RedisDb {
         db
     }
 
-    // ── Internal helpers ─────────────────────────────────────────────────────
+ // ── Internal helpers ─────────────────────────────────────────────────────
 
-    /// Wall-clock time in milliseconds since the Unix epoch.
+ /// Wall-clock time in milliseconds since the Unix epoch.
     fn now_ms() -> i64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -589,13 +567,11 @@ impl RedisDb {
             .unwrap_or(0)
     }
 
-    /// True if the key exists and its TTL has elapsed.
-    ///
-    /// C: db.c:2122 objectIsExpired / keyIsExpiredWithDictIndexImpl
+ /// True if the key exists and its TTL has elapsed.
     pub fn is_expired(&self, key: &RedisString) -> bool {
         // TODO(port): return false when server.loading is true
-        // C: db.c:2126/2144 — a primary in import-mode keeps expired keys
-        // visible to an import-source client.
+ // a primary in import-mode keeps expired keys
+ // visible to an import-source client.
         if self.import_source_active {
             return false;
         }
@@ -605,11 +581,11 @@ impl RedisDb {
         }
     }
 
-    /// Sets the per-command import-expiry state. `import_source_active` keeps
-    /// expired keys fully visible to the current client; `import_mode_keep`
-    /// stops lazy expiration from deleting expired keys (they stay, reported as
-    /// expired). The dispatcher refreshes these before every command so they
-    /// reflect the current client and server state.
+ /// Sets the per-command import-expiry state. `import_source_active` keeps
+ /// expired keys fully visible to the current client; `import_mode_keep`
+ /// stops lazy expiration from deleting expired keys (they stay, reported as
+ /// expired). The dispatcher refreshes these before every command so they
+ /// reflect the current client and server state.
     pub fn set_import_expire_state(&mut self, import_source_active: bool, import_mode_keep: bool) {
         self.import_source_active = import_source_active;
         self.import_mode_keep = import_mode_keep;
@@ -619,9 +595,7 @@ impl RedisDb {
         self.pause_expire_keep = pause_expire_keep;
     }
 
-    /// Check and optionally delete an expired key. Returns the new `KeyStatus`.
-    ///
-    /// C: db.c:2157 expireIfNeededWithDictIndex
+ /// Check and optionally delete an expired key. Returns the new `KeyStatus`.
     pub fn expire_if_needed(&mut self, key: &RedisString, flags: u32) -> KeyStatus {
         if !self.is_expired(key) {
             return KeyStatus::Valid;
@@ -629,9 +603,9 @@ impl RedisDb {
         if flags & EXPIRE_AVOID_DELETE_EXPIRED != 0 {
             return KeyStatus::Expired;
         }
-        // C: getExpirationPolicyWithFlags KEEP_EXPIRED — a primary in import-mode
-        // reports the key as expired but waits for the import source to delete
-        // it, so non-force lookups must not lazily remove it.
+ // a primary in import-mode
+ // reports the key as expired but waits for the import source to delete
+ // it, so non-force lookups must not lazily remove it.
         if (self.import_mode_keep || self.pause_expire_keep)
             && flags & EXPIRE_FORCE_DELETE_EXPIRED == 0
         {
@@ -648,11 +622,9 @@ impl RedisDb {
         KeyStatus::Deleted
     }
 
-    // ── Lookup API ──────────────────────────────────────────────────────────
+ // ── Lookup API ──────────────────────────────────────────────────────────
 
-    /// General-purpose key lookup with flags.
-    ///
-    /// C: db.c:80 lookupKey
+ /// General-purpose key lookup with flags.
     pub fn lookup_key(&mut self, key: &RedisString, flags: u32) -> Option<&RedisObject> {
         if self.expire_if_needed(key, 0) != KeyStatus::Valid {
             if flags & (LOOKUP_NOSTATS | LOOKUP_WRITE) == 0 {
@@ -682,9 +654,7 @@ impl RedisDb {
         result
     }
 
-    /// Read-oriented lookup. Asserts no LOOKUP_WRITE flag.
-    ///
-    /// C: db.c:136 lookupKeyReadWithFlags
+ /// Read-oriented lookup. Asserts no LOOKUP_WRITE flag.
     pub fn lookup_key_read_with_flags(
         &mut self,
         key: &RedisString,
@@ -694,25 +664,20 @@ impl RedisDb {
         self.lookup_key(key, flags)
     }
 
-    /// Convenience read lookup with no flags.
-    ///
-    /// C: db.c:143 lookupKeyRead
-    ///
-    /// MIGRATION SHIM: the original C function (and the full-port version)
-    /// takes `&mut self` because reads touch LRU and may lazy-delete expired
-    /// keys. The architect-stub variant accepted `impl AsRef<[u8]>` and was
-    /// `&self`. To keep all 30+ call sites compiling, the back-compat layer
-    /// makes this `&self` over `impl AsRef<[u8]>` and skips both the LRU
-    /// touch and the expire-if-needed cycle. Callers who want either should
-    /// use `lookup_key_read_with_flags` (mutable, LRU-touching).
+ /// Convenience read lookup with no flags.
+ /// MIGRATION SHIM: the original C function (and the full-port version)
+ /// takes `&mut self` because reads touch LRU and may lazy-delete expired
+ /// keys. The architect-stub variant accepted `impl AsRef<[u8]>` and was
+ /// `&self`. To keep all 30+ call sites compiling, the back-compat layer
+ /// makes this `&self` over `impl AsRef<[u8]>` and skips both the LRU
+ /// touch and the expire-if-needed cycle. Callers who want either should
+ /// use `lookup_key_read_with_flags` (mutable, LRU-touching).
     pub fn lookup_key_read(&self, key: impl AsRef<[u8]>) -> Option<&RedisObject> {
         let k = RedisString::from_bytes(key.as_ref());
         self.find(&k)
     }
 
-    /// Write-oriented lookup — may force-delete an expired key.
-    ///
-    /// C: db.c:153 lookupKeyWriteWithFlags
+ /// Write-oriented lookup — may force-delete an expired key.
     pub fn lookup_key_write_with_flags(
         &mut self,
         key: &RedisString,
@@ -730,18 +695,14 @@ impl RedisDb {
         Some(obj)
     }
 
-    /// Write-oriented lookup with no extra flags.
-    ///
-    /// C: db.c:157 lookupKeyWrite
+ /// Write-oriented lookup with no extra flags.
     pub fn lookup_key_write(&mut self, key: &RedisString) -> Option<&mut RedisObject> {
         self.lookup_key_write_with_flags(key, LOOKUP_NONE)
     }
 
-    // ── Key add / set / replace ─────────────────────────────────────────────
+ // ── Key add / set / replace ─────────────────────────────────────────────
 
-    /// Insert a key that must not already exist (debug-asserts in dev builds).
-    ///
-    /// C: db.c:227 dbAdd
+ /// Insert a key that must not already exist (debug-asserts in dev builds).
     pub fn add(&mut self, key: RedisString, value: RedisObject) {
         debug_assert!(!self.dict.contains_key(&key), "dbAdd: key already exists");
         // TODO(port): signalKeyAsReady(db, key, val->type)
@@ -749,19 +710,16 @@ impl RedisDb {
         self.dict.insert(key, value);
     }
 
-    /// Insert-or-overwrite with no preconditions. Returns the previous value if any.
-    ///
-    /// PORT NOTE: covers both insert (dbAdd path) and overwrite (dbSetValue path)
-    /// depending on caller intent. Use `set_key` for the high-level interface.
+ /// Insert-or-overwrite with no preconditions. Returns the previous value if any.
+ /// PORT NOTE: covers both insert (dbAdd path) and overwrite (dbSetValue path)
+ /// depending on caller intent. Use `set_key` for the high-level interface.
     pub fn insert(&mut self, key: RedisString, value: RedisObject) -> Option<RedisObject> {
         // TODO(port): moduleNotifyKeyUnlink / signalDeletedKeyAsReady on overwrite
         // TODO(port): initObjectLRUOrLFU on insert
         self.dict.insert(key, value)
     }
 
-    /// High-level key setter: insert or overwrite, handle TTL + signals.
-    ///
-    /// C: db.c:417 setKey
+ /// High-level key setter: insert or overwrite, handle TTL + signals.
     pub fn set_key(&mut self, key: RedisString, mut value: RedisObject, flags: u32) {
         let preserved_expire = if flags & SETKEY_KEEPTTL != 0 {
             self.dict.get(&key).map(|o| o.expire).unwrap_or(EXPIRY_NONE)
@@ -772,8 +730,8 @@ impl RedisDb {
         self.set_key_prepared(key, value, flags);
     }
 
-    /// High-level setter when the caller already observed the previous
-    /// expiry during its command-specific lookup.
+ /// High-level setter when the caller already observed the previous
+ /// expiry during its command-specific lookup.
     pub fn set_key_with_known_expire(
         &mut self,
         key: RedisString,
@@ -807,9 +765,7 @@ impl RedisDb {
         }
     }
 
-    /// Replace a key's value without touching its expiry or LRU.
-    ///
-    /// C: db.c:397 dbReplaceValue (→ dbSetValue with overwrite=false)
+ /// Replace a key's value without touching its expiry or LRU.
     pub fn replace_value(&mut self, key: &RedisString, mut value: RedisObject) {
         // TODO(port): lazy-free of old object via tryOffloadFreeObjToIOThreads
         if let Some(old) = self.dict.get(key) {
@@ -819,20 +775,16 @@ impl RedisDb {
         self.dict.insert(key.clone(), value);
     }
 
-    /// Ensure the string at `key` is mutable (raw encoding, not shared).
-    ///
-    /// C: db.c:583 dbUnshareStringValue
+ /// Ensure the string at `key` is mutable (raw encoding, not shared).
     pub fn unshare_string_value(&mut self, key: &RedisString) -> Option<&mut RedisObject> {
         // TODO(port): getDecodedObject / createRawStringObject / dbReplaceValue
-        //             if encoding == EMBSTR or refcount > 1 (Phase 4 encoding work)
+ // if encoding == EMBSTR or refcount > 1 (Phase 4 encoding work)
         self.dict.get_mut(key)
     }
 
-    // ── Delete ──────────────────────────────────────────────────────────────
+ // ── Delete ──────────────────────────────────────────────────────────────
 
-    /// Synchronous delete; returns true if the key existed.
-    ///
-    /// C: db.c:540 dbSyncDelete
+ /// Synchronous delete; returns true if the key existed.
     pub fn sync_delete(&mut self, key: &RedisString) -> bool {
         // TODO(port): moduleNotifyKeyUnlink(key, val, db->id, flags)
         // TODO(port): signalDeletedKeyAsReady(db, key, val->type)
@@ -844,10 +796,8 @@ impl RedisDb {
         existed
     }
 
-    /// Async delete (lazy-free). Phase A falls through to synchronous delete.
-    ///
-    /// C: db.c:546 dbAsyncDelete
-    /// PERF(port): freeObjAsync — background deallocation deferred to Phase 3.
+ /// Async delete (lazy-free). Phase A falls through to synchronous delete.
+ /// PERF(port): freeObjAsync — background deallocation deferred to Phase 3.
     pub fn async_delete(&mut self, key: &RedisString) -> bool {
         let Some(obj) = self.dict.remove(key) else {
             return false;
@@ -858,19 +808,15 @@ impl RedisDb {
         true
     }
 
-    /// Delete using the server's lazyfree setting.
-    ///
-    /// C: db.c:552 dbDelete
+ /// Delete using the server's lazyfree setting.
     pub fn delete(&mut self, key: &RedisString) -> bool {
         // TODO(port): choose sync vs async via server.lazyfree_lazy_server_del
         self.sync_delete(key)
     }
 
-    // ── Expiry ──────────────────────────────────────────────────────────────
+ // ── Expiry ──────────────────────────────────────────────────────────────
 
-    /// Remove the TTL from an existing key (make it persistent).
-    ///
-    /// C: db.c:1891 removeExpire
+ /// Remove the TTL from an existing key (make it persistent).
     pub fn remove_expire(&mut self, key: &RedisString) -> bool {
         if let Some(obj) = self.dict.get_mut(key) {
             if obj.expire != EXPIRY_NONE {
@@ -881,9 +827,7 @@ impl RedisDb {
         false
     }
 
-    /// Set the absolute expiry timestamp (ms since epoch) for an existing key.
-    ///
-    /// C: db.c:1911 setExpire
+ /// Set the absolute expiry timestamp (ms since epoch) for an existing key.
     pub fn set_expire(&mut self, key: &RedisString, when: i64) {
         // TODO(port): rememberReplicaKeyWithExpire on writable replica
         if let Some(obj) = self.dict.get_mut(key) {
@@ -891,25 +835,19 @@ impl RedisDb {
         }
     }
 
-    /// Return the expiry timestamp (ms) or `EXPIRY_NONE` (-1) if no TTL.
-    ///
-    /// C: db.c:1964 getExpire
+ /// Return the expiry timestamp (ms) or `EXPIRY_NONE` (-1) if no TTL.
     pub fn get_expire(&self, key: &RedisString) -> i64 {
         self.dict.get(key).map(|o| o.expire).unwrap_or(EXPIRY_NONE)
     }
 
-    /// True if the key has an elapsed TTL.
-    ///
-    /// C: db.c:2151 keyIsExpired
+ /// True if the key has an elapsed TTL.
     pub fn key_is_expired(&self, key: &RedisString) -> bool {
         self.is_expired(key)
     }
 
-    // ── Misc DB operations ──────────────────────────────────────────────────
+ // ── Misc DB operations ──────────────────────────────────────────────────
 
-    /// Remove all keys.
-    ///
-    /// C: db.c:601 emptyDbStructure (single-db path)
+ /// Remove all keys.
     pub fn clear(&mut self) {
         // TODO(port): emptyDbAsync, kvstoreEmpty callback, resetDbExpiryState
         let watched_keys: Vec<RedisString> = if watched_keys_any() {
@@ -924,26 +862,22 @@ impl RedisDb {
         }
     }
 
-    /// Raw (no expiry check) key lookup. Used by internal scans.
-    ///
-    /// C: db.c:2271 dbFind
+ /// Raw (no expiry check) key lookup. Used by internal scans.
     pub fn find(&self, key: &RedisString) -> Option<&RedisObject> {
         self.dict.get(key)
     }
 
-    /// Borrow the main dict for eviction sampling.
-    ///
-    /// Exposed here rather than going through `keys_snapshot_with_types` so
-    /// the eviction loop in `eviction.rs` can peek at `RedisObject.lru` for
-    /// each sample without allocating a snapshot of the entire keyspace.
+ /// Borrow the main dict for eviction sampling.
+ /// Exposed here rather than going through `keys_snapshot_with_types` so
+ /// the eviction loop in `eviction.rs` can peek at `RedisObject.lru` for
+ /// each sample without allocating a snapshot of the entire keyspace.
     pub fn iter_for_eviction(&self) -> impl Iterator<Item = (&RedisString, &RedisObject)> {
         self.dict.iter()
     }
 
-    /// Borrow live key/value pairs for coarse memory accounting.
-    ///
-    /// This preserves the same visibility filter as `keys_snapshot_with_types`
-    /// without cloning every key or doing a second lookup per entry.
+ /// Borrow live key/value pairs for coarse memory accounting.
+ /// This preserves the same visibility filter as `keys_snapshot_with_types`
+ /// without cloning every key or doing a second lookup per entry.
     pub fn iter_for_memory_accounting(&self) -> impl Iterator<Item = (&RedisString, &RedisObject)> {
         let now = Self::now_ms();
         self.dict.iter().filter(move |(_, obj)| {
@@ -951,27 +885,24 @@ impl RedisDb {
         })
     }
 
-    /// True if the key is in the dict regardless of TTL.
+ /// True if the key is in the dict regardless of TTL.
     pub fn exists_raw(&self, key: &RedisString) -> bool {
         self.dict.contains_key(key)
     }
 
-    /// True if the key is present and not expired.
+ /// True if the key is present and not expired.
     pub fn exists(&mut self, key: &RedisString) -> bool {
         self.lookup_key_read_with_flags(key, LOOKUP_NOTOUCH)
             .is_some()
     }
 
-    /// Number of keys including logically-expired ones not yet lazily removed.
-    ///
-    /// C: db.c:2287 dbSize
+ /// Number of keys including logically-expired ones not yet lazily removed.
     pub fn size(&self) -> u64 {
         self.dict.len() as u64
     }
 
-    /// Number of keys that carry an active TTL (expire != EXPIRY_NONE).
-    ///
-    /// Used by `INFO keyspace` to populate the `expires=N` field.
+ /// Number of keys that carry an active TTL (expire != EXPIRY_NONE).
+ /// Used by `INFO keyspace` to populate the `expires=N` field.
     pub fn expires_count(&self) -> u64 {
         self.dict
             .values()
@@ -983,8 +914,7 @@ impl RedisDb {
         self.dict.is_empty()
     }
 
-    /// Return keys matching `pattern` that are not expired (immutable, no TTL removal).
-    ///
+ /// Return keys matching `pattern` that are not expired (immutable, no TTL removal).
     /// TODO(port): cluster slot filtering (patternHashSlot); active-expiry during scan.
     pub fn matching_keys(&self, pattern: &[u8]) -> Vec<RedisString> {
         let all = pattern == b"*";
@@ -999,15 +929,14 @@ impl RedisDb {
             .collect()
     }
 
-    /// Return a stable snapshot of every live (non-expired) key paired with
-    /// its `TYPE` byte-string name (`string`, `list`, `hash`, `set`, `zset`,
-    /// `stream`, `none`).
-    ///
-    /// Used by the linear-cursor SCAN implementation in `scan_command`; the
-    /// iteration order is whatever the underlying `HashMap` yields and is
-    /// only stable within a single mutation-free window. Real Redis hashes
+ /// Return a stable snapshot of every live (non-expired) key paired with
+ /// its `TYPE` byte-string name (`string`, `list`, `hash`, `set`, `zset`,
+ /// `stream`, `none`).
+ /// Used by the linear-cursor SCAN implementation in `scan_command`;
+ /// iteration order is whatever the underlying `HashMap` yields and is
+ /// only stable within a single mutation-free window. Real Redis hashes
     /// the cursor for resize safety — see the TODO in `scan_command` for
-    /// the deferred parity work.
+ /// the deferred parity work.
     pub fn keys_snapshot_with_types(&self) -> Vec<(RedisString, &'static [u8])> {
         let now = Self::now_ms();
         self.dict
@@ -1019,10 +948,8 @@ impl RedisDb {
             .collect()
     }
 
-    /// Return a random key that is not expired.
-    ///
-    /// C: db.c:442 dbRandomKey
-    /// PERF(port): O(n) HashMap walk — replace with fair random kvstore entry in Phase 4.
+ /// Return a random key that is not expired.
+ /// PERF(port): O(n) HashMap walk — replace with fair random kvstore entry in Phase 4.
     pub fn random_key(&self) -> Option<RedisString> {
         // TODO(port): kvstoreGetFairRandomHashtableIndex / kvstoreHashtableFairRandomEntry
         let now = Self::now_ms();
@@ -1046,15 +973,14 @@ impl RedisDb {
             .map(|(k, _)| k.clone())
     }
 
-    /// Sample up to `max` (key, expire_ms) pairs from this db's keyspace for the
-    /// active-expiration cycle. Only keys that carry a TTL are returned;
-    /// untagged (persistent) keys are skipped. The starting offset is pseudo-
-    /// randomised from `offset_seed` to avoid biased deletion from HashMap
-    /// iteration order.
-    ///
-    /// PERF(port): O(n) walk over the main dict because Phase B has no
-    /// secondary `expires` index yet. Phase 4 kvstore work replaces this with
-    /// a direct sample over `db->expires`.
+ /// Sample up to `max` (key, expire_ms) pairs from this db's keyspace for
+ /// active-expiration cycle. Only keys that carry a TTL are returned;
+ /// untagged (persistent) keys are skipped. The starting offset is pseudo-
+ /// randomised from `offset_seed` to avoid biased deletion from HashMap
+ /// iteration order.
+ /// PERF(port): O(n) walk over the main dict because Phase B has no
+ /// secondary `expires` index yet. Phase 4 kvstore work replaces this with
+ /// a direct sample over `db->expires`.
     pub fn sample_expiring_keys(&self, max: usize, offset_seed: u64) -> Vec<(RedisString, i64)> {
         if max == 0 || self.dict.is_empty() {
             return Vec::new();
@@ -1073,9 +999,8 @@ impl RedisDb {
         out
     }
 
-    /// Number of keys that currently carry a TTL.
-    ///
-    /// PERF(port): O(n) walk — phase-4 kvstore exposes `db->expires` size in O(1).
+ /// Number of keys that currently carry a TTL.
+ /// PERF(port): O(n) walk — phase-4 kvstore exposes `db->expires` size in O(1).
     pub fn expiring_key_count(&self) -> usize {
         self.dict
             .iter()
@@ -1083,9 +1008,7 @@ impl RedisDb {
             .count()
     }
 
-    /// Swap keyspace contents with `other`. blocking/ready/watched stay in place.
-    ///
-    /// C: db.c:1769 dbSwapDatabases (inner per-db swap)
+ /// Swap keyspace contents with `other`. blocking/ready/watched stay in place.
     pub fn swap_contents_with(&mut self, other: &mut RedisDb) {
         watched_keys_touch_all_in_db(self, Some(other));
         watched_keys_touch_all_in_db(other, Some(self));
@@ -1095,16 +1018,13 @@ impl RedisDb {
         std::mem::swap(&mut self.avg_ttl, &mut other.avg_ttl);
     }
 
-    // ── Signal hooks (Phase A stubs) ────────────────────────────────────────
+ // ── Signal hooks (Phase A stubs) ────────────────────────────────────────
 
-    /// Invalidate WATCH state and client-tracking for a modified key.
-    ///
-    /// C: db.c:754 signalModifiedKey
-    ///
-    /// MIGRATION SHIM: accepts anything that views as bytes (the architect
-    /// stub took `impl AsRef<[u8]>`) so callers passing `&RedisString`,
-    /// `&Vec<u8>`, or `&[u8]` all compile. Notifies every WATCH watcher of
-    /// `key` via the global watched-keys index (see [`watched_keys_index`]).
+ /// Invalidate WATCH state and client-tracking for a modified key.
+ /// MIGRATION SHIM: accepts anything that views as bytes (the architect
+ /// stub took `impl AsRef<[u8]>`) so callers passing `&RedisString`,
+ /// `&Vec<u8>`, or `&[u8]` all compile. Notifies every WATCH watcher
+ /// `key` via the global watched-keys index (see [`watched_keys_index`]).
     pub fn signal_modified(&self, key: impl AsRef<[u8]>) {
         // TODO(port): trackingInvalidateKey(c, key, 1)
         if !watched_keys_any() {
@@ -1114,38 +1034,35 @@ impl RedisDb {
         watched_keys_touch(self.id, &k);
     }
 
-    // ── Migration shims for the architect stub ──────────────────────────────
+ // ── Migration shims for the architect stub ──────────────────────────────
 
-    /// Database id as `i32` (matches the C `redisDb.id` type used by callers).
+ /// Database id as `i32` (matches the C `redisDb.id` type used by callers).
     pub fn id(&self) -> i32 {
         self.id as i32
     }
 
-    /// Number of keys (alias of [`size`] as `usize`).
-    ///
-    /// MIGRATION SHIM: the architect-stub `len()` returned `usize`; we keep it
-    /// here for callers that haven't switched to `size()` yet.
+ /// Number of keys (alias of [`size`] as `usize`).
+ /// MIGRATION SHIM: the architect-stub `len` returned `usize`; we keep it
+ /// here for callers that haven't switched to `size` yet.
     pub fn len(&self) -> usize {
         self.size() as usize
     }
 
-    /// Byte-keyed delete shim that accepts `impl AsRef<[u8]>`.
-    ///
-    /// MIGRATION SHIM: the architect stub had `delete(impl AsRef<[u8]>)`;
-    /// some callers still pass `&Vec<u8>`. The full-port `delete(&RedisString)`
-    /// already covers `&RedisString`. This sibling method handles the byte
-    /// path via a temporary `RedisString::from_bytes`.
+ /// Byte-keyed delete shim that accepts `impl AsRef<[u8]>`.
+ /// MIGRATION SHIM: the architect stub had `delete(impl AsRef<[u8]>)`;
+ /// some callers still pass `&Vec<u8>`. The full-port `delete(&RedisString)`
+ /// already covers `&RedisString`. This sibling method handles the byte
+ /// path via a temporary `RedisString::from_bytes`.
     pub fn delete_by_bytes(&mut self, key: impl AsRef<[u8]>) -> bool {
         let k = RedisString::from_bytes(key.as_ref());
         self.delete(&k)
     }
 
-    /// Whether `key` has an active expiry that is already in the past.
-    ///
-    /// MIGRATION SHIM: the architect-stub variant took `&RedisObject` (the
-    /// caller hadn't extracted a key string yet). The new helper extracts the
-    /// string-payload bytes (if any) and reuses [`key_is_expired`]; returns
-    /// `false` for non-string `key` arguments.
+ /// Whether `key` has an active expiry that is already in the past.
+ /// MIGRATION SHIM: the architect-stub variant took `&RedisObject` (
+ /// caller hadn't extracted a key string yet). The new helper extracts
+ /// string-payload bytes (if any) and reuses [`key_is_expired`]; returns
+ /// `false` for non-string `key` arguments.
     pub fn key_is_expired_obj(&self, key: &RedisObject) -> bool {
         match key.as_string_bytes() {
             Some(bytes) => self.key_is_expired(&RedisString::from_bytes(bytes)),
@@ -1153,20 +1070,18 @@ impl RedisDb {
         }
     }
 
-    /// True if no key in this db is currently WATCHed by any client.
-    ///
-    /// MIGRATION SHIM: the architect stub kept the watched-keys map on
-    /// `RedisDb`. Phase 3 will route this through MULTI/EXEC state; until
-    /// then this returns `self.watched_keys.is_empty()`.
+ /// True if no key in this db is currently WATCHed by any client.
+ /// MIGRATION SHIM: the architect stub kept the watched-keys map on
+ /// `RedisDb`. Phase 3 will route this through MULTI/EXEC state; until
+ /// then this returns `self.watched_keys.is_empty`.
     pub fn watched_keys_is_empty(&self) -> bool {
         self.watched_keys.is_empty()
     }
 
-    /// Register `client_id` as a watcher of `key` in this db.
-    ///
-    /// MIGRATION SHIM: the architect stub stored watcher lists on the db
-    /// itself. The full port defers this to Phase 3; we record presence
-    /// only so [`watched_keys_is_empty`] returns the expected answer.
+ /// Register `client_id` as a watcher of `key` in this db.
+ /// MIGRATION SHIM: the architect stub stored watcher lists on the db
+ /// itself. The full port defers this to Phase 3; we record presence
+ /// only so [`watched_keys_is_empty`] returns the expected answer.
     pub fn watched_keys_add_client(
         &mut self,
         key: &RedisObject,
@@ -1185,8 +1100,6 @@ impl RedisDb {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Signal that a DB was flushed (invalidates WATCHes and client tracking).
-///
-/// C: db.c:759 signalFlushedDb
 pub fn signal_flushed_db(_db_id: i32, _async_mode: bool) {
     // TODO(port): scanDatabaseForDeletedKeys(db, NULL)
     // TODO(port): touchAllWatchedKeysInDb(db, NULL)
@@ -1194,8 +1107,6 @@ pub fn signal_flushed_db(_db_id: i32, _async_mode: bool) {
 }
 
 /// Swap two databases by index (keyspace swap; blocking/watched state stays).
-///
-/// C: db.c:1769 dbSwapDatabases
 pub fn db_swap_databases(
     server_dbs: &mut Vec<RedisDb>,
     id1: usize,
@@ -1219,16 +1130,12 @@ pub fn db_swap_databases(
 }
 
 /// Propagate a key deletion to replicas and AOF.
-///
-/// C: db.c:2021 propagateDeletion
 pub fn propagate_deletion(_db_id: u32, _key: &RedisString, _lazy: bool, _slot: i32) {
     // TODO(port): alsoPropagate(db->id, argv[DEL/UNLINK + key], PROPAGATE_AOF|PROPAGATE_REPL, slot)
-    // Replication + AOF: Phase 4+
+ // Replication + AOF: Phase 4
 }
 
 /// Delete an expired key and propagate the implicit deletion.
-///
-/// C: db.c:1969 deleteExpiredKeyAndPropagate
 pub fn delete_expired_key_and_propagate(db: &mut RedisDb, key: &RedisString) {
     // TODO(port): latencyStartMonitor / latencyEndMonitor for "expire-del"
     let db_id = db.id;
@@ -1243,7 +1150,6 @@ pub fn delete_expired_key_and_propagate(db: &mut RedisDb, key: &RedisString) {
 // Key-space commands
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// C: db.c:831 flushdbCommand — FLUSHDB [ASYNC|SYNC]
 pub fn flushdb_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     // TODO(port): parse ASYNC/SYNC flag from argv[1]
     // TODO(port): forceCommandPropagation(c, PROPAGATE_REPL|PROPAGATE_AOF)
@@ -1254,10 +1160,8 @@ pub fn flushdb_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     ctx.reply_simple_string(b"OK")
 }
 
-/// C: db.c:856 flushallCommand — FLUSHALL [ASYNC|SYNC]
-///
-/// Clears every logical database. The current client's DB is cleared via the
-/// already-held `ctx.db_mut()` reference; all other DBs are locked and cleared
+/// Clears every logical database. The current client's DB is cleared via
+/// already-held `ctx.db_mut` reference; all other DBs are locked and cleared
 /// individually to avoid re-acquiring the mutex held by the accept loop.
 pub fn flushall_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     fire_stream_db_flushed_hook();
@@ -1275,8 +1179,6 @@ pub fn flushall_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 }
 
 /// Common body for DEL and UNLINK.
-///
-/// C: db.c:871 delGenericCommand
 fn del_generic_command(ctx: &mut CommandContext, lazy: bool) -> Result<(), RedisError> {
     let argc = ctx.arg_count();
     let mut num_deleted: i64 = 0;
@@ -1312,18 +1214,18 @@ fn del_generic_command(ctx: &mut CommandContext, lazy: bool) -> Result<(), Redis
     ctx.reply_integer(num_deleted)
 }
 
-/// C: db.c:887 delCommand — DEL key [key ...]
+/// DEL key [key...]
 pub fn del_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     // TODO(port): use server.lazyfree_lazy_user_del to pick lazy vs sync
     del_generic_command(ctx, false)
 }
 
-/// C: db.c:891 unlinkCommand — UNLINK key [key ...]
+/// UNLINK key [key...]
 pub fn unlink_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     del_generic_command(ctx, true)
 }
 
-/// C: db.c:896 existsCommand — EXISTS key [key ...]
+/// EXISTS key [key...]
 pub fn exists_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let argc = ctx.arg_count();
     let mut count: i64 = 0;
@@ -1340,7 +1242,7 @@ pub fn exists_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     ctx.reply_integer(count)
 }
 
-/// C: db.c:907 selectCommand — SELECT index
+/// SELECT index
 pub fn select_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let id_arg = ctx.arg(1)?.clone();
     let id = parse_i64_from_bytes(id_arg.as_bytes())
@@ -1350,7 +1252,6 @@ pub fn select_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     ctx.reply_simple_string(b"OK")
 }
 
-/// C: db.c:924 randomkeyCommand — RANDOMKEY
 pub fn randomkey_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     match ctx.db().random_key() {
         None => ctx.reply_null_bulk(),
@@ -1358,7 +1259,7 @@ pub fn randomkey_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     }
 }
 
-/// C: db.c:936 keysCommand — KEYS pattern
+/// KEYS pattern
 pub fn keys_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let pattern = ctx.arg(1)?.clone();
     // TODO(port): cluster slot filtering (patternHashSlot, clusterIsSlotImporting check)
@@ -1371,8 +1272,7 @@ pub fn keys_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 }
 
 /// Return the canonical `TYPE` reply byte-string for an `ObjectKind`.
-///
-/// Mirrors the dispatch table in `t_string.c`'s `typeCommand`; used by
+///'s `typeCommand`; used by
 /// SCAN's `TYPE` filter and by `keys_snapshot_with_types`.
 pub fn object_kind_name(kind: &ObjectKind) -> &'static [u8] {
     match kind {
@@ -1388,14 +1288,12 @@ pub fn object_kind_name(kind: &ObjectKind) -> &'static [u8] {
     }
 }
 
-/// C: db.c:1402 scanCommand — SCAN cursor [MATCH pat] [COUNT n] [TYPE type]
-///
-/// Phase-B linear cursor: the cursor is a `u64` byte-offset into the
-/// snapshot returned by `keys_snapshot_with_types`. Each call walks up to
+/// SCAN cursor [MATCH pat] [COUNT n] [TYPE type]
+/// Phase-B linear cursor: the cursor is a `u64` byte-offset into
+/// snapshot returned by `keys_snapshot_with_types`. Each call walks up
 /// `COUNT` entries (default `10`), applies any `MATCH` glob and `TYPE`
 /// filter, and replies with the next cursor (or `0` on completion) plus
 /// the matched key array. Pattern matching reuses `glob_match`.
-///
 /// TODO(port): resize-safe reverse-binary cursor mixing (db.c hashCursor)
 /// once kvstore lands in Phase 4.
 pub fn scan_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
@@ -1494,18 +1392,16 @@ fn parse_u64_from_bytes(b: &[u8]) -> Option<u64> {
     Some(n)
 }
 
-/// C: db.c:1408 dbsizeCommand — DBSIZE
 pub fn dbsize_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     ctx.reply_integer(ctx.db().size() as i64)
 }
 
-/// C: db.c:1412 lastsaveCommand — LASTSAVE
 pub fn lastsave_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     // TODO(port): server.lastsave
     ctx.reply_integer(0)
 }
 
-/// C: db.c:1416 typeCommand — TYPE key
+/// TYPE key
 pub fn type_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let key = ctx.arg(1)?.clone();
     let type_name: &[u8] = match ctx
@@ -1528,7 +1424,6 @@ pub fn type_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     ctx.reply_simple_string(type_name)
 }
 
-/// C: db.c:1422 shutdownCommand — SHUTDOWN [[NOSAVE|SAVE] [NOW] [FORCE] [SAFE] | ABORT]
 pub fn shutdown_command(_ctx: &mut CommandContext) -> Result<(), RedisError> {
     // TODO(port): full flag parsing (NOSAVE / SAVE / NOW / FORCE / ABORT / SAFE / FAILOVER)
     // TODO(port): blockClientShutdown, prepareForShutdown, abortShutdown, exit(0)
@@ -1538,8 +1433,6 @@ pub fn shutdown_command(_ctx: &mut CommandContext) -> Result<(), RedisError> {
 }
 
 /// Common body for RENAME and RENAMENX.
-///
-/// C: db.c:1491 renameGenericCommand
 fn rename_generic_command(ctx: &mut CommandContext, nx: bool) -> Result<(), RedisError> {
     let src_key = ctx.arg(1)?.clone();
     let dst_key = ctx.arg(2)?.clone();
@@ -1587,18 +1480,17 @@ fn rename_generic_command(ctx: &mut CommandContext, nx: bool) -> Result<(), Redi
     }
 }
 
-/// C: db.c:1530 renameCommand — RENAME key newkey
+/// RENAME key newkey
 pub fn rename_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     rename_generic_command(ctx, false)
 }
 
-/// C: db.c:1534 renamenxCommand — RENAMENX key newkey
+/// RENAMENX key newkey
 pub fn renamenx_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     rename_generic_command(ctx, true)
 }
 
-/// C: db.c:1538 moveGenericCommand — MOVE key db [REPLACE]
-///
+/// MOVE key db [REPLACE]
 /// Atomically moves `key` from the client's current database to `target_db`.
 /// With `REPLACE`, an existing key in the destination is overwritten.
 /// Returns 1 on success, 0 when the key does not exist in the source or
@@ -1660,8 +1552,7 @@ pub fn move_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     ctx.reply_integer(1)
 }
 
-/// C: db.c:1611 copyCommand — COPY source destination [DB n] [REPLACE]
-///
+/// COPY source destination [DB n] [REPLACE]
 /// Copies `source` to `destination`. When `DB n` is supplied and `n` differs
 /// from the client's current database, the destination key lands in that
 /// logical database. The `REPLACE` flag allows overwriting an existing
@@ -1733,9 +1624,8 @@ pub fn copy_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     ctx.reply_integer(1)
 }
 
-/// C: db.c:1408 touchCommand — TOUCH key [key ...]
-///
-/// Returns the number of supplied keys that currently exist. Matches the
+/// TOUCH key [key...]
+/// Returns the number of supplied keys that currently exist. Matches
 /// semantics of EXISTS for Phase A; the C implementation also bumps LRU/LFU
 /// access info, which is deferred.
 pub fn touch_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
@@ -1756,7 +1646,6 @@ pub fn touch_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 
 /// Wake any clients blocked on keys in `other_db_id` (the db not currently
 /// held by the command dispatch).
-///
 /// Delegates to the hook installed by `install_swapdb_wake_hook`. No-op when
 /// no hook is installed (unit tests).
 fn wake_blocked_in_other_db(other_db_id: u32) {
@@ -1775,11 +1664,10 @@ fn eq_ignore_ascii_case(a: &[u8], b: &[u8]) -> bool {
         .all(|(x, y)| x.eq_ignore_ascii_case(y))
 }
 
-/// C: db.c:1861 swapdbCommand — SWAPDB index index
-///
+/// SWAPDB index index
 /// Atomically swaps the contents of two logical databases. When the client's
 /// current database is one of the two being swapped, the swap uses the already-
-/// held `ctx.db_mut()` lock plus a second lock on the other DB to avoid
+/// held `ctx.db_mut` lock plus a second lock on the other DB to avoid
 /// deadlock against the accept loop's lock ordering. When neither swapped DB
 /// is the current client DB both locks are acquired fresh in ascending index
 /// order (matching `GlobalDatabases::swap`). After the swap, blocked clients
@@ -1843,14 +1731,11 @@ pub fn swapdb_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Key-extraction helpers  (C: db.c:2295 getKeysPrepareResult and family)
+// Key-extraction helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Generic key-extraction for commands with a numkeys counter argument.
-///
 /// Used by ZUNION, ZUNIONSTORE, ZINTER, LMPOP, BLMPOP, etc.
-///
-/// C: db.c:2681 genericGetKeys
 pub fn generic_get_keys(
     store_key_ofs: Option<i32>,
     key_count_ofs: usize,
@@ -1880,7 +1765,7 @@ pub fn generic_get_keys(
     Ok(result.keys.len())
 }
 
-/// C: db.c:2597 getKeysUsingLegacyRangeSpec — firstkey/lastkey/step extraction.
+/// firstkey/lastkey/step extraction.
 pub fn get_keys_using_legacy_range_spec(
     first: i32,
     last: i32,
@@ -1909,7 +1794,6 @@ pub fn get_keys_using_legacy_range_spec(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Parse a decimal integer from a byte slice without UTF-8 conversion.
-///
 /// Returns `None` if the slice is empty, contains non-ASCII digits, or overflows.
 fn parse_i64_from_bytes(b: &[u8]) -> Option<i64> {
     if b.is_empty() {
@@ -1938,12 +1822,10 @@ fn parse_i64_from_bytes(b: &[u8]) -> Option<i64> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Glob-style pattern matcher  (C: util.c stringmatchlen)
+// Glob-style pattern matcher
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Case-sensitive glob match over byte slices.
-///
-/// C: util.c `stringmatchlen(pattern, plen, string, slen, 0)`.
 pub fn glob_match(pattern: &[u8], text: &[u8]) -> bool {
     crate::util::string_match_len(pattern, text, false)
 }
@@ -2000,13 +1882,13 @@ mod tests {
         obj.expire = 1; // 1 ms since epoch — always in the past
         db.add(key.clone(), obj);
 
-        // Normal client: the expired key is invisible to lookup and iteration.
+ // Normal client: the expired key is invisible to lookup and iteration.
         assert!(db.is_expired(&key));
         assert!(db.random_key().is_none());
         assert!(db.matching_keys(b"*").is_empty());
 
-        // import-source state: the expired key stays visible everywhere, and
-        // is NOT lazily deleted on lookup.
+ // import-source state: the expired key stays visible everywhere,
+ // is NOT lazily deleted on lookup.
         db.set_import_expire_state(true, true);
         assert!(!db.is_expired(&key));
         assert!(db.lookup_key_read_with_flags(&key, LOOKUP_NONE).is_some());
@@ -2017,14 +1899,14 @@ mod tests {
         assert_eq!(db.random_key(), Some(key.clone()));
         assert_eq!(db.matching_keys(b"*"), vec![key.clone()]);
 
-        // import-mode, normal client: the key is reported expired (invisible)
-        // but a non-force read must NOT lazily delete it.
+ // import-mode, normal client: the key is reported expired (invisible)
+ // but a non-force read must NOT lazily delete it.
         db.set_import_expire_state(false, true);
         assert!(db.is_expired(&key));
         assert!(db.lookup_key_read_with_flags(&key, LOOKUP_NONE).is_none());
         assert!(db.exists_raw(&key), "import-mode must keep the expired key");
 
-        // No import mode: normal lazy expiration deletes on read.
+ // No import mode: normal lazy expiration deletes on read.
         db.set_import_expire_state(false, false);
         assert!(db.is_expired(&key));
         assert!(db.lookup_key_read_with_flags(&key, LOOKUP_NONE).is_none());
@@ -2179,7 +2061,7 @@ mod tests {
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        src/db.c  (~2850 lines, ~80 functions)
+//   source:        Valkey
 //   target_crate:  redis-core
 //   confidence:    high
 //   todos:         59

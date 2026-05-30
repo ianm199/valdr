@@ -1,12 +1,10 @@
 //! Core server state.
-//!
 //! Owners (per `harness/type-vocabulary.tsv`):
-//!   - `Client`          — `src/client.rs`
-//!   - `CommandContext`  — `src/command_context.rs`
-//!   - `RedisServer`     — `src/server.rs`     (STUB; expand in Phase 3)
-//!   - `RedisDb`         — `src/db.rs`         (STUB; HashMap-backed; kvstore in Phase 4)
-//!   - `RedisObject`     — `src/object.rs`     (STUB; encoding sub-variants in Phase 4)
-//!
+//! - `Client` — `src/client.rs`
+//! - `CommandContext` — `src/command_context.rs`
+//! - `RedisServer` — `src/server.rs` (STUB; expand in Phase 3)
+//! - `RedisDb` — `src/db.rs` (STUB; HashMap-backed; kvstore in Phase 4)
+//! - `RedisObject` — `src/object.rs` (STUB; encoding sub-variants in Phase 4)
 //! Phases 2-3 of the pilot land here.
 
 pub mod acl;

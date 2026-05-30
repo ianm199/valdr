@@ -1,12 +1,10 @@
 //! Server introspection: INFO and LASTSAVE.
-//!
 //! INFO is intentionally excluded from the wire-diff oracle corpus because
 //! most fields (pid, port, uptime, used_memory, command stats) differ between
 //! processes by definition. The implementation here exists so clients that
 //! call INFO do not crash on a null reply.
-//!
 //! Memory accounting uses the estimator approach: `used_memory_estimated =
-//! dict.len() * 80 + sum_of_string_bytes`. This is declared in
+//! dict.len * 80 + sum_of_string_bytes`. This is declared
 //! `docs/PATH_TO_DEF3.md` §Eviction as the approved heuristic for Def 3.
 
 use std::io::Write;
@@ -27,7 +25,6 @@ use crate::connection::get_max_clients;
 const ESTIMATED_SERVER_MEMORY_BASELINE: u64 = 1024;
 
 /// Process start time (unix seconds), captured on first call.
-///
 /// Used by both `INFO server` (for `uptime_in_seconds`) and `LASTSAVE`.
 /// Because the pilot server does not persist to disk, the "last save" time
 /// is reported as the process start time — every client treats this as a
@@ -114,7 +111,6 @@ fn memory_hashtable_stats_for_key_count(keys: u64) -> (usize, usize, usize) {
 }
 
 /// `INFO [section]`.
-///
 /// Returns the canonical Redis multi-section text blob as a bulk string.
 /// The default reply (no section) emits every section; a section argument
 /// such as `server`, `clients`, `memory`, `stats`, `replication`, `cpu`, or
@@ -641,7 +637,6 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// `LASTSAVE`.
-///
 /// Returns the Unix timestamp (seconds) of the last successful RDB save,
 /// or the process start time when no save has occurred in this session.
 pub fn lastsave_command(ctx: &mut CommandContext) -> RedisResult<()> {
@@ -675,7 +670,7 @@ fn ascii_lower(b: u8) -> u8 {
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        reference/valkey/src/server.c INFO keyspace DB iteration
+//   source:        Valkey
 //   target_crate:  redis-commands
 //   confidence:    medium
 //   todos:         1

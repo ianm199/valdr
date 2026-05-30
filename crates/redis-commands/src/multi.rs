@@ -1,19 +1,16 @@
 //! MULTI/EXEC transaction block and WATCH/UNWATCH CAS implementation.
-//!
 //! The five user-facing transaction commands are wired through the same
 //! `dispatch` entrypoint used by every other command. Queueing is implemented
-//! by `dispatch::dispatch` itself — once `client.flag_multi()` is set, every
+//! by `dispatch::dispatch` itself — once `client.flag_multi` is set, every
 //! subsequent command other than `MULTI`/`EXEC`/`DISCARD`/`WATCH`/`UNWATCH`/
 //! `RESET` is pushed onto `client.queued_argvs` and the client receives
 //! `+QUEUED\r\n`.
-//!
-//! Cross-connection WATCH invalidation goes through a process-wide index in
-//! `redis-core::db::watched_keys_index()`. WATCH registrations are keyed by
+//! Cross-connection WATCH invalidation goes through a process-wide index
+//! `redis-core::db::watched_keys_index`. WATCH registrations are keyed by
 //! selected DB plus key bytes, and every mutation through `RedisDb::set_key` /
 //! `sync_delete` / `clear` marks matching clients as dirty there. `EXEC`
-//! consults the index at the top of its body, sees its own client id in the
+//! consults the index at the top of its body, sees its own client id in
 //! dirty set, and aborts with `*-1\r\n`.
-//!
 //! The process-wide index lives behind a `OnceLock` because the current
 //! `RedisDb` does not own a reference back to `RedisServer`, and `RedisServer`
 //! does not own the live `Client` list. In future, the index can move onto
@@ -43,7 +40,6 @@ const NAME_DISCARD: &[u8] = b"DISCARD";
 const NAME_UNWATCH: &[u8] = b"UNWATCH";
 
 /// True when `name` runs eagerly even inside a MULTI block.
-///
 /// EXEC, DISCARD, UNWATCH, and RESET tear down or progress the transaction;
 /// they must not be queued. Commands carrying `CMD_NO_MULTI` in the Valkey
 /// command table are rejected by [`reject_no_multi_command`] before reaching
@@ -58,10 +54,9 @@ pub fn is_tx_control_command(name: &[u8]) -> bool {
 }
 
 /// True when `name` carries the C `CMD_NO_MULTI` flag.
-///
 /// Inside a MULTI block, these commands are rejected with the generic
 /// `Command 'X' not allowed inside a transaction` error real Valkey emits
-/// (see C `server.c::processCommand` after the `flag.multi && CMD_NO_MULTI`
+/// (see C `processCommand` after the `flag.multi && CMD_NO_MULTI`
 /// check).
 pub fn is_no_multi_command(name: &[u8]) -> bool {
     command_is_no_multi(name)
@@ -79,8 +74,7 @@ fn eq_ignore_ascii(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// Reject a `CMD_NO_MULTI` command issued inside a MULTI block.
-///
-/// Reproduces the exact C error text from `server.c` line 4410. Lowercases
+/// Reproduces the exact C error text from line 4410. Lowercases
 /// the command name to mirror the C `c->cmd->fullname` lookup (the canonical
 /// dispatch table stores lowercase names).
 pub fn reject_no_multi_command(name: &[u8]) -> RedisError {
@@ -97,7 +91,6 @@ pub fn reject_no_multi_command(name: &[u8]) -> RedisError {
 }
 
 /// Mark the current MULTI block as failed due to a queue-time rejection.
-///
 /// Keep the client in MULTI so EXEC can
 /// return EXECABORT, but discard commands already queued for the doomed batch.
 pub fn flag_transaction_dirty_exec(client: &mut Client) {
@@ -117,8 +110,7 @@ pub fn flag_transaction_dirty_exec(client: &mut Client) {
 }
 
 /// Append the client's current `argv` to its MULTI queue and reply `+QUEUED`.
-///
-/// Caller has already verified `client.flag_multi()` is true and the command
+/// Caller has already verified `client.flag_multi` is true and the command
 /// is not a transaction-control command. Performs a basic command-existence
 /// check; on miss it sets the dirty-exec flag so the EXEC step responds with
 /// the `EXECABORT` error real Redis emits.
@@ -150,7 +142,6 @@ pub fn queue_current_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// `MULTI` — begin a transaction block.
-///
 /// Dispatch rejects nested `MULTI` at the `CMD_NO_MULTI` gate before this
 /// handler is reached, so by the time we run the client is guaranteed to be
 /// outside any transaction.
@@ -283,7 +274,7 @@ fn queued_has_write_command(queued: &[Vec<RedisString>]) -> bool {
 }
 
 /// True when any queued command lacks the `STALE` flag, i.e. it would be
-/// refused on a stale replica. Used to abort EXEC with `MASTERDOWN` when the
+/// refused on a stale replica. Used to abort EXEC with `MASTERDOWN` when
 /// server went stale after the commands were queued.
 fn queued_has_non_stale_command(queued: &[Vec<RedisString>]) -> bool {
     queued.iter().any(|argv| {
@@ -303,7 +294,6 @@ fn queued_has_declared_write_script_on_replica(queued: &[Vec<RedisString>]) -> b
 }
 
 /// Run a single queued argv as if the client had just sent it directly.
-///
 /// Replies (including errors) are written into `client.reply_buf` exactly as
 /// they would be for a top-level dispatch — that's what gives EXEC its array
 /// of inner frames.
@@ -340,11 +330,11 @@ fn propagate_transaction_commands(
     ctx: &mut CommandContext,
     commands: &[(u32, Vec<RedisString>)],
 ) -> i64 {
-    // If a queued REPLICAOF demoted this server to a replica during the EXEC,
-    // the entire transaction must not be propagated to the (now disconnected)
-    // replicas — matching Valkey, which discards pending propagation when it
-    // becomes a replica. The queued writes still executed locally; they are
-    // simply not forwarded.
+ // If a queued REPLICAOF demoted this server to a replica during the EXEC,
+ // the entire transaction must not be propagated to the (now disconnected)
+ // replicas — matching Valkey, which discards pending propagation when it
+ // becomes a replica. The queued writes still executed locally; they are
+ // simply not forwarded.
     if redis_core::replication::global_replication_state().is_replica() {
         return 0;
     }
@@ -427,7 +417,6 @@ fn wake_blocked_for_db(ctx: &mut CommandContext, db_id: u32, key: &RedisString) 
 }
 
 /// `WATCH key [key …]` — register CAS watchers on each key.
-///
 /// `CMD_NO_MULTI` causes dispatch to reject `WATCH` inside an open
 /// transaction with the standard "Command 'watch' not allowed inside a
 /// transaction" message before this handler runs.
@@ -455,9 +444,8 @@ pub fn unwatch_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// Clear the multi-bit, the queue, the dirty flags, and the WATCH set.
-///
 /// Called by `DISCARD`, `EXEC` (after run), and `Client::reset_state`. Mirrors
-/// `multi.c::discardTransaction`.
+/// `discardTransaction`.
 pub fn reset_multi_state(client: &mut Client) {
     client.queued_argvs.clear();
     client.set_flag_multi(false);
@@ -564,7 +552,7 @@ mod tests {
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        src/multi.c (Round 8b dispatch-integration rewrite)
+//   source:        Valkey
 //   target_crate:  redis-commands
 //   confidence:    medium
 //   todos:         0

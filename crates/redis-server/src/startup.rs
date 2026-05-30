@@ -328,12 +328,10 @@ pub(crate) fn unix_control_reply(argv: &[Vec<u8>]) -> Vec<u8> {
 }
 
 /// Reaper thread for BGSAVE child processes.
-///
 /// Polls `server.rdb_child_pid` every 500 ms. When a non-zero PID is
 /// recorded, calls `waitpid` with `WNOHANG` to check if the child has exited.
 /// On success: updates `last_save_unix` and clears the PID. On failure
 /// (non-zero exit status): logs an error and clears the PID.
-///
 /// Only compiled on Unix — the thread-snapshot BGSAVE fallback on non-Unix
 /// platforms does not produce child processes and needs no reaping.
 #[cfg(unix)]
@@ -404,15 +402,13 @@ pub(crate) fn spawn_bgsave_reaper(
 }
 
 /// Reaper for BGSAVE-for-replication child processes.
-///
 /// Tracked separately from the user-`BGSAVE` reaper because the two can run
 /// concurrently: a user invoking `BGSAVE` while a replica is mid-handshake
 /// keeps both children alive at once. On successful child exit this thread
 /// reads the temp RDB file into memory and ships it through each waiting
-/// replica's outbound channel, then sends the catch-up backlog window (from
-/// `snapshot_offset` to the current master offset) and flips the replica to
+/// replica's outbound channel, then sends the catch-up backlog window (
+/// `snapshot_offset` to the current master offset) and flips the replica
 /// `Online`.
-///
 /// On non-Unix the BGSAVE-for-replication path uses a thread fallback that
 /// drops the job onto `ReplicationState` after the save completes — no
 /// `waitpid` is needed there. For now the non-Unix path will leave the temp
@@ -465,7 +461,7 @@ pub(crate) fn spawn_repl_bgsave_reaper() {}
 
 /// Stream the freshly-baked RDB plus the catch-up backlog window to every
 /// replica registered on the current `ReplBgsaveJob`, then mark each one
-/// `Online`. Called by the repl-bgsave reaper after `waitpid` confirms the
+/// `Online`. Called by the repl-bgsave reaper after `waitpid` confirms
 /// child exited cleanly.
 pub(crate) fn dispatch_full_sync_transfer() {
     let repl = redis_core::replication::global_replication_state();
@@ -524,12 +520,12 @@ pub(crate) fn dispatch_full_sync_transfer() {
             snapshot_offset
         );
     }
-    // A client can enter WAIT while one replica is still in full-sync and
-    // therefore before `request_ack_from_replicas` will address it. Once the
-    // RDB plus catch-up backlog are queued, prompt replicas only if a WAIT or
-    // WAITAOF waiter is actually present. Sending GETACK unconditionally
-    // pollutes normal replication-stream assertions and diverges from Valkey's
-    // "only request ACKs for blocked WAIT clients" behavior.
+ // A client can enter WAIT while one replica is still in full-sync
+ // therefore before `request_ack_from_replicas` will address it. Once
+ // RDB plus catch-up backlog are queued, prompt replicas only if a WAIT or
+ // WAITAOF waiter is actually present. Sending GETACK unconditionally
+ // pollutes normal replication-stream assertions and diverges from Valkey's
+ // "only request ACKs for blocked WAIT clients" behavior.
     if job.needs_getack_on_completion || blocked_replication_wait_any() {
         send_getack_to_online_replicas(&repl);
     }
@@ -564,7 +560,6 @@ pub(crate) fn send_getack_to_online_replicas(repl: &redis_core::replication::Rep
 
 /// Background scanner that wakes blocked BLPOP/BRPOP/BLMOVE waiters once
 /// their deadline elapses.
-///
 /// Polls the global `BlockedKeysIndex` every 100 ms, drains entries whose
 /// `deadline_ms` is in the past, and ships either `*-1\r\n` (null array,
 /// for BLPOP / BRPOP / BLMPOP) or `$-1\r\n` (null bulk, for BLMOVE /
@@ -694,7 +689,6 @@ pub(crate) fn spawn_signal_shutdown_watcher(
 }
 
 /// Accept loop. One std::thread per accepted connection.
-///
 /// Before spawning a handler thread, checks the live `maxclients` limit against
 /// the `connected_clients` counter in `ServerMetrics`. When the limit is
 /// reached, writes the canonical error reply and closes the socket.
@@ -766,7 +760,6 @@ pub(crate) fn serve(
 }
 
 /// Accept loop for the TLS listener.
-///
 /// Mirrors `serve` but wraps each accepted `TcpStream` in a rustls
 /// `ServerConnection` before handing off to `handle_connection_tls`. The
 /// plain TCP accept loop is unaffected by this code path.
@@ -860,9 +853,8 @@ pub(crate) fn spawn_writer(mut writer: TcpStream, peer: String) -> Sender<Vec<u8
 }
 
 /// Per-connection event loop for plain TCP connections.
-///
 /// Reads from the socket, feeds the incremental parser, dispatches each
-/// completed command, then ships replies through the outbound mpsc so the
+/// completed command, then ships replies through the outbound mpsc so
 /// dedicated writer thread owns all socket writes.
 pub(crate) fn handle_connection(
     stream: TcpStream,
@@ -900,7 +892,6 @@ pub(crate) fn handle_connection(
 }
 
 /// Per-connection event loop for TLS connections.
-///
 /// Unlike the plain TCP path, TLS state is owned by a single `StreamOwned`
 /// and cannot be cloned. Replies are written synchronously from the read loop
 /// thread; pub/sub payloads delivered via the outbound channel are drained
@@ -941,7 +932,6 @@ pub(crate) fn handle_connection_tls(
 }
 
 /// Shared read-dispatch-write loop for plain TCP connections.
-///
 /// Parameterised over the outbound sender so both `handle_connection` (plain
 /// TCP) can share the same loop body without code duplication.
 pub(crate) fn run_client_loop(
@@ -1043,9 +1033,9 @@ pub(crate) fn run_client_loop(
                 }
             }
 
-            // Batch all replies produced by commands already present in this
-            // read. Draining query_buf per command also destroys pipelined
-            // throughput by repeatedly memmoving the unread tail.
+ // Batch all replies produced by commands already present in this
+ // read. Draining query_buf per command also destroys pipelined
+ // throughput by repeatedly memmoving the unread tail.
             if client.should_close {
                 disconnect = true;
                 break;
@@ -1088,7 +1078,6 @@ pub(crate) fn run_client_loop(
 }
 
 /// Read-dispatch-write loop for TLS connections.
-///
 /// Because `rustls::StreamOwned` is not `Clone`, writes go through
 /// `conn.write_all` on the same thread. The `rx` channel carries pub/sub
 /// payloads from foreign threads; they are drained inline via `try_recv`
@@ -1278,7 +1267,6 @@ pub(crate) fn process_current_command(
 
 /// Route the current `client.argv` through the dispatcher using an already-held
 /// database lock.
-///
 /// If the previous command parked the client on the global blocked-keys
 /// index, the wake/timeout reply has already gone out via the writer thread
 /// before this fresh read returned bytes — clear the residual flag and any
@@ -1331,7 +1319,7 @@ pub(crate) fn process_current_command_with_db(
     client.reset_args();
 }
 
-/// Route the current `client.argv` through the dispatcher using the
+/// Route the current `client.argv` through the dispatcher using
 /// RuntimeOwner-owned DB list.
 pub(crate) fn process_current_command_with_db_list(
     client: &mut Client,
@@ -1436,10 +1424,9 @@ pub(crate) fn flush_reply(client: &mut Client, outbound: &Sender<Vec<u8>>) -> bo
 }
 
 /// Fast path for ordinary plain-TCP request/reply traffic.
-///
 /// Pub/sub, blocked clients, and replicas still need the writer-thread channel
 /// because other connection threads can deliver bytes to them. Normal clients
-/// have no foreign writers, so their own replies can be written directly and
+/// have no foreign writers, so their own replies can be written directly
 /// avoid one mpsc send plus one context switch per read batch.
 pub(crate) fn flush_reply_fast(client: &mut Client, outbound: &Sender<Vec<u8>>) -> bool {
     if client.reply_buf.is_empty() {
@@ -1463,7 +1450,6 @@ pub(crate) fn flush_reply_fast(client: &mut Client, outbound: &Sender<Vec<u8>>) 
 }
 
 /// Determine the initial authenticated username for a newly accepted connection.
-///
 /// If the global default ACL user is enabled and has `nopass`, the client
 /// starts pre-authenticated as `default`. Otherwise the client must AUTH before
 /// running commands.

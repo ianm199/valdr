@@ -1,6 +1,5 @@
 //! Connection-management and server commands: PING, ECHO, SELECT, CLIENT,
 //! COMMAND, DEBUG, TIME, HELLO, RESET, QUIT.
-//!
 //! Most handlers operate purely against the client's argv and reply buffer;
 //! they never need to touch the keyspace.
 
@@ -80,7 +79,6 @@ pub fn set_max_clients(n: u64) {
 }
 
 /// `PING [message]`.
-///
 /// With zero user arguments, replies with the simple string `+PONG\r\n`.
 /// With exactly one user argument, replies with that argument as a bulk
 /// string (mirroring the real Redis behaviour). Any larger arity is a
@@ -106,7 +104,6 @@ pub fn ping_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 }
 
 /// `ECHO message`.
-///
 /// Echoes its single argument back as a bulk string. Any other arity is a
 /// wrong-arity error.
 pub fn echo_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
@@ -118,7 +115,6 @@ pub fn echo_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 }
 
 /// `SELECT index`.
-///
 /// Records the selected DB index on the client after validating it against
 /// the database route attached to the current `CommandContext`.
 pub fn select_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
@@ -134,7 +130,6 @@ pub fn select_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 }
 
 /// `FUNCTION <subcommand> [args]`.
-///
 /// Routes library subcommands into the Lua function registry in `eval.rs`.
 pub fn function_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ctx.arg_count() < 2 {
@@ -189,7 +184,6 @@ pub fn function_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 }
 
 /// `CONFIG GET|SET|RESETSTAT|REWRITE`.
-///
 /// `CONFIG GET <pattern>` returns a flat array of (name, value, name, value …)
 /// entries for every known parameter whose name matches the glob pattern.
 /// Unknown patterns return an empty array. `CONFIG SET key value` updates
@@ -197,7 +191,6 @@ pub fn function_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 /// unknown parameters are also accepted so the TCL test suite does not
 /// abort. `CONFIG RESETSTAT` and `CONFIG REWRITE` are no-ops returning
 /// `+OK\r\n`.
-///
 /// TODO(architect): unknown configs silently accepted per TCL-suite
 /// expectations. A real implementation would gate `SET` on an allowlist
 /// and persist the values to a server-state map.
@@ -325,19 +318,17 @@ pub fn config_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 }
 
 /// Hard-coded list of (parameter, default value) pairs surfaced by CONFIG GET.
-///
-/// Matches the canonical Redis defaults for parameters the TCL harness and
+/// Matches the canonical Redis defaults for parameters the TCL harness
 /// common clients probe. Values are ASCII strings — they are returned verbatim
 /// as bulk strings, so numeric parameters are encoded as decimal text.
 
 /// `MEMORY <subcommand>`.
-///
-/// `MEMORY USAGE key [SAMPLES n]` returns a coarse byte estimate so the
+/// `MEMORY USAGE key [SAMPLES n]` returns a coarse byte estimate so
 /// `string.tcl` memoryusage test sees a non-nil value bigger than the key+value
 /// length sum. We approximate by `key.len + value.len + 48` (the constant is a
 /// rough object-header overhead). For non-string values we use the byte length
 /// of the type tag plus a placeholder; this is enough for the suite to make
-/// progress without a real allocator-walk implementation. Returns nil when the
+/// progress without a real allocator-walk implementation. Returns nil when
 /// key is missing.
 pub fn memory_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ctx.arg_count() < 2 {
@@ -433,10 +424,9 @@ pub(crate) fn memory_hashtable_stats_for_key_count(keys: u64) -> (usize, usize, 
 }
 
 /// `TIME`.
-///
 /// Replies with a two-element array of bulk strings: the current Unix time
 /// in seconds and the microseconds component within the current second.
-/// Read directly from `SystemTime::now()`.
+/// Read directly from `SystemTime::now`.
 pub fn time_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ctx.arg_count() != 1 {
         return Err(RedisError::wrong_number_of_args(b"time"));
@@ -456,7 +446,6 @@ pub fn time_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 }
 
 /// `QUIT`.
-///
 /// Replies `+OK\r\n` then asks the accept loop to drop the connection by
 /// setting `client.should_close`. The accept loop flushes the reply before
 /// closing.
@@ -472,29 +461,25 @@ pub fn quit_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 }
 
 /// `SHUTDOWN [NOSAVE | SAVE] [NOW] [FORCE] [ABORT]`.
-///
 /// Terminates the server process. The sequence mirrors real Valkey: parse any
-/// keyword flags, write `+OK\r\n` directly onto the client's transport so the
+/// keyword flags, write `+OK\r\n` directly onto the client's transport so
 /// caller receives a reply before the socket is closed, then call
-/// `std::process::exit(0)`.  The OS unbinds all listening sockets as part of
+/// `std::process::exit(0)`. The OS unbinds all listening sockets as part
 /// process teardown, which is what releases the TCP port and allows the TCL
 /// harness to reuse it for the next `start_server` cycle.
-///
 /// Persistence behaviour:
-///   * `NOSAVE` (default when no save keyword is given) — skip any RDB/AOF
-///     flush.  Used by the TCL test harness for every non-persistence test.
-///   * `SAVE` — would normally trigger a foreground BGSAVE; not yet wired, so
-///     we treat it identically to NOSAVE for this release.
-///   * `ABORT` — cancels an in-progress shutdown; we return an error because
-///     no background shutdown can be in progress in our single-cycle model.
-///
-/// The reply is written directly to the live transport (bypassing the
+/// * `NOSAVE` (default when no save keyword is given) — skip any RDB/AOF
+/// flush. Used by the TCL test harness for every non-persistence test.
+/// * `SAVE` — would normally trigger a foreground BGSAVE; not yet wired, so
+/// we treat it identically to NOSAVE for this release.
+/// * `ABORT` — cancels an in-progress shutdown; we return an error because
+/// no background shutdown can be in progress in our single-cycle model.
+/// The reply is written directly to the live transport (bypassing
 /// outbound mpsc channel) so the bytes reach the peer before `exit(0)` tears
-/// down the process.  Failures to write the reply are ignored — the caller
+/// down the process. Failures to write the reply are ignored — the caller
 /// gets a broken-pipe error instead, which the TCL harness treats equivalently
 /// to a clean +OK.
-///
-/// C: `shutdownCommand(client *c)` — db.c:1423, calling `prepareForShutdown`
+///, calling `prepareForShutdown`
 /// then `exit(0)`.
 pub fn shutdown_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     let mut abort = false;
@@ -591,7 +576,6 @@ fn exit_process_now() -> ! {
 }
 
 /// `RESET`.
-///
 /// Resets the client's transient state (name, MULTI state, db, flags, queued
 /// reply) and replies `+RESET\r\n`.
 pub fn reset_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
@@ -605,8 +589,6 @@ pub fn reset_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 }
 
 /// `READONLY`.
-///
-/// C: `readonlyCommand(client *c)` in `cluster.c` sets a per-client bit and
 /// replies OK. The bit is observable as `flags=r` in CLIENT LIST.
 pub fn readonly_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ctx.arg_count() != 1 {
@@ -618,8 +600,6 @@ pub fn readonly_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 }
 
 /// `READWRITE`.
-///
-/// C: `readwriteCommand(client *c)` clears the per-client readonly bit.
 pub fn readwrite_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ctx.arg_count() != 1 {
         return Err(RedisError::wrong_number_of_args(b"readwrite"));
@@ -630,7 +610,6 @@ pub fn readwrite_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 }
 
 /// `MONITOR`.
-///
 /// Registers the connection for best-effort command stream messages. The full
 /// Valkey implementation models monitors as replica clients; this port keeps a
 /// narrow sender list so RESET and normal request parsing continue to work.
@@ -766,18 +745,15 @@ fn append_monitor_quoted_arg(out: &mut Vec<u8>, bytes: &[u8]) {
 }
 
 /// `DEBUG <subcommand> [args]`.
-///
 /// Pilot subset:
-///   * `DEBUG SLEEP seconds` — sleep for the given (fractional) seconds,
-///     then reply `+OK\r\n`. Used by tests to inject latency.
-///
-/// Any other subcommand falls through to an `ERR DEBUG ...` error.
+/// * `DEBUG SLEEP seconds` — sleep for the given (fractional) seconds,
+/// then reply `+OK\r\n`. Used by tests to inject latency.
+/// Any other subcommand falls through to an `ERR DEBUG...` error.
 /// `HELLO [protover] [AUTH user pass] [SETNAME name]`.
-///
 /// Pilot-shape reply: a flat RESP2 multi-bulk of `[key, value]` pairs
-/// describing the server. Returns a list (not a RESP3 map) regardless of
+/// describing the server. Returns a list (not a RESP3 map) regardless
 /// the requested protocol version; the underlying client representation is
-/// still RESP2. AUTH and SETNAME options parse-and-ignore for now — the
+/// still RESP2. AUTH and SETNAME options parse-and-ignore for now —
 /// SETNAME option does set the client name when present.
 pub fn hello_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     let argc = ctx.arg_count();
@@ -931,7 +907,6 @@ pub fn module_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 }
 
 /// `AUTH [username] password`.
-///
 /// Single-argument form (`AUTH password`): authenticates against the `default`
 /// user first; if that fails, searches all users for a matching password.
 /// Two-argument form (`AUTH username password`): authenticates as the named user.
@@ -1054,7 +1029,7 @@ pub(crate) fn parse_acl_key_permission(rule: &[u8]) -> Result<(u8, &[u8]), Vec<u
     Ok((permissions, pattern))
 }
 
-/// Parse a floating-point number. Rejects empty input, whitespace, and
+/// Parse a floating-point number. Rejects empty input, whitespace,
 /// non-numeric bytes.
 pub(crate) fn parse_f64_strict(bytes: &[u8]) -> Option<f64> {
     if bytes.is_empty() {

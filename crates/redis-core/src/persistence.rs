@@ -1,7 +1,6 @@
 //! Persistence runtime state shared by INFO, command handlers, and reapers.
-//!
 //! This module intentionally contains only state and small typed enums. RDB
-//! codecs stay in `redis-core::rdb`; AOF replay/rewrite stays in
+//! codecs stay in `redis-core::rdb`; AOF replay/rewrite stays
 //! `redis-commands`, because replay needs the command table.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
@@ -163,7 +162,7 @@ impl PersistenceState {
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        reference/valkey/src/server.h persistence fields
+//   source:        Valkey
 //   target_crate:  redis-core
 //   confidence:    medium
 //   todos:         0

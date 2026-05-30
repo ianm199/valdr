@@ -1,71 +1,55 @@
 //! Fast decimal floating-point parsing for Valkey byte strings.
-//!
-//! Port of `valkey_strtod.c` / `valkey_strtod.h`. The C implementation uses
-//! `ffc.h` — a single-header C99 port of the Rust `fast_float` library by
+//! The C implementation uses
+//! — a single-header C99 port of the Rust `fast_float` library by
 //! Koleman Nix. This translation uses the original Rust `fast_float` crate
-//! directly, which is the upstream source that `ffc.h` was derived from.
-//!
+//! directly, which is the upstream source that was.
 //! # Parsing options (mirrors `valkey_strtod_options` in C)
-//!
 //! The C code configures `ffc` with:
 //! - `FFC_PRESET_GENERAL` = `FFC_FORMAT_FLAG_FIXED | FFC_FORMAT_FLAG_SCIENTIFIC`
-//!   (accepts both `123.456` and `1.23e4` notation)
+//! (accepts both `123.456` and `1.23e4` notation)
 //! - `FFC_FORMAT_FLAG_ALLOW_LEADING_PLUS` (accepts `+1.5`)
 //! - Decimal point: `'.'`
 //! - No `FFC_FORMAT_FLAG_NO_INFNAN`, so `inf`/`nan` literals are accepted.
-//!
 //! # C vs Rust API mapping
-//!
-//! | C function           | Rust equivalent                               |
+//! | C function | Rust equivalent |
 //! |----------------------|-----------------------------------------------|
-//! | `valkey_strtod`      | `strtod(input: &[u8])`                        |
-//! | `valkey_strtod_n`    | `strtod(input: &[u8])` (same — slice carries length) |
-//! | `valkey_strtod_sds`  | `strtod_sds(input: &RedisString)`             |
-//!
-//! The `endptr` output-parameter pattern from C is replaced by returning the
+//! | `valkey_strtod` | `strtod(input: &[u8])` |
+//! | `valkey_strtod_n` | `strtod(input: &[u8])` (same — slice carries length) |
+//! | `valkey_strtod_sds` | `strtod_sds(input: &RedisString)` |
+//! The `endptr` output-parameter pattern from C is replaced by returning
 //! number of bytes consumed as the second element of the `Ok` tuple.
-//!
-//! C: valkey_strtod.c (64 lines, 3 functions)
 
 // TODO(architect): add `fast-float = "0.2"` to redis-core Cargo.toml dependencies.
-// The `fast_float` crate is the Rust original; ffc.h is a C port of it.
+// The `fast_float` crate is the Rust original; is a C port of it.
 
 use redis_types::error::RedisError;
 use redis_types::string::RedisString;
 
 /// Parse a `f64` from a byte slice.
-///
-/// Returns `(value, bytes_consumed)` on success. `bytes_consumed` is the
-/// number of bytes from `input` that were read — the Rust replacement for the
+/// Returns `(value, bytes_consumed)` on success. `bytes_consumed` is
+/// number of bytes from `input` that were read — the Rust replacement for
 /// C `endptr` pattern. The caller can obtain the remaining slice with
 /// `&input[bytes_consumed..]`.
-///
 /// Accepts fixed (`123.456`), scientific (`1.23e4`), leading-plus (`+1.5`),
 /// `inf`, `-inf`, and `nan` (all case-insensitive), mirroring
 /// `valkey_strtod_options` in C.
-///
 /// # Errors
-///
 /// - [`RedisError::not_float`] — input is not a recognisable number literal
-///   (maps to C `errno = EINVAL` / `FFC_OUTCOME_INVALID_INPUT`).
-/// - [`RedisError::out_of_range`] — the value overflows `f64` range (maps to
-///   C `errno = ERANGE` / `FFC_OUTCOME_OUT_OF_RANGE`).
-///
+/// (maps to C `errno = EINVAL` / `FFC_OUTCOME_INVALID_INPUT`).
+/// - [`RedisError::out_of_range`] — the value overflows `f64` range (maps
+/// C `errno = ERANGE` / `FFC_OUTCOME_OUT_OF_RANGE`).
 /// # PORT NOTE
-///
 /// In C, `valkey_strtod` takes a NUL-terminated `const char *` and calls
 /// `strlen` internally, while `valkey_strtod_n` takes `(ptr, len)`. Both are
 /// collapsed into this single function because `&[u8]` already carries its
 /// length, making the distinction meaningless in Rust.
-///
-/// C: valkey_strtod.c:21-52 (valkey_strtod + valkey_strtod_n)
 pub fn strtod(input: &[u8]) -> Result<(f64, usize), RedisError> {
     // TODO(port): fast_float::parse_partial cannot currently distinguish a
-    // literal "inf" input (FFC_OUTCOME_OK in C) from a finite value that
-    // overflows to INFINITY (FFC_OUTCOME_OUT_OF_RANGE in C), because both
-    // return Ok(f64::INFINITY). The helper below uses a byte-prefix heuristic
-    // to recover the distinction. This should be validated in Phase B against
-    // the wire-diff oracle with overflow inputs like "1e9999".
+ // literal "inf" input (FFC_OUTCOME_OK in C) from a finite value that
+ // overflows to INFINITY (FFC_OUTCOME_OUT_OF_RANGE in C), because both
+ // return Ok(f64::INFINITY). The helper below uses a byte-prefix heuristic
+ // to recover the distinction. This should be validated in Phase B against
+ // the wire-diff oracle with overflow inputs like "1e9999".
     match fast_float::parse_partial::<f64, &[u8]>(input) {
         Err(_) => Err(RedisError::not_float()),
         Ok((value, n)) => {
@@ -79,25 +63,19 @@ pub fn strtod(input: &[u8]) -> Result<(f64, usize), RedisError> {
 }
 
 /// Parse a `f64` from a `RedisString`.
-///
 /// Convenience wrapper around [`strtod`] that passes the full string bytes.
 /// Mirrors `valkey_strtod_sds` in C, which calls `valkey_strtod_n(str,
 /// sdslen(str), endptr)`.
-///
-/// C: valkey_strtod.c:61-64 (valkey_strtod_sds)
 pub fn strtod_sds(input: &RedisString) -> Result<(f64, usize), RedisError> {
     strtod(input.as_bytes())
 }
 
 /// Returns `true` if `input` begins with an `inf` or `infinity` literal
 /// (optionally preceded by `+` or `-`, all case-insensitive).
-///
 /// Used to distinguish a genuine infinity literal from an out-of-range finite
 /// value that `fast_float` also maps to `f64::INFINITY`.
-///
 /// Mirrors the set of infinity prefixes accepted by `FFC_PRESET_GENERAL`
 /// (no `FFC_FORMAT_FLAG_NO_INFNAN` flag was set).
-///
 /// PORT NOTE: `FFC_PRESET_GENERAL` does not define exactly which infinity
 /// spellings are accepted; this mirrors fast_float's Rust behaviour which
 /// accepts "inf" and "infinity" (case-insensitive), with an optional leading
@@ -177,7 +155,7 @@ mod tests {
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        src/valkey_strtod.c  (64 lines, 3 functions)
+//   source:        Valkey
 //                  src/valkey_strtod.h  (merged — declares the same 3 fns)
 //   target_crate:  redis-core
 //   confidence:    medium

@@ -1,28 +1,21 @@
 //! Sorted-set (`zset`) command implementations.
-//!
 //! Covers the byte-exact wire surface of ZADD, ZSCORE, ZMSCORE, ZCARD,
 //! ZINCRBY, ZRANGE, ZRANGEBYSCORE, ZREVRANGE, ZREVRANGEBYSCORE, ZRANK,
-//! ZREVRANK, ZREM, ZCOUNT, ZPOPMIN, ZPOPMAX, ZREMRANGEBYRANK, and
+//! ZREVRANK, ZREM, ZCOUNT, ZPOPMIN, ZPOPMAX, ZREMRANGEBYRANK,
 //! ZREMRANGEBYSCORE.
-//!
 //! # Storage shape
-//!
 //! Uses the pragmatic `ObjectKind::ZSet(ZSetEncoding::Inline(_))`
 //! encoding from `redis-core::object` — an `InlineZSet` whose dual
 //! `HashMap` + `BTreeSet` mirror the dict + zskiplist pair in real
 //! Redis. Real `redis_ds::ZSet` will be used once that
 //! crate ships the listpack / skiplist primitives.
-//!
 //! # Architect items
-//!
 //! TODO(architect): swap the `Inline` encoding for real `ListPack` /
 //! `SkipList` types from `redis-ds` once Phase 4 makes them usable.
-//!
 //! TODO(architect): score formatter parity — Rust's default
 //! `f64::to_string` differs from C's `humanfriendly_number_to_string`
 //! (`%.17g` + trailing-zero trim) on some edge cases. The smoke corpus
 //! sticks to scores whose representation matches under both formatters.
-//!
 //! TODO(architect): ZRANGEBYLEX / ZREVRANGEBYLEX / ZLEXCOUNT /
 //! ZREMRANGEBYLEX / ZRANGESTORE / ZUNIONSTORE / ZINTERSTORE /
 //! ZDIFFSTORE / ZUNION / ZINTER / ZDIFF / ZINTERCARD / ZRANDMEMBER /
@@ -41,7 +34,6 @@ use redis_core::object::{InlineZSet, RedisObject};
 use redis_types::{RedisError, RedisResult, RedisString};
 
 /// Parse a score expressed in Redis's float syntax.
-///
 /// Accepts ASCII decimal, scientific notation, and `+inf` / `-inf` /
 /// `inf` (case-insensitive). Rejects NaN, whitespace, empty strings,
 /// and any trailing garbage with the canonical Redis error reply.
@@ -83,7 +75,6 @@ fn parse_strict_i64(bytes: &[u8]) -> Result<i64, RedisError> {
 }
 
 /// Parse one side of a score range, handling the exclusive `(` prefix.
-///
 /// Returns `(score, exclusive)`.
 fn parse_score_range(bytes: &[u8]) -> Result<(f64, bool), RedisError> {
     let (excl, rest) = match bytes.first() {
@@ -96,12 +87,10 @@ fn parse_score_range(bytes: &[u8]) -> Result<(f64, bool), RedisError> {
 }
 
 /// Format a score for bulk-string replies.
-///
 /// Uses Rust's default `f64::to_string` plus an explicit `inf` / `-inf`
 /// short-form to match Redis's `humanfriendly_number_to_string` output.
-///
 /// TODO(architect): full `%.17g` parity once a dedicated formatter
-/// helper is wired in.
+/// helper is wired.
 fn format_score(score: f64) -> Vec<u8> {
     if score.is_infinite() {
         if score > 0.0 {
@@ -150,7 +139,6 @@ fn as_zset_mut(obj: Option<&mut RedisObject>) -> Result<Option<&mut InlineZSet>,
 }
 
 /// Resolve `start`/`stop` for inclusive range queries.
-///
 /// Mirrors `zslGetRangeInLen` — clamps negatives to zero, clamps
 /// `stop >= len` to `len-1`, and returns `None` when the range is
 /// empty after clamping.
@@ -182,8 +170,7 @@ fn delete_if_empty(ctx: &mut CommandContext, key: &RedisString) {
     }
 }
 
-/// ZADD key [NX|XX] [GT|LT] [CH] [INCR] score member [score member ...]
-///
+/// ZADD key [NX|XX] [GT|LT] [CH] [INCR] score member [score member...]
 /// Adds one or more `(score, member)` pairs to the sorted set at `key`,
 /// creating the key when absent. Without `CH` the reply is the number
 /// of *new* members; with `CH` it counts newly-added plus updated
@@ -377,7 +364,7 @@ pub fn zscore_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
 }
 
-/// ZMSCORE key member [member ...]
+/// ZMSCORE key member [member...]
 pub fn zmscore_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
     if argc < 3 {
@@ -453,7 +440,7 @@ pub fn zincrby_command(ctx: &mut CommandContext) -> RedisResult<()> {
     ctx.reply_double(new_score)
 }
 
-/// ZREM key member [member ...]
+/// ZREM key member [member...]
 pub fn zrem_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
     if argc < 3 {
@@ -1024,8 +1011,7 @@ pub fn zremrangebyscore_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// Lex-range bound: `-` / `+` / `[member` / `(member`.
-///
-/// Mirrors the `zslLexRangeSpec` C struct. Comparison is byte-wise on the
+/// Mirrors the `zslLexRangeSpec` C struct. Comparison is byte-wise on
 /// member; the two infinity sentinels short-circuit comparison so any real
 /// member is strictly between `Min` and `Max`.
 #[derive(Debug, Clone)]
@@ -1226,7 +1212,7 @@ enum Aggregate {
     Max,
 }
 
-/// Parsed `WEIGHTS` / `AGGREGATE` / `WITHSCORES` modifiers shared by the
+/// Parsed `WEIGHTS` / `AGGREGATE` / `WITHSCORES` modifiers shared by
 /// zset set-algebra commands.
 #[derive(Debug, Clone)]
 struct ZAlgebraOpts {
@@ -1265,7 +1251,7 @@ fn snapshot_zset_or_set(
     }
 }
 
-/// Parse the trailing `[WEIGHTS w1 ...] [AGGREGATE SUM|MIN|MAX]
+/// Parse the trailing `[WEIGHTS w1...] [AGGREGATE SUM|MIN|MAX]
 /// [WITHSCORES]` block. `withscores_allowed` controls whether
 /// `WITHSCORES` is accepted (only on the non-`*STORE` variants).
 fn parse_zalgebra_opts(
@@ -1322,9 +1308,8 @@ fn parse_zalgebra_opts(
 }
 
 /// Combine two scores per the requested aggregation mode.
-///
 /// Mirrors Redis's `C99` double arithmetic: `+inf + -inf` yields 0.0,
-/// matching the behavior documented in `t_zset.c:zunionInterDiffGenericCommand`.
+/// matching the behavior documented in `:zunionInterDiffGenericCommand`.
 fn combine_scores(existing: f64, new: f64, mode: Aggregate) -> f64 {
     match mode {
         Aggregate::Sum => {
@@ -1464,10 +1449,9 @@ fn store_zset(ctx: &mut CommandContext, dst: RedisString, entries: Vec<(RedisStr
 }
 
 /// Emit a zset-algebra result as a wire array, with or without scores.
-///
-/// In RESP3 with WITHSCORES, emits a nested `*N [ *2 [member, double] ... ]`
+/// In RESP3 with WITHSCORES, emits a nested `*N [ *2 [member, double]... ]`
 /// structure matching real Redis/Valkey's RESP3 shape. In RESP2 (or without
-/// WITHSCORES), emits a flat alternating `*2N [m1, s1, m2, s2, ...]` array.
+/// WITHSCORES), emits a flat alternating `*2N [m1, s1, m2, s2,...]` array.
 fn emit_zalgebra_reply(
     ctx: &mut CommandContext,
     entries: Vec<(RedisString, f64)>,
@@ -1572,17 +1556,17 @@ enum AlgebraOp {
     Inter,
 }
 
-/// ZUNIONSTORE destination numkeys key [key ...] [WEIGHTS w1 ...] [AGGREGATE SUM|MIN|MAX]
+/// ZUNIONSTORE destination numkeys key [key...] [WEIGHTS w1...] [AGGREGATE SUM|MIN|MAX]
 pub fn zunionstore_command(ctx: &mut CommandContext) -> RedisResult<()> {
     algebra_store_inner(ctx, b"zunionstore", AlgebraOp::Union)
 }
 
-/// ZINTERSTORE destination numkeys key [key ...] [WEIGHTS w1 ...] [AGGREGATE SUM|MIN|MAX]
+/// ZINTERSTORE destination numkeys key [key...] [WEIGHTS w1...] [AGGREGATE SUM|MIN|MAX]
 pub fn zinterstore_command(ctx: &mut CommandContext) -> RedisResult<()> {
     algebra_store_inner(ctx, b"zinterstore", AlgebraOp::Inter)
 }
 
-/// ZDIFFSTORE destination numkeys key [key ...]
+/// ZDIFFSTORE destination numkeys key [key...]
 pub fn zdiffstore_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
     if argc < 4 {
@@ -1606,17 +1590,17 @@ pub fn zdiffstore_command(ctx: &mut CommandContext) -> RedisResult<()> {
     ctx.reply_integer(stored)
 }
 
-/// ZUNION numkeys key [key ...] [WEIGHTS w1 ...] [AGGREGATE SUM|MIN|MAX] [WITHSCORES]
+/// ZUNION numkeys key [key...] [WEIGHTS w1...] [AGGREGATE SUM|MIN|MAX] [WITHSCORES]
 pub fn zunion_command(ctx: &mut CommandContext) -> RedisResult<()> {
     algebra_inner(ctx, b"zunion", AlgebraOp::Union)
 }
 
-/// ZINTER numkeys key [key ...] [WEIGHTS w1 ...] [AGGREGATE SUM|MIN|MAX] [WITHSCORES]
+/// ZINTER numkeys key [key...] [WEIGHTS w1...] [AGGREGATE SUM|MIN|MAX] [WITHSCORES]
 pub fn zinter_command(ctx: &mut CommandContext) -> RedisResult<()> {
     algebra_inner(ctx, b"zinter", AlgebraOp::Inter)
 }
 
-/// ZDIFF numkeys key [key ...] [WITHSCORES]
+/// ZDIFF numkeys key [key...] [WITHSCORES]
 pub fn zdiff_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
     if argc < 3 {
@@ -1651,7 +1635,7 @@ pub fn zdiff_command(ctx: &mut CommandContext) -> RedisResult<()> {
     emit_zalgebra_reply(ctx, result, withscores)
 }
 
-/// ZINTERCARD numkeys key [key ...] [LIMIT N]
+/// ZINTERCARD numkeys key [key...] [LIMIT N]
 pub fn zintercard_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
     if argc < 3 {
@@ -1699,7 +1683,6 @@ pub fn zintercard_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// ZRANGESTORE dst src min max [BYSCORE|BYLEX] [REV] [LIMIT offset count]
-///
 /// Computes the same range as `ZRANGE` would, then stores the resulting
 /// `(member, score)` pairs at `dst`. Empty results delete `dst`.
 pub fn zrangestore_command(ctx: &mut CommandContext) -> RedisResult<()> {
@@ -1861,7 +1844,6 @@ fn next_zrandmember_start(len: usize) -> usize {
 }
 
 /// ZRANDMEMBER key [count [WITHSCORES]]
-///
 /// Uses a rotating cursor over the sorted-set snapshot. This is not true
 /// server PRNG sampling, but it preserves the Redis reply shapes and covers
 /// all members under repeated calls until PRNG state is exposed here.
@@ -1948,10 +1930,9 @@ pub fn zrandmember_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
 }
 
-/// ZMPOP numkeys key [key ...] MIN|MAX [COUNT count]
-///
+/// ZMPOP numkeys key [key...] MIN|MAX [COUNT count]
 /// Pops up to `count` (default 1) members from the first non-empty source
-/// key. Replies with `[key, [[member, score], ...]]`, or `*-1\r\n` when
+/// key. Replies with `[key, [[member, score],...]]`, or `*-1\r\n` when
 /// every supplied key is empty or missing.
 pub fn zmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
@@ -2058,14 +2039,12 @@ pub fn zmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// ZSCAN key cursor [MATCH pattern] [COUNT count] [NOSCORES]
-///
 /// Linear-cursor iteration over the `(member, score)` pairs of a sorted
 /// set in ascending score order. Reply shape mirrors HSCAN — a two-element
 /// array of `[next_cursor, items]` where `items` is interleaved
 /// `member, score` bulks unless `NOSCORES` requests member-only output.
-///
 /// TODO(architect): MATCH currently filters on member bytes only. Real
-/// Redis also surfaces the score in `OBJ_ENCODING_LISTPACK` zsets but the
+/// Redis also surfaces the score in `OBJ_ENCODING_LISTPACK` zsets but
 /// glob matcher's input is the member key.
 pub fn zscan_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
@@ -2165,7 +2144,6 @@ fn parse_u64_cursor(bytes: &[u8]) -> Result<u64, RedisError> {
 }
 
 /// Pop one (member, score) pair from the zset at `key`.
-///
 /// Returns the lowest-scored member when `reverse` is false (BZPOPMIN),
 /// or the highest-scored member when `reverse` is true (BZPOPMAX). Returns
 /// `None` when the key is absent or holds an empty zset. Deletes the key when
@@ -2192,7 +2170,6 @@ fn zset_pop_one(db: &mut RedisDb, key: &RedisString, reverse: bool) -> Option<(R
 }
 
 /// Pop up to `count` (member, score) pairs from the zset at `key`.
-///
 /// Returns an empty vec when the key is absent or holds an empty zset. Deletes
 /// the key when the pops leave it empty.
 fn zset_pop_many(
@@ -2231,7 +2208,6 @@ fn zset_pop_many(
 }
 
 /// Append an f64 score in the appropriate wire format for `resp_proto`.
-///
 /// RESP2: `$N\r\n<text>\r\n` (bulk string).
 /// RESP3: `,<text>\r\n` (double).
 fn append_score_frame(buf: &mut Vec<u8>, score: f64, resp_proto: i32) {
@@ -2296,14 +2272,12 @@ fn encode_bzmpop_reply(
 }
 
 /// Deliver a popped zset element or set of elements to a woken waiter.
-///
 /// Called from `list::deliver_to_waiter` when the action is `ZSetPop`. When
 /// `count == 0` (BZPOPMIN / BZPOPMAX shape) pops one element and replies
-/// `*3 [key, member, score]`. When `count >= 1` (BZMPOP shape) pops up to
+/// `*3 [key, member, score]`. When `count >= 1` (BZMPOP shape) pops up
 /// `count` elements and replies `*2 [key, *N [[m1,s1],...]]`.
-///
 /// If the sender is gone the popped values are restored by re-inserting them
-/// into the zset (creating it first when needed), preserving fairness for the
+/// into the zset (creating it first when needed), preserving fairness for
 /// next waiter.
 pub fn deliver_zset_to_waiter(db: &mut RedisDb, key: &RedisString, waiter: BlockedWaiter) {
     let (reverse, count) = match waiter.action {
@@ -2377,7 +2351,6 @@ pub fn deliver_zset_to_waiter(db: &mut RedisDb, key: &RedisString, waiter: Block
 }
 
 /// Wake blocked zset waiters after data is added to `key`.
-///
 /// Should be called by ZADD and ZINCRBY after successfully inserting into a
 /// zset that has blocked waiters. Mirrors `list::wake_blocked_for_key` but
 /// dispatches through `deliver_zset_to_waiter`.
@@ -2411,8 +2384,7 @@ pub fn wake_blocked_zset_for_key(db: &mut RedisDb, key: &RedisString) -> usize {
 }
 
 /// Parse a BLPOP-style timeout value (decimal seconds, non-negative).
-///
-/// Accepts integer and floating-point. Rejects negative values and
+/// Accepts integer and floating-point. Rejects negative values
 /// non-numeric input with the canonical Redis error messages.
 fn parse_blocking_timeout_zset(bytes: &[u8]) -> Result<f64, RedisError> {
     let s = core::str::from_utf8(bytes)
@@ -2441,7 +2413,6 @@ fn parse_blocking_timeout_zset(bytes: &[u8]) -> Result<f64, RedisError> {
 }
 
 /// Park a client that is blocked waiting on one or more zset keys.
-///
 /// Mirrors `list::park_blocked_client` but the action is always `ZSetPop`.
 fn park_zset_blocked_client(
     ctx: &mut CommandContext,
@@ -2489,10 +2460,9 @@ fn park_zset_blocked_client(
 }
 
 /// Shared body for BZPOPMIN and BZPOPMAX.
-///
-/// For each key in order: if the zset is non-empty, pop the
+/// For each key in order: if the zset is non-empty, pop
 /// lowest-scored (or highest-scored when `reverse`) member and reply
-/// `*3 [key, member, score]` immediately. When every key is empty the
+/// `*3 [key, member, score]` immediately. When every key is empty
 /// client is parked in the global blocked-keys index until either a
 /// ZADD/ZINCRBY wakes it or the timeout elapses (replying `*-1`).
 fn bzpop_generic(ctx: &mut CommandContext, reverse: bool) -> RedisResult<()> {
@@ -2540,29 +2510,26 @@ fn bzpop_generic(ctx: &mut CommandContext, reverse: bool) -> RedisResult<()> {
     park_zset_blocked_client(ctx, keys, reverse, 0, timeout_secs)
 }
 
-/// BZPOPMIN key [key ...] timeout
-///
-/// Pops the lowest-scored member from the first non-empty key. Blocks the
+/// BZPOPMIN key [key...] timeout
+/// Pops the lowest-scored member from the first non-empty key. Blocks
 /// client when all listed keys are empty. Replies `*3 [key, member, score]`
 /// on success or `*-1` on timeout.
 pub fn bzpopmin_command(ctx: &mut CommandContext) -> RedisResult<()> {
     bzpop_generic(ctx, false)
 }
 
-/// BZPOPMAX key [key ...] timeout
-///
-/// Pops the highest-scored member from the first non-empty key. Blocks the
+/// BZPOPMAX key [key...] timeout
+/// Pops the highest-scored member from the first non-empty key. Blocks
 /// client when all listed keys are empty. Replies `*3 [key, member, score]`
 /// on success or `*-1` on timeout.
 pub fn bzpopmax_command(ctx: &mut CommandContext) -> RedisResult<()> {
     bzpop_generic(ctx, true)
 }
 
-/// BZMPOP timeout numkeys key [key ...] MIN|MAX [COUNT count]
-///
-/// When some key has data: pops up to `count` (default 1) members from the
+/// BZMPOP timeout numkeys key [key...] MIN|MAX [COUNT count]
+/// When some key has data: pops up to `count` (default 1) members from
 /// first non-empty key and replies `*2 [key, [[m1,s1],...]]`. Otherwise
-/// parks the client on every supplied key; a later ZADD on any one wakes the
+/// parks the client on every supplied key; a later ZADD on any one wakes
 /// waiter and satisfies the `count` request. Timeout `0` blocks forever.
 pub fn bzmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
@@ -2657,7 +2624,7 @@ pub fn bzmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 /// Defer waking blocked zset waiters for `key` until the current command's own
-/// effect has propagated (see `list::schedule_or_wake`). The key is appended to
+/// effect has propagated (see `list::schedule_or_wake`). The key is appended
 /// `client.pending_wakes`, drained by `dispatch` after propagation.
 pub fn schedule_or_wake_zset(ctx: &mut CommandContext, key: &RedisString) {
     if !blocked_keys_any() {
@@ -2703,7 +2670,7 @@ mod tests {
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        src/t_zset.c
+//   source:        Valkey
 //   target_crate:  redis-commands
 //   confidence:    medium
 //   todos:         5

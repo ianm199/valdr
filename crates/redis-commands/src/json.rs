@@ -1,25 +1,20 @@
 //! RedisJSON command implementations.
-//!
 //! Provides native JSON.SET / JSON.GET / JSON.DEL / JSON.TYPE /
 //! JSON.NUMINCRBY / JSON.NUMMULTBY / JSON.STRAPPEND / JSON.STRLEN /
 //! JSON.OBJKEYS / JSON.OBJLEN / JSON.ARRAPPEND / JSON.ARRLEN /
 //! JSON.ARRINSERT / JSON.ARRPOP / JSON.CLEAR / JSON.MGET /
 //! JSON.FORGET (alias of JSON.DEL).
-//!
 //! Storage: `ObjectKind::Json(serde_json::Value)`.
-//!
 //! JSONPath subset implemented:
-//!   `$`              — root
-//!   `$.foo`          — object key
-//!   `$["foo"]`       — bracket-notation key
-//!   `$.a.b`          — nested
-//!   `$[0]`, `$[-1]`  — array index (negative = from end)
-//!   `$.arr[*]`       — wildcard (all array/object elements)
-//!   `$..foo`         — recursive descent
-//!
+//! `$` — root
+//! `$.foo` — object key
+//! `$["foo"]` — bracket-notation key
+//! `$.a.b` — nested
+//! `$[0]`, `$[-1]` — array index (negative = from end)
+//! `$.arr[*]` — wildcard (all array/object elements)
+//! `$..foo` — recursive descent
 //! Deferred JSONPath features: filter expressions `[?(...)]`,
 //! union `[a,b]`, slices `[1:3]`.
-//!
 //! TODO: JSON.MERGE, JSON.RESP (RESP3 native types), JSON.MSET.
 
 use redis_core::command_context::CommandContext;
@@ -228,7 +223,7 @@ fn query_path_owned(root: &Value, path: &str) -> Result<Vec<Value>, RedisError> 
 // Mutable path operations — set / delete / numeric / array ops
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Set the value at `tokens[1..]` within `root`.  Returns number of fields set.
+/// Set the value at `tokens[1..]` within `root`. Returns number of fields set.
 fn set_path_value(
     root: &mut Value,
     tokens: &[PathToken],
@@ -1201,7 +1196,7 @@ pub fn json_set_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// JSON.GET key [INDENT s] [NEWLINE s] [SPACE s] [path ...]
+// JSON.GET key [INDENT s] [NEWLINE s] [SPACE s] [path...]
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub fn json_get_command(ctx: &mut CommandContext) -> RedisResult<()> {
@@ -1258,7 +1253,7 @@ pub fn json_get_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// JSON.DEL key [path]  /  JSON.FORGET key [path]
+// JSON.DEL key [path] / JSON.FORGET key [path]
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub fn json_del_command(ctx: &mut CommandContext) -> RedisResult<()> {
@@ -1604,7 +1599,7 @@ pub fn json_objlen_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// JSON.ARRAPPEND key path value [value ...]
+// JSON.ARRAPPEND key path value [value...]
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub fn json_arrappend_command(ctx: &mut CommandContext) -> RedisResult<()> {
@@ -1697,7 +1692,7 @@ pub fn json_arrlen_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// JSON.ARRINSERT key path index value [value ...]
+// JSON.ARRINSERT key path index value [value...]
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub fn json_arrinsert_command(ctx: &mut CommandContext) -> RedisResult<()> {
@@ -1845,7 +1840,7 @@ pub fn json_clear_command(ctx: &mut CommandContext) -> RedisResult<()> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// JSON.MGET key [key ...] path
+// JSON.MGET key [key...] path
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub fn json_mget_command(ctx: &mut CommandContext) -> RedisResult<()> {

@@ -1,26 +1,21 @@
 //! Partial-range quicksort (`pqsort`).
-//!
-//! This is a direct port of `reference/valkey/src/pqsort.c` — the NetBSD
+//! This is a direct port of — the NetBSD
 //! `libc` quicksort adapted by Redis Ltd. to support sorting only a
-//! specified index range `[lrange, rrange]` of the array.  Elements outside
+//! specified index range `[lrange, rrange]` of the array. Elements outside
 //! that range are still moved to their final partition (lesser / equal /
 //! greater) but their internal order is unspecified.
-//!
 //! The C implementation operates on `void *` arrays with an element-size
-//! argument (`es`).  The Rust port replaces that idiom with a generic
+//! argument (`es`). The Rust port replaces that idiom with a generic
 //! type parameter `T` and a `&mut [T]` slice, eliminating the need for raw
 //! pointer arithmetic and `unsafe`.
-//!
 //! Original C copyright:
-//!   Copyright (c) 1992, 1993 The Regents of the University of California
-//!   (BSD licence — see `reference/valkey/src/pqsort.c` for full text).
-//!   Modifications copyright (c) 2009-2012 Redis Ltd.
+//! Copyright (c) 1992, 1993 The Regents of the University of California
+//! Modifications copyright (c) 2009-2012 Redis Ltd.
 
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 /// Returns the index of the median element among `a`, `b`, `c`.
-///
 /// Equivalent to the static `med3` function in C.
 fn med3_idx<T, F>(slice: &[T], a: usize, b: usize, c: usize, cmp: &F) -> usize
 where
@@ -44,7 +39,6 @@ where
 }
 
 /// Swap `count` elements starting at index `start_a` with those at `start_b`.
-///
 /// Replaces the `vecswap` and `swapfunc`/`swapcode` macros in C.
 /// C swaps raw bytes (word-at-a-time optimisation); here we use slice::swap which
 /// is element-at-a-time. Performance may differ; profile if needed.
@@ -56,14 +50,13 @@ fn vecswap<T>(slice: &mut [T], start_a: usize, start_b: usize, count: usize) {
 
 /// Returns `true` when the index ranges `[l1, r1]` and `[l2, r2]` overlap
 /// (both bounds inclusive).
-///
 /// Requires `l1 <= r1` and `l2 <= r2`. In the C code this is expressed as a
 /// pointer-comparison predicate; here we use index arithmetic.
 /// The C condition is `!((lrange < _l && rrange < _l) || (lrange > _r && rrange > _r))`.
 /// Given lrange <= rrange:
 /// - "both before" ⟺ rrange < _l (since lrange <= rrange < _l)
 /// - "both after" ⟺ lrange > _r (since lrange > _r >= rrange)
-/// The condition simplifies to: !(rrange < l1 || l2 > r1).
+/// The condition simplifies: !(rrange < l1 || l2 > r1).
 fn ranges_overlap(partition_l: usize, partition_r: usize, lrange: usize, rrange: usize) -> bool {
     !(rrange < partition_l || lrange > partition_r)
 }
@@ -71,15 +64,13 @@ fn ranges_overlap(partition_l: usize, partition_r: usize, lrange: usize, rrange:
 // ── core recursive function ───────────────────────────────────────────────────
 
 /// Internal recursive partial sort.
-///
-/// * `slice`      — the current sub-array to (partially) sort.
-/// * `abs_offset` — the absolute element index of `slice[0]` within the
-///                  original array.  Used to compare against `lrange`/`rrange`.
+/// * `slice` — the current sub-array to (partially) sort.
+/// * `abs_offset` — the absolute element index of `slice[0]` within
+/// original array. Used to compare against `lrange`/`rrange`.
 /// * `lrange`/`rrange` — inclusive target range as absolute element indices
-///                       in the *original* array.
-/// * `cmp`        — comparison function; negative / zero / positive like C's
-///                  `qsort` comparator.
-///
+/// in the *original* array.
+/// * `cmp` — comparison function; negative / zero / positive like C's
+/// `qsort` comparator.
 /// C uses `goto loop` to tail-call the right partition in place, saving stack
 /// space. Rust recurses on both partitions; the compiler may optimize the tail
 /// recursion or not. C `lrange`/`rrange` are raw pointers; here they are absolute
@@ -93,7 +84,7 @@ where
         return;
     }
 
-    // Insertion sort for small sub-arrays (n < 7)
+ // Insertion sort for small sub-arrays (n < 7)
     if n < 7 {
         for pm in 1..n {
             let mut pl = pm;
@@ -105,19 +96,19 @@ where
         return;
     }
 
-    // Pivot selection (median-of-3, or pseudo-median-of-9 for n > 40).
-    // Indices add negligible overhead here versus C pointer arithmetic.
+ // Pivot selection (median-of-3, or pseudo-median-of-9 for n > 40).
+ // Indices add negligible overhead here versus C pointer arithmetic.
     let mut pm = n / 2;
     if n > 7 {
         let mut pl = 0usize;
         let mut pn_last = n - 1;
         if n > 40 {
             let d = n / 8;
-            // d = n/8; pl starts at 0, so pl + 2*d <= n/4 < n — safe.
+ // d = n/8; pl starts at 0, so pl + 2*d <= n/4 < n — safe.
             pl = med3_idx(slice, pl, pl + d, pl + 2 * d, cmp);
-            // pm = n/2; pm + d ≤ n/2 + n/8 = 5n/8 < n — safe.
-            // pm - d: use saturating_sub in case n is very small (guarded by n > 40 above).
-            // saturating_sub adds a branch but makes the invariant explicit.
+ // pm = n/2; pm + d ≤ n/2 + n/8 = 5n/8 < n — safe.
+ // pm - d: use saturating_sub in case n is very small (guarded by n > 40 above).
+ // saturating_sub adds a branch but makes the invariant explicit.
             let pm_lo = pm.saturating_sub(d);
             let pm_hi = (pm + d).min(n - 1);
             pm = med3_idx(slice, pm_lo, pm, pm_hi, cmp);
@@ -132,30 +123,28 @@ where
         pm = med3_idx(slice, pl, pm, pn_last, cmp);
     }
 
-    // Move pivot to front so partition loops compare against slice[0].
+ // Move pivot to front so partition loops compare against slice[0].
     slice.swap(0, pm);
 
-    // Bentley-McIlroy 3-way partition
-    //
-    // Invariants during the loop (expressed as element indices):
-    //   [0      .. pa)  : elements equal to pivot   (gathered at front)
-    //   [pa     .. pb)  : elements < pivot
-    //   [pc+1   .. pd+1): elements > pivot
-    //   [pd+1   .. n)   : elements equal to pivot   (gathered at back)
-    //   pivot itself sits at slice[0] throughout
-    //
-    // Key safety argument (no usize underflow):
-    //   pb >= 1 always (starts at 1, only increases).
-    //   During the backward scan pb <= pc, so pc >= pb >= 1 > 0.
-    //   pd >= pc always (pd decreases only when pc does, in lock-step).
-    //   Therefore pd >= 1 and neither `pc -= 1` nor `pd -= 1` underflows.
+ // Bentley-McIlroy 3-way partition
+ // Invariants during the loop (expressed as element indices):
+ // [0.. pa): elements equal to pivot (gathered at front)
+ // [pa.. pb): elements < pivot
+ // [pc+1.. pd+1): elements > pivot
+ // [pd+1.. n): elements equal to pivot (gathered at back)
+ // pivot itself sits at slice[0] throughout
+ // Key safety argument (no usize underflow):
+ // pb >= 1 always (starts at 1, only increases).
+ // During the backward scan pb <= pc, so pc >= pb >= 1 > 0.
+ // pd >= pc always (pd decreases only when pc does, in lock-step).
+ // Therefore pd >= 1 and neither `pc -= 1` nor `pd -= 1` underflows.
     let mut pa = 1usize;
     let mut pb = 1usize;
     let mut pc = n - 1;
     let mut pd = n - 1;
 
     loop {
-        // Forward scan: advance pb over elements ≤ pivot; push equals to front.
+ // Forward scan: advance pb over elements ≤ pivot; push equals to front.
         while pb <= pc {
             let cmp_result = cmp(&slice[pb], &slice[0]);
             if cmp_result > 0 {
@@ -167,8 +156,8 @@ where
             }
             pb += 1;
         }
-        // Backward scan: retreat pc over elements ≥ pivot; push equals to back.
-        // pb <= pc holds at entry → pc >= 1 → no underflow.
+ // Backward scan: retreat pc over elements ≥ pivot; push equals to back.
+ // pb <= pc holds at entry → pc >= 1 → no underflow.
         while pb <= pc {
             let cmp_result = cmp(&slice[pc], &slice[0]);
             if cmp_result < 0 {
@@ -176,45 +165,44 @@ where
             }
             if cmp_result == 0 {
                 slice.swap(pc, pd);
-                // pd >= pc >= pb >= 1, so pd >= 1 → no underflow.
+ // pd >= pc >= pb >= 1, so pd >= 1 → no underflow.
                 pd -= 1;
             }
-            // pc >= pb >= 1 → no underflow.
+ // pc >= pb >= 1 → no underflow.
             pc -= 1;
         }
         if pb > pc {
             break;
         }
-        // Exchange a > pivot element (at pb) with a < pivot element (at pc).
+ // Exchange a > pivot element (at pb) with a < pivot element (at pc).
         slice.swap(pb, pc);
         pb += 1;
-        // After swap: pc was > pb (otherwise we'd have broken), so pc >= pb >= 2 → pc - 1 >= 1.
+ // After swap: pc was > pb (otherwise we'd have broken), so pc >= pb >= 2 → pc - 1 >= 1.
         pc -= 1;
     }
 
-    // Rearrange front/back equal-to-pivot runs to the centre.
-    //
-    // After the partition pb = pc + 1 (they crossed by 1), so:
-    //   [0..pa)        — equals at front  (count: pa)
-    //   [pa..pb)       — less than pivot  (count: pb - pa)
-    //   [pc+1..pd+1)   — greater than pivot
-    //   [pd+1..n)      — equals at back
+ // Rearrange front/back equal-to-pivot runs to the centre.
+ // After the partition pb = pc + 1 (they crossed by 1), so:
+ // [0..pa) — equals at front (count: pa)
+ // [pa..pb) — less than pivot (count: pb - pa)
+ // [pc+1..pd+1) — greater than pivot
+ // [pd+1..n) — equals at back
 
-    // Move front-equals adjacent to the pivot point:
-    // vecswap(a, pb - r1, r1) with r1 = min(pa, pb - pa)
-    // This swaps slice[0..r1] with slice[pb-r1..pb].
+ // Move front-equals adjacent to the pivot point:
+ // vecswap(a, pb - r1, r1) with r1 = min(pa, pb - pa)
+ // This swaps slice[0..r1] with slice[pb-r1..pb].
     let r1 = pa.min(pb - pa);
     vecswap(slice, 0, pb - r1, r1);
 
-    // Move back-equals adjacent to the pivot point:
-    // vecswap(pb, pn - r2, r2) with r2 = min(pd - pc, n - pd - 1)
-    // pd >= pc (invariant) → no underflow.
-    // pd <= n-1 → n - pd - 1 >= 0 → no underflow.
+ // Move back-equals adjacent to the pivot point:
+ // vecswap(pb, pn - r2, r2) with r2 = min(pd - pc, n - pd - 1)
+ // pd >= pc (invariant) → no underflow.
+ // pd <= n-1 → n - pd - 1 >= 0 → no underflow.
     let r2 = (pd - pc).min(n - pd - 1);
     vecswap(slice, pb, n - r2, r2);
 
-    // Recurse into left partition if it overlaps [lrange, rrange].
-    // Left partition contains the `pb - pa` elements that are < pivot.
+ // Recurse into left partition if it overlaps [lrange, rrange].
+ // Left partition contains the `pb - pa` elements that are < pivot.
     let left_size = pb - pa;
     if left_size > 1 {
         let abs_l = abs_offset;
@@ -224,9 +212,9 @@ where
         }
     }
 
-    // Tail-iterate into right partition if it overlaps [lrange, rrange].
-    // Right partition contains the `pd - pc` elements that are > pivot.
-    // C uses `goto loop` for tail call; here we recurse.
+ // Tail-iterate into right partition if it overlaps [lrange, rrange].
+ // Right partition contains the `pd - pc` elements that are > pivot.
+ // C uses `goto loop` for tail call; here we recurse.
     let right_size = pd - pc;
     if right_size > 1 {
         let new_start = n - right_size;
@@ -249,34 +237,28 @@ where
 /// Partially sorts `slice` so that the elements in `slice[lrange..=rrange]`
 /// are correctly placed: every element in `slice[0..lrange]` compares
 /// ≤ every element in `slice[lrange..=rrange]`, which in turn compares
-/// ≤ every element in `slice[rrange+1..]`.  The order of elements *within*
+/// ≤ every element in `slice[rrange+1..]`. The order of elements *within*
 /// `slice[0..lrange]` and `slice[rrange+1..]` is unspecified.
-///
 /// # Arguments
-///
-/// * `slice`  — the array to sort, modified in place.
+/// * `slice` — the array to sort, modified in place.
 /// * `lrange` — inclusive lower bound of the target range (element index).
 /// * `rrange` — inclusive upper bound of the target range (element index).
-/// * `cmp`    — comparison function; must return negative / zero / positive
-///              analogously to C's `qsort` comparator.
-///
+/// * `cmp` — comparison function; must return negative / zero / positive
+/// analogously to C's `qsort` comparator.
 /// # Panics
-///
-/// Panics only if `lrange > rrange` or either bound is ≥ `slice.len()` and
-/// the algorithm happens to index out of bounds.  The caller is responsible
+/// Panics only if `lrange > rrange` or either bound is ≥ `slice.len`
+/// the algorithm happens to index out of bounds. The caller is responsible
 /// for passing valid bounds.
-///
 /// # Port note
-///
 /// The C signature is `pqsort(void *a, size_t n, size_t es, cmp, lrange, rrange)`.
-/// The `n` and `es` arguments collapse into `slice.len()` and the element type `T`.
+/// The `n` and `es` arguments collapse into `slice.len` and the element type `T`.
 /// The comparator returns `i32` (matching C's convention) rather than
 /// `std::cmp::Ordering` to keep the call sites natural.
 pub fn pqsort<T, F>(slice: &mut [T], lrange: usize, rrange: usize, cmp: F)
 where
     F: Fn(&T, &T) -> i32,
 {
-    //    ((unsigned char*)a)+((rrange+1)*es)-1 → rrange as-is (last byte of element rrange)
+ // ((unsigned char*)a)+((rrange+1)*es)-1 → rrange as-is (last byte of element rrange)
     pqsort_inner(slice, 0, lrange, rrange, &cmp);
 }
 
@@ -301,12 +283,12 @@ mod tests {
     fn sort_middle_range() {
         let mut v = vec![5i32, 3, 1, 4, 2];
         pqsort(&mut v, 1, 3, cmp_i32);
-        // Elements at indices 1, 2, 3 must be correctly ordered relative to
-        // the full-sort result (2, 3, 4), but the exact values of the outer
-        // elements are unspecified.
+ // Elements at indices 1, 2, 3 must be correctly ordered relative
+ // the full-sort result (2, 3, 4), but the exact values of the outer
+ // elements are unspecified.
         let sorted = v.iter().cloned().collect::<Vec<_>>();
-        // The element that would be at index 1..=3 in sorted order (2, 3, 4)
-        // must appear at positions 1..=3.
+ // The element that would be at index 1..=3 in sorted order (2, 3, 4)
+ // must appear at positions 1..=3.
         let mut mid: Vec<i32> = sorted[1..=3].to_vec();
         mid.sort();
         assert_eq!(mid, vec![2, 3, 4]);
@@ -351,7 +333,7 @@ mod tests {
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        src/pqsort.c  (185 lines, 3 functions: med3, _pqsort, pqsort)
+//   source:        Valkey
 //   target_crate:  redis-ds
 //   confidence:    high
 //   todos:         0

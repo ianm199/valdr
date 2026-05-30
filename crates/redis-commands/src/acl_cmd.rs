@@ -139,7 +139,6 @@ pub fn acl_log_client_info(ctx: &CommandContext<'_>, command_name: &[u8]) -> Red
 }
 
 /// Attempt to authenticate as `username` with `cleartext`.
-///
 /// Returns `Some(username_as_RedisString)` on success, `None` on failure.
 pub fn authenticate_user(username: &[u8], cleartext: &[u8]) -> Option<RedisString> {
     let key = RedisString::from_bytes(username);
@@ -160,7 +159,6 @@ pub fn authenticate_user(username: &[u8], cleartext: &[u8]) -> Option<RedisStrin
 }
 
 /// Try to match `cleartext` against every user's password list.
-///
 /// Used for the legacy one-argument AUTH form where no username is specified.
 /// Returns the first matching enabled user's name, or `None`.
 pub fn try_password_any_user(cleartext: &[u8]) -> Option<RedisString> {
@@ -1566,7 +1564,6 @@ pub fn build_getuser_selector_reply(selector: &AclUser) -> RespFrame {
 }
 
 /// Return command names belonging to a given ACL category bitmask bit.
-///
 /// Scans the generated `COMMANDS` registry for entries whose `acl_categories`
 /// include the requested bit and collects their names (deduplicated).
 pub fn commands_in_category(bit: u64) -> Vec<Vec<u8>> {

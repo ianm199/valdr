@@ -1,24 +1,19 @@
 //! RDB sorted-set type serialization — Round 22.
-//!
 //! Implements `save_zset_object` and `load_zset_object` for `RDB_TYPE_ZSET_2`
 //! (the IEEE-754 binary-double wire form, type byte 0x05).
-//!
 //! Wire layout after the type byte:
-//!   - `save_len(N)` — number of member/score pairs
-//!   - For each pair: member bytes (length-prefixed), score as 8-byte LE double
-//!
+//! - `save_len(N)` — number of member/score pairs
+//! - For each pair: member bytes (length-prefixed), score as 8-byte LE double
 //! Design decision: we always emit `RDB_TYPE_ZSET_2` regardless of zset size.
 //! C Valkey loads this form for zsets of any size without error. The
 //! `RDB_TYPE_ZSET_LISTPACK` form (type 17) that C Valkey emits for small zsets
 //! is NOT emitted by us in Phase 1. To force C Valkey into ZSET_2 mode for
 //! oracle corpus tests, run `CONFIG SET zset-max-listpack-entries 0` before SAVE.
-//!
 //! Load compatibility:
-//!   - `RDB_TYPE_ZSET_2` (5)          — fully handled
-//!   - `RDB_TYPE_ZSET` (3)            — graceful Unsupported error (text-encoded scores)
-//!   - `RDB_TYPE_ZSET_ZIPLIST` (12)   — graceful Unsupported error
-//!   - `RDB_TYPE_ZSET_LISTPACK` (17)  — graceful Unsupported error
-//!
+//! - `RDB_TYPE_ZSET_2` (5) — fully handled
+//! - `RDB_TYPE_ZSET` (3) — graceful Unsupported error (text-encoded scores)
+//! - `RDB_TYPE_ZSET_ZIPLIST` (12) — graceful Unsupported error
+//! - `RDB_TYPE_ZSET_LISTPACK` (17) — graceful Unsupported error
 //! NaN scores: rejected on load with an InvalidData error. Redis semantics
 //! prohibit NaN scores at the parsing boundary; our `F64Ord` type encodes this
 //! invariant. `+inf` and `-inf` are valid and round-trip correctly through 8-byte
@@ -33,7 +28,6 @@ use super::listpack::decode_listpack;
 use super::varint::{load_len, write_len};
 
 /// Serialize an `RDB_TYPE_ZSET_2` value payload.
-///
 /// The type byte is written by the caller; this function writes the member count
 /// followed by alternating member strings and 8-byte LE binary doubles.
 pub fn save_zset_object(w: &mut impl Write, obj: &RedisObject) -> io::Result<()> {
@@ -52,7 +46,6 @@ pub fn save_zset_object(w: &mut impl Write, obj: &RedisObject) -> io::Result<()>
 }
 
 /// Deserialize an `RDB_TYPE_ZSET_2` value payload, producing a `RedisObject`.
-///
 /// Reads from `r` starting immediately after the type byte. Returns an error
 /// if any loaded score is NaN, which is forbidden by Redis semantics.
 pub fn load_zset_object(r: &mut impl Read) -> io::Result<RedisObject> {
@@ -122,7 +115,6 @@ pub fn load_zset_listpack_object(r: &mut impl Read) -> io::Result<RedisObject> {
 
 /// Read an `RDB_TYPE_ZSET` (v1) double score: a 1-byte length then that many
 /// ASCII bytes parsed as f64, with the sentinels 255=-inf, 254=+inf, 253=NaN.
-/// Mirrors `rdbLoadDoubleValue` in rdb.c.
 fn load_double_value(r: &mut impl Read) -> io::Result<f64> {
     let mut tag = [0u8; 1];
     r.read_exact(&mut tag)?;

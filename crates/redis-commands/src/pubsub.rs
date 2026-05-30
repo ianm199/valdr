@@ -1,15 +1,13 @@
 //! Pub/Sub command implementations: SUBSCRIBE, UNSUBSCRIBE, PSUBSCRIBE,
 //! PUNSUBSCRIBE, PUBLISH, PUBSUB.
-//!
 //! Round 8a live wiring sits on top of the Phase-A skeleton: the global
-//! channel/pattern subscriber tables and per-client outbound senders live in
+//! channel/pattern subscriber tables and per-client outbound senders live
 //! `redis_core::pubsub_registry::PubSubRegistry`. The handlers below take an
 //! `Arc<Mutex<PubSubRegistry>>` via `CommandContext::pubsub`, mutate the per
 //! client `Client::subscribed_channels` / `Client::subscribed_patterns` sets
-//! to mirror the registry, and encode RESP-2 push frames either into the
+//! to mirror the registry, and encode RESP-2 push frames either into
 //! caller's `client.reply_buf` (when delivering to the active client) or into
 //! a `Vec<u8>` that gets shipped to a foreign subscriber via its mpsc sender.
-//!
 //! Cluster propagation is deferred. RESP3 push-frame headers are used for
 //! clients that negotiated RESP3; RESP2 clients receive the classic array
 //! envelope.
@@ -28,7 +26,6 @@ use redis_protocol::RespFrame;
 use redis_types::{RedisError, RedisString};
 
 /// Distinguishes global pub/sub channels from shard-level (cluster) channels.
-///
 /// The legacy skeleton carried both variants; only `Global` is live in Round
 /// 8a. `Shard` is retained for forward-compat with sharded pub/sub work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,7 +35,6 @@ pub enum PubSubKind {
 }
 
 /// Per-client pub/sub bookkeeping placeholder used by the legacy helpers.
-///
 /// The live data now lives on `Client::subscribed_channels` /
 /// `Client::subscribed_patterns`; this struct is preserved to keep the legacy
 /// helper signatures compiling.
@@ -77,7 +73,6 @@ pub type ServerChannelMap = HashMap<u32, HashMap<RedisString, HashSet<ClientId>>
 pub type ServerPatternMap = HashMap<RedisString, HashSet<ClientId>>;
 
 /// Resolve the shared pub/sub registry handle attached to `ctx`.
-///
 /// Returns an `ERR pub/sub not available` runtime error when the context has
 /// no registry. That branch is reachable only from unit tests; production
 /// callers always construct contexts via `CommandContext::with_db_and_pubsub`.
@@ -94,7 +89,7 @@ fn refresh_client_info(client: &redis_core::client::Client) {
     }
 }
 
-/// SUBSCRIBE channel [channel ...]
+/// SUBSCRIBE channel [channel...]
 pub fn subscribe_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     if ctx.argc() < 2 {
         return Err(RedisError::wrong_number_of_args(b"subscribe"));
@@ -129,7 +124,7 @@ pub fn subscribe_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     Ok(())
 }
 
-/// UNSUBSCRIBE [channel ...]
+/// UNSUBSCRIBE [channel...]
 pub fn unsubscribe_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let registry = registry_handle(ctx)?;
     let targets: Vec<RedisString> = if ctx.argc() == 1 {
@@ -183,7 +178,7 @@ pub fn unsubscribe_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     Ok(())
 }
 
-/// PSUBSCRIBE pattern [pattern ...]
+/// PSUBSCRIBE pattern [pattern...]
 pub fn psubscribe_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     if ctx.argc() < 2 {
         return Err(RedisError::wrong_number_of_args(b"psubscribe"));
@@ -218,7 +213,7 @@ pub fn psubscribe_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     Ok(())
 }
 
-/// PUNSUBSCRIBE [pattern ...]
+/// PUNSUBSCRIBE [pattern...]
 pub fn punsubscribe_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let registry = registry_handle(ctx)?;
     let targets: Vec<RedisString> = if ctx.argc() == 1 {
@@ -474,7 +469,7 @@ pub fn is_allowed_in_subscribe_mode(name: &[u8]) -> bool {
     )
 }
 
-/// Drain all subscriptions for `client_id` from the registry, returning the
+/// Drain all subscriptions for `client_id` from the registry, returning
 /// number of channel+pattern subscriptions cleared. Used when a connection
 /// closes.
 pub fn drop_client_from_registry(
@@ -550,7 +545,7 @@ pub fn spublish_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     ctx.reply_integer(receivers)
 }
 
-/// SSUBSCRIBE shardchannel [shardchannel ...]
+/// SSUBSCRIBE shardchannel [shardchannel...]
 pub fn ssubscribe_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     if ctx.argc() < 2 {
         return Err(RedisError::wrong_number_of_args(b"ssubscribe"));
@@ -585,7 +580,7 @@ pub fn ssubscribe_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     Ok(())
 }
 
-/// SUNSUBSCRIBE [shardchannel [shardchannel ...]]
+/// SUNSUBSCRIBE [shardchannel [shardchannel...]]
 pub fn sunsubscribe_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let registry = registry_handle(ctx)?;
     let targets: Vec<RedisString> = if ctx.argc() == 1 {
@@ -712,7 +707,7 @@ mod tests {
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        src/pubsub.c  (Round 8a live wiring)
+//   source:        Valkey
 //   target_crate:  redis-commands
 //   confidence:    high
 //   todos:         0

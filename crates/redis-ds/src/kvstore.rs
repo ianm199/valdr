@@ -1,6 +1,5 @@
 //! `Kvstore` — per-slot sharded keyspace container.
-//!
-//! Wraps a collection of `dict`s (one per cluster slot, or a single one in
+//! Wraps a collection of `dict`s (one per cluster slot, or a single one
 //! standalone mode) so the keyspace and expires can be sharded by hash slot.
 
 #[derive(Debug, Clone, Default)]

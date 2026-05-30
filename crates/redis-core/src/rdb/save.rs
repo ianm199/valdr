@@ -1,16 +1,13 @@
 //! RDB save path — `RdbSaver` writes the complete RDB file.
-//!
 //! Round 19a: replaces the Round 18 empty-payload placeholder with real
 //! `RDB_TYPE_STRING` serialization for all three string encodings: Int,
 //! Embstr, Raw. Non-string types still emit an empty-payload placeholder
 //! (Rounds 20–23 will replace those).
-//!
 //! File layout:
-//!   - Magic header + AUX fields
-//!   - SELECTDB + RESIZEDB hints for every non-empty logical DB
-//!   - Per-key: optional EXPIRETIME_MS + type byte + value payload
-//!   - EOF + CRC64 trailer
-//!
+//! - Magic header + AUX fields
+//! - SELECTDB + RESIZEDB hints for every non-empty logical DB
+//! - Per-key: optional EXPIRETIME_MS + type byte + value payload
+//! - EOF + CRC64 trailer
 //! The saver accumulates everything in a `Vec<u8>` so the CRC can be computed
 //! over the entire byte stream before writing to disk.
 
@@ -92,7 +89,6 @@ fn write_rdb_dbs_to_buf(dbs: &[RedisDb], buf: &mut Vec<u8>) -> io::Result<()> {
 }
 
 /// Serialize a `ObjectKind::Json` value as a length-prefixed UTF-8 JSON string.
-///
 /// Wire format: `write_rdb_string(serde_json::to_string(value))`.
 /// This is a private opcode (RDB_TYPE_JSON_NATIVE = 200) understood only by
 /// this implementation; real Valkey will reject the file.
@@ -110,16 +106,14 @@ fn save_json_object(buf: &mut impl Write, obj: &crate::object::RedisObject) -> i
 
 /// Serialize a `ObjectKind::Bloom` value as a fixed binary record followed by a
 /// length-prefixed byte slice for the bit array.
-///
 /// Wire format (all integers little-endian):
-///   capacity    u64  (8 bytes)
-///   item_count  u64  (8 bytes)
-///   n_hashes    u32  (4 bytes)
-///   error_rate  f64  (8 bytes, IEEE 754)
-///   expansion   u32  (4 bytes)
-///   nonscaling  u8   (1 byte, 0 or 1)
-///   bits        write_rdb_string(bf.bits)
-///
+/// capacity u64 (8 bytes)
+/// item_count u64 (8 bytes)
+/// n_hashes u32 (4 bytes)
+/// error_rate f64 (8 bytes, IEEE 754)
+/// expansion u32 (4 bytes)
+/// nonscaling u8 (1 byte, 0 or 1)
+/// bits write_rdb_string(bf.bits)
 /// This is a private opcode (RDB_TYPE_BLOOM_NATIVE = 201) understood only by
 /// this implementation; real Valkey will reject the file.
 fn save_bloom_object(buf: &mut impl Write, obj: &crate::object::RedisObject) -> io::Result<()> {
@@ -139,7 +133,6 @@ fn save_bloom_object(buf: &mut impl Write, obj: &crate::object::RedisObject) -> 
 }
 
 /// Return the RDB type byte used to encode one Redis object.
-///
 /// `ObjectKind::Module` has no in-tree serializer yet, so callers get an
 /// `Unsupported` error rather than a placeholder byte.
 pub fn rdb_type_for_object(obj: &RedisObject) -> io::Result<u8> {
@@ -179,7 +172,6 @@ pub fn save_object_payload(buf: &mut impl Write, obj: &RedisObject) -> io::Resul
 }
 
 /// Create the byte payload returned by `DUMP`.
-///
 /// Layout: `<type byte><object payload><u16 RDB version LE><u64 CRC64 LE>`.
 pub fn create_dump_payload(obj: &RedisObject) -> io::Result<Vec<u8>> {
     let mut buf = Vec::with_capacity(64);
@@ -192,7 +184,6 @@ pub fn create_dump_payload(obj: &RedisObject) -> io::Result<Vec<u8>> {
 }
 
 /// Save `db` to the file at `path`, using an atomic write-then-rename strategy.
-///
 /// A temporary file `<path>.tmp` is written first; on success it is renamed
 /// over `path`. This ensures the on-disk file is never partially written.
 pub fn save_rdb(db: &RedisDb, path: &Path) -> io::Result<()> {
@@ -215,7 +206,7 @@ pub fn save_rdb_databases(dbs: &[RedisDb], path: &Path) -> io::Result<()> {
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        reference/valkey/src/rdb.c save DB iteration semantics
+//   source:        Valkey
 //   target_crate:  redis-core
 //   confidence:    medium
 //   todos:         0

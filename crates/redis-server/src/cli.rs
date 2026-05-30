@@ -122,7 +122,6 @@ impl Default for CliArgs {
 }
 
 /// Parse CLI flags and (optionally) a Valkey-style config file path.
-///
 /// The Valkey TCL harness invokes the server as `valkey-server /path/to/conf`,
 /// so when `argv[1]` does not start with `--` we treat it as a config-file
 /// path and parse `key value` lines from it. Recognised directives are `port`
@@ -495,10 +494,9 @@ pub(crate) fn cli_error_case(args: &[String]) -> Option<String> {
 }
 
 /// Read a Valkey-style config file and update `args` with the directives we
-/// understand. Lines are split on the first run of whitespace; blank lines and
+/// understand. Lines are split on the first run of whitespace; blank lines
 /// `#`-prefixed comments are skipped; unknown directives are ignored.
-///
-/// Unquote a single config-file value the way `sdssplitargs` does: when the
+/// Unquote a single config-file value the way `sdssplitargs` does: when
 /// value is wrapped in matching single or double quotes, strip them and (for
 /// double quotes) translate `\n \r \t \b \a \xHH` escapes. Bare values are
 /// returned unchanged. Without this, a quoted `appendfilename " a\nb "` would
@@ -783,7 +781,6 @@ pub(crate) fn parse_memsize_config(bytes: &[u8]) -> Option<u64> {
 }
 
 /// Emit the startup-log sentinels the Valkey TCL harness greps for.
-///
 /// `wait_server_started` in `tests/support/server.tcl` scans the server's
 /// stdout for ` PID: <pid>` followed by `Server initialized`. Once those two
 /// tokens appear in the same stream the harness considers the server alive

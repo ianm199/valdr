@@ -1,22 +1,17 @@
 //! Request/response logging for Redis clients.
-//!
 //! Implements the interface for logging clients' requests and responses to a
-//! file. Mirrors the behaviour of C's `logreqres.c`, which is compiled-in only
+//! file., which is compiled-in only
 //! when the `LOG_REQ_RES` preprocessor macro is defined. In Rust the equivalent
 //! gate is the `log_req_res` Cargo feature; the public API symbols are present
 //! regardless, but their implementations become no-ops when the feature is
 //! absent.
-//!
 //! **Log format** — each completed command cycle writes:
 //! ```text
 //! <arg0-len>\r\n<arg0-bytes>\r\n
 //! <arg1-len>\r\n<arg1-bytes>\r\n
-//! ...
 //! 12\r\n__argv_end__\r\n
 //! <RESP-encoded response bytes>
 //! ```
-//!
-//! C: logreqres.c (303 lines, 8 functions)
 
 use redis_types::{RedisError, RedisString};
 use std::io::Write as _;
@@ -24,67 +19,51 @@ use std::io::Write as _;
 // ── Constants ──────────────────────────────────────────────────────────────
 
 /// Sentinel written after all argv entries to delimit request from response.
-///
-/// C: `"__argv_end__"` literal (logreqres.c:208).
 const ARGV_END: &[u8] = b"__argv_end__";
 
 /// Minimum initial capacity for the log accumulation buffer.
-///
-/// C: `max(len, 1024)` in `reqresAppendBuffer` (logreqres.c:97).
 const MIN_BUF_CAPACITY: usize = 1024;
 
 // ── Sub-structs ────────────────────────────────────────────────────────────
 
 /// Byte offset into the tail reply-list node at the moment the offset is saved.
-///
-/// C: anonymous `last_node` struct inside `clientReqResInfo` (server.h:1108–1111).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ReplyNodeOffset {
-    /// Zero-based index of the tail reply-list node when the offset was saved.
+ /// Zero-based index of the tail reply-list node when the offset was saved.
     pub index: usize,
-    /// Bytes used in that node when the offset was saved.
+ /// Bytes used in that node when the offset was saved.
     pub used: usize,
 }
 
 /// Reply-buffer offsets captured once at the start of each command cycle.
-///
-/// C: anonymous `offset` struct inside `clientReqResInfo` (server.h:1102–1112).
 #[derive(Debug, Default, Clone)]
 pub struct ReplyOffset {
-    /// Becomes `true` after the offset is saved; subsequent save calls no-op.
+ /// Becomes `true` after the offset is saved; subsequent save calls no-op.
     pub saved: bool,
-    /// Byte position in the static reply buffer (`client.bufpos`) at save time.
+ /// Byte position in the static reply buffer (`client.bufpos`) at save time.
     pub bufpos: usize,
-    /// Snapshot of the reply-list tail node at save time.
+ /// Snapshot of the reply-list tail node at save time.
     pub last_node: ReplyNodeOffset,
 }
 
 /// Per-client request/response logging state.
-///
-/// C: `clientReqResInfo` (server.h:1094–1113).
-///
 /// TODO(architect): add `pub reqres: ClientReqResInfo` to `Client` in
 /// `crates/redis-core/src/client.rs`. The field should be unconditionally
 /// present; keeping it in a `Vec<u8>` with zero capacity is zero-cost when
 /// logging is disabled and avoids an `Option` wrapper at every call site.
 #[derive(Debug, Default)]
 pub struct ClientReqResInfo {
-    /// `true` once the command argv has been logged for the current cycle.
+ /// `true` once the command argv has been logged for the current cycle.
     pub argv_logged: bool,
-    /// Accumulation buffer holding request bytes and response bytes before
-    /// they are flushed to the log file.
-    ///
-    /// C: `unsigned char *buf` + `size_t used` + `size_t capacity`
-    /// (server.h:1098–1100). Rust `Vec<u8>` manages capacity natively.
+ /// Accumulation buffer holding request bytes and response bytes before
+ /// they are flushed to the log file.
+ ///. Rust `Vec<u8>` manages capacity natively.
     pub buf: Vec<u8>,
-    /// Saved reply-buffer offsets for the current command cycle.
+ /// Saved reply-buffer offsets for the current command cycle.
     pub offset: ReplyOffset,
 }
 
 /// A single block in the client's reply-block linked list.
-///
-/// C: `clientReplyBlock` (server.h:864–869).
-///
 /// PORT NOTE: the C `Client` has a static inline buffer (`c->buf`/`c->bufpos`)
 /// *and* a linked list of `clientReplyBlock` nodes (`c->reply`). The current
 /// Rust `Client` uses a single flat `reply_buf: Vec<u8>`. This struct is
@@ -94,13 +73,11 @@ pub struct ClientReqResInfo {
 /// `Client` before `reqres_append_response` can be fully wired in Phase B.
 #[derive(Debug)]
 pub struct ClientReplyBlock {
-    /// Bytes stored in this block.
+ /// Bytes stored in this block.
     pub buf: Vec<u8>,
 }
 
 /// High-level client classification used by the logging gate.
-///
-/// C: `CLIENT_TYPE_*` constants (server.h:359–362). Only the subset relevant
 /// to logging decisions is modelled here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientType {
@@ -114,12 +91,9 @@ pub enum ClientType {
 // ── Private helpers ────────────────────────────────────────────────────────
 
 /// Return `true` if the command name should be excluded from req/res logging.
-///
 /// The excluded commands either emit streaming or non-standard responses that
 /// would break the log format, or are explicitly hazardous (DEBUG SEGFAULT).
 /// Comparison is ASCII-case-insensitive, matching C's `strcasecmp`.
-///
-/// C: logreqres.c:187–191 (inline filter inside `reqresAppendRequest`).
 fn is_excluded_command(name: &[u8]) -> bool {
     const EXCLUDED: &[&[u8]] = &[
         b"debug",
@@ -139,15 +113,13 @@ fn is_excluded_command(name: &[u8]) -> bool {
 // ── impl ClientReqResInfo ──────────────────────────────────────────────────
 
 impl ClientReqResInfo {
-    /// Construct a zero-initialised instance.
+ /// Construct a zero-initialised instance.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Append raw bytes to the accumulation buffer, growing capacity as needed.
-    ///
-    /// C: `reqresAppendBuffer` (logreqres.c:94–106). The C version manages a
-    /// raw `zmalloc`/`zrealloc` buffer; Rust `Vec` handles growth natively.
+ /// Append raw bytes to the accumulation buffer, growing capacity as needed.
+ /// raw `zmalloc`/`zrealloc` buffer; Rust `Vec` handles growth natively.
     fn append_buffer(&mut self, data: &[u8]) -> usize {
         if self.buf.capacity() == 0 {
             self.buf.reserve(data.len().max(MIN_BUF_CAPACITY));
@@ -156,13 +128,10 @@ impl ClientReqResInfo {
         data.len()
     }
 
-    /// Append one argument in log format: `<decimal-length>\r\n<bytes>\r\n`.
-    ///
-    /// C: `reqresAppendArg` (logreqres.c:110–118). C uses `ll2string` to
-    /// convert the length; Rust's `itoa`-style decimal is identical.
-    ///
-    /// PERF(port): `format!` allocates a temporary `String` for the length
-    /// decimal — profile in Phase B; consider a stack buffer instead.
+ /// Append one argument in log format: `<decimal-length>\r\n<bytes>\r\n`.
+ /// convert the length; Rust's `itoa`-style decimal is identical.
+ /// PERF(port): `format!` allocates a temporary `String` for the length
+ /// decimal — profile in Phase B; consider a stack buffer instead.
     fn append_arg(&mut self, arg: &[u8]) -> usize {
         let len_decimal = format!("{}", arg.len());
         let mut written = self.append_buffer(len_decimal.as_bytes());
@@ -172,13 +141,10 @@ impl ClientReqResInfo {
         written
     }
 
-    /// Reset the logging state, optionally releasing the accumulation buffer.
-    ///
-    /// When `free_buf` is `true` the buffer heap memory is released (`Vec::new`
-    /// replaces it); otherwise `Vec::clear` is used so capacity is retained for
-    /// the next command cycle.
-    ///
-    /// C: `reqresReset` (logreqres.c:125–128).
+ /// Reset the logging state, optionally releasing the accumulation buffer.
+ /// When `free_buf` is `true` the buffer heap memory is released (`Vec::new`
+ /// replaces it); otherwise `Vec::clear` is used so capacity is retained for
+ /// the next command cycle.
     pub fn reset(&mut self, free_buf: bool) {
         if free_buf {
             self.buf = Vec::new();
@@ -193,12 +159,9 @@ impl ClientReqResInfo {
 // ── Public API ─────────────────────────────────────────────────────────────
 
 /// Determine whether req/res logging should be active for the given client.
-///
-/// All parameters correspond to fields that will exist on `Client` once the
+/// All parameters correspond to fields that will exist on `Client` once
 /// `TODO(architect)` items above are resolved. Call sites in `networking.c`
 /// will become calls on `Client` methods once the client struct is extended.
-///
-/// C: `reqresShouldLog` (logreqres.c:77–92, `static`).
 pub fn reqres_should_log(
     log_file_configured: bool,
     is_fake: bool,
@@ -221,27 +184,22 @@ pub fn reqres_should_log(
 }
 
 /// Reset `info`, optionally releasing the accumulation buffer.
-///
-/// C: `reqresReset` — public entry point (logreqres.c:125–128 / 283–286).
+/// public entry point.
 pub fn reqres_reset(info: &mut ClientReqResInfo, free_buf: bool) {
     info.reset(free_buf);
 }
 
 /// Save the client's current reply-buffer offsets so that
 /// `reqres_append_response` can later compute which bytes belong to this command.
-///
 /// Only the first call per command cycle has any effect; once
 /// `info.offset.saved` is `true`, subsequent calls are no-ops. This guards
 /// against double-saving in pipelining scenarios.
-///
 /// Parameters:
 /// - `should_log` — pre-computed result of `reqres_should_log`.
 /// - `static_bufpos` — current value of `client.bufpos`.
 /// - `reply_list_tail` — `Some((index, used))` when the reply-block list is
-///   non-empty (index = last-node index, used = bytes in that node); `None`
-///   when the list is empty.
-///
-/// C: `reqresSaveClientReplyOffset` (logreqres.c:160–175 / 288–290).
+/// non-empty (index = last-node index, used = bytes in that node); `None`
+/// when the list is empty.
 pub fn reqres_save_client_reply_offset(
     info: &mut ClientReqResInfo,
     should_log: bool,
@@ -269,16 +227,12 @@ pub fn reqres_save_client_reply_offset(
 }
 
 /// Append the command's argv to the accumulation buffer.
-///
 /// Each argument is written as `<decimal-length>\r\n<bytes>\r\n`, followed by
 /// the `__argv_end__` sentinel in the same format.
-///
 /// Returns the total bytes appended, or `0` when logging is suppressed.
-///
 /// PORT NOTE: C's implementation branches on `sdsEncodedObject` vs
 /// `OBJ_ENCODING_INT` to format integer-encoded objects as decimal strings.
 /// `RedisString` always stores bytes, so no such branch is needed here.
-/// C: logreqres.c:177–209 / 292–295.
 pub fn reqres_append_request(
     info: &mut ClientReqResInfo,
     should_log: bool,
@@ -305,29 +259,25 @@ pub fn reqres_append_request(
     ret + info.append_arg(ARGV_END)
 }
 
-/// Capture the command's response bytes and flush request + response to the
+/// Capture the command's response bytes and flush request + response to
 /// log file.
-///
 /// Bytes in both the static reply buffer and the reply-block list that arrived
-/// *after* `reqres_save_client_reply_offset` was called are appended to
+/// *after* `reqres_save_client_reply_offset` was called are appended
 /// `info.buf`. The full accumulated buffer (request + response) is then
 /// written to `log_file_path` in append mode.
-///
 /// Returns the number of response bytes captured, or `0` when logging is
 /// suppressed.
-///
 /// Parameters:
 /// - `should_log` — pre-computed result of `reqres_should_log`.
 /// - `static_buf` — the full static reply buffer (`client.buf`).
 /// - `static_bufpos` — write position in `static_buf` (`client.bufpos`).
 /// - `reply_blocks` — slice of reply-list blocks; pass `&[]` for commands
-///   whose reply fits in the static buffer.
+/// whose reply fits in the static buffer.
 /// - `log_file_path` — destination log file; `None` skips the write.
-///
 /// PORT NOTE: C opens the file, writes, then closes on every call. In Rust
 /// we do the same via `OpenOptions::append`. A persistent `BufWriter`
 /// would be more efficient; defer to Phase B once the server config wires
-/// the file handle lifetime. C: logreqres.c:211–277 / 297–300.
+/// the file handle lifetime. C:.
 pub fn reqres_append_response(
     info: &mut ClientReqResInfo,
     should_log: bool,
@@ -340,25 +290,23 @@ pub fn reqres_append_response(
         return Ok(0);
     }
     if !info.argv_logged {
-        // C: logreqres.c:216 — "Example: UNSUBSCRIBE"
+ // "Example: UNSUBSCRIBE"
         return Ok(0);
     }
     if !info.offset.saved {
-        // C: logreqres.c:219 — "Example: module client blocked on keys + CLIENT KILL"
+ // "Example: module client blocked on keys + CLIENT KILL"
         return Ok(0);
     }
 
     let mut ret: usize = 0;
 
-    // Append bytes from the static reply buffer produced by this command.
-    // C: logreqres.c:223–226.
+ // Append bytes from the static reply buffer produced by this command.
     if static_bufpos > info.offset.bufpos {
         let slice = &static_buf[info.offset.bufpos..static_bufpos];
         ret += info.append_buffer(slice);
     }
 
-    // Determine the current tail position of the reply-block list.
-    // C: logreqres.c:228–233.
+ // Determine the current tail position of the reply-block list.
     let curr_index = if reply_blocks.is_empty() {
         0
     } else {
@@ -366,8 +314,7 @@ pub fn reqres_append_response(
     };
     let curr_used = reply_blocks.last().map_or(0, |b| b.buf.len());
 
-    // Append bytes from reply-block list nodes produced by this command.
-    // C: logreqres.c:235–267.
+ // Append bytes from reply-block list nodes produced by this command.
     if curr_index > info.offset.last_node.index || curr_used > info.offset.last_node.used {
         for (i, block) in reply_blocks.iter().enumerate() {
             if block.buf.is_empty() {
@@ -375,17 +322,15 @@ pub fn reqres_append_response(
             }
 
             if i < info.offset.last_node.index {
-                // Entirely predates the saved offset; skip.
+ // Entirely predates the saved offset; skip.
                 continue;
             }
 
             let slice = if i == info.offset.last_node.index {
-                // Partially-written node: only bytes after the saved position.
-                // C: logreqres.c:256–259.
+ // Partially-written node: only bytes after the saved position.
                 &block.buf[info.offset.last_node.used..]
             } else {
-                // New node: all bytes.
-                // C: logreqres.c:261–263.
+ // New node: all bytes.
                 &block.buf[..]
             };
 
@@ -398,8 +343,8 @@ pub fn reqres_append_response(
         "reqres_append_response: zero response bytes captured"
     );
 
-    // Flush accumulated buffer (request + response) to the log file.
-    // C: logreqres.c:270–274 — fopen/fwrite/fclose.
+ // Flush accumulated buffer (request + response) to the log file.
+ // fopen/fwrite/fclose.
     if let Some(path) = log_file_path {
         let mut fp = std::fs::OpenOptions::new()
             .append(true)
@@ -415,7 +360,7 @@ pub fn reqres_append_response(
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        src/logreqres.c  (303 lines, 8 functions)
+//   source:        Valkey
 //   target_crate:  redis-core
 //   confidence:    medium
 //   todos:         3
