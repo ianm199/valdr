@@ -62,13 +62,16 @@
   Full upstream Valkey suite     ██████░░░░  2,466 / 4,299   · 57%</code></pre>
 
   <p class="note">
-    The 1,758-block gap to 4,299 is out of scope — cluster, modules,
-    sentinel, replication-integration, platform. Not failing.
+    These are Valkey's own tests, not ours. Within the scope we build —
+    single-node Redis/Valkey — Valdr passes <strong>100% of counted assertions</strong>
+    and <strong>97% of source test blocks</strong>. The full-suite figure is lower only
+    because ~41% of upstream's tests cover cluster, modules, Sentinel, and replication
+    integration we have deliberately not built — unbuilt scope, not failures.
     Verified 2026-05-28 against
-    <a href="https://github.com/valkey-io/valkey/releases/tag/9.1.0">Valkey 9.1.0</a>;
-    bucketing in
-    <a href="https://github.com/ianm199/valdr/blob/main/docs/TEST_AND_FEATURE_COVERAGE.md">docs/TEST_AND_FEATURE_COVERAGE.md</a>.
+    <a href="https://github.com/valkey-io/valkey/releases/tag/9.1.0">Valkey 9.1.0</a>.
   </p>
+
+  <p class="note"><a href="coverage.html">→ Full coverage breakdown by category</a></p>
 
   <!-- ✍️ WRITE HERE (optional) — a sentence or two in your own words on what
        these numbers mean (e.g. "these are Valkey's own tests, not mine").

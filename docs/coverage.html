@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Valdr — Coverage</title>
+<meta name="description" content="Valdr test coverage — full breakdown by category against Valkey's upstream test suite.">
+<link rel="stylesheet" href="style.css">
+<style>
+  .md-table { border-collapse: collapse; width: 100%; margin: 1rem 0 2rem; font-size: 0.95rem; }
+  .md-table th, .md-table td { padding: 0.45rem 0.7rem; border-bottom: 1px solid var(--border, #2a2a2a); }
+  .md-table thead th { border-bottom: 2px solid var(--border, #2a2a2a); color: var(--muted); font-weight: 600; }
+  .md-table tbody tr:hover { background: rgba(127, 127, 127, 0.06); }
+  #coverage-content h2 { margin-top: 2.4rem; }
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <a class="brand" href="/">Valdr</a>
+  <div class="navlinks">
+    <a href="/#coverage">Coverage</a>
+    <a href="/#scope">Scope</a>
+    <a href="/#performance">Performance</a>
+    <a href="/roadmap.html">Roadmap</a>
+    <a href="/#try">Try it</a>
+  </div>
+  <a class="nav-gh" href="https://github.com/ianm199/valdr">GitHub ↗</a>
+</nav>
+
+<main>
+<section id="coverage-detail">
+  <div id="coverage-content">loading coverage…</div>
+</section>
+</main>
+
+<footer>
+  <p>
+    Valdr · alpha · BSD 3-Clause ·
+    <a href="https://github.com/ianm199/valdr">github.com/ianm199/valdr</a>
+  </p>
+</footer>
+
+<!-- Content lives in coverage.md — edit that, not this file. -->
+<script src="md.js"></script>
+<script>Valdr.loadMarkdownInto('coverage-content', 'coverage.md');</script>
+</body>
+</html>
