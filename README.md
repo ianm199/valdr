@@ -119,57 +119,57 @@ docker network rm valdr-bench
 
 <!-- PERF:START — auto-generated from docs/perf-data.json by `make site-data`; do not hand-edit between these markers -->
 
-Latest warmed local run: Valdr (`8c8678f`) vs **Valkey 9.1.0**, measured 2026-05-29T20:32:39+00:00 on Apple M3 Max. These tables and the [valdr.dev](https://valdr.dev) landing page both render `docs/perf-data.json` — one source of truth, no hand-typed numbers. Ratio = valdr_rps / valkey_rps; >1.00 = Valdr is faster. `function_load` is excluded (its ratio is a reload-fast-path artifact, not throughput).
+Latest warmed local run: Valdr (`9104a19`) vs **Valkey 9.1.0 (jemalloc)**, measured 2026-06-01T14:44:54+00:00 on Apple M3 Max. These tables and the [valdr.dev](https://valdr.dev) landing page both render `docs/perf-data.json` — one source of truth, no hand-typed numbers. Ratio = valdr_rps / valkey_rps; >1.00 = Valdr is faster. `function_load` is excluded (its ratio is a reload-fast-path artifact, not throughput).
 
 **Server config:** no `.conf` file — both servers are launched from explicit flags, persistence off, everything else stock defaults. Valkey: `--save "" --appendonly no --daemonize no --loglevel warning`. Valdr: `--rdb-disabled --appendonly no`. Both bound to `127.0.0.1`.
 
 ### Per-command (default `valkey-benchmark` suite)
 
-| Command | Valdr rps | Valkey 9.1.0 rps | Ratio |
+| Command | Valdr rps | Valkey 9.1.0 (jemalloc) rps | Ratio |
 |---|---:|---:|---:|
-| PING_INLINE | 6,250,000 | 4,000,000 | **1.562×** |
-| PING_MBULK | 6,666,667 | 5,555,556 | 1.200× |
-| SET | 3,846,154 | 2,564,102 | **1.500×** |
-| GET | 4,545,454 | 3,448,276 | **1.318×** |
-| INCR | 4,166,667 | 3,571,428 | 1.167× |
-| LPUSH | 2,702,703 | 2,325,581 | 1.162× |
-| RPUSH | 2,702,703 | 2,702,703 | 1.000× |
-| LPOP | 2,777,778 | 2,325,581 | 1.194× |
-| RPOP | 2,564,102 | 2,631,579 | 0.974× |
-| SADD | 3,448,276 | 3,225,806 | 1.069× |
-| HSET | 2,777,778 | 2,564,102 | 1.083× |
-| SPOP | 4,545,454 | 4,000,000 | 1.136× |
-| ZADD | 2,564,102 | 2,325,581 | 1.103× |
-| ZPOPMIN | 4,166,667 | 3,846,154 | 1.083× |
-| LRANGE_100 | 184,502 | 120,337 | **1.533×** |
-| LRANGE_300 | 62,266 | 37,994 | **1.639×** |
-| LRANGE_500 | 36,805 | 22,589 | **1.629×** |
-| LRANGE_600 | 30,460 | 18,498 | **1.647×** |
-| MSET | 680,272 | 476,190 | **1.429×** |
-| MGET | 1,020,408 | 751,880 | **1.357×** |
-| XADD | 1,265,823 | 1,449,275 | 0.873× |
-| FCALL | 990,099 | 1,408,451 | 0.703× |
+| PING_INLINE | 6,666,667 | 4,761,905 | **1.400×** |
+| PING_MBULK | 9,090,909 | 6,250,000 | **1.455×** |
+| SET | 4,166,667 | 2,941,176 | **1.417×** |
+| GET | 5,000,000 | 3,846,154 | **1.300×** |
+| INCR | 4,545,454 | 4,000,000 | 1.136× |
+| LPUSH | 2,702,703 | 2,702,703 | 1.000× |
+| RPUSH | 2,702,703 | 3,030,303 | 0.892× |
+| LPOP | 2,777,778 | 2,500,000 | 1.111× |
+| RPOP | 2,564,102 | 2,702,703 | 0.949× |
+| SADD | 3,448,276 | 3,571,428 | 0.966× |
+| HSET | 2,777,778 | 2,777,778 | 1.000× |
+| SPOP | 4,761,905 | 4,347,826 | 1.095× |
+| ZADD | 2,631,579 | 2,380,952 | 1.105× |
+| ZPOPMIN | 4,347,826 | 4,000,000 | 1.087× |
+| LRANGE_100 | 185,529 | 132,979 | **1.395×** |
+| LRANGE_300 | 59,277 | 39,620 | **1.496×** |
+| LRANGE_500 | 35,398 | 22,878 | **1.547×** |
+| LRANGE_600 | 30,340 | 18,713 | **1.621×** |
+| MSET | 699,301 | 515,464 | **1.357×** |
+| MGET | 1,075,269 | 793,651 | **1.355×** |
+| XADD | 1,388,889 | 1,724,138 | 0.806× |
+| FCALL | 1,030,928 | 1,449,275 | 0.711× |
 
 - **Wins** (ratio ≥ 1.2×): `ping_inline`, `ping_mbulk`, `set`, `get`, `lrange_100`, `lrange_300`, `lrange_500`, `lrange_600`, `mset`, `mget`.
-- **Parity** (0.95×–1.2×): `incr`, `lpush`, `rpush`, `lpop`, `rpop`, `sadd`, `hset`, `spop`, `zadd`, `zpopmin`.
-- **Behind** (< 0.95×): `xadd`, `fcall` — where the port's oracle-gated behavioral fidelity currently extracts a perf cost not yet paid down.
+- **Parity** (0.95×–1.2×): `incr`, `lpush`, `lpop`, `sadd`, `hset`, `spop`, `zadd`, `zpopmin`.
+- **Behind** (< 0.95×): `rpush`, `rpop`, `xadd`, `fcall` — where the port's oracle-gated behavioral fidelity currently extracts a perf cost not yet paid down.
 
 ### Pipeline-depth curve (GET/SET/PING/INCR at p=1/16/100)
 
-| Workload | Valdr rps | Valkey 9.1.0 rps | Ratio |
+| Workload | Valdr rps | Valkey 9.1.0 (jemalloc) rps | Ratio |
 |---|---:|---:|---:|
-| GET p=1 | 160,256 | 150,602 | 1.064× |
-| GET p=16 | 2,000,000 | 1,739,130 | 1.150× |
-| GET p=100 | 5,128,205 | 3,174,603 | **1.615×** |
-| PING p=1 | 167,785 | 154,799 | 1.084× |
-| PING p=16 | 2,222,222 | 2,105,263 | 1.056× |
-| PING p=100 | 8,000,000 | 5,000,000 | **1.600×** |
-| SET p=1 | 162,338 | 151,515 | 1.071× |
-| SET p=16 | 2,061,856 | 1,562,500 | **1.320×** |
-| SET p=100 | 4,166,667 | 2,247,191 | **1.854×** |
-| INCR p=1 | 168,350 | 163,934 | 1.027× |
-| INCR p=16 | 1,801,802 | 1,739,130 | 1.036× |
-| INCR p=100 | 4,255,320 | 3,389,830 | 1.255× |
+| GET p=1 | 162,866 | 147,059 | 1.107× |
+| GET p=16 | 2,597,402 | 2,040,816 | 1.273× |
+| GET p=100 | 4,761,905 | 3,571,428 | **1.333×** |
+| PING p=1 | 179,211 | 159,236 | 1.125× |
+| PING p=16 | 2,816,901 | 2,469,136 | 1.141× |
+| PING p=100 | 8,000,000 | 5,882,352 | **1.360×** |
+| SET p=1 | 177,936 | 154,799 | 1.149× |
+| SET p=16 | 1,980,198 | 1,785,714 | 1.109× |
+| SET p=100 | 4,081,633 | 2,816,901 | **1.449×** |
+| INCR p=1 | 207,469 | 174,825 | 1.187× |
+| INCR p=16 | 2,173,913 | 2,325,581 | 0.935× |
+| INCR p=100 | 4,166,667 | 3,448,276 | 1.208× |
 
 <!-- PERF:END -->
 
