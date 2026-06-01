@@ -4,7 +4,9 @@ Valdr is a port of [Valkey](https://github.com/valkey-io/valkey) aiming to be fu
 
 Currently Valdr supports the all the core Redis Client commands and passes 99.6% of [single node tests](https://valdr.dev/coverage.html). 
 
-This repo heavily leveraged coding agents in the process and was inspired by similar efforts.
+This repo heavily leveraged coding agents in the process. This was largely inspired by the changing landscape of [memory safety attacks](https://labs.cloudsecurityalliance.org/research/csa-research-note-claude-mythos-autonomous-offensive-thresho/) as agentic cyber capabilities increase.
+
+## Roadmap
 
 ## Status
 
