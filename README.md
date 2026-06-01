@@ -152,6 +152,8 @@ docker run --rm -p 6379:6379 ghcr.io/ianm199/valdr:alpha
 
 ## Benchmark Commands
 
+> A rough, runnable head-to-head against the official `valkey/valkey:8-alpine` image (both sides ship jemalloc). Benchmarking inside a container is noisy — especially Docker Desktop on macOS, where per-run throughput can swing ~2×. The [Performance](#performance) chart above is the measurement of record: native binaries, warmed, jemalloc on both sides, vs Valkey 9.1.0. For a stable head-to-head, run this on a Linux host.
+
 <details>
 <summary>Run official valkey-benchmark against Valkey and valdr Docker images</summary>
 
@@ -183,7 +185,6 @@ docker run --rm \
     -P 100 \
     -d 64 \
     -t ping_inline,ping_mbulk,set,get,incr,lpush,rpush,lpop,rpop,sadd,hset,spop,zadd,zpopmin,lrange_100,lrange_300,lrange_500,lrange_600,mset,mget,xadd,function_load,fcall \
-    --warmup 1 \
     --csv \
     --precision 3
 ```
@@ -200,7 +201,6 @@ docker run --rm \
     -P 100 \
     -d 64 \
     -t ping_inline,ping_mbulk,set,get,incr,lpush,rpush,lpop,rpop,sadd,hset,spop,zadd,zpopmin,lrange_100,lrange_300,lrange_500,lrange_600,mset,mget,xadd,function_load,fcall \
-    --warmup 1 \
     --csv \
     --precision 3
 ```
