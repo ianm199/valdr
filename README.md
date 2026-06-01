@@ -1,4 +1,5 @@
 # valdr
+Single node Valkey in mostly memory safe Rust. Verified against Valkey's test suite, uses memory safe TLS with rustls.
 
 Valdr is a port of [Valkey](https://github.com/valkey-io/valkey) aiming to be fully compatible with Redis/Valkey clients in memory safe Rust. The motivation for this project is to attempt to build mostly memory safe alternatives to core web infrastructure and to explore architecture choices that will enable faster performance in the long run. 
 
@@ -24,7 +25,7 @@ This repo heavily leveraged coding agents in the process. This was largely inspi
 |---|---|---|
 | Single-node RESP wire behavior | Full on current smoke corpus | 23 / 23 byte-exact scripts vs upstream Valkey |
 | RDB load/save interop | Full on current corpus | 378 / 378 bidirectional checks |
-| Upstream TCL suite | Single-node core green; not a full-suite claim | Full denominator 4,299 blocks, bucketed in [`docs/TEST_AND_FEATURE_COVERAGE.md`](docs/TEST_AND_FEATURE_COVERAGE.md) |
+| Upstream TCL suite | Single-node core green; not a full-suite claim | Full denominator 4,299 blocks, bucketed at [valdr.dev/coverage.html](https://valdr.dev/coverage.html) |
 | Cluster mode | Not implemented | Out of scope for current alpha |
 | Loadable C modules | Not implemented | Out of scope for current alpha |
 | Production HA / Sentinel | Not claimed | Replication/AOF exist but are not production-conformance gated |
@@ -152,7 +153,7 @@ Latest warmed local run: Valdr (`9104a19`) vs **Valkey 9.1.0 (jemalloc)**, measu
 
 - **Wins** (ratio ≥ 1.2×): `ping_inline`, `ping_mbulk`, `set`, `get`, `lrange_100`, `lrange_300`, `lrange_500`, `lrange_600`, `mset`, `mget`.
 - **Parity** (0.95×–1.2×): `incr`, `lpush`, `lpop`, `sadd`, `hset`, `spop`, `zadd`, `zpopmin`.
-- **Behind** (< 0.95×): `rpush`, `rpop`, `xadd`, `fcall` — where the port's oracle-gated behavioral fidelity currently extracts a perf cost not yet paid down.
+- **Behind** (< 0.95×): `rpush`, `rpop`, `xadd`, `fcall` 
 
 ### Pipeline-depth curve (GET/SET/PING/INCR at p=1/16/100)
 
@@ -180,7 +181,7 @@ Latest warmed local run: Valdr (`9104a19`) vs **Valkey 9.1.0 (jemalloc)**, measu
   which regenerates `docs/perf-data.json` **and** rewrites the table above from
   it. The [valdr.dev](https://valdr.dev) landing page fetches the same JSON, so
   the site and this README can never disagree — they share one source of truth.
-- Switch the Valkey adversary: `git -C reference/valkey checkout <tag> && make -j BUILD_TLS=no`,
+- Switch the Valkey adversary: `git -C reference/valkey checkout <tag> && make -j MALLOC=jemalloc BUILD_TLS=no`,
   then re-run the refresh.
 
 ## Run
@@ -212,4 +213,4 @@ bash harness/bench/official-warm-run.sh
 The single source of truth for what these prove — counted TCL passes,
 single-node source-block coverage, and how the full 4,299-block upstream
 denominator is bucketed — is
-[`docs/TEST_AND_FEATURE_COVERAGE.md`](docs/TEST_AND_FEATURE_COVERAGE.md).
+[valdr.dev/coverage.html](https://valdr.dev/coverage.html).
