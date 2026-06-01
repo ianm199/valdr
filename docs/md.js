@@ -39,6 +39,16 @@
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i];
 
+      // fenced code block ``` ... ```
+      if (/^```/.test(line)) {
+        setDepth(0);
+        var code = [];
+        i++;
+        while (i < lines.length && !/^```/.test(lines[i])) { code.push(lines[i]); i++; }
+        out.push('<pre><code>' + esc(code.join('\n')) + '</code></pre>');
+        continue;
+      }
+
       // table: a pipe row followed by a |---|---| separator row
       if (/^\s*\|(.+)\|\s*$/.test(line) && i + 1 < lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1])) {
         setDepth(0);
