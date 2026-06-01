@@ -8,7 +8,7 @@ Valdr is a port of [Valkey](https://github.com/valkey-io/valkey) aiming to be fu
 This repo heavily leveraged coding agents in the process. This was largely inspired by the changing landscape of [memory safety attacks](https://labs.cloudsecurityalliance.org/research/csa-research-note-claude-mythos-autonomous-offensive-thresho/) as agentic cyber capabilities increase.
 
 > [!WARNING]
-> **Alpha.** Single-node core is green and oracle-verified. Cluster, loadable C modules, and production HA / Sentinel are out of scope for now; AOF and replication exist but are not production-gated.
+> **Alpha.** Single-node core test suite is green and able to run real loads over TLS. This project is still in alpha.
 
 ## Performance
 
