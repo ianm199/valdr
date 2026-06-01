@@ -91,7 +91,7 @@ socket reproduces a bug "sometimes."
 - **One C file → one Rust file** (per `harness/file-deps.tsv`). Splitting a
   large Rust file across multiple Rust files only when concerns are genuinely
   unrelated AND the harness map agrees. Audit the candidates with
-  `docs/STRUCTURE_AUDIT.md`.
+  `docs/history/STRUCTURE_AUDIT.md`.
 - **No god files**: a file should be either (a) a one-to-one port of a C
   source, or (b) a single cohesive subsystem. If you find yourself adding a
   third concern to a file, split first.
@@ -128,7 +128,7 @@ Hooks live in `port-harness/hooks/` (canonical) with thin wrappers in
 
 ## Recent structural changes (2026-05-28)
 
-A god-file audit (`docs/STRUCTURE_AUDIT.md`) led to four splits, all
+A god-file audit (`docs/history/STRUCTURE_AUDIT.md`) led to four splits, all
 behavior-preserving via `pub use` re-exports:
 
 | Was | Now |
