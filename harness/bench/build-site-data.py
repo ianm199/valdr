@@ -197,8 +197,7 @@ def render_readme_block(payload: dict) -> str:
         "",
         f"- **Wins** (ratio ≥ 1.2×): {_names(wins)}.",
         f"- **Parity** (0.95×–1.2×): {_names(parity)}.",
-        f"- **Behind** (< 0.95×): {_names(behind)} — where the port's "
-        "oracle-gated behavioral fidelity currently extracts a perf cost not yet paid down.",
+        f"- **Behind** (< 0.95×): {_names(behind)} — where the port's ",
         "",
         "### Pipeline-depth curve (GET/SET/PING/INCR at p=1/16/100)",
         "",
