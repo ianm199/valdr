@@ -1,6 +1,10 @@
 # valdr
 
-Single-node Valkey-compatible server: a Rust port of the upstream Valkey C implementation.
+Valdr is a port of [Valkey](https://github.com/valkey-io/valkey) aiming to be fully compatible with Redis/ Valkey clients in memory safe Rust. The motivation for this project is to attempt to build mostly memory safe alternatives to core web infrastructure and to explore archtecture choices that wil enable faster performance in the long run. 
+
+Currently Valdr supports the all the core Redis Client commands and passes 97% of [single node tests](https://valdr.dev/coverage.html). 
+
+This repo heavily leveraged coding agents in the process and was inspired by similar efforts.
 
 ## Status
 
