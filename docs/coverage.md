@@ -6,9 +6,9 @@ Valkey's own test suite, not ours. Verified against [Valkey 9.1.0](https://githu
 
 | Measure | Proven | Total | |
 |---|--:|--:|---|
-| Counted assertions, single-node | 3,015 | 3,015 | **100%** |
-| Single-node core blocks | 2,466 | 2,541 | **97%** |
-| Full upstream suite | 2,466 | 4,299 | 57% |
+| Counted assertions, single-node | 3,074 | 3,074 | **100%** |
+| Single-node core blocks | 2,531 | 2,541 | **99.6%** |
+| Full upstream suite | 2,531 | 4,299 | 59% |
 
 *Counted assertions*: what upstream `test_helper.tcl` reports at runtime. *Source blocks*: a static count of `test {…}` blocks. The full-suite number is lower because ~41% of upstream tests cover features we don't build — unbuilt, not failing.
 
@@ -20,7 +20,9 @@ Valkey's own test suite, not ours. Verified against [Valkey 9.1.0](https://githu
 | Execution | 450 | 450 | 100% |
 | Auth / config / introspection | 436 | 436 | 100% |
 | Protocol / client | 125 | 126 | 99% |
-| Data types | 930 | 995 | 94% |
+| Data types | 995 | 995 | 100% |
+
+`stream-cgroups` (consumer groups) passes 59/59 under the default profile; a few of its subtests exercise *replication* (NOGROUP-to-replica) and are counted in the replication bucket, not here. The remaining 10 unproven single-node blocks are `aofrw` (AOF rewrite, alpha) and `replybufsize` (tag-filtered to 0/0).
 
 ## Out of scope
 
@@ -78,4 +80,20 @@ Not the Tcl suite.
 | limits | 1 | violations | 1 |
 | fuzzer | 1 | | |
 
-Not counted: `aofrw` (AOF rewrite, alpha), `stream-cgroups` (59/59 on the default profile; aborts only under the external dual-server profile), `replybufsize` (filtered to 0/0 by tag policy).
+Not counted (10 blocks): `aofrw` (AOF rewrite, alpha) and `replybufsize` (filtered to 0/0 by tag policy). `stream-cgroups` is counted — it passes 59/59 under the default profile.
+
+## Reproduce
+
+The tests are Valkey's own, under `reference/valkey/tests/`. Run them against Valdr with the [test harness](https://github.com/ianm199/valdr/tree/main/harness/oracle):
+
+```
+# build Valdr + run the full single-node suite (54 files)
+bash harness/oracle/run-single-node-tcl-suite.sh
+
+# one file
+make oracle FILES=unit/type/zset
+
+# consumer groups, under the default profile
+python3 harness/oracle/tcl-survey.py --profile default \
+  --files unit/type/stream-cgroups --isolated-tests-copy
+```

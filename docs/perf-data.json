@@ -1,10 +1,11 @@
 {
-  "generated_utc": "2026-05-30T17:18:47.939919+00:00",
+  "generated_utc": "2026-06-01T14:17:42.391541+00:00",
   "measured_utc": "2026-05-29T20:32:39+00:00",
   "source_commit": "8c8678f",
   "reference": "Valkey 9.1.0",
   "hardware": "Apple M3 Max",
   "note": "Single-node, single-threaded, same host, warmed. Ratio = valdr_rps / valkey_rps; >1.00 = Valdr is faster. function_load excluded (benchmark artifact).",
+  "config_note": "No .conf file: both servers launched from explicit flags, persistence off, everything else stock defaults. Valkey: --save \"\" --appendonly no --daemonize no --loglevel warning. Valdr: --rdb-disabled --appendonly no. Both bound to 127.0.0.1.",
   "pipeline_depth": [
     {
       "workload": "GET p=1",

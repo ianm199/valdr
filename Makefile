@@ -92,7 +92,7 @@ bench-show: ## Reprint the most recent matrix. FORMAT=wide for all columns, json
 bench-release: ## The release-grade packet (warmup + all probes + Markdown bundle, ~90s)
 	bash harness/bench/official-warm-run.sh
 
-site-data: ## Regenerate docs/perf-data.json from the latest local benchmark artifacts (the site fetches this; commit it to update the site)
+site-data: ## Regenerate docs/perf-data.json + README perf tables from the latest local benchmark artifacts (site fetches the JSON; commit both to update)
 	python3 harness/bench/build-site-data.py
 
 oracle: ## Tcl oracle vs our server. TIER=fast (~14s, default) | all; FILES=unit/type/string; FORMAT=json for raw

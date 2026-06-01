@@ -57,13 +57,13 @@
 <section id="coverage">
   <h2>Coverage</h2>
 
-<pre><code>  Counted assertions             ██████████  3,015 / 3,015
-  Single-node-core blocks        █████████░  2,466 / 2,541   · 97%
-  Full upstream Valkey suite     ██████░░░░  2,466 / 4,299   · 57%</code></pre>
+<pre><code>  Counted assertions             ██████████  3,074 / 3,074
+  Single-node-core blocks        ██████████  2,531 / 2,541   · 99.6%
+  Full upstream Valkey suite     ██████░░░░  2,531 / 4,299   · 59%</code></pre>
 
   <p class="note">
     Valkey's own tests, not ours. Single-node, in scope: <strong>100%</strong> of
-    counted assertions, <strong>97%</strong> of source blocks. The full-suite figure
+    counted assertions, <strong>99.6%</strong> of source blocks. The full-suite figure
     is lower because ~41% of upstream tests cover cluster, modules, Sentinel, and
     integration we don't build. Verified against
     <a href="https://github.com/valkey-io/valkey/releases/tag/9.1.0">Valkey 9.1.0</a>.
@@ -171,7 +171,7 @@
               '</tbody></table>';
             document.getElementById('perf-meta').textContent =
               d.note + ' Measured ' + (d.measured_utc || '').slice(0, 10) + ' at commit ' +
-              d.source_commit + ' on ' + d.hardware + '.';
+              d.source_commit + ' on ' + d.hardware + '. ' + (d.config_note || '');
           })
           .catch(function () { host.textContent = 'benchmark data unavailable (perf-data.json)'; });
       })();
