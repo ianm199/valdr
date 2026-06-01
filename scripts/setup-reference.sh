@@ -54,9 +54,11 @@ else
 fi
 
 echo ""
-echo "==> building valkey-server (this takes a minute)"
+echo "==> building valkey-server with jemalloc (this takes a minute)"
 cd "${REF_DIR}"
-make -j BUILD_TLS=no USE_SYSTEMD=no 2>&1 | tail -3
+# MALLOC=jemalloc matches how Valkey actually ships (its default on Linux), so
+# benchmarks compare against the production allocator, not macOS libc malloc.
+make -j MALLOC=jemalloc BUILD_TLS=no USE_SYSTEMD=no 2>&1 | tail -3
 
 if [[ -x "${REF_DIR}/src/valkey-server" ]]; then
     VERSION="$("${REF_DIR}/src/valkey-server" --version 2>&1 | head -1)"

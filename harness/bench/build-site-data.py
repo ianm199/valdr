@@ -80,9 +80,12 @@ def reference_version() -> str:
     binary = ROOT / "reference/valkey/src/valkey-server"
     try:
         out = subprocess.check_output([str(binary), "--version"], text=True, stderr=subprocess.DEVNULL)
-        for tok in out.split():
-            if tok.startswith("v="):
-                return f"Valkey {tok[2:]}"
+        toks = {k: v for k, _, v in (t.partition("=") for t in out.split() if "=" in t)}
+        ver = toks.get("v")
+        if ver:
+            malloc = toks.get("malloc", "")
+            alloc = " (jemalloc)" if malloc.startswith("jemalloc") else (" (libc malloc)" if malloc == "libc" else "")
+            return f"Valkey {ver}{alloc}"
     except (OSError, subprocess.CalledProcessError):
         pass
     return "Valkey (reference)"
