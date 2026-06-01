@@ -1,217 +1,217 @@
 {
-  "generated_utc": "2026-06-01T14:20:51.006263+00:00",
-  "measured_utc": "2026-05-29T20:32:39+00:00",
-  "source_commit": "8c8678f",
-  "reference": "Valkey 9.1.0",
+  "generated_utc": "2026-06-01T14:47:03.164074+00:00",
+  "measured_utc": "2026-06-01T14:44:54+00:00",
+  "source_commit": "9104a19",
+  "reference": "Valkey 9.1.0 (jemalloc)",
   "hardware": "Apple M3 Max",
   "note": "Single-node, single-threaded, same host, warmed. Ratio = valdr_rps / valkey_rps; >1.00 = Valdr is faster. function_load excluded (benchmark artifact).",
   "config_note": "No .conf file: both servers launched from explicit flags, persistence off, everything else stock defaults. Valkey: --save \"\" --appendonly no --daemonize no --loglevel warning. Valdr: --rdb-disabled --appendonly no. Both bound to 127.0.0.1.",
   "pipeline_depth": [
     {
       "workload": "GET p=1",
-      "valdr_rps": 160256,
-      "valkey_rps": 150602,
-      "ratio": 1.064
+      "valdr_rps": 162866,
+      "valkey_rps": 147059,
+      "ratio": 1.107
     },
     {
       "workload": "GET p=16",
-      "valdr_rps": 2000000,
-      "valkey_rps": 1739130,
-      "ratio": 1.15
+      "valdr_rps": 2597402,
+      "valkey_rps": 2040816,
+      "ratio": 1.273
     },
     {
       "workload": "GET p=100",
-      "valdr_rps": 5128205,
-      "valkey_rps": 3174603,
-      "ratio": 1.615
+      "valdr_rps": 4761905,
+      "valkey_rps": 3571428,
+      "ratio": 1.333
     },
     {
       "workload": "PING p=1",
-      "valdr_rps": 167785,
-      "valkey_rps": 154799,
-      "ratio": 1.084
+      "valdr_rps": 179211,
+      "valkey_rps": 159236,
+      "ratio": 1.125
     },
     {
       "workload": "PING p=16",
-      "valdr_rps": 2222222,
-      "valkey_rps": 2105263,
-      "ratio": 1.056
+      "valdr_rps": 2816901,
+      "valkey_rps": 2469136,
+      "ratio": 1.141
     },
     {
       "workload": "PING p=100",
       "valdr_rps": 8000000,
-      "valkey_rps": 5000000,
-      "ratio": 1.6
+      "valkey_rps": 5882352,
+      "ratio": 1.36
     },
     {
       "workload": "SET p=1",
-      "valdr_rps": 162338,
-      "valkey_rps": 151515,
-      "ratio": 1.071
+      "valdr_rps": 177936,
+      "valkey_rps": 154799,
+      "ratio": 1.149
     },
     {
       "workload": "SET p=16",
-      "valdr_rps": 2061856,
-      "valkey_rps": 1562500,
-      "ratio": 1.32
+      "valdr_rps": 1980198,
+      "valkey_rps": 1785714,
+      "ratio": 1.109
     },
     {
       "workload": "SET p=100",
-      "valdr_rps": 4166667,
-      "valkey_rps": 2247191,
-      "ratio": 1.854
+      "valdr_rps": 4081633,
+      "valkey_rps": 2816901,
+      "ratio": 1.449
     },
     {
       "workload": "INCR p=1",
-      "valdr_rps": 168350,
-      "valkey_rps": 163934,
-      "ratio": 1.027
+      "valdr_rps": 207469,
+      "valkey_rps": 174825,
+      "ratio": 1.187
     },
     {
       "workload": "INCR p=16",
-      "valdr_rps": 1801802,
-      "valkey_rps": 1739130,
-      "ratio": 1.036
+      "valdr_rps": 2173913,
+      "valkey_rps": 2325581,
+      "ratio": 0.935
     },
     {
       "workload": "INCR p=100",
-      "valdr_rps": 4255320,
-      "valkey_rps": 3389830,
-      "ratio": 1.255
+      "valdr_rps": 4166667,
+      "valkey_rps": 3448276,
+      "ratio": 1.208
     }
   ],
   "default_suite": [
     {
       "workload": "ping_inline",
-      "valdr_rps": 6250000,
-      "valkey_rps": 4000000,
-      "ratio": 1.562
+      "valdr_rps": 6666667,
+      "valkey_rps": 4761905,
+      "ratio": 1.4
     },
     {
       "workload": "ping_mbulk",
-      "valdr_rps": 6666667,
-      "valkey_rps": 5555556,
-      "ratio": 1.2
+      "valdr_rps": 9090909,
+      "valkey_rps": 6250000,
+      "ratio": 1.455
     },
     {
       "workload": "set",
-      "valdr_rps": 3846154,
-      "valkey_rps": 2564102,
-      "ratio": 1.5
+      "valdr_rps": 4166667,
+      "valkey_rps": 2941176,
+      "ratio": 1.417
     },
     {
       "workload": "get",
-      "valdr_rps": 4545454,
-      "valkey_rps": 3448276,
-      "ratio": 1.318
+      "valdr_rps": 5000000,
+      "valkey_rps": 3846154,
+      "ratio": 1.3
     },
     {
       "workload": "incr",
-      "valdr_rps": 4166667,
-      "valkey_rps": 3571428,
-      "ratio": 1.167
-    },
-    {
-      "workload": "lpush",
-      "valdr_rps": 2702703,
-      "valkey_rps": 2325581,
-      "ratio": 1.162
-    },
-    {
-      "workload": "rpush",
-      "valdr_rps": 2702703,
-      "valkey_rps": 2702703,
-      "ratio": 1.0
-    },
-    {
-      "workload": "lpop",
-      "valdr_rps": 2777778,
-      "valkey_rps": 2325581,
-      "ratio": 1.194
-    },
-    {
-      "workload": "rpop",
-      "valdr_rps": 2564102,
-      "valkey_rps": 2631579,
-      "ratio": 0.974
-    },
-    {
-      "workload": "sadd",
-      "valdr_rps": 3448276,
-      "valkey_rps": 3225806,
-      "ratio": 1.069
-    },
-    {
-      "workload": "hset",
-      "valdr_rps": 2777778,
-      "valkey_rps": 2564102,
-      "ratio": 1.083
-    },
-    {
-      "workload": "spop",
       "valdr_rps": 4545454,
       "valkey_rps": 4000000,
       "ratio": 1.136
     },
     {
-      "workload": "zadd",
+      "workload": "lpush",
+      "valdr_rps": 2702703,
+      "valkey_rps": 2702703,
+      "ratio": 1.0
+    },
+    {
+      "workload": "rpush",
+      "valdr_rps": 2702703,
+      "valkey_rps": 3030303,
+      "ratio": 0.892
+    },
+    {
+      "workload": "lpop",
+      "valdr_rps": 2777778,
+      "valkey_rps": 2500000,
+      "ratio": 1.111
+    },
+    {
+      "workload": "rpop",
       "valdr_rps": 2564102,
-      "valkey_rps": 2325581,
-      "ratio": 1.103
+      "valkey_rps": 2702703,
+      "ratio": 0.949
+    },
+    {
+      "workload": "sadd",
+      "valdr_rps": 3448276,
+      "valkey_rps": 3571428,
+      "ratio": 0.966
+    },
+    {
+      "workload": "hset",
+      "valdr_rps": 2777778,
+      "valkey_rps": 2777778,
+      "ratio": 1.0
+    },
+    {
+      "workload": "spop",
+      "valdr_rps": 4761905,
+      "valkey_rps": 4347826,
+      "ratio": 1.095
+    },
+    {
+      "workload": "zadd",
+      "valdr_rps": 2631579,
+      "valkey_rps": 2380952,
+      "ratio": 1.105
     },
     {
       "workload": "zpopmin",
-      "valdr_rps": 4166667,
-      "valkey_rps": 3846154,
-      "ratio": 1.083
+      "valdr_rps": 4347826,
+      "valkey_rps": 4000000,
+      "ratio": 1.087
     },
     {
       "workload": "lrange_100",
-      "valdr_rps": 184502,
-      "valkey_rps": 120337,
-      "ratio": 1.533
+      "valdr_rps": 185529,
+      "valkey_rps": 132979,
+      "ratio": 1.395
     },
     {
       "workload": "lrange_300",
-      "valdr_rps": 62266,
-      "valkey_rps": 37994,
-      "ratio": 1.639
+      "valdr_rps": 59277,
+      "valkey_rps": 39620,
+      "ratio": 1.496
     },
     {
       "workload": "lrange_500",
-      "valdr_rps": 36805,
-      "valkey_rps": 22589,
-      "ratio": 1.629
+      "valdr_rps": 35398,
+      "valkey_rps": 22878,
+      "ratio": 1.547
     },
     {
       "workload": "lrange_600",
-      "valdr_rps": 30460,
-      "valkey_rps": 18498,
-      "ratio": 1.647
+      "valdr_rps": 30340,
+      "valkey_rps": 18713,
+      "ratio": 1.621
     },
     {
       "workload": "mset",
-      "valdr_rps": 680272,
-      "valkey_rps": 476190,
-      "ratio": 1.429
-    },
-    {
-      "workload": "mget",
-      "valdr_rps": 1020408,
-      "valkey_rps": 751880,
+      "valdr_rps": 699301,
+      "valkey_rps": 515464,
       "ratio": 1.357
     },
     {
+      "workload": "mget",
+      "valdr_rps": 1075269,
+      "valkey_rps": 793651,
+      "ratio": 1.355
+    },
+    {
       "workload": "xadd",
-      "valdr_rps": 1265823,
-      "valkey_rps": 1449275,
-      "ratio": 0.873
+      "valdr_rps": 1388889,
+      "valkey_rps": 1724138,
+      "ratio": 0.806
     },
     {
       "workload": "fcall",
-      "valdr_rps": 990099,
-      "valkey_rps": 1408451,
-      "ratio": 0.703
+      "valdr_rps": 1030928,
+      "valkey_rps": 1449275,
+      "ratio": 0.711
     }
   ]
 }
