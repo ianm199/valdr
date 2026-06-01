@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="522" viewBox="0 0 760 522" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+<rect x="0.5" y="0.5" width="759" height="521" rx="9" fill="#ffffff" stroke="#e4e4e7"/>
+<text x="22" y="28" font-size="15" font-weight="700" fill="#18181b">valdr ÷ Valkey 9.1.0 (jemalloc) — throughput ratio by command</text>
+<text x="22" y="46" font-size="11" fill="#71717a">bars right of the line = valdr faster &#183; warmed, single-node, Apple M3 Max</text>
+<line x1="347.5" y1="58" x2="347.5" y2="508" stroke="#3f3f46" stroke-width="1" stroke-dasharray="3 3"/>
+<text x="347.5" y="54" font-size="10" fill="#3f3f46" text-anchor="middle">parity 1.0×</text>
+<rect x="347.5" y="67" width="325.2" height="13" rx="2" fill="#2e9e5b"/>
+<text x="130" y="78" font-size="11" fill="#3f3f46" text-anchor="end">LRANGE_600</text>
+<text x="677.6" y="78" font-size="10.5" fill="#52525b" text-anchor="start">1.62×</text>
+<rect x="347.5" y="87" width="286.4" height="13" rx="2" fill="#2e9e5b"/>
+<text x="130" y="98" font-size="11" fill="#3f3f46" text-anchor="end">LRANGE_500</text>
+<text x="638.9" y="98" font-size="10.5" fill="#52525b" text-anchor="start">1.55×</text>
+<rect x="347.5" y="107" width="259.7" height="13" rx="2" fill="#2e9e5b"/>
+<text x="130" y="118" font-size="11" fill="#3f3f46" text-anchor="end">LRANGE_300</text>
+<text x="612.2" y="118" font-size="10.5" fill="#52525b" text-anchor="start">1.50×</text>
+<rect x="347.5" y="127" width="238.3" height="13" rx="2" fill="#2e9e5b"/>
+<text x="130" y="138" font-size="11" fill="#3f3f46" text-anchor="end">PING_MBULK</text>
+<text x="590.7" y="138" font-size="10.5" fill="#52525b" text-anchor="start">1.46×</text>
+<rect x="347.5" y="147" width="218.4" height="13" rx="2" fill="#2e9e5b"/>
+<text x="130" y="158" font-size="11" fill="#3f3f46" text-anchor="end">SET</text>
+<text x="570.8" y="158" font-size="10.5" fill="#52525b" text-anchor="start">1.42×</text>
+<rect x="347.5" y="167" width="209.5" height="13" rx="2" fill="#2e9e5b"/>
+<text x="130" y="178" font-size="11" fill="#3f3f46" text-anchor="end">PING_INLINE</text>
+<text x="561.9" y="178" font-size="10.5" fill="#52525b" text-anchor="start">1.40×</text>
+<rect x="347.5" y="187" width="206.8" height="13" rx="2" fill="#2e9e5b"/>
+<text x="130" y="198" font-size="11" fill="#3f3f46" text-anchor="end">LRANGE_100</text>
+<text x="559.3" y="198" font-size="10.5" fill="#52525b" text-anchor="start">1.40×</text>
+<rect x="347.5" y="207" width="186.9" height="13" rx="2" fill="#2e9e5b"/>
+<text x="130" y="218" font-size="11" fill="#3f3f46" text-anchor="end">MSET</text>
+<text x="539.4" y="218" font-size="10.5" fill="#52525b" text-anchor="start">1.36×</text>
+<rect x="347.5" y="227" width="185.9" height="13" rx="2" fill="#2e9e5b"/>
+<text x="130" y="238" font-size="11" fill="#3f3f46" text-anchor="end">MGET</text>
+<text x="538.3" y="238" font-size="10.5" fill="#52525b" text-anchor="start">1.35×</text>
+<rect x="347.5" y="247" width="157.1" height="13" rx="2" fill="#2e9e5b"/>
+<text x="130" y="258" font-size="11" fill="#3f3f46" text-anchor="end">GET</text>
+<text x="509.5" y="258" font-size="10.5" fill="#52525b" text-anchor="start">1.30×</text>
+<rect x="347.5" y="267" width="71.2" height="13" rx="2" fill="#8a9099"/>
+<text x="130" y="278" font-size="11" fill="#3f3f46" text-anchor="end">INCR</text>
+<text x="423.7" y="278" font-size="10.5" fill="#52525b" text-anchor="start">1.14×</text>
+<rect x="347.5" y="287" width="58.1" height="13" rx="2" fill="#8a9099"/>
+<text x="130" y="298" font-size="11" fill="#3f3f46" text-anchor="end">LPOP</text>
+<text x="410.6" y="298" font-size="10.5" fill="#52525b" text-anchor="start">1.11×</text>
+<rect x="347.5" y="307" width="55.0" height="13" rx="2" fill="#8a9099"/>
+<text x="130" y="318" font-size="11" fill="#3f3f46" text-anchor="end">ZADD</text>
+<text x="407.4" y="318" font-size="10.5" fill="#52525b" text-anchor="start">1.10×</text>
+<rect x="347.5" y="327" width="49.7" height="13" rx="2" fill="#8a9099"/>
+<text x="130" y="338" font-size="11" fill="#3f3f46" text-anchor="end">SPOP</text>
+<text x="402.2" y="338" font-size="10.5" fill="#52525b" text-anchor="start">1.09×</text>
+<rect x="347.5" y="347" width="45.6" height="13" rx="2" fill="#8a9099"/>
+<text x="130" y="358" font-size="11" fill="#3f3f46" text-anchor="end">ZPOPMIN</text>
+<text x="398.0" y="358" font-size="10.5" fill="#52525b" text-anchor="start">1.09×</text>
+<rect x="347.5" y="367" width="0.5" height="13" rx="2" fill="#8a9099"/>
+<text x="130" y="378" font-size="11" fill="#3f3f46" text-anchor="end">LPUSH</text>
+<text x="352.5" y="378" font-size="10.5" fill="#52525b" text-anchor="start">1.00×</text>
+<rect x="347.5" y="387" width="0.5" height="13" rx="2" fill="#8a9099"/>
+<text x="130" y="398" font-size="11" fill="#3f3f46" text-anchor="end">HSET</text>
+<text x="352.5" y="398" font-size="10.5" fill="#52525b" text-anchor="start">1.00×</text>
+<rect x="329.7" y="407" width="17.8" height="13" rx="2" fill="#8a9099"/>
+<text x="130" y="418" font-size="11" fill="#3f3f46" text-anchor="end">SADD</text>
+<text x="324.7" y="418" font-size="10.5" fill="#52525b" text-anchor="end">0.97×</text>
+<rect x="320.7" y="427" width="26.7" height="13" rx="2" fill="#d65b4a"/>
+<text x="130" y="438" font-size="11" fill="#3f3f46" text-anchor="end">RPOP</text>
+<text x="315.7" y="438" font-size="10.5" fill="#52525b" text-anchor="end">0.95×</text>
+<rect x="290.9" y="447" width="56.6" height="13" rx="2" fill="#d65b4a"/>
+<text x="130" y="458" font-size="11" fill="#3f3f46" text-anchor="end">RPUSH</text>
+<text x="285.9" y="458" font-size="10.5" fill="#52525b" text-anchor="end">0.89×</text>
+<rect x="245.9" y="467" width="101.6" height="13" rx="2" fill="#d65b4a"/>
+<text x="130" y="478" font-size="11" fill="#3f3f46" text-anchor="end">XADD</text>
+<text x="240.9" y="478" font-size="10.5" fill="#52525b" text-anchor="end">0.81×</text>
+<rect x="196.1" y="487" width="151.3" height="13" rx="2" fill="#d65b4a"/>
+<text x="130" y="498" font-size="11" fill="#3f3f46" text-anchor="end">FCALL</text>
+<text x="191.1" y="498" font-size="10.5" fill="#52525b" text-anchor="end">0.71×</text>
+</svg>
