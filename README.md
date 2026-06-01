@@ -7,7 +7,7 @@ Currently Valdr supports the all the core Redis Client commands and passes 99.6%
 This repo heavily leveraged coding agents in the process. This was largely inspired by the changing landscape of [memory safety attacks](https://labs.cloudsecurityalliance.org/research/csa-research-note-claude-mythos-autonomous-offensive-thresho/) as agentic cyber capabilities increase.
 
 ## Roadmap
-
+[Full roadmap here](https://valdr.dev/roadmap.html)
 ## Status
 
 | Area | Status |
