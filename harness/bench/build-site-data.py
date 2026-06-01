@@ -39,23 +39,19 @@ PIPELINE_PROFILES = {"core-p1": "p=1", "core-p16": "p=16", "core-p100": "p=100"}
 PIPELINE_COMMANDS = ["GET", "SET", "PING_MBULK", "INCR"]
 EXCLUDE_SELECTORS = {"function_load"}
 
-# Both servers are launched from explicit CLI flags by the bench probes
-# (pipeline-smoke.py / default-suite-parts.py start_server) — NO .conf file is
-# involved. Persistence is off on both sides; everything else is stock defaults.
-# Keep this in sync with those start_server() flag lists.
+# The exact launch flags live in one place — the bench probes' start_server()
+# (harness/bench/default-suite-parts.py). The note links there instead of
+# repeating the flags, so there is no copy to drift out of sync.
 BENCH_CONFIG_NOTE = (
     "**Server config:** no `.conf` file — both servers are launched from explicit "
-    "flags, persistence off, everything else stock defaults. Valkey: "
-    "`--save \"\" --appendonly no --daemonize no --loglevel warning`. Valdr: "
-    "`--rdb-disabled --appendonly no`. Both bound to `127.0.0.1`."
+    "flags by the [bench harness](harness/bench/default-suite-parts.py), persistence "
+    "off, otherwise stock defaults."
 )
 # Plain-text twin of BENCH_CONFIG_NOTE for the landing page (rendered via
-# textContent, so no markdown). Same facts, no backticks.
+# textContent, so no markdown/links). Same facts.
 BENCH_CONFIG_NOTE_PLAIN = (
-    "No .conf file: both servers launched from explicit flags, persistence off, "
-    "everything else stock defaults. Valkey: --save \"\" --appendonly no "
-    "--daemonize no --loglevel warning. Valdr: --rdb-disabled --appendonly no. "
-    "Both bound to 127.0.0.1."
+    "No .conf file: both servers launched from explicit flags by the bench harness "
+    "(harness/bench/default-suite-parts.py), persistence off, otherwise stock defaults."
 )
 
 

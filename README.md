@@ -16,9 +16,7 @@ This repo heavily leveraged coding agents in the process. This was largely inspi
 
 ![valdr vs Valkey throughput ratio by command](docs/perf.svg)
 
-Latest warmed local run: Valdr (`9104a19`) vs **Valkey 9.1.0 (jemalloc)**, measured 2026-06-01T14:44:54+00:00 on Apple M3 Max. These tables and the [valdr.dev](https://valdr.dev) landing page both render `docs/perf-data.json` — one source of truth, no hand-typed numbers. Ratio = valdr_rps / valkey_rps; >1.00 = Valdr is faster. `function_load` is excluded (its ratio is a reload-fast-path artifact, not throughput).
-
-**Server config:** no `.conf` file — both servers are launched from explicit flags, persistence off, everything else stock defaults. Valkey: `--save "" --appendonly no --daemonize no --loglevel warning`. Valdr: `--rdb-disabled --appendonly no`. Both bound to `127.0.0.1`.
+**Server config:** no `.conf` file — both servers are launched from explicit flags by the [bench harness](harness/bench/default-suite-parts.py), persistence off, otherwise stock defaults.
 
 ### Per-command (default `valkey-benchmark` suite)
 
@@ -83,7 +81,7 @@ Latest warmed local run: Valdr (`9104a19`) vs **Valkey 9.1.0 (jemalloc)**, measu
 
 ## Coverage
 
-Valkey's own test suite, not ours — [full breakdown by category → valdr.dev/coverage.html](https://valdr.dev/coverage.html).
+Valkey's own test suite [full breakdown by category → valdr.dev/coverage.html](https://valdr.dev/coverage.html).
 
 ```
 Counted assertions (single-node)  [████████████████████] 100.0%   3,074 / 3,074
@@ -91,7 +89,7 @@ Single-node core blocks           [███████████████
 Full upstream suite               [███████████░░░░░░░░░]   59%     2,531 / 4,299
 ```
 
-The full-suite figure is lower because ~41% of upstream tests cover features valdr doesn't build (cluster, modules, Sentinel) — unbuilt, not failing.
+The full-suite figure is lower because ~41% of upstream tests cover features valdr doesn't build (cluster, modules, Sentinel)
 
 ## Status
 

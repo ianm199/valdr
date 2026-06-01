@@ -5,7 +5,7 @@
   "reference": "Valkey 9.1.0 (jemalloc)",
   "hardware": "Apple M3 Max",
   "note": "Single-node, single-threaded, same host, warmed. Ratio = valdr_rps / valkey_rps; >1.00 = Valdr is faster. function_load excluded (benchmark artifact).",
-  "config_note": "No .conf file: both servers launched from explicit flags, persistence off, everything else stock defaults. Valkey: --save \"\" --appendonly no --daemonize no --loglevel warning. Valdr: --rdb-disabled --appendonly no. Both bound to 127.0.0.1.",
+  "config_note": "No .conf file: both servers launched from explicit flags by the bench harness (harness/bench/default-suite-parts.py), persistence off, otherwise stock defaults.",
   "pipeline_depth": [
     {
       "workload": "GET p=1",
