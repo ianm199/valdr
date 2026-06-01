@@ -14,7 +14,7 @@ This repo heavily leveraged coding agents in the process. This was largely inspi
 
 <!-- PERF:START — auto-generated from docs/perf-data.json by `make site-data`; do not hand-edit between these markers -->
 
-![valdr vs Valkey throughput ratio by command](docs/perf.svg)
+[![valdr vs Valkey throughput ratio by command](docs/perf.png)](https://valdr.dev)
 
 **Server config:** no `.conf` file — both servers are launched from explicit flags by the [bench harness](harness/bench/default-suite-parts.py), persistence off, otherwise stock defaults.
 
@@ -72,7 +72,7 @@ This repo heavily leveraged coding agents in the process. This was largely inspi
 
 - Warmup: 1,000 `PING_MBULK` requests (1 client, pipeline 1) before every measured row.
 - Refresh: `make bench-release` (fresh local artifacts) then `make site-data`,
-  which regenerates `docs/perf-data.json`, `docs/perf.svg`, **and** rewrites the
+  which regenerates `docs/perf-data.json`, `docs/perf.svg`, `docs/perf.png`, **and** rewrites the
   table above from it. The [valdr.dev](https://valdr.dev) landing page fetches the
   same JSON, so the site and this README can never disagree — they share one
   source of truth.

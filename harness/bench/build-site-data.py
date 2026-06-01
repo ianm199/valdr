@@ -24,6 +24,7 @@ a meaningful throughput number.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -156,7 +157,20 @@ def _ratio(r: float) -> str:
 
 
 PERF_SVG = ROOT / "docs/perf.svg"
+PERF_PNG = ROOT / "docs/perf.png"
+PERF_LINK = "https://valdr.dev"
 SVG_FONT = "ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+
+
+def write_perf_png() -> None:
+    """Rasterize docs/perf.svg to a 2x PNG. The README embeds the PNG (not the
+    SVG) so it renders inline on GitHub reliably and the image links to the
+    site instead of opening the raw file. Requires librsvg; this is a declared
+    requirement of `make site-data`, not an optional step."""
+    rsvg = shutil.which("rsvg-convert")
+    if rsvg is None:
+        raise SystemExit("rsvg-convert not found — install librsvg (`brew install librsvg`) to render docs/perf.png")
+    subprocess.run([rsvg, "-z", "2", str(PERF_SVG), "-o", str(PERF_PNG)], check=True)
 
 
 def _bucket_color(r: float) -> str:
@@ -230,7 +244,7 @@ def render_readme_block(payload: dict) -> str:
     lines = [
         f"{README_START} — auto-generated from docs/perf-data.json by `make site-data`; do not hand-edit between these markers -->",
         "",
-        "![valdr vs Valkey throughput ratio by command](docs/perf.svg)",
+        f"[![valdr vs Valkey throughput ratio by command](docs/perf.png)]({PERF_LINK})",
         "",
         f"Latest warmed local run: Valdr (`{payload['source_commit']}`) vs "
         f"**{ref}**, measured {payload['measured_utc']} on {payload['hardware']}. "
@@ -319,8 +333,9 @@ def main() -> int:
     }
     OUT.write_text(json.dumps(payload, indent=2) + "\n")
     PERF_SVG.write_text(render_perf_svg(payload))
+    write_perf_png()
     print(f"wrote {OUT.relative_to(ROOT)} — {len(pipeline_rows)} pipeline rows, {len(suite_rows)} suite rows")
-    print(f"wrote {PERF_SVG.relative_to(ROOT)} — {len(suite_rows)}-bar ratio chart")
+    print(f"wrote {PERF_SVG.relative_to(ROOT)} + {PERF_PNG.relative_to(ROOT)} — {len(suite_rows)}-bar ratio chart")
     print(f"  source: matrix={matrix.name if matrix else '-'}  suite={suite.name if suite else '-'}  commit={commit}")
     update_readme(payload)
     return 0
