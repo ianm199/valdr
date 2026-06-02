@@ -293,6 +293,21 @@ pub fn debug_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ascii_eq_ignore_case(sub.as_bytes(), b"CLOSE-LISTENERS-ASA") {
         return ctx.reply_simple_string(b"OK");
     }
+    if ascii_eq_ignore_case(sub.as_bytes(), b"REPLICATE") {
+ // `DEBUG REPLICATE <cmd> [args...]` injects an arbitrary command verbatim
+ // into the replication stream (no implicit SELECT), mirroring C
+ // `replicationFeedReplicas(-1, argv+2, argc-2)`. Used by replication-4 to
+ // deliberately diverge a replica.
+        if ctx.arg_count() < 3 {
+            return Err(RedisError::wrong_number_of_args(b"debug"));
+        }
+        let mut fed = Vec::with_capacity(ctx.arg_count() - 2);
+        for i in 2..ctx.arg_count() {
+            fed.push(ctx.arg_owned(i)?);
+        }
+        crate::dispatch::propagate_command_raw(&fed);
+        return ctx.reply_simple_string(b"OK");
+    }
     let mut msg =
         Vec::with_capacity(b"ERR Unknown DEBUG subcommand: ".len() + sub.as_bytes().len());
     msg.extend_from_slice(b"ERR Unknown DEBUG subcommand: ");

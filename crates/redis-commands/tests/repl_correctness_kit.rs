@@ -407,6 +407,36 @@ fn finding4_partial_resync_continue_must_replay_backlog_window() {
     );
 }
 
+// ─── P3: DEBUG REPLICATE feeds the replication stream ────────────────────────
+
+/// P3 — `DEBUG REPLICATE <cmd> [args...]` must inject the command verbatim into
+/// the replication stream (mirrors C `replicationFeedReplicas(-1, ...)`), so an
+/// attached replica receives it. replication-4 uses this to force divergence;
+/// the un-implemented subcommand previously aborted the whole file.
+#[test]
+fn p3_debug_replicate_feeds_replication_stream() {
+    let _g = repl_guard();
+    let cap = ReplCapture::attach(970_001, global_replication_state().master_offset());
+    let mut db = RedisDb::new(0);
+    let reply = dispatch_as_primary(
+        970_002,
+        &mut db,
+        &[b"DEBUG", b"REPLICATE", b"fake-command-1", b"xyz"],
+    );
+    assert!(
+        reply.starts_with(b"+OK"),
+        "DEBUG REPLICATE should reply +OK, got {:?}",
+        String::from_utf8_lossy(&reply),
+    );
+    let sent = cap.drain();
+    let needle = resp(&[b"fake-command-1", b"xyz"]);
+    assert!(
+        sent.windows(needle.len()).any(|w| w == needle.as_slice()),
+        "DEBUG REPLICATE must feed the verbatim command to replicas.\n  sent: {:?}",
+        String::from_utf8_lossy(&sent),
+    );
+}
+
 // ─── P2: partial-resync counters (sync_full / sync_partial_ok / err) ─────────
 
 /// P2 — the master-side `handle_psync` decision must bump the three sync
