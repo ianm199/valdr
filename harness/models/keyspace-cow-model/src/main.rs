@@ -823,6 +823,9 @@ fn print_help_and_exit() -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn keys(count: usize) -> Vec<Vec<u8>> {
         (0..count).map(key_bytes).collect()
@@ -830,6 +833,7 @@ mod tests {
 
     #[test]
     fn deep_snapshot_clone_counts_keys_and_payloads() {
+        let _guard = TEST_LOCK.lock().unwrap();
         let live = build_deep(3, 5);
         reset_clone_counters();
 
@@ -842,6 +846,7 @@ mod tests {
 
     #[test]
     fn arc_snapshot_keeps_old_payload_after_live_mutation() {
+        let _guard = TEST_LOCK.lock().unwrap();
         let keys = keys(4);
         let mut live = build_arc(4, 8);
         let snapshot = live.clone();
@@ -857,6 +862,7 @@ mod tests {
 
     #[test]
     fn segmented_snapshot_keeps_old_segment_after_live_replace() {
+        let _guard = TEST_LOCK.lock().unwrap();
         let keys = keys(8);
         let mut live = SegmentedCow::with_keys(8, 8, 4);
         let snapshot = live.clone();
@@ -872,6 +878,7 @@ mod tests {
 
     #[test]
     fn im_snapshot_keeps_old_payload_after_live_mutation() {
+        let _guard = TEST_LOCK.lock().unwrap();
         let keys = keys(4);
         let mut live = build_im(4, 8);
         let snapshot = live.clone();
