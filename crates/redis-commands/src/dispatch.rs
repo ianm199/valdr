@@ -653,11 +653,17 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
     ctx.db_mut()
         .set_import_expire_state(import_source_active, import_mode);
     ctx.db_mut().set_pause_expire_keep(pause_expire);
- // A replica never lazily deletes a logically-expired key; it reports the key
- // as expired to reads and waits for the primary to propagate the DEL.
-    let replica_keep_expired = redis_core::replication::global_replication_state().is_replica();
+ // Replica expiry policy (C getExpirationPolicyWithFlags):
+ //  * a command applied from the primary link IGNORES expiry — keys are
+ //    treated as present so a replicated INCR mutates the existing value
+ //    instead of recreating it TTL-less.
+ //  * a normal client on a replica KEEPS logically-expired keys (reports them
+ //    expired but does not lazily delete; waits for the primary's DEL).
+    let replica_link_apply = ctx.client_ref().replication_apply;
+    let is_replica = redis_core::replication::global_replication_state().is_replica();
+    ctx.db_mut().set_replica_link_apply(replica_link_apply);
     ctx.db_mut()
-        .set_replica_keep_expired(replica_keep_expired);
+        .set_replica_keep_expired(is_replica && !replica_link_apply);
 
     let initial_slowlog_gate = ctx.live_config().slowlog_timing_gate();
     let should_time_slowlog = initial_slowlog_gate.should_time() && !metadata.skip_commandlog;

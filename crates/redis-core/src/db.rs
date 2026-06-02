@@ -538,6 +538,15 @@ pub struct RedisDb {
  /// replica waits for the primary to propagate the DEL. C: the `masterhost
  /// != NULL` branch of `getExpirationPolicyWithFlags` returning KEEP.
     replica_keep_expired: bool,
+
+ /// When true, the command currently executing arrived on the primary link
+ /// (the replica applying the replication stream). Such commands must IGNORE
+ /// expiry entirely — keys are treated as present regardless of TTL — so a
+ /// replicated INCR/APPEND on a logically-expired key mutates the existing
+ /// value instead of recreating it TTL-less and diverging the keyspace. C:
+ /// `getExpirationPolicyWithFlags` returns POLICY_IGNORE_EXPIRE when
+ /// `current_client->flag.primary`.
+    replica_link_apply: bool,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -578,7 +587,7 @@ impl RedisDb {
         // TODO(port): return false when server.loading is true
  // a primary in import-mode keeps expired keys
  // visible to an import-source client.
-        if self.import_source_active {
+        if self.import_source_active || self.replica_link_apply {
             return false;
         }
         match self.dict.get(key) {
@@ -606,6 +615,13 @@ impl RedisDb {
  /// expired. Refreshed per-command by the dispatcher.
     pub fn set_replica_keep_expired(&mut self, replica_keep_expired: bool) {
         self.replica_keep_expired = replica_keep_expired;
+    }
+
+ /// Mark whether the current command arrived on the primary link (replica
+ /// applying the replication stream), enabling IGNORE_EXPIRE. Refreshed
+ /// per-command by the dispatcher.
+    pub fn set_replica_link_apply(&mut self, replica_link_apply: bool) {
+        self.replica_link_apply = replica_link_apply;
     }
 
  /// Check and optionally delete an expired key. Returns the new `KeyStatus`.
@@ -1971,6 +1987,27 @@ mod tests {
         db.set_replica_keep_expired(false);
         assert_eq!(db.expire_if_needed(&key2, 0), KeyStatus::Deleted);
         assert!(!db.exists_raw(&key2));
+    }
+
+    #[test]
+    fn replica_link_apply_ignores_expiry() {
+ // A command applied from the primary link must treat an expired key as
+ // present (IGNORE_EXPIRE), so a replicated INCR mutates the existing value
+ // rather than recreating it. C: POLICY_IGNORE_EXPIRE for
+ // current_client->flag.primary.
+        let mut db = RedisDb::new(0);
+        let key = k(b"k");
+        let mut obj = make_str_obj(b"1");
+        obj.expire = 1; // already in the past
+        db.add(key.clone(), obj);
+
+        db.set_replica_link_apply(true);
+        assert!(!db.is_expired(&key), "primary-link apply must ignore expiry");
+        assert!(
+            db.lookup_key_read_with_flags(&key, LOOKUP_NONE).is_some(),
+            "primary-link apply sees the expired key as present"
+        );
+        assert!(db.exists_raw(&key), "and must not delete it");
     }
 
     #[test]
