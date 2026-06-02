@@ -710,11 +710,15 @@ pub fn check_already_expired(server: &RedisServer, when: MsTime) -> bool {
     // TODO(port): server.current_client / slot_migration_job not yet on stub.
 
     // TODO(port): commandTimeSnapshot not yet ported; using ms_time_now() approximation.
-    // TODO(port): server.loading / server.primary_host not on stub.
+    // TODO(port): server.loading not on stub.
  // A primary in import-mode stores an already-expired key (with its past expire)
  // instead of deleting it immediately, and waits for the import source to propagate it.
+ // A replica likewise stores it: the primary owns expiry and will propagate the
+ // DEL; deleting locally would diverge the keyspace (C: `!server.primary_host`).
     let now = ms_time_now();
-    when <= now && !server.live_config.import_mode()
+    when <= now
+        && !server.live_config.import_mode()
+        && !crate::replication::global_replication_state().is_replica()
 }
 
 // ── parseExtendedExpireArgumentsOrReply ────────────────────────────────────

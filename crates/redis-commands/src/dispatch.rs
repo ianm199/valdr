@@ -653,6 +653,11 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
     ctx.db_mut()
         .set_import_expire_state(import_source_active, import_mode);
     ctx.db_mut().set_pause_expire_keep(pause_expire);
+ // A replica never lazily deletes a logically-expired key; it reports the key
+ // as expired to reads and waits for the primary to propagate the DEL.
+    let replica_keep_expired = redis_core::replication::global_replication_state().is_replica();
+    ctx.db_mut()
+        .set_replica_keep_expired(replica_keep_expired);
 
     let initial_slowlog_gate = ctx.live_config().slowlog_timing_gate();
     let should_time_slowlog = initial_slowlog_gate.should_time() && !metadata.skip_commandlog;

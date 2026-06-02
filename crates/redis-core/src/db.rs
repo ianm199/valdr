@@ -532,6 +532,12 @@ pub struct RedisDb {
  /// remain logically expired for normal lookups but are not deleted and can
  /// still be sampled by RANDOMKEY, matching Valkey's PAUSE_ACTION_EXPIRE.
     pause_expire_keep: bool,
+
+ /// When true (this server is a replica of a primary), an expired key is
+ /// reported as logically expired to lookups but is NOT lazily deleted — the
+ /// replica waits for the primary to propagate the DEL. C: the `masterhost
+ /// != NULL` branch of `getExpirationPolicyWithFlags` returning KEEP.
+    replica_keep_expired: bool,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -595,6 +601,13 @@ impl RedisDb {
         self.pause_expire_keep = pause_expire_keep;
     }
 
+ /// Set whether this server is currently a replica, so the lazy-expiry path
+ /// keeps (does not delete) logically-expired keys while reporting them
+ /// expired. Refreshed per-command by the dispatcher.
+    pub fn set_replica_keep_expired(&mut self, replica_keep_expired: bool) {
+        self.replica_keep_expired = replica_keep_expired;
+    }
+
  /// Check and optionally delete an expired key. Returns the new `KeyStatus`.
     pub fn expire_if_needed(&mut self, key: &RedisString, flags: u32) -> KeyStatus {
         if !self.is_expired(key) {
@@ -606,7 +619,7 @@ impl RedisDb {
  // a primary in import-mode
  // reports the key as expired but waits for the import source to delete
  // it, so non-force lookups must not lazily remove it.
-        if (self.import_mode_keep || self.pause_expire_keep)
+        if (self.import_mode_keep || self.pause_expire_keep || self.replica_keep_expired)
             && flags & EXPIRE_FORCE_DELETE_EXPIRED == 0
         {
             return KeyStatus::Expired;
@@ -1914,6 +1927,50 @@ mod tests {
             !db.exists_raw(&key),
             "without import mode the key is lazily deleted"
         );
+    }
+
+    #[test]
+    fn replica_keep_expired_reports_expired_without_deleting() {
+ // On a replica, a logically-expired key reads as absent (EXISTS/GET see
+ // it gone) but is NOT lazily deleted — the replica waits for the primary
+ // to propagate the DEL. C: `getExpirationPolicyWithFlags` returns
+ // POLICY_KEEP_EXPIRED when `server.primary_host != NULL`. This is the
+ // semantics replication-3/-4's "writable/readonly replica doesn't return
+ // expired keys" assertions depend on.
+        let mut db = RedisDb::new(0);
+        let key = k(b"k");
+        let mut obj = make_str_obj(b"1");
+        obj.expire = 1; // 1 ms since epoch — always in the past
+        db.add(key.clone(), obj);
+
+        db.set_replica_keep_expired(true);
+        assert!(db.is_expired(&key));
+        assert_eq!(
+            db.expire_if_needed(&key, 0),
+            KeyStatus::Expired,
+            "replica must report the key expired",
+        );
+        assert!(
+            db.exists_raw(&key),
+            "replica must NOT lazily delete the expired key (waits for primary DEL)"
+        );
+
+ // A forced delete (the synthesized DEL applied from the primary) still
+ // removes it even in replica mode.
+        assert_eq!(
+            db.expire_if_needed(&key, EXPIRE_FORCE_DELETE_EXPIRED),
+            KeyStatus::Deleted,
+        );
+        assert!(!db.exists_raw(&key));
+
+ // As a primary (flag cleared), a normal lookup lazily deletes on access.
+        let key2 = k(b"k2");
+        let mut obj2 = make_str_obj(b"2");
+        obj2.expire = 1;
+        db.add(key2.clone(), obj2);
+        db.set_replica_keep_expired(false);
+        assert_eq!(db.expire_if_needed(&key2, 0), KeyStatus::Deleted);
+        assert!(!db.exists_raw(&key2));
     }
 
     #[test]
