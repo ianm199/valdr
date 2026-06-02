@@ -11,15 +11,17 @@
 //! the network path. Malformed input and unsupported commands are fatal unless
 //! the caller explicitly allows a truncated tail.
 
+use std::cell::RefCell;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use redis_core::db::RedisDb;
 use redis_core::object::{HashEncoding, InlineHash, ObjectKind, EXPIRY_NONE};
+use redis_core::persistence::{PersistenceState, PersistenceStatus};
 use redis_core::{Client, CommandContext, PubSubRegistry, RedisServer};
 use redis_types::RedisString;
 
@@ -49,11 +51,11 @@ pub fn fsync_policy_str(code: u8) -> &'static str {
 /// Options controlling AOF replay strictness.
 #[derive(Clone, Debug, Default)]
 pub struct AofLoadOptions {
- /// Accept an incomplete final command and replay the valid prefix.
+    /// Accept an incomplete final command and replay the valid prefix.
     pub load_truncated: bool,
- /// Accept an RDB preamble before RESP commands. Placeholder for
- /// manifest/RDB-preamble packet; legacy single-file AOF currently rejects
- /// preambles even when this is true.
+    /// Accept an RDB preamble before RESP commands. Placeholder for
+    /// manifest/RDB-preamble packet; legacy single-file AOF currently rejects
+    /// preambles even when this is true.
     pub allow_rdb_preamble: bool,
 }
 
@@ -61,6 +63,7 @@ const AOF_MANIFEST_SUFFIX: &str = ".manifest";
 const BASE_AOF_SUFFIX: &str = ".base.aof";
 const INCR_AOF_SUFFIX: &str = ".incr.aof";
 const MANIFEST_MAX_LINE: usize = 1024;
+const AOF_FAULT_ENV: &str = "VALDR_AOF_FAULT";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AofManifestFileType {
@@ -76,9 +79,22 @@ struct AofManifestFile {
     file_type: AofManifestFileType,
 }
 
-#[derive(Default, Debug)]
+#[derive(Clone)]
+pub struct AofManifestRewritePlan {
+    temp_base_path: PathBuf,
+    base_path: PathBuf,
+    base_name: Vec<u8>,
+    base_seq: i64,
+    incr_name: Vec<u8>,
+    incr_seq: i64,
+    writer: Arc<AofWriter>,
+    use_rdb_preamble: bool,
+}
+
+#[derive(Clone, Default, Debug)]
 struct AofManifest {
     base: Option<AofManifestFile>,
+    history: Vec<AofManifestFile>,
     incr: Vec<AofManifestFile>,
 }
 
@@ -111,6 +127,26 @@ impl AofManifest {
 
 /// The global AOF writer. `None` when `appendonly` is disabled.
 static AOF_WRITER: OnceLock<Arc<Mutex<Option<Arc<AofWriter>>>>> = OnceLock::new();
+
+thread_local! {
+    static THREAD_AOF_BATCH: RefCell<Option<ThreadAofBatch>> = const { RefCell::new(None) };
+}
+
+struct ThreadAofBatch {
+    writer: Option<Arc<AofWriter>>,
+    encoded: Vec<u8>,
+    pending_repl_offset: i64,
+}
+
+impl Default for ThreadAofBatch {
+    fn default() -> Self {
+        Self {
+            writer: None,
+            encoded: Vec::with_capacity(4096),
+            pending_repl_offset: -1,
+        }
+    }
+}
 
 fn aof_writer_cell() -> &'static Arc<Mutex<Option<Arc<AofWriter>>>> {
     AOF_WRITER.get_or_init(|| Arc::new(Mutex::new(None)))
@@ -169,28 +205,33 @@ pub struct AofWriter {
     pub path: PathBuf,
     file: Mutex<BufWriter<File>>,
     selected_db: Mutex<Option<u32>>,
+    current_size: AtomicU64,
     pub pending_bytes: AtomicUsize,
     pub fsync_policy: AtomicU8,
     pending_repl_offset: AtomicI64,
     fsynced_repl_offset: AtomicI64,
+    fsync_count: AtomicU64,
 }
 
 impl AofWriter {
- /// Open (or create) the AOF file at `path`.
+    /// Open (or create) the AOF file at `path`.
     pub fn open(path: &Path, fsync_policy: u8) -> io::Result<Self> {
         let file = OpenOptions::new().create(true).append(true).open(path)?;
+        let current_size = path.metadata().map(|metadata| metadata.len()).unwrap_or(0);
         Ok(Self {
             path: path.to_path_buf(),
             file: Mutex::new(BufWriter::new(file)),
             selected_db: Mutex::new(None),
+            current_size: AtomicU64::new(current_size),
             pending_bytes: AtomicUsize::new(0),
             fsync_policy: AtomicU8::new(fsync_policy),
             pending_repl_offset: AtomicI64::new(-1),
             fsynced_repl_offset: AtomicI64::new(0),
+            fsync_count: AtomicU64::new(0),
         })
     }
 
- /// Create or truncate an AOF file, then reopen it in append mode.
+    /// Create or truncate an AOF file, then reopen it in append mode.
     pub fn open_truncate(path: &Path, fsync_policy: u8) -> io::Result<Self> {
         OpenOptions::new()
             .create(true)
@@ -200,28 +241,37 @@ impl AofWriter {
         Self::open(path, fsync_policy)
     }
 
- /// Encode `argv` as a RESP multibulk command and append it to the file.
- /// When the fsync policy is `FSYNC_ALWAYS`, flushes and fsyncs before
- /// returning. Otherwise the everysec background thread or the OS handles
- /// durability.
+    /// Encode `argv` as a RESP multibulk command and append it to the file.
+    /// When the fsync policy is `FSYNC_ALWAYS`, flushes and fsyncs before
+    /// returning. Otherwise the everysec background thread or the OS handles
+    /// durability.
     pub fn append(&self, argv: &[RedisString]) -> io::Result<()> {
         self.append_selected(0, argv)
     }
 
- /// Append a command without inserting an implicit SELECT record.
- /// MULTI/EXEC transaction envelopes use this; commands inside the envelope
- /// still call `append_selected` so DB selection is represented inside
- /// transaction.
+    /// Append a command without inserting an implicit SELECT record.
+    /// MULTI/EXEC transaction envelopes use this; commands inside the envelope
+    /// still call `append_selected` so DB selection is represented inside
+    /// transaction.
     pub fn append_raw(&self, argv: &[RedisString]) -> io::Result<()> {
         let encoded = encode_resp_command(argv);
         self.append_encoded(&encoded)
     }
 
- /// Append a command that was executed against logical DB `db_id`.
- /// Mirrors Valkey `feedAppendOnlyFile`: a SELECT record is inserted when
- /// the target DB differs from the previous AOF record, then the command is
- /// appended in the same RESP multibulk format used by replication.
+    pub fn encode_raw(&self, argv: &[RedisString]) -> Vec<u8> {
+        encode_resp_command(argv)
+    }
+
+    /// Append a command that was executed against logical DB `db_id`.
+    /// Mirrors Valkey `feedAppendOnlyFile`: a SELECT record is inserted when
+    /// the target DB differs from the previous AOF record, then the command is
+    /// appended in the same RESP multibulk format used by replication.
     pub fn append_selected(&self, db_id: u32, argv: &[RedisString]) -> io::Result<()> {
+        let encoded = self.encode_selected(db_id, argv);
+        self.append_encoded(&encoded)
+    }
+
+    pub fn encode_selected(&self, db_id: u32, argv: &[RedisString]) -> Vec<u8> {
         let mut encoded = Vec::with_capacity(64);
         {
             let mut selected = match self.selected_db.lock() {
@@ -236,7 +286,7 @@ impl AofWriter {
             }
         }
         encoded.extend_from_slice(&encode_resp_command(argv));
-        self.append_encoded(&encoded)
+        encoded
     }
 
     fn append_encoded(&self, encoded: &[u8]) -> io::Result<()> {
@@ -247,9 +297,11 @@ impl AofWriter {
                 Err(p) => p.into_inner(),
             };
             guard.write_all(encoded)?;
+            self.current_size.fetch_add(len as u64, Ordering::Relaxed);
             if self.fsync_policy.load(Ordering::Relaxed) == FSYNC_ALWAYS {
                 guard.flush()?;
                 guard.get_ref().sync_data()?;
+                self.fsync_count.fetch_add(1, Ordering::Relaxed);
                 self.pending_bytes.store(0, Ordering::Relaxed);
                 let pending = self.pending_repl_offset.load(Ordering::Relaxed);
                 if pending >= 0 {
@@ -262,8 +314,55 @@ impl AofWriter {
         Ok(())
     }
 
- /// Flush the BufWriter and fsync to disk if there are pending bytes.
- /// Called by the everysec background thread.
+    fn append_encoded_fsync_always(&self, encoded: &[u8], repl_offset: i64) -> io::Result<()> {
+        let len = encoded.len();
+        let mut guard = match self.file.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard.write_all(encoded)?;
+        self.current_size.fetch_add(len as u64, Ordering::Relaxed);
+        if repl_offset >= 0 {
+            self.pending_repl_offset
+                .store(repl_offset, Ordering::Release);
+        }
+        guard.flush()?;
+        guard.get_ref().sync_data()?;
+        self.fsync_count.fetch_add(1, Ordering::Relaxed);
+        self.pending_bytes.store(0, Ordering::Relaxed);
+        if repl_offset >= 0 {
+            self.fsynced_repl_offset
+                .store(repl_offset, Ordering::Release);
+        }
+        Ok(())
+    }
+
+    pub fn current_size(&self) -> u64 {
+        self.current_size.load(Ordering::Relaxed)
+    }
+
+    pub fn set_current_size(&self, size: u64) {
+        self.current_size.store(size, Ordering::Relaxed);
+    }
+
+    pub fn refresh_current_size_with_base(&self, base_size: u64) -> io::Result<u64> {
+        let mut guard = match self.file.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard.flush()?;
+        let incr_size = self.path.metadata().map(|metadata| metadata.len())?;
+        let current_size = base_size.saturating_add(incr_size);
+        self.current_size.store(current_size, Ordering::Relaxed);
+        Ok(current_size)
+    }
+
+    pub fn fsync_count(&self) -> u64 {
+        self.fsync_count.load(Ordering::Relaxed)
+    }
+
+    /// Flush the BufWriter and fsync to disk if there are pending bytes.
+    /// Called by the everysec background thread.
     pub fn fsync_if_due(&self) -> io::Result<()> {
         if self.pending_bytes.load(Ordering::Relaxed) == 0 {
             return Ok(());
@@ -274,6 +373,7 @@ impl AofWriter {
         };
         guard.flush()?;
         guard.get_ref().sync_data()?;
+        self.fsync_count.fetch_add(1, Ordering::Relaxed);
         self.pending_bytes.store(0, Ordering::Relaxed);
         let pending = self.pending_repl_offset.load(Ordering::Relaxed);
         if pending >= 0 {
@@ -282,11 +382,11 @@ impl AofWriter {
         Ok(())
     }
 
- /// Record the replication offset covered by the most recent AOF append.
- /// Upstream Valkey tracks `server.fsynced_reploff` rather than raw file
- /// byte offsets. WAITAOF waits on that replication offset, so the Rust AOF
- /// writer remembers the highest replication offset whose command bytes
- /// have been appended, then publishes it after a successful fsync.
+    /// Record the replication offset covered by the most recent AOF append.
+    /// Upstream Valkey tracks `server.fsynced_reploff` rather than raw file
+    /// byte offsets. WAITAOF waits on that replication offset, so the Rust AOF
+    /// writer remembers the highest replication offset whose command bytes
+    /// have been appended, then publishes it after a successful fsync.
     pub fn note_repl_offset(&self, offset: i64) {
         if offset < 0 {
             return;
@@ -309,7 +409,7 @@ impl AofWriter {
         self.fsynced_repl_offset.store(offset, Ordering::Release);
     }
 
- /// Flush the buffer without fsyncing. Used during clean shutdown.
+    /// Flush the buffer without fsyncing. Used during clean shutdown.
     pub fn flush(&self) -> io::Result<()> {
         let mut guard = match self.file.lock() {
             Ok(g) => g,
@@ -318,18 +418,18 @@ impl AofWriter {
         guard.flush()
     }
 
- /// Atomically replace the AOF file with a freshly-rewritten version
- /// `new_path` by renaming `new_path` over `self.path`.
+    /// Atomically replace the AOF file with a freshly-rewritten version
+    /// `new_path` by renaming `new_path` over `self.path`.
     pub fn rewrite_swap(&self, new_path: &Path) -> io::Result<()> {
         std::fs::rename(new_path, &self.path)
     }
 
- /// Blocking, single-file AOF rewrite used until manifest-style rewrite
- /// finalization lands.
- /// The writer mutex is held for the full rewrite so no acknowledged command
- /// can append to the old file and then be hidden by the final rename. This
- /// is deliberately conservative: `BGREWRITEAOF` is not truly background
- /// while this path is active, but it preserves the no-write-loss invariant.
+    /// Blocking, single-file AOF rewrite used until manifest-style rewrite
+    /// finalization lands.
+    /// The writer mutex is held for the full rewrite so no acknowledged command
+    /// can append to the old file and then be hidden by the final rename. This
+    /// is deliberately conservative: `BGREWRITEAOF` is not truly background
+    /// while this path is active, but it preserves the no-write-loss invariant.
     pub fn rewrite_from_dbs_blocking(&self, dbs: &[RedisDb], tmp_path: &Path) -> io::Result<()> {
         let mut active = match self.file.lock() {
             Ok(g) => g,
@@ -354,6 +454,12 @@ impl AofWriter {
             .append(true)
             .open(&self.path)?;
         *active = BufWriter::new(reopened);
+        let current_size = self
+            .path
+            .metadata()
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        self.current_size.store(current_size, Ordering::Relaxed);
         self.pending_bytes.store(0, Ordering::Relaxed);
         match self.selected_db.lock() {
             Ok(mut selected) => *selected = None,
@@ -378,6 +484,191 @@ pub fn current_fsynced_repl_offset() -> i64 {
 pub fn force_current_writer_fsynced_repl_offset(offset: i64) {
     if let Some(writer) = aof_writer() {
         writer.force_fsynced_repl_offset(offset);
+    }
+}
+
+pub fn begin_thread_aof_batch() {
+    THREAD_AOF_BATCH.with(|cell| {
+        let mut active = cell.borrow_mut();
+        if active.is_none() {
+            *active = Some(ThreadAofBatch::default());
+        }
+    });
+}
+
+pub fn finish_thread_aof_batch(persistence: &PersistenceState) -> bool {
+    let batch = THREAD_AOF_BATCH.with(|cell| cell.borrow_mut().take());
+    flush_taken_aof_batch(persistence, "AOF batched append failed", batch)
+}
+
+pub fn flush_thread_aof_batch_for_lifecycle(
+    persistence: &PersistenceState,
+    error_prefix: &str,
+) -> bool {
+    let batch = THREAD_AOF_BATCH.with(|cell| cell.borrow_mut().take());
+    let was_active = batch.is_some();
+    let ok = flush_taken_aof_batch(persistence, error_prefix, batch);
+    if was_active {
+        THREAD_AOF_BATCH.with(|cell| {
+            *cell.borrow_mut() = Some(ThreadAofBatch::default());
+        });
+    }
+    ok
+}
+
+pub fn append_selected_for_dispatch(
+    persistence: &PersistenceState,
+    error_prefix: &str,
+    writer: Arc<AofWriter>,
+    db_id: u32,
+    argv: &[RedisString],
+    repl_offset: i64,
+) -> bool {
+    if writer.fsync_policy.load(Ordering::Relaxed) == FSYNC_ALWAYS {
+        let encoded = writer.encode_selected(db_id, argv);
+        if let Some(staged) = stage_encoded_for_thread_batch(
+            persistence,
+            error_prefix,
+            Arc::clone(&writer),
+            encoded,
+            repl_offset,
+        ) {
+            return staged;
+        }
+    }
+    let ok = record_aof_append_result(
+        persistence,
+        error_prefix,
+        writer.append_selected(db_id, argv),
+    );
+    if ok {
+        note_writer_repl_offset_and_wake(&writer, repl_offset);
+    }
+    ok
+}
+
+pub fn append_raw_for_dispatch(
+    persistence: &PersistenceState,
+    error_prefix: &str,
+    writer: Arc<AofWriter>,
+    argv: &[RedisString],
+    repl_offset: i64,
+) -> bool {
+    if writer.fsync_policy.load(Ordering::Relaxed) == FSYNC_ALWAYS {
+        let encoded = writer.encode_raw(argv);
+        if let Some(staged) = stage_encoded_for_thread_batch(
+            persistence,
+            error_prefix,
+            Arc::clone(&writer),
+            encoded,
+            repl_offset,
+        ) {
+            return staged;
+        }
+    }
+    let ok = record_aof_append_result(persistence, error_prefix, writer.append_raw(argv));
+    if ok {
+        note_writer_repl_offset_and_wake(&writer, repl_offset);
+    }
+    ok
+}
+
+fn stage_encoded_for_thread_batch(
+    persistence: &PersistenceState,
+    error_prefix: &str,
+    writer: Arc<AofWriter>,
+    encoded: Vec<u8>,
+    repl_offset: i64,
+) -> Option<bool> {
+    let must_flush = THREAD_AOF_BATCH.with(|cell| {
+        let active = cell.borrow();
+        let Some(batch) = active.as_ref() else {
+            return false;
+        };
+        batch
+            .writer
+            .as_ref()
+            .is_some_and(|existing| !Arc::ptr_eq(existing, &writer))
+            && !batch.encoded.is_empty()
+    });
+    if must_flush && !flush_thread_aof_batch_for_lifecycle(persistence, error_prefix) {
+        return Some(false);
+    }
+
+    THREAD_AOF_BATCH.with(|cell| {
+        let mut active = cell.borrow_mut();
+        let Some(batch) = active.as_mut() else {
+            return None;
+        };
+        if batch
+            .writer
+            .as_ref()
+            .is_none_or(|existing| !Arc::ptr_eq(existing, &writer))
+        {
+            batch.writer = Some(writer);
+        }
+        batch.encoded.extend_from_slice(&encoded);
+        if repl_offset >= 0 {
+            batch.pending_repl_offset = batch.pending_repl_offset.max(repl_offset);
+        }
+        Some(true)
+    })
+}
+
+fn flush_taken_aof_batch(
+    persistence: &PersistenceState,
+    error_prefix: &str,
+    batch: Option<ThreadAofBatch>,
+) -> bool {
+    let Some(batch) = batch else {
+        return true;
+    };
+    if batch.encoded.is_empty() {
+        return true;
+    }
+    let Some(writer) = batch.writer else {
+        return true;
+    };
+    let ok = record_aof_append_result(
+        persistence,
+        error_prefix,
+        writer.append_encoded_fsync_always(&batch.encoded, batch.pending_repl_offset),
+    );
+    if ok && batch.pending_repl_offset >= 0 {
+        crate::replication::maybe_wake_wait_clients();
+    }
+    ok
+}
+
+fn note_writer_repl_offset_and_wake(writer: &AofWriter, offset: i64) {
+    if offset < 0 {
+        return;
+    }
+    writer.note_repl_offset(offset);
+    crate::replication::maybe_wake_wait_clients();
+}
+
+/// Record the operator-visible outcome of an AOF append attempt.
+///
+/// Both ordinary command dispatch and transaction dispatch use this helper so
+/// the failure invariant has one production implementation: a failed append
+/// flips `aof_last_write_status` to `err`, and a successful append restores it
+/// to `ok`.
+pub fn record_aof_append_result(
+    persistence: &PersistenceState,
+    error_prefix: &str,
+    result: io::Result<()>,
+) -> bool {
+    match result {
+        Ok(()) => {
+            persistence.set_aof_last_write_status(PersistenceStatus::Ok);
+            true
+        }
+        Err(err) => {
+            eprintln!("redis-server: {}: {}", error_prefix, err);
+            persistence.set_aof_last_write_status(PersistenceStatus::Err);
+            false
+        }
     }
 }
 
@@ -885,7 +1176,7 @@ pub fn open_manifest_current_incr_writer(
     appenddirname: &str,
     dbs: &[RedisDb],
     fsync_policy: u8,
-) -> io::Result<(AofWriter, u64)> {
+) -> io::Result<(AofWriter, u64, u64)> {
     let aof_dir = dir.join(appenddirname);
     std::fs::create_dir_all(&aof_dir)?;
     let manifest_path = aof_manifest_path(dir, appendfilename, appenddirname);
@@ -927,34 +1218,53 @@ pub fn open_manifest_current_incr_writer(
     let incr_path = manifest_file_path(&aof_dir, &incr_name);
     let writer = AofWriter::open(&incr_path, fsync_policy)?;
     if dirty {
-        persist_aof_manifest(&manifest_path, &manifest)?;
+        persist_aof_manifest(&manifest_path, &manifest, "manifest-current")?;
     }
-    let size = incr_path.metadata().map(|m| m.len()).unwrap_or(0);
-    Ok((writer, size))
+    let base_size = manifest
+        .base
+        .as_ref()
+        .and_then(|file| manifest_file_path(&aof_dir, &file.name).metadata().ok())
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    let incr_size = manifest.incr.iter().fold(0u64, |sum, file| {
+        sum.saturating_add(
+            manifest_file_path(&aof_dir, &file.name)
+                .metadata()
+                .map(|metadata| metadata.len())
+                .unwrap_or(0),
+        )
+    });
+    let current_size = base_size.saturating_add(incr_size);
+    writer.set_current_size(current_size);
+    Ok((writer, base_size, current_size))
 }
 
-/// Rewrite a Valkey multi-part AOF manifest while keeping appends on an INCR.
-/// This is synchronous for now, but follows the parent-side ordering that
-/// matters for correctness: publish a new active INCR first, write and rename a
-/// durable BASE file, then persist a manifest naming only the new BASE and
-/// current INCR. History deletion and failed-rewrite INCR accumulation are
-/// intentionally left out of this v1 path.
-pub fn rewrite_manifest_aof_from_dbs(
+/// Open a fresh active INCR and synchronously persist a manifest that names it.
+///
+/// This is the crash-safety boundary that lets `BGREWRITEAOF` return before the
+/// BASE rewrite is done: until finalization succeeds, restart replays the old
+/// BASE/INCR files plus this new active INCR.
+pub fn begin_manifest_aof_rewrite(
     dir: &Path,
     appendfilename: &str,
     appenddirname: &str,
-    dbs: &[RedisDb],
     fsync_policy: u8,
     use_rdb_preamble: bool,
-) -> io::Result<(u64, u64)> {
+) -> io::Result<(AofManifestRewritePlan, u64)> {
     let aof_dir = dir.join(appenddirname);
     std::fs::create_dir_all(&aof_dir)?;
     let manifest_path = aof_manifest_path(dir, appendfilename, appenddirname);
-    let manifest = if manifest_path.exists() {
+    let mut manifest = if manifest_path.exists() {
         load_aof_manifest(&manifest_path)?
     } else {
         AofManifest::default()
     };
+    if manifest.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "cannot rewrite an empty AOF manifest while appendonly is enabled",
+        ));
+    }
 
     let base_seq = manifest.next_base_seq();
     let incr_seq = manifest.next_incr_seq();
@@ -963,67 +1273,196 @@ pub fn rewrite_manifest_aof_from_dbs(
     } else {
         BASE_AOF_SUFFIX
     };
-    let base_name = format!("{}.{}{}", appendfilename, base_seq, base_suffix);
-    let incr_name = format!("{}.{}{}", appendfilename, incr_seq, INCR_AOF_SUFFIX);
-    let base_path = aof_dir.join(&base_name);
-    let incr_path = aof_dir.join(&incr_name);
+    let base_name = format!("{}.{}{}", appendfilename, base_seq, base_suffix).into_bytes();
+    let incr_name = format!("{}.{}{}", appendfilename, incr_seq, INCR_AOF_SUFFIX).into_bytes();
+    let base_path = manifest_file_path(&aof_dir, &base_name);
+    let incr_path = manifest_file_path(&aof_dir, &incr_name);
     let temp_base_path = aof_dir.join(format!(
         "temp-rewriteaof-bg-{}{}",
         std::process::id(),
         if use_rdb_preamble { ".rdb" } else { ".aof" }
     ));
 
-    let new_writer = Arc::new(AofWriter::open_truncate(&incr_path, fsync_policy)?);
-    let previous_writer = take_aof_writer();
-    if let Some(writer) = &previous_writer {
-        if let Err(e) = writer.flush() {
-            restore_aof_writer(previous_writer);
-            return Err(e);
+    let writer = Arc::new(AofWriter::open_truncate(&incr_path, fsync_policy)?);
+    if let Some(previous_writer) = aof_writer() {
+        if let Err(err) = previous_writer.flush() {
+            let _ = std::fs::remove_file(&incr_path);
+            return Err(err);
         }
     }
-    install_aof_writer(Arc::clone(&new_writer));
 
-    let result = (|| {
-        if use_rdb_preamble {
-            redis_core::rdb::save_rdb_databases(dbs, &temp_base_path)?;
-        } else {
-            write_base_aof_file(&temp_base_path, dbs)?;
-        }
-        std::fs::rename(&temp_base_path, &base_path)?;
-
-        let final_manifest = AofManifest {
-            base: Some(AofManifestFile {
-                name: base_name.into_bytes(),
-                seq: base_seq,
-                file_type: AofManifestFileType::Base,
-            }),
-            incr: vec![AofManifestFile {
-                name: incr_name.into_bytes(),
-                seq: incr_seq,
-                file_type: AofManifestFileType::Incr,
-            }],
-        };
-        persist_aof_manifest(&manifest_path, &final_manifest)?;
-
-        let base_size = base_path.metadata().map(|m| m.len()).unwrap_or(0);
-        new_writer.flush()?;
-        let incr_size = incr_path.metadata().map(|m| m.len()).unwrap_or(0);
-        Ok((base_size, base_size.saturating_add(incr_size)))
-    })();
-
-    if result.is_err() {
-        restore_aof_writer(previous_writer);
-        let _ = std::fs::remove_file(&temp_base_path);
-        let _ = std::fs::remove_file(&base_path);
+    manifest.incr.push(AofManifestFile {
+        name: incr_name.clone(),
+        seq: incr_seq,
+        file_type: AofManifestFileType::Incr,
+    });
+    if let Err(err) = persist_aof_manifest(&manifest_path, &manifest, "manifest-preliminary") {
         let _ = std::fs::remove_file(&incr_path);
+        return Err(err);
     }
 
-    result
+    let current_size = manifest_total_size(&aof_dir, &manifest);
+    writer.set_current_size(current_size);
+    install_aof_writer(Arc::clone(&writer));
+
+    Ok((
+        AofManifestRewritePlan {
+            temp_base_path,
+            base_path,
+            base_name,
+            base_seq,
+            incr_name,
+            incr_seq,
+            writer,
+            use_rdb_preamble,
+        },
+        current_size,
+    ))
+}
+
+/// Finish a manifest AOF rewrite after `begin_manifest_aof_rewrite`.
+///
+/// On failure, the preliminary manifest remains valid and keeps the active INCR
+/// replayable with the previous BASE/INCR chain.
+pub fn complete_manifest_aof_rewrite(
+    dir: &Path,
+    appendfilename: &str,
+    appenddirname: &str,
+    plan: AofManifestRewritePlan,
+    dbs: &[RedisDb],
+) -> io::Result<(u64, u64)> {
+    let manifest_path = aof_manifest_path(dir, appendfilename, appenddirname);
+    let preliminary_manifest = if manifest_path.exists() {
+        load_aof_manifest(&manifest_path)?
+    } else {
+        AofManifest::default()
+    };
+    let history = rewrite_history_files(&preliminary_manifest, &plan);
+
+    if plan.use_rdb_preamble {
+        redis_core::rdb::save_rdb_databases(dbs, &plan.temp_base_path)?;
+        maybe_inject_aof_fault("base-rdb-before-sync")?;
+        sync_existing_file(&plan.temp_base_path)?;
+        maybe_inject_aof_fault("base-rdb-before-dir-sync")?;
+        sync_parent_dir(&plan.temp_base_path)?;
+    } else {
+        write_base_aof_file(&plan.temp_base_path, dbs)?;
+    }
+    maybe_inject_aof_fault("base-before-rename")?;
+    std::fs::rename(&plan.temp_base_path, &plan.base_path)?;
+    maybe_inject_aof_fault("base-after-rename-before-dir-sync")?;
+    sync_parent_dir(&plan.base_path)?;
+
+    let published_manifest = AofManifest {
+        base: Some(AofManifestFile {
+            name: plan.base_name.clone(),
+            seq: plan.base_seq,
+            file_type: AofManifestFileType::Base,
+        }),
+        history: history.clone(),
+        incr: vec![AofManifestFile {
+            name: plan.incr_name.clone(),
+            seq: plan.incr_seq,
+            file_type: AofManifestFileType::Incr,
+        }],
+    };
+    persist_aof_manifest(&manifest_path, &published_manifest, "manifest-final")?;
+
+    if !history.is_empty() {
+        if let Err(err) = delete_aof_history_files(&dir.join(appenddirname), &history) {
+            eprintln!("redis-server: AOF history cleanup failed: {}", err);
+        } else {
+            let compact_manifest = AofManifest {
+                base: published_manifest.base.clone(),
+                history: Vec::new(),
+                incr: published_manifest.incr.clone(),
+            };
+            if let Err(err) =
+                persist_aof_manifest(&manifest_path, &compact_manifest, "manifest-compact")
+            {
+                eprintln!("redis-server: AOF history manifest cleanup failed: {}", err);
+            }
+        }
+    }
+
+    let base_size = plan.base_path.metadata().map(|m| m.len()).unwrap_or(0);
+    let current_size = plan.writer.refresh_current_size_with_base(base_size)?;
+    Ok((base_size, current_size))
+}
+
+/// Synchronous wrapper retained for tests and one-shot callers. Production
+/// `BGREWRITEAOF` uses `begin_manifest_aof_rewrite` and finishes in a
+/// background thread.
+pub fn rewrite_manifest_aof_from_dbs(
+    dir: &Path,
+    appendfilename: &str,
+    appenddirname: &str,
+    dbs: &[RedisDb],
+    fsync_policy: u8,
+    use_rdb_preamble: bool,
+) -> io::Result<(u64, u64)> {
+    let (plan, _) = begin_manifest_aof_rewrite(
+        dir,
+        appendfilename,
+        appenddirname,
+        fsync_policy,
+        use_rdb_preamble,
+    )?;
+    complete_manifest_aof_rewrite(dir, appendfilename, appenddirname, plan, dbs)
 }
 
 fn aof_manifest_path(dir: &Path, appendfilename: &str, appenddirname: &str) -> PathBuf {
     dir.join(appenddirname)
         .join(format!("{}{}", appendfilename, AOF_MANIFEST_SUFFIX))
+}
+
+fn manifest_total_size(aof_dir: &Path, manifest: &AofManifest) -> u64 {
+    let base_size = manifest
+        .base
+        .as_ref()
+        .and_then(|file| manifest_file_path(aof_dir, &file.name).metadata().ok())
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    manifest.incr.iter().fold(base_size, |sum, file| {
+        sum.saturating_add(
+            manifest_file_path(aof_dir, &file.name)
+                .metadata()
+                .map(|metadata| metadata.len())
+                .unwrap_or(0),
+        )
+    })
+}
+
+fn rewrite_history_files(
+    preliminary_manifest: &AofManifest,
+    plan: &AofManifestRewritePlan,
+) -> Vec<AofManifestFile> {
+    preliminary_manifest
+        .load_sequence()
+        .into_iter()
+        .filter(|file| file.name != plan.base_name && file.name != plan.incr_name)
+        .map(|file| AofManifestFile {
+            name: file.name.clone(),
+            seq: file.seq,
+            file_type: AofManifestFileType::History,
+        })
+        .collect()
+}
+
+fn delete_aof_history_files(aof_dir: &Path, history: &[AofManifestFile]) -> io::Result<usize> {
+    let mut deleted = 0usize;
+    for file in history {
+        let path = manifest_file_path(aof_dir, &file.name);
+        match std::fs::remove_file(&path) {
+            Ok(()) => {
+                deleted += 1;
+                sync_parent_dir(&path)?;
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(deleted)
 }
 
 fn write_base_aof_file(path: &Path, dbs: &[RedisDb]) -> io::Result<()> {
@@ -1035,20 +1474,88 @@ fn write_base_aof_file(path: &Path, dbs: &[RedisDb]) -> io::Result<()> {
     let mut writer = BufWriter::new(file);
     write_aof_rewrite_for_dbs(dbs, &mut writer)?;
     writer.flush()?;
-    writer.get_ref().sync_data()
+    maybe_inject_aof_fault("base-aof-before-sync")?;
+    writer.get_ref().sync_all()
 }
 
-fn persist_aof_manifest(path: &Path, manifest: &AofManifest) -> io::Result<()> {
+fn persist_aof_manifest(path: &Path, manifest: &AofManifest, phase: &str) -> io::Result<()> {
     let tmp_path = path.with_extension("manifest.tmp");
     let data = encode_aof_manifest(manifest);
-    std::fs::write(&tmp_path, data)?;
-    std::fs::rename(tmp_path, path)
+    let result = (|| {
+        let mut file = File::create(&tmp_path)?;
+        file.write_all(&data)?;
+        file.flush()?;
+        maybe_inject_aof_fault_for_phase(phase, "before-sync")?;
+        file.sync_all()?;
+        drop(file);
+        maybe_inject_aof_fault_for_phase(phase, "before-rename")?;
+        std::fs::rename(&tmp_path, path)?;
+        maybe_inject_aof_fault_for_phase(phase, "after-rename-before-dir-sync")?;
+        sync_parent_dir(path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    result
+}
+
+fn maybe_inject_aof_fault_for_phase(phase: &str, boundary: &str) -> io::Result<()> {
+    if std::env::var_os(AOF_FAULT_ENV).is_none() {
+        return Ok(());
+    }
+    maybe_inject_aof_fault(&format!("{phase}-{boundary}"))
+}
+
+fn maybe_inject_aof_fault(point: &str) -> io::Result<()> {
+    let Ok(raw) = std::env::var(AOF_FAULT_ENV) else {
+        return Ok(());
+    };
+    if raw
+        .split(',')
+        .map(str::trim)
+        .any(|candidate| candidate == point)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("injected AOF fault at {point}"),
+        ));
+    }
+    Ok(())
+}
+
+fn sync_existing_file(path: &Path) -> io::Result<()> {
+    let file = OpenOptions::new().read(true).open(path)?;
+    file.sync_all()
+}
+
+fn sync_parent_dir(path: &Path) -> io::Result<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    let dir = match File::open(parent) {
+        Ok(dir) => dir,
+        Err(err) if directory_sync_unavailable(&err) => return Ok(()),
+        Err(err) => return Err(err),
+    };
+    match dir.sync_all() {
+        Ok(()) => Ok(()),
+        Err(err) if directory_sync_unavailable(&err) => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+fn directory_sync_unavailable(err: &io::Error) -> bool {
+    matches!(err.kind(), io::ErrorKind::Unsupported)
+        || (cfg!(windows) && matches!(err.kind(), io::ErrorKind::PermissionDenied))
 }
 
 fn encode_aof_manifest(manifest: &AofManifest) -> Vec<u8> {
     let mut out = Vec::new();
     if let Some(base) = &manifest.base {
         encode_manifest_line(&mut out, base);
+    }
+    for history in &manifest.history {
+        encode_manifest_line(&mut out, history);
     }
     for incr in &manifest.incr {
         encode_manifest_line(&mut out, incr);
@@ -1278,7 +1785,9 @@ fn load_aof_manifest(path: &Path) -> io::Result<AofManifest> {
                 max_incr_seq = item.seq;
                 manifest.incr.push(item);
             }
-            AofManifestFileType::History => {}
+            AofManifestFileType::History => {
+                manifest.history.push(item);
+            }
         }
     }
 

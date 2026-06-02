@@ -925,10 +925,10 @@ pub fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
             }
         }
         b"tls-ciphers" | b"tls-ciphersuites" | b"tls-prefer-server-ciphers" => {
- // Accepted for upstream-config compatibility but inert: rustls
- // refuses CBC suites and always prefers server ciphers, so these
- // OpenSSL knobs have no effect. Documented as a deliberate
- // security-upgrade divergence on the site.
+            // Accepted for upstream-config compatibility but inert: rustls
+            // refuses CBC suites and always prefers server ciphers, so these
+            // OpenSSL knobs have no effect. Documented as a deliberate
+            // security-upgrade divergence on the site.
         }
         b"tls-port" => {
             if let Some(n) = parse_usize_strict(value) {
@@ -1354,17 +1354,25 @@ pub fn apply_appendonly_config_set(
     cfg: &Arc<LiveConfig>,
     value: &[u8],
 ) -> RedisResult<()> {
+    if !crate::aof::flush_thread_aof_batch_for_lifecycle(
+        &ctx.server().persistence,
+        "AOF appendonly config barrier flush failed",
+    ) {
+        return Err(RedisError::runtime(
+            b"ERR CONFIG SET appendonly failed while flushing pending AOF writes",
+        ));
+    }
     let enabled = ascii_eq_ignore_case(value, b"yes");
     let was_enabled = cfg.appendonly();
     if enabled {
         if !was_enabled {
             let snapshot = ctx.snapshot_all_dbs()?;
-            let dbs = snapshots_to_dbs(&snapshot);
+            let dbs = snapshot.to_dbs();
             let dir = cfg.rdb_dir();
             let filename = cfg.appendfilename();
             let dirname = cfg.appenddirname();
             let policy = cfg.appendfsync();
-            let (writer, size) = crate::aof::open_manifest_current_incr_writer(
+            let (writer, base_size, current_size) = crate::aof::open_manifest_current_incr_writer(
                 std::path::Path::new(&dir),
                 &filename,
                 &dirname,
@@ -1375,40 +1383,14 @@ pub fn apply_appendonly_config_set(
                 RedisError::runtime(format!("ERR CONFIG SET appendonly failed: {}", e).into_bytes())
             })?;
             crate::aof::install_aof_writer(std::sync::Arc::new(writer));
-            ctx.server().persistence.set_aof_current_size(size);
+            ctx.server().persistence.set_aof_base_size(base_size);
+            ctx.server().persistence.set_aof_current_size(current_size);
             ctx.server().set_aof_state(redis_core::AofState::On);
-            if ctx.server().rdb_child_pid() != 0 {
-                ctx.server().persistence.set_aof_rewrite_in_progress(false);
-                ctx.server().persistence.set_aof_rewrite_scheduled(true);
-                log_server_notice("AOF background was scheduled");
-                let server = ctx.server_arc();
-                let _ = std::thread::Builder::new()
-                    .name("aof-scheduled-clear".to_string())
-                    .spawn(move || {
-                        for _ in 0..200 {
-                            if server.rdb_child_pid() == 0 {
-                                server.persistence.set_aof_rewrite_scheduled(false);
-                                return;
-                            }
-                            std::thread::sleep(std::time::Duration::from_millis(50));
-                        }
-                        server.persistence.set_aof_rewrite_scheduled(false);
-                    });
-            } else {
-                ctx.server().persistence.set_aof_rewrite_in_progress(true);
-                let server = ctx.server_arc();
-                let delay = rdb_key_save_delay_us().min(5_000_000);
-                let _ = std::thread::Builder::new()
-                    .name("aof-initial-rewrite-clear".to_string())
-                    .spawn(move || {
-                        std::thread::sleep(std::time::Duration::from_micros(delay.max(100_000)));
-                        server.persistence.set_aof_rewrite_in_progress(false);
-                    });
-            }
-            if ctx.client_ref().flag_deny_blocking() {
-                log_server_notice("AOF background was scheduled");
-            }
-            redis_core::metrics::record_total_fork();
+            ctx.server().persistence.set_aof_rewrite_in_progress(false);
+            ctx.server().persistence.set_aof_rewrite_scheduled(false);
+            ctx.server()
+                .persistence
+                .set_aof_last_bgrewrite_status(redis_core::persistence::PersistenceStatus::Ok);
         }
         cfg.set_appendonly(true);
     } else {

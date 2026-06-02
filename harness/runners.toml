@@ -66,6 +66,30 @@ claim_level = "telemetry"
 capabilities = ["performance-profile-matrix", "faithful-runtime-ownership"]
 
 [[runner]]
+id = "bench-aof-matrix"
+kind = "json_command"
+surface = "performance"
+method = "bench-load"
+workload = "aof-fsync-and-append-overhead"
+command = ["python3", "harness/bench/aof-matrix.py"]
+timeout_s = 2400
+resources = ["benchmark-host", "bench-results", "port:6379", "port:16379"]
+claim_level = "telemetry"
+capabilities = ["persistence-aof", "performance-aof"]
+
+[[runner]]
+id = "bench-aof-rewrite-latency"
+kind = "json_command"
+surface = "performance"
+method = "bench-load"
+workload = "aof-rewrite-latency-under-write-load"
+command = ["python3", "harness/bench/aof-rewrite-latency.py"]
+timeout_s = 2400
+resources = ["benchmark-host", "bench-results", "port:6379", "port:16379"]
+claim_level = "telemetry"
+capabilities = ["persistence-aof-rewrite", "performance-aof"]
+
+[[runner]]
 id = "tcl-survey-unswept"
 kind = "json_command"
 surface = "correctness"

@@ -23,13 +23,16 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use redis_commands::aof::{
-    encode_resp_command, replay_aof_databases_with_options, AofLoadOptions, AofWriter,
+    append_raw_for_dispatch, append_selected_for_dispatch, begin_thread_aof_batch,
+    encode_resp_command, finish_thread_aof_batch, flush_thread_aof_batch_for_lifecycle,
+    record_aof_append_result, replay_aof_databases_with_options, AofLoadOptions, AofWriter,
     FSYNC_ALWAYS, FSYNC_EVERYSEC, FSYNC_NO,
 };
 use redis_core::db::RedisDb;
 use redis_core::object::{ObjectKind, RedisObject, EXPIRY_NONE};
 use redis_core::persistence::{PersistenceState, PersistenceStatus};
 use redis_types::RedisString;
+use std::sync::Arc;
 
 // ─── tmpdir plumbing (no tempfile dev-dep available) ─────────────────────────
 
@@ -185,15 +188,15 @@ fn anchor_six_types_roundtrip_under_always() {
     let aof_path = scratch.path("appendonly.aof");
     let writer = AofWriter::open(&aof_path, FSYNC_ALWAYS).expect("open aof");
 
- // string
+    // string
     writer
         .append(&[rs(b"SET"), rs(b"k:str"), rs(b"hello world")])
         .unwrap();
- // list
+    // list
     writer
         .append(&[rs(b"RPUSH"), rs(b"k:list"), rs(b"a"), rs(b"b"), rs(b"c")])
         .unwrap();
- // hash
+    // hash
     writer
         .append(&[
             rs(b"HMSET"),
@@ -204,11 +207,11 @@ fn anchor_six_types_roundtrip_under_always() {
             rs(b"v2"),
         ])
         .unwrap();
- // set
+    // set
     writer
         .append(&[rs(b"SADD"), rs(b"k:set"), rs(b"x"), rs(b"y"), rs(b"z")])
         .unwrap();
- // zset
+    // zset
     writer
         .append(&[
             rs(b"ZADD"),
@@ -219,7 +222,7 @@ fn anchor_six_types_roundtrip_under_always() {
             rs(b"two"),
         ])
         .unwrap();
- // volatile string (TTL ~1000s in the future)
+    // volatile string (TTL ~1000s in the future)
     let expire_at = current_ms() + 1_000_000;
     writer
         .append(&[rs(b"SET"), rs(b"k:vol"), rs(b"ephemeral")])
@@ -233,7 +236,7 @@ fn anchor_six_types_roundtrip_under_always() {
         .unwrap();
     writer.flush().unwrap();
 
- // Build the expected DB independently (not from the AOF).
+    // Build the expected DB independently (not from the AOF).
     let mut expected = RedisDb::new(0);
     expected.insert(rs(b"k:str"), RedisObject::new_string(b"hello world"));
     let mut list = std::collections::VecDeque::new();
@@ -274,7 +277,7 @@ fn anchor_six_types_roundtrip_under_always() {
     );
 }
 
-// ─── audit finding 1: DISK-FULL SWALLOWED (RED) ──────────────────────────────
+// ─── append failure status ───────────────────────────────────────────────────
 
 /// A sink that fails every write with ENOSPC, used to drive the durability
 /// decision the dispatch tail makes.
@@ -295,41 +298,12 @@ impl Write for FailingSink {
     }
 }
 
-/// Faithful reproduction of the production AOF-append swallow logic
-/// `dispatch.rs:749-758`:
-/// ```ignore
-/// if let Some(aof) = aof {
-/// if let Some(argv) = argv_snapshot.as_ref {
-/// if let Err(e) = aof.append_selected(...) {
-/// eprintln!("redis-server: AOF append failed: {}", e); // <-- swallowed
-/// } else {... }
-/// }
-/// }
-/// ```
-/// The append result is logged and dropped; `aof_last_write_status` is never
-/// touched and the client is still acked success. `AofWriter`'s file field is
-/// private, so this kit cannot inject `FailingSink` into the live writer
-/// without a production hook (documented in the kit notes). Instead it
-/// reproduces the exact control flow against a real `PersistenceState`:
-/// append errors (ENOSPC), the production handler swallows it, and we observe
-/// the resulting status. Valkey would instead `flagAofError` →
-/// `aof_last_write_status = ERR` and stop acking. This is the bug.
-fn production_append_swallow(_persistence: &PersistenceState, append_result: io::Result<()>) {
-    if let Err(e) = append_result {
- // VERBATIM from dispatch.rs:752 — the only thing the prod code does.
- // The `_persistence` arg is deliberately untouched: that absence (
- // missing `set_aof_last_write_status(Err)`) IS the bug.
-        eprintln!("redis-server: AOF append failed: {}", e);
-    }
- // dispatch.rs never touches aof_last_write_status here; the client is acked.
-}
-
 #[test]
-fn disk_full_append_failure_is_swallowed_status_stays_ok() {
+fn disk_full_append_failure_sets_operator_status_err() {
     let persistence = PersistenceState::new();
     assert_eq!(persistence.aof_last_write_status(), PersistenceStatus::Ok);
 
- // The write genuinely fails ENOSPC through the failing sink.
+    // The write genuinely fails ENOSPC through the failing sink.
     let mut sink = FailingSink;
     let encoded = encode_resp_command(&[rs(b"SET"), rs(b"k"), rs(b"v")]);
     let append_result = sink.write_all(&encoded);
@@ -338,17 +312,29 @@ fn disk_full_append_failure_is_swallowed_status_stays_ok() {
         "FailingSink must produce the ENOSPC error"
     );
 
- // Run the production swallow logic over that failure.
-    production_append_swallow(&persistence, append_result);
+    // Run the same production status helper used by dispatch.rs and multi.rs.
+    assert!(!record_aof_append_result(
+        &persistence,
+        "AOF append failed",
+        append_result
+    ));
 
- // EXPECTED (Valkey): a swallowed durability failure must flip the write
- // status to ERR (and the command must not be acked as durable). The
- // production code never does this, so this assertion fails and pins the bug.
+    // A durability failure must be visible through INFO persistence.
     assert_eq!(
         persistence.aof_last_write_status(),
         PersistenceStatus::Err,
-        "ENOSPC on AOF append must set aof_last_write_status=ERR; \
-         dispatch.rs:752 only eprintln!'d it and acked success (durability divergence)"
+        "ENOSPC on AOF append must set aof_last_write_status=ERR"
+    );
+
+    assert!(record_aof_append_result(
+        &persistence,
+        "AOF append failed",
+        Ok(())
+    ));
+    assert_eq!(
+        persistence.aof_last_write_status(),
+        PersistenceStatus::Ok,
+        "a later successful AOF append should restore aof_last_write_status=OK"
     );
 }
 
@@ -377,8 +363,8 @@ fn fsync_policies_all_replay_identically() {
         for (k, v) in &payload {
             writer.append(&[rs(b"SET"), k.clone(), rs(v)]).unwrap();
         }
- // Deterministic everysec window: force the once-per-second drain now,
- // rather than sleeping. For NO/ALWAYS this is a harmless flush.
+        // Deterministic everysec window: force the once-per-second drain now,
+        // rather than sleeping. For NO/ALWAYS this is a harmless flush.
         writer.fsync_if_due().expect("fsync_if_due drain");
         writer.flush().unwrap();
 
@@ -393,8 +379,145 @@ fn fsync_policies_all_replay_identically() {
             "policy {label} produced a divergent replay"
         );
     }
- // Sanity: the reference actually has the three keys.
+    // Sanity: the reference actually has the three keys.
     assert_eq!(reference.entries.len(), 3);
+}
+
+#[test]
+fn appendfsync_always_thread_batch_syncs_once_for_many_commands() {
+    let scratch = Scratch::new("always_batch_once");
+    let aof_path = scratch.path("appendonly.aof");
+    let writer = Arc::new(AofWriter::open(&aof_path, FSYNC_ALWAYS).expect("open aof"));
+    let persistence = PersistenceState::new();
+
+    let _ = finish_thread_aof_batch(&persistence);
+    begin_thread_aof_batch();
+    assert!(append_selected_for_dispatch(
+        &persistence,
+        "AOF append failed",
+        Arc::clone(&writer),
+        0,
+        &[rs(b"SET"), rs(b"k1"), rs(b"v1")],
+        11,
+    ));
+    assert!(append_selected_for_dispatch(
+        &persistence,
+        "AOF append failed",
+        Arc::clone(&writer),
+        0,
+        &[rs(b"SET"), rs(b"k2"), rs(b"v2")],
+        22,
+    ));
+
+    assert_eq!(writer.fsync_count(), 0, "staged appends must not fsync");
+    assert_eq!(
+        writer.current_size(),
+        0,
+        "staged bytes are not visible until flush"
+    );
+    assert!(finish_thread_aof_batch(&persistence));
+
+    assert_eq!(writer.fsync_count(), 1, "one batch flush should fsync once");
+    assert_eq!(writer.fsynced_repl_offset(), 22);
+    assert_eq!(persistence.aof_last_write_status(), PersistenceStatus::Ok);
+    let snap = replay_into_fresh(&aof_path, AofLoadOptions::default()).unwrap();
+    assert_eq!(snap.entries.len(), 2);
+}
+
+#[test]
+fn appendfsync_always_transaction_envelope_batches_as_one_flush() {
+    let scratch = Scratch::new("always_batch_tx");
+    let aof_path = scratch.path("appendonly.aof");
+    let writer = Arc::new(AofWriter::open(&aof_path, FSYNC_ALWAYS).expect("open aof"));
+    let persistence = PersistenceState::new();
+
+    let _ = finish_thread_aof_batch(&persistence);
+    begin_thread_aof_batch();
+    assert!(append_raw_for_dispatch(
+        &persistence,
+        "transaction AOF append failed",
+        Arc::clone(&writer),
+        &[rs(b"MULTI")],
+        -1,
+    ));
+    assert!(append_selected_for_dispatch(
+        &persistence,
+        "transaction AOF append failed",
+        Arc::clone(&writer),
+        0,
+        &[rs(b"SET"), rs(b"tx:k1"), rs(b"v1")],
+        -1,
+    ));
+    assert!(append_selected_for_dispatch(
+        &persistence,
+        "transaction AOF append failed",
+        Arc::clone(&writer),
+        0,
+        &[rs(b"INCR"), rs(b"tx:n")],
+        -1,
+    ));
+    assert!(append_raw_for_dispatch(
+        &persistence,
+        "transaction AOF append failed",
+        Arc::clone(&writer),
+        &[rs(b"EXEC")],
+        77,
+    ));
+    assert!(finish_thread_aof_batch(&persistence));
+
+    assert_eq!(writer.fsync_count(), 1);
+    assert_eq!(writer.fsynced_repl_offset(), 77);
+    let bytes = std::fs::read(&aof_path).unwrap();
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("MULTI"));
+    assert!(text.contains("EXEC"));
+    let snap = replay_into_fresh(&aof_path, AofLoadOptions::default()).unwrap();
+    assert_eq!(snap.entries.len(), 2);
+}
+
+#[test]
+fn appendfsync_always_lifecycle_barrier_flushes_current_batch() {
+    let scratch = Scratch::new("always_batch_barrier");
+    let aof_path = scratch.path("appendonly.aof");
+    let writer = Arc::new(AofWriter::open(&aof_path, FSYNC_ALWAYS).expect("open aof"));
+    let persistence = PersistenceState::new();
+
+    let _ = finish_thread_aof_batch(&persistence);
+    begin_thread_aof_batch();
+    assert!(append_selected_for_dispatch(
+        &persistence,
+        "AOF append failed",
+        Arc::clone(&writer),
+        0,
+        &[rs(b"SET"), rs(b"before"), rs(b"1")],
+        1,
+    ));
+    assert!(flush_thread_aof_batch_for_lifecycle(
+        &persistence,
+        "lifecycle barrier flush failed",
+    ));
+    assert_eq!(writer.fsync_count(), 1);
+    assert_eq!(writer.fsynced_repl_offset(), 1);
+
+    assert!(append_selected_for_dispatch(
+        &persistence,
+        "AOF append failed",
+        Arc::clone(&writer),
+        0,
+        &[rs(b"SET"), rs(b"after"), rs(b"2")],
+        2,
+    ));
+    assert_eq!(
+        writer.fsync_count(),
+        1,
+        "barrier leaves a fresh active batch"
+    );
+    assert!(finish_thread_aof_batch(&persistence));
+    assert_eq!(writer.fsync_count(), 2);
+    assert_eq!(writer.fsynced_repl_offset(), 2);
+
+    let snap = replay_into_fresh(&aof_path, AofLoadOptions::default()).unwrap();
+    assert_eq!(snap.entries.len(), 2);
 }
 
 // ─── audit finding 3: MULTI/EXEC AOF replay (RED — replayer rejects EXEC) ────
@@ -417,7 +540,7 @@ fn multi_exec_envelope_replays_keyspace_exactly() {
     let aof_path = scratch.path("appendonly.aof");
     let writer = AofWriter::open(&aof_path, FSYNC_ALWAYS).expect("open aof");
 
- // Faithful copy of append_transaction_commands_to_aof's multi-command arm.
+    // Faithful copy of append_transaction_commands_to_aof's multi-command arm.
     writer.append_raw(&[rs(b"MULTI")]).unwrap();
     writer
         .append_selected(0, &[rs(b"SET"), rs(b"tx:a"), rs(b"1")])
@@ -441,9 +564,9 @@ fn multi_exec_envelope_replays_keyspace_exactly() {
     hs.insert(rs(b"m"));
     expected.insert(rs(b"tx:s"), RedisObject::new_set_from_set(hs));
 
- // Capture the replay outcome explicitly so the failure lands on
- // documented assertion (replay must succeed and reconstruct the keyspace),
- // not on an unwrap panic.
+    // Capture the replay outcome explicitly so the failure lands on
+    // documented assertion (replay must succeed and reconstruct the keyspace),
+    // not on an unwrap panic.
     let replayed = replay_into_fresh(&aof_path, AofLoadOptions::default());
     assert_eq!(
         replayed.map_err(|e| e.to_string()),
@@ -464,15 +587,15 @@ fn truncated_tail_loads_prefix_only_when_allowed() {
     let scratch = Scratch::new("trunc");
     let aof_path = scratch.path("appendonly.aof");
 
- // Two complete commands, then a deliberately truncated third (header claims
- // a 3-element array but the bytes stop mid-command).
+    // Two complete commands, then a deliberately truncated third (header claims
+    // a 3-element array but the bytes stop mid-command).
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&encode_resp_command(&[rs(b"SET"), rs(b"good1"), rs(b"v1")]));
     bytes.extend_from_slice(&encode_resp_command(&[rs(b"SET"), rs(b"good2"), rs(b"v2")]));
     bytes.extend_from_slice(b"*3\r\n$3\r\nSET\r\n$4\r\ngo"); // truncated tail
     std::fs::write(&aof_path, &bytes).unwrap();
 
- // load_truncated=yes → valid prefix replays, no error.
+    // load_truncated=yes → valid prefix replays, no error.
     let mut opts_yes = AofLoadOptions::default();
     opts_yes.load_truncated = true;
     let replayed = replay_into_fresh(&aof_path, opts_yes).expect("truncated tail tolerated");
@@ -485,7 +608,7 @@ fn truncated_tail_loads_prefix_only_when_allowed() {
         "load_truncated=yes must replay the valid prefix and drop the torn tail"
     );
 
- // load_truncated=no → error.
+    // load_truncated=no → error.
     let mut dbs = vec![RedisDb::new(0)];
     let err = replay_aof_databases_with_options(&aof_path, &mut dbs, AofLoadOptions::default())
         .expect_err("load_truncated=no must reject a torn tail");
@@ -520,7 +643,7 @@ fn manifest_well_formed_round_trips_and_loads() {
     let appendfile = "appendonly.aof";
     let appenddir = "appendonlydir";
 
- // BASE holds a SET; INCR holds another SET.
+    // BASE holds a SET; INCR holds another SET.
     let dir = scratch.path(appenddir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(

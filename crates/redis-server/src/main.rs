@@ -219,18 +219,17 @@ fn main() {
             load_truncated: args.aof_load_truncated,
             allow_rdb_preamble: args.aof_use_rdb_preamble,
         };
-        let loaded_aof_size = match redis_commands::aof::load_append_only_files(
+        match redis_commands::aof::load_append_only_files(
             Path::new(&args.dir),
             &args.appendfilename,
             &args.appenddirname,
             &mut owner_dbs,
             load_options,
         ) {
-            Ok(Some((n, size))) => {
+            Ok(Some((n, _size))) => {
                 eprintln!("redis-server: AOF replay: {} commands", n);
-                Some(size)
             }
-            Ok(None) => None,
+            Ok(None) => {}
             Err(e) => {
                 eprintln!("redis-server: AOF replay failed: {}", e);
                 std::process::exit(1);
@@ -243,9 +242,9 @@ fn main() {
             &owner_dbs,
             args.appendfsync,
         ) {
-            Ok((w, incr_size)) => {
-                let size = loaded_aof_size.unwrap_or(incr_size);
-                server.persistence.set_aof_current_size(size);
+            Ok((w, base_size, current_size)) => {
+                server.persistence.set_aof_base_size(base_size);
+                server.persistence.set_aof_current_size(current_size);
                 server.set_aof_state(redis_core::AofState::On);
                 redis_commands::aof::install_aof_writer(Arc::new(w));
             }
@@ -370,9 +369,9 @@ fn main() {
         }
     }));
 
- // Build the TLS listener(s) + rustls config from startup config (the same
- // tls-* keys the upstream test harness passes). TLS connections are served
- // by the same RuntimeOwner / DB as plain TCP (the divergent-DB path is gone).
+    // Build the TLS listener(s) + rustls config from startup config (the same
+    // tls-* keys the upstream test harness passes). TLS connections are served
+    // by the same RuntimeOwner / DB as plain TCP (the divergent-DB path is gone).
     let (tls_listeners, tls_config) = build_tls_startup(&args, &live_config);
 
     runtime_owner::RuntimeOwner::run_plain_tcp(

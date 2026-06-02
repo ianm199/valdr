@@ -519,6 +519,14 @@ pub fn shutdown_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             b"ERR Errors trying to SHUTDOWN. Check logs.",
         ));
     }
+    if !crate::aof::flush_thread_aof_batch_for_lifecycle(
+        &ctx.server().persistence,
+        "SHUTDOWN barrier flush failed",
+    ) {
+        return Err(RedisError::runtime(
+            b"ERR Errors trying to SHUTDOWN. Check logs.",
+        ));
+    }
     log_server_notice("ready to exit, bye bye");
     cleanup_bgsave_child_for_shutdown(ctx);
     exit_process_now();

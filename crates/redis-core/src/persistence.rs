@@ -61,6 +61,8 @@ pub struct PersistenceState {
     aof_last_write_status: AtomicU8,
     aof_current_size: AtomicU64,
     aof_base_size: AtomicU64,
+    aof_last_rewrite_snapshot_keys: AtomicU64,
+    aof_last_rewrite_snapshot_micros: AtomicU64,
 }
 
 impl Default for PersistenceState {
@@ -75,6 +77,8 @@ impl Default for PersistenceState {
             aof_last_write_status: AtomicU8::new(PersistenceStatus::Ok as u8),
             aof_current_size: AtomicU64::new(0),
             aof_base_size: AtomicU64::new(0),
+            aof_last_rewrite_snapshot_keys: AtomicU64::new(0),
+            aof_last_rewrite_snapshot_micros: AtomicU64::new(0),
         }
     }
 }
@@ -157,6 +161,22 @@ impl PersistenceState {
 
     pub fn set_aof_base_size(&self, size: u64) {
         self.aof_base_size.store(size, Ordering::Relaxed);
+    }
+
+    pub fn aof_last_rewrite_snapshot_keys(&self) -> u64 {
+        self.aof_last_rewrite_snapshot_keys.load(Ordering::Relaxed)
+    }
+
+    pub fn aof_last_rewrite_snapshot_micros(&self) -> u64 {
+        self.aof_last_rewrite_snapshot_micros
+            .load(Ordering::Relaxed)
+    }
+
+    pub fn set_aof_last_rewrite_snapshot_stats(&self, keys: u64, micros: u64) {
+        self.aof_last_rewrite_snapshot_keys
+            .store(keys, Ordering::Relaxed);
+        self.aof_last_rewrite_snapshot_micros
+            .store(micros, Ordering::Relaxed);
     }
 }
 

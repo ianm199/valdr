@@ -2,8 +2,9 @@ use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::env;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 static KEY_CLONE_BYTES: AtomicU64 = AtomicU64::new(0);
@@ -70,6 +71,18 @@ impl Payload {
             *first = first.wrapping_add(salt).wrapping_add(1);
         }
     }
+
+    fn incr_counter(&mut self, delta: u64) -> u64 {
+        let mut bytes = [0u8; 8];
+        let copy_len = self.bytes.len().min(bytes.len());
+        bytes[..copy_len].copy_from_slice(&self.bytes[..copy_len]);
+        let next = u64::from_le_bytes(bytes).wrapping_add(delta);
+        if self.bytes.len() < bytes.len() {
+            self.bytes.resize(bytes.len(), 0);
+        }
+        self.bytes[..8].copy_from_slice(&next.to_le_bytes());
+        next
+    }
 }
 
 impl Clone for Payload {
@@ -85,39 +98,39 @@ impl Clone for Payload {
 struct SegmentedCow {
     segments: Vec<Arc<HashMap<Key, Arc<Payload>>>>,
     value_bytes: usize,
+    hash_route: bool,
 }
 
 impl SegmentedCow {
-    fn with_keys(keys: usize, value_bytes: usize, segment_count: usize) -> Self {
+    fn with_keys(keys: usize, value_bytes: usize, segment_count: usize, hash_route: bool) -> Self {
         let segment_count = segment_count.max(1).min(keys.max(1));
         let mut segments: Vec<HashMap<Key, Arc<Payload>>> =
             (0..segment_count).map(|_| HashMap::new()).collect();
         for id in 0..keys {
-            let segment = id % segment_count;
-            segments[segment].insert(
-                Key::from_id(id),
-                Arc::new(Payload::new(value_bytes, id, 0x31)),
-            );
+            let key = Key::from_id(id);
+            let segment = segment_for_key(segment_count, id, key.0.as_slice(), hash_route);
+            segments[segment].insert(key, Arc::new(Payload::new(value_bytes, id, 0x31)));
         }
         Self {
             segments: segments.into_iter().map(Arc::new).collect(),
             value_bytes,
+            hash_route,
         }
     }
 
-    fn segment_for(&self, id: usize) -> usize {
-        id % self.segments.len()
+    fn segment_for(&self, id: usize, key: &[u8]) -> usize {
+        segment_for_key(self.segments.len(), id, key, self.hash_route)
     }
 
     fn get(&self, id: usize, key: &[u8]) -> usize {
-        self.segments[self.segment_for(id)]
+        self.segments[self.segment_for(id, key)]
             .get(key)
             .map(|v| v.len() ^ v.first() as usize)
             .unwrap_or(0)
     }
 
     fn replace(&mut self, id: usize, key: &[u8], salt: u8) -> usize {
-        let segment = self.segment_for(id);
+        let segment = self.segment_for(id, key);
         let map = Arc::make_mut(&mut self.segments[segment]);
         map.insert(
             Key(key.to_vec()),
@@ -127,7 +140,7 @@ impl SegmentedCow {
     }
 
     fn mutate(&mut self, id: usize, key: &[u8], salt: u8) -> usize {
-        let segment = self.segment_for(id);
+        let segment = self.segment_for(id, key);
         let map = Arc::make_mut(&mut self.segments[segment]);
         match map.get_mut(key) {
             Some(payload) => {
@@ -135,6 +148,21 @@ impl SegmentedCow {
                 1
             }
             None => 0,
+        }
+    }
+
+    fn incr(&mut self, id: usize, key: &[u8], delta: u64) -> usize {
+        let segment = self.segment_for(id, key);
+        let map = Arc::make_mut(&mut self.segments[segment]);
+        match map.get_mut(key) {
+            Some(payload) => Arc::make_mut(payload).incr_counter(delta) as usize,
+            None => {
+                map.insert(
+                    Key(key.to_vec()),
+                    Arc::new(Payload::new(self.value_bytes, id, delta as u8)),
+                );
+                0
+            }
         }
     }
 
@@ -173,6 +201,7 @@ impl Default for Config {
                 "deep".to_string(),
                 "arc".to_string(),
                 "seg".to_string(),
+                "seg_hash".to_string(),
                 "im".to_string(),
             ],
         }
@@ -187,6 +216,8 @@ struct Row {
     elapsed: Duration,
     key_clone_bytes: u64,
     payload_clone_bytes: u64,
+    rss_kb: u64,
+    rss_delta_kb: i64,
     checksum: usize,
 }
 
@@ -197,14 +228,22 @@ fn main() {
     let write_ids = make_ids(cfg.write_ops, cfg.keys, 0x0ddc_0ffe_e15e_d00d);
 
     println!(
-        "variant\tkeys\tvalue_bytes\tsegments\tphase\tops\telapsed_ms\tns_per_op\tkey_clone_mb\tpayload_clone_mb\tchecksum"
+        "variant\tkeys\tvalue_bytes\tsegments\tphase\tops\telapsed_ms\tns_per_op\tkey_clone_mb\tpayload_clone_mb\trss_kb\trss_delta_kb\tchecksum"
     );
 
     for variant in &cfg.variants {
         match variant.as_str() {
             "deep" => run_deep(&cfg, &key_bytes_cache, &read_ids, &write_ids),
             "arc" => run_arc(&cfg, &key_bytes_cache, &read_ids, &write_ids),
-            "seg" => run_segmented(&cfg, &key_bytes_cache, &read_ids, &write_ids),
+            "seg" => run_segmented("seg", false, &cfg, &key_bytes_cache, &read_ids, &write_ids),
+            "seg_hash" => run_segmented(
+                "seg_hash",
+                true,
+                &cfg,
+                &key_bytes_cache,
+                &read_ids,
+                &write_ids,
+            ),
             "im" => run_im(&cfg, &key_bytes_cache, &read_ids, &write_ids),
             other => eprintln!("unknown variant ignored: {other}"),
         }
@@ -257,6 +296,17 @@ fn run_deep(cfg: &Config, keys: &[Vec<u8>], read_ids: &[usize], write_ids: &[usi
     );
 
     let mut live = build_deep(cfg.keys, cfg.value_bytes);
+    emit(
+        cfg,
+        Row {
+            variant: "deep",
+            phase: "incr_live",
+            ops: write_ids.len(),
+            ..measure(|| bench_incr_deep(&mut live, keys, write_ids))
+        },
+    );
+
+    let mut live = build_deep(cfg.keys, cfg.value_bytes);
     let _held = live.clone();
     emit(
         cfg,
@@ -277,6 +327,18 @@ fn run_deep(cfg: &Config, keys: &[Vec<u8>], read_ids: &[usize], write_ids: &[usi
             phase: "mutate_held_snapshot",
             ops: write_ids.len(),
             ..measure(|| bench_mutate_deep(&mut live, keys, write_ids))
+        },
+    );
+
+    let mut live = build_deep(cfg.keys, cfg.value_bytes);
+    let _held = live.clone();
+    emit(
+        cfg,
+        Row {
+            variant: "deep",
+            phase: "incr_held_snapshot",
+            ops: write_ids.len(),
+            ..measure(|| bench_incr_deep(&mut live, keys, write_ids))
         },
     );
 }
@@ -327,6 +389,17 @@ fn run_arc(cfg: &Config, keys: &[Vec<u8>], read_ids: &[usize], write_ids: &[usiz
     );
 
     let mut live = build_arc(cfg.keys, cfg.value_bytes);
+    emit(
+        cfg,
+        Row {
+            variant: "arc",
+            phase: "incr_live",
+            ops: write_ids.len(),
+            ..measure(|| bench_incr_arc(&mut live, keys, write_ids))
+        },
+    );
+
+    let mut live = build_arc(cfg.keys, cfg.value_bytes);
     let _held = live.clone();
     emit(
         cfg,
@@ -349,16 +422,35 @@ fn run_arc(cfg: &Config, keys: &[Vec<u8>], read_ids: &[usize], write_ids: &[usiz
             ..measure(|| bench_mutate_arc(&mut live, keys, write_ids))
         },
     );
+
+    let mut live = build_arc(cfg.keys, cfg.value_bytes);
+    let _held = live.clone();
+    emit(
+        cfg,
+        Row {
+            variant: "arc",
+            phase: "incr_held_snapshot",
+            ops: write_ids.len(),
+            ..measure(|| bench_incr_arc(&mut live, keys, write_ids))
+        },
+    );
 }
 
-fn run_segmented(cfg: &Config, keys: &[Vec<u8>], read_ids: &[usize], write_ids: &[usize]) {
-    let live = SegmentedCow::with_keys(cfg.keys, cfg.value_bytes, cfg.segments);
-    measure_snapshot("seg", cfg, || live.clone());
+fn run_segmented(
+    variant: &'static str,
+    hash_route: bool,
+    cfg: &Config,
+    keys: &[Vec<u8>],
+    read_ids: &[usize],
+    write_ids: &[usize],
+) {
+    let live = SegmentedCow::with_keys(cfg.keys, cfg.value_bytes, cfg.segments, hash_route);
+    measure_snapshot(variant, cfg, || live.clone());
     let snapshot = live.clone();
     emit(
         cfg,
         Row {
-            variant: "seg",
+            variant,
             phase: "iter_snapshot",
             ops: cfg.keys,
             ..measure(|| snapshot.iter_sum())
@@ -367,56 +459,79 @@ fn run_segmented(cfg: &Config, keys: &[Vec<u8>], read_ids: &[usize], write_ids: 
     emit(
         cfg,
         Row {
-            variant: "seg",
+            variant,
             phase: "get_live",
             ops: read_ids.len(),
             ..measure(|| bench_get_segmented(&live, keys, read_ids))
         },
     );
 
-    let mut live = SegmentedCow::with_keys(cfg.keys, cfg.value_bytes, cfg.segments);
+    let mut live = SegmentedCow::with_keys(cfg.keys, cfg.value_bytes, cfg.segments, hash_route);
     emit(
         cfg,
         Row {
-            variant: "seg",
+            variant,
             phase: "replace_live",
             ops: write_ids.len(),
             ..measure(|| bench_replace_segmented(&mut live, keys, write_ids))
         },
     );
 
-    let mut live = SegmentedCow::with_keys(cfg.keys, cfg.value_bytes, cfg.segments);
+    let mut live = SegmentedCow::with_keys(cfg.keys, cfg.value_bytes, cfg.segments, hash_route);
     emit(
         cfg,
         Row {
-            variant: "seg",
+            variant,
             phase: "mutate_live",
             ops: write_ids.len(),
             ..measure(|| bench_mutate_segmented(&mut live, keys, write_ids))
         },
     );
 
-    let mut live = SegmentedCow::with_keys(cfg.keys, cfg.value_bytes, cfg.segments);
+    let mut live = SegmentedCow::with_keys(cfg.keys, cfg.value_bytes, cfg.segments, hash_route);
+    emit(
+        cfg,
+        Row {
+            variant,
+            phase: "incr_live",
+            ops: write_ids.len(),
+            ..measure(|| bench_incr_segmented(&mut live, keys, write_ids))
+        },
+    );
+
+    let mut live = SegmentedCow::with_keys(cfg.keys, cfg.value_bytes, cfg.segments, hash_route);
     let _held = live.clone();
     emit(
         cfg,
         Row {
-            variant: "seg",
+            variant,
             phase: "replace_held_snapshot",
             ops: write_ids.len(),
             ..measure(|| bench_replace_segmented(&mut live, keys, write_ids))
         },
     );
 
-    let mut live = SegmentedCow::with_keys(cfg.keys, cfg.value_bytes, cfg.segments);
+    let mut live = SegmentedCow::with_keys(cfg.keys, cfg.value_bytes, cfg.segments, hash_route);
     let _held = live.clone();
     emit(
         cfg,
         Row {
-            variant: "seg",
+            variant,
             phase: "mutate_held_snapshot",
             ops: write_ids.len(),
             ..measure(|| bench_mutate_segmented(&mut live, keys, write_ids))
+        },
+    );
+
+    let mut live = SegmentedCow::with_keys(cfg.keys, cfg.value_bytes, cfg.segments, hash_route);
+    let _held = live.clone();
+    emit(
+        cfg,
+        Row {
+            variant,
+            phase: "incr_held_snapshot",
+            ops: write_ids.len(),
+            ..measure(|| bench_incr_segmented(&mut live, keys, write_ids))
         },
     );
 }
@@ -467,6 +582,17 @@ fn run_im(cfg: &Config, keys: &[Vec<u8>], read_ids: &[usize], write_ids: &[usize
     );
 
     let mut live = build_im(cfg.keys, cfg.value_bytes);
+    emit(
+        cfg,
+        Row {
+            variant: "im",
+            phase: "incr_live",
+            ops: write_ids.len(),
+            ..measure(|| bench_incr_im(&mut live, keys, write_ids, cfg.value_bytes))
+        },
+    );
+
+    let mut live = build_im(cfg.keys, cfg.value_bytes);
     let _held = live.clone();
     emit(
         cfg,
@@ -487,6 +613,18 @@ fn run_im(cfg: &Config, keys: &[Vec<u8>], read_ids: &[usize], write_ids: &[usize
             phase: "mutate_held_snapshot",
             ops: write_ids.len(),
             ..measure(|| bench_mutate_im(&mut live, keys, write_ids, cfg.value_bytes))
+        },
+    );
+
+    let mut live = build_im(cfg.keys, cfg.value_bytes);
+    let _held = live.clone();
+    emit(
+        cfg,
+        Row {
+            variant: "im",
+            phase: "incr_held_snapshot",
+            ops: write_ids.len(),
+            ..measure(|| bench_incr_im(&mut live, keys, write_ids, cfg.value_bytes))
         },
     );
 }
@@ -559,6 +697,16 @@ fn bench_mutate_deep(map: &mut HashMap<Key, Payload>, keys: &[Vec<u8>], ids: &[u
     sum
 }
 
+fn bench_incr_deep(map: &mut HashMap<Key, Payload>, keys: &[Vec<u8>], ids: &[usize]) -> usize {
+    let mut sum = 0usize;
+    for (op, &id) in ids.iter().enumerate() {
+        if let Some(value) = map.get_mut(keys[id].as_slice()) {
+            sum = sum.wrapping_add(value.incr_counter((op as u64) + 1) as usize);
+        }
+    }
+    sum
+}
+
 fn bench_get_arc(map: &HashMap<Key, Arc<Payload>>, keys: &[Vec<u8>], ids: &[usize]) -> usize {
     let mut sum = 0usize;
     for &id in ids {
@@ -601,6 +749,16 @@ fn bench_mutate_arc(
     sum
 }
 
+fn bench_incr_arc(map: &mut HashMap<Key, Arc<Payload>>, keys: &[Vec<u8>], ids: &[usize]) -> usize {
+    let mut sum = 0usize;
+    for (op, &id) in ids.iter().enumerate() {
+        if let Some(value) = map.get_mut(keys[id].as_slice()) {
+            sum = sum.wrapping_add(Arc::make_mut(value).incr_counter((op as u64) + 1) as usize);
+        }
+    }
+    sum
+}
+
 fn bench_get_segmented(model: &SegmentedCow, keys: &[Vec<u8>], ids: &[usize]) -> usize {
     let mut sum = 0usize;
     for &id in ids {
@@ -621,6 +779,14 @@ fn bench_mutate_segmented(model: &mut SegmentedCow, keys: &[Vec<u8>], ids: &[usi
     let mut sum = 0usize;
     for (op, &id) in ids.iter().enumerate() {
         sum = sum.wrapping_add(model.mutate(id, keys[id].as_slice(), (op & 0xff) as u8));
+    }
+    sum
+}
+
+fn bench_incr_segmented(model: &mut SegmentedCow, keys: &[Vec<u8>], ids: &[usize]) -> usize {
+    let mut sum = 0usize;
+    for (op, &id) in ids.iter().enumerate() {
+        sum = sum.wrapping_add(model.incr(id, keys[id].as_slice(), (op as u64) + 1));
     }
     sum
 }
@@ -674,6 +840,27 @@ fn bench_mutate_im(
     sum
 }
 
+fn bench_incr_im(
+    map: &mut im::HashMap<Key, Arc<Payload>>,
+    keys: &[Vec<u8>],
+    ids: &[usize],
+    value_bytes: usize,
+) -> usize {
+    let mut sum = 0usize;
+    for (op, &id) in ids.iter().enumerate() {
+        let delta = (op as u64) + 1;
+        if let Some(value) = map.get_mut(keys[id].as_slice()) {
+            sum = sum.wrapping_add(Arc::make_mut(value).incr_counter(delta) as usize);
+        } else {
+            map.insert(
+                Key(keys[id].clone()),
+                Arc::new(Payload::new(value_bytes, id, delta as u8)),
+            );
+        }
+    }
+    sum
+}
+
 fn iter_deep(map: &HashMap<Key, Payload>) -> usize {
     map.iter()
         .map(|(k, v)| k.0.len() ^ v.len() ^ v.first() as usize)
@@ -707,9 +894,11 @@ fn measure_snapshot<T>(variant: &'static str, cfg: &Config, mut snapshot: impl F
 
 fn measure(mut f: impl FnMut() -> usize) -> Row {
     reset_clone_counters();
+    let rss_before = current_rss_kb();
     let start = Instant::now();
     let checksum = f();
     let elapsed = start.elapsed();
+    let rss_after = current_rss_kb();
     Row {
         variant: "",
         phase: "",
@@ -717,6 +906,8 @@ fn measure(mut f: impl FnMut() -> usize) -> Row {
         elapsed,
         key_clone_bytes: KEY_CLONE_BYTES.load(Ordering::Relaxed),
         payload_clone_bytes: PAYLOAD_CLONE_BYTES.load(Ordering::Relaxed),
+        rss_kb: rss_after,
+        rss_delta_kb: rss_after as i64 - rss_before as i64,
         checksum,
     }
 }
@@ -733,7 +924,7 @@ fn emit(cfg: &Config, row: Row) {
         row.elapsed.as_nanos() as f64 / row.ops as f64
     };
     println!(
-        "{}\t{}\t{}\t{}\t{}\t{}\t{:.3}\t{:.3}\t{:.6}\t{:.6}\t{}",
+        "{}\t{}\t{}\t{}\t{}\t{}\t{:.3}\t{:.3}\t{:.6}\t{:.6}\t{}\t{}\t{}",
         row.variant,
         cfg.keys,
         cfg.value_bytes,
@@ -744,8 +935,22 @@ fn emit(cfg: &Config, row: Row) {
         ns_per_op,
         bytes_to_mb(row.key_clone_bytes),
         bytes_to_mb(row.payload_clone_bytes),
+        row.rss_kb,
+        row.rss_delta_kb,
         row.checksum
     );
+}
+
+fn segment_for_key(segment_count: usize, id: usize, key: &[u8], hash_route: bool) -> usize {
+    if !hash_route {
+        return id % segment_count;
+    }
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in key {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    (hash as usize) % segment_count
 }
 
 fn key_bytes(id: usize) -> Vec<u8> {
@@ -770,6 +975,18 @@ fn make_ids(count: usize, modulo: usize, seed: u64) -> Vec<usize> {
 
 fn bytes_to_mb(bytes: u64) -> f64 {
     bytes as f64 / (1024.0 * 1024.0)
+}
+
+fn current_rss_kb() -> u64 {
+    let pid = std::process::id().to_string();
+    let Ok(output) = Command::new("ps").args(["-o", "rss=", "-p", &pid]).output() else {
+        return 0;
+    };
+    if !output.status.success() {
+        return 0;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    raw.trim().parse().unwrap_or(0)
 }
 
 fn parse_args() -> Config {
@@ -815,7 +1032,7 @@ fn parse_next_string(args: &mut impl Iterator<Item = String>, flag: &str) -> Str
 
 fn print_help_and_exit() -> ! {
     eprintln!(
-        "usage: keyspace-cow-model [--keys N] [--value-bytes N] [--read-ops N] [--write-ops N] [--segments N] [--variants deep,arc,seg,im]"
+        "usage: keyspace-cow-model [--keys N] [--value-bytes N] [--read-ops N] [--write-ops N] [--segments N] [--variants deep,arc,seg,seg_hash,im]"
     );
     std::process::exit(2);
 }
@@ -864,7 +1081,7 @@ mod tests {
     fn segmented_snapshot_keeps_old_segment_after_live_replace() {
         let _guard = TEST_LOCK.lock().unwrap();
         let keys = keys(8);
-        let mut live = SegmentedCow::with_keys(8, 8, 4);
+        let mut live = SegmentedCow::with_keys(8, 8, 4, false);
         let snapshot = live.clone();
         let before = snapshot.get(0, keys[0].as_slice());
         reset_clone_counters();
@@ -873,6 +1090,22 @@ mod tests {
 
         assert_ne!(live.get(0, keys[0].as_slice()), before);
         assert_eq!(snapshot.get(0, keys[0].as_slice()), before);
+        assert!(KEY_CLONE_BYTES.load(Ordering::Relaxed) > 0);
+    }
+
+    #[test]
+    fn segmented_hash_snapshot_keeps_old_segment_after_live_incr() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let keys = keys(8);
+        let mut live = SegmentedCow::with_keys(8, 8, 4, true);
+        let snapshot = live.clone();
+        let before = snapshot.get(3, keys[3].as_slice());
+        reset_clone_counters();
+
+        assert_ne!(live.incr(3, keys[3].as_slice(), 7), 0);
+
+        assert_ne!(live.get(3, keys[3].as_slice()), before);
+        assert_eq!(snapshot.get(3, keys[3].as_slice()), before);
         assert!(KEY_CLONE_BYTES.load(Ordering::Relaxed) > 0);
     }
 

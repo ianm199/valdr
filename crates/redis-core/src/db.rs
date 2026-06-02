@@ -27,6 +27,7 @@ use redis_types::{RedisError, RedisString};
 
 use crate::client::ClientId;
 use crate::command_context::CommandContext;
+use crate::keyspace_map::{KeyspaceMap, KeyspaceMapSnapshot};
 use crate::live_config::LiveConfig;
 use crate::metrics::server_metrics;
 use crate::notify::{NOTIFY_EXPIRED, NOTIFY_GENERIC, NOTIFY_KEYEVENT, NOTIFY_KEYSPACE};
@@ -495,7 +496,7 @@ pub struct RedisDb {
     pub id: u32,
 
  /// Main keyspace. C: serverDb.keys (kvstore).
-    dict: HashMap<RedisString, RedisObject>,
+    dict: KeyspaceMap,
 
  /// Keys with blocking clients (BLPOP / BRPOP / XREADGROUP).
     /// C: serverDb.blocking_keys — TODO(port): deferred to Phase 3.
@@ -570,6 +571,10 @@ impl RedisDb {
             db.dict.insert(k, v);
         }
         db
+    }
+
+    pub fn snapshot_keyspace(&self) -> KeyspaceMapSnapshot {
+        self.dict.snapshot()
     }
 
  // ── Internal helpers ─────────────────────────────────────────────────────
@@ -663,13 +668,15 @@ impl RedisDb {
             }
             return None;
         }
-        if flags & LOOKUP_NOTOUCH == 0 {
+        let result = if flags & LOOKUP_NOTOUCH == 0 {
             let now = crate::lru_clock::current_lru_clock();
-            if let Some(obj) = self.dict.get_mut(key) {
+            self.dict.get_mut(key).map(|obj| {
                 obj.lru = now;
-            }
-        }
-        let result = self.dict.get(key);
+                &*obj
+            })
+        } else {
+            self.dict.get(key)
+        };
         if flags & (LOOKUP_NOSTATS | LOOKUP_WRITE) == 0 {
             match result {
                 Some(_) => server_metrics()
@@ -990,9 +997,8 @@ impl RedisDb {
         let start = (u64::from_le_bytes(seed) as usize) % self.dict.len();
         self.dict
             .iter()
-            .cycle()
             .skip(start)
-            .take(self.dict.len())
+            .chain(self.dict.iter().take(start))
             .find(|(_, obj)| {
                 self.import_source_active
                     || self.pause_expire_keep
@@ -1017,7 +1023,7 @@ impl RedisDb {
         let len = self.dict.len();
         let start = (offset_seed as usize) % len;
         let mut out: Vec<(RedisString, i64)> = Vec::with_capacity(max);
-        for (k, obj) in self.dict.iter().cycle().skip(start).take(len) {
+        for (k, obj) in self.dict.iter().skip(start).chain(self.dict.iter().take(start)) {
             if obj.expire != EXPIRY_NONE {
                 out.push((k.clone(), obj.expire));
                 if out.len() >= max {
@@ -2040,6 +2046,43 @@ mod tests {
         db.clear();
         assert!(db.is_empty());
         assert_eq!(db.size(), 0);
+    }
+
+    #[test]
+    fn keyspace_snapshot_keeps_old_value_after_live_replace() {
+        let mut db = RedisDb::new(0);
+        let key = k(b"cow-replace");
+        db.add(key.clone(), make_str_obj(b"before"));
+
+        let snapshot = db.snapshot_keyspace();
+        db.replace_value(&key, make_str_obj(b"after"));
+
+        let (_, snap_obj) = snapshot
+            .iter()
+            .find(|(snap_key, _)| *snap_key == &key)
+            .expect("snapshot keeps key");
+        assert_eq!(snap_obj.as_string_bytes(), Some(&b"before"[..]));
+        assert_eq!(
+            db.find(&key).and_then(RedisObject::as_string_bytes),
+            Some(&b"after"[..])
+        );
+    }
+
+    #[test]
+    fn keyspace_snapshot_keeps_deleted_key_visible() {
+        let mut db = RedisDb::new(0);
+        let key = k(b"cow-delete");
+        db.add(key.clone(), make_str_obj(b"before"));
+
+        let snapshot = db.snapshot_keyspace();
+        assert!(db.sync_delete(&key));
+
+        let (_, snap_obj) = snapshot
+            .iter()
+            .find(|(snap_key, _)| *snap_key == &key)
+            .expect("snapshot keeps deleted key");
+        assert_eq!(snap_obj.as_string_bytes(), Some(&b"before"[..]));
+        assert!(db.find(&key).is_none());
     }
 
     #[test]

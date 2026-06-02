@@ -1,6 +1,9 @@
 # Option D — Forkless point-in-time snapshots via a persistent keyspace
 
-**Status:** design spec / decision input, updated with toy-model evidence. Not started.
+**Status:** phase-one implementation checkpoint, updated with toy-model and
+production AOF rewrite evidence. Segmented COW `KeyspaceMap` is landed as the
+current live keyspace; value-payload sharing and persistent inner encodings are
+still future work.
 **Author:** repl-observability follow-up, 2026-06-02.
 **One-line:** replace `fork()`'s page-level copy-on-write with safe Rust
 snapshotting. The goal is data-structure-level structural sharing, but the
@@ -115,26 +118,32 @@ port.
 
 ---
 
-## 3. The Rust port today (what changes)
+## 3. The Rust port today (what changed in phase one)
 
-- Keyspace: `crates/redis-core/src/db.rs:498` `dict: HashMap<RedisString, RedisObject>`
-  — a std `HashMap`, **values owned by value** (no sharing). The header comment
-  is explicit this is provisional: `db.rs:490` *"Phase-A implementation:
-  HashMap-backed. kvstore, cluster-slot addressing … Phase 4"*.
-- Values: `crates/redis-core/src/object.rs:428` `pub struct RedisObject` — owned;
-  and `object.rs:8` already names the target: *"`makeObjectShared` maps to
-  `Arc<RedisObject>` (not yet introduced)."*
-- Snapshot today: `command_context.rs:848` `snapshot_all_dbs` does
-  `iter().map(|(k, v)| (k.clone(), v.clone())).collect()` — a **full deep copy of
-  every key and value on the owner thread**, then `persist.rs:625/764`
-  `snapshot.clone()` copies it **again**, then forks.
+- Keyspace: `crates/redis-core/src/db.rs` now stores `dict: KeyspaceMap`.
+  `KeyspaceMap` is a segmented copy-on-write table:
+  `Vec<Arc<HashMap<RedisString, RedisObject>>>`. A snapshot clones segment
+  roots in O(segment count) instead of walking every key.
+- Snapshot facade: `crates/redis-core/src/keyspace_snapshot.rs` remains the only
+  consumer contract. AOF/RDB callers receive `KeyspaceSnapshot`; they do not
+  know whether a DB snapshot is owned/deep or shared/segmented.
+- Command capture: `command_context.rs` `snapshot_all_dbs` now calls
+  `db.snapshot_keyspace()` and wraps the result in `KeyspaceSnapshotDb`. The
+  owner-thread capture is therefore root cloning, not full key/value cloning.
+- Serialization/materialization: the current RDB/AOF writer still eventually
+  materializes cloned `(RedisString, RedisObject)` entries through the
+  `KeyspaceSnapshot` facade. The big win is moving that O(N) work off the
+  command path; this phase does not yet introduce shared object payloads.
+- Values: `RedisObject` is still owned by value. `object.rs` still names the
+  deeper target: `makeObjectShared` maps to `Arc<RedisObject>` or, better, to a
+  metadata/payload split. That work is intentionally not bundled into this
+  packet.
 
-So the current port is the *worst* case on both axes: it pays a full (double)
-O(N) copy **and** forks. The forkless direction deletes the process hazard first;
-structural sharing then tries to replace the O(N) snapshot copy with cheap
-root/segment clones. Note the port also already diverges from C twice (std
-HashMap vs the cache-line `hashtable`, owned values vs refcounted `robj`); this
-work is a chance to close the value-sharing gap faithfully.
+So the current port is no longer the worst case on both axes. It still has
+owned values and background materialization, but `BGREWRITEAOF` start no longer
+deep-clones the dataset on the owner thread. The remaining forkless/value-COW
+work is real core data-structure work, not a precondition for the first
+rewrite-start latency win.
 
 ---
 
@@ -340,72 +349,123 @@ The reusable model lives at `harness/models/keyspace-cow-model`. It compares:
 
 - `deep`: `HashMap<Key, Payload>` with full snapshot clone.
 - `arc`: `HashMap<Key, Arc<Payload>>` with full index clone and shared values.
-- `seg`: segmented copy-on-write `HashMap` roots.
+- `seg`: segmented copy-on-write `HashMap` roots with `id % segments` routing.
+- `seg_hash`: segmented copy-on-write with key-byte hash routing, matching
+  production `KeyspaceMap` more closely.
 - `im`: persistent HAMT using the `im` crate.
 
-Selected model results on an Apple M3 Max:
+Fresh model artifacts:
 
-100k keys, 64-byte values:
+- `harness/models/keyspace-cow-model/results/keys100k-v64-fnv-incr-rss.tsv`
+- `harness/models/keyspace-cow-model/results/keys1m-v64-fnv-incr-rss.tsv`
 
-| Variant | Snapshot | GET ns/op | Held Replace ns/op | Snapshot Clone Bytes |
-|---|---:|---:|---:|---:|
-| deep | 8.56 ms | 79.5 | 221.7 | 1.53 MiB keys + 6.10 MiB payload |
-| arc | 3.30 ms | 156.7 | 149.9 | 1.53 MiB keys |
-| seg 1024 | 0.003 ms | 106.5 | 490.1 | none at snapshot |
-| im | ~0 ms | 199.8 | 857.1 | none at snapshot |
+100k keys, 64-byte values, 1024 segments:
 
-1M keys, 64-byte values:
+| Variant | Snapshot | GET ns/op | INCR ns/op | Held Replace ns/op | Held INCR ns/op | Snapshot Clone Bytes |
+|---|---:|---:|---:|---:|---:|---:|
+| deep | 9.420 ms | 57.8 | 104.1 | 206.2 | 97.5 | 1.53 MiB keys + 6.10 MiB payload |
+| arc | 3.344 ms | 59.2 | 130.6 | 154.6 | 194.2 | 1.53 MiB keys |
+| seg 1024 | 0.003 ms | 84.9 | 133.2 | 397.0 | 493.1 | none at snapshot |
+| seg_hash 1024 | 0.004 ms | 97.5 | 176.2 | 464.1 | 444.8 | none at snapshot |
+| im | ~0 ms | 112.4 | 258.5 | 945.8 | 912.7 | none at snapshot |
 
-| Variant | Snapshot | GET ns/op | Held Replace ns/op | Held Replace Clone Bytes |
-|---|---:|---:|---:|---:|
-| deep | 109.86 ms | 148.4 | 341.9 | none after snapshot |
-| arc | 73.07 ms | 178.5 | 359.0 | none after snapshot |
-| seg 4096 | 0.022 ms | 210.3 | 4477.7 | 13.97 MiB keys |
-| seg 16384 | 0.061 ms | 239.5 | 3173.6 | 6.96 MiB keys |
-| seg 65536 | 0.209 ms | 256.9 | 1448.4 | 2.16 MiB keys |
-| im | ~0 ms | 308.1 | 2229.4 | 1.79 MiB keys |
+1M keys, 64-byte values, 16384 segments:
+
+| Variant | Snapshot | GET ns/op | INCR ns/op | Held Replace ns/op | Held INCR ns/op | Held Clone Bytes |
+|---|---:|---:|---:|---:|---:|---:|
+| deep | 131.180 ms | 160.7 | 416.0 | 397.2 | 261.4 | none after snapshot |
+| seg_hash 16384 | 0.112 ms | 300.6 | 674.1 | 4202.8 | 4331.8 | 13.98 MiB keys + 0.61 MiB payload |
+| im | ~0 ms | 271.9 | 513.6 | 2104.6 | 2050.5 | 1.78 MiB keys + 0.61 MiB payload |
 
 Current read:
 
-- Generic HAMT delivers the snapshot property but looks too expensive for the
-  default live keyspace.
+- Generic HAMT still delivers the snapshot property, but it remains too costly
+  for this packet as the default live keyspace. It improves 1M held-write clone
+  bytes versus segmented COW, but it has slower snapshot iteration and visible
+  live-operation overhead.
 - `Arc` payloads help snapshot memory but still leave an O(N) key/index clone.
-- Segmented COW is more plausible than HAMT as a first-principles map direction,
-  but it has a tunable write-window cost and still needs a more faithful Valdr
-  prototype.
+- Segmented COW is the best phase-one production step because it keeps
+  hash-table-like lookup and makes capture root-clone sized. It is not free:
+  first writes to shared segments during a held snapshot clone segment maps.
 - Mutating large shared values copies the full payload in all shared-payload
   variants; splitting metadata from payload is prerequisite work, not polish.
+
+### 5.6 Production packet evidence
+
+Phase one landed the smallest production step justified by the model:
+`RedisDb` now uses `KeyspaceMap`, while `KeyspaceSnapshot` remains the only
+AOF/RDB consumer facade. This means the structural-sharing feature is active in
+the live keyspace, so normal command throughput must be measured. AOF itself
+remains off by default.
+
+Final production artifacts on 2026-06-02:
+
+- Rewrite-latency gate:
+  `harness/bench/results/20260602T210203Z-1a9d679-aof-rewrite-latency.*`.
+- Full profile matrix:
+  `harness/bench/results/20260602T210228Z-1a9d679-profile-matrix.tsv`.
+- Focused ordered hit-path probes:
+  `harness/bench/results/20260602T210252Z-1a9d679-default-suite-parts.*` and
+  `harness/bench/results/20260602T210259Z-1a9d679-default-suite-parts.*`.
+- Correctness gates: `persistence-cycle --mode rdb` pass
+  (`20260602T210155Z`), `persistence-cycle --mode aof` pass
+  (`20260602T205929Z`), `persistence-cycle --mode aof-rewrite` pass
+  (`20260602T205934Z`), and full persistence frontier 40/40 pass
+  (`20260602T205938Z`).
+
+Rewrite-start capture at required dataset sizes:
+
+| Dataset | Snapshot Keys | Snapshot Capture | Command Wall | Post-Reply Rewrite | Restart |
+|---:|---:|---:|---:|---:|---|
+| 5k | 7942 | 55 us | 10.058 ms | 50.442 ms | passed |
+| 25k | 27794 | 99 us | 9.114 ms | 69.123 ms | passed |
+| 100k | 102916 | 97 us | 9.778 ms | 127.611 ms | passed |
+
+Packet J's deep-snapshot baseline at 100k was 19319 us snapshot capture and
+27.943 ms command wall. Phase one brings that row to 97 us and 9.778 ms,
+respectively. The BASE writer still walks and serializes the snapshot in the
+background, which is why post-reply rewrite wall remains proportional to data.
+
+Throughput read:
+
+- Full profile matrix summary: median 1.02x, min 0.76x, max 1.35x. The soft
+  rows are p1 `GET` at 0.86x, p16 `PING_MBULK` at 0.76x, p16 `INCR` at 0.88x,
+  and range-prep `LPUSH` at 0.89x. p100 `GET` is 1.17x and p100 `SET` is
+  1.30x.
+- Focused p1 ordered hit-path probe: `SET` 1.011x, `GET` 0.950x, `INCR`
+  1.032x.
+- Focused p16 ordered hit-path probe: `SET` 1.323x, `GET` 1.022x, `INCR`
+  0.950x.
+- Read this as bounded mixed telemetry, not a 99% throughput cliff. The
+  segmented keyspace is active even when AOF is off, so these rows remain the
+  main guardrail for future tuning.
 
 ---
 
 ## 6. Migration plan (phased, oracle-anchored, each rung independently shippable)
 
-0. **Merge the evidence package.** Keep this spec and
+0. **Evidence package: done.** Keep this spec and
    `harness/models/keyspace-cow-model` in the repo so future keyspace work has a
    reproducible first-principles model instead of only prose.
-1. **Ship Option B independently.** The diskless-sync-delay window is a cheap
-   correctness/oracle win and does not depend on keyspace representation.
-2. **Forkless saver over the current deep snapshot.** Switch `bgsave_command` /
-   `bgsave_for_replication` (`persist.rs:604/742`) from fork child to saver
-   thread while still using today's `snapshot_all_dbs`. This deletes the unsafe
-   `fork/_exit` path first and keeps the live GET/SET path unchanged. Gate:
-   replication/full-sync suites keep their observable `WAIT_BGSAVE_*` window.
-3. **Centralize the snapshot view.** Introduce a `KeyspaceSnapshot` type that is
-   the only shape RDB save, full sync, DEBUG, and CONFIG rewrite consume. This
-   prevents every caller from owning its own snapshot semantics.
-4. **Fix saver memory shape.** The current RDB path buffers large outputs in
-   memory and full-sync reads temp RDB data back into memory. Streaming writer
-   plumbing is separate from keyspace COW and should be measured separately.
-5. **Split metadata from payload.** Move toward `Entry { lru, expire, payload:
-   Arc<ObjectPayload> }` before introducing broad `Arc` value sharing. This
-   avoids cloning large values for LRU/TTL changes while a snapshot is live.
-6. **Prototype `KeyspaceMap` behind a flag.** Keep `std::HashMap` as the control;
-   test HAMT and segmented COW against real Valdr benchmarks. Gates: GET/SET
-   regression, snapshot-start latency, held-snapshot write cost, peak RSS, and
-   replication oracle behavior.
-7. **Only replace the live index if the gates clear.** If HAMT loses on hot-path
-   cost, do not force it. A purpose-built segmented/versioned map may be the
-   better Valdr answer.
+1. **KeyspaceSnapshot facade: done.** AOF/RDB consumers use
+   `KeyspaceSnapshot`, not ad hoc key/value vectors.
+2. **Segmented-COW index phase one: done.** `RedisDb` uses `KeyspaceMap`, and
+   `snapshot_all_dbs` captures shared segment roots on the owner thread.
+3. **Keep materialization behind the facade.** Saver-side materialization can be
+   replaced later without changing AOF/RDB call sites. The current packet
+   deliberately preserves that boundary.
+4. **Add completion/lifetime accounting for held snapshots.** Today segment COW
+   naturally releases when the background snapshot drops. Future work should
+   expose enough counters to report held-snapshot segment clone pressure.
+5. **Fix saver memory shape.** The current RDB/AOF path still serializes from a
+   snapshot into file output after capture. Streaming writer plumbing is
+   separate from keyspace COW and should be measured separately.
+6. **Split metadata from payload.** Move toward `Entry { lru, expire, payload:
+   Arc<ObjectPayload> }` before introducing broad value sharing. This avoids
+   cloning large values for LRU/TTL changes while a snapshot is live.
+7. **Tune or replace segment routing only with evidence.** Segment count,
+   routing hash, and possible prehashed-key storage are performance knobs.
+   Current telemetry does not justify a bigger map rewrite inside this packet.
 8. **Defer persistent inner encodings** for large collections (§4.4) until
    oracle/bench evidence shows the big-value COW spike matters.
 
@@ -413,41 +473,46 @@ Current read:
 
 ## 7. Risks & open questions
 
-- **Read-path regression is real** (§5.1/§5.5). Mitigation: keep the current
-  map as the control and make any new index prove itself on kit benches before
-  landing as default.
+- **Read-path regression remains the main guardrail** (§5.1/§5.6). Current
+  telemetry clears the phase-one bar, but every future segment/value-sharing
+  change needs the same GET/SET/INCR evidence.
 - **Whole-object `Arc` is the wrong first step.** The current `RedisObject`
   layout mixes metadata and payload; split it first or metadata churn can clone
   large values.
 - **Allocator pressure** from HAMT path-copying or segmented first-write clones
   can move latency even when average throughput looks acceptable.
 - **Segment tuning is workload-sensitive.** More segments reduce held-snapshot
-  clone bytes but add root/read overhead. The toy model is useful precisely
-  because this is a tunable first-principles question.
+  clone bytes but add root/read overhead. The toy model and profile matrix are
+  both required before changing `DEFAULT_KEYSPACE_SEGMENTS`.
 - **Large-value COW spike** (§4.4) is the main place software COW is worse than
   fork until persistent inner encodings exist.
 - **RDB streaming is a separate bottleneck.** Keyspace COW does not fix output
   buffering by itself.
 - **Lifecycle is bigger than deleting `libc::fork`.** PID, reaper, metrics, and
   replication job state all need a thread/job-completion shape.
-- **Scope.** The safe first step is forkless saver with today's snapshot. Full
-  structural sharing is core data-structure work touching `redis-core` db/object
-  layers and eventually `redis-ds`.
+- **Scope.** Phase one changes the index but not value payload ownership. Full
+  structural sharing is still core data-structure work touching `redis-core`
+  db/object layers and eventually `redis-ds`.
 
 ## 8. Recommendation
 
-Forkless snapshots are still the right direction. Generic HAMT as the default
-live keyspace is not justified by the evidence.
+Forkless/structurally shared snapshots are still the right direction, and the
+phase-one segmented-COW implementation is justified by the evidence. Generic
+HAMT as the default live keyspace is still not justified.
 
-Merge this spec and toy model as the decision record, then move in this order:
+Move next in this order:
 
-1. Land Option B / diskless-sync-delay if it is still pending.
-2. Delete fork by running the existing deep snapshot on a saver thread, so the
-   unsafe/process hazard goes away without changing steady-state GET/SET.
-3. Centralize `KeyspaceSnapshot` and streaming saver plumbing.
-4. Split metadata from payload.
-5. Re-run the model and a feature-gated Valdr prototype for HAMT vs segmented
-   COW vs `std::HashMap` control.
+1. Merge this phase-one structural-sharing plus AOF-fault packet once review
+   accepts the evidence.
+2. Add held-snapshot clone counters so future tuning can report real segment
+   COW pressure, not only benchmark side effects.
+3. Split key metadata from value payload before introducing broad payload
+   sharing.
+4. Add background/startup cleanup for orphaned rewrite temp/history files after
+   the synchronous successful-cleanup path remains stable.
+5. Re-run the toy model and profile matrix for any future segment-count,
+   routing-hash, prehashed-key, or HAMT experiment.
 
-That path keeps the Valkey port honest while still allowing first-principles
-work when the numbers support it.
+That path keeps the Valkey port honest: take the measured snapshot-start win,
+keep hot-path throughput guarded, and reserve deeper persistent data-structure
+work for evidence that demands it.

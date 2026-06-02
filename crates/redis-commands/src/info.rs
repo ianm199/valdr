@@ -364,7 +364,7 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
             last_save
         };
         let aof_current_size = crate::aof::aof_writer()
-            .and_then(|w| w.path.metadata().ok().map(|m| m.len()))
+            .map(|w| w.current_size())
             .unwrap_or_else(|| persistence.aof_current_size());
         let _ = writeln!(buf, "# Persistence\r");
         let _ = writeln!(buf, "loading:{}\r", persistence.loading() as u8);
@@ -411,6 +411,16 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         );
         let _ = writeln!(buf, "aof_current_size:{}\r", aof_current_size);
         let _ = writeln!(buf, "aof_base_size:{}\r", persistence.aof_base_size());
+        let _ = writeln!(
+            buf,
+            "aof_last_rewrite_snapshot_keys:{}\r",
+            persistence.aof_last_rewrite_snapshot_keys()
+        );
+        let _ = writeln!(
+            buf,
+            "aof_last_rewrite_snapshot_us:{}\r",
+            persistence.aof_last_rewrite_snapshot_micros()
+        );
         let _ = writeln!(buf, "\r");
     }
     if want(b"stats") {

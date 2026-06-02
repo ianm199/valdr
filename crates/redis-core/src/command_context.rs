@@ -6,10 +6,12 @@
 //! packet adds it).
 
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Instant;
 
 use crate::client::Client;
 use crate::databases::{global_databases, GlobalDatabases};
 use crate::db::RedisDb;
+use crate::keyspace_snapshot::{KeyspaceSnapshot, KeyspaceSnapshotDb};
 use crate::live_config::LiveConfig;
 use crate::notify::{NOTIFY_KEYEVENT, NOTIFY_KEYSPACE};
 use crate::object::RedisObject;
@@ -844,17 +846,14 @@ impl<'a> CommandContext<'a> {
         }
     }
 
- /// Snapshot every logical DB reachable through this context.
-    pub fn snapshot_all_dbs(&mut self) -> RedisResult<Vec<(u32, Vec<(RedisString, RedisObject)>)>> {
-        let mut out = Vec::new();
+    /// Snapshot every logical DB reachable through this context.
+    pub fn snapshot_all_dbs(&mut self) -> RedisResult<KeyspaceSnapshot> {
+        let started = Instant::now();
+        let mut dbs = Vec::new();
         self.for_each_db_mut(|db| {
-            let entries = db
-                .iter_for_eviction()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            out.push((db.id, entries));
+            dbs.push(KeyspaceSnapshotDb::from_keyspace(db.id, db.snapshot_keyspace()));
         })?;
-        Ok(out)
+        Ok(KeyspaceSnapshot::new(dbs, started.elapsed()))
     }
 
  /// Mutable borrow of the underlying `Client`.

@@ -27,6 +27,7 @@
 
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::time::Duration;
 
 use redis_core::replication::{
     global_replication_state, ReplicaConn, ReplicaState, ReplicationState,
@@ -84,7 +85,7 @@ struct ReplCapture {
 }
 
 impl ReplCapture {
- /// Register a fresh online replica in the global state at `start_offset`.
+    /// Register a fresh online replica in the global state at `start_offset`.
     fn attach(client_id: u64, start_offset: i64) -> Self {
         let repl = global_replication_state();
         let (tx, rx) = mpsc::channel();
@@ -97,8 +98,8 @@ impl ReplCapture {
         }
     }
 
- /// All bytes the fan-out path has sent to this replica, concatenated
- /// send order — the in-memory replication stream for this connection.
+    /// All bytes the fan-out path has sent to this replica, concatenated
+    /// send order — the in-memory replication stream for this connection.
     fn drain(&self) -> Vec<u8> {
         let mut out = Vec::new();
         while let Ok(chunk) = self.rx.try_recv() {
@@ -129,6 +130,23 @@ fn dispatch_as_primary(client_id: u64, db: &mut RedisDb, cmd: &[&[u8]]) -> Vec<u
     c.drain_reply()
 }
 
+/// Drive one command through the same dispatch entrypoint used by EXEC while
+/// draining queued commands. `flag_deny_blocking` is the current in-EXEC marker
+/// in production code; it bypasses processCommand-only gates such as the
+/// read-only-replica check without relaxing ordinary top-level dispatch.
+fn dispatch_as_exec_drain(client_id: u64, db: &mut RedisDb, cmd: &[&[u8]]) -> Vec<u8> {
+    let mut c = Client::new(client_id);
+    c.set_flag_deny_blocking(true);
+    c.set_args(argv(cmd));
+    let server = Arc::new(RedisServer::default());
+    let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
+    {
+        let mut ctx = redis_core::CommandContext::with_server(&mut c, db, server, pubsub);
+        let _ = dispatch(&mut ctx);
+    }
+    c.drain_reply()
+}
+
 // ─── GREEN ANCHOR ────────────────────────────────────────────────────────────
 
 /// GREEN ANCHOR — proves the capture mechanism is faithful before any red test
@@ -147,8 +165,8 @@ fn anchor_plain_set_propagates_verbatim() {
 
     let stream = cap.drain();
     let set_frame = resp(&[b"SET", b"k", b"v"]);
- // The fan-out prepends SELECT when the replica's last-seen DB differs;
- // SET frame must appear verbatim as a suffix of the captured stream.
+    // The fan-out prepends SELECT when the replica's last-seen DB differs;
+    // SET frame must appear verbatim as a suffix of the captured stream.
     assert!(
         stream
             .windows(set_frame.len())
@@ -181,7 +199,7 @@ fn finding1_noop_del_in_multi_must_not_propagate() {
     let server = Arc::new(RedisServer::default());
     let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
 
- // MULTI; DEL missing; EXEC — DEL deletes nothing (key never existed).
+    // MULTI; DEL missing; EXEC — DEL deletes nothing (key never existed).
     for cmd in [
         &[b"MULTI".as_slice()][..],
         &[b"DEL".as_slice(), b"missing-key".as_slice()][..],
@@ -240,42 +258,48 @@ fn finding1b_noop_del_top_level_must_not_propagate() {
 
 // ─── Finding #2: IN-MULTI REPLICAOF ──────────────────────────────────────────
 
-/// AUDIT FINDING #2 (active bug): queuing a write together with a role change
-/// inside MULTI then EXEC aborts the transaction with READONLY.
-/// The faithful, fully in-memory reproduction of the gate that causes it:
-/// the readonly gate (dispatch.rs:1950 `enforce_replica_readonly_gate`) fires
-/// for an ordinary write the instant `global_replication_state.is_replica`
-/// is true. Inside EXEC, a role change earlier in the same transaction flips
-/// that global mid-run, so a following queued write hits READONLY. We model
-/// "now a replica" condition deterministically by flipping the global repl
-/// state to replica (no TCP, no dialer thread — the real `REPLICAOF` handler
-/// replication.rs:43 does a blocking TCP connect + thread spawn, which is not
-/// in-memory-safe; see notes), then dispatching a SET. Expected: the write must
-/// not be rejected with READONLY in this transaction-internal scenario.
+/// AUDIT FINDING #2 (regression guard): queuing a write together with a role
+/// change inside MULTI then EXEC must not abort the later queued write with
+/// READONLY.
+///
+/// A top-level write should fail the instant the global replication state is a
+/// replica. A queued command already inside EXEC is different: Valkey drains the
+/// queued argv through `call` rather than re-entering processCommand, so the
+/// processCommand-only read-only-replica gate must not fire. We model the
+/// mid-EXEC "now a replica" condition by flipping the global repl state, then
+/// compare ordinary top-level dispatch with the production in-EXEC marker.
 #[test]
 fn finding2_write_after_inmulti_role_change_should_not_readonly() {
     let _g = repl_guard();
     let repl = global_replication_state();
 
- // Snapshot + flip the live global into replica mode (the state REPLICAOF
- // would establish mid-EXEC), then restore afterwards.
+    // Snapshot + flip the live global into replica mode (the state REPLICAOF
+    // would establish mid-EXEC), then restore afterwards.
     let was_replica = repl.is_replica();
     repl.become_replica_of(RedisString::from_bytes(b"127.0.0.1"), 1);
 
-    let mut db = RedisDb::new(0);
-    let reply = dispatch_as_primary(21, &mut db, &[b"SET", b"k", b"v"]);
+    let mut top_level_db = RedisDb::new(0);
+    let top_level_reply = dispatch_as_primary(21, &mut top_level_db, &[b"SET", b"k", b"v"]);
+    let mut exec_db = RedisDb::new(0);
+    let exec_reply = dispatch_as_exec_drain(22, &mut exec_db, &[b"SET", b"k", b"v"]);
 
- // restore global state for sibling tests
+    // restore global state for sibling tests
     repl.become_master();
     if was_replica {
         repl.become_replica_of(RedisString::from_bytes(b"127.0.0.1"), 1);
     }
 
     assert!(
-        !reply.starts_with(b"-READONLY"),
+        top_level_reply.starts_with(b"-READONLY"),
+        "ordinary top-level writes on a read-only replica must still be \
+         rejected, but got: {:?}",
+        String::from_utf8_lossy(&top_level_reply),
+    );
+    assert!(
+        !exec_reply.starts_with(b"-READONLY"),
         "a write issued in the role-change-in-MULTI scenario must not be \
          rejected READONLY, but got: {:?}",
-        String::from_utf8_lossy(&reply),
+        String::from_utf8_lossy(&exec_reply),
     );
 }
 
@@ -303,7 +327,7 @@ fn finding3_rdb_roundtrip_reconstructs_keyspace_loader_is_dead_in_sink_loop() {
     std::fs::create_dir_all(&dir).unwrap();
     let rdb_path = dir.join("dump.rdb");
 
- // Master keyspace.
+    // Master keyspace.
     let mut master = RedisDb::new(0);
     master.add(
         RedisString::from_bytes(b"a"),
@@ -316,7 +340,7 @@ fn finding3_rdb_roundtrip_reconstructs_keyspace_loader_is_dead_in_sink_loop() {
 
     redis_core::rdb::save_rdb(&master, &rdb_path).expect("master RDB save");
 
- // What `ingest_rdb` does: load into a fresh DB.
+    // What `ingest_rdb` does: load into a fresh DB.
     let mut replica = RedisDb::new(0);
     redis_core::rdb::load_into(&mut replica, &rdb_path).expect("replica RDB load");
 
@@ -348,9 +372,9 @@ fn finding4_partial_resync_continue_must_replay_backlog_window() {
     let _g = repl_guard();
     let repl = global_replication_state();
 
- // Seed backlog so there is a definite (provided..master] window. We pick
- // `provided` = current master offset, append a known frame, and expect
- // replica to receive exactly that frame on +CONTINUE.
+    // Seed backlog so there is a definite (provided..master] window. We pick
+    // `provided` = current master offset, append a known frame, and expect
+    // replica to receive exactly that frame on +CONTINUE.
     let provided_offset = repl.master_offset();
     let catchup = resp(&[b"SET", b"late", b"x"]);
     repl.append_to_backlog(&catchup);
@@ -360,15 +384,15 @@ fn finding4_partial_resync_continue_must_replay_backlog_window() {
         "backlog must have advanced"
     );
 
- // The replica connection: register a pubsub sender so `psync_command` can
- // steal it, and capture the receiver.
+    // The replica connection: register a pubsub sender so `psync_command` can
+    // steal it, and capture the receiver.
     let client_id: u64 = 940_001;
     let (tx, rx) = mpsc::channel();
     let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
     pubsub.lock().unwrap().register_sender(client_id, tx);
 
     let mut c = Client::new(client_id);
- // PSYNC ? <provided_offset> → runid "?" matches, offset in window → +CONTINUE
+    // PSYNC ? <provided_offset> → runid "?" matches, offset in window → +CONTINUE
     c.set_args(argv(&[
         b"PSYNC",
         b"?",
@@ -388,7 +412,7 @@ fn finding4_partial_resync_continue_must_replay_backlog_window() {
         String::from_utf8_lossy(&reply)
     );
 
- // Drain whatever the master pushed to the replica's outbound channel.
+    // Drain whatever the master pushed to the replica's outbound channel.
     let mut sent = Vec::new();
     while let Ok(chunk) = rx.try_recv() {
         sent.extend_from_slice(&chunk);
@@ -470,33 +494,60 @@ fn p2_psync_bumps_sync_counters() {
         reply
     };
 
- // Seed the backlog so there is a definite in-window offset.
+    // Seed the backlog so there is a definite in-window offset.
     let in_window_offset = repl.master_offset();
     repl.append_to_backlog(&resp(&[b"SET", b"a", b"1"]));
 
- // (1) in-window partial → +CONTINUE, sync_partial_ok += 1.
+    // (1) in-window partial → +CONTINUE, sync_partial_ok += 1.
     let (f0, ok0, err0) = repl.sync_counters();
-    let reply = drive_psync(960_101, &[b"PSYNC", b"?", in_window_offset.to_string().as_bytes()]);
+    let reply = drive_psync(
+        960_101,
+        &[b"PSYNC", b"?", in_window_offset.to_string().as_bytes()],
+    );
     let (f1, ok1, err1) = repl.sync_counters();
-    assert!(reply.starts_with(b"+CONTINUE"), "want +CONTINUE, got {:?}", String::from_utf8_lossy(&reply));
-    assert_eq!((ok1, err1, f1), (ok0 + 1, err0, f0), "in-window partial must bump only sync_partial_ok");
+    assert!(
+        reply.starts_with(b"+CONTINUE"),
+        "want +CONTINUE, got {:?}",
+        String::from_utf8_lossy(&reply)
+    );
+    assert_eq!(
+        (ok1, err1, f1),
+        (ok0 + 1, err0, f0),
+        "in-window partial must bump only sync_partial_ok"
+    );
 
- // (2) out-of-window partial (concrete replid + impossible future offset)
- //     → +FULLRESYNC, sync_partial_err += 1 AND sync_full += 1.
+    // (2) out-of-window partial (concrete replid + impossible future offset)
+    //     → +FULLRESYNC, sync_partial_err += 1 AND sync_full += 1.
     let runid = String::from_utf8(repl.runid().to_vec()).unwrap();
     let beyond = (repl.master_offset() + 1_000_000).to_string();
     let (f2, ok2, err2) = repl.sync_counters();
     let reply = drive_psync(960_102, &[b"PSYNC", runid.as_bytes(), beyond.as_bytes()]);
     let (f3, ok3, err3) = repl.sync_counters();
-    assert!(reply.starts_with(b"+FULLRESYNC"), "want +FULLRESYNC, got {:?}", String::from_utf8_lossy(&reply));
-    assert_eq!((ok3, err3, f3), (ok2, err2 + 1, f2 + 1), "out-of-window partial must bump sync_partial_err and sync_full");
+    assert!(
+        reply.starts_with(b"+FULLRESYNC"),
+        "want +FULLRESYNC, got {:?}",
+        String::from_utf8_lossy(&reply)
+    );
+    assert_eq!(
+        (ok3, err3, f3),
+        (ok2, err2 + 1, f2 + 1),
+        "out-of-window partial must bump sync_partial_err and sync_full"
+    );
 
- // (3) fresh full sync (PSYNC ? -1) → sync_full += 1, partials flat.
+    // (3) fresh full sync (PSYNC ? -1) → sync_full += 1, partials flat.
     let (f4, ok4, err4) = repl.sync_counters();
     let reply = drive_psync(960_103, &[b"PSYNC", b"?", b"-1"]);
     let (f5, ok5, err5) = repl.sync_counters();
-    assert!(reply.starts_with(b"+FULLRESYNC"), "want +FULLRESYNC, got {:?}", String::from_utf8_lossy(&reply));
-    assert_eq!((ok5, err5, f5), (ok4, err4, f4 + 1), "fresh full sync must bump only sync_full");
+    assert!(
+        reply.starts_with(b"+FULLRESYNC"),
+        "want +FULLRESYNC, got {:?}",
+        String::from_utf8_lossy(&reply)
+    );
+    assert_eq!(
+        (ok5, err5, f5),
+        (ok4, err4, f4 + 1),
+        "fresh full sync must bump only sync_full"
+    );
 }
 
 // ─── P1: replica link-state observability ────────────────────────────────────
@@ -548,9 +599,107 @@ fn p1_role_reports_replica_link_state() {
         );
     }
 
- // Restore the process-global state to MASTER so later repl tests that
- // assume primary mode (should_propagate_writes) are unaffected.
+    // Restore the process-global state to MASTER so later repl tests that
+    // assume primary mode (should_propagate_writes) are unaffected.
     repl.become_master();
+}
+
+// ─── WAITAOF local durability guards ────────────────────────────────────────
+
+#[test]
+fn p4_waitaof_local_fsync_progress_pair() {
+    let _g = repl_guard();
+    let repl = global_replication_state();
+    repl.become_master();
+
+    let dir = unique_temp_dir("repl-kit-waitaof-local");
+    std::fs::create_dir_all(&dir).unwrap();
+    let aof_path = dir.join("appendonly.aof");
+    let writer = Arc::new(
+        redis_commands::aof::AofWriter::open_truncate(&aof_path, redis_commands::aof::FSYNC_ALWAYS)
+            .expect("open aof"),
+    );
+    writer.force_fsynced_repl_offset(42);
+    redis_commands::aof::install_aof_writer(writer);
+
+    let server = Arc::new(RedisServer::default());
+    server.live_config.set_appendonly(true);
+    let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
+    let mut c = Client::new(980_001);
+    c.last_write_repl_offset = 42;
+    c.set_args(argv(&[b"WAITAOF", b"1", b"0", b"0"]));
+    let mut db = RedisDb::new(0);
+    {
+        let mut ctx = redis_core::CommandContext::with_server(&mut c, &mut db, server, pubsub);
+        redis_commands::replication::waitaof_command(&mut ctx).expect("waitaof");
+    }
+
+    redis_commands::aof::remove_aof_writer();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(c.drain_reply(), b"*2\r\n:1\r\n:0\r\n");
+}
+
+#[test]
+fn p4_waitaof_local_requires_appendonly() {
+    let _g = repl_guard();
+    global_replication_state().become_master();
+    redis_commands::aof::remove_aof_writer();
+
+    let server = Arc::new(RedisServer::default());
+    let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
+    let mut c = Client::new(980_002);
+    c.last_write_repl_offset = 42;
+    c.set_args(argv(&[b"WAITAOF", b"1", b"0", b"0"]));
+    let mut db = RedisDb::new(0);
+    let err = {
+        let mut ctx = redis_core::CommandContext::with_server(&mut c, &mut db, server, pubsub);
+        redis_commands::replication::waitaof_command(&mut ctx).unwrap_err()
+    };
+    assert!(
+        err.to_resp_payload()
+            .as_bytes()
+            .windows(b"appendonly is disabled".len())
+            .any(|w| w == b"appendonly is disabled"),
+        "WAITAOF numlocal>0 with appendonly off must reject, got {:?}",
+        String::from_utf8_lossy(err.to_resp_payload().as_bytes()),
+    );
+}
+
+#[test]
+fn p4_waitaof_local_waiter_unblocks_when_appendonly_disabled() {
+    let _g = repl_guard();
+    global_replication_state().become_master();
+    redis_commands::aof::remove_aof_writer();
+
+    let server = Arc::new(RedisServer::default());
+    server.live_config.set_appendonly(true);
+    let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
+    let (tx, rx) = mpsc::channel();
+    let client_id = 980_003;
+    pubsub.lock().unwrap().register_sender(client_id, tx);
+
+    let mut c = Client::new(client_id);
+    c.last_write_repl_offset = 42;
+    c.set_args(argv(&[b"WAITAOF", b"1", b"0", b"5000"]));
+    let mut db = RedisDb::new(0);
+    {
+        let mut ctx = redis_core::CommandContext::with_server(&mut c, &mut db, server, pubsub);
+        redis_commands::replication::waitaof_command(&mut ctx).expect("waitaof");
+    }
+    assert!(c.blocked_on_keys, "WAITAOF should block before local fsync");
+
+    redis_commands::replication::unblock_waitaof_local_disabled();
+    let reply = rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("WAITAOF waiter should be unblocked");
+    assert!(
+        reply.starts_with(
+            b"-ERR WAITAOF cannot be used when numlocal is set but appendonly is disabled."
+        ),
+        "unexpected unblock reply: {:?}",
+        String::from_utf8_lossy(&reply),
+    );
 }
 
 // ─── AOF round-trip (green capability) ───────────────────────────────────────

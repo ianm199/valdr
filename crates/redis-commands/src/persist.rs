@@ -85,7 +85,7 @@ pub fn save_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     let path = rdb_path(&cfg.rdb_dir(), &cfg.rdb_filename());
 
     let snapshot = ctx.snapshot_all_dbs()?;
-    let snapshot_dbs = snapshots_to_dbs(&snapshot);
+    let snapshot_dbs = snapshot.to_dbs();
     let result = save_rdb_databases(&snapshot_dbs, &path);
 
     match result {
@@ -622,18 +622,17 @@ pub fn bgsave_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     #[cfg(unix)]
     {
         let server_arc = ctx.server_arc();
-        let snapshot_for_child = snapshot.clone();
 
- // SAFETY: fork(2) is the standard Unix mechanism for COW snapshot.
- // All requirements (single-threaded child, async-signal-safe ops only)
- // are met: child immediately writes RDB and _exits without running any
- // parent atexit handlers. The parent half only stores the child PID into
- // an atomic and returns — no Rust destructors of the shared state run
- // the child because _exit bypasses them.
+        // SAFETY: fork(2) is the standard Unix mechanism for COW snapshot.
+        // All requirements (single-threaded child, async-signal-safe ops only)
+        // are met: child immediately writes RDB and _exits without running any
+        // parent atexit handlers. The parent half only stores the child PID into
+        // an atomic and returns — no Rust destructors of the shared state run
+        // the child because _exit bypasses them.
         let pid = unsafe {
             let p = libc::fork();
             if p == 0 {
-                let dbs = snapshots_to_dbs(&snapshot_for_child);
+                let dbs = snapshot.to_dbs();
                 let child_pid = libc::getpid();
                 let exit_code = if save_bgsave_child_databases(&dbs, &path, child_pid).is_ok() {
                     0i32
@@ -657,7 +656,7 @@ pub fn bgsave_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     let _ = thread::Builder::new()
         .name("bgsave".to_string())
         .spawn(move || {
-            let dbs = snapshots_to_dbs(&snapshot);
+            let dbs = snapshot.to_dbs();
             match save_rdb_databases(&dbs, &path) {
                 Ok(()) => {
                     let now = SystemTime::now()
@@ -702,9 +701,9 @@ fn save_bgsave_child_databases(
 
     let delay_us = crate::connection::rdb_key_save_delay_us();
     if delay_us > 0 {
- // Upstream's debug knob delays per key. For the shutdown frontier we
- // need the same observable state: a live child with temp-<pid>.rdb
- // present long enough for the parent to observe and clean it up.
+        // Upstream's debug knob delays per key. For the shutdown frontier we
+        // need the same observable state: a live child with temp-<pid>.rdb
+        // present long enough for the parent to observe and clean it up.
         thread::sleep(Duration::from_micros(delay_us.min(5_000_000)));
     }
 
@@ -761,11 +760,10 @@ pub fn bgsave_for_replication(
     #[cfg(unix)]
     {
         let path_for_child = temp_path.clone();
-        let snapshot_for_child = snapshot.clone();
         let pid = unsafe {
             let p = libc::fork();
             if p == 0 {
-                let dbs = snapshots_to_dbs(&snapshot_for_child);
+                let dbs = snapshot.to_dbs();
                 let exit_code = if save_rdb_databases(&dbs, &path_for_child).is_ok() {
                     0i32
                 } else {
@@ -807,7 +805,7 @@ pub fn bgsave_for_replication(
     let spawn = thread::Builder::new()
         .name("bgsave-repl".to_string())
         .spawn(move || {
-            let dbs = snapshots_to_dbs(&snapshot);
+            let dbs = snapshot.to_dbs();
             let ok = save_rdb_databases(&dbs, &temp_for_thread).is_ok();
             if !ok {
                 eprintln!("redis-server: BGSAVE-for-replication thread fallback save failed");
@@ -823,15 +821,23 @@ pub fn bgsave_for_replication(
 }
 
 /// `BGREWRITEAOF` — background AOF rewrite.
-/// The v1 implementation remains synchronous, but follows Valkey's multi-part
-/// AOF ordering: switch appends to a fresh INCR, write a new BASE, then persist
-/// a manifest naming the new BASE and active INCR. No child or thread renames
-/// over the active writer.
+/// The implementation follows Valkey's multi-part AOF ordering: first persist
+/// a manifest that includes a fresh active INCR, then write the new BASE in a
+/// background worker, and finally publish a manifest naming the new BASE plus
+/// the active INCR. No worker renames over the active writer.
 /// When AOF is not enabled the command still succeeds but is a no-op (
 /// canonical Valkey behaviour when appendonly=no).
 pub fn bgrewriteaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ctx.arg_count() != 1 {
         return Err(RedisError::wrong_number_of_args(b"bgrewriteaof"));
+    }
+    if !crate::aof::flush_thread_aof_batch_for_lifecycle(
+        &ctx.server().persistence,
+        "BGREWRITEAOF barrier flush failed",
+    ) {
+        return Err(RedisError::runtime(
+            b"ERR BGREWRITEAOF failed while flushing pending AOF writes",
+        ));
     }
 
     if ctx.client_ref().flag_deny_blocking() {
@@ -858,7 +864,12 @@ pub fn bgrewriteaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     }
 
     let snapshot = ctx.snapshot_all_dbs()?;
-    let dbs = snapshots_to_dbs(&snapshot);
+    ctx.server()
+        .persistence
+        .set_aof_last_rewrite_snapshot_stats(
+            snapshot.key_count() as u64,
+            snapshot.capture_micros(),
+        );
     let cfg = Arc::clone(&ctx.server().live_config);
     let dir = cfg.rdb_dir();
     let filename = cfg.appendfilename();
@@ -866,51 +877,68 @@ pub fn bgrewriteaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     let policy = cfg.appendfsync();
     let use_rdb_preamble = cfg.aof_use_rdb_preamble();
 
-    ctx.server().persistence.set_aof_rewrite_in_progress(true);
-    let result = crate::aof::rewrite_manifest_aof_from_dbs(
+    let (plan, current_size) = match crate::aof::begin_manifest_aof_rewrite(
         std::path::Path::new(&dir),
         &filename,
         &dirname,
-        &dbs,
         policy,
         use_rdb_preamble,
-    );
-    ctx.server().persistence.set_aof_rewrite_in_progress(false);
-
-    match result {
-        Ok((base_size, current_size)) => {
-            ctx.server().persistence.set_aof_base_size(base_size);
-            ctx.server().persistence.set_aof_current_size(current_size);
-            ctx.server()
-                .persistence
-                .set_aof_last_bgrewrite_status(PersistenceStatus::Ok);
-            ctx.reply_simple_string(b"Background append only file rewriting started")
-        }
+    ) {
+        Ok(result) => result,
         Err(e) => {
             ctx.server()
                 .persistence
                 .set_aof_last_bgrewrite_status(PersistenceStatus::Err);
-            Err(RedisError::runtime(
+            return Err(RedisError::runtime(
                 format!("ERR BGREWRITEAOF failed: {}", e).into_bytes(),
+            ));
+        }
+    };
+
+    ctx.server().persistence.set_aof_current_size(current_size);
+    ctx.server().persistence.set_aof_rewrite_in_progress(true);
+    let server = ctx.server_arc();
+    let spawn_result = thread::Builder::new()
+        .name("aof-rewrite".to_string())
+        .spawn(move || {
+            let dbs = snapshot.into_dbs();
+            let result = crate::aof::complete_manifest_aof_rewrite(
+                std::path::Path::new(&dir),
+                &filename,
+                &dirname,
+                plan,
+                &dbs,
+            );
+            match result {
+                Ok((base_size, current_size)) => {
+                    server.persistence.set_aof_base_size(base_size);
+                    server.persistence.set_aof_current_size(current_size);
+                    server
+                        .persistence
+                        .set_aof_last_bgrewrite_status(PersistenceStatus::Ok);
+                }
+                Err(e) => {
+                    eprintln!("redis-server: BGREWRITEAOF failed: {}", e);
+                    server
+                        .persistence
+                        .set_aof_last_bgrewrite_status(PersistenceStatus::Err);
+                }
+            }
+            server.persistence.set_aof_rewrite_in_progress(false);
+        });
+
+    match spawn_result {
+        Ok(_) => ctx.reply_simple_string(b"Background append only file rewriting started"),
+        Err(e) => {
+            ctx.server().persistence.set_aof_rewrite_in_progress(false);
+            ctx.server()
+                .persistence
+                .set_aof_last_bgrewrite_status(PersistenceStatus::Err);
+            Err(RedisError::runtime(
+                format!("ERR BGREWRITEAOF failed to start worker: {}", e).into_bytes(),
             ))
         }
     }
-}
-
-fn snapshots_to_dbs(
-    snapshot: &[(
-        u32,
-        Vec<(redis_types::RedisString, redis_core::RedisObject)>,
-    )],
-) -> Vec<RedisDb> {
-    snapshot
-        .iter()
-        .map(|(id, entries)| {
-            let mut db = RedisDb::from_snapshot(entries.clone());
-            db.id = *id;
-            db
-        })
-        .collect()
 }
 
 // ──────────────────────────────────────────────────────────────────────────

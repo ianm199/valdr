@@ -339,7 +339,7 @@ pub fn debug_reload_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     let path = redis_core::rdb::rdb_path(&cfg.rdb_dir(), &cfg.rdb_filename());
     if !nosave {
         let snapshot = ctx.snapshot_all_dbs()?;
-        let snapshot_dbs = snapshots_to_dbs(&snapshot);
+        let snapshot_dbs = snapshot.to_dbs();
         redis_core::rdb::save_rdb_databases(&snapshot_dbs, &path).map_err(|e| {
             ctx.server()
                 .persistence
@@ -427,22 +427,6 @@ pub(crate) fn replace_or_merge_dbs(
         }
     }
     Ok(())
-}
-
-pub(crate) fn snapshots_to_dbs(
-    snapshot: &[(
-        u32,
-        Vec<(redis_types::RedisString, redis_core::RedisObject)>,
-    )],
-) -> Vec<RedisDb> {
-    snapshot
-        .iter()
-        .map(|(id, entries)| {
-            let mut db = RedisDb::from_snapshot(entries.clone());
-            db.id = *id;
-            db
-        })
-        .collect()
 }
 
 // ──────────────────────────────────────────────────────────────────────────

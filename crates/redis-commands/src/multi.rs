@@ -23,6 +23,7 @@ use redis_core::db::{
 };
 use redis_protocol::frame::{encode_resp2, RespFrame};
 use redis_types::{RedisError, RedisResult, RedisString};
+use std::sync::Arc;
 
 use crate::list::wake_blocked_for_key;
 use crate::zset::wake_blocked_zset_for_key;
@@ -330,16 +331,15 @@ fn propagate_transaction_commands(
     ctx: &mut CommandContext,
     commands: &[(u32, Vec<RedisString>)],
 ) -> i64 {
- // If a queued REPLICAOF demoted this server to a replica during the EXEC,
- // the entire transaction must not be propagated to the (now disconnected)
- // replicas — matching Valkey, which discards pending propagation when it
- // becomes a replica. The queued writes still executed locally; they are
- // simply not forwarded.
+    // If a queued REPLICAOF demoted this server to a replica during the EXEC,
+    // the entire transaction must not be propagated to the (now disconnected)
+    // replicas — matching Valkey, which discards pending propagation when it
+    // becomes a replica. The queued writes still executed locally; they are
+    // simply not forwarded.
     if redis_core::replication::global_replication_state().is_replica() {
         return 0;
     }
-    append_transaction_commands_to_aof(ctx, commands);
-    match commands {
+    let offset = match commands {
         [] => 0,
         [(db_id, argv)] => crate::dispatch::propagate_command_from_wake(*db_id, argv),
         _ => {
@@ -359,39 +359,58 @@ fn propagate_transaction_commands(
                 offset
             }
         }
-    }
+    };
+    append_transaction_commands_to_aof(ctx, commands, offset);
+    offset
 }
 
 fn append_transaction_commands_to_aof(
     ctx: &mut CommandContext,
     commands: &[(u32, Vec<RedisString>)],
+    repl_offset: i64,
 ) {
     let Some(aof) = crate::aof::aof_writer() else {
         return;
     };
-    let result = match commands {
-        [] => Ok(()),
-        [(db_id, argv)] => aof.append_selected(*db_id, argv),
-        _ => aof
-            .append_raw(&[RedisString::from_bytes(b"MULTI")])
-            .and_then(|()| {
-                for (db_id, argv) in commands {
-                    aof.append_selected(*db_id, argv)?;
-                }
-                Ok(())
-            })
-            .and_then(|()| aof.append_raw(&[RedisString::from_bytes(b"EXEC")])),
-    };
-    match result {
-        Ok(()) => ctx
-            .server()
-            .persistence
-            .set_aof_last_write_status(redis_core::persistence::PersistenceStatus::Ok),
-        Err(err) => {
-            eprintln!("redis-server: transaction AOF append failed: {}", err);
-            ctx.server()
-                .persistence
-                .set_aof_last_write_status(redis_core::persistence::PersistenceStatus::Err);
+    match commands {
+        [] => {}
+        [(db_id, argv)] => {
+            crate::aof::append_selected_for_dispatch(
+                &ctx.server().persistence,
+                "transaction AOF append failed",
+                aof,
+                *db_id,
+                argv,
+                repl_offset,
+            );
+        }
+        _ => {
+            let multi = [RedisString::from_bytes(b"MULTI")];
+            let exec = [RedisString::from_bytes(b"EXEC")];
+            let mut append_ok = crate::aof::append_raw_for_dispatch(
+                &ctx.server().persistence,
+                "transaction AOF append failed",
+                Arc::clone(&aof),
+                &multi,
+                -1,
+            );
+            for (db_id, argv) in commands {
+                append_ok = crate::aof::append_selected_for_dispatch(
+                    &ctx.server().persistence,
+                    "transaction AOF append failed",
+                    Arc::clone(&aof),
+                    *db_id,
+                    argv,
+                    -1,
+                ) && append_ok;
+            }
+            let _ = crate::aof::append_raw_for_dispatch(
+                &ctx.server().persistence,
+                "transaction AOF append failed",
+                aof,
+                &exec,
+                repl_offset,
+            ) && append_ok;
         }
     }
 }
