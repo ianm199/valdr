@@ -291,11 +291,12 @@ pub fn role_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     }
     let repl = global_replication_state();
     if let Some((host, port)) = repl.replica_of_target() {
+        let link_state = repl.replica_link_str();
         return ctx.reply_frame(&RespFrame::array(vec![
             RespFrame::bulk(b"slave".as_slice()),
             RespFrame::bulk(host),
             RespFrame::Integer(port as i64),
-            RespFrame::bulk(b"connected".as_slice()),
+            RespFrame::bulk(link_state.as_bytes()),
             RespFrame::Integer(repl.master_offset()),
         ]));
     }

@@ -407,6 +407,60 @@ fn finding4_partial_resync_continue_must_replay_backlog_window() {
     );
 }
 
+// ─── P1: replica link-state observability ────────────────────────────────────
+
+/// P1 — the `ROLE` reply's replica state field must reflect the fine-grained
+/// link phase the dialer publishes (`connect`/`connecting`/`handshake`/`sync`/
+/// `connected`), not a hardcoded `connected`. This is the observability the
+/// dual-server harness polls via `[lindex [$replica role] 3]`. Pure mapping
+/// plus a live `role_command` drive in replica mode, restoring MASTER after.
+#[test]
+fn p1_role_reports_replica_link_state() {
+    use redis_core::replication::replica_link_code as link;
+    assert_eq!(link::as_role_str(link::CONNECT), "connect");
+    assert_eq!(link::as_role_str(link::CONNECTING), "connecting");
+    assert_eq!(link::as_role_str(link::HANDSHAKE), "handshake");
+    assert_eq!(link::as_role_str(link::TRANSFER), "sync");
+    assert_eq!(link::as_role_str(link::CONNECTED), "connected");
+
+    let _g = repl_guard();
+    let repl = global_replication_state();
+    repl.become_replica_of(RedisString::from_bytes(b"127.0.0.1"), 6379);
+
+    let server = Arc::new(RedisServer::default());
+    let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
+    for (code, want) in [
+        (link::HANDSHAKE, "handshake"),
+        (link::TRANSFER, "sync"),
+        (link::CONNECTED, "connected"),
+    ] {
+        repl.set_replica_link(code);
+        let mut c = Client::new(951_001);
+        c.set_args(argv(&[b"ROLE"]));
+        let mut db = RedisDb::new(0);
+        {
+            let mut ctx = redis_core::CommandContext::with_server(
+                &mut c,
+                &mut db,
+                server.clone(),
+                pubsub.clone(),
+            );
+            redis_commands::replication::role_command(&mut ctx).expect("role");
+        }
+        let reply = c.drain_reply();
+        assert!(
+            reply.windows(want.len()).any(|w| w == want.as_bytes()),
+            "ROLE state field should be {:?}, reply was {:?}",
+            want,
+            String::from_utf8_lossy(&reply),
+        );
+    }
+
+ // Restore the process-global state to MASTER so later repl tests that
+ // assume primary mode (should_propagate_writes) are unaffected.
+    repl.become_master();
+}
+
 // ─── AOF round-trip (green capability) ───────────────────────────────────────
 
 /// GREEN — AOF append→bytes→replay→assert-dbs-equal on the live codec.

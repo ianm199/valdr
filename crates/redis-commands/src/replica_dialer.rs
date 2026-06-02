@@ -21,7 +21,9 @@ use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::Duration;
 
-use redis_core::replication::{global_replication_state, repl_state_code, ReplicationState};
+use redis_core::replication::{
+    global_replication_state, repl_state_code, replica_link_code, ReplicationState,
+};
 use redis_core::server::RedisServer;
 use redis_types::RedisString;
 
@@ -107,6 +109,7 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
             return;
         }
 
+        repl.set_replica_link(replica_link_code::CONNECTING);
         let host_str = String::from_utf8_lossy(host.as_bytes()).to_string();
         let stream = match TcpStream::connect(format!("{}:{}", host_str, port)) {
             Ok(s) => s,
@@ -115,12 +118,14 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
                     "redis-server: replica: connect {}:{} failed: {}",
                     host_str, port, e
                 );
+                repl.set_replica_link(replica_link_code::CONNECT);
                 thread::sleep(Duration::from_millis(200));
                 continue;
             }
         };
         let _ = stream.set_nodelay(true);
 
+        repl.set_replica_link(replica_link_code::HANDSHAKE);
         let initial_offset = match run_handshake(&stream, &repl, our_port) {
             Ok(off) => off,
             Err(e) => {
@@ -133,6 +138,7 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
         if !repl.dialer_epoch_is_current(dialer_epoch) {
             return;
         }
+        repl.set_replica_link(replica_link_code::TRANSFER);
         let rdb_bytes = match read_fullresync_rdb(&stream) {
             Ok(bytes) => bytes,
             Err(e) => {
@@ -156,6 +162,7 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
             .store(initial_offset, Ordering::SeqCst);
         repl.repl_state
             .store(repl_state_code::REPLICA_ONLINE, Ordering::SeqCst);
+        repl.set_replica_link(replica_link_code::CONNECTED);
 
         let periodic_ack_stream = stream.try_clone().ok();
         if let Some(ack_stream) = periodic_ack_stream {
@@ -170,6 +177,7 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
         }
         repl.repl_state
             .store(repl_state_code::REPLICA_CONNECTING, Ordering::SeqCst);
+        repl.set_replica_link(replica_link_code::CONNECT);
         thread::sleep(Duration::from_millis(200));
     }
 }

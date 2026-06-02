@@ -41,6 +41,38 @@ pub mod repl_state_code {
     pub const REPLICA_ONLINE: u8 = 2;
 }
 
+/// Fine-grained replica-side link state, published by the dialer purely for
+/// observability (`ROLE` reply state field, upstream `replicaStateToString`).
+/// The coarse [`repl_state_code`] still drives propagation/ACK logic; this is a
+/// faithful mirror of the C `server.repl_state` handshake phases so `ROLE`
+/// reports `connect`/`connecting`/`handshake`/`sync`/`connected` like Valkey.
+pub mod replica_link_code {
+ /// Not connected; the dialer is between reconnect attempts (`connect`).
+    pub const CONNECT: u8 = 0;
+ /// A TCP connection to the primary is being established (`connecting`).
+    pub const CONNECTING: u8 = 1;
+ /// Connected; PING/REPLCONF/PSYNC exchange in progress and the replica is
+ /// awaiting the `+FULLRESYNC`/`+CONTINUE` reply (`handshake`).
+    pub const HANDSHAKE: u8 = 2;
+ /// `+FULLRESYNC` received; the RDB bulk payload is being received (`sync`).
+    pub const TRANSFER: u8 = 3;
+ /// RDB loaded; streaming live command deltas (`connected`).
+    pub const CONNECTED: u8 = 4;
+
+ /// Map a link-state code to the `ROLE` reply spelling used by upstream
+ /// `replicaStateToString`.
+    pub fn as_role_str(code: u8) -> &'static str {
+        match code {
+            CONNECT => "connect",
+            CONNECTING => "connecting",
+            HANDSHAKE => "handshake",
+            TRANSFER => "sync",
+            CONNECTED => "connected",
+            _ => "unknown",
+        }
+    }
+}
+
 /// Per-replica connection state. Drives whether the master will stream
 /// backlog to a given replica yet (it has to wait for the BGSAVE RDB transfer
 /// to land first when full-syncing).
@@ -300,6 +332,9 @@ pub struct ReplicationState {
     pub replica_of: Mutex<Option<(RedisString, u16)>>,
  /// Top-level role/state code; see [`repl_state_code`].
     pub repl_state: AtomicU8,
+ /// Fine-grained replica-side link phase; see [`replica_link_code`]. Set by
+ /// the dialer for `ROLE`-reply observability only. Meaningless on a primary.
+    pub replica_link: AtomicU8,
  /// PID of the in-flight BGSAVE-for-replication child, or 0 when no such
  /// child is running. Tracked separately from `RedisServer::rdb_child_pid`
  /// so a user-issued `BGSAVE` does not interfere with replica full-sync.
@@ -337,6 +372,7 @@ impl ReplicationState {
             replicas: Mutex::new(HashMap::new()),
             replica_of: Mutex::new(None),
             repl_state: AtomicU8::new(repl_state_code::MASTER),
+            replica_link: AtomicU8::new(replica_link_code::CONNECT),
             repl_child_pid: AtomicI32::new(0),
             repl_bgsave_job: Mutex::new(None),
             selected_db: AtomicI32::new(-1),
@@ -438,6 +474,19 @@ impl ReplicationState {
         }
         self.repl_state
             .store(repl_state_code::MASTER, Ordering::Relaxed);
+        self.replica_link
+            .store(replica_link_code::CONNECT, Ordering::Relaxed);
+    }
+
+ /// Publish the fine-grained replica link phase (see [`replica_link_code`]).
+ /// Dialer-only; primaries never call this.
+    pub fn set_replica_link(&self, code: u8) {
+        self.replica_link.store(code, Ordering::Relaxed);
+    }
+
+ /// Current replica link phase rendered as the `ROLE`-reply state string.
+    pub fn replica_link_str(&self) -> &'static str {
+        replica_link_code::as_role_str(self.replica_link.load(Ordering::Relaxed))
     }
 
  /// Configure this server as a replica of `(host, port)` and move
@@ -455,6 +504,8 @@ impl ReplicationState {
         }
         self.repl_state
             .store(repl_state_code::REPLICA_CONNECTING, Ordering::Relaxed);
+        self.replica_link
+            .store(replica_link_code::CONNECT, Ordering::Relaxed);
         epoch
     }
 
