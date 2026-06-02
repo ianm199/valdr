@@ -103,4 +103,68 @@ takes the partial path and bumps `sync_partial_ok`; a miss bumps
 - Record the final per-file before/after table at the bottom of this doc.
 
 ## Results log (append as you go)
-_(to be filled in by the lane)_
+
+### Lane run 2026-06-02 (overnight, sequential `--clients 1`)
+
+**Per-file before → after (sequential oracle, `integration-repl`, baseport 47000):**
+
+| File | Baseline | After | Δ | Notes |
+|---|---|---|---|---|
+| `replication-2` | 7/0 ✓ | **7/0 ✓** | — | tripwire held GREEN |
+| `block-repl` | 2/0 ✓ | **2/0 ✓** | — | tripwire held GREEN |
+| `replication-4` | abort (0 counted) | **13/4** | **+13 passes** | DEBUG REPLICATE un-aborted the file (P3a) |
+| `replication-psync` | 66/24 | **72–73/17–18** | **+6–7 passes** | partial-resync path + counters wired (P2); 73/17 at the P2 gate, 72/18 on the final sweep — a 1-test run-to-run variance, not a regression: the load (`bg_complex_data`→`createComplexDataset` *without* `useexpire`) creates no TTL keys, so the P3b expire changes provably cannot touch its digest (dual-server timing noise per `oracle-suite-contention`) |
+| `replication-3` | 4/3 | 4/3 | — | expire fails blocked deeper (see below) |
+| `replication-buffer` | 0 (setup-die) | 0 | — | blocked on diskless sync-window |
+| `replication` | timeout (0) | timeout (0) | — | blocked on diskless block-1 (150s of waits) |
+| `replica-redirect` | abort (0) | abort (0) | — | not attempted (big feature, see below) |
+
+**Net: +19–20 counted passing tests** across the dual-server replication suite,
+two whole tripwire files held GREEN, zero regressions (zero `unsafe` added).
+
+**Commits (this lane):**
+- `P1: faithful replica link-state observability (ROLE/INFO)` — `replica_link_code`
+  (connect/connecting/handshake/sync/connected) published by the dialer; ROLE
+  state field reflects the live phase. Kit: `p1_role_reports_replica_link_state`.
+- `P2: wire partial-resync path + sync counters` — replica caches the primary
+  replid and requests `PSYNC <replid> <offset>` on reconnect; `+CONTINUE` handled
+  distinctly (no RDB, keyspace preserved); INFO emits `sync_full` /
+  `sync_partial_ok` / `sync_partial_err`, bumped in `handle_psync`. Kit:
+  `p2_psync_bumps_sync_counters`.
+- `P3a: DEBUG REPLICATE injects command into replication stream` — un-aborts
+  `replication-4`. Kit: `p3_debug_replicate_feeds_replication_stream`.
+- `P3b: replica passive expiry` + `(cont): primary-link applies IGNORE expiry` —
+  faithful replica expiry policy (KEEP for normal clients, IGNORE for the
+  primary link, store-already-expired on a replica). Units:
+  `replica_keep_expired_reports_expired_without_deleting`,
+  `replica_link_apply_ignores_expiry`. No counted movement (blocked deeper).
+
+**rung-2 / unit coverage added:** 3 new kit cases (`repl_correctness_kit.rs`) +
+2 new `RedisDb` unit tests. All green; pre-existing kit failure `finding2` is
+unrelated (verified on a clean tree).
+
+**What remains / blockers (honest):**
+- **`replication.tcl` + `replication-buffer.tcl`** — their `handshake` /
+  `wait_bgsave` / role==`sync` assertions need the master to HOLD the sync for
+  a configurable window (`repl-diskless-sync-delay`). That window bottoms out on
+  the fork()-based BGSAVE hold, explicitly **OUT OF SCOPE** for this safe-Rust
+  lane. P1 lands the faithful ROLE/INFO machinery that future window work builds
+  on, but cannot un-block these without the fork-delay mechanism.
+- **`replication-3` expire fails + 3 of `replication-4`'s 4 fails** — bottom out
+  on **command-propagation rewriting** the primary does not yet do: relative-TTL
+  writes are not rewritten to absolute `PEXPIREAT` (a paused-then-resumed replica
+  re-anchors the TTL to apply-time and reads the key as live), and `SPOP <count>`
+  is not rewritten to `SREM`. Plus `replication-3`'s high-volume consistency test
+  fails on `wait_for_ofs_sync` not converging (offset-sync), and its `select 5`
+  keys never reach the replica keyspace (multi-DB delivery). These are core
+  replication mechanics, not the observability/discrete-command gaps this lane
+  targets. The replica expiry-policy trio (P3b) is the faithful prerequisite for
+  them and is now in place.
+- **`replica-redirect.tcl`** — needs full `CLIENT CAPA REDIRECT` (replica
+  write-redirect) **and** a real `FAILOVER` role-swap state machine
+  (`master_failover_state` transitions + promote/demote). A bare FAILOVER stub
+  would only convert the abort into a summary of still-failing tests (the file is
+  dominated by redirect/failover semantics we don't implement), so it was not
+  attempted — it is a feature, not an observability gap.
+- **`replication-psync` remaining 17 fails** — diskless-load variants
+  (`diskless: yes`, out of scope) plus a few backlog-window edge cases.
