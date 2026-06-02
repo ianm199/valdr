@@ -421,6 +421,11 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let _ = writeln!(buf, "total_net_input_bytes:0\r");
         let _ = writeln!(buf, "total_net_output_bytes:0\r");
         let _ = writeln!(buf, "rejected_connections:{}\r", rejected);
+        let (sync_full, sync_partial_ok, sync_partial_err) =
+            redis_core::replication::global_replication_state().sync_counters();
+        let _ = writeln!(buf, "sync_full:{}\r", sync_full);
+        let _ = writeln!(buf, "sync_partial_ok:{}\r", sync_partial_ok);
+        let _ = writeln!(buf, "sync_partial_err:{}\r", sync_partial_err);
         let _ = writeln!(buf, "total_forks:{}\r", total_forks);
         let _ = writeln!(buf, "expired_keys:{}\r", expired_keys);
         let _ = writeln!(

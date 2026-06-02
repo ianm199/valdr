@@ -126,8 +126,8 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
         let _ = stream.set_nodelay(true);
 
         repl.set_replica_link(replica_link_code::HANDSHAKE);
-        let initial_offset = match run_handshake(&stream, &repl, our_port) {
-            Ok(off) => off,
+        let outcome = match run_handshake(&stream, &repl, our_port) {
+            Ok(o) => o,
             Err(e) => {
                 eprintln!("redis-server: replica: handshake failed: {}", e);
                 thread::sleep(Duration::from_millis(200));
@@ -138,28 +138,47 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
         if !repl.dialer_epoch_is_current(dialer_epoch) {
             return;
         }
-        repl.set_replica_link(replica_link_code::TRANSFER);
-        let rdb_bytes = match read_fullresync_rdb(&stream) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                eprintln!("redis-server: replica: RDB sink failed: {}", e);
-                thread::sleep(Duration::from_millis(200));
-                continue;
+
+        let online_offset = match outcome {
+            PsyncOutcome::FullResync { offset, replid } => {
+ // Adopt the primary's replid so the next reconnect can request a
+ // partial resync against it.
+                repl.set_cached_primary_replid(replid);
+                repl.set_replica_link(replica_link_code::TRANSFER);
+                let rdb_bytes = match read_fullresync_rdb(&stream) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        eprintln!("redis-server: replica: RDB sink failed: {}", e);
+                        thread::sleep(Duration::from_millis(200));
+                        continue;
+                    }
+                };
+
+                if !repl.dialer_epoch_is_current(dialer_epoch) {
+                    return;
+                }
+                if !load_rdb_via_runtime_owner(rdb_bytes, offset) {
+                    eprintln!("redis-server: replica: RDB load failed");
+                    thread::sleep(Duration::from_millis(200));
+                    continue;
+                }
+                repl.master_repl_offset.store(offset, Ordering::SeqCst);
+                offset
+            }
+            PsyncOutcome::Continue { offset } => {
+ // Partial resync: no RDB. The backlog catch-up bytes arrive inline
+ // on the same stream and are consumed by the sink loop below, which
+ // advances the offset as it applies them. The keyspace is preserved.
+                eprintln!(
+                    "redis-server: replica: +CONTINUE partial resync from offset {}",
+                    offset
+                );
+                offset
             }
         };
 
-        if !repl.dialer_epoch_is_current(dialer_epoch) {
-            return;
-        }
-        if !load_rdb_via_runtime_owner(rdb_bytes, initial_offset) {
-            eprintln!("redis-server: replica: RDB load failed");
-            thread::sleep(Duration::from_millis(200));
-            continue;
-        }
         let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
-        crate::aof::force_current_writer_fsynced_repl_offset(initial_offset);
-        repl.master_repl_offset
-            .store(initial_offset, Ordering::SeqCst);
+        crate::aof::force_current_writer_fsynced_repl_offset(online_offset);
         repl.repl_state
             .store(repl_state_code::REPLICA_ONLINE, Ordering::SeqCst);
         repl.set_replica_link(replica_link_code::CONNECTED);
@@ -246,9 +265,13 @@ fn run_replica_sink_loop(stream: &TcpStream, repl: &ReplicationState, dialer_epo
 }
 
 /// Execute the PING / REPLCONF / PSYNC handshake over `stream`.
-/// Returns the initial replication offset from the `+FULLRESYNC` reply.
-/// On `+CONTINUE` we return the current master offset (partial resync).
-fn run_handshake(stream: &TcpStream, repl: &ReplicationState, our_port: u16) -> io::Result<i64> {
+/// Returns the PSYNC outcome: `FullResync` (an RDB bulk follows) or `Continue`
+/// (backlog catch-up streams inline, no RDB).
+fn run_handshake(
+    stream: &TcpStream,
+    repl: &ReplicationState,
+    our_port: u16,
+) -> io::Result<PsyncOutcome> {
     if let Some(primaryauth) = GLOBAL_SERVER
         .get()
         .and_then(|server| server.live_config.primaryauth())
@@ -309,19 +332,17 @@ fn run_handshake(stream: &TcpStream, repl: &ReplicationState, our_port: u16) -> 
         ));
     }
 
-    let our_runid = repl.runid();
+ // Attempt a partial resync when we have already completed a full sync with
+ // this primary (we cached its replid) and hold a concrete offset. The
+ // primary grants `+CONTINUE` if our offset is still inside its backlog
+ // window; otherwise it falls back to `+FULLRESYNC`. This is independent of
+ // the live `repl_state`, which the dialer resets to CONNECTING on every
+ // disconnect — so partial resync survives a dropped link.
     let our_offset = repl.master_repl_offset.load(Ordering::SeqCst);
-    let is_reconnect =
-        repl.repl_state.load(Ordering::SeqCst) == repl_state_code::REPLICA_ONLINE && our_offset > 0;
-
-    if is_reconnect {
+    let cached_replid = repl.cached_primary_replid();
+    if let (Some(replid), true) = (cached_replid, our_offset > 0) {
         let offset_str = our_offset.to_string();
-        let runid_str = std::str::from_utf8(our_runid)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid runid"))?;
-        send_multibulk(
-            stream,
-            &[b"PSYNC", runid_str.as_bytes(), offset_str.as_bytes()],
-        )?;
+        send_multibulk(stream, &[b"PSYNC", &replid, offset_str.as_bytes()])?;
     } else {
         send_multibulk(stream, &[b"PSYNC", b"?", b"-1"])?;
     }
@@ -330,35 +351,63 @@ fn run_handshake(stream: &TcpStream, repl: &ReplicationState, our_port: u16) -> 
     parse_psync_reply(&reply)
 }
 
-/// Parse the `+FULLRESYNC <runid> <offset>` or `+CONTINUE <runid>` line.
-/// Returns the initial offset the replica should track.
-fn parse_psync_reply(line: &[u8]) -> io::Result<i64> {
+/// The two PSYNC outcomes the replica must handle differently: a `+FULLRESYNC`
+/// is followed by an RDB bulk payload (replace the keyspace); a `+CONTINUE`
+/// streams backlog catch-up bytes inline with no RDB (keep the keyspace).
+enum PsyncOutcome {
+ /// `+FULLRESYNC <replid> <offset>` — adopt `replid`, read the RDB, reset
+ /// the offset to `offset`.
+    FullResync { offset: i64, replid: [u8; 40] },
+ /// `+CONTINUE [<replid>]` — partial resync accepted; resume from `offset`
+ /// (the replica's current offset). No RDB follows.
+    Continue { offset: i64 },
+}
+
+/// Parse the `+FULLRESYNC <runid> <offset>` or `+CONTINUE [<runid>]` line.
+fn parse_psync_reply(line: &[u8]) -> io::Result<PsyncOutcome> {
     let s = std::str::from_utf8(line)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "non-UTF8 PSYNC reply"))?
         .trim();
 
     if let Some(rest) = s.strip_prefix("+FULLRESYNC ") {
         let mut parts = rest.splitn(2, ' ');
-        let _runid = parts.next().unwrap_or("");
+        let runid = parts.next().unwrap_or("");
         let offset_str = parts.next().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "missing offset in +FULLRESYNC")
         })?;
         let offset = offset_str.trim().parse::<i64>().map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidData, "cannot parse FULLRESYNC offset")
         })?;
-        return Ok(offset);
+        let replid = parse_replid(runid).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "bad replid in +FULLRESYNC")
+        })?;
+        return Ok(PsyncOutcome::FullResync { offset, replid });
     }
 
     if s.starts_with("+CONTINUE") {
-        return Ok(global_replication_state()
-            .master_repl_offset
-            .load(Ordering::SeqCst));
+        return Ok(PsyncOutcome::Continue {
+            offset: global_replication_state()
+                .master_repl_offset
+                .load(Ordering::SeqCst),
+        });
     }
 
     Err(io::Error::new(
         io::ErrorKind::InvalidData,
         format!("unexpected PSYNC reply: {}", s),
     ))
+}
+
+/// Parse a 40-char hex replid into the fixed-width byte array the partial-resync
+/// `PSYNC` echoes back. Returns `None` unless it is exactly 40 ASCII bytes.
+fn parse_replid(runid: &str) -> Option<[u8; 40]> {
+    let bytes = runid.as_bytes();
+    if bytes.len() != 40 {
+        return None;
+    }
+    let mut out = [0u8; 40];
+    out.copy_from_slice(bytes);
+    Some(out)
 }
 
 /// Read the `$<size>\r\n<rdb-bytes>` bulk payload that follows `+FULLRESYNC`.

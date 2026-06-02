@@ -407,6 +407,68 @@ fn finding4_partial_resync_continue_must_replay_backlog_window() {
     );
 }
 
+// ─── P2: partial-resync counters (sync_full / sync_partial_ok / err) ─────────
+
+/// P2 — the master-side `handle_psync` decision must bump the three sync
+/// counters the dual-server harness asserts on (`INFO sync_full /
+/// sync_partial_ok / sync_partial_err`), mirroring C `syncCommand` /
+/// `masterTryPartialResynchronization`:
+/// * in-window partial PSYNC → `+CONTINUE`, `sync_partial_ok += 1`
+/// * out-of-window partial PSYNC (concrete replid+offset) → `+FULLRESYNC`,
+///   `sync_partial_err += 1` AND `sync_full += 1`
+/// * fresh `PSYNC ? -1` → `+FULLRESYNC`, `sync_full += 1`, partial counters flat
+#[test]
+fn p2_psync_bumps_sync_counters() {
+    let _g = repl_guard();
+    let repl = global_replication_state();
+
+    let drive_psync = |client_id: u64, args: &[&[u8]]| -> Vec<u8> {
+        let (tx, _rx) = mpsc::channel();
+        let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
+        pubsub.lock().unwrap().register_sender(client_id, tx);
+        let mut c = Client::new(client_id);
+        c.set_args(argv(args));
+        let mut db = RedisDb::new(0);
+        let server = Arc::new(RedisServer::default());
+        {
+            let mut ctx =
+                redis_core::CommandContext::with_server(&mut c, &mut db, server, pubsub.clone());
+            redis_commands::replication::psync_command(&mut ctx).expect("psync");
+        }
+        let reply = c.drain_reply();
+        repl.remove_replica(client_id);
+        reply
+    };
+
+ // Seed the backlog so there is a definite in-window offset.
+    let in_window_offset = repl.master_offset();
+    repl.append_to_backlog(&resp(&[b"SET", b"a", b"1"]));
+
+ // (1) in-window partial → +CONTINUE, sync_partial_ok += 1.
+    let (f0, ok0, err0) = repl.sync_counters();
+    let reply = drive_psync(960_101, &[b"PSYNC", b"?", in_window_offset.to_string().as_bytes()]);
+    let (f1, ok1, err1) = repl.sync_counters();
+    assert!(reply.starts_with(b"+CONTINUE"), "want +CONTINUE, got {:?}", String::from_utf8_lossy(&reply));
+    assert_eq!((ok1, err1, f1), (ok0 + 1, err0, f0), "in-window partial must bump only sync_partial_ok");
+
+ // (2) out-of-window partial (concrete replid + impossible future offset)
+ //     → +FULLRESYNC, sync_partial_err += 1 AND sync_full += 1.
+    let runid = String::from_utf8(repl.runid().to_vec()).unwrap();
+    let beyond = (repl.master_offset() + 1_000_000).to_string();
+    let (f2, ok2, err2) = repl.sync_counters();
+    let reply = drive_psync(960_102, &[b"PSYNC", runid.as_bytes(), beyond.as_bytes()]);
+    let (f3, ok3, err3) = repl.sync_counters();
+    assert!(reply.starts_with(b"+FULLRESYNC"), "want +FULLRESYNC, got {:?}", String::from_utf8_lossy(&reply));
+    assert_eq!((ok3, err3, f3), (ok2, err2 + 1, f2 + 1), "out-of-window partial must bump sync_partial_err and sync_full");
+
+ // (3) fresh full sync (PSYNC ? -1) → sync_full += 1, partials flat.
+    let (f4, ok4, err4) = repl.sync_counters();
+    let reply = drive_psync(960_103, &[b"PSYNC", b"?", b"-1"]);
+    let (f5, ok5, err5) = repl.sync_counters();
+    assert!(reply.starts_with(b"+FULLRESYNC"), "want +FULLRESYNC, got {:?}", String::from_utf8_lossy(&reply));
+    assert_eq!((ok5, err5, f5), (ok4, err4, f4 + 1), "fresh full sync must bump only sync_full");
+}
+
 // ─── P1: replica link-state observability ────────────────────────────────────
 
 /// P1 — the `ROLE` reply's replica state field must reflect the fine-grained

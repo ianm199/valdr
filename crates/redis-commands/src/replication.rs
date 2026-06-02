@@ -893,6 +893,7 @@ fn handle_psync(
     let outbound = steal_outbound_sender(ctx.pubsub.as_ref(), client_id);
 
     if can_partial {
+        repl.incr_sync_partial_ok();
         if let Some(sender) = outbound {
             register_replica(
                 &repl,
@@ -921,6 +922,15 @@ fn handle_psync(
         }
         return Ok(());
     }
+
+ // A partial resync was requested (concrete runid + non-negative offset)
+ // but could not be served from the live backlog window: count it as a
+ // partial-resync error before falling back to a full resync, mirroring C
+ // `masterTryPartialResynchronization` → `server.stat_sync_partial_err++`.
+    if provided_runid != b"?" && provided_offset >= 0 && !can_partial {
+        repl.incr_sync_partial_err();
+    }
+    repl.incr_sync_full();
 
     let snapshot_offset = master_offset;
     repl.selected_db

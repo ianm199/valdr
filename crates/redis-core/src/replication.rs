@@ -358,6 +358,21 @@ pub struct ReplicationState {
  /// Dialers capture this epoch at spawn and must stop applying bytes or
  /// sending ACKs once it changes.
     pub dialer_epoch: AtomicU64,
+ /// `INFO stats sync_full` — count of full resyncs served to replicas
+ /// (mirrors C `server.stat_sync_full`).
+    pub stat_sync_full: AtomicU64,
+ /// `INFO stats sync_partial_ok` — count of successful partial resyncs
+ /// (`+CONTINUE`), mirrors C `server.stat_sync_partial_ok`.
+    pub stat_sync_partial_ok: AtomicU64,
+ /// `INFO stats sync_partial_err` — count of partial-resync requests that
+ /// could not be satisfied and fell back to full resync (mirrors C
+ /// `server.stat_sync_partial_err`).
+    pub stat_sync_partial_err: AtomicU64,
+ /// The primary replid the replica adopted from the last `+FULLRESYNC`
+ /// reply. `None` until the first full sync completes. On reconnect the
+ /// dialer echoes this in `PSYNC <replid> <offset>` so the primary's
+ /// run-id check can grant a `+CONTINUE` partial resync.
+    pub cached_primary_replid: Mutex<Option<[u8; 40]>>,
 }
 
 impl ReplicationState {
@@ -378,6 +393,52 @@ impl ReplicationState {
             selected_db: AtomicI32::new(-1),
             dialer_stop_flag: AtomicBool::new(false),
             dialer_epoch: AtomicU64::new(0),
+            stat_sync_full: AtomicU64::new(0),
+            stat_sync_partial_ok: AtomicU64::new(0),
+            stat_sync_partial_err: AtomicU64::new(0),
+            cached_primary_replid: Mutex::new(None),
+        }
+    }
+
+ /// Increment the full-resync served counter (`INFO sync_full`).
+    pub fn incr_sync_full(&self) {
+        self.stat_sync_full.fetch_add(1, Ordering::Relaxed);
+    }
+
+ /// Increment the successful partial-resync counter (`INFO sync_partial_ok`).
+    pub fn incr_sync_partial_ok(&self) {
+        self.stat_sync_partial_ok.fetch_add(1, Ordering::Relaxed);
+    }
+
+ /// Increment the failed partial-resync counter (`INFO sync_partial_err`).
+    pub fn incr_sync_partial_err(&self) {
+        self.stat_sync_partial_err.fetch_add(1, Ordering::Relaxed);
+    }
+
+ /// Snapshot of the three sync counters as
+ /// `(sync_full, sync_partial_ok, sync_partial_err)` for `INFO stats`.
+    pub fn sync_counters(&self) -> (u64, u64, u64) {
+        (
+            self.stat_sync_full.load(Ordering::Relaxed),
+            self.stat_sync_partial_ok.load(Ordering::Relaxed),
+            self.stat_sync_partial_err.load(Ordering::Relaxed),
+        )
+    }
+
+ /// Adopt the primary's replid from a `+FULLRESYNC` reply (replica side).
+    pub fn set_cached_primary_replid(&self, replid: [u8; 40]) {
+        match self.cached_primary_replid.lock() {
+            Ok(mut g) => *g = Some(replid),
+            Err(p) => *p.into_inner() = Some(replid),
+        }
+    }
+
+ /// The cached primary replid for a partial-resync `PSYNC`, if a full sync
+ /// has completed at least once.
+    pub fn cached_primary_replid(&self) -> Option<[u8; 40]> {
+        match self.cached_primary_replid.lock() {
+            Ok(g) => *g,
+            Err(p) => *p.into_inner(),
         }
     }
 
