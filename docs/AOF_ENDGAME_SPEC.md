@@ -16,7 +16,9 @@ Packet M adds held-snapshot keyspace COW telemetry, samples it during
 variants. Packet N adds conservative startup appenddir cleanup, hardens
 multipart `valkey-check-aof`, expands the source-shaped persistence frontier to
 cleanup/checker states, and turns focused upstream persistence TCL aborts into
-parsed follow-up evidence.
+parsed follow-up evidence. Packets P and Q clear focused `integration/aof` and
+`unit/aofrw`; Packet R clears `unit/other` plus `integration/rdb` and turns the
+four-file focused persistence TCL gate green.
 **Date:** 2026-06-03.
 **Scope:** Append-Only File persistence, replay, rewrite, manifests, durability
 signals, and performance gates.
@@ -1978,7 +1980,60 @@ Current release blockers after Packet Q:
 
 ---
 
-## 15. Risks
+## 15. Packet R Progress: Focused Persistence TCL Gate
+
+Packet R cleared the remaining focused persistence TCL blockers after Packet Q,
+including the `integration/rdb` timeout, expire/reload parity, RDB load-info
+accounting, and BGSAVE failure lifecycle behavior.
+
+Implemented:
+
+- Startup RDB loading can opt into `rdb-version-check relaxed`, while strict
+  startup and `DEBUG RELOAD` still reject incompatible future versions and log
+  the upstream-visible `Can't handle RDB format version` message.
+- RDB loading now records `rdb_last_load_keys_expired` and
+  `rdb_last_load_keys_loaded`; startup load and `DEBUG RELOAD` copy those
+  counters into `INFO persistence`.
+- RDB save/load preserves already-expired TTL entries long enough for load-time
+  expired-key accounting, then skips them during load as upstream expects.
+- Startup loading state now survives delayed RDB loading, so clients observe
+  `loading=1` during `key-load-delay` tests.
+- `DEBUG POPULATE`, `DEBUG LOG`, and `DEBUG SET-ACTIVE-EXPIRE` accept the
+  upstream test forms needed by `unit/other` and `integration/rdb`.
+- `SAVE`, `BGSAVE`, `BGSAVE SCHEDULE`, and `BGSAVE CANCEL` now maintain dirty
+  counters, scheduled state, child cancellation, temp-file cleanup, and
+  `stop-writes-on-bgsave-error` behavior closely enough for the upstream tests.
+- The central dispatcher rejects write commands with the Valkey-shaped
+  `MISCONF` message after a failed BGSAVE while still allowing read commands
+  and read-only script bodies to proceed.
+
+Packet R gates run on 2026-06-03:
+
+- `cargo test -p redis-commands --test aof_correctness_kit`: 18/18 pass.
+- `cargo test -p redis-server`: 10/10 pass.
+- `cargo check -p redis-core -p redis-commands -p redis-server`: pass.
+- `cargo build -p redis-server`: pass.
+- Focused `integration/rdb`:
+  `python3 harness/oracle/tcl-survey.py --runner-id tcl-persistence-focused --skip-build --timeout-s 180 --no-default-deny-tags --deny-tag needs:repl --deny-tag cluster --files integration/rdb`
+  passed 22/22, run id `20260603T062002921883Z`.
+- Full persistence frontier:
+  `python3 harness/oracle/persistence-frontier.py --skip-build` passed 58/58,
+  run id `20260603T062640Z`.
+- Focused four-file persistence survey:
+  `python3 harness/oracle/tcl-survey.py --runner-id tcl-persistence-focused --skip-build --timeout-s 420 --no-default-deny-tags --deny-tag needs:repl --deny-tag cluster --files unit/other,unit/aofrw,integration/aof,integration/rdb`
+  passed 121/121 with zero parsed failures, zero timeouts, and zero
+  abort/exception points, run id `20260603T062710021245Z`.
+
+Current release blockers after Packet R:
+
+- `integration/aof`: green in focused survey.
+- `unit/aofrw`: green in focused survey.
+- `unit/other`: green in focused survey.
+- `integration/rdb`: green in focused survey.
+
+---
+
+## 16. Risks
 
 - **False confidence from old dirty-tree evidence.** The 23/23 persistence
   frontier is useful history, but clean current evidence must replace it.
@@ -2013,50 +2068,32 @@ Current release blockers after Packet Q:
 
 ---
 
-## 16. Recommendation
+## 17. Recommendation
 
-After Packet Q, the next high-leverage AOF work is no longer
+After Packet R, the next high-leverage AOF work is no longer
 baseline repair,
 basic background BASE generation, manifest fsync hardening, successful-rewrite
 history deletion, command-path snapshot cloning, syscall-level rewrite
 publication fault injection, held-snapshot COW visibility, startup cleanup, or
 basic multipart checking. Those surfaces now have production code plus
-frontier/process/bench evidence, and focused `integration/aof` plus
-`unit/aofrw` are green.
+frontier/process/bench evidence, and focused `integration/aof`, `unit/aofrw`,
+`unit/other`, and `integration/rdb` are green.
 
-The next pragmatic move is to continue the persistence TCL burn-down with
-`unit/other` expire/reload parity, then `integration/rdb` timeout
-classification.
+The next pragmatic move is to decide whether AOF can move from alpha wording to
+a narrower release-gated claim, then rerun quick AOF matrix and rewrite-latency
+telemetry on the current tree before publishing any performance or durability
+statement.
 
-Ambitious Packet P end state:
+Release-qualification loop after Packet R:
 
-- `integration/aof`, `unit/aofrw`, `unit/other`, and `integration/rdb` either
-  pass in focused survey or each remaining test is classified with a concrete
-  unsupported-surface reason.
-- `DEBUG LOADAOF` plus timed-out scripts yield enough through RuntimeOwner to
-  expose upstream `LOADING` behavior.
-- Function rewrite/replay support remains locked by Rust kit coverage and
-  `unit/aofrw`.
-- RDB integration timeouts are split into a server bug, a harness lifecycle
-  bug, or an unsupported upstream fixture.
-
-Packet P tool loop:
-
-1. Run focused TCL once, then work one file at a time from earliest abort to
-   first semantic failure:
-   `python3 harness/oracle/tcl-survey.py --runner-id tcl-persistence-focused --skip-build --timeout-s 180 --no-default-deny-tags --deny-tag needs:repl --deny-tag cluster --files unit/other,unit/aofrw,integration/aof,integration/rdb`.
-2. For each blocker, add the smallest Rust unit, process frontier scenario, or
-   TCL-survey assertion that reproduces the failure outside the full TCL run.
-3. Fix production behavior, rerun that small reproducer, then rerun the focused
-   TCL file.
-4. Keep `cargo test -p redis-commands --test aof_correctness_kit`,
-   `cargo test -p redis-server`, and the 58-scenario persistence frontier green
-   after every semantic fix.
-5. Run the quick AOF matrix and rewrite-latency telemetry only after correctness
-   moves, or immediately if a fix touches append, fsync, rewrite, manifest, RDB,
-   or RuntimeOwner flush order.
-
-Packet P should be considered complete only when the focused TCL status has
-moved from "parsed and red" to either "passing" or "precisely classified with
-source-backed gaps." That is the shortest path from alpha AOF toward a real
-release gate.
+1. Rerun the current fast correctness gates on a clean rebuild:
+   `cargo test -p redis-commands --test aof_correctness_kit`,
+   `cargo test -p redis-server`, `persistence-frontier.py --skip-build`, and
+   the four-file `tcl-persistence-focused` survey.
+2. Run `harness/bench/aof-matrix.py --quick --targets rust --skip-build` and
+   `harness/bench/aof-rewrite-latency.py --quick --targets rust --skip-build`
+   before making any public performance claim.
+3. Update README/coverage wording only to the exact claim the gates support:
+   single-node AOF correctness across legacy and multipart replay/rewrite under
+   the tested fsync modes, with remaining filesystem-durability caveats called
+   out explicitly.

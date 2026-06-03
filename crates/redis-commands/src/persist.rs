@@ -106,6 +106,7 @@ pub fn save_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
             cfg.set_last_save_unix(now);
+            ctx.server().set_dirty(0);
             ctx.server()
                 .persistence
                 .set_rdb_last_bgsave_status(PersistenceStatus::Ok);
@@ -617,7 +618,36 @@ pub fn bgsave_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         return Err(RedisError::wrong_number_of_args(b"bgsave"));
     }
 
-    let server = ctx.server();
+    let mode = if ctx.arg_count() == 2 {
+        let option = ctx.arg_owned(1)?;
+        let bytes = option.as_bytes();
+        if ascii_eq_ignore_case(bytes, b"schedule") {
+            BgsaveMode::Schedule
+        } else if ascii_eq_ignore_case(bytes, b"cancel") {
+            BgsaveMode::Cancel
+        } else {
+            return Err(RedisError::syntax(b"syntax error"));
+        }
+    } else {
+        BgsaveMode::Start
+    };
+
+    let server = ctx.server_arc();
+
+    if mode == BgsaveMode::Cancel {
+        let child_pid = server.rdb_child_pid();
+        if child_pid != 0 {
+            cancel_active_bgsave(&server, child_pid);
+            return ctx.reply_simple_string(b"Background saving cancelled");
+        }
+        if server.persistence.rdb_bgsave_scheduled() {
+            server.persistence.set_rdb_bgsave_scheduled(false);
+            return ctx.reply_simple_string(b"Scheduled background saving cancelled");
+        }
+        return Err(RedisError::runtime(
+            b"ERR Background saving is currently not in progress or scheduled",
+        ));
+    }
 
     if server.rdb_child_pid() != 0 {
         return Err(RedisError::runtime(
@@ -625,14 +655,35 @@ pub fn bgsave_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         ));
     }
 
+    if server.persistence.aof_rewrite_in_progress() || server.in_exec() {
+        if mode == BgsaveMode::Schedule || server.in_exec() {
+            server.persistence.set_rdb_bgsave_scheduled(true);
+            return ctx.reply_simple_string(b"Background saving scheduled");
+        }
+        return Err(RedisError::runtime(
+            b"ERR Another child process is active (AOF?): can't BGSAVE right now. Use BGSAVE SCHEDULE in order to schedule a BGSAVE whenever possible.",
+        ));
+    }
+
     let cfg = Arc::clone(&server.live_config);
     let path: PathBuf = rdb_path(&cfg.rdb_dir(), &cfg.rdb_filename());
-    let snapshot = ctx.snapshot_all_dbs()?;
-    let server_arc_for_thread = ctx.server_arc();
+    let dirty_before_bgsave = server.dirty();
+    server
+        .persistence
+        .set_rdb_dirty_before_bgsave(dirty_before_bgsave);
+    server.persistence.set_rdb_bgsave_scheduled(false);
+    let snapshot = match ctx.snapshot_all_dbs() {
+        Ok(snapshot) => snapshot,
+        Err(e) => {
+            server.persistence.set_rdb_dirty_before_bgsave(0);
+            return Err(e);
+        }
+    };
+    let server_arc_for_thread = Arc::clone(&server);
 
     #[cfg(unix)]
     {
-        let server_arc = ctx.server_arc();
+        let server_arc = Arc::clone(&server);
 
         // SAFETY: fork(2) is the standard Unix mechanism for COW snapshot.
         // All requirements (single-threaded child, async-signal-safe ops only)
@@ -675,11 +726,19 @@ pub fn bgsave_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
                         .map(|d| d.as_secs() as i64)
                         .unwrap_or(0);
                     cfg.set_last_save_unix(now);
+                    let dirty_before = server_arc_for_thread.persistence.rdb_dirty_before_bgsave();
+                    server_arc_for_thread.subtract_dirty_saturating(dirty_before);
+                    server_arc_for_thread
+                        .persistence
+                        .set_rdb_dirty_before_bgsave(0);
                     server_arc_for_thread
                         .persistence
                         .set_rdb_last_bgsave_status(PersistenceStatus::Ok);
                 }
                 Err(e) => {
+                    server_arc_for_thread
+                        .persistence
+                        .set_rdb_dirty_before_bgsave(0);
                     server_arc_for_thread
                         .persistence
                         .set_rdb_last_bgsave_status(PersistenceStatus::Err);
@@ -691,8 +750,34 @@ pub fn bgsave_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     ctx.reply_simple_string(b"Background saving started")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BgsaveMode {
+    Start,
+    Schedule,
+    Cancel,
+}
+
+fn cancel_active_bgsave(server: &redis_core::RedisServer, child_pid: i32) {
+    #[cfg(unix)]
+    unsafe {
+        let _ = libc::kill(child_pid as libc::pid_t, libc::SIGUSR1);
+    }
+
+    let path = rdb_path(
+        &server.live_config.rdb_dir(),
+        &server.live_config.rdb_filename(),
+    );
+    let temp_path = bgsave_temp_path_for_pid(&path, child_pid);
+    let _ = std::fs::remove_file(&temp_path);
+    let _ = std::fs::remove_file(temp_path.with_extension("rdb.tmp"));
+}
+
 #[cfg(unix)]
 fn bgsave_temp_path(final_path: &Path, child_pid: i32) -> PathBuf {
+    bgsave_temp_path_for_pid(final_path, child_pid)
+}
+
+fn bgsave_temp_path_for_pid(final_path: &Path, child_pid: i32) -> PathBuf {
     final_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -996,6 +1081,96 @@ pub fn bgrewriteaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
                 format!("ERR BGREWRITEAOF failed to start worker: {}", e).into_bytes(),
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use redis_core::db::RedisDb;
+    use redis_core::pubsub_registry::PubSubRegistry;
+    use redis_core::{Client, RedisServer};
+    use redis_types::RedisString;
+    use std::sync::{Arc, Mutex};
+
+    fn run_bgsave(
+        server: Arc<RedisServer>,
+        client: &mut Client,
+        db: &mut RedisDb,
+        args: &[&[u8]],
+    ) -> RedisResult<()> {
+        client.set_args(
+            args.iter()
+                .map(|arg| RedisString::from_bytes(*arg))
+                .collect(),
+        );
+        let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
+        let mut ctx = CommandContext::with_server(client, db, server, pubsub);
+        bgsave_command(&mut ctx)
+    }
+
+    #[test]
+    fn bgsave_schedule_then_cancel_tracks_scheduled_state() {
+        let server = Arc::new(RedisServer::default());
+        server.persistence.set_aof_rewrite_in_progress(true);
+        let mut client = Client::new(1);
+        let mut db = RedisDb::new(0);
+
+        run_bgsave(
+            Arc::clone(&server),
+            &mut client,
+            &mut db,
+            &[b"BGSAVE".as_slice(), b"SCHEDULE".as_slice()],
+        )
+        .unwrap();
+        assert_eq!(client.drain_reply(), b"+Background saving scheduled\r\n");
+        assert!(server.persistence.rdb_bgsave_scheduled());
+
+        run_bgsave(
+            Arc::clone(&server),
+            &mut client,
+            &mut db,
+            &[b"BGSAVE".as_slice(), b"CANCEL".as_slice()],
+        )
+        .unwrap();
+        assert_eq!(
+            client.drain_reply(),
+            b"+Scheduled background saving cancelled\r\n"
+        );
+        assert!(!server.persistence.rdb_bgsave_scheduled());
+    }
+
+    #[test]
+    fn bgsave_cancel_without_active_or_scheduled_save_errors() {
+        let server = Arc::new(RedisServer::default());
+        let mut client = Client::new(1);
+        let mut db = RedisDb::new(0);
+
+        let err = run_bgsave(
+            Arc::clone(&server),
+            &mut client,
+            &mut db,
+            &[b"BGSAVE".as_slice(), b"CANCEL".as_slice()],
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.to_resp_payload().as_bytes(),
+            b"ERR Background saving is currently not in progress or scheduled"
+        );
+    }
+
+    #[test]
+    fn bgsave_dirty_subtract_preserves_writes_after_snapshot_marker() {
+        let server = RedisServer::default();
+        server.set_dirty(12);
+        server
+            .persistence
+            .set_rdb_dirty_before_bgsave(server.dirty());
+        server.add_dirty(3);
+
+        server.subtract_dirty_saturating(server.persistence.rdb_dirty_before_bgsave());
+
+        assert_eq!(server.dirty(), 3);
     }
 }
 

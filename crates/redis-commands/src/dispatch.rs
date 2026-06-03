@@ -26,7 +26,7 @@ use redis_core::metrics::{
 };
 use redis_core::monotonic::{elapsed_start, elapsed_us};
 use redis_core::networking::{is_server_paused_for, PAUSE_ACTION_EVICT, PAUSE_ACTION_EXPIRE};
-use redis_core::CommandContext;
+use redis_core::{CommandContext, PersistenceStatus};
 use redis_types::{RedisError, RedisResult, RedisString};
 use serde_json::Value;
 
@@ -621,6 +621,13 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
     }
 
     if let Some(reply) = enforce_replica_readonly_gate(ctx, name, metadata.write) {
+        record_command_stat(name, 0, true, false);
+        record_dispatch_error_reply(ctx, &reply);
+        ctx.client_mut().reply_buf.extend_from_slice(&reply);
+        return Ok(());
+    }
+
+    if let Some(reply) = enforce_bgsave_error_write_gate(ctx, metadata) {
         record_command_stat(name, 0, true, false);
         record_dispatch_error_reply(ctx, &reply);
         ctx.client_mut().reply_buf.extend_from_slice(&reply);
@@ -2114,6 +2121,25 @@ fn enforce_min_replicas_gate(ctx: &CommandContext<'_>) -> Option<Vec<u8>> {
     }
     Some(NOREPLICAS_ERROR.to_vec())
 }
+
+fn enforce_bgsave_error_write_gate(
+    ctx: &CommandContext<'_>,
+    metadata: CommandMetadata,
+) -> Option<Vec<u8>> {
+    if !ctx.live_config().save_enabled() {
+        return None;
+    }
+    if ctx.server().persistence.rdb_last_bgsave_status() != PersistenceStatus::Err {
+        return None;
+    }
+    if !metadata.write {
+        return None;
+    }
+    Some(BGSAVE_ERROR_WRITE_REPLY.to_vec())
+}
+
+const BGSAVE_ERROR_WRITE_REPLY: &[u8] =
+    b"-MISCONF Redis is configured to save RDB snapshots, but it's currently unable to persist to disk. Commands that may modify the data set are disabled, because this instance is configured to report errors during writes if RDB snapshotting fails (stop-writes-on-bgsave-error option). Please check the Redis logs for details about the RDB error.\r\n";
 
 fn good_replicas_status(ctx: &CommandContext<'_>) -> bool {
     let min_replicas = ctx.live_config().repl_min_replicas_to_write();

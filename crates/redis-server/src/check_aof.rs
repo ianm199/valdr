@@ -43,9 +43,7 @@ pub(crate) fn run_check_aof(args: &[String]) -> i32 {
             check_multi_part_aof(&dirpath, path, fix, truncate_to_timestamp)
         }
         InputFileType::Resp => check_old_style_aof(path, fix, truncate_to_timestamp, false),
-        InputFileType::RdbPreamble => {
-            check_old_style_aof(path, fix, truncate_to_timestamp, true)
-        }
+        InputFileType::RdbPreamble => check_old_style_aof(path, fix, truncate_to_timestamp, true),
     }
     // The check functions terminate the process via `std::process::exit`.
     0

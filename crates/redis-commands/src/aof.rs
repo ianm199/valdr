@@ -2171,6 +2171,7 @@ fn load_manifest_files(
                     allow_dup: true,
                     skip_expired: true,
                     aof_preamble: true,
+                    relaxed_version_check: false,
                 };
                 redis_core::rdb::load_into_dbs_with_options(dbs, &path, rdb_options)?;
             }

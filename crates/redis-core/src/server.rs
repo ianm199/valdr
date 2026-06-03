@@ -30,7 +30,7 @@ pub struct CommandTableHandle;
 /// `connection::ConnListener` once the vtable registry has live backends).
 #[derive(Debug, Default)]
 pub struct ListenerHandle {
- /// Number of bound file descriptors (0 when the listener is inactive).
+    /// Number of bound file descriptors (0 when the listener is inactive).
     pub fd_count: i32,
 }
 
@@ -38,50 +38,50 @@ pub struct ListenerHandle {
 /// every connection reads the same live config without lock acquisition.
 pub struct RedisServer {
     next_client_id: AtomicU64,
- /// Databases. Standalone defaults to 16 dbs; pilot uses just 1. The vec
- /// itself is fixed at startup; per-db state is interior-mutable through
- /// `&RedisDb`.
+    /// Databases. Standalone defaults to 16 dbs; pilot uses just 1. The vec
+    /// itself is fixed at startup; per-db state is interior-mutable through
+    /// `&RedisDb`.
     dbs: Vec<RedisDb>,
- /// Bind port (configured at startup).
+    /// Bind port (configured at startup).
     pub port: u16,
- /// Bind addresses as raw bytes (e.g. `b"127.0.0.1"`).
+    /// Bind addresses as raw bytes (e.g. `b"127.0.0.1"`).
     pub bind_addrs: Vec<Vec<u8>>,
- /// Live (CONFIG SET-tunable) configuration knobs.
+    /// Live (CONFIG SET-tunable) configuration knobs.
     pub live_config: Arc<LiveConfig>,
     /// Command-table handle. TODO(architect): real type later.
     pub commands_table: CommandTableHandle,
- /// Persistence runtime state reported by INFO and updated by reapers.
+    /// Persistence runtime state reported by INFO and updated by reapers.
     pub persistence: PersistenceState,
- /// Cached command-time snapshot in milliseconds since epoch.
+    /// Cached command-time snapshot in milliseconds since epoch.
     pub cmd_time_snapshot: AtomicI64,
- /// Active TCP listeners.
+    /// Active TCP listeners.
     pub listeners: Vec<ListenerHandle>,
- /// Number of clients currently in a MULTI block watching keys.
+    /// Number of clients currently in a MULTI block watching keys.
     pub watching_clients: AtomicU64,
- /// Dirty counter — increments per write command for AOF/replication.
+    /// Dirty counter — increments per write command for AOF/replication.
     pub dirty: AtomicI64,
- /// Whether the server is in the middle of an EXEC dispatch.
+    /// Whether the server is in the middle of an EXEC dispatch.
     pub in_exec: AtomicBool,
- /// Whether the server is paused (CLIENT PAUSE / failover).
+    /// Whether the server is paused (CLIENT PAUSE / failover).
     pub pause_cron: AtomicBool,
- /// Client-pause state, one `PauseEvent` per `PausePurpose`. Written by
- /// CLIENT PAUSE/UNPAUSE and read by the command gate, INFO, and
- /// eviction/active-expire paths. Mirrors `server.client_pause_*` in C.
+    /// Client-pause state, one `PauseEvent` per `PausePurpose`. Written by
+    /// CLIENT PAUSE/UNPAUSE and read by the command gate, INFO, and
+    /// eviction/active-expire paths. Mirrors `server.client_pause_*` in C.
     pub pause_events: Mutex<[crate::networking::PauseEvent; 4]>,
- /// Cached aggregate of active pause actions. The common unpaused path can
- /// read this without taking `pause_events` or sampling wall-clock time.
+    /// Cached aggregate of active pause actions. The common unpaused path can
+    /// read this without taking `pause_events` or sampling wall-clock time.
     pub cached_paused_actions: AtomicU32,
- /// Maximum size of a bulk reply payload in bytes.
+    /// Maximum size of a bulk reply payload in bytes.
     pub proto_max_bulk_len: AtomicI64,
- /// Server start time (Unix milliseconds).
+    /// Server start time (Unix milliseconds).
     pub start_time_ms: i64,
- /// Shutdown flag — checked by the event loop and accept loop.
+    /// Shutdown flag — checked by the event loop and accept loop.
     pub shutdown_asap: AtomicBool,
- /// Per-db count budget for the eviction pool's round-robin scan.
+    /// Per-db count budget for the eviction pool's round-robin scan.
     pub eviction_db_cursor: AtomicUsize,
- /// PID of the in-flight BGSAVE child process, or 0 when no child is running.
- /// Written by the BGSAVE fork path and cleared by the reaper thread once
- /// child exits. Polled by a background thread every 500 ms.
+    /// PID of the in-flight BGSAVE child process, or 0 when no child is running.
+    /// Written by the BGSAVE fork path and cleared by the reaper thread once
+    /// child exits. Polled by a background thread every 500 ms.
     pub rdb_child_pid: AtomicI32,
 }
 
@@ -105,8 +105,8 @@ impl Default for RedisServer {
 }
 
 impl RedisServer {
- /// Construct a `RedisServer` bound at the given port with one DB and a
- /// fresh default `LiveConfig`.
+    /// Construct a `RedisServer` bound at the given port with one DB and a
+    /// fresh default `LiveConfig`.
     pub fn new(port: u16) -> Self {
         Self {
             next_client_id: AtomicU64::new(0),
@@ -132,16 +132,16 @@ impl RedisServer {
         }
     }
 
- /// Construct sharing a caller-supplied `LiveConfig` (e.g. the accept loop
- /// has already populated it from CLI/config-file parsing).
+    /// Construct sharing a caller-supplied `LiveConfig` (e.g. the accept loop
+    /// has already populated it from CLI/config-file parsing).
     pub fn with_live_config(port: u16, live_config: Arc<LiveConfig>) -> Self {
         let mut server = Self::new(port);
         server.live_config = live_config;
         server
     }
 
- /// Compatibility shim returning a snapshot view of the legacy
- /// `ServerConfig` struct. Reads pass through `LiveConfig`.
+    /// Compatibility shim returning a snapshot view of the legacy
+    /// `ServerConfig` struct. Reads pass through `LiveConfig`.
     pub fn config(&self) -> ServerConfig {
         ServerConfig {
             max_memory: self.live_config.maxmemory(),
@@ -149,7 +149,7 @@ impl RedisServer {
         }
     }
 
- /// Atomically allocate the next client id.
+    /// Atomically allocate the next client id.
     pub fn alloc_client_id(&self) -> ClientId {
         self.next_client_id.fetch_add(1, Ordering::Relaxed)
     }
@@ -162,8 +162,8 @@ impl RedisServer {
         self.dbs.len()
     }
 
- /// Add additional databases (standalone Redis defaults to 16). Intended
- /// for the startup path before the server is wrapped in `Arc`.
+    /// Add additional databases (standalone Redis defaults to 16). Intended
+    /// for the startup path before the server is wrapped in `Arc`.
     pub fn set_db_count(&mut self, n: usize) {
         while self.dbs.len() < n {
             let id = self.dbs.len() as u32;
@@ -172,18 +172,18 @@ impl RedisServer {
         self.dbs.truncate(n);
     }
 
- /// Whether cluster mode is enabled. STUB — Phase B placeholder.
+    /// Whether cluster mode is enabled. STUB — Phase B placeholder.
     pub fn cluster_enabled(&self) -> bool {
         false
     }
 
- /// Maximum idle time, in seconds, before an idle client is closed.
- /// STUB — Phase B placeholder.
+    /// Maximum idle time, in seconds, before an idle client is closed.
+    /// STUB — Phase B placeholder.
     pub fn max_idle_time(&self) -> i64 {
         0
     }
 
- /// Set the server-wide `in_exec` flag (true while EXEC is mid-flight).
+    /// Set the server-wide `in_exec` flag (true while EXEC is mid-flight).
     pub fn set_in_exec(&self, value: bool) {
         self.in_exec.store(value, Ordering::Relaxed);
     }
@@ -212,6 +212,17 @@ impl RedisServer {
         self.dirty.store(value, Ordering::Relaxed);
     }
 
+    pub fn subtract_dirty_saturating(&self, delta: i64) {
+        if delta <= 0 {
+            return;
+        }
+        let _ = self
+            .dirty
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_sub(delta).max(0))
+            });
+    }
+
     pub fn cmd_time_snapshot(&self) -> i64 {
         self.cmd_time_snapshot.load(Ordering::Relaxed)
     }
@@ -228,12 +239,12 @@ impl RedisServer {
         self.proto_max_bulk_len.store(n, Ordering::Relaxed);
     }
 
- /// Return the PID of the in-flight BGSAVE child, or 0 if none is running.
+    /// Return the PID of the in-flight BGSAVE child, or 0 if none is running.
     pub fn rdb_child_pid(&self) -> i32 {
         self.rdb_child_pid.load(Ordering::SeqCst)
     }
 
- /// Store the PID of the newly-forked BGSAVE child.
+    /// Store the PID of the newly-forked BGSAVE child.
     pub fn set_rdb_child_pid(&self, pid: i32) {
         self.rdb_child_pid.store(pid, Ordering::SeqCst);
     }
@@ -246,9 +257,9 @@ impl RedisServer {
         self.persistence.set_aof_state(state);
     }
 
- /// Stub random number used by lolwut. Centralised here so command handlers
- /// can call `ctx.server.pseudo_random_f32_minus1_to_1` without an
- /// external `rand` dependency.
+    /// Stub random number used by lolwut. Centralised here so command handlers
+    /// can call `ctx.server.pseudo_random_f32_minus1_to_1` without an
+    /// external `rand` dependency.
     pub fn pseudo_random_f32_minus1_to_1(&self) -> f32 {
         let seed = self.next_client_id.load(Ordering::Relaxed);
         let scaled = (seed.wrapping_mul(2654435761) & 0xFFFF) as f32 / 32768.0;

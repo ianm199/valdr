@@ -66,6 +66,31 @@ pub fn debug_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         return ctx.reply_simple_string(b"OK");
     }
     if ascii_eq_ignore_case(sub.as_bytes(), b"SET-ACTIVE-EXPIRE") {
+        if ctx.arg_count() != 3 {
+            return Err(RedisError::wrong_number_of_args(b"debug set-active-expire"));
+        }
+        let value = ctx.arg_owned(2usize)?;
+        match value.as_bytes() {
+            b"0" => redis_core::expire::active_expire_config().set_effort(0),
+            b"1" => redis_core::expire::active_expire_config().set_effort(1),
+            _ => {
+                return Err(RedisError::runtime(
+                    b"ERR value is not an integer or out of range",
+                ))
+            }
+        }
+        return ctx.reply_simple_string(b"OK");
+    }
+    if ascii_eq_ignore_case(sub.as_bytes(), b"LOG") {
+        if ctx.arg_count() != 3 {
+            return Err(RedisError::wrong_number_of_args(b"debug log"));
+        }
+        let message = ctx.arg_owned(2usize)?;
+        if let Ok(message) = std::str::from_utf8(message.as_bytes()) {
+            eprintln!("redis-server: DEBUG LOG: {}", message);
+        } else {
+            eprintln!("redis-server: DEBUG LOG: {:?}", message.as_bytes());
+        }
         return ctx.reply_simple_string(b"OK");
     }
     if ascii_eq_ignore_case(sub.as_bytes(), b"PAUSE-CRON") {
@@ -148,27 +173,45 @@ pub fn debug_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
                 b"ERR value is not an integer or out of range",
             ));
         };
-        let prefix = ctx.arg_owned(3usize)?;
+        let prefix = if ctx.arg_count() >= 4 {
+            ctx.arg_owned(3usize)?
+        } else {
+            RedisString::from_bytes(b"key")
+        };
         let size = if ctx.arg_count() >= 5 {
             let size_arg = ctx.arg_owned(4usize)?;
-            parse_i64_strict(size_arg.as_bytes())
-                .filter(|n| *n >= 0)
-                .unwrap_or(0) as usize
+            let Some(size) = parse_i64_strict(size_arg.as_bytes()).filter(|n| *n >= 0) else {
+                return Err(RedisError::runtime(
+                    b"ERR value is not an integer or out of range",
+                ));
+            };
+            size as usize
         } else {
             0
         };
-        let value = RedisString::from_vec(vec![b'0'; size]);
+        let mut inserted = 0i64;
         for idx in 0..count {
             let mut key = Vec::with_capacity(prefix.len() + 24);
             key.extend_from_slice(prefix.as_bytes());
             key.extend_from_slice(b":");
             key.extend_from_slice(idx.to_string().as_bytes());
+            let value = if size == 0 {
+                RedisString::from_vec(format!("value:{}", idx).into_bytes())
+            } else {
+                let seed = format!("value:{}", idx);
+                let mut bytes = vec![0u8; size];
+                let copy_len = bytes.len().min(seed.len());
+                bytes[..copy_len].copy_from_slice(&seed.as_bytes()[..copy_len]);
+                RedisString::from_vec(bytes)
+            };
             ctx.db_mut().set_key(
                 RedisString::from_vec(key),
-                redis_core::RedisObject::from_string(value.clone()),
+                redis_core::RedisObject::from_string(value),
                 0,
             );
+            inserted += 1;
         }
+        ctx.server().add_dirty(inserted);
         return ctx.reply_simple_string(b"OK");
     }
     if ascii_eq_ignore_case(sub.as_bytes(), b"CLIENT-ENFORCE-REPLY-LIST") {
@@ -389,9 +432,19 @@ pub fn debug_reload_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             allow_dup: merge,
             skip_expired: true,
             aof_preamble: false,
+            relaxed_version_check: cfg.rdb_version_check_relaxed(),
         },
     )
-    .map_err(|e| RedisError::runtime(format!("ERR DEBUG RELOAD failed: {}", e).into_bytes()))?;
+    .map_err(|e| {
+        let message = e.to_string();
+        println!("redis-server: DEBUG RELOAD failed: {}", message);
+        let _ = std::io::stdout().flush();
+        RedisError::runtime(format!("ERR DEBUG RELOAD failed: {}", message).into_bytes())
+    })?;
+    let stats = redis_core::rdb::last_load_stats();
+    ctx.server()
+        .persistence
+        .set_rdb_last_load_stats(stats.keys_expired, stats.keys_loaded);
 
     replace_or_merge_dbs(ctx, loaded, noflush, merge)?;
     ctx.reply_simple_string(b"OK")
@@ -453,6 +506,69 @@ pub(crate) fn replace_or_merge_dbs(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use redis_core::db::{RedisDb, LOOKUP_NOTOUCH};
+    use redis_core::pubsub_registry::PubSubRegistry;
+    use redis_core::{Client, RedisServer};
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn debug_populate_accepts_count_only_defaults() {
+        let server = Arc::new(RedisServer::default());
+        let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
+        let mut client = Client::new(1);
+        client.set_args(vec![
+            RedisString::from_bytes(b"DEBUG"),
+            RedisString::from_bytes(b"POPULATE"),
+            RedisString::from_bytes(b"2"),
+        ]);
+        let mut db = RedisDb::new(0);
+        {
+            let mut ctx =
+                CommandContext::with_server(&mut client, &mut db, Arc::clone(&server), pubsub);
+            debug_command(&mut ctx).unwrap();
+        }
+
+        assert_eq!(client.drain_reply(), b"+OK\r\n");
+        assert_eq!(server.dirty(), 2);
+        let key0 = RedisString::from_bytes(b"key:0");
+        let key1 = RedisString::from_bytes(b"key:1");
+        assert_eq!(
+            db.lookup_key_read_with_flags(&key0, LOOKUP_NOTOUCH)
+                .unwrap()
+                .string_bytes_owned(),
+            b"value:0"
+        );
+        assert_eq!(
+            db.lookup_key_read_with_flags(&key1, LOOKUP_NOTOUCH)
+                .unwrap()
+                .string_bytes_owned(),
+            b"value:1"
+        );
+    }
+
+    #[test]
+    fn debug_log_accepts_message() {
+        let server = Arc::new(RedisServer::default());
+        let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
+        let mut client = Client::new(1);
+        client.set_args(vec![
+            RedisString::from_bytes(b"DEBUG"),
+            RedisString::from_bytes(b"LOG"),
+            RedisString::from_bytes(b"bla"),
+        ]);
+        let mut db = RedisDb::new(0);
+        {
+            let mut ctx = CommandContext::with_server(&mut client, &mut db, server, pubsub);
+            debug_command(&mut ctx).unwrap();
+        }
+
+        assert_eq!(client.drain_reply(), b"+OK\r\n");
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────

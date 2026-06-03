@@ -163,7 +163,7 @@ mod tests {
     use super::*;
 
     fn build_ziplist(entries: &[&[u8]]) -> Vec<u8> {
- // Build a minimal ziplist with 6-bit string entries and 1-byte prevlens.
+        // Build a minimal ziplist with 6-bit string entries and 1-byte prevlens.
         let mut body: Vec<u8> = Vec::new();
         let mut prevlen = 0u8;
         for e in entries {

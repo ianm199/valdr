@@ -472,17 +472,24 @@ pub(crate) fn spawn_bgsave_reaper(
                     .map(|d| d.as_secs() as i64)
                     .unwrap_or(0);
                 live_config.set_last_save_unix(now);
+                let dirty_before = server.persistence.rdb_dirty_before_bgsave();
+                server.subtract_dirty_saturating(dirty_before);
                 server
                     .persistence
                     .set_rdb_last_bgsave_status(PersistenceStatus::Ok);
                 server_metrics()
                     .rdb_saves_succeeded
                     .fetch_add(1, Ordering::Relaxed);
+            } else if libc::WIFSIGNALED(status) && libc::WTERMSIG(status) == libc::SIGUSR1 {
+                remove_bgsave_temp_file(&live_config, child_pid);
             } else {
                 eprintln!(
                     "redis-server: BGSAVE child {} exited with status {}",
                     child_pid, status
                 );
+                if libc::WIFSIGNALED(status) {
+                    remove_bgsave_temp_file(&live_config, child_pid);
+                }
                 server_metrics()
                     .rdb_saves_failed
                     .fetch_add(1, Ordering::Relaxed);
@@ -490,8 +497,20 @@ pub(crate) fn spawn_bgsave_reaper(
                     .persistence
                     .set_rdb_last_bgsave_status(PersistenceStatus::Err);
             }
+            server.persistence.set_rdb_dirty_before_bgsave(0);
             server.set_rdb_child_pid(0);
         });
+}
+
+#[cfg(unix)]
+fn remove_bgsave_temp_file(live_config: &redis_core::live_config::LiveConfig, child_pid: i32) {
+    let path = redis_core::rdb::rdb_path(&live_config.rdb_dir(), &live_config.rdb_filename());
+    let temp_path = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("temp-{}.rdb", child_pid));
+    let _ = fs::remove_file(&temp_path);
+    let _ = fs::remove_file(temp_path.with_extension("rdb.tmp"));
 }
 
 #[cfg(not(unix))]

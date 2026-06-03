@@ -19,7 +19,7 @@
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-use std::io;
+use std::io::{self, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64};
@@ -145,6 +145,7 @@ fn main() {
     live_config.set_appendfsync(args.appendfsync);
     live_config.set_aof_load_truncated(args.aof_load_truncated);
     live_config.set_aof_use_rdb_preamble(args.aof_use_rdb_preamble);
+    live_config.set_rdb_version_check_relaxed(args.rdb_version_check_relaxed);
     live_config.set_auto_aof_rewrite_percentage(args.auto_aof_rewrite_percentage);
     live_config.set_auto_aof_rewrite_min_size(args.auto_aof_rewrite_min_size);
     live_config.set_hash_max_listpack_entries(args.hash_max_listpack_entries);
@@ -287,14 +288,32 @@ fn main() {
         let rdb_path =
             redis_core::rdb::rdb_path(&live_config.rdb_dir(), &live_config.rdb_filename());
         if rdb_path.exists() {
-            match redis_core::rdb::load_into_dbs(&mut owner_dbs, &rdb_path) {
-                Ok(msg) => eprintln!("redis-server: {}", msg),
+            let rdb_options = redis_core::rdb::RdbLoadOptions {
+                relaxed_version_check: live_config.rdb_version_check_relaxed(),
+                ..Default::default()
+            };
+            match redis_core::rdb::load_into_dbs_with_options(
+                &mut owner_dbs,
+                &rdb_path,
+                rdb_options,
+            ) {
+                Ok(msg) => {
+                    let stats = redis_core::rdb::last_load_stats();
+                    server
+                        .persistence
+                        .set_rdb_last_load_stats(stats.keys_expired, stats.keys_loaded);
+                    println!("redis-server: {}", msg);
+                }
                 Err(e) => {
-                    eprintln!(
+                    println!(
                         "redis-server: RDB load failed ({}): {}",
                         rdb_path.display(),
                         e
                     );
+                    println!(
+                        "redis-server: Fatal error loading the DB, check server logs. Exiting."
+                    );
+                    let _ = io::stdout().flush();
                     std::process::exit(1);
                 }
             }

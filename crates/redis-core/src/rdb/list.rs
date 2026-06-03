@@ -183,10 +183,10 @@ mod tests {
         }
     }
 
- /// A crafted payload declares billions of elements but supplies no data.
- /// Without the pre-allocation cap this would attempt a multi-gigabyte
- /// `VecDeque` allocation and abort the process; with the cap it must fail
- /// cleanly on the first absent element read instead.
+    /// A crafted payload declares billions of elements but supplies no data.
+    /// Without the pre-allocation cap this would attempt a multi-gigabyte
+    /// `VecDeque` allocation and abort the process; with the cap it must fail
+    /// cleanly on the first absent element read instead.
     #[test]
     fn hostile_length_prefix_errors_without_aborting() {
         let mut buf: Vec<u8> = Vec::new();

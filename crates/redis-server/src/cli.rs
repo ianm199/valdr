@@ -55,6 +55,7 @@ pub(crate) struct CliArgs {
     pub(crate) appendfsync: u8,
     pub(crate) aof_load_truncated: bool,
     pub(crate) aof_use_rdb_preamble: bool,
+    pub(crate) rdb_version_check_relaxed: bool,
     pub(crate) auto_aof_rewrite_percentage: u64,
     pub(crate) auto_aof_rewrite_min_size: u64,
     pub(crate) maxmemory: u64,
@@ -97,6 +98,7 @@ impl Default for CliArgs {
             appendfsync: redis_commands::aof::FSYNC_EVERYSEC,
             aof_load_truncated: redis_core::live_config::DEFAULT_AOF_LOAD_TRUNCATED,
             aof_use_rdb_preamble: redis_core::live_config::DEFAULT_AOF_USE_RDB_PREAMBLE,
+            rdb_version_check_relaxed: false,
             auto_aof_rewrite_percentage:
                 redis_core::live_config::DEFAULT_AUTO_AOF_REWRITE_PERCENTAGE,
             auto_aof_rewrite_min_size: redis_core::live_config::DEFAULT_AUTO_AOF_REWRITE_MIN_SIZE,
@@ -347,6 +349,12 @@ pub(crate) fn parse_args(argv: Vec<String>) -> Result<CliArgs, String> {
                     .next()
                     .ok_or_else(|| "--aof-use-rdb-preamble requires yes/no".to_string())?;
                 out.aof_use_rdb_preamble = v.eq_ignore_ascii_case("yes");
+            }
+            "--rdb-version-check" => {
+                let v = it
+                    .next()
+                    .ok_or_else(|| "--rdb-version-check requires strict/relaxed".to_string())?;
+                out.rdb_version_check_relaxed = v.eq_ignore_ascii_case("relaxed");
             }
             "--auto-aof-rewrite-percentage" => {
                 let v = it
@@ -673,6 +681,9 @@ pub(crate) fn apply_config_file(args: &mut CliArgs, path: &Path) -> Result<(), S
             "aof-use-rdb-preamble" => {
                 args.aof_use_rdb_preamble = value.eq_ignore_ascii_case("yes");
             }
+            "rdb-version-check" => {
+                args.rdb_version_check_relaxed = value.eq_ignore_ascii_case("relaxed");
+            }
             "auto-aof-rewrite-percentage" => {
                 if let Ok(v) = value.parse::<u64>() {
                     args.auto_aof_rewrite_percentage = v;
@@ -783,6 +794,7 @@ pub(crate) fn expose_config_file_value(key: &str) -> bool {
             | "key-load-delay"
             | "slot-migration-max-failover-repl-bytes"
             | "rdb-key-save-delay"
+            | "rdb-version-check"
             | "hash-seed"
             | "maxmemory"
             | "maxmemory-policy"
@@ -870,6 +882,45 @@ pub(crate) fn run_check_rdb(args: &[String]) -> i32 {
         0
     } else {
         1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_file_sets_rdb_version_check_relaxed_for_startup_load() {
+        let path = std::env::temp_dir().join(format!(
+            "valdr-rdb-version-check-{}-relaxed.conf",
+            std::process::id()
+        ));
+        std::fs::write(&path, "rdb-version-check relaxed\n").unwrap();
+
+        let args = parse_args(vec![
+            "redis-server".to_string(),
+            path.to_string_lossy().into_owned(),
+        ])
+        .unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert!(args.rdb_version_check_relaxed);
+        assert!(args
+            .startup_config_overrides
+            .iter()
+            .any(|(k, v)| k == "rdb-version-check" && v == "relaxed"));
+    }
+
+    #[test]
+    fn cli_sets_rdb_version_check_relaxed_for_startup_load() {
+        let args = parse_args(vec![
+            "redis-server".to_string(),
+            "--rdb-version-check".to_string(),
+            "relaxed".to_string(),
+        ])
+        .unwrap();
+
+        assert!(args.rdb_version_check_relaxed);
     }
 }
 

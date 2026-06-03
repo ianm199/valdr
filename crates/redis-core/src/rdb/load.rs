@@ -9,7 +9,7 @@
 
 use std::io::{self, BufReader, Cursor, Read};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Whether RDB/DUMP CRC64 checksums are verified on load. Toggled by
@@ -18,6 +18,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// deliberately corrupt but whose trailing checksum was not recomputed still
 /// reaches the type-level integrity checks instead of being rejected on CRC.
 static SKIP_CHECKSUM_VALIDATION: AtomicBool = AtomicBool::new(false);
+static LAST_LOAD_KEYS_EXPIRED: AtomicI64 = AtomicI64::new(0);
+static LAST_LOAD_KEYS_LOADED: AtomicI64 = AtomicI64::new(0);
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RdbLoadStats {
+    pub keys_expired: i64,
+    pub keys_loaded: i64,
+}
 
 pub fn set_skip_checksum_validation(skip: bool) {
     SKIP_CHECKSUM_VALIDATION.store(skip, Ordering::Relaxed);
@@ -27,6 +35,18 @@ pub fn skip_checksum_validation() -> bool {
     SKIP_CHECKSUM_VALIDATION.load(Ordering::Relaxed)
 }
 
+pub fn last_load_stats() -> RdbLoadStats {
+    RdbLoadStats {
+        keys_expired: LAST_LOAD_KEYS_EXPIRED.load(Ordering::Relaxed),
+        keys_loaded: LAST_LOAD_KEYS_LOADED.load(Ordering::Relaxed),
+    }
+}
+
+fn store_last_load_stats(stats: RdbLoadStats) {
+    LAST_LOAD_KEYS_EXPIRED.store(stats.keys_expired.max(0), Ordering::Relaxed);
+    LAST_LOAD_KEYS_LOADED.store(stats.keys_loaded.max(0), Ordering::Relaxed);
+}
+
 use crate::db::RedisDb;
 use crate::object::EXPIRY_NONE;
 use redis_types::RedisString;
@@ -34,16 +54,16 @@ use redis_types::RedisString;
 use super::crc::crc64;
 use super::hash::load_hash_object;
 use super::header::{
-    read_magic, read_rdb_string, RDB_DUMP_VERSION, RDB_OPCODE_AUX, RDB_OPCODE_EOF,
-    RDB_OPCODE_EXPIRETIME, RDB_OPCODE_EXPIRETIME_MS, RDB_OPCODE_FREQ, RDB_OPCODE_FUNCTION2,
-    RDB_OPCODE_IDLE, RDB_OPCODE_MODULE_AUX, RDB_OPCODE_RESIZEDB, RDB_OPCODE_SELECTDB,
-    RDB_OPCODE_SLOT_IMPORT, RDB_OPCODE_SLOT_INFO, RDB_TYPE_BLOOM_NATIVE, RDB_TYPE_HASH,
-    RDB_TYPE_HASH_2, RDB_TYPE_HASH_LISTPACK, RDB_TYPE_HASH_ZIPLIST, RDB_TYPE_HASH_ZIPMAP,
-    RDB_TYPE_JSON_NATIVE, RDB_TYPE_LIST, RDB_TYPE_LIST_QUICKLIST, RDB_TYPE_LIST_QUICKLIST_2,
-    RDB_TYPE_LIST_ZIPLIST, RDB_TYPE_SET, RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK,
-    RDB_TYPE_STREAM_LISTPACKS, RDB_TYPE_STREAM_LISTPACKS_2, RDB_TYPE_STREAM_LISTPACKS_3,
-    RDB_TYPE_STRING, RDB_TYPE_ZSET, RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK, RDB_TYPE_ZSET_ZIPLIST,
-    RDB_VERSION,
+    read_magic, read_rdb_string, RDB_DUMP_VERSION, RDB_MAGIC_REDIS, RDB_MAGIC_VALKEY,
+    RDB_OPCODE_AUX, RDB_OPCODE_EOF, RDB_OPCODE_EXPIRETIME, RDB_OPCODE_EXPIRETIME_MS,
+    RDB_OPCODE_FREQ, RDB_OPCODE_FUNCTION2, RDB_OPCODE_IDLE, RDB_OPCODE_MODULE_AUX,
+    RDB_OPCODE_RESIZEDB, RDB_OPCODE_SELECTDB, RDB_OPCODE_SLOT_IMPORT, RDB_OPCODE_SLOT_INFO,
+    RDB_TYPE_BLOOM_NATIVE, RDB_TYPE_HASH, RDB_TYPE_HASH_2, RDB_TYPE_HASH_LISTPACK,
+    RDB_TYPE_HASH_ZIPLIST, RDB_TYPE_HASH_ZIPMAP, RDB_TYPE_JSON_NATIVE, RDB_TYPE_LIST,
+    RDB_TYPE_LIST_QUICKLIST, RDB_TYPE_LIST_QUICKLIST_2, RDB_TYPE_LIST_ZIPLIST, RDB_TYPE_SET,
+    RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK, RDB_TYPE_STREAM_LISTPACKS,
+    RDB_TYPE_STREAM_LISTPACKS_2, RDB_TYPE_STREAM_LISTPACKS_3, RDB_TYPE_STRING, RDB_TYPE_ZSET,
+    RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK, RDB_TYPE_ZSET_ZIPLIST, RDB_VERSION,
 };
 use super::list::{load_list_object, load_quicklist2_object};
 use super::set::load_set_object;
@@ -62,6 +82,7 @@ pub struct RdbLoadOptions {
     pub allow_dup: bool,
     pub skip_expired: bool,
     pub aof_preamble: bool,
+    pub relaxed_version_check: bool,
 }
 
 impl Default for RdbLoadOptions {
@@ -70,6 +91,7 @@ impl Default for RdbLoadOptions {
             allow_dup: false,
             skip_expired: true,
             aof_preamble: false,
+            relaxed_version_check: false,
         }
     }
 }
@@ -93,6 +115,88 @@ fn read_u32_le(reader: &mut impl Read) -> io::Result<u32> {
     let mut b = [0u8; 4];
     reader.read_exact(&mut b)?;
     Ok(u32::from_le_bytes(b))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RdbMagic {
+    Redis,
+    Valkey,
+}
+
+fn read_file_magic(body: &[u8]) -> io::Result<(RdbMagic, u16)> {
+    if body.len() < 9 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "RDB file too short",
+        ));
+    }
+
+    if body[..9].starts_with(RDB_MAGIC_REDIS) {
+        let version_str = std::str::from_utf8(&body[5..9])
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "non-UTF8 RDB version"))?;
+        let version = version_str
+            .parse()
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "non-numeric RDB version"))?;
+        Ok((RdbMagic::Redis, version))
+    } else if body[..9].starts_with(RDB_MAGIC_VALKEY) {
+        let version_str = std::str::from_utf8(&body[6..9]).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "non-UTF8 VALKEY RDB version")
+        })?;
+        let version = version_str.parse().map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "non-numeric VALKEY RDB version")
+        })?;
+        Ok((RdbMagic::Valkey, version))
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid RDB magic",
+        ))
+    }
+}
+
+const RDB_FOREIGN_VERSION_MIN: u16 = 12;
+const RDB_FOREIGN_VERSION_MAX: u16 = 79;
+const RDB_NATIVE_VALKEY_VERSION: u16 = RDB_DUMP_VERSION;
+const RDB_FOREIGN_TYPE_MIN: u8 = RDB_TYPE_HASH_2;
+const RDB_FOREIGN_TYPE_MAX: u8 = RDB_OPCODE_SLOT_IMPORT;
+
+fn is_foreign_rdb_version(version: u16) -> bool {
+    (RDB_FOREIGN_VERSION_MIN..=RDB_FOREIGN_VERSION_MAX).contains(&version)
+}
+
+fn is_foreign_rdb_type_or_opcode(type_byte: u8) -> bool {
+    (RDB_FOREIGN_TYPE_MIN..=RDB_FOREIGN_TYPE_MAX).contains(&type_byte)
+}
+
+fn validate_file_version(magic: RdbMagic, version: u16, options: RdbLoadOptions) -> io::Result<()> {
+    let invalid_magic_version = match magic {
+        RdbMagic::Redis => version > RDB_FOREIGN_VERSION_MAX,
+        RdbMagic::Valkey => version <= RDB_FOREIGN_VERSION_MAX,
+    };
+    if version < 1 || invalid_magic_version {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Can't handle RDB format version {}", version),
+        ));
+    }
+
+    if !options.relaxed_version_check
+        && (version > RDB_NATIVE_VALKEY_VERSION || is_foreign_rdb_version(version))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Can't handle RDB format version {}", version),
+        ));
+    }
+
+    Ok(())
+}
+
+fn unknown_type_or_opcode_error() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        "Unknown type or opcode when loading DB. Unrecoverable error, aborting now.",
+    )
 }
 
 /// Skip a varint-length-prefixed blob (skips AUX value, IDLE, etc.).
@@ -142,6 +246,7 @@ pub fn load_into_dbs_with_options(
     path: &Path,
     options: RdbLoadOptions,
 ) -> io::Result<String> {
+    store_last_load_stats(RdbLoadStats::default());
     if dbs.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -161,25 +266,25 @@ pub fn load_into_dbs_with_options(
         ));
     }
 
-    let stored_crc = u64::from_le_bytes(
-        body[body.len() - 8..]
-            .try_into()
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "cannot read CRC"))?,
-    );
-    let payload = &body[..body.len() - 8];
+    let (magic, version) = read_file_magic(&body)?;
+    validate_file_version(magic, version, options)?;
 
-    if stored_crc != 0 && !skip_checksum_validation() {
-        let computed = crc64(0, payload);
-        if computed != stored_crc {
+    let (payload, stored_crc) = if version >= 5 {
+        if body.len() < 17 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!(
-                    "RDB CRC mismatch: file has 0x{:016x}, computed 0x{:016x}",
-                    stored_crc, computed
-                ),
+                "RDB file too short for checksum trailer",
             ));
         }
-    }
+        let stored_crc = u64::from_le_bytes(
+            body[body.len() - 8..]
+                .try_into()
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "cannot read CRC"))?,
+        );
+        (&body[..body.len() - 8], Some(stored_crc))
+    } else {
+        (&body[..], None)
+    };
 
     let mut reader = std::io::Cursor::new(payload);
     let version = read_magic(&mut reader)?;
@@ -190,11 +295,25 @@ pub fn load_into_dbs_with_options(
         .unwrap_or(0);
 
     let mut pending_expire: i64 = EXPIRY_NONE;
-    let mut keys_loaded: u64 = 0;
+    let mut keys_loaded: i64 = 0;
+    let mut keys_expired: i64 = 0;
     let mut selected_db: usize = 0;
 
     loop {
         let opcode = read_byte(&mut reader)?;
+
+        if magic == RdbMagic::Redis
+            && is_foreign_rdb_version(version)
+            && is_foreign_rdb_type_or_opcode(opcode)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Can't handle foreign type or opcode {} in RDB with version {}",
+                    opcode, version
+                ),
+            ));
+        }
 
         match opcode {
             RDB_OPCODE_AUX => {
@@ -250,12 +369,22 @@ pub fn load_into_dbs_with_options(
 
             type_byte => {
                 let key_bytes = read_rdb_string(&mut reader)?;
-                let mut obj = load_value_payload(&mut reader, type_byte)?;
+                let mut obj = match load_value_payload(&mut reader, type_byte) {
+                    Ok(obj) => obj,
+                    Err(err)
+                        if err.kind() == io::ErrorKind::Unsupported
+                            && err.to_string().contains("not yet handled") =>
+                    {
+                        return Err(unknown_type_or_opcode_error());
+                    }
+                    Err(err) => return Err(err),
+                };
 
                 let expire = pending_expire;
                 pending_expire = EXPIRY_NONE;
 
                 if options.skip_expired && expire != EXPIRY_NONE && expire < now_ms {
+                    keys_expired += 1;
                     continue;
                 }
 
@@ -266,6 +395,26 @@ pub fn load_into_dbs_with_options(
             }
         }
     }
+
+    if let Some(stored_crc) = stored_crc {
+        if stored_crc != 0 && !skip_checksum_validation() {
+            let computed = crc64(0, payload);
+            if computed != stored_crc {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "RDB CRC error: wrong RDB checksum expected 0x{:016x} but got 0x{:016x}",
+                        computed, stored_crc
+                    ),
+                ));
+            }
+        }
+    }
+
+    store_last_load_stats(RdbLoadStats {
+        keys_expired,
+        keys_loaded,
+    });
 
     Ok(format!(
         "DB loaded from RDB version {} — {} keys",
@@ -344,10 +493,10 @@ pub fn check_rdb_file(path: &Path) -> RdbCheckReport {
         ));
     }
 
- // Scan the whole file: the RDB_OPCODE_EOF marker is the true end of
- // object stream. Any trailing CRC64 (present only for rdb_ver >= 5) follows
- // EOF and is simply never read — and old versions (e.g. RDB v4) have no CRC
- // at all, so stripping a fixed 8-byte footer would truncate real data.
+    // Scan the whole file: the RDB_OPCODE_EOF marker is the true end of
+    // object stream. Any trailing CRC64 (present only for rdb_ver >= 5) follows
+    // EOF and is simply never read — and old versions (e.g. RDB v4) have no CRC
+    // at all, so stripping a fixed 8-byte footer would truncate real data.
     let mut reader = Cursor::new(&data[..]);
     reader.set_position(9);
 
@@ -581,6 +730,130 @@ fn load_bloom_object(reader: &mut impl Read) -> io::Result<crate::object::RedisO
         bits,
     };
     Ok(crate::object::RedisObject::new_bloom_from_filter(bf))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture(name: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("reference/valkey/tests/assets")
+            .join(name)
+    }
+
+    #[test]
+    fn redis_rdb_v4_loads_without_checksum_trailer() {
+        let mut dbs: Vec<RedisDb> = (0..16).map(RedisDb::new).collect();
+        let msg = load_into_dbs_with_options(
+            &mut dbs,
+            &fixture("encodings.rdb"),
+            RdbLoadOptions::default(),
+        )
+        .expect("RDB v4 fixture has no checksum trailer and should load");
+
+        assert!(msg.contains("RDB version 4"));
+        assert_eq!(dbs.iter().map(RedisDb::len).sum::<usize>(), 13);
+        assert!(dbs[0].find(&RedisString::from_static(b"string")).is_some());
+    }
+
+    #[test]
+    fn future_rdb_requires_relaxed_version_check() {
+        let path = fixture("encodings-rdb987.rdb");
+        let mut strict: Vec<RedisDb> = (0..16).map(RedisDb::new).collect();
+        let err = load_into_dbs_with_options(&mut strict, &path, RdbLoadOptions::default())
+            .expect_err("future RDB fixture must be rejected in strict mode");
+        assert!(err
+            .to_string()
+            .contains("Can't handle RDB format version 987"));
+
+        let mut relaxed: Vec<RedisDb> = (0..16).map(RedisDb::new).collect();
+        let msg = load_into_dbs_with_options(
+            &mut relaxed,
+            &path,
+            RdbLoadOptions {
+                relaxed_version_check: true,
+                ..Default::default()
+            },
+        )
+        .expect("relaxed version check should load the future fixture");
+        assert!(msg.contains("RDB version 987"));
+        assert_eq!(relaxed.iter().map(RedisDb::len).sum::<usize>(), 13);
+    }
+
+    #[test]
+    fn relaxed_future_unknown_type_reports_valkey_fatal_reason() {
+        let path = fixture("encodings-rdb987-unknown-types.rdb");
+        let mut dbs: Vec<RedisDb> = (0..16).map(RedisDb::new).collect();
+        let err = load_into_dbs_with_options(
+            &mut dbs,
+            &path,
+            RdbLoadOptions {
+                relaxed_version_check: true,
+                ..Default::default()
+            },
+        )
+        .expect_err("future RDB with unknown types must fail after version acceptance");
+
+        assert_eq!(
+            err.to_string(),
+            "Unknown type or opcode when loading DB. Unrecoverable error, aborting now."
+        );
+    }
+
+    #[test]
+    fn relaxed_foreign_unknown_type_reports_foreign_opcode() {
+        let path = fixture("encodings-rdb75-unknown-types.rdb");
+        let mut dbs: Vec<RedisDb> = (0..16).map(RedisDb::new).collect();
+        let err = load_into_dbs_with_options(
+            &mut dbs,
+            &path,
+            RdbLoadOptions {
+                relaxed_version_check: true,
+                ..Default::default()
+            },
+        )
+        .expect_err("foreign RDB with unknown type/opcode must fail explicitly");
+
+        assert_eq!(
+            err.to_string(),
+            "Can't handle foreign type or opcode 150 in RDB with version 75"
+        );
+    }
+
+    #[test]
+    fn load_stats_count_loaded_and_expired_keys() {
+        let path = std::env::temp_dir().join(format!(
+            "redis-rs-rdb-load-stats-{}-{}.rdb",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let mut source = RedisDb::new(0);
+        source.insert(
+            RedisString::from_static(b"live"),
+            crate::object::RedisObject::from_string(RedisString::from_static(b"value")),
+        );
+        let mut expired = crate::object::RedisObject::from_string(RedisString::from_static(b"old"));
+        expired.expire = 1;
+        source.insert(RedisString::from_static(b"expired"), expired);
+
+        crate::rdb::save::save_rdb_databases(&[source], &path).expect("test RDB should save");
+        let mut dbs: Vec<RedisDb> = (0..16).map(RedisDb::new).collect();
+        let msg = load_into_dbs_with_options(&mut dbs, &path, RdbLoadOptions::default())
+            .expect("test RDB should load");
+        let stats = last_load_stats();
+        let _ = std::fs::remove_file(&path);
+
+        assert!(msg.contains("1 keys"));
+        assert_eq!(stats.keys_loaded, 1);
+        assert_eq!(stats.keys_expired, 1);
+        assert!(dbs[0].find(&RedisString::from_static(b"live")).is_some());
+        assert!(dbs[0].find(&RedisString::from_static(b"expired")).is_none());
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────

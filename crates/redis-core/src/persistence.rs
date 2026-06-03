@@ -3,7 +3,7 @@
 //! codecs stay in `redis-core::rdb`; AOF replay/rewrite stays
 //! `redis-commands`, because replay needs the command table.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering};
 
 /// C-compatible AOF state discriminant.
 #[repr(u8)]
@@ -56,7 +56,11 @@ pub struct PersistenceState {
     aof_state: AtomicU8,
     aof_rewrite_in_progress: AtomicBool,
     aof_rewrite_scheduled: AtomicBool,
+    rdb_bgsave_scheduled: AtomicBool,
+    rdb_dirty_before_bgsave: AtomicI64,
     rdb_last_bgsave_status: AtomicU8,
+    rdb_last_load_keys_expired: AtomicI64,
+    rdb_last_load_keys_loaded: AtomicI64,
     aof_last_bgrewrite_status: AtomicU8,
     aof_last_write_status: AtomicU8,
     aof_current_size: AtomicU64,
@@ -72,7 +76,11 @@ impl Default for PersistenceState {
             aof_state: AtomicU8::new(AofState::Off as u8),
             aof_rewrite_in_progress: AtomicBool::new(false),
             aof_rewrite_scheduled: AtomicBool::new(false),
+            rdb_bgsave_scheduled: AtomicBool::new(false),
+            rdb_dirty_before_bgsave: AtomicI64::new(0),
             rdb_last_bgsave_status: AtomicU8::new(PersistenceStatus::Ok as u8),
+            rdb_last_load_keys_expired: AtomicI64::new(0),
+            rdb_last_load_keys_loaded: AtomicI64::new(0),
             aof_last_bgrewrite_status: AtomicU8::new(PersistenceStatus::Ok as u8),
             aof_last_write_status: AtomicU8::new(PersistenceStatus::Ok as u8),
             aof_current_size: AtomicU64::new(0),
@@ -120,6 +128,23 @@ impl PersistenceState {
         self.aof_rewrite_scheduled.store(value, Ordering::Relaxed);
     }
 
+    pub fn rdb_bgsave_scheduled(&self) -> bool {
+        self.rdb_bgsave_scheduled.load(Ordering::Relaxed)
+    }
+
+    pub fn set_rdb_bgsave_scheduled(&self, value: bool) {
+        self.rdb_bgsave_scheduled.store(value, Ordering::Relaxed);
+    }
+
+    pub fn rdb_dirty_before_bgsave(&self) -> i64 {
+        self.rdb_dirty_before_bgsave.load(Ordering::Relaxed)
+    }
+
+    pub fn set_rdb_dirty_before_bgsave(&self, value: i64) {
+        self.rdb_dirty_before_bgsave
+            .store(value.max(0), Ordering::Relaxed);
+    }
+
     pub fn rdb_last_bgsave_status(&self) -> PersistenceStatus {
         PersistenceStatus::from_u8(self.rdb_last_bgsave_status.load(Ordering::Relaxed))
     }
@@ -127,6 +152,21 @@ impl PersistenceState {
     pub fn set_rdb_last_bgsave_status(&self, status: PersistenceStatus) {
         self.rdb_last_bgsave_status
             .store(status as u8, Ordering::Relaxed);
+    }
+
+    pub fn rdb_last_load_keys_expired(&self) -> i64 {
+        self.rdb_last_load_keys_expired.load(Ordering::Relaxed)
+    }
+
+    pub fn rdb_last_load_keys_loaded(&self) -> i64 {
+        self.rdb_last_load_keys_loaded.load(Ordering::Relaxed)
+    }
+
+    pub fn set_rdb_last_load_stats(&self, expired: i64, loaded: i64) {
+        self.rdb_last_load_keys_expired
+            .store(expired.max(0), Ordering::Relaxed);
+        self.rdb_last_load_keys_loaded
+            .store(loaded.max(0), Ordering::Relaxed);
     }
 
     pub fn aof_last_bgrewrite_status(&self) -> PersistenceStatus {

@@ -1471,6 +1471,7 @@ impl RuntimeOwner {
         server: &Arc<redis_core::RedisServer>,
     ) -> bool {
         let mut progressed = false;
+        let had_jobs = !self.debug_loadaof_jobs.is_empty();
         let mut i = 0usize;
         while i < self.debug_loadaof_jobs.len() {
             let recv = self.debug_loadaof_jobs[i].rx.try_recv();
@@ -1498,7 +1499,7 @@ impl RuntimeOwner {
                 }
             }
         }
-        if self.debug_loadaof_jobs.is_empty() {
+        if had_jobs && self.debug_loadaof_jobs.is_empty() {
             server.persistence.set_loading(false);
         }
         progressed
@@ -2015,10 +2016,13 @@ impl RuntimeOwner {
                 if self.debug_loadaof_jobs.is_empty() {
                     server.persistence.set_loading(true);
                     slot.debug_loadaof_pending = true;
-                    let job = spawn_debug_loadaof_job(slot.id(), Arc::clone(server), self.dbs.len());
+                    let job =
+                        spawn_debug_loadaof_job(slot.id(), Arc::clone(server), self.dbs.len());
                     self.debug_loadaof_jobs.push(job);
                 } else {
-                    slot.client.reply_buf.extend_from_slice(&loading_error_reply());
+                    slot.client
+                        .reply_buf
+                        .extend_from_slice(&loading_error_reply());
                 }
                 slot.client.reset_args();
                 continue;

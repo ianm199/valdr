@@ -254,7 +254,7 @@ impl ListpackBuilder {
         }
     }
 
- /// Append an integer entry using the smallest encoding that fits `v`.
+    /// Append an integer entry using the smallest encoding that fits `v`.
     pub fn append_int(&mut self, v: i64) {
         let mut enc_buf = [0u8; 9];
         let enc_len = encode_integer(v, &mut enc_buf);
@@ -265,7 +265,7 @@ impl ListpackBuilder {
         self.num_elements += 1;
     }
 
- /// Append a byte-string entry using the smallest string encoding that fits.
+    /// Append a byte-string entry using the smallest string encoding that fits.
     pub fn append_string(&mut self, s: &[u8]) {
         let slen = s.len();
         if slen < 64 {
@@ -294,15 +294,15 @@ impl ListpackBuilder {
         self.num_elements += 1;
     }
 
- /// Number of entries appended so far.
+    /// Number of entries appended so far.
     pub fn num_elements(&self) -> usize {
         self.num_elements
     }
 
- /// Build the final blob: 6-byte header + entries + 0xFF EOF byte.
- /// `num_elements` is clamped to `UINT16_MAX` to match C's
- /// `LP_HDR_NUMELE_UNKNOWN` sentinel; the loader treats values >= UINT16_MAX
- /// as "unknown" and walks the body to count entries.
+    /// Build the final blob: 6-byte header + entries + 0xFF EOF byte.
+    /// `num_elements` is clamped to `UINT16_MAX` to match C's
+    /// `LP_HDR_NUMELE_UNKNOWN` sentinel; the loader treats values >= UINT16_MAX
+    /// as "unknown" and walks the body to count entries.
     pub fn finalize(self) -> Vec<u8> {
         let total = LP_HDR_SIZE + self.body.len() + 1;
         let mut out = Vec::with_capacity(total);

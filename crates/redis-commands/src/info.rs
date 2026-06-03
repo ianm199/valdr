@@ -387,6 +387,16 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         );
         let _ = writeln!(
             buf,
+            "rdb_last_load_keys_expired:{}\r",
+            persistence.rdb_last_load_keys_expired()
+        );
+        let _ = writeln!(
+            buf,
+            "rdb_last_load_keys_loaded:{}\r",
+            persistence.rdb_last_load_keys_loaded()
+        );
+        let _ = writeln!(
+            buf,
             "aof_enabled:{}\r",
             ctx.live_config().appendonly() as u8
         );

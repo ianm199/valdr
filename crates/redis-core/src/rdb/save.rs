@@ -13,7 +13,6 @@
 
 use std::io::{self, Write};
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::db::RedisDb;
 use crate::object::{ObjectKind, RedisObject, EXPIRY_NONE};
@@ -37,17 +36,8 @@ fn write_rdb_dbs_to_buf(dbs: &[RedisDb], buf: &mut Vec<u8>) -> io::Result<()> {
     write_magic(buf)?;
     write_aux_fields(buf)?;
 
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
-
     for db in dbs {
-        let live_keys = db
-            .iter_for_eviction()
-            .filter(|(_, obj)| obj.expire == EXPIRY_NONE || obj.expire >= now_ms)
-            .count();
-        if live_keys == 0 {
+        if db.size() == 0 {
             continue;
         }
 
@@ -61,10 +51,6 @@ fn write_rdb_dbs_to_buf(dbs: &[RedisDb], buf: &mut Vec<u8>) -> io::Result<()> {
         write_len(buf, expires_count)?;
 
         for (key, obj) in db.iter_for_eviction() {
-            if obj.expire != EXPIRY_NONE && obj.expire < now_ms {
-                continue;
-            }
-
             if obj.expire != EXPIRY_NONE {
                 buf.write_all(&[RDB_OPCODE_EXPIRETIME_MS])?;
                 buf.write_all(&obj.expire.to_le_bytes())?;

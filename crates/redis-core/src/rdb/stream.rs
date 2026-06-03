@@ -209,10 +209,10 @@ fn load_stream_inner(
         let (entries_added, _) = load_len(r)?;
         stream.entries_added = entries_added;
     } else {
- // Legacy RDB_TYPE_STREAM_LISTPACKS (Redis <= 6.2, rdb_ver < 10) has no
- // first_id / max_deleted_id / entries_added. Default the tombstone
- // 0-0 and seed entries_added from the current length, matching
- // legacy path in C `rdbLoadObject`.
+        // Legacy RDB_TYPE_STREAM_LISTPACKS (Redis <= 6.2, rdb_ver < 10) has no
+        // first_id / max_deleted_id / entries_added. Default the tombstone
+        // 0-0 and seed entries_added from the current length, matching
+        // legacy path in C `rdbLoadObject`.
         stream.max_deleted_id = StreamId::new(0, 0);
         stream.entries_added = stream.entries.len() as u64;
     }
