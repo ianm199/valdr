@@ -509,13 +509,13 @@ pub fn wait_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     };
 
     let timeout_secs = if timeout_ms == 0 && repl.connected_replicas() == 0 {
- // RuntimeOwner currently disables the replica dialer until replica
- // apply can target owner-owned DBs. In that state, WAIT 0 would block
- // forever with no registered replicas and hide the upstream file behind
- // a harness timeout. Keep the client visibly blocked, but give it a
- // bounded timeout so the file becomes counted-red. Once
- // RuntimeOwner replica channel lands, remove this guard and let WAIT 0
- // block for future replicas like C Valkey.
+        // RuntimeOwner currently disables the replica dialer until replica
+        // apply can target owner-owned DBs. In that state, WAIT 0 would block
+        // forever with no registered replicas and hide the upstream file behind
+        // a harness timeout. Keep the client visibly blocked, but give it a
+        // bounded timeout so the file becomes counted-red. Once
+        // RuntimeOwner replica channel lands, remove this guard and let WAIT 0
+        // block for future replicas like C Valkey.
         2.0
     } else if timeout_ms == 0 {
         0.0
@@ -586,6 +586,10 @@ pub fn waitaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         return Err(RedisError::runtime(
             b"ERR WAITAOF cannot be used when numlocal is set but appendonly is disabled.",
         ));
+    }
+
+    if numlocal > 0 {
+        crate::config_cmd::wait_for_scheduled_initial_aof(ctx, timeout_ms)?;
     }
 
     let target_offset = ctx.client_ref().last_write_repl_offset;
@@ -829,10 +833,10 @@ fn request_ack_from_replicas(repl: &ReplicationState) {
         ReplicaState::from_u8(conn.state.load(Ordering::Acquire)) == ReplicaState::Online
     });
     if has_online {
- // C Valkey sends GETACK through replicationFeedReplicas(-1), so
- // request itself is part of the replication stream and advances
- // offsets. Keeping that invariant prevents an ACK for GETACK
- // jumping ahead of future writes.
+        // C Valkey sends GETACK through replicationFeedReplicas(-1), so
+        // request itself is part of the replication stream and advances
+        // offsets. Keeping that invariant prevents an ACK for GETACK
+        // jumping ahead of future writes.
         repl.append_to_backlog(&getack);
     }
     for conn in guard.values() {
@@ -923,10 +927,10 @@ fn handle_psync(
         return Ok(());
     }
 
- // A partial resync was requested (concrete runid + non-negative offset)
- // but could not be served from the live backlog window: count it as a
- // partial-resync error before falling back to a full resync, mirroring C
- // `masterTryPartialResynchronization` → `server.stat_sync_partial_err++`.
+    // A partial resync was requested (concrete runid + non-negative offset)
+    // but could not be served from the live backlog window: count it as a
+    // partial-resync error before falling back to a full resync, mirroring C
+    // `masterTryPartialResynchronization` → `server.stat_sync_partial_err++`.
     if provided_runid != b"?" && provided_offset >= 0 && !can_partial {
         repl.incr_sync_partial_err();
     }
@@ -1056,9 +1060,9 @@ fn parse_offset(bytes: &[u8]) -> RedisResult<i64> {
 fn parse_port(bytes: &[u8]) -> Option<u16> {
     let s = std::str::from_utf8(bytes).ok()?;
     let n: i64 = s.parse().ok()?;
- // Valkey's REPLICAOF / REPLCONF parse the port via getRangeLongFromObject
- // with bounds 0..=65535 — port 0 is accepted (e.g. `REPLICAOF host 0`
- // point at an unreachable primary).
+    // Valkey's REPLICAOF / REPLCONF parse the port via getRangeLongFromObject
+    // with bounds 0..=65535 — port 0 is accepted (e.g. `REPLICAOF host 0`
+    // point at an unreachable primary).
     if !(0..=65535).contains(&n) {
         return None;
     }

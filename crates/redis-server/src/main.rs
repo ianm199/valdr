@@ -207,6 +207,7 @@ fn main() {
         args.port,
         Arc::clone(&live_config),
     ));
+    spawn_signal_shutdown_watcher(Arc::clone(&server), Arc::clone(&live_config));
 
     let (replica_apply_tx, replica_apply_rx) =
         mpsc::channel::<redis_commands::replica_dialer::ReplicaApplyRequest>();
@@ -222,6 +223,7 @@ fn main() {
         .collect();
 
     server.persistence.set_loading(true);
+    let mut loaded_persistence = false;
     if args.appendonly {
         let load_options = redis_commands::aof::AofLoadOptions {
             load_truncated: args.aof_load_truncated,
@@ -236,6 +238,7 @@ fn main() {
             load_options,
         ) {
             Ok(Some((n, _size))) => {
+                loaded_persistence = true;
                 eprintln!("redis-server: AOF replay: {} commands", n);
             }
             Ok(None) => {}
@@ -288,6 +291,7 @@ fn main() {
         let rdb_path =
             redis_core::rdb::rdb_path(&live_config.rdb_dir(), &live_config.rdb_filename());
         if rdb_path.exists() {
+            loaded_persistence = true;
             let rdb_options = redis_core::rdb::RdbLoadOptions {
                 relaxed_version_check: live_config.rdb_version_check_relaxed(),
                 ..Default::default()
@@ -319,7 +323,7 @@ fn main() {
             }
         }
     }
-    if args.key_load_delay > 0 {
+    if args.key_load_delay > 0 && loaded_persistence {
         let server_for_loading = Arc::clone(&server);
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_secs(30));
@@ -343,7 +347,6 @@ fn main() {
     active_expire_cfg.set_hz(live_config.hz());
     let _ = spawn_lru_clock_thread();
     spawn_bgsave_reaper(Arc::clone(&server), Arc::clone(&live_config));
-    spawn_signal_shutdown_watcher(Arc::clone(&server), Arc::clone(&live_config));
     spawn_repl_bgsave_reaper();
 
     let bind_addrs_for_port_hook = args.bind.clone();

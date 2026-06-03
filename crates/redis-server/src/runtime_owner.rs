@@ -478,6 +478,12 @@ impl ClientSlot {
         }
     }
 
+    fn publish_client_metadata(&self) {
+        if let Ok(mut guard) = client_info_registry().lock() {
+            guard.update_client_metadata(&self.client);
+        }
+    }
+
     fn mark_close_after_flush(&mut self) {
         self.close_after_flush = true;
     }
@@ -1815,6 +1821,7 @@ impl RuntimeOwner {
             slot.client.net_output_bytes =
                 slot.client.net_output_bytes.saturating_add(consumed as u64);
             slot.reconcile_output_buffer_after_write();
+            slot.publish_client_metadata();
             progressed = true;
         }
         if errored {
@@ -2288,14 +2295,6 @@ impl RuntimeOwner {
                     buffer.consume_front(n);
                     slot.client.net_output_bytes =
                         slot.client.net_output_bytes.saturating_add(n as u64);
-                    // `net_output_bytes` accrues on the client and is synced
-                    // the observable registry by the end-of-dispatch
-                    // `update_client_info_snapshot` and the throttled memory
-                    // snapshot refresh. Taking the global `client_info_registry`
-                    // mutex on every successful write put a lock acquisition
-                    // the per-request write path that Valkey's single-threaded
-                    // loop never pays; CLIENT LIST `tot-net-out` lagging by
-                    // most one reply is invisible to callers.
                     progressed = true;
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
@@ -2307,6 +2306,9 @@ impl RuntimeOwner {
             }
         }
         slot.reconcile_output_buffer_after_write();
+        if progressed {
+            slot.publish_client_metadata();
+        }
         if slot.write_buffer.is_empty() && slot.writable_interest {
             let token = token_for_slot(slot.id());
             if let Some(stream) = slot.stream.as_mut() {

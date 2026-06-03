@@ -39,9 +39,9 @@
   <p class="lead">
     Valdr is intended to be a drop-in replacement for Valkey/Redis for
     single-node use cases, written in mostly-safe Rust. Aiming to be part of a
-    future with safer critical infrastructure for the web. Valdr implements all
-    commands and features besides the C module ABI, clustering, and high
-    availability for now.
+    future with safer critical infrastructure for the web. Valdr implements the
+    single-node core command surface; the C module ABI, clustering, Sentinel,
+    and production high availability are outside the current alpha claim.
   </p>
 
   <p class="actions">
@@ -57,15 +57,18 @@
 <section id="coverage">
   <h2>Coverage</h2>
 
-<pre><code>  Counted assertions             ██████████  3,074 / 3,074
-  Single-node-core blocks        ██████████  2,531 / 2,541   · 99.6%
-  Full upstream Valkey suite     ██████░░░░  2,531 / 4,299   · 59%</code></pre>
+<pre><code>  Counted assertions             ██████████  3,035 / 3,035
+  Single-node-core blocks        ██████████  2,525 / 2,526   · 99.96%
+  Full upstream Valkey suite     ██████░░░░  2,534 / 4,281   · 59%</code></pre>
 
   <p class="note">
     Valkey's own tests, not ours. Single-node, in scope: <strong>100%</strong> of
-    counted assertions, <strong>99.6%</strong> of source blocks. The full-suite figure
-    is lower because ~41% of upstream tests cover cluster, modules, Sentinel, and
-    integration we don't build. Verified against
+    counted assertions, <strong>99.96%</strong> of core source blocks. The remaining
+    core source block is filtered to a 0/0 run by tag policy. AOF is
+    single-node correctness-gated; replication/HA is still alpha and not part of
+    the single-node claim. The full-suite figure is lower because ~41% of
+    upstream tests cover cluster, modules, Sentinel, and integration we do not
+    claim yet. Verified against
     <a href="https://github.com/valkey-io/valkey/releases/tag/9.1.0">Valkey 9.1.0</a>.
   </p>
 
@@ -94,8 +97,8 @@
   RDB persistence                            ████████████  bidirectional
   TLS                                        ████████████  rustls 1.2/1.3, mTLS
 
-  AOF persistence                            ███████░░░░░  alpha
-  Replication                                ██████░░░░░░  alpha · partial-resync unproven
+  AOF persistence                            ███████████░  single-node gated
+  Replication                                ██████░░░░░░  alpha · HA/PSYNC unproven
 
   Cluster mode                               ░░░░░░░░░░░░  not implemented
   Sentinel HA                                ░░░░░░░░░░░░  not implemented

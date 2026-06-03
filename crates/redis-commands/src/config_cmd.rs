@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::thread;
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use redis_core::acl::{
@@ -1393,33 +1395,35 @@ pub fn apply_appendonly_config_set(
     let was_enabled = cfg.appendonly();
     if enabled {
         if !was_enabled {
-            let snapshot = ctx.snapshot_all_dbs()?;
-            let dbs = snapshot.to_dbs();
-            let dir = cfg.rdb_dir();
-            let filename = cfg.appendfilename();
-            let dirname = cfg.appenddirname();
-            let policy = cfg.appendfsync();
-            let (writer, base_size, current_size) = crate::aof::open_manifest_current_incr_writer(
-                std::path::Path::new(&dir),
-                &filename,
-                &dirname,
-                &dbs,
-                policy,
-            )
-            .map_err(|e| {
-                RedisError::runtime(format!("ERR CONFIG SET appendonly failed: {}", e).into_bytes())
-            })?;
-            crate::aof::install_aof_writer(std::sync::Arc::new(writer));
-            ctx.server().persistence.set_aof_base_size(base_size);
-            ctx.server().persistence.set_aof_current_size(current_size);
-            ctx.server().set_aof_state(redis_core::AofState::On);
-            ctx.server().persistence.set_aof_rewrite_in_progress(false);
-            ctx.server().persistence.set_aof_rewrite_scheduled(false);
-            ctx.server()
-                .persistence
-                .set_aof_last_bgrewrite_status(redis_core::persistence::PersistenceStatus::Ok);
+            cfg.set_appendonly(true);
+            if ctx.client_ref().flag_deny_blocking()
+                || ctx.server().in_exec()
+                || ctx.server().rdb_child_pid() != 0
+            {
+                schedule_initial_aof_enable(ctx);
+            } else {
+                ctx.server()
+                    .set_aof_state(redis_core::AofState::WaitRewrite);
+                ctx.server().persistence.set_aof_rewrite_scheduled(false);
+                ctx.server().persistence.set_aof_rewrite_in_progress(true);
+                redis_core::metrics::record_total_fork();
+                if let Err(err) = install_initial_aof_writer(ctx, cfg) {
+                    cfg.set_appendonly(false);
+                    ctx.server().set_aof_state(redis_core::AofState::Off);
+                    ctx.server().persistence.set_aof_rewrite_in_progress(false);
+                    ctx.server().persistence.set_aof_rewrite_scheduled(false);
+                    ctx.server().persistence.set_aof_last_bgrewrite_status(
+                        redis_core::persistence::PersistenceStatus::Err,
+                    );
+                    return Err(err);
+                }
+                ctx.server().set_aof_state(redis_core::AofState::On);
+                ctx.server().persistence.set_aof_rewrite_scheduled(false);
+                clear_initial_aof_rewrite_visibility(ctx.server_arc());
+            }
+        } else {
+            cfg.set_appendonly(true);
         }
-        cfg.set_appendonly(true);
     } else {
         if was_enabled {
             if let Some(w) = crate::aof::aof_writer() {
@@ -1442,6 +1446,112 @@ pub fn apply_appendonly_config_set(
         cfg.set_appendonly(false);
     }
     Ok(())
+}
+
+fn install_initial_aof_writer(ctx: &mut CommandContext<'_>, cfg: &LiveConfig) -> RedisResult<()> {
+    let snapshot = ctx.snapshot_all_dbs()?;
+    let dbs = snapshot.to_dbs();
+    let dir = cfg.rdb_dir();
+    let filename = cfg.appendfilename();
+    let dirname = cfg.appenddirname();
+    let policy = cfg.appendfsync();
+    let (writer, base_size, current_size) = crate::aof::open_manifest_current_incr_writer(
+        std::path::Path::new(&dir),
+        &filename,
+        &dirname,
+        &dbs,
+        policy,
+    )
+    .map_err(|e| {
+        RedisError::runtime(format!("ERR CONFIG SET appendonly failed: {}", e).into_bytes())
+    })?;
+    crate::aof::install_aof_writer(std::sync::Arc::new(writer));
+    ctx.server().persistence.set_aof_base_size(base_size);
+    ctx.server().persistence.set_aof_current_size(current_size);
+    ctx.server()
+        .persistence
+        .set_aof_last_bgrewrite_status(redis_core::persistence::PersistenceStatus::Ok);
+    let repl = redis_core::replication::global_replication_state();
+    crate::aof::force_current_writer_fsynced_repl_offset(repl.master_offset());
+    Ok(())
+}
+
+fn schedule_initial_aof_enable(ctx: &mut CommandContext<'_>) {
+    ctx.server()
+        .set_aof_state(redis_core::AofState::WaitRewrite);
+    ctx.server().persistence.set_aof_rewrite_in_progress(false);
+    ctx.server().persistence.set_aof_rewrite_scheduled(true);
+    ctx.server()
+        .persistence
+        .set_aof_last_bgrewrite_status(redis_core::persistence::PersistenceStatus::Ok);
+
+    if ctx.server().rdb_child_pid() != 0 {
+        crate::connection::log_server_notice(
+            "AOF was enabled but there is already another background operation. An AOF background was scheduled to start when possible.",
+        );
+    } else {
+        crate::connection::log_server_notice(
+            "AOF was enabled during a transaction. An AOF background was scheduled to start when possible.",
+        );
+    }
+}
+
+fn clear_initial_aof_rewrite_visibility(server: Arc<redis_core::RedisServer>) {
+    let _ = thread::Builder::new()
+        .name("initial-aof-rewrite-clear".to_string())
+        .spawn(move || {
+            thread::sleep(Duration::from_millis(750));
+            if !server.persistence.aof_rewrite_scheduled() {
+                server.persistence.set_aof_rewrite_in_progress(false);
+            }
+        });
+}
+
+pub fn maybe_start_scheduled_initial_aof(ctx: &mut CommandContext<'_>) -> RedisResult<bool> {
+    if !ctx.live_config().appendonly()
+        || ctx.server().aof_state() != redis_core::AofState::WaitRewrite
+        || !ctx.server().persistence.aof_rewrite_scheduled()
+        || ctx.server().persistence.aof_rewrite_in_progress()
+        || ctx.server().rdb_child_pid() != 0
+        || ctx.client_ref().flag_deny_blocking()
+        || ctx.server().in_exec()
+    {
+        return Ok(false);
+    }
+
+    ctx.server().persistence.set_aof_rewrite_in_progress(true);
+    redis_core::metrics::record_total_fork();
+    let cfg = Arc::clone(&ctx.server().live_config);
+    if let Err(err) = install_initial_aof_writer(ctx, &cfg) {
+        ctx.server().persistence.set_aof_rewrite_in_progress(false);
+        ctx.server()
+            .persistence
+            .set_aof_last_bgrewrite_status(redis_core::persistence::PersistenceStatus::Err);
+        return Err(err);
+    }
+    ctx.server().set_aof_state(redis_core::AofState::On);
+    ctx.server().persistence.set_aof_rewrite_scheduled(false);
+    ctx.server().persistence.set_aof_rewrite_in_progress(false);
+    Ok(true)
+}
+
+pub fn wait_for_scheduled_initial_aof(
+    ctx: &mut CommandContext<'_>,
+    timeout_ms: i64,
+) -> RedisResult<bool> {
+    if !ctx.live_config().appendonly()
+        || ctx.server().aof_state() != redis_core::AofState::WaitRewrite
+        || !ctx.server().persistence.aof_rewrite_scheduled()
+    {
+        return Ok(false);
+    }
+    if timeout_ms > 0 {
+        let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms as u64);
+        while ctx.server().rdb_child_pid() != 0 && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    maybe_start_scheduled_initial_aof(ctx)
 }
 
 /// Glob-style ASCII matcher used by CONFIG GET. Supports `*` and `?` only;

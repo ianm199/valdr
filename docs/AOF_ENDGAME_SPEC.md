@@ -104,11 +104,13 @@ This is not blank slate. AOF already exists across the repo:
   - `harness/oracle/persistence-frontier.py`
   - `harness/runners.toml`
 
-Current labels still say alpha:
+Current public labels now use narrow gated wording:
 
-- `README.md`: AOF is alpha.
-- `docs/coverage.md`: `unit/aofrw` is outside the gated core.
-- `docs/TEST_AND_FEATURE_COVERAGE.md`: AOF is not release-gated.
+- `README.md`: AOF is single-node alpha, correctness-gated.
+- `docs/coverage.md`: `unit/aofrw` is green in the wrapper and counted
+  separately from `single_node_core_v1`.
+- `docs/TEST_AND_FEATURE_COVERAGE.md`: AOF is a single-node alpha surface with
+  current correctness gates and telemetry; it is not a production HA claim.
 
 ### Important Current Behaviors
 
@@ -653,12 +655,12 @@ python3 harness/oracle/tcl-survey.py --runner-id aof-waitaof-focused \
 
 ### Wave 6 — Upstream Persistence Surface
 
-Goal: move AOF out of alpha docs.
+Goal: move AOF to narrow single-node correctness-gated docs.
 
 Work:
 
 - Run focused upstream persistence TCL files.
-- Triage `unit/aofrw` no-summary into concrete failures.
+- Keep `unit/aofrw` green and treat regressions as release blockers.
 - Decide which Valkey function/module rewrite cases are in scope.
 - Update README/coverage only after evidence is clean.
 
@@ -878,7 +880,8 @@ operator status, `fsynced_repl_offset`, and WAITAOF wakeup semantics.
 
 ## 9. Release Gates
 
-AOF can leave alpha only when these are true on a clean tree:
+AOF can move beyond narrow single-node alpha wording only when these are true on
+a clean tree:
 
 ### Rust / Kit Gates
 
@@ -1599,9 +1602,9 @@ Ambitious end state:
   manifest `.rdb` BASE preambles.
 - Focused upstream persistence TCL files are either passing, converted into
   concrete bug packets, or clearly blocked by harness limitations.
-- Docs can move from "AOF alpha" toward a precise release-gated status only
-  after the source-shaped frontier, process cycles, checker cases, and
-  benchmark telemetry agree.
+- Docs can move beyond "single-node alpha, correctness-gated" only after the
+  source-shaped frontier, process cycles, checker cases, and benchmark
+  telemetry agree.
 
 Non-goals:
 
@@ -2079,21 +2082,28 @@ basic multipart checking. Those surfaces now have production code plus
 frontier/process/bench evidence, and focused `integration/aof`, `unit/aofrw`,
 `unit/other`, and `integration/rdb` are green.
 
-The next pragmatic move is to decide whether AOF can move from alpha wording to
-a narrower release-gated claim, then rerun quick AOF matrix and rewrite-latency
-telemetry on the current tree before publishing any performance or durability
-statement.
+The next pragmatic move was completed on 2026-06-03 for the current tree:
+rebuild release, rerun the quick AOF matrix, rerun rewrite-latency telemetry,
+and update public wording to the exact claim the gates support. The resulting
+claim is **single-node alpha, correctness-gated**. It is not a production HA
+claim and it is not a universal filesystem power-loss guarantee.
 
-Release-qualification loop after Packet R:
+Current-tree qualification loop after Packet R:
 
-1. Rerun the current fast correctness gates on a clean rebuild:
-   `cargo test -p redis-commands --test aof_correctness_kit`,
-   `cargo test -p redis-server`, `persistence-frontier.py --skip-build`, and
-   the four-file `tcl-persistence-focused` survey.
-2. Run `harness/bench/aof-matrix.py --quick --targets rust --skip-build` and
-   `harness/bench/aof-rewrite-latency.py --quick --targets rust --skip-build`
-   before making any public performance claim.
-3. Update README/coverage wording only to the exact claim the gates support:
-   single-node AOF correctness across legacy and multipart replay/rewrite under
-   the tested fsync modes, with remaining filesystem-durability caveats called
-   out explicitly.
+1. Correctness gates are green on the current tree:
+   `cargo test --workspace`, `unit/aofrw` 22/22 in the 54-file wrapper
+   (`20260603T160316334341Z`), and the AOF correctness kit 18/18.
+2. Quick AOF matrix passed 16/16 after a release rebuild:
+   `harness/bench/results/20260603T162047Z-a580d88-aof-matrix.json`.
+   Worst quick-run overhead is `appendfsync always`, `incr`, pipeline 1:
+   99.452% throughput overhead. Pipeline 16 recorded 3,889.5 rps for `incr`
+   and 3,667.5 rps for `set`. Treat this as telemetry only.
+3. Rewrite-latency telemetry passed 1/1:
+   `harness/bench/results/20260603T162115Z-a580d88-aof-rewrite-latency.json`.
+   Dataset 250, 400 acknowledged writes, restart passed, manifest found,
+   snapshot 822 keys in 46 us, rewrite command/start block 8.750 ms,
+   post-reply wall 43.051 ms, rewrite wall 51.801 ms, during p99 3.913 ms,
+   during p100 8.740 ms.
+4. README, coverage, roadmap, and site wording should stay at the narrow
+   single-node AOF claim until clean release-host telemetry and any additional
+   durability evidence justify stronger public language.

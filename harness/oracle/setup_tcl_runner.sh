@@ -23,6 +23,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BIN_DIR="${ROOT}/target/debug"
 RUST_BIN="${BIN_DIR}/redis-server"
 VALKEY_LINK="${BIN_DIR}/valkey-server"
+VALKEY_CLI_SOURCE="${ROOT}/reference/valkey/src/valkey-cli"
+VALKEY_CLI_LINK="${BIN_DIR}/valkey-cli"
 
 SKIP_BUILD=0
 for arg in "$@"; do
@@ -56,6 +58,16 @@ for util in valkey-check-aof valkey-check-rdb; do
     ln -s "${RUST_BIN}" "${UTIL_LINK}"
     echo "==> linked ${UTIL_LINK} -> ${RUST_BIN}"
 done
+
+if [[ -x "${VALKEY_CLI_SOURCE}" ]]; then
+    if [[ -L "${VALKEY_CLI_LINK}" || -e "${VALKEY_CLI_LINK}" ]]; then
+        rm -f "${VALKEY_CLI_LINK}"
+    fi
+    ln -s "${VALKEY_CLI_SOURCE}" "${VALKEY_CLI_LINK}"
+    echo "==> linked ${VALKEY_CLI_LINK} -> ${VALKEY_CLI_SOURCE}"
+else
+    echo "WARN: ${VALKEY_CLI_SOURCE} not found or not executable; networking tests that shell out to valkey-cli may fail." >&2
+fi
 
 echo ""
 echo "Next:"

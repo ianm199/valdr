@@ -745,7 +745,7 @@ pub(crate) fn spawn_signal_shutdown_watcher(
         let _ = thread::Builder::new()
             .name("signal-shutdown".to_string())
             .spawn(move || {
-                let mut seen = redis_commands::connection::shutdown_signal_count();
+                let mut seen = 0usize;
                 loop {
                     thread::sleep(Duration::from_millis(10));
                     let current = redis_commands::connection::shutdown_signal_count();
@@ -780,6 +780,9 @@ pub(crate) fn spawn_signal_shutdown_watcher(
                         continue;
                     }
                     if signal == libc::SIGTERM && !redis_commands::connection::debug_pause_cron() {
+                        if !server.persistence.loading() {
+                            let _ = save_rdb_for_signal_shutdown(&server, &live_config);
+                        }
                         redis_commands::connection::log_server_notice("ready to exit, bye bye");
                         unsafe { libc::_exit(0) };
                     }
@@ -804,6 +807,41 @@ pub(crate) fn spawn_signal_shutdown_watcher(
     #[cfg(not(unix))]
     {
         let _ = live_config;
+    }
+}
+
+fn save_rdb_for_signal_shutdown(
+    server: &redis_core::RedisServer,
+    live_config: &redis_core::live_config::LiveConfig,
+) -> bool {
+    if !live_config.save_enabled() || server.dirty() == 0 {
+        return true;
+    }
+    let globals = global_databases();
+    let mut snapshot_dbs = Vec::with_capacity(globals.count());
+    for index in 0..globals.count() {
+        let handle = globals.get(index as u32);
+        let guard = match handle.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        snapshot_dbs.push(redis_core::KeyspaceSnapshotDb::from_keyspace(
+            guard.id,
+            guard.snapshot_keyspace(),
+        ));
+    }
+    let snapshot = redis_core::KeyspaceSnapshot::new(snapshot_dbs, Duration::ZERO);
+    let dbs = snapshot.to_dbs();
+    let path = redis_core::rdb::rdb_path(&live_config.rdb_dir(), &live_config.rdb_filename());
+    match redis_core::rdb::save_rdb_databases(&dbs, &path) {
+        Ok(()) => true,
+        Err(err) => {
+            redis_commands::connection::log_server_notice(&format!(
+                "Error trying to save the DB, can't exit: {}",
+                err
+            ));
+            false
+        }
     }
 }
 

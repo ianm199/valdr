@@ -43,6 +43,8 @@ const READ_ONLY_SCRIPT_WRITE_ERROR_LUA: &str =
     "Write commands are not allowed from read-only scripts. script:1";
 const READ_ONLY_SCRIPT_WRITE_ERROR_RESP: &str =
     "ERR Write commands are not allowed from read-only scripts.";
+const REPLICA_READONLY_ERROR_PAYLOAD: &[u8] =
+    b"READONLY You can't write against a read only replica.";
 use redis_types::{RedisError, RedisResult, RedisString};
 
 use crate::dispatch::{command_acl_categories, command_is_denyoom, dispatch_command_name};
@@ -2496,13 +2498,13 @@ fn active_function_call() -> mlua::Result<ActiveFunctionCall> {
 }
 
 fn active_function_dirty(active: ActiveFunctionCall) -> &'static Cell<bool> {
- // The pointer is installed only for the duration of `CachedFunctionRuntime::call`
- // and cleared by `ActiveFunctionCallGuard` before the stack frame exits.
+    // The pointer is installed only for the duration of `CachedFunctionRuntime::call`
+    // and cleared by `ActiveFunctionCallGuard` before the stack frame exits.
     unsafe { &*active.script_dirty }
 }
 
 fn active_function_error_recorded(active: ActiveFunctionCall) -> &'static Cell<bool> {
- // See `active_function_dirty`; both cells live in the guarded call frame.
+    // See `active_function_dirty`; both cells live in the guarded call frame.
     unsafe { &*active.script_error_already_recorded }
 }
 
@@ -2510,9 +2512,9 @@ fn with_active_function_context<R>(
     f: impl FnOnce(&mut CommandContext<'static>, ActiveFunctionCall) -> mlua::Result<R>,
 ) -> mlua::Result<R> {
     let active = active_function_call()?;
- // The cached Lua callbacks are process-static, but the command context is
- // per-call. The guard above ensures this raw pointer is valid only while
- // the callback is executing on the same thread.
+    // The cached Lua callbacks are process-static, but the command context is
+    // per-call. The guard above ensures this raw pointer is valid only while
+    // the callback is executing on the same thread.
     let ctx = unsafe { &mut *active.ctx };
     f(ctx, active)
 }
@@ -2533,10 +2535,7 @@ fn snapshot_function_libraries() -> Vec<LoadedFunctionLibrary> {
 pub(crate) fn function_library_codes_for_aof_rewrite() -> Vec<Vec<u8>> {
     let mut libraries = snapshot_function_libraries();
     libraries.sort_by(|a, b| ascii_casecmp_bytes(&a.name, &b.name));
-    libraries
-        .into_iter()
-        .map(|library| library.code)
-        .collect()
+    libraries.into_iter().map(|library| library.code).collect()
 }
 
 pub(crate) fn function_vm_memory_used_estimate() -> usize {
@@ -2696,7 +2695,33 @@ fn replica_readonly_script_blocked(ctx: &CommandContext<'_>) -> bool {
 }
 
 fn replica_readonly_error() -> RedisError {
-    RedisError::runtime(b"READONLY You can't write against a read only replica.")
+    RedisError::runtime(REPLICA_READONLY_ERROR_PAYLOAD)
+}
+
+fn replica_readonly_lua_call_payload() -> Vec<u8> {
+    lua_script_call_error_payload(REPLICA_READONLY_ERROR_PAYLOAD.to_vec())
+}
+
+fn replica_readonly_lua_call_error() -> LuaError {
+    LuaError::RuntimeError(
+        String::from_utf8_lossy(&replica_readonly_lua_call_payload()).into_owned(),
+    )
+}
+
+fn replica_readonly_lua_call_table(lua: &Lua) -> mlua::Result<LuaValue> {
+    let t = lua.create_table()?;
+    t.raw_set(
+        "err",
+        lua.create_string(&replica_readonly_lua_call_payload())?,
+    )?;
+    t.raw_set(LUA_ERROR_ALREADY_RECORDED_FIELD, true)?;
+    Ok(LuaValue::Table(t))
+}
+
+fn replica_readonly_lua_call_blocked(ctx: &CommandContext<'_>, args: &[Vec<u8>]) -> bool {
+    call_is_write_command(args)
+        && replica_readonly_script_blocked(ctx)
+        && ctx.live_config().slave_read_only()
 }
 
 fn good_replicas_status(ctx: &CommandContext<'_>) -> bool {
@@ -3627,6 +3652,7 @@ fn is_known_function_flag(flag: &[u8]) -> bool {
 
 fn cached_function_call(lua_inner: &Lua, args: MultiValue) -> mlua::Result<LuaValue> {
     let arg_bytes = collect_call_args(args)?;
+    let is_write = call_is_write_command(&arg_bytes);
     if script_command_not_allowed(&arg_bytes) {
         return Err(LuaError::RuntimeError(
             "This Redis command is not allowed from script".to_string(),
@@ -3639,16 +3665,21 @@ fn cached_function_call(lua_inner: &Lua, args: MultiValue) -> mlua::Result<LuaVa
     {
         return Err(stale_replica_lua_call_error());
     }
-    if active.read_only && call_is_write_command(&arg_bytes) {
-        record_script_rejected_command(&arg_bytes, READ_ONLY_SCRIPT_WRITE_ERROR_PAYLOAD);
-        active_function_error_recorded(active).set(true);
-        return Err(LuaError::RuntimeError(
-            READ_ONLY_SCRIPT_WRITE_ERROR_LUA.to_string(),
-        ));
-    }
 
     with_active_function_context(|ctx, active| {
-        if call_is_write_command(&arg_bytes) && !good_replicas_status(&*ctx) {
+        if replica_readonly_lua_call_blocked(&*ctx, &arg_bytes) {
+            record_script_rejected_command(&arg_bytes, REPLICA_READONLY_ERROR_PAYLOAD);
+            active_function_error_recorded(active).set(true);
+            return Err(replica_readonly_lua_call_error());
+        }
+        if active.read_only && is_write {
+            record_script_rejected_command(&arg_bytes, READ_ONLY_SCRIPT_WRITE_ERROR_PAYLOAD);
+            active_function_error_recorded(active).set(true);
+            return Err(LuaError::RuntimeError(
+                READ_ONLY_SCRIPT_WRITE_ERROR_LUA.to_string(),
+            ));
+        }
+        if is_write && !good_replicas_status(&*ctx) {
             record_script_rejected_command(&arg_bytes, NOREPLICAS_ERROR.as_bytes());
             active_function_error_recorded(active).set(true);
             return Err(noreplicas_lua_error());
@@ -3676,6 +3707,7 @@ fn cached_function_call(lua_inner: &Lua, args: MultiValue) -> mlua::Result<LuaVa
 
 fn cached_function_pcall(lua_inner: &Lua, args: MultiValue) -> mlua::Result<LuaValue> {
     let arg_bytes = collect_call_args(args)?;
+    let is_write = call_is_write_command(&arg_bytes);
     if script_command_not_allowed(&arg_bytes) {
         let t = lua_inner.create_table()?;
         t.raw_set(
@@ -3696,19 +3728,23 @@ fn cached_function_pcall(lua_inner: &Lua, args: MultiValue) -> mlua::Result<LuaV
         )?;
         return Ok(LuaValue::Table(t));
     }
-    if active.read_only && call_is_write_command(&arg_bytes) {
-        record_script_rejected_command(&arg_bytes, READ_ONLY_SCRIPT_WRITE_ERROR_PAYLOAD);
-        let t = lua_inner.create_table()?;
-        t.raw_set(
-            "err",
-            lua_inner.create_string(READ_ONLY_SCRIPT_WRITE_ERROR_RESP)?,
-        )?;
-        t.raw_set(LUA_ERROR_ALREADY_RECORDED_FIELD, true)?;
-        return Ok(LuaValue::Table(t));
-    }
 
     with_active_function_context(|ctx, active| {
-        if call_is_write_command(&arg_bytes) && !good_replicas_status(&*ctx) {
+        if replica_readonly_lua_call_blocked(&*ctx, &arg_bytes) {
+            record_script_rejected_command(&arg_bytes, REPLICA_READONLY_ERROR_PAYLOAD);
+            return replica_readonly_lua_call_table(lua_inner);
+        }
+        if active.read_only && is_write {
+            record_script_rejected_command(&arg_bytes, READ_ONLY_SCRIPT_WRITE_ERROR_PAYLOAD);
+            let t = lua_inner.create_table()?;
+            t.raw_set(
+                "err",
+                lua_inner.create_string(READ_ONLY_SCRIPT_WRITE_ERROR_RESP)?,
+            )?;
+            t.raw_set(LUA_ERROR_ALREADY_RECORDED_FIELD, true)?;
+            return Ok(LuaValue::Table(t));
+        }
+        if is_write && !good_replicas_status(&*ctx) {
             record_script_rejected_command(&arg_bytes, NOREPLICAS_ERROR.as_bytes());
             return noreplicas_lua_table(lua_inner);
         }
@@ -3886,12 +3922,9 @@ fn compile_cached_function_runtime(
                 .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?,
         )
         .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
-    redis_tbl
-        .raw_set(
-            "set_repl",
-            create_set_repl_function(&lua)
-                .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?,
-        )
+    install_set_repl_function(&lua, &redis_tbl)
+        .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
+    install_log_function(&lua, &redis_tbl)
         .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
     redis_tbl
         .raw_set(
@@ -3903,20 +3936,7 @@ fn compile_cached_function_runtime(
             .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?,
         )
         .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
-    redis_tbl
-        .raw_set(
-            "setresp",
-            lua.create_function(|lua_inner, n: i64| -> mlua::Result<()> {
-                if n != 2 && n != 3 {
-                    return Err(LuaError::RuntimeError(
-                        "RESP version must be 2 or 3".to_string(),
-                    ));
-                }
-                lua_inner.set_named_registry_value("__redis_resp_view", n)?;
-                Ok(())
-            })
-            .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?,
-        )
+    install_setresp_function(&lua, &redis_tbl)
         .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
 
     let registrations: Rc<RefCell<Vec<RuntimeFunctionRegistration>>> =
@@ -4240,11 +4260,25 @@ fn install_redis_api_constants(redis_tbl: &LuaTable) -> mlua::Result<()> {
     redis_tbl.raw_set("REPL_SLAVE", 2)?;
     redis_tbl.raw_set("REPL_REPLICA", 2)?;
     redis_tbl.raw_set("REPL_ALL", 3)?;
+    redis_tbl.raw_set("LOG_DEBUG", 0)?;
+    redis_tbl.raw_set("LOG_VERBOSE", 1)?;
+    redis_tbl.raw_set("LOG_NOTICE", 2)?;
+    redis_tbl.raw_set("LOG_WARNING", 3)?;
     Ok(())
 }
 
 fn create_set_repl_function(lua: &Lua) -> mlua::Result<LuaFunction> {
-    lua.create_function(|lua_inner, flags: i64| -> mlua::Result<()> {
+    lua.create_function(|lua_inner, args: MultiValue| -> mlua::Result<()> {
+        if args.len() != 1 {
+            return Err(LuaError::RuntimeError(
+                "ERR server.set_repl() requires one argument.".to_string(),
+            ));
+        }
+        let flags = match args.front() {
+            Some(LuaValue::Integer(n)) => *n,
+            Some(LuaValue::Number(n)) => *n as i64,
+            _ => 0,
+        };
         if !(0..=3).contains(&flags) {
             return Err(LuaError::RuntimeError(
                 "Invalid replication flags".to_string(),
@@ -4253,6 +4287,95 @@ fn create_set_repl_function(lua: &Lua) -> mlua::Result<LuaFunction> {
         lua_inner.set_named_registry_value("__redis_repl_flags", flags)?;
         Ok(())
     })
+}
+
+fn install_set_repl_function(lua: &Lua, redis_tbl: &LuaTable) -> mlua::Result<()> {
+    let raw_set_repl = create_set_repl_function(lua)?;
+    install_error_normalizing_function(lua, redis_tbl, "__raw_set_repl", "set_repl", raw_set_repl)
+}
+
+fn lua_log_arg_to_string(value: &LuaValue) -> Option<String> {
+    match value {
+        LuaValue::String(s) => Some(String::from_utf8_lossy(&s.as_bytes()).into_owned()),
+        LuaValue::Integer(n) => Some(n.to_string()),
+        LuaValue::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+fn install_error_normalizing_function(
+    lua: &Lua,
+    redis_tbl: &LuaTable,
+    raw_name: &str,
+    public_name: &str,
+    raw: LuaFunction,
+) -> mlua::Result<()> {
+    redis_tbl.raw_set(raw_name, raw.clone())?;
+    let shim = lua
+        .load(
+            "local raw = ...\n\
+             return function(...)\n\
+                 local ok, res = pcall(raw, ...)\n\
+                 if ok then return res end\n\
+                 local msg = tostring(res)\n\
+                 msg = msg:gsub('^.-: ', '', 1)\n\
+                 msg = msg:gsub('\\nstack traceback.*$', '')\n\
+                 if msg == '' then msg = 'ERR' end\n\
+                 local code = string.match(msg, '^[^ \\t]*') or ''\n\
+                 if string.sub(msg, 1, 4) ~= 'ERR ' and not string.match(code, '^[A-Z0-9_]+$') then\n\
+                     msg = 'ERR ' .. msg\n\
+                 end\n\
+                 error(msg, 0)\n\
+             end\n",
+        )
+        .set_name("redis_api_error_shim")
+        .call::<LuaFunction>(raw)?;
+    redis_tbl.raw_set(public_name, shim)?;
+    Ok(())
+}
+
+fn install_log_function(lua: &Lua, redis_tbl: &LuaTable) -> mlua::Result<()> {
+    let raw_log = lua.create_function(|_lua_inner, args: MultiValue| -> mlua::Result<()> {
+        if args.len() < 2 {
+            return Err(LuaError::RuntimeError(
+                "ERR server.log() requires two arguments or more.".to_string(),
+            ));
+        }
+        let level = match args.front() {
+            Some(LuaValue::Integer(n)) => *n,
+            Some(LuaValue::Number(n)) => *n as i64,
+            _ => {
+                return Err(LuaError::RuntimeError(
+                    "ERR First argument must be a number (log level).".to_string(),
+                ));
+            }
+        };
+        if !(0..=3).contains(&level) {
+            return Err(LuaError::RuntimeError("ERR Invalid log level.".to_string()));
+        }
+        let message = args
+            .iter()
+            .skip(1)
+            .filter_map(lua_log_arg_to_string)
+            .collect::<Vec<_>>()
+            .join(" ");
+        crate::connection::log_server_notice(&message);
+        Ok(())
+    })?;
+    install_error_normalizing_function(lua, redis_tbl, "__raw_log", "log", raw_log)
+}
+
+fn install_setresp_function(lua: &Lua, redis_tbl: &LuaTable) -> mlua::Result<()> {
+    let raw_setresp = lua.create_function(|lua_inner, n: i64| -> mlua::Result<()> {
+        if n != 2 && n != 3 {
+            return Err(LuaError::RuntimeError(
+                "ERR RESP version must be 2 or 3.".to_string(),
+            ));
+        }
+        lua_inner.set_named_registry_value("__redis_resp_view", n)?;
+        Ok(())
+    })?;
+    install_error_normalizing_function(lua, redis_tbl, "__raw_setresp", "setresp", raw_setresp)
 }
 
 fn acl_check_cmd_allowed(ctx: &CommandContext<'_>, args: &[Vec<u8>]) -> mlua::Result<bool> {
@@ -4516,7 +4639,14 @@ fn run_loaded_function_uncached(
                     {
                         return Err(stale_replica_lua_call_error());
                     }
-                    if read_only && call_is_write_command(&arg_bytes) {
+                    let is_write = call_is_write_command(&arg_bytes);
+                    let mut borrow = cell.borrow_mut();
+                    if replica_readonly_lua_call_blocked(&borrow, &arg_bytes) {
+                        record_script_rejected_command(&arg_bytes, REPLICA_READONLY_ERROR_PAYLOAD);
+                        error_recorded.set(true);
+                        return Err(replica_readonly_lua_call_error());
+                    }
+                    if read_only && is_write {
                         record_script_rejected_command(
                             &arg_bytes,
                             READ_ONLY_SCRIPT_WRITE_ERROR_PAYLOAD,
@@ -4526,8 +4656,7 @@ fn run_loaded_function_uncached(
                             READ_ONLY_SCRIPT_WRITE_ERROR_LUA.to_string(),
                         ));
                     }
-                    let mut borrow = cell.borrow_mut();
-                    if call_is_write_command(&arg_bytes) && !good_replicas_status(&borrow) {
+                    if is_write && !good_replicas_status(&borrow) {
                         record_script_rejected_command(&arg_bytes, NOREPLICAS_ERROR.as_bytes());
                         error_recorded.set(true);
                         return Err(noreplicas_lua_error());
@@ -4584,7 +4713,13 @@ fn run_loaded_function_uncached(
                         )?;
                         return Ok(LuaValue::Table(t));
                     }
-                    if read_only && call_is_write_command(&arg_bytes) {
+                    let is_write = call_is_write_command(&arg_bytes);
+                    let mut borrow = cell.borrow_mut();
+                    if replica_readonly_lua_call_blocked(&borrow, &arg_bytes) {
+                        record_script_rejected_command(&arg_bytes, REPLICA_READONLY_ERROR_PAYLOAD);
+                        return replica_readonly_lua_call_table(lua_inner);
+                    }
+                    if read_only && is_write {
                         record_script_rejected_command(
                             &arg_bytes,
                             READ_ONLY_SCRIPT_WRITE_ERROR_PAYLOAD,
@@ -4597,8 +4732,7 @@ fn run_loaded_function_uncached(
                         t.raw_set(LUA_ERROR_ALREADY_RECORDED_FIELD, true)?;
                         return Ok(LuaValue::Table(t));
                     }
-                    let mut borrow = cell.borrow_mut();
-                    if call_is_write_command(&arg_bytes) && !good_replicas_status(&borrow) {
+                    if is_write && !good_replicas_status(&borrow) {
                         record_script_rejected_command(&arg_bytes, NOREPLICAS_ERROR.as_bytes());
                         return noreplicas_lua_table(lua_inner);
                     }
@@ -4635,8 +4769,6 @@ fn run_loaded_function_uncached(
 
         let replicate_fn =
             lua.create_function(|_lua, _: MultiValue| -> mlua::Result<bool> { Ok(true) })?;
-        let set_repl_fn = create_set_repl_function(&lua)?;
-
         let acl_check_fn = {
             let cell = &ctx_cell;
             scope.create_function_mut(
@@ -4679,18 +4811,10 @@ fn run_loaded_function_uncached(
         redis_tbl.raw_set("status_reply", status_reply_fn)?;
         redis_tbl.raw_set("sha1hex", sha1hex_fn)?;
         redis_tbl.raw_set("replicate_commands", replicate_fn)?;
-        redis_tbl.raw_set("set_repl", set_repl_fn)?;
+        install_set_repl_function(&lua, &redis_tbl)?;
+        install_log_function(&lua, &redis_tbl)?;
         redis_tbl.raw_set("acl_check_cmd", acl_check_fn)?;
-        let setresp_fn = lua.create_function(|lua_inner, n: i64| -> mlua::Result<()> {
-            if n != 2 && n != 3 {
-                return Err(LuaError::RuntimeError(
-                    "RESP version must be 2 or 3".to_string(),
-                ));
-            }
-            lua_inner.set_named_registry_value("__redis_resp_view", n)?;
-            Ok(())
-        })?;
-        redis_tbl.raw_set("setresp", setresp_fn)?;
+        install_setresp_function(&lua, &redis_tbl)?;
         let load_api = lua.create_table()?;
         install_redis_api_constants(&load_api)?;
         load_api.raw_set("register_function", register_fn)?;
@@ -5093,7 +5217,20 @@ fn run_script(
                 {
                     return Err(stale_replica_lua_call_error());
                 }
-                if read_only && call_is_write_command(&arg_bytes) {
+                let is_write = call_is_write_command(&arg_bytes);
+                let mut borrow = cell.borrow_mut();
+                maybe_enter_eval_timedout_mode(
+                    &borrow,
+                    script_start,
+                    timedout.as_ref(),
+                    dirty.as_ref(),
+                );
+                if replica_readonly_lua_call_blocked(&borrow, &arg_bytes) {
+                    record_script_rejected_command(&arg_bytes, REPLICA_READONLY_ERROR_PAYLOAD);
+                    error_recorded.set(true);
+                    return Err(replica_readonly_lua_call_error());
+                }
+                if read_only && is_write {
                     record_script_rejected_command(
                         &arg_bytes,
                         READ_ONLY_SCRIPT_WRITE_ERROR_PAYLOAD,
@@ -5103,9 +5240,7 @@ fn run_script(
                         READ_ONLY_SCRIPT_WRITE_ERROR_LUA.to_string(),
                     ));
                 }
-                let mut borrow = cell.borrow_mut();
-                maybe_enter_eval_timedout_mode(&borrow, script_start, timedout.as_ref(), dirty.as_ref());
-                if call_is_write_command(&arg_bytes) && !good_replicas_status(&borrow) {
+                if is_write && !good_replicas_status(&borrow) {
                     record_script_rejected_command(&arg_bytes, NOREPLICAS_ERROR.as_bytes());
                     error_recorded.set(true);
                     return Err(noreplicas_lua_error());
@@ -5162,7 +5297,19 @@ fn run_script(
                         )?;
                         return Ok(LuaValue::Table(t));
                     }
-                    if read_only && call_is_write_command(&arg_bytes) {
+                    let is_write = call_is_write_command(&arg_bytes);
+                    let mut borrow = cell.borrow_mut();
+                    maybe_enter_eval_timedout_mode(
+                        &borrow,
+                        script_start,
+                        timedout.as_ref(),
+                        dirty.as_ref(),
+                    );
+                    if replica_readonly_lua_call_blocked(&borrow, &arg_bytes) {
+                        record_script_rejected_command(&arg_bytes, REPLICA_READONLY_ERROR_PAYLOAD);
+                        return replica_readonly_lua_call_table(lua_inner);
+                    }
+                    if read_only && is_write {
                         record_script_rejected_command(
                             &arg_bytes,
                             READ_ONLY_SCRIPT_WRITE_ERROR_PAYLOAD,
@@ -5175,9 +5322,7 @@ fn run_script(
                         t.raw_set(LUA_ERROR_ALREADY_RECORDED_FIELD, true)?;
                         return Ok(LuaValue::Table(t));
                     }
-                    let mut borrow = cell.borrow_mut();
-                    maybe_enter_eval_timedout_mode(&borrow, script_start, timedout.as_ref(), dirty.as_ref());
-                    if call_is_write_command(&arg_bytes) && !good_replicas_status(&borrow) {
+                    if is_write && !good_replicas_status(&borrow) {
                         record_script_rejected_command(&arg_bytes, NOREPLICAS_ERROR.as_bytes());
                         return noreplicas_lua_table(lua_inner);
                     }
@@ -5214,8 +5359,6 @@ fn run_script(
 
         let replicate_fn =
             lua.create_function(|_lua, _: MultiValue| -> mlua::Result<bool> { Ok(true) })?;
-        let set_repl_fn = create_set_repl_function(&lua)?;
-
         let acl_check_fn = {
             let cell = &ctx_cell;
             scope.create_function_mut(
@@ -5233,18 +5376,10 @@ fn run_script(
         redis_tbl.raw_set("status_reply", status_reply_fn)?;
         redis_tbl.raw_set("sha1hex", sha1hex_fn)?;
         redis_tbl.raw_set("replicate_commands", replicate_fn)?;
-        redis_tbl.raw_set("set_repl", set_repl_fn)?;
+        install_set_repl_function(&lua, &redis_tbl)?;
+        install_log_function(&lua, &redis_tbl)?;
         redis_tbl.raw_set("acl_check_cmd", acl_check_fn)?;
-        let setresp_fn = lua.create_function(|lua_inner, n: i64| -> mlua::Result<()> {
-            if n != 2 && n != 3 {
-                return Err(LuaError::RuntimeError(
-                    "RESP version must be 2 or 3".to_string(),
-                ));
-            }
-            lua_inner.set_named_registry_value("__redis_resp_view", n)?;
-            Ok(())
-        })?;
-        redis_tbl.raw_set("setresp", setresp_fn)?;
+        install_setresp_function(&lua, &redis_tbl)?;
         lua.globals().set("redis", redis_tbl.clone())?;
         lua.globals().set("server", redis_tbl.clone())?;
 

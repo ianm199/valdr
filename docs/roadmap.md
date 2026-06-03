@@ -2,9 +2,12 @@
 
 ## Near term
 
-- Take AOF and replication out of alpha
+- Keep AOF release wording narrow and evidence-backed
+  - AOF is single-node alpha, correctness-gated on the current tree
+  - Repeat AOF matrix/rewrite-latency telemetry on isolated release hosts before stronger public performance or durability claims
+- Take replication out of alpha
   - Prove partial-resync (PSYNC) instead of always doing a full re-sync
-  - AOF multi-part + truncated-tail recovery edge cases
+  - Define and gate the production HA story separately from the single-node alpha
 - Add Clustering and HA to get closer to feature parity
 
 ## Performance

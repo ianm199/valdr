@@ -84,12 +84,15 @@ This repo heavily leveraged coding agents in the process. This was largely inspi
 Valkey's own test suite [full breakdown by category → valdr.dev/coverage.html](https://valdr.dev/coverage.html).
 
 ```
-Counted assertions (single-node)  [████████████████████] 100.0%   3,074 / 3,074
-Single-node core blocks           [███████████████████░]  99.6%   2,531 / 2,541
-Full upstream suite               [███████████░░░░░░░░░]   59%     2,531 / 4,299
+Counted assertions (54-file run)  [████████████████████] 100.0%   3,035 / 3,035
+Single-node core blocks           [████████████████████]  99.96%  2,525 / 2,526
+Full upstream suite               [███████████░░░░░░░░░]   59%     2,534 / 4,281
 ```
 
-The full-suite figure is lower because ~41% of upstream tests cover features valdr doesn't build (cluster, modules, Sentinel)
+The only unproven single-node core source block is `unit/replybufsize.tcl`, which
+the current tag policy filters to a 0/0 run. The full-suite figure is lower
+because ~41% of upstream tests cover surfaces valdr does not claim yet: cluster,
+modules, Sentinel, HA replication, and platform-specific integration.
 
 ## Status
 
@@ -107,10 +110,10 @@ The full-suite figure is lower because ~41% of upstream tests cover features val
 |---|---|---|
 | Single-node RESP wire behavior | Full on current smoke corpus | 23 / 23 byte-exact scripts vs upstream Valkey |
 | RDB load/save interop | Full on current corpus | 378 / 378 bidirectional checks |
-| Upstream TCL suite | Single-node core green; not a full-suite claim | Full denominator 4,299 blocks, bucketed at [valdr.dev/coverage.html](https://valdr.dev/coverage.html) |
+| Upstream TCL suite | Single-node core green; not a full-suite claim | 3,035 / 3,035 counted assertions in the 54-file wrapper; full denominator 4,281 source blocks bucketed at [valdr.dev/coverage.html](https://valdr.dev/coverage.html) |
 | Cluster mode | Not implemented | Out of scope for current alpha |
 | Loadable C modules | Not implemented | Out of scope for current alpha |
-| Production HA / Sentinel | Not claimed | Replication/AOF exist but are not production-conformance gated |
+| Production HA / Sentinel | Not claimed | Replication remains alpha; PSYNC/HA behavior is outside the single-node alpha promise. AOF is single-node correctness-gated, with performance/durability wording limited to measured telemetry. |
 | In-process TLS | Enabled (rustls; no OpenSSL) | TLS 1.2 + 1.3; mTLS tri-state (`no`/`optional`/`yes`); dynamic CONFIG SET of `tls-protocols`, `tls-auth-clients`, cert/key paths. CBC-suite tests in `unit/tls.tcl` are a deliberate rustls divergence. |
 
 ## Features
@@ -131,7 +134,7 @@ The full-suite figure is lower because ~41% of upstream tests cover features val
 | Expiration / TTL | Implemented |
 | Maxmemory eviction | Implemented |
 | RDB persistence | Implemented and oracle-gated |
-| AOF | Alpha |
+| AOF | Single-node alpha, correctness-gated |
 | Replication | Alpha |
 | RedisJSON-compatible commands | Native subset |
 | RedisBloom-compatible commands | Native subset |
@@ -225,7 +228,7 @@ bash harness/bench/official-warm-run.sh
 ```
 
 The single source of truth for what these prove — counted TCL passes,
-single-node source-block coverage, and how the full 4,299-block upstream
+single-node source-block coverage, and how the full 4,281-block upstream
 denominator is bucketed — is
 [valdr.dev/coverage.html](https://valdr.dev/coverage.html).
 

@@ -671,6 +671,10 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
         return Ok(());
     }
 
+    if !name.eq_ignore_ascii_case(b"CONFIG") {
+        crate::config_cmd::maybe_start_scheduled_initial_aof(ctx)?;
+    }
+
     let fed_monitor_before = should_feed_monitor_before(ctx, name, metadata);
     if fed_monitor_before && crate::connection::has_monitor_clients() {
         crate::connection::feed_monitors(ctx, &ctx.client_ref().argv);
@@ -2247,6 +2251,9 @@ fn enforce_busy_script_gate(
     if !crate::eval::is_script_busy() {
         return None;
     }
+    if ctx.client_ref().flag_lua() && crate::eval::busy_script_owner_is(ctx.client_ref().id) {
+        return None;
+    }
     if ascii_eq_ignore_case(name, b"PING") && crate::eval::busy_script_owner_is(ctx.client_ref().id)
     {
         return None;
@@ -2261,10 +2268,55 @@ fn enforce_busy_script_gate(
 }
 
 fn enforce_loading_gate(ctx: &CommandContext<'_>, allow_loading_command: bool) -> Option<Vec<u8>> {
-    if !ctx.server().persistence.loading() || allow_loading_command {
+    if !ctx.server().persistence.loading()
+        || allow_loading_command
+        || command_allowed_during_loading_by_args(ctx)
+    {
         return None;
     }
     Some(loading_error_reply())
+}
+
+fn command_allowed_during_loading_by_args(ctx: &CommandContext<'_>) -> bool {
+    let Some(command) = ctx.client_ref().arg(0) else {
+        return false;
+    };
+    if ascii_eq_ignore_case(command.as_bytes(), b"MEMORY") {
+        let Some(subcommand) = ctx.client_ref().arg(1) else {
+            return false;
+        };
+        let subcommand = subcommand.as_bytes();
+        return ascii_eq_ignore_case(subcommand, b"HELP")
+            || ascii_eq_ignore_case(subcommand, b"MALLOC-STATS")
+            || ascii_eq_ignore_case(subcommand, b"PURGE");
+    }
+    if !ascii_eq_ignore_case(command.as_bytes(), b"CONFIG") {
+        return false;
+    }
+    let Some(subcommand) = ctx.client_ref().arg(1) else {
+        return false;
+    };
+    if ascii_eq_ignore_case(subcommand.as_bytes(), b"GET") {
+        return ctx.arg_count() == 3
+            && ctx
+                .client_ref()
+                .arg(2)
+                .is_some_and(|key| ascii_eq_ignore_case(key.as_bytes(), b"loglevel"));
+    }
+    if !ascii_eq_ignore_case(subcommand.as_bytes(), b"SET") || ctx.arg_count() < 4 {
+        return false;
+    }
+    let mut index = 2usize;
+    while index + 1 < ctx.arg_count() {
+        let Some(key) = ctx.client_ref().arg(index) else {
+            return false;
+        };
+        if !ascii_eq_ignore_case(key.as_bytes(), b"loglevel") {
+            return false;
+        }
+        index += 2;
+    }
+    index == ctx.arg_count()
 }
 
 fn loading_error_reply() -> Vec<u8> {
