@@ -467,6 +467,28 @@ def main() -> int:
                     "denominator": 1,
                 }
             )
+            measurements.extend(
+                [
+                    {
+                        **identity,
+                        "metric": "tcl_parsed_failure_count",
+                        "value": len(failures),
+                        "unit": "failures",
+                    },
+                    {
+                        **identity,
+                        "metric": "tcl_file_has_abort_test",
+                        "numerator": 1 if abort_test else 0,
+                        "denominator": 1,
+                    },
+                    {
+                        **identity,
+                        "metric": "tcl_file_has_exception",
+                        "numerator": 1 if exception else 0,
+                        "denominator": 1,
+                    },
+                ]
+            )
             if passed is not None and failed is not None:
                 measurements.extend(
                     [
@@ -491,9 +513,12 @@ def main() -> int:
     total_failed = sum(item["failed"] or 0 for item in file_results)
     timed_out = sum(1 for item in file_results if item["timed_out"])
     no_summary = sum(1 for item in file_results if item["passed"] is None or item["failed"] is None)
+    parsed_failures = sum(len(item["failures"]) for item in file_results)
+    abort_points = sum(1 for item in file_results if item["abort_test"] or item["exception"])
     summary = (
         f"TCL survey: {len(file_results)} files, {total_passed} passed tests, "
-        f"{total_failed} failed tests, {timed_out} timed out, {no_summary} without summary"
+        f"{total_failed} failed tests, {timed_out} timed out, {no_summary} without summary, "
+        f"{parsed_failures} parsed failure lines, {abort_points} abort/exception points"
     )
 
     result = {

@@ -43,7 +43,7 @@ pub(crate) fn run_check_aof(args: &[String]) -> i32 {
         InputFileType::Resp => check_old_style_aof(path, fix, false),
         InputFileType::RdbPreamble => check_old_style_aof(path, fix, true),
     }
- // The check functions terminate the process via `std::process::exit`.
+    // The check functions terminate the process via `std::process::exit`.
     0
 }
 
@@ -183,37 +183,129 @@ struct Manifest {
 /// "Invalid AOF manifest file format".
 fn load_manifest(path: &Path) -> Result<Manifest, ()> {
     let content = std::fs::read(path).map_err(|_| ())?;
+    if content.is_empty() {
+        return Err(());
+    }
     let mut base = None;
     let mut incr = Vec::new();
-    for raw in content.split(|&b| b == b'\n') {
-        if raw.is_empty() {
-            continue;
-        }
+    let mut max_incr_seq = 0i64;
+    let mut saw_line = false;
+    let mut pos = 0usize;
+
+    while pos < content.len() {
+        let Some(rel_end) = content[pos..].iter().position(|&b| b == b'\n') else {
+            return Err(());
+        };
+        let end = pos + rel_end;
+        let raw = &content[pos..=end];
+        pos = end + 1;
+        saw_line = true;
+
         if raw.len() > MANIFEST_MAX_LINE {
             return Err(());
         }
         if raw.first() == Some(&b'#') {
             continue;
         }
-        let fields: Vec<&[u8]> = raw
-            .split(|&b| b == b' ' || b == b'\r')
+        let line = trim_manifest_line(raw);
+        if line.is_empty() {
+            return Err(());
+        }
+
+        let fields: Vec<&[u8]> = line
+            .split(|b| b.is_ascii_whitespace())
             .filter(|f| !f.is_empty())
             .collect();
         if fields.len() < 6 || !fields.len().is_multiple_of(2) {
             return Err(());
         }
-        if fields[0] != b"file" || fields[2] != b"seq" || fields[4] != b"type" {
-            return Err(());
+
+        let mut name: Option<&[u8]> = None;
+        let mut seq: Option<i64> = None;
+        let mut file_type: Option<&[u8]> = None;
+        for pair in fields.chunks_exact(2) {
+            if pair[0].eq_ignore_ascii_case(b"file") {
+                if !path_is_base_name(pair[1]) {
+                    return Err(());
+                }
+                name = Some(pair[1]);
+            } else if pair[0].eq_ignore_ascii_case(b"seq") {
+                seq = parse_i64_ascii(pair[1]);
+            } else if pair[0].eq_ignore_ascii_case(b"type") {
+                file_type = Some(pair[1]);
+            }
         }
-        let name = String::from_utf8(fields[1].to_vec()).map_err(|_| ())?;
-        match fields[5] {
-            b"b" => base = Some(name),
-            b"i" => incr.push(name),
+
+        let name = name.ok_or(())?;
+        let seq = seq.filter(|n| *n != 0).ok_or(())?;
+        let file_type = file_type.ok_or(())?;
+        let name = String::from_utf8(name.to_vec()).map_err(|_| ())?;
+
+        match file_type {
+            b"b" => {
+                if base.is_some() {
+                    return Err(());
+                }
+                base = Some(name);
+            }
+            b"i" => {
+                if seq <= max_incr_seq {
+                    return Err(());
+                }
+                max_incr_seq = seq;
+                incr.push(name);
+            }
             b"h" => {}
             _ => return Err(()),
         }
     }
+    if !saw_line || (base.is_none() && incr.is_empty()) {
+        return Err(());
+    }
     Ok(Manifest { base, incr })
+}
+
+fn trim_manifest_line(line: &[u8]) -> &[u8] {
+    let mut start = 0usize;
+    let mut end = line.len();
+    while start < end && matches!(line[start], b' ' | b'\t' | b'\r' | b'\n') {
+        start += 1;
+    }
+    while end > start && matches!(line[end - 1], b' ' | b'\t' | b'\r' | b'\n') {
+        end -= 1;
+    }
+    &line[start..end]
+}
+
+fn path_is_base_name(path: &[u8]) -> bool {
+    !path.contains(&b'/')
+}
+
+fn parse_i64_ascii(bytes: &[u8]) -> Option<i64> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let mut i = 0usize;
+    let mut sign = 1i64;
+    if bytes[0] == b'-' {
+        sign = -1;
+        i = 1;
+    } else if bytes[0] == b'+' {
+        i = 1;
+    }
+    if i == bytes.len() {
+        return None;
+    }
+    let mut out = 0i64;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        out = out.checked_mul(10)?.checked_add((b - b'0') as i64)?;
+        i += 1;
+    }
+    out.checked_mul(sign)
 }
 
 /// Walk a single AOF file, tracking the last fully-parsed byte offset (`pos`)
@@ -241,8 +333,8 @@ fn check_single_aof(
     let mut cur = Cursor::new(&bytes);
 
     if preamble {
- // The RDB-preamble occupies the head of the file. Validate it via
- // shared RDB checker; the AOF tail (if any) begins after the RDB EOF.
+        // The RDB-preamble occupies the head of the file. Validate it via
+        // shared RDB checker; the AOF tail (if any) begins after the RDB EOF.
         match redis_core::rdb::load::check_rdb_file(path) {
             report if report.ok => {
                 println!("RDB preamble is OK, proceeding with AOF tail...");
@@ -252,10 +344,10 @@ fn check_single_aof(
                 std::process::exit(1);
             }
         }
- // We cannot currently resume RESP parsing after the RDB section without
- // the loader reporting its consumed length; treat a clean RDB preamble
- // as a valid base (the common multi-part case where the base is a pure
- // RDB snapshot and the tail lives in the INCR file).
+        // We cannot currently resume RESP parsing after the RDB section without
+        // the loader reporting its consumed length; treat a clean RDB preamble
+        // as a valid base (the common multi-part case where the base is a pure
+        // RDB snapshot and the tail lives in the INCR file).
         return Ok(AofCheck::Ok);
     }
 
@@ -274,7 +366,7 @@ fn check_single_aof(
             break; // EOF
         };
         if first == b'#' {
- // Timestamp annotation line; consume to end of line.
+            // Timestamp annotation line; consume to end of line.
             if !cur.skip_annotation() {
                 break;
             }
@@ -386,7 +478,7 @@ impl<'a> Cursor<'a> {
         }
     }
 
- /// Read a `<prefix><number>\r\n` header. Returns the number.
+    /// Read a `<prefix><number>\r\n` header. Returns the number.
     fn read_long(&mut self, prefix: u8) -> Option<i64> {
         if self.bytes.get(self.pos) != Some(&prefix) {
             return None;
@@ -406,7 +498,7 @@ impl<'a> Cursor<'a> {
         Some(num)
     }
 
- /// Read a `$<len>\r\n<bytes>\r\n` bulk string, discarding its content.
+    /// Read a `$<len>\r\n<bytes>\r\n` bulk string, discarding its content.
     fn read_string(&mut self) -> Result<Vec<u8>, ()> {
         let len = self.read_long(b'$').ok_or(())?;
         if len < 0 {
@@ -424,8 +516,8 @@ impl<'a> Cursor<'a> {
         Ok(s)
     }
 
- /// Decode one RESP array, tracking MULTI/EXEC nesting. Returns Ok(false) on
- /// a clean short read (incomplete trailing record), Err on a malformed one.
+    /// Decode one RESP array, tracking MULTI/EXEC nesting. Returns Ok(false) on
+    /// a clean short read (incomplete trailing record), Err on a malformed one.
     fn process_resp(&mut self, multi: &mut i64) -> Result<bool, String> {
         let argc = match self.read_long(b'*') {
             Some(n) => n,
@@ -453,7 +545,7 @@ impl<'a> Cursor<'a> {
         Ok(true)
     }
 
- /// Consume a `#...\r\n` annotation line.
+    /// Consume a `#...\r\n` annotation line.
     fn skip_annotation(&mut self) -> bool {
         while self.pos < self.bytes.len() && self.bytes[self.pos] != b'\n' {
             self.pos += 1;

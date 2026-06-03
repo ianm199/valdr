@@ -13,7 +13,10 @@ Packet L adds syscall-level AOF rewrite fault injection around BASE/manifest
 sync and rename boundaries, then gates those failures through restart checks.
 Packet M adds held-snapshot keyspace COW telemetry, samples it during
 `BGREWRITEAOF`, and extends the reusable toy model with metadata/payload split
-variants.
+variants. Packet N adds conservative startup appenddir cleanup, hardens
+multipart `valkey-check-aof`, expands the source-shaped persistence frontier to
+cleanup/checker states, and turns focused upstream persistence TCL aborts into
+parsed follow-up evidence.
 **Date:** 2026-06-03.
 **Scope:** Append-Only File persistence, replay, rewrite, manifests, durability
 signals, and performance gates.
@@ -1737,6 +1740,77 @@ Packet N is accepted when:
 - Docs record what changed, exact artifacts, remaining release gaps, and the
   next recommendation.
 
+### 11.5 Packet N Landing Record
+
+Packet N landed the release-frontier cleanup/checker layer without changing AOF
+default enablement. `appendonly` remains off by default.
+
+Implemented:
+
+- `cleanup_aof_appenddir` loads the current manifest, preserves every BASE,
+  HISTORY, and INCR filename it references, and removes only recognized safe
+  debris: temp manifests, temp rewrite files, and unreferenced generated
+  multipart AOF files for the configured `appendfilename`.
+- AOF startup runs cleanup only after successful load/open/install of the active
+  writer. Cleanup is best-effort and non-fatal; it reports inspected, preserved,
+  removed, and error counts.
+- `valkey-check-aof` now fails closed on empty or malformed multipart
+  manifests, duplicate BASE entries, non-increasing INCR sequence numbers,
+  missing manifest targets, corrupt RESP streams, and non-bare manifest paths.
+  It accepts valid multipart layouts and manifest `.rdb` BASE preambles.
+- The persistence frontier gained cleanup/checker scenarios for safe startup
+  orphan deletion, referenced-file preservation, failed-rewrite preliminary
+  chains, idempotent rewrite cleanup, valid multipart checking, missing/corrupt
+  target failure, and RDB-preamble BASE checking.
+- `tcl-survey.py` now records parsed failure-line counts plus abort/exception
+  points when upstream TCL files do not emit normal pass/fail summaries.
+
+Packet N gates run on 2026-06-03:
+
+- `cargo check -p redis-commands -p redis-server`: pass.
+- `cargo test -p redis-commands --test aof_correctness_kit`: 11/11 pass.
+- `cargo test -p redis-server`: 8/8 pass.
+- `python3 harness/oracle/persistence-cycle.py --mode rdb --skip-build`: pass,
+  run timestamp `20260603T022026Z`.
+- `python3 harness/oracle/persistence-cycle.py --mode aof --skip-build`: pass,
+  run timestamp `20260603T022026Z`.
+- `python3 harness/oracle/persistence-cycle.py --mode aof-rewrite --skip-build`:
+  pass, run timestamp `20260603T022026Z`.
+- `python3 harness/oracle/persistence-frontier.py --skip-build --fail-on-failure`:
+  48/48 pass, run id `20260603T022034Z`.
+- `cargo test -p redis-commands --test repl_correctness_kit`: 13/13 pass.
+- `python3 harness/oracle/tcl-survey.py --runner-id tcl-persistence-focused ...`:
+  4 files surveyed, 1 timeout, 4 without normal summary, 9 parsed failure
+  lines, 3 abort/exception points, run id `20260603T022554572501Z`.
+- `python3 harness/bench/aof-matrix.py --quick --targets rust --skip-build`:
+  16/16 pass, artifacts
+  `harness/bench/results/20260603T023030Z-a3e82bf-aof-matrix.tsv` and `.json`.
+- `python3 harness/bench/aof-rewrite-latency.py --targets rust --skip-build --dataset-sizes 5000,25000,100000`:
+  3/3 pass, artifacts
+  `harness/bench/results/20260603T023101Z-a3e82bf-aof-rewrite-latency.tsv`
+  and `.json`.
+
+Focused TCL is now actionable but still a release blocker:
+
+- `integration/aof`: five parsed failures plus an abort at
+  `AOF fsync always barrier issue` because `DEBUG aof-flush-sleep` is missing.
+- `unit/aofrw`: one parsed failure plus an abort in `AOF rewrite functions`
+  because function replay/rewrite support is missing.
+- `unit/other`: three parsed persistence/expire failures and an unrelated
+  unix-socket harness exception.
+- `integration/rdb`: timed out at 180 seconds without a normal summary.
+
+Performance read:
+
+- The quick matrix still passes; `appendfsync always` remains fsync-bound and is
+  expectedly expensive, especially p1 writes.
+- Rewrite-start snapshot capture remains root-clone scale: 100k rewrite
+  snapshot capture was 59 us, command wall/start block was 11.4006 ms, and
+  post-reply rewrite wall was 132.7145 ms.
+- Packet N did not broaden AOF's public claim. Release docs should stay
+  conservative until the focused TCL blockers are resolved or explicitly
+  classified as unsupported upstream surfaces.
+
 ---
 
 ## 12. Risks
@@ -1757,9 +1831,9 @@ Packet N is accepted when:
 - **Crash/fault coverage is stronger but not physics-complete.** Packet L
   injects production-call failures at the key publication boundaries, but it
   still does not prove every filesystem's behavior after power loss.
-- **History cleanup is synchronous best-effort.** Packet J deletes superseded
-  history after durable final publication, but it does not yet add a background
-  retry queue, startup garbage collection, or an operator-visible cleanup knob.
+- **Cleanup is conservative but still synchronous best-effort.** Packet N adds
+  startup garbage collection for recognized orphan/temp AOF files, but there is
+  still no background retry queue or operator-visible cleanup knob.
 - **RDB preamble ambiguity.** Manifest `.rdb` BASE and legacy RDB-preamble AOF
   are different surfaces. Do not accidentally claim both.
 - **AOF propagation drift.** Command handlers can mutate argv or suppress
@@ -1776,28 +1850,48 @@ Packet N is accepted when:
 
 ## 13. Recommendation
 
-After Packet M, the next high-leverage AOF work is no longer baseline repair,
-basic background BASE generation, obvious manifest fsync hardening,
-successful-rewrite history deletion, command-path snapshot cloning,
-syscall-level rewrite publication fault injection, or held-snapshot COW
-visibility. The frontier covers modeled states plus production-call failures,
-the `always` cliff has a measured partial recovery, rewrite telemetry separates
-command start blocking from post-reply background work, and COW pressure during
-rewrite windows is now measurable.
+After Packet N, the next high-leverage AOF work is no longer baseline repair,
+basic background BASE generation, manifest fsync hardening, successful-rewrite
+history deletion, command-path snapshot cloning, syscall-level rewrite
+publication fault injection, held-snapshot COW visibility, startup cleanup, or
+basic multipart checking. Those surfaces now have production code plus
+frontier/process/bench evidence.
 
-1. Add startup/lifecycle cleanup for orphaned history/temp files and prove it
-   cannot delete manifest-referenced data.
-2. Harden `valkey-check-aof` for multipart layouts and RDB-preamble BASE files.
-3. Get focused upstream persistence TCL into parsed, actionable summaries.
-4. Split key metadata from value payload only in a narrower follow-up packet
-   after the AOF release-frontier work, unless new COW evidence makes it urgent.
-5. Profile the remaining p16 `appendfsync always` gap and soft `INCR` rows
-   against reference.
-6. Keep the AOF matrix and rewrite-latency runners as telemetry on every packet
-   that changes persistence, replication offsets, snapshot structure, or
-   RuntimeOwner flush order.
+The next pragmatic move is Packet O: focused persistence TCL burn-down.
 
-The ambitious end state remains release-grade multipart AOF with measured fsync
-and rewrite overhead. The next pragmatic move is cleanup/counter work around
-the now-hardened rewrite path, followed by value-payload sharing only when the
-data-structure gates justify it.
+Ambitious Packet O end state:
+
+- `integration/aof`, `unit/aofrw`, `unit/other`, and `integration/rdb` either
+  pass in focused survey or each remaining test is classified with a concrete
+  unsupported-surface reason.
+- AOF log/error behavior is close enough to upstream for the truncation, bad
+  format, unfinished MULTI, short read, expire, and fsync-barrier cases the TCL
+  files exercise.
+- Function rewrite/replay support is implemented far enough that upstream AOF
+  rewrite function tests no longer abort at `ERR Function not found`, or the
+  missing function subsystem is documented as the gating non-AOF dependency.
+- `DEBUG aof-flush-sleep` or an equivalent harness-only hook exists if needed
+  to test fsync-barrier timing deterministically.
+- RDB integration timeouts are split into a server bug, a harness lifecycle
+  bug, or an unsupported upstream fixture.
+
+Packet O tool loop:
+
+1. Run focused TCL once, then work one file at a time from earliest abort to
+   first semantic failure:
+   `python3 harness/oracle/tcl-survey.py --runner-id tcl-persistence-focused --skip-build --timeout-s 180 --no-default-deny-tags --deny-tag needs:repl --deny-tag cluster --files unit/other,unit/aofrw,integration/aof,integration/rdb`.
+2. For each blocker, add the smallest Rust unit, process frontier scenario, or
+   TCL-survey assertion that reproduces the failure outside the full TCL run.
+3. Fix production behavior, rerun that small reproducer, then rerun the focused
+   TCL file.
+4. Keep `cargo test -p redis-commands --test aof_correctness_kit`,
+   `cargo test -p redis-server`, and the 48-scenario persistence frontier green
+   after every semantic fix.
+5. Run the quick AOF matrix and rewrite-latency telemetry only after correctness
+   moves, or immediately if a fix touches append, fsync, rewrite, manifest, RDB,
+   or RuntimeOwner flush order.
+
+Packet O should be considered complete only when the focused TCL status has
+moved from "parsed and red" to either "passing" or "precisely classified with
+source-backed gaps." That is the shortest path from alpha AOF toward a real
+release gate.

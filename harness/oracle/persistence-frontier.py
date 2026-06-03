@@ -376,6 +376,25 @@ def current_incr_from_manifest(aof_dir: Path) -> Path | None:
     return aof_dir / best[1]
 
 
+def run_check_aof(tmp: Path, target: Path) -> dict[str, Any]:
+    checker = tmp / "valkey-check-aof"
+    if not checker.exists():
+        checker.symlink_to(RUST_BIN)
+    proc = subprocess.run(
+        [str(checker), str(target)],
+        cwd=ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=20,
+    )
+    return {
+        "returncode": proc.returncode,
+        "output": proc.stdout[-8000:],
+        "passed": proc.returncode == 0,
+    }
+
+
 def setup_preliminary_rewrite_layout(aof_dir: Path) -> Path:
     write_aof(aof_dir / f"{AOF_BASENAME}.1.base.aof", [("SET", "crash:base", "1")])
     write_aof(aof_dir / f"{AOF_BASENAME}.1.incr.aof", [("SET", "crash:old-incr", "1")])
@@ -1130,6 +1149,291 @@ def scenario_multipart_rewrite_failure_preserves_history_files(tmp: Path) -> dic
         stop_server(restart)
 
 
+def scenario_multipart_startup_cleanup_removes_safe_orphans(tmp: Path) -> dict[str, Any]:
+    aof_dir = tmp / AOF_DIRNAME
+    base = f"{AOF_BASENAME}.1.base.aof"
+    incr = f"{AOF_BASENAME}.1.incr.aof"
+    write_aof(aof_dir / base, [("SET", "cleanup:base", "1")])
+    write_aof(aof_dir / incr, [("SET", "cleanup:incr", "1")])
+    write_manifest(
+        aof_dir,
+        [
+            f"file {base} seq 1 type b",
+            f"file {incr} seq 1 type i",
+        ],
+    )
+    stale_temp = aof_dir / "temp-rewriteaof-bg-999999.aof"
+    stale_rdb_temp = aof_dir / "temp-rewriteaof-bg-999999.rdb"
+    stale_manifest = aof_dir / f"{AOF_MANIFEST}.tmp"
+    orphan_base = aof_dir / f"{AOF_BASENAME}.9.base.aof"
+    unknown = aof_dir / "manual-backup.aof"
+    stale_temp.write_bytes(b"stale")
+    stale_rdb_temp.write_bytes(b"stale")
+    stale_manifest.write_text("stale", encoding="utf-8")
+    write_aof(orphan_base, [("SET", "cleanup:orphan", "1")])
+    unknown.write_bytes(b"manual")
+
+    server = start_server(tmp, appendonly=True, extra=["--appenddirname", AOF_DIRNAME])
+    try:
+        client = RespClient(server.port)
+        try:
+            values = {
+                "cleanup:base": bulk(client.command("GET", "cleanup:base")),
+                "cleanup:incr": bulk(client.command("GET", "cleanup:incr")),
+                "cleanup:orphan": bulk(client.command("GET", "cleanup:orphan")),
+            }
+        finally:
+            client.close()
+    finally:
+        log = stop_server(server)
+
+    exists = {
+        "base": (aof_dir / base).exists(),
+        "incr": (aof_dir / incr).exists(),
+        "stale_temp": stale_temp.exists(),
+        "stale_rdb_temp": stale_rdb_temp.exists(),
+        "stale_manifest": stale_manifest.exists(),
+        "orphan_base": orphan_base.exists(),
+        "unknown": unknown.exists(),
+    }
+    passed = (
+        values == {
+            "cleanup:base": "1",
+            "cleanup:incr": "1",
+            "cleanup:orphan": None,
+        }
+        and exists["base"]
+        and exists["incr"]
+        and not exists["stale_temp"]
+        and not exists["stale_rdb_temp"]
+        and not exists["stale_manifest"]
+        and not exists["orphan_base"]
+        and exists["unknown"]
+    )
+    return {"passed": passed, "values": values, "exists": exists, "server_log_tail": log[-2000:]}
+
+
+def scenario_multipart_startup_cleanup_preserves_manifest_references(tmp: Path) -> dict[str, Any]:
+    aof_dir = tmp / AOF_DIRNAME
+    base = f"{AOF_BASENAME}.1.base.aof"
+    history = f"{AOF_BASENAME}.1.incr.aof"
+    incr = f"{AOF_BASENAME}.2.incr.aof"
+    write_aof(aof_dir / base, [("SET", "preserve-ref:base", "1")])
+    write_aof(aof_dir / history, [("SET", "preserve-ref:history", "1")])
+    write_aof(aof_dir / incr, [("SET", "preserve-ref:incr", "1")])
+    write_manifest(
+        aof_dir,
+        [
+            f"file {base} seq 1 type b",
+            f"file {history} seq 1 type h",
+            f"file {incr} seq 2 type i",
+        ],
+    )
+
+    server = start_server(tmp, appendonly=True, extra=["--appenddirname", AOF_DIRNAME])
+    try:
+        client = RespClient(server.port)
+        try:
+            values = {
+                "preserve-ref:base": bulk(client.command("GET", "preserve-ref:base")),
+                "preserve-ref:history": bulk(client.command("GET", "preserve-ref:history")),
+                "preserve-ref:incr": bulk(client.command("GET", "preserve-ref:incr")),
+            }
+        finally:
+            client.close()
+    finally:
+        log = stop_server(server)
+
+    exists = {name: (aof_dir / name).exists() for name in [base, history, incr]}
+    passed = (
+        values == {
+            "preserve-ref:base": "1",
+            "preserve-ref:history": None,
+            "preserve-ref:incr": "1",
+        }
+        and all(exists.values())
+    )
+    return {"passed": passed, "values": values, "exists": exists, "server_log_tail": log[-2000:]}
+
+
+def scenario_multipart_failed_rewrite_preliminary_chain_survives_cleanup(tmp: Path) -> dict[str, Any]:
+    aof_dir = tmp / AOF_DIRNAME
+    manifest = setup_preliminary_rewrite_layout(aof_dir)
+    stale_temp = aof_dir / "temp-rewriteaof-bg-777777.aof"
+    stale_temp.write_bytes(b"stale")
+
+    server = start_server(tmp, appendonly=True, extra=["--appenddirname", AOF_DIRNAME])
+    try:
+        client = RespClient(server.port)
+        try:
+            values = {
+                "crash:base": bulk(client.command("GET", "crash:base")),
+                "crash:old-incr": bulk(client.command("GET", "crash:old-incr")),
+                "crash:new-incr": bulk(client.command("GET", "crash:new-incr")),
+            }
+        finally:
+            client.close()
+    finally:
+        log = stop_server(server)
+
+    names = manifest_names_by_type(manifest_lines(manifest))
+    exists = {name: (aof_dir / name).exists() for name in names}
+    passed = (
+        values == {"crash:base": "1", "crash:old-incr": "1", "crash:new-incr": "1"}
+        and all(exists.values())
+        and not stale_temp.exists()
+    )
+    return {
+        "passed": passed,
+        "values": values,
+        "referenced_exists": exists,
+        "stale_temp_exists": stale_temp.exists(),
+        "server_log_tail": log[-2000:],
+    }
+
+
+def scenario_multipart_rewrite_success_cleanup_idempotent_restart(tmp: Path) -> dict[str, Any]:
+    server = start_server(
+        tmp,
+        appendonly=True,
+        extra=["--appenddirname", AOF_DIRNAME, "--aof-use-rdb-preamble", "no"],
+    )
+    aof_dir = tmp / AOF_DIRNAME
+    manifest = aof_dir / AOF_MANIFEST
+    try:
+        client = RespClient(server.port)
+        try:
+            assert client.command("SET", "idempotent:before", "1") == "OK"
+            before_names = manifest_names_by_type(manifest_lines(manifest))
+            assert client.command("BGREWRITEAOF") == "Background append only file rewriting started"
+            wait_rewrite_done(client)
+            assert client.command("SET", "idempotent:after", "1") == "OK"
+            first_lines = manifest_lines(manifest)
+        finally:
+            client.close()
+    finally:
+        stop_server(server)
+
+    restart = start_server(tmp, appendonly=True, extra=["--appenddirname", AOF_DIRNAME])
+    try:
+        client = RespClient(restart.port)
+        try:
+            values = {
+                "idempotent:before": bulk(client.command("GET", "idempotent:before")),
+                "idempotent:after": bulk(client.command("GET", "idempotent:after")),
+            }
+            second_lines = manifest_lines(manifest)
+        finally:
+            client.close()
+    finally:
+        log = stop_server(restart)
+
+    after_names = manifest_names_by_type(second_lines)
+    old_exists = {name: (aof_dir / name).exists() for name in before_names if name not in after_names}
+    live_exists = {name: (aof_dir / name).exists() for name in after_names}
+    passed = (
+        values == {"idempotent:before": "1", "idempotent:after": "1"}
+        and first_lines == second_lines
+        and len(after_names) == 2
+        and not manifest_names_by_type(second_lines, "h")
+        and not any(old_exists.values())
+        and all(live_exists.values())
+    )
+    return {
+        "passed": passed,
+        "values": values,
+        "first_lines": first_lines,
+        "second_lines": second_lines,
+        "old_exists": old_exists,
+        "live_exists": live_exists,
+        "server_log_tail": log[-2000:],
+    }
+
+
+def scenario_check_aof_valid_multipart_layout(tmp: Path) -> dict[str, Any]:
+    aof_dir = tmp / AOF_DIRNAME
+    base = f"{AOF_BASENAME}.1.base.aof"
+    incr = f"{AOF_BASENAME}.1.incr.aof"
+    write_aof(aof_dir / base, [("SET", "check:base", "1")])
+    write_aof(aof_dir / incr, [("SET", "check:incr", "1")])
+    manifest = write_manifest(
+        aof_dir,
+        [
+            f"file {base} seq 1 type b",
+            f"file {incr} seq 1 type i",
+        ],
+    )
+    result = run_check_aof(tmp, manifest)
+    result["passed"] = result["returncode"] == 0 and "All AOF files and manifest are valid" in result["output"]
+    return result
+
+
+def scenario_check_aof_missing_manifest_target_fails(tmp: Path) -> dict[str, Any]:
+    aof_dir = tmp / AOF_DIRNAME
+    base = f"{AOF_BASENAME}.1.base.aof"
+    missing = f"{AOF_BASENAME}.1.incr.aof"
+    write_aof(aof_dir / base, [("SET", "check:base", "1")])
+    manifest = write_manifest(
+        aof_dir,
+        [
+            f"file {base} seq 1 type b",
+            f"file {missing} seq 1 type i",
+        ],
+    )
+    result = run_check_aof(tmp, manifest)
+    result["passed"] = result["returncode"] != 0 and "Cannot open file" in result["output"]
+    return result
+
+
+def scenario_check_aof_corrupt_incr_fails(tmp: Path) -> dict[str, Any]:
+    aof_dir = tmp / AOF_DIRNAME
+    base = f"{AOF_BASENAME}.1.base.aof"
+    incr = f"{AOF_BASENAME}.1.incr.aof"
+    write_aof(aof_dir / base, [("SET", "check:base", "1")])
+    (aof_dir / incr).write_bytes(b"not-resp")
+    manifest = write_manifest(
+        aof_dir,
+        [
+            f"file {base} seq 1 type b",
+            f"file {incr} seq 1 type i",
+        ],
+    )
+    result = run_check_aof(tmp, manifest)
+    result["passed"] = result["returncode"] != 0 and "not valid" in result["output"]
+    return result
+
+
+def scenario_check_aof_rdb_preamble_base_valid(tmp: Path) -> dict[str, Any]:
+    server = start_server(
+        tmp,
+        appendonly=True,
+        extra=["--appenddirname", AOF_DIRNAME, "--aof-use-rdb-preamble", "yes"],
+    )
+    aof_dir = tmp / AOF_DIRNAME
+    manifest = aof_dir / AOF_MANIFEST
+    try:
+        client = RespClient(server.port)
+        try:
+            assert client.command("SET", "check:rdb", "1") == "OK"
+            assert client.command("BGREWRITEAOF") == "Background append only file rewriting started"
+            wait_rewrite_done(client)
+        finally:
+            client.close()
+    finally:
+        stop_server(server)
+
+    result = run_check_aof(tmp, manifest)
+    lines = manifest_lines(manifest)
+    result["manifest_lines"] = lines
+    result["passed"] = (
+        result["returncode"] == 0
+        and any(".base.rdb" in line for line in lines)
+        and "Start to check BASE AOF (RDB format)." in result["output"]
+        and "All AOF files and manifest are valid" in result["output"]
+    )
+    return result
+
+
 def run_faulted_manifest_rewrite(
     tmp: Path,
     *,
@@ -1508,6 +1812,14 @@ SCENARIOS: list[Scenario] = [
     Scenario("multipart-aof-rewrite-corrupt-final-base-fails-closed", "persistence-aof-rewrite", scenario_multipart_rewrite_corrupt_final_base_fails_closed),
     Scenario("multipart-aof-rewrite-success-deletes-history", "persistence-aof-rewrite", scenario_multipart_rewrite_success_deletes_history),
     Scenario("multipart-aof-rewrite-failure-preserves-history-files", "persistence-aof-rewrite", scenario_multipart_rewrite_failure_preserves_history_files),
+    Scenario("multipart-aof-startup-cleanup-removes-safe-orphans", "persistence-aof-cleanup", scenario_multipart_startup_cleanup_removes_safe_orphans),
+    Scenario("multipart-aof-startup-cleanup-preserves-manifest-references", "persistence-aof-cleanup", scenario_multipart_startup_cleanup_preserves_manifest_references),
+    Scenario("multipart-aof-failed-rewrite-preliminary-chain-survives-cleanup", "persistence-aof-cleanup", scenario_multipart_failed_rewrite_preliminary_chain_survives_cleanup),
+    Scenario("multipart-aof-rewrite-success-cleanup-idempotent-restart", "persistence-aof-cleanup", scenario_multipart_rewrite_success_cleanup_idempotent_restart),
+    Scenario("check-aof-valid-multipart-layout", "persistence-aof-check", scenario_check_aof_valid_multipart_layout),
+    Scenario("check-aof-missing-manifest-target-fails", "persistence-aof-check", scenario_check_aof_missing_manifest_target_fails),
+    Scenario("check-aof-corrupt-incr-fails", "persistence-aof-check", scenario_check_aof_corrupt_incr_fails),
+    Scenario("check-aof-rdb-preamble-base-valid", "persistence-aof-check", scenario_check_aof_rdb_preamble_base_valid),
     Scenario("multipart-aof-rewrite-fault-preliminary-manifest-before-rename", "persistence-aof-rewrite-fault", scenario_multipart_rewrite_fault_preliminary_manifest_before_rename),
     Scenario("multipart-aof-rewrite-fault-base-before-rename", "persistence-aof-rewrite-fault", scenario_multipart_rewrite_fault_base_before_rename),
     Scenario("multipart-aof-rewrite-fault-base-after-rename-before-dir-sync", "persistence-aof-rewrite-fault", scenario_multipart_rewrite_fault_base_after_rename_before_dir_sync),

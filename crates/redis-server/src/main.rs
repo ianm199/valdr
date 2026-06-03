@@ -247,6 +247,23 @@ fn main() {
                 server.persistence.set_aof_current_size(current_size);
                 server.set_aof_state(redis_core::AofState::On);
                 redis_commands::aof::install_aof_writer(Arc::new(w));
+                let cleanup = redis_commands::aof::cleanup_aof_appenddir(
+                    Path::new(&args.dir),
+                    &args.appendfilename,
+                    &args.appenddirname,
+                );
+                if cleanup.did_work() {
+                    eprintln!(
+                        "redis-server: AOF cleanup inspected {} files, preserved {} referenced files, removed {} temp files and {} orphaned AOF files",
+                        cleanup.inspected_files,
+                        cleanup.preserved_referenced_files,
+                        cleanup.removed_temp_files,
+                        cleanup.removed_orphaned_aof_files
+                    );
+                    for err in cleanup.errors {
+                        eprintln!("redis-server: {}", err);
+                    }
+                }
             }
             Err(e) => {
                 eprintln!(

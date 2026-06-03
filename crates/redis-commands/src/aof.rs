@@ -12,6 +12,7 @@
 //! the caller explicitly allows a truncated tail.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -57,6 +58,26 @@ pub struct AofLoadOptions {
     /// manifest/RDB-preamble packet; legacy single-file AOF currently rejects
     /// preambles even when this is true.
     pub allow_rdb_preamble: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AofCleanupReport {
+    pub inspected_files: usize,
+    pub preserved_referenced_files: usize,
+    pub removed_temp_files: usize,
+    pub removed_orphaned_aof_files: usize,
+    pub errors: Vec<String>,
+}
+
+impl AofCleanupReport {
+    pub fn removed_files(&self) -> usize {
+        self.removed_temp_files
+            .saturating_add(self.removed_orphaned_aof_files)
+    }
+
+    pub fn did_work(&self) -> bool {
+        self.removed_files() > 0 || !self.errors.is_empty()
+    }
 }
 
 const AOF_MANIFEST_SUFFIX: &str = ".manifest";
@@ -1165,6 +1186,104 @@ pub fn load_append_only_files(
     Ok(Some((replayed, size)))
 }
 
+pub fn cleanup_aof_appenddir(
+    dir: &Path,
+    appendfilename: &str,
+    appenddirname: &str,
+) -> AofCleanupReport {
+    let mut report = AofCleanupReport::default();
+    let aof_dir = dir.join(appenddirname);
+    let manifest_path = aof_manifest_path(dir, appendfilename, appenddirname);
+    if !aof_dir.exists() {
+        return report;
+    }
+
+    let manifest = match load_aof_manifest(&manifest_path) {
+        Ok(manifest) => manifest,
+        Err(err) => {
+            report.errors.push(format!(
+                "skipped AOF cleanup because manifest {} could not be loaded: {}",
+                manifest_path.display(),
+                err
+            ));
+            return report;
+        }
+    };
+    let referenced: HashSet<Vec<u8>> = manifest
+        .base
+        .iter()
+        .chain(manifest.history.iter())
+        .chain(manifest.incr.iter())
+        .map(|file| file.name.clone())
+        .collect();
+    let manifest_name = format!("{}{}", appendfilename, AOF_MANIFEST_SUFFIX);
+    let temp_manifest_name = format!("{manifest_name}.tmp");
+
+    let entries = match std::fs::read_dir(&aof_dir) {
+        Ok(entries) => entries,
+        Err(err) => {
+            report.errors.push(format!(
+                "skipped AOF cleanup because appenddir {} could not be read: {}",
+                aof_dir.display(),
+                err
+            ));
+            return report;
+        }
+    };
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                report
+                    .errors
+                    .push(format!("AOF cleanup skipped unreadable dir entry: {}", err));
+                continue;
+            }
+        };
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(err) => {
+                report.errors.push(format!(
+                    "AOF cleanup skipped {}: {}",
+                    entry.path().display(),
+                    err
+                ));
+                continue;
+            }
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+
+        let name_os = entry.file_name();
+        let Some(name) = name_os.to_str() else {
+            continue;
+        };
+        report.inspected_files += 1;
+        if name == manifest_name {
+            continue;
+        }
+        if referenced.contains(name.as_bytes()) {
+            report.preserved_referenced_files += 1;
+            continue;
+        }
+
+        let path = entry.path();
+        if name == temp_manifest_name || is_aof_temp_rewrite_file(name) {
+            if remove_cleanup_file(&path, &mut report.errors) {
+                report.removed_temp_files += 1;
+            }
+        } else if is_generated_aof_file_name(name, appendfilename) {
+            if remove_cleanup_file(&path, &mut report.errors) {
+                report.removed_orphaned_aof_files += 1;
+            }
+        }
+    }
+
+    report
+}
+
 /// Open the active writer using Valkey's multi-part manifest layout.
 /// Startup and `CONFIG SET appendonly yes` both call this after any existing
 /// AOF state has been loaded into `dbs`. It creates `appenddirname`, creates a
@@ -1463,6 +1582,50 @@ fn delete_aof_history_files(aof_dir: &Path, history: &[AofManifestFile]) -> io::
         }
     }
     Ok(deleted)
+}
+
+fn remove_cleanup_file(path: &Path, errors: &mut Vec<String>) -> bool {
+    match std::fs::remove_file(path) {
+        Ok(()) => {
+            if let Err(err) = sync_parent_dir(path) {
+                errors.push(format!(
+                    "AOF cleanup removed {} but failed to sync parent dir: {}",
+                    path.display(),
+                    err
+                ));
+            }
+            true
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => false,
+        Err(err) => {
+            errors.push(format!(
+                "AOF cleanup failed to remove {}: {}",
+                path.display(),
+                err
+            ));
+            false
+        }
+    }
+}
+
+fn is_aof_temp_rewrite_file(name: &str) -> bool {
+    (name.starts_with("temp-rewriteaof-bg-") || name.starts_with("temp-rewriteaof-"))
+        && (name.ends_with(".aof") || name.ends_with(".rdb"))
+}
+
+fn is_generated_aof_file_name(name: &str, appendfilename: &str) -> bool {
+    let prefix = format!("{appendfilename}.");
+    let Some(rest) = name.strip_prefix(&prefix) else {
+        return false;
+    };
+    for suffix in [BASE_AOF_SUFFIX, ".base.rdb", INCR_AOF_SUFFIX] {
+        let Some(seq) = rest.strip_suffix(suffix) else {
+            continue;
+        };
+        let seq = seq.strip_suffix('.').unwrap_or(seq);
+        return !seq.is_empty() && seq.bytes().all(|b| b.is_ascii_digit());
+    }
+    false
 }
 
 fn write_base_aof_file(path: &Path, dbs: &[RedisDb]) -> io::Result<()> {
