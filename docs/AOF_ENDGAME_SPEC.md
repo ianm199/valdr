@@ -1938,7 +1938,47 @@ Current release blockers after this Packet P slice:
 
 ---
 
-## 14. Risks
+## 14. Packet Q Progress: AOF Rewrite Functions And Lifecycle Parity
+
+Packet Q cleared `unit/aofrw` by fixing the two source-shaped gaps exposed
+after Packet P:
+
+- AOF rewrite now emits loaded function libraries before DB contents as
+  `FUNCTION LOAD <library-code>`, matching Valkey's `rewriteFunctions` step.
+- The function subsystem exposes a deterministic library-code snapshot for AOF
+  rewrite without inventing a second serialization format.
+- Manual `BGREWRITEAOF` with `appendonly=no` now writes a fresh manifest BASE
+  and does not install an active INCR writer. This matches the Valkey shape
+  where off-state rewrites materialize a loadable snapshot for `DEBUG LOADAOF`.
+- `CONFIG SET appendonly no` logs the upstream-visible AOF child cancellation
+  message and clears scheduled rewrite state.
+- `BGREWRITEAOF` now replies `scheduled` and sets `aof_rewrite_scheduled=1`
+  while a `BGSAVE` child is active, then clears the flag after the RDB child
+  exits.
+
+Packet Q gates run on 2026-06-03:
+
+- `cargo check -p redis-core -p redis-commands -p redis-server`: pass.
+- `cargo build -p redis-server`: pass.
+- `cargo test -p redis-commands --test aof_correctness_kit`: 17/17 pass.
+- `cargo test -p redis-server`: 8/8 pass.
+- Full persistence frontier:
+  `python3 harness/oracle/persistence-frontier.py --skip-build --fail-on-failure`
+  passed 58/58, run id `20260603T040034Z`.
+- Focused `unit/aofrw`:
+  `python3 harness/oracle/tcl-survey.py --runner-id tcl-persistence-focused --skip-build --timeout-s 260 --no-default-deny-tags --deny-tag needs:repl --deny-tag cluster --files unit/aofrw`
+  passed 22/22, run id `20260603T040007625153Z`.
+
+Current release blockers after Packet Q:
+
+- `integration/aof`: green in focused survey.
+- `unit/aofrw`: green in focused survey.
+- `unit/other`: still needs expire/reload and unix-socket fixture burn-down.
+- `integration/rdb`: still needs timeout classification.
+
+---
+
+## 15. Risks
 
 - **False confidence from old dirty-tree evidence.** The 23/23 persistence
   frontier is useful history, but clean current evidence must replace it.
@@ -1973,19 +2013,20 @@ Current release blockers after this Packet P slice:
 
 ---
 
-## 15. Recommendation
+## 16. Recommendation
 
-After the first Packet P slice, the next high-leverage AOF work is no longer
+After Packet Q, the next high-leverage AOF work is no longer
 baseline repair,
 basic background BASE generation, manifest fsync hardening, successful-rewrite
 history deletion, command-path snapshot cloning, syscall-level rewrite
 publication fault injection, held-snapshot COW visibility, startup cleanup, or
 basic multipart checking. Those surfaces now have production code plus
-frontier/process/bench evidence, and focused `integration/aof` is green.
+frontier/process/bench evidence, and focused `integration/aof` plus
+`unit/aofrw` are green.
 
-The next pragmatic move is to continue Packet P with `unit/aofrw` function
-rewrite support, then `unit/other` expire/reload parity, then `integration/rdb`
-timeout classification.
+The next pragmatic move is to continue the persistence TCL burn-down with
+`unit/other` expire/reload parity, then `integration/rdb` timeout
+classification.
 
 Ambitious Packet P end state:
 
@@ -1994,9 +2035,8 @@ Ambitious Packet P end state:
   unsupported-surface reason.
 - `DEBUG LOADAOF` plus timed-out scripts yield enough through RuntimeOwner to
   expose upstream `LOADING` behavior.
-- Function rewrite/replay support is implemented far enough that upstream AOF
-  rewrite function tests no longer abort at `ERR Function not found`, or the
-  missing function subsystem is documented as the gating non-AOF dependency.
+- Function rewrite/replay support remains locked by Rust kit coverage and
+  `unit/aofrw`.
 - RDB integration timeouts are split into a server bug, a harness lifecycle
   bug, or an unsupported upstream fixture.
 

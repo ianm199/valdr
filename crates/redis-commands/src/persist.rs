@@ -52,6 +52,17 @@ fn mark_migrate_socket_cached() {
     });
 }
 
+fn clear_scheduled_aof_rewrite_after_bgsave(server: Arc<redis_core::RedisServer>) {
+    let _ = thread::Builder::new()
+        .name("aof-rewrite-scheduled-clear".to_string())
+        .spawn(move || {
+            while server.rdb_child_pid() != 0 {
+                thread::sleep(Duration::from_millis(50));
+            }
+            server.persistence.set_aof_rewrite_scheduled(false);
+        });
+}
+
 fn ascii_lower(b: u8) -> u8 {
     if b.is_ascii_uppercase() {
         b + 32
@@ -824,9 +835,9 @@ pub fn bgsave_for_replication(
 /// The implementation follows Valkey's multi-part AOF ordering: first persist
 /// a manifest that includes a fresh active INCR, then write the new BASE in a
 /// background worker, and finally publish a manifest naming the new BASE plus
-/// the active INCR. No worker renames over the active writer.
-/// When AOF is not enabled the command still succeeds but is a no-op (
-/// canonical Valkey behaviour when appendonly=no).
+/// the active INCR. No worker renames over the active writer. When appendonly
+/// is disabled, manual `BGREWRITEAOF` still writes a fresh BASE manifest but
+/// does not install an active INCR writer.
 pub fn bgrewriteaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ctx.arg_count() != 1 {
         return Err(RedisError::wrong_number_of_args(b"bgrewriteaof"));
@@ -853,14 +864,16 @@ pub fn bgrewriteaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         return ctx.reply_simple_string(b"Background append only file rewriting scheduled");
     }
 
-    if aof_writer().is_none() {
-        return ctx.reply_simple_string(b"Background append only file rewriting started");
-    }
-
     if ctx.server().persistence.aof_rewrite_in_progress() {
         return Err(RedisError::runtime(
             b"ERR Background append only file rewriting already in progress",
         ));
+    }
+
+    if ctx.server().rdb_child_pid() != 0 {
+        ctx.server().persistence.set_aof_rewrite_scheduled(true);
+        clear_scheduled_aof_rewrite_after_bgsave(ctx.server_arc());
+        return ctx.reply_simple_string(b"Background append only file rewriting scheduled");
     }
 
     let snapshot = ctx.snapshot_all_dbs()?;
@@ -876,6 +889,51 @@ pub fn bgrewriteaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     let dirname = cfg.appenddirname();
     let policy = cfg.appendfsync();
     let use_rdb_preamble = cfg.aof_use_rdb_preamble();
+
+    if aof_writer().is_none() {
+        ctx.server().persistence.set_aof_rewrite_in_progress(true);
+        let server = ctx.server_arc();
+        let spawn_result = thread::Builder::new()
+            .name("aof-rewrite-disabled".to_string())
+            .spawn(move || {
+                let dbs = snapshot.into_dbs();
+                let result = crate::aof::rewrite_manifest_aof_disabled_from_dbs(
+                    std::path::Path::new(&dir),
+                    &filename,
+                    &dirname,
+                    &dbs,
+                    use_rdb_preamble,
+                );
+                match result {
+                    Ok((base_size, current_size)) => {
+                        server.persistence.set_aof_base_size(base_size);
+                        server.persistence.set_aof_current_size(current_size);
+                        server
+                            .persistence
+                            .set_aof_last_bgrewrite_status(PersistenceStatus::Ok);
+                    }
+                    Err(e) => {
+                        eprintln!("redis-server: BGREWRITEAOF failed: {}", e);
+                        server
+                            .persistence
+                            .set_aof_last_bgrewrite_status(PersistenceStatus::Err);
+                    }
+                }
+                server.persistence.set_aof_rewrite_in_progress(false);
+            });
+        return match spawn_result {
+            Ok(_) => ctx.reply_simple_string(b"Background append only file rewriting started"),
+            Err(e) => {
+                ctx.server().persistence.set_aof_rewrite_in_progress(false);
+                ctx.server()
+                    .persistence
+                    .set_aof_last_bgrewrite_status(PersistenceStatus::Err);
+                Err(RedisError::runtime(
+                    format!("ERR BGREWRITEAOF failed to start worker: {}", e).into_bytes(),
+                ))
+            }
+        };
+    }
 
     let (plan, current_size) = match crate::aof::begin_manifest_aof_rewrite(
         std::path::Path::new(&dir),

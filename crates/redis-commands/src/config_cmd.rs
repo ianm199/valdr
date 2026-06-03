@@ -1422,6 +1422,16 @@ pub fn apply_appendonly_config_set(
             if let Some(w) = crate::aof::aof_writer() {
                 let _ = w.flush();
             }
+            if ctx.server().persistence.aof_rewrite_in_progress() {
+                crate::connection::log_server_notice(
+                    "Killing AOF child because appendonly was disabled",
+                );
+                ctx.server().persistence.set_aof_rewrite_in_progress(false);
+                ctx.server()
+                    .persistence
+                    .set_aof_last_bgrewrite_status(redis_core::persistence::PersistenceStatus::Err);
+            }
+            ctx.server().persistence.set_aof_rewrite_scheduled(false);
             crate::aof::remove_aof_writer();
             ctx.server().set_aof_state(redis_core::AofState::Off);
             crate::replication::unblock_waitaof_local_disabled();

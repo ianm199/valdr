@@ -911,7 +911,8 @@ pub fn spawn_fsync_thread() {
 /// previous `delivery_count` slot in our codebase (zero), so
 /// original per-PEL `delivery_count` and `delivery_time_ms` are
 /// not restored exactly — they reset to zero / replay-time.
-/// After the data command each key with a TTL gets PEXPIREAT.
+/// Function libraries are emitted first as `FUNCTION LOAD <code>` records,
+/// matching Valkey's rewrite order, then each key with a TTL gets PEXPIREAT.
 pub fn write_aof_rewrite<W: Write>(db: &RedisDb, writer: &mut W) -> io::Result<()> {
     write_aof_rewrite_for_dbs(std::slice::from_ref(db), writer)
 }
@@ -924,6 +925,7 @@ pub fn write_aof_rewrite_for_dbs<W: Write>(dbs: &[RedisDb], writer: &mut W) -> i
         .unwrap_or(0);
 
     write_aof_timestamp_annotation_if_needed(writer, true)?;
+    write_aof_rewrite_functions(writer)?;
 
     let mut selected_db: Option<u32> = None;
     for db in dbs {
@@ -937,6 +939,18 @@ pub fn write_aof_rewrite_for_dbs<W: Write>(dbs: &[RedisDb], writer: &mut W) -> i
             selected_db = Some(db.id);
         }
         write_aof_rewrite_db_contents(db, writer, now_ms)?;
+    }
+    Ok(())
+}
+
+fn write_aof_rewrite_functions<W: Write>(writer: &mut W) -> io::Result<()> {
+    for code in crate::eval::function_library_codes_for_aof_rewrite() {
+        let cmd = [
+            RedisString::from_bytes(b"FUNCTION"),
+            RedisString::from_bytes(b"LOAD"),
+            RedisString::from_vec(code),
+        ];
+        writer.write_all(&encode_resp_command(&cmd))?;
     }
     Ok(())
 }
@@ -1769,6 +1783,95 @@ pub fn rewrite_manifest_aof_from_dbs(
         use_rdb_preamble,
     )?;
     complete_manifest_aof_rewrite(dir, appendfilename, appenddirname, plan, dbs)
+}
+
+/// Rewrite the manifest BASE while appendonly is disabled.
+///
+/// Valkey still lets manual `BGREWRITEAOF` materialize a fresh on-disk
+/// snapshot when `appendonly=no`; it just does not open a new active INCR file
+/// or install an append writer. `DEBUG LOADAOF` and startup can then consume
+/// the fresh BASE from the manifest.
+pub fn rewrite_manifest_aof_disabled_from_dbs(
+    dir: &Path,
+    appendfilename: &str,
+    appenddirname: &str,
+    dbs: &[RedisDb],
+    use_rdb_preamble: bool,
+) -> io::Result<(u64, u64)> {
+    let aof_dir = dir.join(appenddirname);
+    std::fs::create_dir_all(&aof_dir)?;
+
+    let manifest_path = aof_manifest_path(dir, appendfilename, appenddirname);
+    let previous_manifest = if manifest_path.exists() {
+        load_aof_manifest(&manifest_path)?
+    } else {
+        AofManifest::default()
+    };
+
+    let base_seq = previous_manifest.next_base_seq();
+    let base_suffix = if use_rdb_preamble {
+        ".base.rdb"
+    } else {
+        BASE_AOF_SUFFIX
+    };
+    let base_name = format!("{appendfilename}.{base_seq}{base_suffix}").into_bytes();
+    let base_path = manifest_file_path(&aof_dir, &base_name);
+    let temp_base_path = aof_dir.join(format!(
+        "temp-rewriteaof-bg-{}-{}{}",
+        std::process::id(),
+        base_seq,
+        if use_rdb_preamble { ".rdb" } else { ".aof" }
+    ));
+
+    if use_rdb_preamble {
+        redis_core::rdb::save_rdb_databases(dbs, &temp_base_path)?;
+        sync_existing_file(&temp_base_path)?;
+    } else {
+        write_base_aof_file(&temp_base_path, dbs)?;
+    }
+    std::fs::rename(&temp_base_path, &base_path)?;
+    sync_parent_dir(&base_path)?;
+
+    let history: Vec<AofManifestFile> = previous_manifest
+        .load_sequence()
+        .into_iter()
+        .filter(|file| file.name != base_name)
+        .map(|file| AofManifestFile {
+            name: file.name.clone(),
+            seq: file.seq,
+            file_type: AofManifestFileType::History,
+        })
+        .collect();
+    let published_manifest = AofManifest {
+        base: Some(AofManifestFile {
+            name: base_name.clone(),
+            seq: base_seq,
+            file_type: AofManifestFileType::Base,
+        }),
+        history: history.clone(),
+        incr: Vec::new(),
+    };
+    persist_aof_manifest(&manifest_path, &published_manifest, "manifest-final")?;
+
+    if !history.is_empty() {
+        if let Err(err) = delete_aof_history_files(&aof_dir, &history) {
+            eprintln!("redis-server: AOF history cleanup failed: {}", err);
+        } else {
+            let compact_manifest = AofManifest {
+                base: published_manifest.base.clone(),
+                history: Vec::new(),
+                incr: Vec::new(),
+            };
+            if let Err(err) =
+                persist_aof_manifest(&manifest_path, &compact_manifest, "manifest-compact")
+            {
+                eprintln!("redis-server: AOF history manifest cleanup failed: {}", err);
+            }
+        }
+    }
+
+    let base_size = base_path.metadata().map(|m| m.len()).unwrap_or(0);
+    Ok((base_size, base_size))
 }
 
 fn aof_manifest_path(dir: &Path, appendfilename: &str, appenddirname: &str) -> PathBuf {

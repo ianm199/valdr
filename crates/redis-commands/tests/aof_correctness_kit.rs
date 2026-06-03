@@ -26,9 +26,9 @@ use std::time::{Duration, Instant};
 use redis_commands::aof::{
     aof_timestamp_enabled, append_raw_for_dispatch, append_selected_for_dispatch,
     begin_thread_aof_batch, debug_aof_flush_sleep_micros, encode_resp_command,
-    finish_thread_aof_batch,
-    flush_thread_aof_batch_for_lifecycle, record_aof_append_result,
-    replay_aof_databases_with_options, set_aof_timestamp_enabled,
+    finish_thread_aof_batch, flush_thread_aof_batch_for_lifecycle, load_append_only_files,
+    record_aof_append_result, replay_aof_databases_with_options,
+    rewrite_manifest_aof_disabled_from_dbs, set_aof_timestamp_enabled,
     set_debug_aof_flush_sleep_micros, write_aof_rewrite_for_dbs, AofLoadOptions, AofWriter,
     FSYNC_ALWAYS, FSYNC_EVERYSEC, FSYNC_NO,
 };
@@ -36,11 +36,12 @@ use redis_core::db::{RedisDb, LOOKUP_NONE};
 use redis_core::object::{ObjectKind, RedisObject, EXPIRY_NONE};
 use redis_core::persistence::{PersistenceState, PersistenceStatus};
 use redis_types::RedisString;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 // ─── tmpdir plumbing (no tempfile dev-dep available) ─────────────────────────
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
+static AOF_GLOBAL_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// A unique scratch directory under the OS temp dir, removed on drop. No
 /// external crate; we only have `std` here because the crate has no
@@ -428,6 +429,7 @@ fn debug_aof_flush_sleep_delays_pre_write_flush_path() {
 
 #[test]
 fn aof_timestamp_annotations_prefix_append_and_rewrite_when_enabled() {
+    let _global = AOF_GLOBAL_TEST_LOCK.lock().expect("AOF global test lock");
     let _reset = ResetAofTimestamp;
     let scratch = Scratch::new("aof_timestamp_annotations");
     let aof_path = scratch.path("appendonly.aof");
@@ -452,6 +454,165 @@ fn aof_timestamp_annotations_prefix_append_and_rewrite_when_enabled() {
         rewrite.starts_with(b"#TS:"),
         "enabled AOF timestamp annotations must prefix rewrite output"
     );
+}
+
+#[test]
+fn rewrite_snapshots_loaded_functions_before_keyspace() {
+    let _global = AOF_GLOBAL_TEST_LOCK.lock().expect("AOF global test lock");
+    let _reset_timestamp = ResetAofTimestamp;
+    set_aof_timestamp_enabled(false);
+    let scratch = Scratch::new("rewrite_functions");
+    let seed_path = scratch.path("seed.aof");
+    let rewrite_path = scratch.path("rewrite.aof");
+    let verify_path = scratch.path("verify.aof");
+    let library = b"#!lua name=test\nserver.register_function('test', function() return 1 end)\n";
+
+    std::fs::write(
+        &seed_path,
+        [
+            encode_resp_command(&[rs(b"FUNCTION"), rs(b"FLUSH")]),
+            encode_resp_command(&[rs(b"FUNCTION"), rs(b"LOAD"), rs(library)]),
+        ]
+        .concat(),
+    )
+    .unwrap();
+    let mut dbs = vec![RedisDb::new(0)];
+    replay_aof_databases_with_options(&seed_path, &mut dbs, AofLoadOptions::default())
+        .expect("seed FUNCTION LOAD must replay");
+
+    let mut rewrite = Vec::new();
+    write_aof_rewrite_for_dbs(&dbs, &mut rewrite).expect("rewrite with functions");
+    assert!(
+        rewrite.starts_with(b"*3\r\n$8\r\nFUNCTION\r\n$4\r\nLOAD\r\n"),
+        "rewrite must emit FUNCTION LOAD before DB SELECT/key records"
+    );
+    assert!(
+        rewrite
+            .windows(library.len())
+            .any(|window| window == library),
+        "rewrite must preserve original library source"
+    );
+
+    std::fs::write(&rewrite_path, &rewrite).unwrap();
+    std::fs::write(
+        &verify_path,
+        [
+            encode_resp_command(&[rs(b"FUNCTION"), rs(b"FLUSH")]),
+            std::fs::read(&rewrite_path).unwrap(),
+            encode_resp_command(&[rs(b"FCALL"), rs(b"test"), rs(b"0")]),
+        ]
+        .concat(),
+    )
+    .unwrap();
+    let mut verify_dbs = vec![RedisDb::new(0)];
+    replay_aof_databases_with_options(&verify_path, &mut verify_dbs, AofLoadOptions::default())
+        .expect("rewritten FUNCTION LOAD must make FCALL replayable after flush");
+
+    std::fs::write(
+        scratch.path("cleanup.aof"),
+        encode_resp_command(&[rs(b"FUNCTION"), rs(b"FLUSH")]),
+    )
+    .unwrap();
+    let mut cleanup_dbs = vec![RedisDb::new(0)];
+    replay_aof_databases_with_options(
+        &scratch.path("cleanup.aof"),
+        &mut cleanup_dbs,
+        AofLoadOptions::default(),
+    )
+    .expect("cleanup function registry");
+}
+
+#[test]
+fn disabled_bgrewriteaof_replaces_stale_manifest_with_function_snapshot() {
+    let _global = AOF_GLOBAL_TEST_LOCK.lock().expect("AOF global test lock");
+    let _reset_timestamp = ResetAofTimestamp;
+    set_aof_timestamp_enabled(false);
+    let scratch = Scratch::new("disabled_rewrite_functions");
+    let appendfile = "appendonly.aof";
+    let appenddir = "appendonlydir";
+    let aof_dir = scratch.path(appenddir);
+    std::fs::create_dir_all(&aof_dir).unwrap();
+    std::fs::write(
+        aof_dir.join("appendonly.aof.1.base.aof"),
+        encode_resp_command(&[rs(b"SET"), rs(b"stale"), rs(b"old")]),
+    )
+    .unwrap();
+    std::fs::write(aof_dir.join("appendonly.aof.1.incr.aof"), b"").unwrap();
+    write_manifest(
+        &scratch,
+        appenddir,
+        appendfile,
+        "file appendonly.aof.1.base.aof seq 1 type b\n\
+         file appendonly.aof.1.incr.aof seq 1 type i\n",
+    );
+
+    let library = b"#!lua name=test\nserver.register_function('test', function() return 1 end)\n";
+    let seed_path = scratch.path("disabled-seed.aof");
+    std::fs::write(
+        &seed_path,
+        [
+            encode_resp_command(&[rs(b"FUNCTION"), rs(b"FLUSH")]),
+            encode_resp_command(&[rs(b"FUNCTION"), rs(b"LOAD"), rs(library)]),
+        ]
+        .concat(),
+    )
+    .unwrap();
+    let mut dbs = vec![RedisDb::new(0)];
+    replay_aof_databases_with_options(&seed_path, &mut dbs, AofLoadOptions::default())
+        .expect("seed FUNCTION LOAD must replay");
+
+    let (base_size, current_size) =
+        rewrite_manifest_aof_disabled_from_dbs(&scratch.dir, appendfile, appenddir, &dbs, false)
+            .expect("disabled AOF rewrite");
+    assert_eq!(base_size, current_size);
+
+    let manifest = std::fs::read_to_string(aof_dir.join("appendonly.aof.manifest")).unwrap();
+    assert!(manifest.contains("file appendonly.aof.2.base.aof seq 2 type b"));
+    assert!(
+        !manifest.contains("type i"),
+        "disabled rewrite must not publish an active INCR"
+    );
+    let base = std::fs::read(aof_dir.join("appendonly.aof.2.base.aof")).unwrap();
+    assert!(base.windows(library.len()).any(|window| window == library));
+    assert!(
+        !base
+            .windows(b"stale".len())
+            .any(|window| window == b"stale"),
+        "disabled rewrite must replace the stale on-disk BASE"
+    );
+
+    std::fs::write(
+        scratch.path("disabled-flush.aof"),
+        encode_resp_command(&[rs(b"FUNCTION"), rs(b"FLUSH")]),
+    )
+    .unwrap();
+    let mut flush_dbs = vec![RedisDb::new(0)];
+    replay_aof_databases_with_options(
+        &scratch.path("disabled-flush.aof"),
+        &mut flush_dbs,
+        AofLoadOptions::default(),
+    )
+    .expect("flush before manifest load");
+
+    let mut loaded = vec![RedisDb::new(0)];
+    load_append_only_files(
+        &scratch.dir,
+        appendfile,
+        appenddir,
+        &mut loaded,
+        AofLoadOptions::default(),
+    )
+    .expect("disabled rewrite manifest must load");
+    assert_eq!(snapshot(&loaded[0]).entries.len(), 0);
+
+    let fcall_path = scratch.path("disabled-fcall.aof");
+    std::fs::write(
+        &fcall_path,
+        encode_resp_command(&[rs(b"FCALL"), rs(b"test"), rs(b"0")]),
+    )
+    .unwrap();
+    replay_aof_databases_with_options(&fcall_path, &mut loaded, AofLoadOptions::default())
+        .expect("loaded disabled rewrite function must be callable");
 }
 
 #[test]
@@ -804,8 +965,6 @@ fn replay_preserves_past_expire_across_later_collection_mutation() {
 // BASE+INCR; a malformed manifest (duplicate base / non-monotonic incr seq)
 // must error with the exact Valkey message. See kit notes for the visibility
 // limitation.
-
-use redis_commands::aof::load_append_only_files;
 
 fn write_manifest(scratch: &Scratch, appenddir: &str, appendfile: &str, body: &str) -> PathBuf {
     let dir = scratch.path(appenddir);

@@ -2530,6 +2530,15 @@ fn snapshot_function_libraries() -> Vec<LoadedFunctionLibrary> {
     guard.values().cloned().collect()
 }
 
+pub(crate) fn function_library_codes_for_aof_rewrite() -> Vec<Vec<u8>> {
+    let mut libraries = snapshot_function_libraries();
+    libraries.sort_by(|a, b| ascii_casecmp_bytes(&a.name, &b.name));
+    libraries
+        .into_iter()
+        .map(|library| library.code)
+        .collect()
+}
+
 pub(crate) fn function_vm_memory_used_estimate() -> usize {
     snapshot_function_libraries()
         .iter()
