@@ -1811,9 +1811,81 @@ Performance read:
   conservative until the focused TCL blockers are resolved or explicitly
   classified as unsupported upstream surfaces.
 
+## 12. Packet O Progress: Focused TCL Burn-Down
+
+Packet O moved `integration/aof` from a broad persistence-red file to one
+remaining runtime-yield blocker. The production changes are intentionally
+source-shaped and covered by Rust/process/frontier checks before claiming TCL
+movement.
+
+Implemented:
+
+- `DEBUG AOF-FLUSH-SLEEP <micros>` delays immediately before AOF bytes are
+  written, matching upstream's fsync-barrier timing knob.
+- AOF replay with `aof-load-truncated yes` physically truncates legacy and
+  multipart files back to the last valid RESP boundary before accepting future
+  appends.
+- AOF replay now treats unfinished `MULTI` as an atomic truncated transaction:
+  `load_truncated yes` cuts back before `MULTI`, while strict mode fails with
+  an unexpected EOF.
+- `valkey-check-aof` tracks committed offsets inside `MULTI` and refuses to
+  truncate non-last multipart files, including timestamp truncation mode.
+- AOF startup logs now expose upstream-shaped bad-format, unknown-command, and
+  unexpected-EOF messages on the stdout stream the TCL harness watches.
+- Replay preserves key expiry metadata across later collection mutations, and
+  past `PEXPIREAT` values survive loading until normal post-load lookup deletes
+  the key.
+- Blocked `BLMPOP`/`BZMPOP` wake mutations append to AOF in the same owner
+  batch as the triggering write, preserving replay order.
+- `aof-timestamp-enabled` is live-configured, emits `#TS:<unix-seconds>` for
+  incremental and rewritten AOF files when enabled, and remains off by default.
+- `appendfsync everysec` now flushes AOF bytes to the file immediately while
+  still deferring fsync; upstream tests that inspect the file after a write now
+  see the command bytes.
+- `valkey-check-aof --truncate-to-timestamp` truncates at the first future
+  `#TS:` annotation and reports upstream-shaped abort/non-last-file messages.
+
+Packet O gates run on 2026-06-03:
+
+- `cargo check -p redis-core -p redis-commands -p redis-server`: pass.
+- `cargo test -p redis-commands --test aof_correctness_kit`: 15/15 pass.
+- `cargo test -p redis-server`: 8/8 pass.
+- `python3 -m py_compile harness/oracle/persistence-frontier.py`: pass.
+- Targeted frontier:
+  `aof-blocked-lmpop-zmpop-wake-persists` passed, run id
+  `20260603T031138Z`.
+- Targeted timestamp frontier:
+  `aof-timestamp-annotations-generated,check-aof-truncate-to-timestamp` passed,
+  run id `20260603T032103Z`.
+- Full persistence frontier:
+  `python3 harness/oracle/persistence-frontier.py --skip-build --fail-on-failure`
+  passed 57/57, run id `20260603T032251Z`.
+- Focused `integration/aof`:
+  `python3 harness/oracle/tcl-survey.py --runner-id tcl-persistence-focused --skip-build --timeout-s 180 --no-default-deny-tags --deny-tag needs:repl --deny-tag cluster --files integration/aof`
+  reports 42/43 pass, one remaining failure, run id
+  `20260603T032108720990Z`.
+- Focused four-file persistence survey:
+  `unit/other`, `unit/aofrw`, `integration/aof`, and `integration/rdb` produced
+  42 passed tests, one failed test, one timed-out file, three files without
+  normal summaries, six parsed failure lines, and two abort/exception points;
+  run id `20260603T032306533386Z`.
+
+Current release blockers after Packet O:
+
+- `integration/aof`: only `EVAL timeout with slow verbatim Lua script from AOF`
+  remains. This is not an AOF parser/truncation issue; upstream serves other
+  clients during a timed-out loading script through `processEventsWhileBlocked`,
+  while this port's RuntimeOwner still executes `DEBUG LOADAOF` synchronously.
+- `unit/aofrw`: still aborts at `AOF rewrite functions` with
+  `ERR Function not found`; this is a function subsystem/rewrite surface, not a
+  basic AOF manifest or truncation failure.
+- `unit/other`: still records expire/reload failures and aborts later in a
+  unix-socket fixture before a normal summary.
+- `integration/rdb`: still times out at 180 seconds without a normal summary.
+
 ---
 
-## 12. Risks
+## 13. Risks
 
 - **False confidence from old dirty-tree evidence.** The 23/23 persistence
   frontier is useful history, but clean current evidence must replace it.
@@ -1848,34 +1920,35 @@ Performance read:
 
 ---
 
-## 13. Recommendation
+## 14. Recommendation
 
-After Packet N, the next high-leverage AOF work is no longer baseline repair,
+After Packet O, the next high-leverage AOF work is no longer baseline repair,
 basic background BASE generation, manifest fsync hardening, successful-rewrite
 history deletion, command-path snapshot cloning, syscall-level rewrite
 publication fault injection, held-snapshot COW visibility, startup cleanup, or
 basic multipart checking. Those surfaces now have production code plus
-frontier/process/bench evidence.
+frontier/process/bench evidence, and `integration/aof` is down to one remaining
+runtime-yield failure.
 
-The next pragmatic move is Packet O: focused persistence TCL burn-down.
+The next pragmatic move is Packet P: runtime-yield and remaining focused TCL
+classification.
 
-Ambitious Packet O end state:
+Ambitious Packet P end state:
 
 - `integration/aof`, `unit/aofrw`, `unit/other`, and `integration/rdb` either
   pass in focused survey or each remaining test is classified with a concrete
   unsupported-surface reason.
-- AOF log/error behavior is close enough to upstream for the truncation, bad
-  format, unfinished MULTI, short read, expire, and fsync-barrier cases the TCL
-  files exercise.
+- `DEBUG LOADAOF` plus timed-out scripts either yield enough through
+  RuntimeOwner to expose upstream `LOADING` behavior, or the missing
+  `processEventsWhileBlocked` runtime work is specified as a separate release
+  dependency.
 - Function rewrite/replay support is implemented far enough that upstream AOF
   rewrite function tests no longer abort at `ERR Function not found`, or the
   missing function subsystem is documented as the gating non-AOF dependency.
-- `DEBUG aof-flush-sleep` or an equivalent harness-only hook exists if needed
-  to test fsync-barrier timing deterministically.
 - RDB integration timeouts are split into a server bug, a harness lifecycle
   bug, or an unsupported upstream fixture.
 
-Packet O tool loop:
+Packet P tool loop:
 
 1. Run focused TCL once, then work one file at a time from earliest abort to
    first semantic failure:
@@ -1891,7 +1964,7 @@ Packet O tool loop:
    moves, or immediately if a fix touches append, fsync, rewrite, manifest, RDB,
    or RuntimeOwner flush order.
 
-Packet O should be considered complete only when the focused TCL status has
+Packet P should be considered complete only when the focused TCL status has
 moved from "parsed and red" to either "passing" or "precisely classified with
 source-backed gaps." That is the shortest path from alpha AOF toward a real
 release gate.

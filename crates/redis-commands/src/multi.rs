@@ -341,12 +341,12 @@ fn propagate_transaction_commands(
     }
     let offset = match commands {
         [] => 0,
-        [(db_id, argv)] => crate::dispatch::propagate_command_from_wake(*db_id, argv),
+        [(db_id, argv)] => crate::dispatch::propagate_command_from_wake_repl_only(*db_id, argv),
         _ => {
             let mut offset =
                 crate::dispatch::propagate_command_raw(&[RedisString::from_bytes(b"MULTI")]);
             for (db_id, argv) in commands {
-                let next = crate::dispatch::propagate_command_from_wake(*db_id, argv);
+                let next = crate::dispatch::propagate_command_from_wake_repl_only(*db_id, argv);
                 if next > 0 {
                     offset = next;
                 }

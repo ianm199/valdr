@@ -165,6 +165,8 @@ pub struct LiveConfig {
     pub aof_load_truncated: AtomicBool,
  /// Whether AOF rewrite may emit an RDB preamble.
     pub aof_use_rdb_preamble: AtomicBool,
+ /// Whether AOF writes include `#TS:<unix-seconds>` annotations.
+    pub aof_timestamp_enabled: AtomicBool,
  /// Auto AOF rewrite threshold percentage.
     pub auto_aof_rewrite_percentage: AtomicU64,
  /// Auto AOF rewrite minimum size in bytes.
@@ -292,6 +294,8 @@ pub const DEFAULT_AOF_DIRNAME: &str = "appendonlydir";
 pub const DEFAULT_AOF_LOAD_TRUNCATED: bool = true;
 /// Default `aof-use-rdb-preamble` setting.
 pub const DEFAULT_AOF_USE_RDB_PREAMBLE: bool = true;
+/// Default `aof-timestamp-enabled` setting.
+pub const DEFAULT_AOF_TIMESTAMP_ENABLED: bool = false;
 /// Default auto AOF rewrite percentage.
 pub const DEFAULT_AUTO_AOF_REWRITE_PERCENTAGE: u64 = 100;
 /// Default auto AOF rewrite minimum size (64 MiB).
@@ -345,6 +349,7 @@ impl Default for LiveConfig {
             appendfsync: AtomicU8::new(1),
             aof_load_truncated: AtomicBool::new(DEFAULT_AOF_LOAD_TRUNCATED),
             aof_use_rdb_preamble: AtomicBool::new(DEFAULT_AOF_USE_RDB_PREAMBLE),
+            aof_timestamp_enabled: AtomicBool::new(DEFAULT_AOF_TIMESTAMP_ENABLED),
             auto_aof_rewrite_percentage: AtomicU64::new(DEFAULT_AUTO_AOF_REWRITE_PERCENTAGE),
             auto_aof_rewrite_min_size: AtomicU64::new(DEFAULT_AUTO_AOF_REWRITE_MIN_SIZE),
             repl_backlog_size: AtomicU64::new(DEFAULT_REPL_BACKLOG_SIZE),
@@ -798,6 +803,14 @@ impl LiveConfig {
 
     pub fn set_aof_use_rdb_preamble(&self, enabled: bool) {
         self.aof_use_rdb_preamble.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn aof_timestamp_enabled(&self) -> bool {
+        self.aof_timestamp_enabled.load(Ordering::Relaxed)
+    }
+
+    pub fn set_aof_timestamp_enabled(&self, enabled: bool) {
+        self.aof_timestamp_enabled.store(enabled, Ordering::Relaxed);
     }
 
     pub fn auto_aof_rewrite_percentage(&self) -> u64 {

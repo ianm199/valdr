@@ -22,7 +22,7 @@ use redis_core::blocked_keys::{
 };
 use redis_core::client_info::client_info_registry;
 use redis_core::command_context::CommandContext;
-use redis_core::db::RedisDb;
+use redis_core::db::{RedisDb, LOOKUP_NONE};
 use redis_core::notify::{NOTIFY_GENERIC, NOTIFY_LIST};
 use redis_core::object::RedisObject;
 use redis_types::{RedisError, RedisResult, RedisString};
@@ -72,7 +72,6 @@ fn as_list_ref(obj: Option<&RedisObject>) -> Result<Option<&VecDeque<RedisString
         Some(o) => o.list().map(Some).ok_or_else(RedisError::wrong_type),
     }
 }
-
 
 /// Normalise a signed list index into `[0, len]` for read access.
 /// Negative indexes count from the tail. Returns `None` when
@@ -689,7 +688,7 @@ pub fn llen_command(ctx: &mut CommandContext) -> RedisResult<()> {
         return Err(RedisError::wrong_number_of_args(b"llen"));
     }
     let key = ctx.arg_owned(1usize)?;
-    let len = match as_list_ref(ctx.db().lookup_key_read(&key))? {
+    let len = match as_list_ref(ctx.db_mut().lookup_key_read_with_flags(&key, LOOKUP_NONE))? {
         None => 0,
         Some(d) => d.len() as i64,
     };

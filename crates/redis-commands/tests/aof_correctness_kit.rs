@@ -21,14 +21,18 @@
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use redis_commands::aof::{
-    append_raw_for_dispatch, append_selected_for_dispatch, begin_thread_aof_batch,
-    encode_resp_command, finish_thread_aof_batch, flush_thread_aof_batch_for_lifecycle,
-    record_aof_append_result, replay_aof_databases_with_options, AofLoadOptions, AofWriter,
+    aof_timestamp_enabled, append_raw_for_dispatch, append_selected_for_dispatch,
+    begin_thread_aof_batch, debug_aof_flush_sleep_micros, encode_resp_command,
+    finish_thread_aof_batch,
+    flush_thread_aof_batch_for_lifecycle, record_aof_append_result,
+    replay_aof_databases_with_options, set_aof_timestamp_enabled,
+    set_debug_aof_flush_sleep_micros, write_aof_rewrite_for_dbs, AofLoadOptions, AofWriter,
     FSYNC_ALWAYS, FSYNC_EVERYSEC, FSYNC_NO,
 };
-use redis_core::db::RedisDb;
+use redis_core::db::{RedisDb, LOOKUP_NONE};
 use redis_core::object::{ObjectKind, RedisObject, EXPIRY_NONE};
 use redis_core::persistence::{PersistenceState, PersistenceStatus};
 use redis_types::RedisString;
@@ -62,6 +66,22 @@ impl Scratch {
 impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+struct ResetAofFlushSleep;
+
+impl Drop for ResetAofFlushSleep {
+    fn drop(&mut self) {
+        set_debug_aof_flush_sleep_micros(0);
+    }
+}
+
+struct ResetAofTimestamp;
+
+impl Drop for ResetAofTimestamp {
+    fn drop(&mut self) {
+        set_aof_timestamp_enabled(false);
     }
 }
 
@@ -384,6 +404,57 @@ fn fsync_policies_all_replay_identically() {
 }
 
 #[test]
+fn debug_aof_flush_sleep_delays_pre_write_flush_path() {
+    let _reset = ResetAofFlushSleep;
+    let scratch = Scratch::new("debug_aof_flush_sleep");
+    let aof_path = scratch.path("appendonly.aof");
+    let writer = AofWriter::open(&aof_path, FSYNC_ALWAYS).expect("open aof");
+
+    set_debug_aof_flush_sleep_micros(75_000);
+    assert_eq!(debug_aof_flush_sleep_micros(), 75_000);
+
+    let start = Instant::now();
+    writer
+        .append(&[rs(b"SET"), rs(b"sleep:probe"), rs(b"1")])
+        .expect("append with debug sleep");
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed >= Duration::from_millis(50),
+        "DEBUG AOF-FLUSH-SLEEP must delay the pre-write flush path; elapsed={elapsed:?}"
+    );
+    assert!(std::fs::metadata(&aof_path).unwrap().len() > 0);
+}
+
+#[test]
+fn aof_timestamp_annotations_prefix_append_and_rewrite_when_enabled() {
+    let _reset = ResetAofTimestamp;
+    let scratch = Scratch::new("aof_timestamp_annotations");
+    let aof_path = scratch.path("appendonly.aof");
+    let writer = AofWriter::open(&aof_path, FSYNC_EVERYSEC).expect("open aof");
+
+    set_aof_timestamp_enabled(true);
+    assert!(aof_timestamp_enabled());
+    writer
+        .append(&[rs(b"SET"), rs(b"timestamp:append"), rs(b"1")])
+        .expect("append timestamped command");
+    let bytes = std::fs::read(&aof_path).expect("read timestamped append");
+    assert!(
+        bytes.starts_with(b"#TS:"),
+        "enabled AOF timestamp annotations must prefix the next append"
+    );
+
+    let mut db = RedisDb::new(0);
+    db.insert(rs(b"timestamp:rewrite"), RedisObject::new_string(b"2"));
+    let mut rewrite = Vec::new();
+    write_aof_rewrite_for_dbs(&[db], &mut rewrite).expect("rewrite timestamped aof");
+    assert!(
+        rewrite.starts_with(b"#TS:"),
+        "enabled AOF timestamp annotations must prefix rewrite output"
+    );
+}
+
+#[test]
 fn appendfsync_always_thread_batch_syncs_once_for_many_commands() {
     let scratch = Scratch::new("always_batch_once");
     let aof_path = scratch.path("appendonly.aof");
@@ -577,6 +648,50 @@ fn multi_exec_envelope_replays_keyspace_exactly() {
     );
 }
 
+#[test]
+fn unfinished_multi_load_truncated_reverts_to_before_multi() {
+    let scratch = Scratch::new("unfinished_multi");
+    let aof_path = scratch.path("appendonly.aof");
+    let reject_path = scratch.path("appendonly-reject.aof");
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&encode_resp_command(&[
+        rs(b"SET"),
+        rs(b"foo"),
+        rs(b"hello"),
+    ]));
+    let valid_before_multi = bytes.len();
+    bytes.extend_from_slice(&encode_resp_command(&[rs(b"MULTI")]));
+    bytes.extend_from_slice(&encode_resp_command(&[
+        rs(b"SET"),
+        rs(b"bar"),
+        rs(b"world"),
+    ]));
+    std::fs::write(&aof_path, &bytes).unwrap();
+    std::fs::write(&reject_path, &bytes).unwrap();
+
+    let mut opts_yes = AofLoadOptions::default();
+    opts_yes.load_truncated = true;
+    let replayed = replay_into_fresh(&aof_path, opts_yes).expect("unfinished MULTI tolerated");
+    let mut expected = RedisDb::new(0);
+    expected.insert(rs(b"foo"), RedisObject::new_string(b"hello"));
+    assert_eq!(
+        replayed,
+        snapshot(&expected),
+        "load_truncated=yes must roll back an unfinished MULTI body"
+    );
+    assert_eq!(
+        std::fs::metadata(&aof_path).unwrap().len(),
+        valid_before_multi as u64,
+        "unfinished MULTI truncation must cut back to before MULTI"
+    );
+
+    let mut dbs = vec![RedisDb::new(0)];
+    let err = replay_aof_databases_with_options(&reject_path, &mut dbs, AofLoadOptions::default())
+        .expect_err("load_truncated=no must reject unfinished MULTI");
+    assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+}
+
 // ─── audit finding 4: TRUNCATED-TAIL (GREEN-LOCK / no oracle) ────────────────
 
 /// A truncated final command: the valid prefix must replay under
@@ -586,16 +701,20 @@ fn multi_exec_envelope_replays_keyspace_exactly() {
 fn truncated_tail_loads_prefix_only_when_allowed() {
     let scratch = Scratch::new("trunc");
     let aof_path = scratch.path("appendonly.aof");
+    let reject_path = scratch.path("appendonly-reject.aof");
 
     // Two complete commands, then a deliberately truncated third (header claims
     // a 3-element array but the bytes stop mid-command).
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&encode_resp_command(&[rs(b"SET"), rs(b"good1"), rs(b"v1")]));
     bytes.extend_from_slice(&encode_resp_command(&[rs(b"SET"), rs(b"good2"), rs(b"v2")]));
+    let valid_prefix_len = bytes.len();
     bytes.extend_from_slice(b"*3\r\n$3\r\nSET\r\n$4\r\ngo"); // truncated tail
     std::fs::write(&aof_path, &bytes).unwrap();
+    std::fs::write(&reject_path, &bytes).unwrap();
 
-    // load_truncated=yes → valid prefix replays, no error.
+    // load_truncated=yes -> valid prefix replays and the torn tail is removed
+    // so future appends land after a valid RESP boundary.
     let mut opts_yes = AofLoadOptions::default();
     opts_yes.load_truncated = true;
     let replayed = replay_into_fresh(&aof_path, opts_yes).expect("truncated tail tolerated");
@@ -607,15 +726,74 @@ fn truncated_tail_loads_prefix_only_when_allowed() {
         snapshot(&expected),
         "load_truncated=yes must replay the valid prefix and drop the torn tail"
     );
+    assert_eq!(
+        std::fs::metadata(&aof_path).unwrap().len(),
+        valid_prefix_len as u64,
+        "load_truncated=yes must physically truncate the torn tail before new appends"
+    );
 
-    // load_truncated=no → error.
+    let writer = AofWriter::open(&aof_path, FSYNC_ALWAYS).expect("reopen repaired aof");
+    writer
+        .append(&[rs(b"SET"), rs(b"after"), rs(b"repair")])
+        .expect("append after truncation repair");
+    let replayed = replay_into_fresh(&aof_path, AofLoadOptions::default())
+        .expect("repaired file must replay without load_truncated");
+    expected.insert(rs(b"after"), RedisObject::new_string(b"repair"));
+    assert_eq!(
+        replayed,
+        snapshot(&expected),
+        "new commands appended after truncation repair must survive restart"
+    );
+
+    // load_truncated=no -> error on a fresh copy of the same torn input.
     let mut dbs = vec![RedisDb::new(0)];
-    let err = replay_aof_databases_with_options(&aof_path, &mut dbs, AofLoadOptions::default())
+    let err = replay_aof_databases_with_options(&reject_path, &mut dbs, AofLoadOptions::default())
         .expect_err("load_truncated=no must reject a torn tail");
     assert!(
         err.kind() == io::ErrorKind::UnexpectedEof || err.kind() == io::ErrorKind::InvalidData,
         "expected EOF/InvalidData on torn tail, got {err:?}"
     );
+}
+
+#[test]
+fn replay_preserves_past_expire_across_later_collection_mutation() {
+    let scratch = Scratch::new("expire_replay");
+    let aof_path = scratch.path("appendonly.aof");
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&encode_resp_command(&[
+        rs(b"RPUSH"),
+        rs(b"list"),
+        rs(b"foo"),
+    ]));
+    bytes.extend_from_slice(&encode_resp_command(&[
+        rs(b"PEXPIREAT"),
+        rs(b"list"),
+        rs(b"1000"),
+    ]));
+    bytes.extend_from_slice(&encode_resp_command(&[
+        rs(b"RPUSH"),
+        rs(b"list"),
+        rs(b"bar"),
+    ]));
+    std::fs::write(&aof_path, &bytes).unwrap();
+
+    let key = rs(b"list");
+    let mut dbs = vec![RedisDb::new(0)];
+    replay_aof_databases_with_options(&aof_path, &mut dbs, AofLoadOptions::default())
+        .expect("AOF with past PEXPIREAT should replay");
+
+    let obj = dbs[0]
+        .find(&key)
+        .expect("replay should keep the expired key until normal lookup");
+    assert_eq!(obj.expire, 1000);
+    assert_eq!(obj.list().map(|list| list.len()), Some(2));
+    assert!(
+        dbs[0]
+            .lookup_key_read_with_flags(&key, LOOKUP_NONE)
+            .is_none(),
+        "normal post-load lookup should expire the key"
+    );
+    assert!(!dbs[0].exists_raw(&key));
 }
 
 // ─── audit finding 5: MANIFEST round-trip + validation (GREEN-LOCK) ──────────

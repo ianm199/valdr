@@ -19,6 +19,7 @@
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+use std::io;
 use std::net::{IpAddr, SocketAddr, TcpListener};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64};
@@ -231,7 +232,7 @@ fn main() {
             }
             Ok(None) => {}
             Err(e) => {
-                eprintln!("redis-server: AOF replay failed: {}", e);
+                log_aof_replay_error(&e, &args.appendfilename);
                 std::process::exit(1);
             }
         };
@@ -403,4 +404,28 @@ fn main() {
         owner_dbs,
         replica_apply_rx,
     );
+}
+
+fn log_aof_replay_error(err: &io::Error, appendfilename: &str) {
+    let message = err.to_string();
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("unknown command") {
+        println!("{}", message);
+    }
+    match err.kind() {
+        io::ErrorKind::UnexpectedEof => {
+            println!(
+                "Unexpected end of file reading the append only file {}. You can: 1) Make a backup of your AOF file, then use ./valkey-check-aof --fix <filename.manifest>. 2) Alternatively you can set the 'aof-load-truncated' configuration option to yes and restart the server.",
+                appendfilename
+            );
+        }
+        io::ErrorKind::InvalidData => {
+            println!(
+                "Bad file format reading the append only file {}: make a backup of your AOF file, then use ./valkey-check-aof --fix <filename.manifest>",
+                appendfilename
+            );
+        }
+        _ => {}
+    }
+    eprintln!("redis-server: AOF replay failed: {}", message);
 }

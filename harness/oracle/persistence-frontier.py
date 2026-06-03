@@ -376,12 +376,36 @@ def current_incr_from_manifest(aof_dir: Path) -> Path | None:
     return aof_dir / best[1]
 
 
-def run_check_aof(tmp: Path, target: Path) -> dict[str, Any]:
+def current_base_from_manifest(aof_dir: Path) -> Path | None:
+    manifest = aof_dir / AOF_MANIFEST
+    best: tuple[int, str] | None = None
+    for line in manifest_lines(manifest):
+        parts = line.split()
+        if len(parts) < 6:
+            continue
+        if parts[0] != "file" or parts[2] != "seq" or parts[4] != "type" or parts[5] != "b":
+            continue
+        try:
+            seq = int(parts[3])
+        except ValueError:
+            continue
+        if best is None or seq > best[0]:
+            best = (seq, parts[1])
+    if best is None:
+        return None
+    return aof_dir / best[1]
+
+
+def run_check_aof(tmp: Path, target: Path, extra: list[str] | None = None) -> dict[str, Any]:
     checker = tmp / "valkey-check-aof"
     if not checker.exists():
         checker.symlink_to(RUST_BIN)
+    cmd = [str(checker)]
+    if extra:
+        cmd.extend(extra)
+    cmd.append(str(target))
     proc = subprocess.run(
-        [str(checker), str(target)],
+        cmd,
         cwd=ROOT,
         text=True,
         stdout=subprocess.PIPE,
@@ -512,8 +536,9 @@ def scenario_expires_after_aof_loadaof(tmp: Path) -> dict[str, Any]:
 
 
 def scenario_aof_load_truncated_yes(tmp: Path) -> dict[str, Any]:
+    legacy = tmp / "appendonly.aof"
     write_aof(
-        tmp / "appendonly.aof",
+        legacy,
         [("INCR", "foo")] * 5,
         trailer=encode_command("INCR", "foo")[:-1],
     )
@@ -522,11 +547,107 @@ def scenario_aof_load_truncated_yes(tmp: Path) -> dict[str, Any]:
         client = RespClient(server.port)
         try:
             value = bulk(client.command("GET", "foo"))
-            return {"passed": value == "5", "foo": value}
+            assert client.command("INCR", "foo") == 6
         finally:
             client.close()
     finally:
         stop_server(server)
+
+    restart = start_server(tmp, appendonly=True, extra=["--aof-load-truncated", "no"])
+    try:
+        client = RespClient(restart.port)
+        try:
+            restarted_value = bulk(client.command("GET", "foo"))
+        finally:
+            client.close()
+    finally:
+        restart_log = stop_server(restart)
+
+    legacy_size = legacy.stat().st_size if legacy.exists() else 0
+    passed = value == "5" and restarted_value == "6" and legacy_size > 0
+    return {
+        "passed": passed,
+        "foo_after_truncated_load": value,
+        "foo_after_append_restart": restarted_value,
+        "legacy_size_after_truncate": legacy_size,
+        "restart_log_tail": restart_log[-2000:],
+    }
+
+
+def scenario_multipart_aof_load_truncated_append_survives_restart(tmp: Path) -> dict[str, Any]:
+    aof_dir = tmp / AOF_DIRNAME
+    incr = f"{AOF_BASENAME}.1.incr.aof"
+    write_aof(aof_dir / incr, [("INCR", "foo")] * 5, trailer=encode_command("INCR", "foo")[:-1])
+    write_manifest(aof_dir, [f"file {incr} seq 1 type i"])
+
+    server = start_server(
+        tmp,
+        appendonly=True,
+        extra=["--appenddirname", AOF_DIRNAME, "--aof-load-truncated", "yes"],
+    )
+    try:
+        client = RespClient(server.port)
+        try:
+            value = bulk(client.command("GET", "foo"))
+            incr_reply = client.command("INCR", "foo")
+        finally:
+            client.close()
+    finally:
+        stop_server(server)
+
+    restart = start_server(
+        tmp,
+        appendonly=True,
+        extra=["--appenddirname", AOF_DIRNAME, "--aof-load-truncated", "no"],
+    )
+    try:
+        client = RespClient(restart.port)
+        try:
+            restarted_value = bulk(client.command("GET", "foo"))
+        finally:
+            client.close()
+    finally:
+        restart_log = stop_server(restart)
+
+    incr_size = (aof_dir / incr).stat().st_size if (aof_dir / incr).exists() else 0
+    passed = value == "5" and incr_reply == 6 and restarted_value == "6"
+    return {
+        "passed": passed,
+        "foo_after_truncated_load": value,
+        "incr_reply": incr_reply,
+        "foo_after_append_restart": restarted_value,
+        "incr_size_after_restart": incr_size,
+        "manifest_lines": manifest_lines(aof_dir / AOF_MANIFEST),
+        "restart_log_tail": restart_log[-2000:],
+    }
+
+
+def scenario_multipart_aof_expired_key_not_resurrected_by_later_push(tmp: Path) -> dict[str, Any]:
+    aof_dir = tmp / AOF_DIRNAME
+    incr = f"{AOF_BASENAME}.1.incr.aof"
+    write_aof(
+        aof_dir / incr,
+        [
+            ("RPUSH", "list", "foo"),
+            ("PEXPIREAT", "list", "1000"),
+            ("RPUSH", "list", "bar"),
+        ],
+    )
+    write_manifest(aof_dir, [f"file {incr} seq 1 type i"])
+    server = start_server(tmp, appendonly=True, extra=["--appenddirname", AOF_DIRNAME])
+    try:
+        client = RespClient(server.port)
+        try:
+            llen = client.command("LLEN", "list")
+        finally:
+            client.close()
+    finally:
+        log = stop_server(server)
+    return {
+        "passed": llen == 0,
+        "llen": llen,
+        "server_log_tail": log[-2000:],
+    }
 
 
 def scenario_aof_load_truncated_no_fails(tmp: Path) -> dict[str, Any]:
@@ -535,15 +656,41 @@ def scenario_aof_load_truncated_no_fails(tmp: Path) -> dict[str, Any]:
         [("SET", "foo", "hello")],
         trailer=encode_command("SET", "bar", "world")[:-2],
     )
-    return expect_startup_failure(tmp, extra=["--aof-load-truncated", "no"])
+    result = expect_startup_failure(tmp, extra=["--aof-load-truncated", "no"])
+    result["passed"] = result["passed"] and "Unexpected end of file reading the append only file" in result["output"]
+    return result
+
+
+def scenario_aof_unfinished_multi_load_truncated_no_fails(tmp: Path) -> dict[str, Any]:
+    write_aof(
+        tmp / "appendonly.aof",
+        [("SET", "foo", "hello"), ("MULTI",), ("SET", "bar", "world")],
+    )
+    result = expect_startup_failure(tmp, extra=["--aof-load-truncated", "no"])
+    result["passed"] = result["passed"] and "Unexpected end of file reading the append only file" in result["output"]
+    return result
+
+
+def scenario_aof_bad_format_logs_upstream_error(tmp: Path) -> dict[str, Any]:
+    path = tmp / "appendonly.aof"
+    path.write_bytes(
+        encode_command("SET", "foo", "hello")
+        + b"!!!"
+        + encode_command("SET", "foo", "again")
+    )
+    result = expect_startup_failure(tmp, extra=["--aof-load-truncated", "yes"])
+    result["passed"] = result["passed"] and "Bad file format reading the append only file" in result["output"]
+    return result
 
 
 def scenario_aof_unknown_command_fails(tmp: Path) -> dict[str, Any]:
     write_aof(
         tmp / "appendonly.aof",
-        [("SET", "foo", "hello"), ("BLA", "foo", "hello"), ("SET", "foo", "again")],
+        [("SET", "foo", "hello"), ("bla", "foo", "hello"), ("SET", "foo", "again")],
     )
-    return expect_startup_failure(tmp, extra=["--aof-load-truncated", "yes"])
+    result = expect_startup_failure(tmp, extra=["--aof-load-truncated", "yes"])
+    result["passed"] = result["passed"] and "unknown command 'bla'" in result["output"]
+    return result
 
 
 def scenario_aof_getex_no_append(tmp: Path) -> dict[str, Any]:
@@ -621,6 +768,111 @@ def scenario_aof_lmpop_zmpop_replay(tmp: Path) -> dict[str, Any]:
             client.close()
     finally:
         stop_server(server)
+
+
+def scenario_aof_blocked_lmpop_zmpop_wake_persists(tmp: Path) -> dict[str, Any]:
+    server = start_server(tmp, appendonly=True, extra=["--appenddirname", AOF_DIRNAME])
+    list_reply: list[Any] = []
+    zset_reply: list[Any] = []
+    errors: list[str] = []
+
+    def wait_list_pop() -> None:
+        try:
+            client = RespClient(server.port)
+            try:
+                list_reply.append(
+                    client.command("BLMPOP", "5", "1", "wake:list", "LEFT", "COUNT", "2")
+                )
+            finally:
+                client.close()
+        except Exception as exc:  # noqa: BLE001 - captured into scenario detail
+            errors.append(f"list:{exc!r}")
+
+    def wait_zset_pop() -> None:
+        try:
+            client = RespClient(server.port)
+            try:
+                zset_reply.append(
+                    client.command("BZMPOP", "5", "1", "wake:zset", "MIN", "COUNT", "2")
+                )
+            finally:
+                client.close()
+        except Exception as exc:  # noqa: BLE001 - captured into scenario detail
+            errors.append(f"zset:{exc!r}")
+
+    def normalize_blocked_reply(reply: Any) -> Any:
+        if isinstance(reply, list) and len(reply) == 2:
+            values = reply[1]
+            if isinstance(values, list):
+                if values and isinstance(values[0], list):
+                    return [bulk(reply[0]), [normalize_array(pair) for pair in values]]
+                return [bulk(reply[0]), normalize_array(values)]
+        return str(reply)
+
+    try:
+        client = RespClient(server.port)
+        try:
+            list_thread = threading.Thread(target=wait_list_pop)
+            list_thread.start()
+            time.sleep(0.1)
+            list_push = client.command("RPUSH", "wake:list", "a", "b", "c")
+            list_thread.join(timeout=5)
+            if list_thread.is_alive():
+                errors.append("list thread timed out")
+
+            zset_thread = threading.Thread(target=wait_zset_pop)
+            zset_thread.start()
+            time.sleep(0.1)
+            zset_add = client.command("ZADD", "wake:zset", "1", "a", "2", "b", "3", "c")
+            zset_thread.join(timeout=5)
+            if zset_thread.is_alive():
+                errors.append("zset thread timed out")
+
+            live_list = normalize_array(client.command("LRANGE", "wake:list", "0", "-1"))
+            live_zset = normalize_array(
+                client.command("ZRANGE", "wake:zset", "0", "-1", "WITHSCORES")
+            )
+        finally:
+            client.close()
+    finally:
+        stop_server(server)
+
+    restart = start_server(tmp, appendonly=True, extra=["--appenddirname", AOF_DIRNAME])
+    try:
+        client = RespClient(restart.port)
+        try:
+            restart_list = normalize_array(client.command("LRANGE", "wake:list", "0", "-1"))
+            restart_zset = normalize_array(
+                client.command("ZRANGE", "wake:zset", "0", "-1", "WITHSCORES")
+            )
+        finally:
+            client.close()
+    finally:
+        restart_log = stop_server(restart)
+
+    list_view = normalize_blocked_reply(list_reply[0]) if list_reply else None
+    zset_view = normalize_blocked_reply(zset_reply[0]) if zset_reply else None
+    passed = (
+        not errors
+        and list_push == 3
+        and zset_add == 3
+        and list_view == ["wake:list", ["a", "b"]]
+        and live_list == ["c"]
+        and restart_list == live_list
+        and live_zset == ["c", "3"]
+        and restart_zset == live_zset
+    )
+    return {
+        "passed": passed,
+        "errors": errors,
+        "list_reply": list_view,
+        "zset_reply": zset_view,
+        "live_list": live_list,
+        "restart_list": restart_list,
+        "live_zset": live_zset,
+        "restart_zset": restart_zset,
+        "restart_log_tail": restart_log[-2000:],
+    }
 
 
 def scenario_aof_rewrite_collections_digest(tmp: Path) -> dict[str, Any]:
@@ -1403,6 +1655,43 @@ def scenario_check_aof_corrupt_incr_fails(tmp: Path) -> dict[str, Any]:
     return result
 
 
+def scenario_check_aof_unfinished_multi_base_fails_not_last(tmp: Path) -> dict[str, Any]:
+    aof_dir = tmp / AOF_DIRNAME
+    base = f"{AOF_BASENAME}.1.base.aof"
+    incr = f"{AOF_BASENAME}.1.incr.aof"
+    write_aof(
+        aof_dir / base,
+        [
+            ("SET", "check:base", "1"),
+            ("MULTI",),
+            ("SET", "check:inside-multi", "1"),
+        ],
+    )
+    write_aof(aof_dir / incr, [("SET", "check:incr", "1")])
+    manifest = write_manifest(
+        aof_dir,
+        [
+            f"file {base} seq 1 type b",
+            f"file {incr} seq 1 type i",
+        ],
+    )
+    normal = run_check_aof(tmp, manifest)
+    fix = run_check_aof(tmp, manifest, extra=["--fix"])
+    passed = (
+        normal["returncode"] != 0
+        and "Reached EOF before reading EXEC for MULTI" in normal["output"]
+        and "not valid" in normal["output"]
+        and fix["returncode"] != 0
+        and "Failed to truncate AOF" in fix["output"]
+        and "because it is not the last file" in fix["output"]
+    )
+    return {
+        "passed": passed,
+        "normal": normal,
+        "fix": fix,
+    }
+
+
 def scenario_check_aof_rdb_preamble_base_valid(tmp: Path) -> dict[str, Any]:
     server = start_server(
         tmp,
@@ -1432,6 +1721,166 @@ def scenario_check_aof_rdb_preamble_base_valid(tmp: Path) -> dict[str, Any]:
         and "All AOF files and manifest are valid" in result["output"]
     )
     return result
+
+
+def scenario_aof_debug_flush_sleep_delays_always_append(tmp: Path) -> dict[str, Any]:
+    server = start_server(tmp, appendonly=True, extra=["--appenddirname", AOF_DIRNAME])
+    client = RespClient(server.port)
+    try:
+        debug_ok = client.command("DEBUG", "AOF-FLUSH-SLEEP", "75000")
+        start = time.monotonic()
+        set_ok = client.command("SET", "debug:aof-flush-sleep", "1")
+        elapsed_ms = (time.monotonic() - start) * 1000.0
+        reset_ok = client.command("DEBUG", "AOF-FLUSH-SLEEP", "0")
+    finally:
+        client.close()
+        log = stop_server(server)
+
+    aof = current_incr_from_manifest(tmp / AOF_DIRNAME)
+    aof_size = aof.stat().st_size if aof and aof.exists() else 0
+    passed = (
+        debug_ok == "OK"
+        and set_ok == "OK"
+        and reset_ok == "OK"
+        and elapsed_ms >= 50.0
+        and aof_size > 0
+    )
+    return {
+        "passed": passed,
+        "debug_ok": debug_ok,
+        "set_ok": set_ok,
+        "reset_ok": reset_ok,
+        "elapsed_ms": elapsed_ms,
+        "aof_size": aof_size,
+        "server_log_tail": log[-2000:],
+    }
+
+
+def scenario_aof_timestamp_annotations_generated(tmp: Path) -> dict[str, Any]:
+    server = start_server(tmp, appendonly=True, extra=["--appenddirname", AOF_DIRNAME])
+    try:
+        client = RespClient(server.port)
+        try:
+            timestamp_ok = client.command("CONFIG", "SET", "aof-timestamp-enabled", "yes")
+            preamble_ok = client.command("CONFIG", "SET", "aof-use-rdb-preamble", "no")
+            set_ok = client.command("SET", "timestamp:frontier", "1")
+            incr = current_incr_from_manifest(tmp / AOF_DIRNAME)
+            incr_first = (
+                incr.read_bytes().splitlines()[0].decode("utf-8", "replace")
+                if incr and incr.exists() and incr.stat().st_size > 0
+                else ""
+            )
+            rewrite_reply = client.command("BGREWRITEAOF")
+            wait_rewrite_done(client)
+            base = current_base_from_manifest(tmp / AOF_DIRNAME)
+            base_first = (
+                base.read_bytes().splitlines()[0].decode("utf-8", "replace")
+                if base and base.exists() and base.stat().st_size > 0
+                else ""
+            )
+        finally:
+            client.close()
+    finally:
+        log = stop_server(server)
+
+    passed = (
+        timestamp_ok == "OK"
+        and preamble_ok == "OK"
+        and set_ok == "OK"
+        and isinstance(rewrite_reply, str)
+        and rewrite_reply.startswith("Background append only file rewriting")
+        and incr_first.startswith("#TS:")
+        and base_first.startswith("#TS:")
+    )
+    return {
+        "passed": passed,
+        "timestamp_ok": timestamp_ok,
+        "preamble_ok": preamble_ok,
+        "set_ok": set_ok,
+        "rewrite_reply": rewrite_reply,
+        "incr_first": incr_first,
+        "base_first": base_first,
+        "manifest_lines": manifest_lines(tmp / AOF_DIRNAME / AOF_MANIFEST),
+        "server_log_tail": log[-2000:],
+    }
+
+
+def scenario_check_aof_truncate_to_timestamp(tmp: Path) -> dict[str, Any]:
+    def timestamped_aof_bytes() -> bytes:
+        return (
+            b"#TS:1628217470\r\n"
+            + encode_command("SET", "foo1", "bar1")
+            + b"#TS:1628217471\r\n"
+            + encode_command("SET", "foo2", "bar2")
+            + b"#TS:1628217472\r\n"
+            + b"#TS:1628217473\r\n"
+            + encode_command("SET", "foo3", "bar3")
+            + b"#TS:1628217474\r\n"
+        )
+
+    ok_dir = tmp / "timestamp-ok"
+    ok_aof_dir = ok_dir / AOF_DIRNAME
+    ok_base = f"{AOF_BASENAME}.1.base.aof"
+    (ok_aof_dir / ok_base).parent.mkdir(parents=True, exist_ok=True)
+    (ok_aof_dir / ok_base).write_bytes(timestamped_aof_bytes())
+    ok_manifest = write_manifest(ok_aof_dir, [f"file {ok_base} seq 1 type b"])
+    truncate = run_check_aof(ok_dir, ok_manifest, extra=["--truncate-to-timestamp", "1628217471"])
+
+    server = start_server(ok_dir, appendonly=True, extra=["--appenddirname", AOF_DIRNAME])
+    try:
+        client = RespClient(server.port)
+        try:
+            values = {
+                "foo1": bulk(client.command("GET", "foo1")),
+                "foo2": bulk(client.command("GET", "foo2")),
+                "foo3": bulk(client.command("GET", "foo3")),
+            }
+        finally:
+            client.close()
+    finally:
+        restart_log = stop_server(server)
+
+    abort_dir = tmp / "timestamp-abort"
+    abort_aof_dir = abort_dir / AOF_DIRNAME
+    (abort_aof_dir / ok_base).parent.mkdir(parents=True, exist_ok=True)
+    (abort_aof_dir / ok_base).write_bytes(timestamped_aof_bytes())
+    abort_manifest = write_manifest(abort_aof_dir, [f"file {ok_base} seq 1 type b"])
+    abort = run_check_aof(abort_dir, abort_manifest, extra=["--truncate-to-timestamp", "1628217469"])
+
+    nonlast_dir = tmp / "timestamp-nonlast"
+    nonlast_aof_dir = nonlast_dir / AOF_DIRNAME
+    incr = f"{AOF_BASENAME}.1.incr.aof"
+    (nonlast_aof_dir / ok_base).parent.mkdir(parents=True, exist_ok=True)
+    (nonlast_aof_dir / ok_base).write_bytes(timestamped_aof_bytes())
+    write_aof(nonlast_aof_dir / incr, [("SET", "tail", "1")])
+    nonlast_manifest = write_manifest(
+        nonlast_aof_dir,
+        [f"file {ok_base} seq 1 type b", f"file {incr} seq 1 type i"],
+    )
+    nonlast = run_check_aof(
+        nonlast_dir,
+        nonlast_manifest,
+        extra=["--truncate-to-timestamp", "1628217473"],
+    )
+
+    passed = (
+        truncate["returncode"] == 0
+        and values == {"foo1": "bar1", "foo2": "bar2", "foo3": None}
+        and abort["returncode"] != 0
+        and "aborting" in abort["output"]
+        and nonlast["returncode"] != 0
+        and "Failed to truncate AOF" in nonlast["output"]
+        and "to timestamp" in nonlast["output"]
+        and "because it is not the last file" in nonlast["output"]
+    )
+    return {
+        "passed": passed,
+        "truncate": truncate,
+        "values_after_truncate": values,
+        "abort": abort,
+        "nonlast": nonlast,
+        "restart_log_tail": restart_log[-2000:],
+    }
 
 
 def run_faulted_manifest_rewrite(
@@ -1787,11 +2236,16 @@ SCENARIOS: list[Scenario] = [
     Scenario("expires-after-rdb-reload", "persistence-rdb", scenario_expires_after_rdb_reload),
     Scenario("expires-after-aof-loadaof", "persistence-aof", scenario_expires_after_aof_loadaof),
     Scenario("aof-load-truncated-yes-short-read", "persistence-aof", scenario_aof_load_truncated_yes),
+    Scenario("multipart-aof-load-truncated-append-survives-restart", "persistence-aof", scenario_multipart_aof_load_truncated_append_survives_restart),
+    Scenario("multipart-aof-expired-key-not-resurrected-by-later-push", "persistence-aof", scenario_multipart_aof_expired_key_not_resurrected_by_later_push),
     Scenario("aof-load-truncated-no-fails", "persistence-aof", scenario_aof_load_truncated_no_fails),
+    Scenario("aof-unfinished-multi-load-truncated-no-fails", "persistence-aof", scenario_aof_unfinished_multi_load_truncated_no_fails),
+    Scenario("aof-bad-format-logs-upstream-error", "persistence-aof", scenario_aof_bad_format_logs_upstream_error),
     Scenario("aof-unknown-command-fails-startup", "persistence-aof", scenario_aof_unknown_command_fails),
     Scenario("getex-does-not-append-to-aof", "persistence-aof-propagation", scenario_aof_getex_no_append),
     Scenario("aof-spop-count-replay", "persistence-aof-propagation", scenario_aof_spop_count_replay),
     Scenario("aof-lmpop-zmpop-replay", "persistence-aof-propagation", scenario_aof_lmpop_zmpop_replay),
+    Scenario("aof-blocked-lmpop-zmpop-wake-persists", "persistence-aof-propagation", scenario_aof_blocked_lmpop_zmpop_wake_persists),
     Scenario("aof-rewrite-collections-digest", "persistence-aof-rewrite", scenario_aof_rewrite_collections_digest),
     Scenario("multipart-aof-manifest-basic-load", "persistence-aof-manifest", scenario_multipart_manifest_basic_load),
     Scenario("multipart-aof-manifest-missing-file-fails", "persistence-aof-manifest", scenario_multipart_manifest_missing_file_fails),
@@ -1819,7 +2273,11 @@ SCENARIOS: list[Scenario] = [
     Scenario("check-aof-valid-multipart-layout", "persistence-aof-check", scenario_check_aof_valid_multipart_layout),
     Scenario("check-aof-missing-manifest-target-fails", "persistence-aof-check", scenario_check_aof_missing_manifest_target_fails),
     Scenario("check-aof-corrupt-incr-fails", "persistence-aof-check", scenario_check_aof_corrupt_incr_fails),
+    Scenario("check-aof-unfinished-multi-base-fails-not-last", "persistence-aof-check", scenario_check_aof_unfinished_multi_base_fails_not_last),
     Scenario("check-aof-rdb-preamble-base-valid", "persistence-aof-check", scenario_check_aof_rdb_preamble_base_valid),
+    Scenario("aof-debug-flush-sleep-delays-always-append", "persistence-aof-debug", scenario_aof_debug_flush_sleep_delays_always_append),
+    Scenario("aof-timestamp-annotations-generated", "persistence-aof-timestamp", scenario_aof_timestamp_annotations_generated),
+    Scenario("check-aof-truncate-to-timestamp", "persistence-aof-check", scenario_check_aof_truncate_to_timestamp),
     Scenario("multipart-aof-rewrite-fault-preliminary-manifest-before-rename", "persistence-aof-rewrite-fault", scenario_multipart_rewrite_fault_preliminary_manifest_before_rename),
     Scenario("multipart-aof-rewrite-fault-base-before-rename", "persistence-aof-rewrite-fault", scenario_multipart_rewrite_fault_base_before_rename),
     Scenario("multipart-aof-rewrite-fault-base-after-rename-before-dir-sync", "persistence-aof-rewrite-fault", scenario_multipart_rewrite_fault_base_after_rename_before_dir_sync),

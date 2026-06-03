@@ -66,6 +66,7 @@ pub fn default_config_pairs() -> &'static [(&'static str, &'static str)] {
         ("appenddirname", "appendonlydir"),
         ("aof-load-truncated", "yes"),
         ("aof-use-rdb-preamble", "yes"),
+        ("aof-timestamp-enabled", "no"),
         ("auto-aof-rewrite-percentage", "100"),
         ("auto-aof-rewrite-min-size", "67108864"),
         ("save", "3600 1 300 100 60 10000"),
@@ -235,6 +236,7 @@ pub fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)>
     let live_appenddirname = cfg.appenddirname();
     let live_aof_load_truncated = yes_no(cfg.aof_load_truncated()).to_string();
     let live_aof_use_rdb_preamble = yes_no(cfg.aof_use_rdb_preamble()).to_string();
+    let live_aof_timestamp_enabled = yes_no(cfg.aof_timestamp_enabled()).to_string();
     let live_auto_aof_rewrite_percentage = cfg.auto_aof_rewrite_percentage().to_string();
     let live_auto_aof_rewrite_min_size = cfg.auto_aof_rewrite_min_size().to_string();
     let live_repl_backlog_size = cfg.repl_backlog_size().to_string();
@@ -326,6 +328,7 @@ pub fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)>
             "appenddirname" => Some(live_appenddirname.clone()),
             "aof-load-truncated" => Some(live_aof_load_truncated.clone()),
             "aof-use-rdb-preamble" => Some(live_aof_use_rdb_preamble.clone()),
+            "aof-timestamp-enabled" => Some(live_aof_timestamp_enabled.clone()),
             "auto-aof-rewrite-percentage" => Some(live_auto_aof_rewrite_percentage.clone()),
             "auto-aof-rewrite-min-size" => Some(live_auto_aof_rewrite_min_size.clone()),
             "repl-backlog-size" => Some(live_repl_backlog_size.clone()),
@@ -579,6 +582,7 @@ pub fn config_value_is_live_only(key: &[u8]) -> bool {
         b"appenddirname",
         b"aof-load-truncated",
         b"aof-use-rdb-preamble",
+        b"aof-timestamp-enabled",
         b"auto-aof-rewrite-percentage",
         b"auto-aof-rewrite-min-size",
         b"repl-backlog-size",
@@ -995,6 +999,15 @@ pub fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
                 cfg.set_aof_use_rdb_preamble(true);
             } else if ascii_eq_ignore_case(value, b"no") {
                 cfg.set_aof_use_rdb_preamble(false);
+            }
+        }
+        b"aof-timestamp-enabled" => {
+            if ascii_eq_ignore_case(value, b"yes") {
+                cfg.set_aof_timestamp_enabled(true);
+                crate::aof::set_aof_timestamp_enabled(true);
+            } else if ascii_eq_ignore_case(value, b"no") {
+                cfg.set_aof_timestamp_enabled(false);
+                crate::aof::set_aof_timestamp_enabled(false);
             }
         }
         b"auto-aof-rewrite-percentage" => {

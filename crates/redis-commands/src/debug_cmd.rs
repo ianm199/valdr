@@ -82,9 +82,9 @@ pub fn debug_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
                 ))
             }
         }
- // Upstream uses this as a test-only clientsCron timing knob. This
- // port does not run a C-style clientsCron loop, so accepting the knob
- // lets query-buffer tests proceed to their observable assertions.
+        // Upstream uses this as a test-only clientsCron timing knob. This
+        // port does not run a C-style clientsCron loop, so accepting the knob
+        // lets query-buffer tests proceed to their observable assertions.
         return ctx.reply_simple_string(b"OK");
     }
     if ascii_eq_ignore_case(sub.as_bytes(), b"REPLYBUFFER") {
@@ -110,9 +110,9 @@ pub fn debug_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
                 b"ERR value is not an integer or out of range",
             ));
         }
- // The runtime owner tracks reply-buffer memory directly rather than
- // through a peak-reset timer. Accept the test-only knob and leave
- // actual accounting path unchanged.
+        // The runtime owner tracks reply-buffer memory directly rather than
+        // through a peak-reset timer. Accept the test-only knob and leave
+        // actual accounting path unchanged.
         return ctx.reply_simple_string(b"OK");
     }
     if ascii_eq_ignore_case(sub.as_bytes(), b"SET-SKIP-CHECKSUM-VALIDATION") {
@@ -123,6 +123,19 @@ pub fn debug_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         }
         let flag = ctx.arg_owned(2usize)?;
         redis_core::rdb::load::set_skip_checksum_validation(flag.as_bytes() != b"0");
+        return ctx.reply_simple_string(b"OK");
+    }
+    if ascii_eq_ignore_case(sub.as_bytes(), b"AOF-FLUSH-SLEEP") {
+        if ctx.arg_count() != 3 {
+            return Err(RedisError::wrong_number_of_args(b"debug aof-flush-sleep"));
+        }
+        let micros = ctx.arg_owned(2usize)?;
+        let Some(micros) = parse_i64_strict(micros.as_bytes()).filter(|n| *n >= 0) else {
+            return Err(RedisError::runtime(
+                b"ERR value is not an integer or out of range",
+            ));
+        };
+        crate::aof::set_debug_aof_flush_sleep_micros(micros as u64);
         return ctx.reply_simple_string(b"OK");
     }
     if ascii_eq_ignore_case(sub.as_bytes(), b"POPULATE") {
@@ -183,9 +196,9 @@ pub fn debug_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
                 b"debug config-rewrite-force-all",
             ));
         }
- // Test-only upstream knob: force CONFIG REWRITE to emit every option.
- // This port's CONFIG REWRITE is currently a no-op persistence shim, so
- // accepting the DEBUG command is the observable compatibility contract.
+        // Test-only upstream knob: force CONFIG REWRITE to emit every option.
+        // This port's CONFIG REWRITE is currently a no-op persistence shim, so
+        // accepting the DEBUG command is the observable compatibility contract.
         return ctx.reply_simple_string(b"OK");
     }
     if ascii_eq_ignore_case(sub.as_bytes(), b"FORCE-FREE-PRIMARY-ASYNC") {
@@ -203,11 +216,11 @@ pub fn debug_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
                 ))
             }
         }
- // C toggles server.debug_force_free_primary_async so the next primary
- // client is freed on the async path. This port does not yet keep a
- // primary client object in the RuntimeOwner-disabled replica dialer,
- // but the upstream wait.tcl repoint test uses this knob before it
- // checks that REPLICAOF logs only one reconnect attempt.
+        // C toggles server.debug_force_free_primary_async so the next primary
+        // client is freed on the async path. This port does not yet keep a
+        // primary client object in the RuntimeOwner-disabled replica dialer,
+        // but the upstream wait.tcl repoint test uses this knob before it
+        // checks that REPLICAOF logs only one reconnect attempt.
         return ctx.reply_simple_string(b"OK");
     }
     if ascii_eq_ignore_case(sub.as_bytes(), b"DIGEST-VALUE") {
@@ -294,10 +307,10 @@ pub fn debug_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         return ctx.reply_simple_string(b"OK");
     }
     if ascii_eq_ignore_case(sub.as_bytes(), b"REPLICATE") {
- // `DEBUG REPLICATE <cmd> [args...]` injects an arbitrary command verbatim
- // into the replication stream (no implicit SELECT), mirroring C
- // `replicationFeedReplicas(-1, argv+2, argc-2)`. Used by replication-4 to
- // deliberately diverge a replica.
+        // `DEBUG REPLICATE <cmd> [args...]` injects an arbitrary command verbatim
+        // into the replication stream (no implicit SELECT), mirroring C
+        // `replicationFeedReplicas(-1, argv+2, argc-2)`. Used by replication-4 to
+        // deliberately diverge a replica.
         if ctx.arg_count() < 3 {
             return Err(RedisError::wrong_number_of_args(b"debug"));
         }

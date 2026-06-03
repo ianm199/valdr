@@ -2310,17 +2310,45 @@ fn propagate_write_to_replicas(
     offset
 }
 
-/// Feed a synthesized write command to the replication stream from outside a
+/// Feed a synthesized write command to propagation surfaces from outside a
 /// `CommandContext` — a blocked client (BLPOP/BLMPOP/BZPOPMIN) served via
 /// deferred wake path, where the pop has no dispatch-time argv to rewrite.
 /// Because `dispatch` drains pending wakes after propagating the triggering
-/// command, this lands in causal order. No-ops when propagation is disabled.
+/// command, this lands in causal order.
 pub fn propagate_command_from_wake(selected_db: u32, argv: &[RedisString]) -> i64 {
+    propagate_command_from_wake_inner(selected_db, argv, true)
+}
+
+/// Transaction propagation appends its AOF envelope separately, so it needs
+/// only the replication stream offset from each synthesized command.
+pub fn propagate_command_from_wake_repl_only(selected_db: u32, argv: &[RedisString]) -> i64 {
+    propagate_command_from_wake_inner(selected_db, argv, false)
+}
+
+fn propagate_command_from_wake_inner(
+    selected_db: u32,
+    argv: &[RedisString],
+    persist_to_aof: bool,
+) -> i64 {
     let repl = redis_core::replication::global_replication_state();
-    if !repl.should_propagate_writes() {
-        return 0;
+    let offset = if repl.should_propagate_writes() {
+        propagate_write_to_replicas(&repl, selected_db, argv)
+    } else {
+        0
+    };
+
+    if persist_to_aof {
+        if let Some(writer) = crate::aof::aof_writer() {
+            let repl_offset = if offset > 0 { offset } else { -1 };
+            if let Err(err) =
+                crate::aof::append_selected_for_wake(writer, selected_db, argv, repl_offset)
+            {
+                eprintln!("redis-server: AOF append from wake failed: {}", err);
+            }
+        }
     }
-    propagate_write_to_replicas(&repl, selected_db, argv)
+
+    offset
 }
 
 /// Append a synthesized write command to replication without an implicit SELECT.

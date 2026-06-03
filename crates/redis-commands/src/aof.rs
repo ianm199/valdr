@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI64, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -148,6 +148,8 @@ impl AofManifest {
 
 /// The global AOF writer. `None` when `appendonly` is disabled.
 static AOF_WRITER: OnceLock<Arc<Mutex<Option<Arc<AofWriter>>>>> = OnceLock::new();
+static DEBUG_AOF_FLUSH_SLEEP_MICROS: AtomicU64 = AtomicU64::new(0);
+static AOF_TIMESTAMP_ENABLED: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
     static THREAD_AOF_BATCH: RefCell<Option<ThreadAofBatch>> = const { RefCell::new(None) };
@@ -181,6 +183,81 @@ pub fn aof_writer() -> Option<Arc<AofWriter>> {
         Err(p) => p.into_inner(),
     };
     guard.clone()
+}
+
+/// Test-only compatibility hook for upstream `DEBUG AOF-FLUSH-SLEEP`.
+/// The sleep happens immediately before AOF bytes are written, matching
+/// Valkey's `flushAppendOnlyFile` test knob. It is a no-op unless explicitly
+/// enabled through DEBUG.
+pub fn set_debug_aof_flush_sleep_micros(micros: u64) {
+    DEBUG_AOF_FLUSH_SLEEP_MICROS.store(micros, Ordering::Relaxed);
+}
+
+pub fn debug_aof_flush_sleep_micros() -> u64 {
+    DEBUG_AOF_FLUSH_SLEEP_MICROS.load(Ordering::Relaxed)
+}
+
+pub fn set_aof_timestamp_enabled(enabled: bool) {
+    let previous = AOF_TIMESTAMP_ENABLED.swap(enabled, Ordering::Relaxed);
+    if enabled && !previous {
+        if let Some(writer) = aof_writer() {
+            writer.reset_timestamp_annotation();
+        }
+    }
+}
+
+pub fn aof_timestamp_enabled() -> bool {
+    AOF_TIMESTAMP_ENABLED.load(Ordering::Relaxed)
+}
+
+fn current_unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn append_aof_timestamp_annotation_if_needed(
+    buf: &mut Vec<u8>,
+    current_timestamp_secs: &AtomicI64,
+    force: bool,
+) {
+    if !aof_timestamp_enabled() {
+        return;
+    }
+    let now = current_unix_secs();
+    let current = current_timestamp_secs.load(Ordering::Relaxed);
+    if !force && current >= now {
+        return;
+    }
+    current_timestamp_secs.store(now, Ordering::Relaxed);
+    buf.extend_from_slice(b"#TS:");
+    buf.extend_from_slice(now.to_string().as_bytes());
+    buf.extend_from_slice(b"\r\n");
+}
+
+fn write_aof_timestamp_annotation_if_needed<W: Write>(
+    writer: &mut W,
+    force: bool,
+) -> io::Result<()> {
+    let current_timestamp_secs = AtomicI64::new(0);
+    let mut annotation = Vec::new();
+    append_aof_timestamp_annotation_if_needed(&mut annotation, &current_timestamp_secs, force);
+    if annotation.is_empty() {
+        return Ok(());
+    }
+    writer.write_all(&annotation)
+}
+
+fn maybe_debug_sleep_before_aof_flush(encoded_len: usize) {
+    if encoded_len == 0 {
+        return;
+    }
+    let micros = DEBUG_AOF_FLUSH_SLEEP_MICROS.load(Ordering::Relaxed);
+    if micros == 0 {
+        return;
+    }
+    std::thread::sleep(Duration::from_micros(micros));
 }
 
 /// Install (or replace) the active `AofWriter`.
@@ -232,6 +309,7 @@ pub struct AofWriter {
     pending_repl_offset: AtomicI64,
     fsynced_repl_offset: AtomicI64,
     fsync_count: AtomicU64,
+    current_timestamp_secs: AtomicI64,
 }
 
 impl AofWriter {
@@ -249,6 +327,7 @@ impl AofWriter {
             pending_repl_offset: AtomicI64::new(-1),
             fsynced_repl_offset: AtomicI64::new(0),
             fsync_count: AtomicU64::new(0),
+            current_timestamp_secs: AtomicI64::new(0),
         })
     }
 
@@ -275,12 +354,19 @@ impl AofWriter {
     /// still call `append_selected` so DB selection is represented inside
     /// transaction.
     pub fn append_raw(&self, argv: &[RedisString]) -> io::Result<()> {
-        let encoded = encode_resp_command(argv);
+        let encoded = self.encode_raw(argv);
         self.append_encoded(&encoded)
     }
 
     pub fn encode_raw(&self, argv: &[RedisString]) -> Vec<u8> {
-        encode_resp_command(argv)
+        let mut encoded = Vec::with_capacity(64);
+        append_aof_timestamp_annotation_if_needed(
+            &mut encoded,
+            &self.current_timestamp_secs,
+            false,
+        );
+        encoded.extend_from_slice(&encode_resp_command(argv));
+        encoded
     }
 
     /// Append a command that was executed against logical DB `db_id`.
@@ -294,6 +380,11 @@ impl AofWriter {
 
     pub fn encode_selected(&self, db_id: u32, argv: &[RedisString]) -> Vec<u8> {
         let mut encoded = Vec::with_capacity(64);
+        append_aof_timestamp_annotation_if_needed(
+            &mut encoded,
+            &self.current_timestamp_secs,
+            false,
+        );
         {
             let mut selected = match self.selected_db.lock() {
                 Ok(g) => g,
@@ -310,6 +401,10 @@ impl AofWriter {
         encoded
     }
 
+    pub fn reset_timestamp_annotation(&self) {
+        self.current_timestamp_secs.store(0, Ordering::Relaxed);
+    }
+
     fn append_encoded(&self, encoded: &[u8]) -> io::Result<()> {
         let len = encoded.len();
         {
@@ -317,6 +412,7 @@ impl AofWriter {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
+            maybe_debug_sleep_before_aof_flush(len);
             guard.write_all(encoded)?;
             self.current_size.fetch_add(len as u64, Ordering::Relaxed);
             if self.fsync_policy.load(Ordering::Relaxed) == FSYNC_ALWAYS {
@@ -330,6 +426,7 @@ impl AofWriter {
                 }
                 return Ok(());
             }
+            guard.flush()?;
         }
         self.pending_bytes.fetch_add(len, Ordering::Relaxed);
         Ok(())
@@ -341,6 +438,7 @@ impl AofWriter {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
+        maybe_debug_sleep_before_aof_flush(len);
         guard.write_all(encoded)?;
         self.current_size.fetch_add(len as u64, Ordering::Relaxed);
         if repl_offset >= 0 {
@@ -568,6 +666,24 @@ pub fn append_selected_for_dispatch(
     ok
 }
 
+pub fn append_selected_for_wake(
+    writer: Arc<AofWriter>,
+    db_id: u32,
+    argv: &[RedisString],
+    repl_offset: i64,
+) -> io::Result<()> {
+    if writer.fsync_policy.load(Ordering::Relaxed) == FSYNC_ALWAYS
+        && stage_selected_for_existing_thread_batch(Arc::clone(&writer), db_id, argv, repl_offset)
+    {
+        return Ok(());
+    }
+    let result = writer.append_selected(db_id, argv);
+    if result.is_ok() {
+        note_writer_repl_offset_and_wake(&writer, repl_offset);
+    }
+    result
+}
+
 pub fn append_raw_for_dispatch(
     persistence: &PersistenceState,
     error_prefix: &str,
@@ -633,6 +749,38 @@ fn stage_encoded_for_thread_batch(
             batch.pending_repl_offset = batch.pending_repl_offset.max(repl_offset);
         }
         Some(true)
+    })
+}
+
+fn stage_selected_for_existing_thread_batch(
+    writer: Arc<AofWriter>,
+    db_id: u32,
+    argv: &[RedisString],
+    repl_offset: i64,
+) -> bool {
+    let active = THREAD_AOF_BATCH.with(|cell| cell.borrow().is_some());
+    if !active {
+        return false;
+    }
+
+    let encoded = writer.encode_selected(db_id, argv);
+    THREAD_AOF_BATCH.with(|cell| {
+        let mut active = cell.borrow_mut();
+        let Some(batch) = active.as_mut() else {
+            return false;
+        };
+        if batch
+            .writer
+            .as_ref()
+            .is_none_or(|existing| !Arc::ptr_eq(existing, &writer))
+        {
+            batch.writer = Some(writer);
+        }
+        batch.encoded.extend_from_slice(&encoded);
+        if repl_offset >= 0 {
+            batch.pending_repl_offset = batch.pending_repl_offset.max(repl_offset);
+        }
+        true
     })
 }
 
@@ -762,6 +910,8 @@ pub fn write_aof_rewrite_for_dbs<W: Write>(dbs: &[RedisDb], writer: &mut W) -> i
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
+
+    write_aof_timestamp_annotation_if_needed(writer, true)?;
 
     let mut selected_db: Option<u32> = None;
     for db in dbs {
@@ -1079,13 +1229,20 @@ pub fn replay_aof_databases_with_options(
         return Err(io::Error::new(io::ErrorKind::InvalidData, mode));
     }
     let mut buf: &[u8] = &data;
+    let mut pos = 0usize;
+    let mut valid_up_to = 0usize;
+    let mut truncate_to: Option<usize> = None;
     let mut replayed = 0usize;
     let mut selected_db: usize = 0;
+    let mut multi_queue: Option<(usize, Vec<(usize, Vec<RedisString>)>)> = None;
 
     loop {
         while buf.starts_with(b"#") {
-            if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-                buf = &buf[pos + 1..];
+            if let Some(line_end) = buf.iter().position(|&b| b == b'\n') {
+                let consumed = line_end + 1;
+                buf = &buf[consumed..];
+                pos += consumed;
+                valid_up_to = pos;
             } else {
                 break;
             }
@@ -1096,8 +1253,13 @@ pub fn replay_aof_databases_with_options(
 
         match parse_inline_or_multibulk(buf) {
             Ok(Some((argv, consumed))) => {
+                let record_start = pos;
                 buf = &buf[consumed..];
+                pos += consumed;
                 if argv.is_empty() {
+                    if multi_queue.is_none() {
+                        valid_up_to = pos;
+                    }
                     continue;
                 }
                 let name_lower: Vec<u8> = argv[0]
@@ -1105,6 +1267,36 @@ pub fn replay_aof_databases_with_options(
                     .iter()
                     .map(|b| b.to_ascii_lowercase())
                     .collect();
+                if name_lower.as_slice() == b"multi" {
+                    if multi_queue.is_some() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "Unexpected MULTI while loading AOF",
+                        ));
+                    }
+                    multi_queue = Some((record_start, Vec::new()));
+                    replayed += 1;
+                    continue;
+                }
+                if name_lower.as_slice() == b"exec" {
+                    let Some((_multi_start, queued)) = multi_queue.take() else {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "Unexpected EXEC while loading AOF",
+                        ));
+                    };
+                    for (db_index, queued_argv) in queued {
+                        dispatch_replay_command_to_dbs(&queued_argv, dbs, db_index)?;
+                    }
+                    replayed += 1;
+                    valid_up_to = pos;
+                    continue;
+                }
+                if let Some((_multi_start, queued)) = multi_queue.as_mut() {
+                    queued.push((selected_db, argv.to_vec()));
+                    replayed += 1;
+                    continue;
+                }
                 if name_lower.as_slice() == b"select" && argv.len() >= 2 {
                     let index = parse_usize_ascii(argv[1].as_bytes()).ok_or_else(|| {
                         io::Error::new(io::ErrorKind::InvalidData, "AOF SELECT has invalid DB id")
@@ -1117,20 +1309,16 @@ pub fn replay_aof_databases_with_options(
                     }
                     selected_db = index;
                     replayed += 1;
+                    valid_up_to = pos;
                     continue;
                 }
-                if name_lower.as_slice() == b"flushall" {
-                    for db in dbs.iter_mut() {
-                        db.clear();
-                    }
-                    replayed += 1;
-                    continue;
-                }
-                dispatch_replay_command(&argv, &mut dbs[selected_db])?;
+                dispatch_replay_command_to_dbs(&argv, dbs, selected_db)?;
                 replayed += 1;
+                valid_up_to = pos;
             }
             Ok(None) => {
                 if options.load_truncated {
+                    truncate_to = Some(valid_up_to);
                     break;
                 }
                 return Err(io::Error::new(
@@ -1140,6 +1328,7 @@ pub fn replay_aof_databases_with_options(
             }
             Err(e) => {
                 if options.load_truncated && !buf.contains(&b'\n') {
+                    truncate_to = Some(valid_up_to);
                     break;
                 }
                 return Err(io::Error::new(
@@ -1150,7 +1339,46 @@ pub fn replay_aof_databases_with_options(
         }
     }
 
+    if let Some((multi_start, _queued)) = multi_queue.take() {
+        if options.load_truncated {
+            truncate_to = Some(multi_start);
+        } else {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "AOF ended before EXEC for MULTI",
+            ));
+        }
+    }
+
+    if let Some(valid_up_to) = truncate_to {
+        truncate_aof_to_valid_prefix(path, valid_up_to)?;
+    }
+
     Ok(replayed)
+}
+
+fn truncate_aof_to_valid_prefix(path: &Path, valid_up_to: usize) -> io::Result<()> {
+    let file = OpenOptions::new().write(true).open(path)?;
+    file.set_len(valid_up_to as u64)
+}
+
+fn dispatch_replay_command_to_dbs(
+    argv: &[RedisString],
+    dbs: &mut [RedisDb],
+    selected_db: usize,
+) -> io::Result<()> {
+    let name_lower: Vec<u8> = argv[0]
+        .as_bytes()
+        .iter()
+        .map(|b| b.to_ascii_lowercase())
+        .collect();
+    if name_lower.as_slice() == b"flushall" {
+        for db in dbs.iter_mut() {
+            db.clear();
+        }
+        return Ok(());
+    }
+    dispatch_replay_command(argv, &mut dbs[selected_db])
 }
 
 /// Load Valkey multi-part AOF files or fall back to the legacy single AOF.
@@ -2224,26 +2452,27 @@ fn dispatch_replay_command(argv: &[RedisString], db: &mut RedisDb) -> io::Result
         b"rpush" if argv.len() >= 3 => {
             use std::collections::VecDeque;
             let key = argv[1].clone();
-            let mut dq = match db.lookup_key_read(&key) {
-                Some(obj) => obj.list().cloned().unwrap_or_default(),
-                None => VecDeque::new(),
+            let (mut dq, expire) = match db.lookup_key_read(&key) {
+                Some(obj) => (obj.list().cloned().unwrap_or_default(), obj.expire),
+                None => (VecDeque::new(), EXPIRY_NONE),
             };
             for elem in &argv[2..] {
                 dq.push_back(elem.clone());
             }
-            let obj = RedisObject::new_list_from_vec(dq);
+            let mut obj = RedisObject::new_list_from_vec(dq);
+            obj.expire = expire;
             db.insert(key, obj);
         }
         b"hmset" if argv.len() >= 4 && (argv.len() - 2).is_multiple_of(2) => {
             let key = argv[1].clone();
-            let mut map: InlineHash = match db.lookup_key_read(&key) {
+            let (mut map, expire): (InlineHash, i64) = match db.lookup_key_read(&key) {
                 Some(obj) => match &obj.kind {
                     ObjectKind::Hash(HashEncoding::Inline(m) | HashEncoding::HashTable(m)) => {
-                        m.clone()
+                        (m.clone(), obj.expire)
                     }
-                    _ => InlineHash::new(),
+                    _ => (InlineHash::new(), obj.expire),
                 },
-                None => InlineHash::new(),
+                None => (InlineHash::new(), EXPIRY_NONE),
             };
             let mut i = 2;
             while i + 1 < argv.len() {
@@ -2252,7 +2481,7 @@ fn dispatch_replay_command(argv: &[RedisString], db: &mut RedisDb) -> io::Result
             }
             let obj = RedisObject {
                 lru: 0,
-                expire: EXPIRY_NONE,
+                expire,
                 kind: ObjectKind::Hash(HashEncoding::Inline(map)),
             };
             db.insert(key, obj);
@@ -2260,25 +2489,26 @@ fn dispatch_replay_command(argv: &[RedisString], db: &mut RedisDb) -> io::Result
         b"sadd" if argv.len() >= 3 => {
             use std::collections::HashSet;
             let key = argv[1].clone();
-            let mut hs: HashSet<RedisString> = match db.lookup_key_read(&key) {
-                Some(obj) => obj.set().cloned().unwrap_or_default(),
-                None => HashSet::new(),
+            let (mut hs, expire): (HashSet<RedisString>, i64) = match db.lookup_key_read(&key) {
+                Some(obj) => (obj.set().cloned().unwrap_or_default(), obj.expire),
+                None => (HashSet::new(), EXPIRY_NONE),
             };
             for m in &argv[2..] {
                 hs.insert(m.clone());
             }
-            let obj = RedisObject::new_set_from_set(hs);
+            let mut obj = RedisObject::new_set_from_set(hs);
+            obj.expire = expire;
             db.insert(key, obj);
         }
         b"zadd" if argv.len() >= 4 && (argv.len() - 2).is_multiple_of(2) => {
             use redis_core::object::{InlineZSet, ZSetEncoding};
             let key = argv[1].clone();
-            let mut zs = match db.lookup_key_read(&key) {
+            let (mut zs, expire) = match db.lookup_key_read(&key) {
                 Some(obj) => match &obj.kind {
-                    ObjectKind::ZSet(ZSetEncoding::Inline(z)) => z.clone(),
-                    _ => InlineZSet::new(),
+                    ObjectKind::ZSet(ZSetEncoding::Inline(z)) => (z.clone(), obj.expire),
+                    _ => (InlineZSet::new(), obj.expire),
                 },
-                None => InlineZSet::new(),
+                None => (InlineZSet::new(), EXPIRY_NONE),
             };
             let mut i = 2;
             while i + 1 < argv.len() {
@@ -2293,7 +2523,7 @@ fn dispatch_replay_command(argv: &[RedisString], db: &mut RedisDb) -> io::Result
             }
             let obj = RedisObject {
                 lru: 0,
-                expire: EXPIRY_NONE,
+                expire,
                 kind: ObjectKind::ZSet(ZSetEncoding::Inline(zs)),
             };
             db.insert(key, obj);
@@ -2301,14 +2531,15 @@ fn dispatch_replay_command(argv: &[RedisString], db: &mut RedisDb) -> io::Result
         b"lpush" if argv.len() >= 3 => {
             use std::collections::VecDeque;
             let key = argv[1].clone();
-            let mut dq = match db.lookup_key_read(&key) {
-                Some(obj) => obj.list().cloned().unwrap_or_default(),
-                None => VecDeque::new(),
+            let (mut dq, expire) = match db.lookup_key_read(&key) {
+                Some(obj) => (obj.list().cloned().unwrap_or_default(), obj.expire),
+                None => (VecDeque::new(), EXPIRY_NONE),
             };
             for elem in argv[2..].iter().rev() {
                 dq.push_front(elem.clone());
             }
-            let obj = RedisObject::new_list_from_vec(dq);
+            let mut obj = RedisObject::new_list_from_vec(dq);
+            obj.expire = expire;
             db.insert(key, obj);
         }
         b"del" if argv.len() >= 2 => {
@@ -2328,12 +2559,7 @@ fn dispatch_replay_command(argv: &[RedisString], db: &mut RedisDb) -> io::Result
                 Some(n) => n,
                 None => return invalid_aof_command("PEXPIREAT has invalid timestamp"),
             };
-            let now_ms = current_ms();
-            if expire_ms <= now_ms {
-                db.sync_delete(key);
-            } else {
-                db.set_expire(key, expire_ms);
-            }
+            db.set_expire(key, expire_ms);
         }
         b"expire" if argv.len() >= 3 => {
             let key = &argv[1];
@@ -2349,14 +2575,14 @@ fn dispatch_replay_command(argv: &[RedisString], db: &mut RedisDb) -> io::Result
         }
         b"hset" if argv.len() >= 4 && (argv.len() - 2).is_multiple_of(2) => {
             let key = argv[1].clone();
-            let mut map: InlineHash = match db.lookup_key_read(&key) {
+            let (mut map, expire): (InlineHash, i64) = match db.lookup_key_read(&key) {
                 Some(obj) => match &obj.kind {
                     ObjectKind::Hash(HashEncoding::Inline(m) | HashEncoding::HashTable(m)) => {
-                        m.clone()
+                        (m.clone(), obj.expire)
                     }
-                    _ => InlineHash::new(),
+                    _ => (InlineHash::new(), obj.expire),
                 },
-                None => InlineHash::new(),
+                None => (InlineHash::new(), EXPIRY_NONE),
             };
             let mut i = 2;
             while i + 1 < argv.len() {
@@ -2365,7 +2591,7 @@ fn dispatch_replay_command(argv: &[RedisString], db: &mut RedisDb) -> io::Result
             }
             let obj = RedisObject {
                 lru: 0,
-                expire: EXPIRY_NONE,
+                expire,
                 kind: ObjectKind::Hash(HashEncoding::Inline(map)),
             };
             db.insert(key, obj);

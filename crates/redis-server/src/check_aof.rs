@@ -23,7 +23,7 @@ enum AofCheck {
 
 /// Entry point dispatched from `main` when argv[0] is `valkey-check-aof`.
 pub(crate) fn run_check_aof(args: &[String]) -> i32 {
-    let (fix, filepath) = match parse_args(args) {
+    let (fix, truncate_to_timestamp, filepath) = match parse_args(args) {
         Some(v) => v,
         None => {
             println!("Usage: valkey-check-aof [--fix|--truncate-to-timestamp $timestamp] <file.manifest|file.aof>");
@@ -39,26 +39,34 @@ pub(crate) fn run_check_aof(args: &[String]) -> i32 {
         .unwrap_or_else(|| PathBuf::from("."));
 
     match get_input_file_type(path) {
-        InputFileType::MultiPart => check_multi_part_aof(&dirpath, path, fix),
-        InputFileType::Resp => check_old_style_aof(path, fix, false),
-        InputFileType::RdbPreamble => check_old_style_aof(path, fix, true),
+        InputFileType::MultiPart => {
+            check_multi_part_aof(&dirpath, path, fix, truncate_to_timestamp)
+        }
+        InputFileType::Resp => check_old_style_aof(path, fix, truncate_to_timestamp, false),
+        InputFileType::RdbPreamble => {
+            check_old_style_aof(path, fix, truncate_to_timestamp, true)
+        }
     }
     // The check functions terminate the process via `std::process::exit`.
     0
 }
 
-/// Returns `(fix, filepath)`. `--version`/`-v` exits the process directly.
-fn parse_args(args: &[String]) -> Option<(bool, String)> {
+/// Returns `(fix, truncate_to_timestamp, filepath)`.
+/// `--version`/`-v` exits the process directly.
+fn parse_args(args: &[String]) -> Option<(bool, Option<i64>, String)> {
     match args.len() {
         1 => {
             if args[0] == "-v" || args[0] == "--version" {
                 println!("valkey-check-aof {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
-            Some((false, args[0].clone()))
+            Some((false, None, args[0].clone()))
         }
-        2 if args[0] == "--fix" => Some((true, args[1].clone())),
-        3 if args[0] == "--truncate-to-timestamp" => Some((false, args[2].clone())),
+        2 if args[0] == "--fix" => Some((true, None, args[1].clone())),
+        3 if args[0] == "--truncate-to-timestamp" => {
+            let timestamp = parse_i64_ascii(args[1].as_bytes())?;
+            Some((false, Some(timestamp), args[2].clone()))
+        }
         _ => None,
     }
 }
@@ -112,10 +120,10 @@ fn file_is_manifest(path: &Path) -> bool {
     is_manifest
 }
 
-fn check_old_style_aof(path: &Path, fix: bool, preamble: bool) {
+fn check_old_style_aof(path: &Path, fix: bool, truncate_to_timestamp: Option<i64>, preamble: bool) {
     println!("Start checking Old-Style AOF");
     let name = path.display().to_string();
-    match check_single_aof(&name, path, true, fix, preamble) {
+    match check_single_aof(&name, path, true, fix, truncate_to_timestamp, preamble) {
         Ok(AofCheck::Ok) => println!("AOF {} is valid", name),
         Ok(AofCheck::Empty) => println!("AOF {} is empty", name),
         Ok(AofCheck::Truncated) => println!("Successfully truncated AOF {}", name),
@@ -124,7 +132,12 @@ fn check_old_style_aof(path: &Path, fix: bool, preamble: bool) {
     std::process::exit(0);
 }
 
-fn check_multi_part_aof(dirpath: &Path, manifest_path: &Path, fix: bool) {
+fn check_multi_part_aof(
+    dirpath: &Path,
+    manifest_path: &Path,
+    fix: bool,
+    truncate_to_timestamp: Option<i64>,
+) {
     println!("Start checking Multi Part AOF");
     let manifest = match load_manifest(manifest_path) {
         Ok(m) => m,
@@ -146,7 +159,14 @@ fn check_multi_part_aof(dirpath: &Path, manifest_path: &Path, fix: bool) {
             "Start to check BASE AOF ({} format).",
             if preamble { "RDB" } else { "RESP" }
         );
-        match check_single_aof(base, &base_path, last_file, fix, preamble) {
+        match check_single_aof(
+            base,
+            &base_path,
+            last_file,
+            fix,
+            truncate_to_timestamp,
+            preamble,
+        ) {
             Ok(AofCheck::Ok) => println!("BASE AOF {} is valid", base),
             Ok(AofCheck::Empty) => println!("BASE AOF {} is empty", base),
             Ok(AofCheck::Truncated) => println!("Successfully truncated AOF {}", base),
@@ -160,7 +180,14 @@ fn check_multi_part_aof(dirpath: &Path, manifest_path: &Path, fix: bool) {
             let incr_path = dirpath.join(incr);
             seen += 1;
             let last_file = seen == total;
-            match check_single_aof(incr, &incr_path, last_file, fix, false) {
+            match check_single_aof(
+                incr,
+                &incr_path,
+                last_file,
+                fix,
+                truncate_to_timestamp,
+                false,
+            ) {
                 Ok(AofCheck::Ok) => println!("INCR AOF {} is valid", incr),
                 Ok(AofCheck::Empty) => println!("INCR AOF {} is empty", incr),
                 Ok(AofCheck::Truncated) => println!("Successfully truncated AOF {}", incr),
@@ -316,6 +343,7 @@ fn check_single_aof(
     path: &Path,
     last_file: bool,
     fix: bool,
+    truncate_to_timestamp: Option<i64>,
     preamble: bool,
 ) -> Result<AofCheck, ()> {
     let bytes = match std::fs::read(path) {
@@ -352,6 +380,7 @@ fn check_single_aof(
     }
 
     let mut multi = 0i64;
+    let mut valid_before_multi = 0usize;
     let mut error: Option<String> = None;
     loop {
         let line_start_pos = if multi == 0 {
@@ -366,14 +395,24 @@ fn check_single_aof(
             break; // EOF
         };
         if first == b'#' {
-            // Timestamp annotation line; consume to end of line.
-            if !cur.skip_annotation() {
-                break;
+            if let Some(result) =
+                cur.process_annotation(name, path, last_file, truncate_to_timestamp)
+            {
+                return Ok(result);
             }
         } else if first == b'*' {
+            let record_start = cur.pos;
+            let multi_before = multi;
             match cur.process_resp(&mut multi) {
                 Ok(true) => {
-                    cur.committed_pos = cur.pos;
+                    if multi_before == 0 && multi > 0 {
+                        valid_before_multi = record_start;
+                        cur.committed_pos = valid_before_multi;
+                    } else if multi > 0 {
+                        cur.committed_pos = valid_before_multi;
+                    } else {
+                        cur.committed_pos = cur.pos;
+                    }
                 }
                 Ok(false) => break,
                 Err(e) => {
@@ -389,6 +428,7 @@ fn check_single_aof(
 
     if multi != 0 && error.is_none() {
         error = Some("Reached EOF before reading EXEC for MULTI".to_string());
+        cur.committed_pos = valid_before_multi;
     }
     if let Some(e) = &error {
         println!("{}", e);
@@ -396,6 +436,14 @@ fn check_single_aof(
 
     let pos = cur.committed_pos;
     let diff = size - pos;
+    if diff == 0 && truncate_to_timestamp.is_some() {
+        println!(
+            "Truncate nothing in AOF {} to timestamp {}",
+            name,
+            truncate_to_timestamp.unwrap()
+        );
+        return Ok(AofCheck::Ok);
+    }
     println!(
         "AOF analyzed: filename={}, size={}, ok_up_to={}, ok_up_to_line={}, diff={}",
         name, size, pos, cur.line, diff
@@ -545,19 +593,77 @@ impl<'a> Cursor<'a> {
         Ok(true)
     }
 
-    /// Consume a `#...\r\n` annotation line.
-    fn skip_annotation(&mut self) -> bool {
+    /// Consume a `#...\r\n` annotation line. In truncate-to-timestamp mode,
+    /// truncate at the start of the first `#TS:` annotation greater than the
+    /// requested target.
+    fn process_annotation(
+        &mut self,
+        name: &str,
+        path: &Path,
+        last_file: bool,
+        truncate_to_timestamp: Option<i64>,
+    ) -> Option<AofCheck> {
+        let annotation_start = self.pos;
         while self.pos < self.bytes.len() && self.bytes[self.pos] != b'\n' {
             self.pos += 1;
         }
-        if self.pos < self.bytes.len() {
-            self.pos += 1;
-            self.line += 1;
-            self.committed_pos = self.pos;
-            true
-        } else {
-            false
+        if self.pos >= self.bytes.len() {
+            println!("Failed to read annotations from AOF {}, aborting...", name);
+            std::process::exit(1);
         }
+
+        let line = &self.bytes[annotation_start..=self.pos];
+        self.pos += 1;
+        self.line += 1;
+        self.committed_pos = self.pos;
+
+        let Some(target) = truncate_to_timestamp else {
+            return None;
+        };
+        if !line.starts_with(b"#TS:") {
+            return None;
+        }
+        let Some(cr_pos) = line.iter().position(|&b| b == b'\r') else {
+            println!("Invalid timestamp annotation");
+            std::process::exit(1);
+        };
+        let Some(timestamp) = parse_i64_ascii(&line[4..cr_pos]) else {
+            println!("Invalid timestamp annotation");
+            std::process::exit(1);
+        };
+        if timestamp <= target {
+            return None;
+        }
+        if annotation_start == 0 {
+            println!(
+                "AOF {} has nothing before timestamp {}, aborting...",
+                name, target
+            );
+            std::process::exit(1);
+        }
+        if !last_file {
+            println!(
+                "Failed to truncate AOF {} to timestamp {} to offset {} because it is not the last file.",
+                name, target, annotation_start
+            );
+            println!(
+                "If you insist, please delete all files after this file according to the manifest file and delete the corresponding records in manifest file manually. Then re-run valkey-check-aof."
+            );
+            std::process::exit(1);
+        }
+        match std::fs::OpenOptions::new().write(true).open(path) {
+            Ok(file) => {
+                if file.set_len(annotation_start as u64).is_err() {
+                    println!("Failed to truncate AOF {} to timestamp {}", name, target);
+                    std::process::exit(1);
+                }
+            }
+            Err(_) => {
+                println!("Failed to truncate AOF {} to timestamp {}", name, target);
+                std::process::exit(1);
+            }
+        }
+        Some(AofCheck::Truncated)
     }
 }
 
