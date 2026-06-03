@@ -2432,6 +2432,36 @@ fn current_command_argv(ctx: &CommandContext<'_>) -> Vec<Vec<u8>> {
         .collect()
 }
 
+fn maybe_enter_eval_timedout_mode(
+    ctx: &CommandContext<'_>,
+    start: Instant,
+    timedout: &Cell<bool>,
+    script_dirty: &Cell<bool>,
+) {
+    if timedout.get() {
+        redis_core::networking::process_events_while_blocked();
+        return;
+    }
+    let threshold = ctx.live_config().lua_time_limit_ms();
+    if threshold == 0 || start.elapsed().as_millis() < threshold as u128 {
+        return;
+    }
+    timedout.set(true);
+    let elapsed = start.elapsed().as_millis().max(1) as u64;
+    println!(
+        "Slow script detected: still in execution after {} milliseconds. You can try killing the script using the SCRIPT KILL command. Script name is: <eval>.",
+        elapsed
+    );
+    set_busy_script(BusyScriptState {
+        kind: BusyScriptKind::Eval,
+        owner_id: ctx.client_ref().id,
+        name: b"<eval>".to_vec(),
+        command: current_command_argv(ctx),
+        dirty: script_dirty.get(),
+    });
+    redis_core::networking::process_events_while_blocked();
+}
+
 fn function_call_active() -> bool {
     ACTIVE_FUNCTION_CALL.with(|slot| slot.borrow().is_some())
 }
@@ -5029,6 +5059,8 @@ fn run_script(
     let ctx_cell: RefCell<&mut CommandContext<'_>> = RefCell::new(ctx);
     let script_dirty = Rc::new(Cell::new(false));
     let script_error_already_recorded = Rc::new(Cell::new(false));
+    let script_start = Instant::now();
+    let script_timedout = Rc::new(Cell::new(false));
 
     let script_result: Result<LuaValue, LuaError> = lua.scope(|scope| {
         let redis_tbl = lua.create_table()?;
@@ -5038,6 +5070,7 @@ fn run_script(
             let cell = &ctx_cell;
             let dirty = Rc::clone(&script_dirty);
             let error_recorded = Rc::clone(&script_error_already_recorded);
+            let timedout = Rc::clone(&script_timedout);
             scope.create_function_mut(move |_lua, args: MultiValue| -> mlua::Result<LuaValue> {
                 let arg_bytes = collect_call_args(args)?;
                 if script_command_not_allowed(&arg_bytes) {
@@ -5062,6 +5095,7 @@ fn run_script(
                     ));
                 }
                 let mut borrow = cell.borrow_mut();
+                maybe_enter_eval_timedout_mode(&borrow, script_start, timedout.as_ref(), dirty.as_ref());
                 if call_is_write_command(&arg_bytes) && !good_replicas_status(&borrow) {
                     record_script_rejected_command(&arg_bytes, NOREPLICAS_ERROR.as_bytes());
                     error_recorded.set(true);
@@ -5094,6 +5128,7 @@ fn run_script(
         let pcall_fn = {
             let cell = &ctx_cell;
             let dirty = Rc::clone(&script_dirty);
+            let timedout = Rc::clone(&script_timedout);
             scope.create_function_mut(
                 move |lua_inner, args: MultiValue| -> mlua::Result<LuaValue> {
                     let arg_bytes = collect_call_args(args)?;
@@ -5132,6 +5167,7 @@ fn run_script(
                         return Ok(LuaValue::Table(t));
                     }
                     let mut borrow = cell.borrow_mut();
+                    maybe_enter_eval_timedout_mode(&borrow, script_start, timedout.as_ref(), dirty.as_ref());
                     if call_is_write_command(&arg_bytes) && !good_replicas_status(&borrow) {
                         record_script_rejected_command(&arg_bytes, NOREPLICAS_ERROR.as_bytes());
                         return noreplicas_lua_table(lua_inner);
@@ -5228,6 +5264,10 @@ fn run_script(
             .set_environment(script_env)
             .eval::<LuaValue>()
     });
+
+    if script_timedout.get() {
+        clear_busy_script();
+    }
 
     ctx.set_selected_db_index(original_db);
     if let Some(maxmemory) = original_maxmemory {

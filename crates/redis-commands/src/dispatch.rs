@@ -61,6 +61,7 @@ struct CommandMetadata {
     admin: bool,
     monitor_admin: bool,
     stale: bool,
+    loading: bool,
     acl_categories: u64,
 }
 
@@ -464,6 +465,13 @@ pub fn dispatch(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
                     ctx.client_mut().reply_buf.extend_from_slice(&reply);
                     return Ok(());
                 }
+                if let Some(reply) = enforce_loading_gate(ctx, metadata.loading) {
+                    crate::multi::flag_transaction_dirty_exec(ctx.client_mut());
+                    record_command_stat(dispatch_name, 0, true, false);
+                    record_dispatch_error_reply(ctx, &reply);
+                    ctx.client_mut().reply_buf.extend_from_slice(&reply);
+                    return Ok(());
+                }
                 if let Some(reply) =
                     enforce_busy_script_gate(ctx, dispatch_name, metadata.allow_busy)
                 {
@@ -629,6 +637,13 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
     }
 
     if let Some(reply) = enforce_maxmemory_gate(ctx, metadata.denyoom) {
+        record_command_stat(name, 0, true, false);
+        record_dispatch_error_reply(ctx, &reply);
+        ctx.client_mut().reply_buf.extend_from_slice(&reply);
+        return Ok(());
+    }
+
+    if let Some(reply) = enforce_loading_gate(ctx, metadata.loading) {
         record_command_stat(name, 0, true, false);
         record_dispatch_error_reply(ctx, &reply);
         ctx.client_mut().reply_buf.extend_from_slice(&reply);
@@ -1237,6 +1252,7 @@ impl CommandMetadata {
                 CommandFlag::SKIP_COMMANDLOG => self.skip_commandlog = true,
                 CommandFlag::SKIP_MONITOR => self.skip_monitor = true,
                 CommandFlag::STALE => self.stale = true,
+                CommandFlag::LOADING => self.loading = true,
                 _ => {}
             }
         }
@@ -2216,6 +2232,22 @@ fn enforce_busy_script_gate(
         return None;
     }
     Some(crate::eval::busy_script_error_reply())
+}
+
+fn enforce_loading_gate(ctx: &CommandContext<'_>, allow_loading_command: bool) -> Option<Vec<u8>> {
+    if !ctx.server().persistence.loading() || allow_loading_command {
+        return None;
+    }
+    Some(loading_error_reply())
+}
+
+fn loading_error_reply() -> Vec<u8> {
+    let payload = RedisError::loading().to_resp_payload();
+    let mut out = Vec::with_capacity(payload.as_bytes().len() + 3);
+    out.push(b'-');
+    out.extend_from_slice(payload.as_bytes());
+    out.extend_from_slice(b"\r\n");
+    out
 }
 
 fn is_script_kill_command(ctx: &CommandContext<'_>, name: &[u8]) -> bool {

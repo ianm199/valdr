@@ -151,6 +151,7 @@ fn main() {
     live_config.set_zset_max_listpack_entries(args.zset_max_listpack_entries);
     live_config.set_zset_max_listpack_value(args.zset_max_listpack_value);
     live_config.set_lua_enable_insecure_api(args.lua_enable_insecure_api);
+    live_config.set_lua_time_limit_ms(args.lua_time_limit_ms);
     if let Some(secret) = &args.requirepass {
         live_config.set_requirepass(Some(redis_types::RedisString::from_bytes(
             secret.as_bytes(),
@@ -219,6 +220,7 @@ fn main() {
         let load_options = redis_commands::aof::AofLoadOptions {
             load_truncated: args.aof_load_truncated,
             allow_rdb_preamble: args.aof_use_rdb_preamble,
+            lua_time_limit_ms: args.lua_time_limit_ms,
         };
         match redis_commands::aof::load_append_only_files(
             Path::new(&args.dir),

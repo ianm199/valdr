@@ -73,6 +73,7 @@ pub(crate) struct CliArgs {
     pub(crate) requirepass: Option<String>,
     pub(crate) command_renames: Vec<(String, String)>,
     pub(crate) lua_enable_insecure_api: bool,
+    pub(crate) lua_time_limit_ms: u64,
     pub(crate) config_path: Option<String>,
     pub(crate) unixsocket: Option<String>,
     pub(crate) startup_config_overrides: Vec<(String, String)>,
@@ -113,6 +114,7 @@ impl Default for CliArgs {
             requirepass: None,
             command_renames: Vec::new(),
             lua_enable_insecure_api: false,
+            lua_time_limit_ms: redis_core::live_config::DEFAULT_LUA_TIME_LIMIT_MS,
             config_path: None,
             unixsocket: None,
             startup_config_overrides: Vec::new(),
@@ -365,6 +367,14 @@ pub(crate) fn parse_args(argv: Vec<String>) -> Result<CliArgs, String> {
                     .next()
                     .ok_or_else(|| format!("{} requires yes/no", normalized_flag))?;
                 out.lua_enable_insecure_api = v.eq_ignore_ascii_case("yes");
+            }
+            "--lua-time-limit" | "--busy-reply-threshold" => {
+                let v = it
+                    .next()
+                    .ok_or_else(|| format!("{} requires a value", normalized_flag))?;
+                out.lua_time_limit_ms = v
+                    .parse()
+                    .map_err(|_| format!("invalid {}: {}", normalized_flag, v))?;
             }
             "--help" | "-h" => {
                 println!(
@@ -714,6 +724,11 @@ pub(crate) fn apply_config_file(args: &mut CliArgs, path: &Path) -> Result<(), S
             }
             "lua-enable-insecure-api" | "lua-enable-deprecated-api" => {
                 args.lua_enable_insecure_api = value.eq_ignore_ascii_case("yes");
+            }
+            "lua-time-limit" | "busy-reply-threshold" => {
+                if let Ok(v) = value.parse::<u64>() {
+                    args.lua_time_limit_ms = v;
+                }
             }
             _ => {}
         }

@@ -403,6 +403,7 @@ pub fn debug_loadaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         crate::aof::AofLoadOptions {
             load_truncated: cfg.aof_load_truncated(),
             allow_rdb_preamble: cfg.aof_use_rdb_preamble(),
+            lua_time_limit_ms: cfg.lua_time_limit_ms(),
         },
     )
     .map_err(|e| RedisError::runtime(format!("ERR DEBUG LOADAOF failed: {}", e).into_bytes()))?;

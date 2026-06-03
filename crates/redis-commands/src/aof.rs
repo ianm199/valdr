@@ -50,7 +50,7 @@ pub fn fsync_policy_str(code: u8) -> &'static str {
 }
 
 /// Options controlling AOF replay strictness.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct AofLoadOptions {
     /// Accept an incomplete final command and replay the valid prefix.
     pub load_truncated: bool,
@@ -58,6 +58,18 @@ pub struct AofLoadOptions {
     /// manifest/RDB-preamble packet; legacy single-file AOF currently rejects
     /// preambles even when this is true.
     pub allow_rdb_preamble: bool,
+    /// Slow-script busy threshold applied to replayed EVAL/FCALL handlers.
+    pub lua_time_limit_ms: u64,
+}
+
+impl Default for AofLoadOptions {
+    fn default() -> Self {
+        Self {
+            load_truncated: false,
+            allow_rdb_preamble: false,
+            lua_time_limit_ms: redis_core::live_config::DEFAULT_LUA_TIME_LIMIT_MS,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1286,7 +1298,7 @@ pub fn replay_aof_databases_with_options(
                         ));
                     };
                     for (db_index, queued_argv) in queued {
-                        dispatch_replay_command_to_dbs(&queued_argv, dbs, db_index)?;
+                        dispatch_replay_command_to_dbs(&queued_argv, dbs, db_index, &options)?;
                     }
                     replayed += 1;
                     valid_up_to = pos;
@@ -1312,7 +1324,7 @@ pub fn replay_aof_databases_with_options(
                     valid_up_to = pos;
                     continue;
                 }
-                dispatch_replay_command_to_dbs(&argv, dbs, selected_db)?;
+                dispatch_replay_command_to_dbs(&argv, dbs, selected_db, &options)?;
                 replayed += 1;
                 valid_up_to = pos;
             }
@@ -1366,6 +1378,7 @@ fn dispatch_replay_command_to_dbs(
     argv: &[RedisString],
     dbs: &mut [RedisDb],
     selected_db: usize,
+    options: &AofLoadOptions,
 ) -> io::Result<()> {
     let name_lower: Vec<u8> = argv[0]
         .as_bytes()
@@ -1378,7 +1391,7 @@ fn dispatch_replay_command_to_dbs(
         }
         return Ok(());
     }
-    dispatch_replay_command(argv, &mut dbs[selected_db])
+    dispatch_replay_command(argv, &mut dbs[selected_db], options)
 }
 
 /// Load Valkey multi-part AOF files or fall back to the legacy single AOF.
@@ -2369,7 +2382,11 @@ fn manifest_error_at(msg: &'static str, line_num: usize, line: &[u8]) -> io::Err
 /// Constructs a minimal synthetic client (no live transport, authenticated as
 /// the default user) and calls [`crate::dispatch::dispatch_command_name`].
 /// Errors and unknown commands are returned as replay failures.
-fn dispatch_via_handler(argv: &[RedisString], db: &mut RedisDb) -> io::Result<()> {
+fn dispatch_via_handler(
+    argv: &[RedisString],
+    db: &mut RedisDb,
+    options: &AofLoadOptions,
+) -> io::Result<()> {
     if argv.is_empty() {
         return Ok(());
     }
@@ -2377,7 +2394,9 @@ fn dispatch_via_handler(argv: &[RedisString], db: &mut RedisDb) -> io::Result<()
     let mut client = Client::new(0);
     client.authenticated_user = Some(RedisString::from_bytes(b"default"));
     client.set_args(argv.to_vec());
-    let server = Arc::new(RedisServer::default());
+    let live_config = Arc::new(redis_core::live_config::LiveConfig::default());
+    live_config.set_lua_time_limit_ms(options.lua_time_limit_ms);
+    let server = Arc::new(RedisServer::with_live_config(0, live_config));
     let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
     let mut ctx = CommandContext::with_server(&mut client, db, server, pubsub);
     let saved_writer = take_aof_writer();
@@ -2412,7 +2431,11 @@ fn dispatch_via_handler(argv: &[RedisString], db: &mut RedisDb) -> io::Result<()
 /// Unknown or unsupported commands during replay are fatal. The small direct
 /// cases keep common replay hot paths simple; other commands fall through
 /// the real command handler with AOF propagation suppressed.
-fn dispatch_replay_command(argv: &[RedisString], db: &mut RedisDb) -> io::Result<()> {
+fn dispatch_replay_command(
+    argv: &[RedisString],
+    db: &mut RedisDb,
+    options: &AofLoadOptions,
+) -> io::Result<()> {
     use redis_core::object::{ObjectKind, RedisObject, EXPIRY_NONE};
 
     if argv.is_empty() {
@@ -2597,23 +2620,23 @@ fn dispatch_replay_command(argv: &[RedisString], db: &mut RedisDb) -> io::Result
             db.insert(key, obj);
         }
         b"xadd" if argv.len() >= 5 => {
-            dispatch_via_handler(argv, db)?;
+            dispatch_via_handler(argv, db, options)?;
         }
         b"xdel" if argv.len() >= 3 => {
-            dispatch_via_handler(argv, db)?;
+            dispatch_via_handler(argv, db, options)?;
         }
         b"xsetid" if argv.len() >= 3 => {
-            dispatch_via_handler(argv, db)?;
+            dispatch_via_handler(argv, db, options)?;
         }
         b"xgroup" if argv.len() >= 4 => {
-            dispatch_via_handler(argv, db)?;
+            dispatch_via_handler(argv, db, options)?;
         }
         b"xclaim" if argv.len() >= 6 => {
-            dispatch_via_handler(argv, db)?;
+            dispatch_via_handler(argv, db, options)?;
         }
         b"multi" | b"exec" => {}
         _ => {
-            dispatch_via_handler(argv, db)?;
+            dispatch_via_handler(argv, db, options)?;
         }
     }
     Ok(())

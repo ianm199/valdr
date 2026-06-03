@@ -1885,7 +1885,60 @@ Current release blockers after Packet O:
 
 ---
 
-## 13. Risks
+## 13. Packet P Progress: Runtime-Yield DEBUG LOADAOF
+
+Packet P cleared the remaining `integration/aof` blocker by making
+`DEBUG LOADAOF` behave like a blocking load from the perspective of other
+clients without re-entering RuntimeOwner unsafely.
+
+Implemented:
+
+- `lua-time-limit` / `busy-reply-threshold` is now live-configured and passed
+  through startup, `CONFIG GET/SET`, and AOF replay options.
+- The dispatcher now enforces generated `LOADING` command flags, so commands
+  without `CMD_LOADING` receive the upstream-shaped `LOADING` error while a
+  foreground load is active.
+- RuntimeOwner intercepts `DEBUG LOADAOF`, marks `server.loading`, parks the
+  requesting client, loads AOF into a detached DB vector on a worker, keeps the
+  owner loop serving other clients, then swaps the loaded DBs back into the
+  owner and replies `OK`.
+- Replayed Lua scripts enter slow-script mode after the configured threshold
+  from `redis.call` / `redis.pcall`, log `Slow script detected`, and expose the
+  busy-script state while preserving `LOADING` as the earlier rejection during
+  AOF load.
+- The persistence frontier added
+  `aof-debug-loadaof-slow-eval-reports-loading`, a process-level regression for
+  deferred `DEBUG LOADAOF`, concurrent `PING -> LOADING`, final key visibility,
+  and slow-script logging.
+
+Packet P gates run on 2026-06-03:
+
+- `cargo check -p redis-core -p redis-commands -p redis-server`: pass.
+- `cargo build -p redis-server`: pass.
+- `cargo test -p redis-commands --test aof_correctness_kit`: 15/15 pass.
+- `cargo test -p redis-server`: 8/8 pass.
+- `python3 -m py_compile harness/oracle/persistence-frontier.py`: pass.
+- Targeted frontier:
+  `aof-debug-loadaof-slow-eval-reports-loading` passed, run id
+  `20260603T034517Z`.
+- Full persistence frontier:
+  `python3 harness/oracle/persistence-frontier.py --skip-build --fail-on-failure`
+  passed 58/58, run id `20260603T034547Z`.
+- Focused `integration/aof`:
+  `python3 harness/oracle/tcl-survey.py --runner-id tcl-persistence-focused --skip-build --timeout-s 180 --no-default-deny-tags --deny-tag needs:repl --deny-tag cluster --files integration/aof`
+  passed 43/43, run id `20260603T034320871990Z`.
+
+Current release blockers after this Packet P slice:
+
+- `integration/aof`: green in focused survey.
+- `unit/aofrw`: still the next priority from the previous four-file survey,
+  aborting at `AOF rewrite functions` with `ERR Function not found`.
+- `unit/other`: still needs expire/reload and unix-socket fixture burn-down.
+- `integration/rdb`: still needs timeout classification.
+
+---
+
+## 14. Risks
 
 - **False confidence from old dirty-tree evidence.** The 23/23 persistence
   frontier is useful history, but clean current evidence must replace it.
@@ -1920,28 +1973,27 @@ Current release blockers after Packet O:
 
 ---
 
-## 14. Recommendation
+## 15. Recommendation
 
-After Packet O, the next high-leverage AOF work is no longer baseline repair,
+After the first Packet P slice, the next high-leverage AOF work is no longer
+baseline repair,
 basic background BASE generation, manifest fsync hardening, successful-rewrite
 history deletion, command-path snapshot cloning, syscall-level rewrite
 publication fault injection, held-snapshot COW visibility, startup cleanup, or
 basic multipart checking. Those surfaces now have production code plus
-frontier/process/bench evidence, and `integration/aof` is down to one remaining
-runtime-yield failure.
+frontier/process/bench evidence, and focused `integration/aof` is green.
 
-The next pragmatic move is Packet P: runtime-yield and remaining focused TCL
-classification.
+The next pragmatic move is to continue Packet P with `unit/aofrw` function
+rewrite support, then `unit/other` expire/reload parity, then `integration/rdb`
+timeout classification.
 
 Ambitious Packet P end state:
 
 - `integration/aof`, `unit/aofrw`, `unit/other`, and `integration/rdb` either
   pass in focused survey or each remaining test is classified with a concrete
   unsupported-surface reason.
-- `DEBUG LOADAOF` plus timed-out scripts either yield enough through
-  RuntimeOwner to expose upstream `LOADING` behavior, or the missing
-  `processEventsWhileBlocked` runtime work is specified as a separate release
-  dependency.
+- `DEBUG LOADAOF` plus timed-out scripts yield enough through RuntimeOwner to
+  expose upstream `LOADING` behavior.
 - Function rewrite/replay support is implemented far enough that upstream AOF
   rewrite function tests no longer abort at `ERR Function not found`, or the
   missing function subsystem is documented as the gating non-AOF dependency.
@@ -1958,7 +2010,7 @@ Packet P tool loop:
 3. Fix production behavior, rerun that small reproducer, then rerun the focused
    TCL file.
 4. Keep `cargo test -p redis-commands --test aof_correctness_kit`,
-   `cargo test -p redis-server`, and the 48-scenario persistence frontier green
+   `cargo test -p redis-server`, and the 58-scenario persistence frontier green
    after every semantic fix.
 5. Run the quick AOF matrix and rewrite-latency telemetry only after correctness
    moves, or immediately if a fix touches append, fsync, rewrite, manifest, RDB,

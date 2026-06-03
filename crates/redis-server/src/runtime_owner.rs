@@ -12,6 +12,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener as StdTcpListener, TcpStream as StdTcpStream};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
@@ -34,7 +35,7 @@ use redis_core::networking::{
 use redis_core::pubsub_registry::PubSubRegistry;
 use redis_core::{Client, Connection};
 use redis_protocol::parse_inline_or_multibulk_into;
-use redis_types::RedisString;
+use redis_types::{RedisError, RedisString};
 use rustls::{ServerConfig, ServerConnection};
 
 pub const DEFAULT_DATABASE_COUNT: u32 = 16;
@@ -254,6 +255,7 @@ pub struct ClientSlot {
     writable_interest: bool,
     closed: bool,
     close_after_flush: bool,
+    debug_loadaof_pending: bool,
     /// Present iff this is a TLS connection: the rustls server session layered
     /// over `stream`. `None` for plain TCP (the untouched fast path).
     tls: Option<Box<ServerConnection>>,
@@ -282,6 +284,7 @@ impl ClientSlot {
             writable_interest: false,
             closed: false,
             close_after_flush: false,
+            debug_loadaof_pending: false,
             tls: None,
             tls_handshake_done: false,
         }
@@ -312,6 +315,7 @@ impl ClientSlot {
             writable_interest: false,
             closed: false,
             close_after_flush: false,
+            debug_loadaof_pending: false,
             tls: None,
             tls_handshake_done: false,
         }
@@ -717,6 +721,13 @@ struct SlotDispatchOutcome {
     reschedule: bool,
 }
 
+type DebugLoadAofResult = io::Result<(Vec<RedisDb>, Option<(usize, u64)>)>;
+
+struct DebugLoadAofJob {
+    slot_id: SlotId,
+    rx: Receiver<DebugLoadAofResult>,
+}
+
 /// Owner of normal plain-TCP command execution for the mio readiness path.
 pub struct RuntimeOwner {
     #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
@@ -732,6 +743,7 @@ pub struct RuntimeOwner {
     #[allow(dead_code)] // owner-loop vocabulary, see object-vocabulary.tsv
     events: VecDeque<RuntimeEvent>,
     replica_apply_rx: Option<Receiver<redis_commands::replica_dialer::ReplicaApplyRequest>>,
+    debug_loadaof_jobs: Vec<DebugLoadAofJob>,
     replica_apply_db_index: u32,
     /// rustls server config for TLS listeners; `None` when TLS is disabled.
     tls_config: Option<Arc<ServerConfig>>,
@@ -769,6 +781,7 @@ impl RuntimeOwner {
             last_active_expire: Instant::now(),
             events: VecDeque::new(),
             replica_apply_rx: None,
+            debug_loadaof_jobs: Vec::new(),
             replica_apply_db_index: 0,
             tls_config: None,
             tls_listener_start: usize::MAX,
@@ -946,6 +959,7 @@ impl RuntimeOwner {
             let mut progressed = false;
 
             progressed |= owner.active_expire_step(&server);
+            progressed |= owner.drain_debug_loadaof_jobs(poll.registry(), &server);
             progressed |= owner.drain_replica_apply_requests(&registry, &server);
             progressed |= owner.dispatch_scheduled_commands(poll.registry(), &registry, &server);
             progressed |= owner.schedule_unpaused_postponed_commands(&server);
@@ -976,6 +990,7 @@ impl RuntimeOwner {
             );
             progressed |= owner.install_pending_dynamic_listeners(&mut listeners, poll.registry());
             progressed |= owner.drain_foreign_payloads(poll.registry());
+            progressed |= owner.drain_debug_loadaof_jobs(poll.registry(), &server);
             progressed |= owner.drain_replica_apply_requests(&registry, &server);
             progressed |= owner.dispatch_scheduled_commands(poll.registry(), &registry, &server);
             progressed |= owner.schedule_unpaused_postponed_commands(&server);
@@ -1450,6 +1465,81 @@ impl RuntimeOwner {
         progressed
     }
 
+    fn drain_debug_loadaof_jobs(
+        &mut self,
+        poll_registry: &MioRegistry,
+        server: &Arc<redis_core::RedisServer>,
+    ) -> bool {
+        let mut progressed = false;
+        let mut i = 0usize;
+        while i < self.debug_loadaof_jobs.len() {
+            let recv = self.debug_loadaof_jobs[i].rx.try_recv();
+            match recv {
+                Ok(result) => {
+                    let job = self.debug_loadaof_jobs.swap_remove(i);
+                    self.complete_debug_loadaof_job(job.slot_id, result, poll_registry, server);
+                    progressed = true;
+                }
+                Err(TryRecvError::Empty) => {
+                    i += 1;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    let job = self.debug_loadaof_jobs.swap_remove(i);
+                    self.complete_debug_loadaof_job(
+                        job.slot_id,
+                        Err(io::Error::new(
+                            io::ErrorKind::BrokenPipe,
+                            "DEBUG LOADAOF worker disconnected",
+                        )),
+                        poll_registry,
+                        server,
+                    );
+                    progressed = true;
+                }
+            }
+        }
+        if self.debug_loadaof_jobs.is_empty() {
+            server.persistence.set_loading(false);
+        }
+        progressed
+    }
+
+    fn complete_debug_loadaof_job(
+        &mut self,
+        slot_id: SlotId,
+        result: DebugLoadAofResult,
+        poll_registry: &MioRegistry,
+        server: &Arc<redis_core::RedisServer>,
+    ) {
+        let reply = match result {
+            Ok((mut loaded, _summary)) => {
+                for (idx, db) in loaded.iter_mut().enumerate() {
+                    db.id = idx as u32;
+                }
+                self.dbs = loaded;
+                b"+OK\r\n".to_vec()
+            }
+            Err(err) => debug_loadaof_error_reply(&err),
+        };
+
+        if self.debug_loadaof_jobs.is_empty() {
+            server.persistence.set_loading(false);
+        }
+
+        let should_schedule = if let Some(slot) = self.slot_mut(slot_id) {
+            slot.debug_loadaof_pending = false;
+            slot.client.commands_processed = slot.client.commands_processed.saturating_add(1);
+            slot.queue_write_owned(reply);
+            !slot.client.query_buf.is_empty() && has_complete_command(&slot.client.query_buf)
+        } else {
+            false
+        };
+        let _ = self.ensure_writable_interest(poll_registry, slot_id);
+        if should_schedule {
+            self.schedule_command_continuation(slot_id);
+        }
+    }
+
     fn drain_replica_apply_requests(
         &mut self,
         registry: &Arc<Mutex<PubSubRegistry>>,
@@ -1832,6 +1922,7 @@ impl RuntimeOwner {
         let has_parked_paused_command = slot.pause_postponed && !slot.client.argv.is_empty();
         if slot.closed
             || slot.close_after_flush
+            || slot.debug_loadaof_pending
             || (slot.client.query_buf.is_empty() && !has_parked_paused_command)
         {
             return SlotDispatchOutcome::default();
@@ -1919,6 +2010,20 @@ impl RuntimeOwner {
                 slot.mark_close_after_flush();
                 break;
             }
+
+            if is_debug_loadaof_command(&slot.client) {
+                if self.debug_loadaof_jobs.is_empty() {
+                    server.persistence.set_loading(true);
+                    slot.debug_loadaof_pending = true;
+                    let job = spawn_debug_loadaof_job(slot.id(), Arc::clone(server), self.dbs.len());
+                    self.debug_loadaof_jobs.push(job);
+                } else {
+                    slot.client.reply_buf.extend_from_slice(&loading_error_reply());
+                }
+                slot.client.reset_args();
+                continue;
+            }
+
             super::process_current_command_with_db_list(
                 &mut slot.client,
                 &mut self.dbs,
@@ -2273,6 +2378,67 @@ fn client_interest(writable: bool) -> Interest {
     } else {
         Interest::READABLE
     }
+}
+
+fn is_debug_loadaof_command(client: &Client) -> bool {
+    if client.argv.len() != 2 {
+        return false;
+    }
+    let Some(cmd) = client.arg(0) else {
+        return false;
+    };
+    let Some(subcmd) = client.arg(1) else {
+        return false;
+    };
+    cmd.as_bytes().eq_ignore_ascii_case(b"DEBUG")
+        && subcmd.as_bytes().eq_ignore_ascii_case(b"LOADAOF")
+}
+
+fn spawn_debug_loadaof_job(
+    slot_id: SlotId,
+    server: Arc<redis_core::RedisServer>,
+    db_count: usize,
+) -> DebugLoadAofJob {
+    let cfg = Arc::clone(&server.live_config);
+    let dir = PathBuf::from(cfg.rdb_dir());
+    let filename = cfg.appendfilename();
+    let dirname = cfg.appenddirname();
+    let options = redis_commands::aof::AofLoadOptions {
+        load_truncated: cfg.aof_load_truncated(),
+        allow_rdb_preamble: cfg.aof_use_rdb_preamble(),
+        lua_time_limit_ms: cfg.lua_time_limit_ms(),
+    };
+    let (tx, rx) = mpsc::channel::<DebugLoadAofResult>();
+    std::thread::spawn(move || {
+        let count = db_count.max(1);
+        let mut loaded: Vec<RedisDb> = (0..count as u32).map(RedisDb::new).collect();
+        let result = redis_commands::aof::load_append_only_files(
+            &dir,
+            &filename,
+            &dirname,
+            &mut loaded,
+            options,
+        )
+        .map(|summary| (loaded, summary));
+        let _ = tx.send(result);
+    });
+    DebugLoadAofJob { slot_id, rx }
+}
+
+fn loading_error_reply() -> Vec<u8> {
+    error_payload_reply(RedisError::loading().to_resp_payload().as_bytes())
+}
+
+fn debug_loadaof_error_reply(err: &io::Error) -> Vec<u8> {
+    error_payload_reply(format!("ERR DEBUG LOADAOF failed: {}", err).as_bytes())
+}
+
+fn error_payload_reply(payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(payload.len() + 3);
+    out.push(b'-');
+    out.extend_from_slice(payload);
+    out.extend_from_slice(b"\r\n");
+    out
 }
 
 fn has_complete_command(bytes: &[u8]) -> bool {

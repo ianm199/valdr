@@ -492,6 +492,65 @@ def scenario_aof_debug_loadaof_complex(tmp: Path) -> dict[str, Any]:
         stop_server(server)
 
 
+def scenario_aof_debug_loadaof_slow_eval_reports_loading(tmp: Path) -> dict[str, Any]:
+    script = (
+        "redis.call('set',KEYS[1],'y'); "
+        "for i=1,1500000 do redis.call('ping') end "
+        "return 'ok'"
+    )
+    write_aof(
+        tmp / "appendonly.aof",
+        [("SELECT", "0"), ("EVAL", script, "1", "x")],
+    )
+    server = start_server(
+        tmp,
+        extra=["--lua-time-limit", "1", "--aof-use-rdb-preamble", "no"],
+    )
+    loader: RespClient | None = None
+    probe: RespClient | None = None
+    loading_error = ""
+    loader_reply: Any = None
+    value: str | None = None
+    try:
+        loader = RespClient(server.port)
+        loader.sock.settimeout(40)
+        probe = RespClient(server.port)
+        loader.sock.sendall(encode_command("DEBUG", "LOADAOF"))
+
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline:
+            try:
+                probe.command("PING")
+            except RespError as exc:
+                loading_error = str(exc)
+                if loading_error.startswith("LOADING"):
+                    break
+            time.sleep(0.02)
+
+        loader_reply = loader._read()
+        value = bulk(probe.command("GET", "x"))
+    finally:
+        if loader is not None:
+            loader.close()
+        if probe is not None:
+            probe.close()
+        log = stop_server(server)
+
+    return {
+        "passed": (
+            loading_error.startswith("LOADING")
+            and loader_reply == "OK"
+            and value == "y"
+            and "Slow script detected" in log
+        ),
+        "loading_error": loading_error,
+        "loader_reply": loader_reply,
+        "value": value,
+        "slow_script_logged": "Slow script detected" in log,
+        "log_tail": log[-2000:],
+    }
+
+
 def scenario_expires_after_rdb_reload(tmp: Path) -> dict[str, Any]:
     server = start_server(tmp)
     try:
@@ -2233,6 +2292,7 @@ SCENARIOS: list[Scenario] = [
     Scenario("rdb-missing-file-empty-startup", "persistence-rdb", scenario_rdb_missing_file_empty_startup),
     Scenario("rdb-bgsave-status-ok-file-written", "persistence-rdb", scenario_rdb_bgsave_status_ok_file_written),
     Scenario("aof-debug-loadaof-complex-dataset", "persistence-aof", scenario_aof_debug_loadaof_complex),
+    Scenario("aof-debug-loadaof-slow-eval-reports-loading", "persistence-aof", scenario_aof_debug_loadaof_slow_eval_reports_loading),
     Scenario("expires-after-rdb-reload", "persistence-rdb", scenario_expires_after_rdb_reload),
     Scenario("expires-after-aof-loadaof", "persistence-aof", scenario_expires_after_aof_loadaof),
     Scenario("aof-load-truncated-yes-short-read", "persistence-aof", scenario_aof_load_truncated_yes),

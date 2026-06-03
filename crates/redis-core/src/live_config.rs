@@ -199,6 +199,9 @@ pub struct LiveConfig {
  /// Enable Lua 5.1 APIs that upstream marks insecure/deprecated
  /// (`lua-enable-insecure-api`). Default `false`.
     pub lua_enable_insecure_api: AtomicBool,
+ /// Slow-script busy threshold in milliseconds (`lua-time-limit` /
+ /// `busy-reply-threshold`). Default 5000.
+    pub lua_time_limit_ms: AtomicU64,
  /// Whether the primary is in import mode (`import-mode` config key).
     pub import_mode: AtomicBool,
  /// Optional availability-zone string surfaced by HELLO.
@@ -306,6 +309,8 @@ pub const DEFAULT_REPL_BACKLOG_SIZE: u64 = 1024 * 1024;
 
 /// Default `repl-timeout` (60 seconds).
 pub const DEFAULT_REPL_TIMEOUT: u64 = 60;
+/// Default slow-script busy threshold in milliseconds.
+pub const DEFAULT_LUA_TIME_LIMIT_MS: u64 = 5000;
 
 impl Default for LiveConfig {
     fn default() -> Self {
@@ -360,6 +365,7 @@ impl Default for LiveConfig {
             slave_read_only: AtomicBool::new(true),
             replica_serve_stale_data: AtomicBool::new(true),
             lua_enable_insecure_api: AtomicBool::new(false),
+            lua_time_limit_ms: AtomicU64::new(DEFAULT_LUA_TIME_LIMIT_MS),
             import_mode: AtomicBool::new(false),
             availability_zone: Mutex::new(String::new()),
             repl_diskless_sync: AtomicBool::new(true),
@@ -905,6 +911,14 @@ impl LiveConfig {
 
     pub fn set_lua_enable_insecure_api(&self, v: bool) {
         self.lua_enable_insecure_api.store(v, Ordering::Relaxed);
+    }
+
+    pub fn lua_time_limit_ms(&self) -> u64 {
+        self.lua_time_limit_ms.load(Ordering::Relaxed)
+    }
+
+    pub fn set_lua_time_limit_ms(&self, value: u64) {
+        self.lua_time_limit_ms.store(value, Ordering::Relaxed);
     }
 
     pub fn import_mode(&self) -> bool {
