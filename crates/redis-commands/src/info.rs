@@ -357,6 +357,7 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
     if want(b"persistence") {
         let persistence = &ctx.server().persistence;
+        let cow = redis_core::keyspace_cow_stats_snapshot();
         let last_save = ctx.server().live_config.last_save_unix();
         let last_save = if last_save == 0 {
             server_start_time() as i64
@@ -420,6 +421,48 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
             buf,
             "aof_last_rewrite_snapshot_us:{}\r",
             persistence.aof_last_rewrite_snapshot_micros()
+        );
+        let _ = writeln!(
+            buf,
+            "keyspace_cow_active_snapshots:{}\r",
+            cow.active_snapshots
+        );
+        let _ = writeln!(
+            buf,
+            "keyspace_cow_snapshot_starts:{}\r",
+            cow.snapshot_starts
+        );
+        let _ = writeln!(buf, "keyspace_cow_snapshot_drops:{}\r", cow.snapshot_drops);
+        let _ = writeln!(buf, "keyspace_cow_segment_clones:{}\r", cow.segment_clones);
+        let _ = writeln!(
+            buf,
+            "keyspace_cow_segment_clone_keys:{}\r",
+            cow.segment_clone_keys
+        );
+        let _ = writeln!(
+            buf,
+            "keyspace_cow_segment_clone_estimated_bytes:{}\r",
+            cow.segment_clone_estimated_bytes
+        );
+        let _ = writeln!(
+            buf,
+            "keyspace_cow_segment_clone_max_keys:{}\r",
+            cow.segment_clone_max_keys
+        );
+        let _ = writeln!(
+            buf,
+            "keyspace_cow_segment_clone_max_estimated_bytes:{}\r",
+            cow.segment_clone_max_estimated_bytes
+        );
+        let _ = writeln!(
+            buf,
+            "keyspace_cow_segment_clone_us:{}\r",
+            cow.segment_clone_micros
+        );
+        let _ = writeln!(
+            buf,
+            "keyspace_cow_segment_clone_max_us:{}\r",
+            cow.segment_clone_max_micros
         );
         let _ = writeln!(buf, "\r");
     }
@@ -680,6 +723,74 @@ fn ascii_lower(b: u8) -> u8 {
         b + 32
     } else {
         b
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use redis_core::{Client, RedisDb, RedisObject};
+
+    fn arg(bytes: &[u8]) -> RedisString {
+        RedisString::from_bytes(bytes)
+    }
+
+    fn bulk_text(reply: &[u8]) -> &str {
+        assert!(reply.starts_with(b"$"), "not a bulk reply: {reply:?}");
+        let header_end = reply
+            .windows(2)
+            .position(|window| window == b"\r\n")
+            .expect("bulk header terminator");
+        let len: usize = std::str::from_utf8(&reply[1..header_end])
+            .expect("utf8 bulk length")
+            .parse()
+            .expect("numeric bulk length");
+        let body_start = header_end + 2;
+        let body_end = body_start + len;
+        assert!(reply.len() >= body_end + 2, "truncated bulk reply");
+        std::str::from_utf8(&reply[body_start..body_end]).expect("utf8 INFO body")
+    }
+
+    fn field_value<'a>(text: &'a str, field: &str) -> &'a str {
+        let prefix = format!("{field}:");
+        text.lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .unwrap_or_else(|| panic!("missing INFO field {field}"))
+    }
+
+    #[test]
+    fn info_persistence_exposes_keyspace_cow_fields() {
+        let mut db = RedisDb::new(0);
+        let key = arg(b"cow-info");
+        db.add(key.clone(), RedisObject::new_string(b"before"));
+        let snapshot = db.snapshot_keyspace();
+        db.replace_value(&key, RedisObject::new_string(b"after"));
+
+        let mut client = Client::new(1);
+        client.set_args(vec![arg(b"INFO"), arg(b"persistence")]);
+        let mut ctx = CommandContext::with_db(&mut client, &mut db);
+        info_command(&mut ctx).unwrap();
+
+        let reply = client.drain_reply();
+        let text = bulk_text(&reply);
+        for field in [
+            "keyspace_cow_active_snapshots",
+            "keyspace_cow_snapshot_starts",
+            "keyspace_cow_snapshot_drops",
+            "keyspace_cow_segment_clones",
+            "keyspace_cow_segment_clone_keys",
+            "keyspace_cow_segment_clone_estimated_bytes",
+            "keyspace_cow_segment_clone_max_keys",
+            "keyspace_cow_segment_clone_max_estimated_bytes",
+            "keyspace_cow_segment_clone_us",
+            "keyspace_cow_segment_clone_max_us",
+        ] {
+            field_value(text, field)
+                .parse::<u64>()
+                .unwrap_or_else(|_| panic!("non-numeric INFO field {field}"));
+        }
+
+        drop(snapshot);
     }
 }
 

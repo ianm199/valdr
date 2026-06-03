@@ -28,6 +28,19 @@ VALKEY_BIN = ROOT / "reference/valkey/src/valkey-server"
 RUST_BIN = ROOT / "target/release/redis-server"
 RESULTS_DIR = ROOT / "harness/bench/results"
 
+COW_INFO_KEYS = [
+    "keyspace_cow_active_snapshots",
+    "keyspace_cow_snapshot_starts",
+    "keyspace_cow_snapshot_drops",
+    "keyspace_cow_segment_clones",
+    "keyspace_cow_segment_clone_keys",
+    "keyspace_cow_segment_clone_estimated_bytes",
+    "keyspace_cow_segment_clone_max_keys",
+    "keyspace_cow_segment_clone_max_estimated_bytes",
+    "keyspace_cow_segment_clone_us",
+    "keyspace_cow_segment_clone_max_us",
+]
+
 
 class RespClient:
     def __init__(self, port: int):
@@ -234,6 +247,21 @@ def stop_server(proc: subprocess.Popen[str] | None) -> None:
         proc.wait(timeout=5)
 
 
+def wait_until_loaded(client: RespClient, timeout_s: float = 60.0) -> None:
+    deadline = time.monotonic() + timeout_s
+    last_error = ""
+    while time.monotonic() < deadline:
+        try:
+            if client.command("PING") == "PONG":
+                return
+        except RuntimeError as exc:
+            last_error = str(exc)
+            if "LOADING" not in last_error:
+                raise
+        time.sleep(0.05)
+    raise TimeoutError(f"server did not finish loading within {timeout_s}s: {last_error}")
+
+
 def normalize_bulk(value: Any) -> str | None:
     if value is None:
         return None
@@ -259,6 +287,28 @@ def int_info(fields: dict[str, str], key: str, default: int = 0) -> int:
         return int(fields.get(key, default))
     except (TypeError, ValueError):
         return default
+
+
+def cow_info(fields: dict[str, str]) -> dict[str, int]:
+    return {key: int_info(fields, key) for key in COW_INFO_KEYS}
+
+
+def cow_delta(before: dict[str, int], after: dict[str, int], key: str) -> int:
+    return after.get(key, 0) - before.get(key, 0)
+
+
+def cow_peak(samples: list[dict[str, int]]) -> dict[str, int]:
+    if not samples:
+        return {key: 0 for key in COW_INFO_KEYS}
+    return {key: max(sample.get(key, 0) for sample in samples) for key in COW_INFO_KEYS}
+
+
+def read_cow_info(port: int) -> dict[str, int]:
+    client = RespClient(port)
+    try:
+        return cow_info(info_fields(client, "persistence"))
+    finally:
+        client.close()
 
 
 def wait_aof_rewrite_done(client: RespClient, timeout_s: float) -> tuple[float, bool]:
@@ -288,19 +338,27 @@ def wait_aof_rewrite_done_with_rss(
     client: RespClient,
     timeout_s: float,
     proc: subprocess.Popen[str],
-) -> tuple[float, bool, int | None]:
+) -> tuple[float, bool, int | None, dict[str, int], list[dict[str, int]]]:
     deadline = time.perf_counter() + timeout_s
     observed_in_progress = False
     peak_rss_kb = process_rss_kb(proc)
+    cow_samples: list[dict[str, int]] = []
     while time.perf_counter() < deadline:
         fields = info_fields(client, "persistence")
+        cow_samples.append(cow_info(fields))
         in_progress = fields.get("aof_rewrite_in_progress") == "1"
         observed_in_progress = observed_in_progress or in_progress
         current_rss = process_rss_kb(proc)
         if current_rss is not None:
             peak_rss_kb = max(peak_rss_kb or current_rss, current_rss)
         if not in_progress:
-            return time.perf_counter(), observed_in_progress, peak_rss_kb
+            return (
+                time.perf_counter(),
+                observed_in_progress,
+                peak_rss_kb,
+                cow_peak(cow_samples),
+                cow_samples,
+            )
         time.sleep(0.01)
     raise TimeoutError("AOF rewrite did not finish")
 
@@ -433,6 +491,7 @@ def verify_after_restart(target: str, data_dir: Path, fsync: str, expected_write
         proc = start_server(target, port, data_dir, fsync, log_path)
         client = RespClient(port)
         try:
+            wait_until_loaded(client)
             missing = []
             bad = []
             for seq in range(expected_writes):
@@ -482,6 +541,7 @@ def run_target(target: str, dataset_size: int, stamp: str, args: argparse.Namesp
             finally:
                 client.close()
             rss_before_rewrite_kb = process_rss_kb(proc)
+            cow_before_rewrite = read_cow_info(port)
 
             writer_ready = threading.Event()
             writer_result: dict[str, Any] = {}
@@ -500,10 +560,16 @@ def run_target(target: str, dataset_size: int, stamp: str, args: argparse.Namesp
                 rewrite_reply_end = time.perf_counter()
                 rss_after_reply_kb = process_rss_kb(proc)
                 rewrite_info_after_reply = info_fields(rewrite_client, "persistence")
-                rewrite_end, rewrite_observed_in_progress, rss_peak_kb = wait_aof_rewrite_done_with_rss(
-                    rewrite_client, args.timeout_s, proc
-                )
+                cow_after_reply = cow_info(rewrite_info_after_reply)
+                (
+                    rewrite_end,
+                    rewrite_observed_in_progress,
+                    rss_peak_kb,
+                    cow_peak_during_rewrite,
+                    cow_during_samples,
+                ) = wait_aof_rewrite_done_with_rss(rewrite_client, args.timeout_s, proc)
                 rss_after_rewrite_kb = process_rss_kb(proc)
+                cow_after_rewrite = cow_info(info_fields(rewrite_client, "persistence"))
             finally:
                 rewrite_client.close()
 
@@ -537,6 +603,33 @@ def run_target(target: str, dataset_size: int, stamp: str, args: argparse.Namesp
             "snapshot": {
                 "key_count": int_info(rewrite_info_after_reply, "aof_last_rewrite_snapshot_keys"),
                 "capture_us": int_info(rewrite_info_after_reply, "aof_last_rewrite_snapshot_us"),
+            },
+            "cow": {
+                "before_rewrite": cow_before_rewrite,
+                "after_reply": cow_after_reply,
+                "after_rewrite": cow_after_rewrite,
+                "peak_during_rewrite": cow_peak_during_rewrite,
+                "during_sample_count": len(cow_during_samples),
+                "segment_clones_delta": cow_delta(
+                    cow_before_rewrite,
+                    cow_after_rewrite,
+                    "keyspace_cow_segment_clones",
+                ),
+                "segment_clone_keys_delta": cow_delta(
+                    cow_before_rewrite,
+                    cow_after_rewrite,
+                    "keyspace_cow_segment_clone_keys",
+                ),
+                "segment_clone_estimated_bytes_delta": cow_delta(
+                    cow_before_rewrite,
+                    cow_after_rewrite,
+                    "keyspace_cow_segment_clone_estimated_bytes",
+                ),
+                "segment_clone_us_delta": cow_delta(
+                    cow_before_rewrite,
+                    cow_after_rewrite,
+                    "keyspace_cow_segment_clone_us",
+                ),
             },
             "rewrite_started_s": rewrite_start,
             "rewrite_ended_s": rewrite_end,
@@ -580,10 +673,18 @@ def write_tsv(path: Path, stamp: str, commit: str, dirty: list[str], rows: list[
             "rewrite_command_wall_ms\trewrite_post_reply_wall_ms\trewrite_wall_ms\t"
             "before_p99_ms\tduring_p99_ms\tafter_p99_ms\tduring_p100_ms\t"
             "rss_before_kb\trss_peak_kb\trss_after_kb\tbase_bytes\tincr_bytes\t"
+            "cow_active_after_reply\tcow_active_peak\tcow_active_after_rewrite\t"
+            "cow_segment_clones_delta\tcow_segment_clone_keys_delta\t"
+            "cow_segment_clone_estimated_bytes_delta\tcow_segment_clone_us_delta\t"
+            "cow_segment_clone_max_us\tcow_samples\t"
             "restart_passed\telapsed_s\n"
         )
         for row in rows:
             rss = row.get("rss_kb") or {}
+            cow = row.get("cow") or {}
+            cow_after_reply = cow.get("after_reply") or {}
+            cow_peak_during = cow.get("peak_during_rewrite") or {}
+            cow_after_rewrite = cow.get("after_rewrite") or {}
             out.write(
                 f"{row['target']}\t{row['status']}\t{row['appendfsync']}\t"
                 f"{row['dataset']['base_size']}\t{row['writes']}\t{row['acknowledged_writes']}\t"
@@ -601,6 +702,15 @@ def write_tsv(path: Path, stamp: str, commit: str, dirty: list[str], rows: list[
                 f"{rss.get('after_rewrite') or 0}\t"
                 f"{row['manifest'].get('base_bytes') or 0}\t"
                 f"{row['manifest'].get('incr_bytes') or 0}\t"
+                f"{cow_after_reply.get('keyspace_cow_active_snapshots') or 0}\t"
+                f"{cow_peak_during.get('keyspace_cow_active_snapshots') or 0}\t"
+                f"{cow_after_rewrite.get('keyspace_cow_active_snapshots') or 0}\t"
+                f"{cow.get('segment_clones_delta') or 0}\t"
+                f"{cow.get('segment_clone_keys_delta') or 0}\t"
+                f"{cow.get('segment_clone_estimated_bytes_delta') or 0}\t"
+                f"{cow.get('segment_clone_us_delta') or 0}\t"
+                f"{cow_after_rewrite.get('keyspace_cow_segment_clone_max_us') or 0}\t"
+                f"{cow.get('during_sample_count') or 0}\t"
                 f"{row['restart']['passed']}\t{row['elapsed_s']:.3f}\n"
             )
 
@@ -649,6 +759,30 @@ def measurements(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "aof_rewrite_rss_before_kb": row.get("rss_kb", {}).get("before_rewrite"),
             "aof_rewrite_rss_peak_kb": row.get("rss_kb", {}).get("peak_during_rewrite"),
             "aof_rewrite_rss_after_kb": row.get("rss_kb", {}).get("after_rewrite"),
+            "aof_rewrite_cow_active_after_reply": row.get("cow", {})
+            .get("after_reply", {})
+            .get("keyspace_cow_active_snapshots"),
+            "aof_rewrite_cow_active_peak": row.get("cow", {})
+            .get("peak_during_rewrite", {})
+            .get("keyspace_cow_active_snapshots"),
+            "aof_rewrite_cow_active_after_rewrite": row.get("cow", {})
+            .get("after_rewrite", {})
+            .get("keyspace_cow_active_snapshots"),
+            "aof_rewrite_cow_segment_clones_delta": row.get("cow", {}).get(
+                "segment_clones_delta"
+            ),
+            "aof_rewrite_cow_segment_clone_keys_delta": row.get("cow", {}).get(
+                "segment_clone_keys_delta"
+            ),
+            "aof_rewrite_cow_segment_clone_estimated_bytes_delta": row.get("cow", {}).get(
+                "segment_clone_estimated_bytes_delta"
+            ),
+            "aof_rewrite_cow_segment_clone_us_delta": row.get("cow", {}).get(
+                "segment_clone_us_delta"
+            ),
+            "aof_rewrite_cow_segment_clone_max_us": row.get("cow", {})
+            .get("after_rewrite", {})
+            .get("keyspace_cow_segment_clone_max_us"),
         }
         for metric, value in scalar_metrics.items():
             if value is None:

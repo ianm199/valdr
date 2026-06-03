@@ -2050,6 +2050,7 @@ mod tests {
 
     #[test]
     fn keyspace_snapshot_keeps_old_value_after_live_replace() {
+        let _guard = crate::keyspace_cow::test_counter_lock();
         let mut db = RedisDb::new(0);
         let key = k(b"cow-replace");
         db.add(key.clone(), make_str_obj(b"before"));
@@ -2070,6 +2071,7 @@ mod tests {
 
     #[test]
     fn keyspace_snapshot_keeps_deleted_key_visible() {
+        let _guard = crate::keyspace_cow::test_counter_lock();
         let mut db = RedisDb::new(0);
         let key = k(b"cow-delete");
         db.add(key.clone(), make_str_obj(b"before"));

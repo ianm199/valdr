@@ -11,7 +11,10 @@ lands segmented-COW `KeyspaceMap` phase one, cutting rewrite-start snapshot
 capture to root-clone scale while keeping AOF/RDB consumers on the same facade.
 Packet L adds syscall-level AOF rewrite fault injection around BASE/manifest
 sync and rename boundaries, then gates those failures through restart checks.
-**Date:** 2026-06-02.
+Packet M adds held-snapshot keyspace COW telemetry, samples it during
+`BGREWRITEAOF`, and extends the reusable toy model with metadata/payload split
+variants.
+**Date:** 2026-06-03.
 **Scope:** Append-Only File persistence, replay, rewrite, manifests, durability
 signals, and performance gates.
 
@@ -1033,7 +1036,7 @@ python3 harness/bench/aof-rewrite-latency.py
 Goal: make `appendfsync always` behave more like upstream Valkey under
 pipelined/event-loop workloads.
 
-Status: implemented in the current dirty tree as a narrow `appendfsync always`
+Status: implemented as a narrow `appendfsync always`
 staging path. `appendfsync no/everysec` intentionally stays on the immediate
 append path.
 
@@ -1103,7 +1106,7 @@ gap versus reference still justifies a follow-up profile before any broad claim.
 Goal: move `BGREWRITEAOF` from a synchronous command-path rewrite to the
 upstream Valkey shape without taking on fork/COW yet.
 
-Status: implemented in the current dirty tree.
+Status: implemented.
 
 Targets:
 
@@ -1172,7 +1175,7 @@ history cleanup/fsync-hardening around manifest directories.
 Goal: harden multipart AOF publication after Packet H and prove the main
 rewrite crash windows with process-level frontier coverage.
 
-Status: implemented in the current dirty tree.
+Status: implemented.
 
 Targets:
 
@@ -1254,7 +1257,7 @@ another structural-sharing snapshot.
 Goal: close the successful-rewrite history-file lifecycle and create a stable
 snapshot contract before replacing the live keyspace representation.
 
-Status: implemented in the current dirty tree.
+Status: implemented.
 
 Targets:
 
@@ -1334,7 +1337,7 @@ bounded and mergeable.
 Goal: remove the command-path deep clone from rewrite snapshot capture while
 preserving the `KeyspaceSnapshot` facade as the only AOF/RDB consumer contract.
 
-Status: implemented in the current dirty tree.
+Status: implemented.
 
 Targets:
 
@@ -1420,7 +1423,7 @@ blockers.
 Goal: move beyond modeled on-disk states by injecting failures at the production
 rewrite publication calls and proving restart behavior.
 
-Status: implemented in the current dirty tree.
+Status: implemented.
 
 Targets:
 
@@ -1488,7 +1491,255 @@ failures.
 
 ---
 
-## 11. Risks
+### Packet M — Held-Snapshot COW Telemetry / Payload Model
+
+Goal: make forkless snapshot write-window cost observable and decide whether
+payload sharing should be implemented broadly or narrowly.
+
+Status: implemented in this packet.
+
+Targets:
+
+- `crates/redis-core/src/keyspace_cow.rs`
+- `crates/redis-core/src/keyspace_map.rs`
+- `crates/redis-commands/src/info.rs`
+- `harness/bench/aof-rewrite-latency.py`
+- `harness/models/keyspace-cow-model`
+- `docs/KEYSPACE_COW_PAYLOAD_SHARING_SPEC.md`
+- `docs/AOF_ENDGAME_SPEC.md`
+
+Work:
+
+- Add atomic keyspace COW counters for active snapshots, snapshot starts/drops,
+  segment clone count, cloned key count, estimated clone bytes, and max
+  clone-key/byte pressure.
+- Hold a snapshot guard inside `KeyspaceMapSnapshot` so active snapshot counts
+  track the actual lifetime of AOF/RDB snapshot consumers.
+- Expose COW counters under `INFO persistence`.
+- Extend `aof-rewrite-latency.py` to sample COW counters before, during, and
+  after `BGREWRITEAOF`, with per-run deltas and peaks.
+- Extend the standalone model with production-shaped owned-payload segmented
+  COW and metadata/payload split variants.
+- Keep `keyspace_cow_segment_clone_us` at zero for this packet. Clone timing
+  would require either a pre-`strong_count` branch or an unconditional timer
+  around every mutating key operation; the chosen hot path is one
+  `Arc::make_mut` plus pointer comparison.
+
+Gates:
+
+```bash
+cargo check -p redis-core -p redis-commands
+cargo test --manifest-path harness/models/keyspace-cow-model/Cargo.toml
+cargo test -p redis-core
+cargo test -p redis-commands info_persistence_exposes_keyspace_cow_fields -- --nocapture
+cargo test -p redis-commands --test aof_correctness_kit
+cargo test -p redis-commands --test repl_correctness_kit
+cargo test -p redis-server
+python3 harness/oracle/persistence-cycle.py --mode rdb
+python3 harness/oracle/persistence-cycle.py --mode aof
+python3 harness/oracle/persistence-cycle.py --mode aof-rewrite
+python3 harness/oracle/persistence-frontier.py --skip-build
+bash harness/bench/run-profile-matrix.sh
+python3 harness/bench/aof-rewrite-latency.py --dataset-sizes 5000,25000,100000
+```
+
+Measured result on 2026-06-03:
+
+- Model tests: 10/10 pass.
+- `cargo check`, `redis-core`, AOF kit, replication kit, and `redis-server`:
+  pass.
+- RDB/AOF/AOF-rewrite restart cycles: pass.
+- Full persistence frontier: 40/40 pass (`20260603T015103Z`).
+- Rewrite latency artifact:
+  `harness/bench/results/20260603T014824Z-787f63c-aof-rewrite-latency.*`.
+- 100k rewrite row: 102,937 snapshot keys, 111 us snapshot capture,
+  8.372 ms command wall, 439 COW segment clones, 43,076 cloned keys, and
+  6,835,864 estimated clone bytes. Restart verification passed.
+- Profile matrix artifact:
+  `harness/bench/results/20260603T014731Z-787f63c-profile-matrix.tsv`,
+  median 0.98x, min 0.84x, max 1.33x.
+- Focused p1 `SET`/`GET`/`INCR`:
+  1.020x / 1.051x / 1.008x.
+- Focused p16 `SET`/`GET`/`INCR`:
+  1.211x / 1.006x / 0.910x. The p16 `INCR` dip is consistent with a
+  pre-packet baseline probe and is not treated as a new COW cliff.
+
+Acceptance read: Packet M gives AOF rewrite windows an operator-visible COW
+pressure surface without making AOF the default. The model shows large
+held-snapshot wins from metadata/payload splitting, especially at 1 KiB and
+64 KiB payload sizes, but the small-value live-operation risk is high enough
+that broad production `RedisObject { Arc<ObjectPayload> }` migration is
+deferred. The next payload-sharing work should be a narrower payload-handle
+packet, not a whole-object-layout rewrite.
+
+---
+
+## 11. Next AOF Working Spec
+
+The next AOF packet should move from "rewrite is structurally safe" toward
+"AOF is a release-grade durability surface." The highest-leverage code work is
+not another keyspace map rewrite; it is the AOF release-frontier cleanup and
+validation layer around the hardened multipart rewrite path.
+
+### 11.1 Packet N — AOF Release Frontier Cleanup / Checker / TCL Triage
+
+Ambitious end state:
+
+- Startup and successful rewrites do not leave unbounded temp/history debris in
+  `appenddirname`.
+- Cleanup never deletes a file named by the current manifest, even in a failed
+  rewrite or crash-window state.
+- `valkey-check-aof` is a real preflight tool for the layouts this server can
+  create: legacy RESP AOF, multipart manifests, `.aof` BASE/INCR files, and
+  manifest `.rdb` BASE preambles.
+- Focused upstream persistence TCL files are either passing, converted into
+  concrete bug packets, or clearly blocked by harness limitations.
+- Docs can move from "AOF alpha" toward a precise release-gated status only
+  after the source-shaped frontier, process cycles, checker cases, and
+  benchmark telemetry agree.
+
+Non-goals:
+
+- Do not change AOF default enablement. `appendonly` stays off by default.
+- Do not make filesystem power-loss claims beyond measured and injected-fault
+  evidence.
+- Do not rewrite RuntimeOwner or the global AOF writer as part of this packet.
+- Do not broaden payload sharing inside this AOF packet.
+- Do not delete files whose names are not recognized as this server's AOF temp,
+  history, BASE, INCR, or manifest forms.
+
+### 11.2 Code Work
+
+1. **Recover exact upstream intent.**
+   Read local Valkey `src/aof.c` for:
+   `aofDelHistoryFiles`, temp rewrite file cleanup, `loadAppendOnlyFiles`,
+   manifest validation, and `redis-check-aof` behavior.
+
+2. **Inventory current Rust behavior.**
+   Read:
+   `crates/redis-commands/src/aof.rs`,
+   `crates/redis-server/src/main.rs`,
+   `crates/redis-server/src/check_aof.rs`,
+   `harness/oracle/persistence-frontier.py`, and the latest AOF runner results.
+
+3. **Add conservative cleanup primitives.**
+   Add small production helpers that:
+   - parse the current manifest into referenced filenames;
+   - classify appenddir files as live, history, temp rewrite, unknown, or
+     legacy;
+   - delete only safe unreferenced temp/history files;
+   - report cleanup counts and errors without blocking successful startup on
+     harmless orphan cleanup failure.
+
+4. **Wire cleanup at the right lifecycle points.**
+   Candidate hooks:
+   - after successful AOF startup load;
+   - after successful final manifest publication and history deletion;
+   - optionally after `CONFIG SET appendonly yes` creates the initial layout.
+
+5. **Harden `valkey-check-aof`.**
+   Ensure check-aof:
+   - validates multipart manifest grammar and referenced files;
+   - validates `.aof` BASE and INCR RESP streams;
+   - validates manifest `.rdb` BASE preambles through the shared RDB checker;
+   - reports truncated tails consistently with upstream expectations;
+   - does not silently accept corrupt manifests or missing files.
+
+6. **Extend frontier scenarios before trusting cleanup.**
+   Add process scenarios for:
+   - startup removes old temp rewrite files after successful load;
+   - startup preserves every current-manifest-referenced file;
+   - startup preserves failed-rewrite preliminary chain and active INCR;
+   - successful rewrite cleanup is idempotent across restart;
+   - check-aof accepts valid multipart layout;
+   - check-aof fails missing/corrupt BASE or INCR;
+   - check-aof validates RDB preamble BASE if `aof-use-rdb-preamble yes`.
+
+7. **Triage focused upstream persistence TCL.**
+   Rerun `tcl-persistence-focused`. If the runner still produces no summaries,
+   fix the harness summary path first. Then split failures into:
+   real AOF bugs, unsupported upstream surfaces, or unrelated harness limits.
+
+8. **Update release docs only after gates pass.**
+   Update `README.md`, `docs/coverage.md`, and
+   `docs/TEST_AND_FEATURE_COVERAGE.md` with the exact AOF status, not a broad
+   release claim.
+
+### 11.3 Tool Iteration Loop
+
+Start cheap and local:
+
+```bash
+git status --short
+cargo check -p redis-core -p redis-commands -p redis-server
+cargo test -p redis-commands --test aof_correctness_kit
+cargo test -p redis-server check_aof
+python3 -m py_compile harness/oracle/persistence-frontier.py
+```
+
+Then run targeted process evidence:
+
+```bash
+python3 harness/oracle/persistence-frontier.py --skip-build --fail-on-failure \
+  --scenarios multipart-aof-rewrite-success-deletes-history,multipart-aof-rewrite-failure-preserves-history-files
+python3 harness/oracle/persistence-cycle.py --mode aof --skip-build
+python3 harness/oracle/persistence-cycle.py --mode aof-rewrite --skip-build
+```
+
+After adding new scenarios, run the full frontier:
+
+```bash
+python3 harness/oracle/persistence-frontier.py --skip-build --fail-on-failure
+```
+
+Then run upstream persistence telemetry:
+
+```bash
+python3 harness/oracle/tcl-survey.py --runner-id tcl-persistence-focused \
+  --skip-build --timeout-s 180 --no-default-deny-tags \
+  --deny-tag needs:repl --deny-tag cluster \
+  --files unit/other,unit/aofrw,integration/aof,integration/rdb
+```
+
+Only after correctness is clean, run AOF performance telemetry:
+
+```bash
+python3 harness/bench/aof-matrix.py --quick --targets rust --skip-build
+python3 harness/bench/aof-rewrite-latency.py --targets rust --skip-build \
+  --dataset-sizes 5000,25000,100000
+```
+
+If performance moves unexpectedly, use profiler runners in this order:
+
+```bash
+bash harness/bench/run-profile-matrix.sh
+python3 harness/bench/profile-hotspots.py --suite smoke --sample-seconds 4
+python3 harness/bench/profile-calltree.py --suite big --profile-seconds 8
+```
+
+Do not run benchmark/profiler agents concurrently; they share CPU, ports,
+results directories, and profiler resources.
+
+### 11.4 Acceptance Criteria
+
+Packet N is accepted when:
+
+- AOF kit and `redis-server` check-aof tests pass.
+- RDB/AOF/AOF-rewrite process cycles pass.
+- Full persistence frontier passes with new cleanup/checker scenarios included.
+- Focused persistence TCL has a parsed summary; remaining failures are linked
+  to concrete follow-up packets.
+- Cleanup leaves all manifest-referenced files intact in failed and successful
+  rewrite windows.
+- Check-aof returns failure for missing/corrupt manifest targets and success for
+  valid layouts this server creates.
+- AOF matrix and rewrite-latency telemetry still pass in quick Rust mode.
+- Docs record what changed, exact artifacts, remaining release gaps, and the
+  next recommendation.
+
+---
+
+## 12. Risks
 
 - **False confidence from old dirty-tree evidence.** The 23/23 persistence
   frontier is useful history, but clean current evidence must replace it.
@@ -1498,8 +1749,8 @@ failures.
   command-path deep snapshot clone, but BASE generation still walks and
   serializes the snapshot in the background.
 - **Segmented-COW write-window cost.** Writes during a held snapshot can clone
-  touched segment maps. Current telemetry clears the phase-one bar, but future
-  segment tuning needs real held-snapshot counters.
+  touched segment maps. Packet M makes this visible, but future segment tuning
+  still needs repeated held-window evidence.
 - **Value payloads are still owned.** Packet K shares index roots, not object
   payload internals. Large mutable values can still be expensive until metadata
   and payload ownership are split.
@@ -1523,23 +1774,26 @@ failures.
 
 ---
 
-## 12. Recommendation
+## 13. Recommendation
 
-After Packet L, the next high-leverage AOF work is no longer baseline repair,
+After Packet M, the next high-leverage AOF work is no longer baseline repair,
 basic background BASE generation, obvious manifest fsync hardening,
-successful-rewrite history deletion, command-path snapshot cloning, or
-syscall-level rewrite publication fault injection. The frontier covers modeled
-states plus production-call failures, the `always` cliff has a measured partial
-recovery, rewrite telemetry separates command start blocking from post-reply
-background work, and structural-sharing capture is now measured.
+successful-rewrite history deletion, command-path snapshot cloning,
+syscall-level rewrite publication fault injection, or held-snapshot COW
+visibility. The frontier covers modeled states plus production-call failures,
+the `always` cliff has a measured partial recovery, rewrite telemetry separates
+command start blocking from post-reply background work, and COW pressure during
+rewrite windows is now measurable.
 
-1. Add background or startup cleanup for orphaned history/temp files once the
-   synchronous successful-cleanup path is stable.
-2. Add held-snapshot COW counters before further `KeyspaceMap` tuning.
-3. Split key metadata from value payload before broad payload sharing.
-4. Profile the remaining p16 `appendfsync always` gap and soft `INCR` rows
+1. Add startup/lifecycle cleanup for orphaned history/temp files and prove it
+   cannot delete manifest-referenced data.
+2. Harden `valkey-check-aof` for multipart layouts and RDB-preamble BASE files.
+3. Get focused upstream persistence TCL into parsed, actionable summaries.
+4. Split key metadata from value payload only in a narrower follow-up packet
+   after the AOF release-frontier work, unless new COW evidence makes it urgent.
+5. Profile the remaining p16 `appendfsync always` gap and soft `INCR` rows
    against reference.
-5. Keep the AOF matrix and rewrite-latency runners as telemetry on every packet
+6. Keep the AOF matrix and rewrite-latency runners as telemetry on every packet
    that changes persistence, replication offsets, snapshot structure, or
    RuntimeOwner flush order.
 

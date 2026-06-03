@@ -25,14 +25,23 @@ cargo run --release -- --keys 100000 --value-bytes 64 --read-ops 200000 --write-
 cargo run --release -- --keys 1000000 --value-bytes 64 --read-ops 300000 --write-ops 10000 --segments 16384 --variants deep,seg_hash,im > results/keys1m-v64-fnv-incr-rss.tsv
 ```
 
+Packet M metadata/payload split runs:
+
+```bash
+cargo run --release -- --keys 100000 --value-bytes 64 --read-ops 200000 --write-ops 10000 --segments 1024 > results/keys100k-v64-entry-split.tsv
+cargo run --release -- --keys 100000 --value-bytes 1024 --read-ops 200000 --write-ops 10000 --segments 1024 > results/keys100k-v1k-entry-split.tsv
+cargo run --release -- --keys 4096 --value-bytes 65536 --read-ops 100000 --write-ops 1000 --segments 512 > results/keys4k-v64k-entry-split.tsv
+```
+
 Model tests:
 
 ```bash
 cargo test --manifest-path harness/models/keyspace-cow-model/Cargo.toml
 ```
 
-Result: 5/5 pass, including snapshot-isolation checks for deep, `Arc`, `im`,
-segmented replace, and hashed segmented INCR.
+Result: 10/10 pass, including snapshot-isolation checks for deep, `Arc`, `im`,
+segmented replace, hashed segmented INCR, entry metadata/payload split, and
+production-shaped segmented deep/entry held-snapshot behavior.
 
 ## Selected Numbers
 
@@ -79,3 +88,37 @@ and live-operation overhead.
   from payload and adding persistent inner encodings are separate future
   packets; this model deliberately does not pretend segmented index sharing
   solves that class.
+
+## Packet M Metadata/Payload Split Read
+
+The new `seg_deep_hash` variant models the current production shape: segmented
+COW index with owned payloads. The new `seg_entry_hash` variant models metadata
+by value with shared payload handles.
+
+100k keys, 64-byte values, 1024 segments:
+
+| Variant | Live Replace | Held Metadata | Held Mutate | Held INCR | Held Clone Bytes |
+|---|---:|---:|---:|---:|---:|
+| seg_deep_hash | 174 ns/op | n/a | 751 ns/op | 701 ns/op | 1.53 MiB keys + 6.10 MiB payload |
+| seg_entry_hash | 1131 ns/op | 277 ns/op | 426 ns/op | 467 ns/op | 1.53 MiB keys + 2.29 MiB entries + 0.58 MiB touched payload |
+
+100k keys, 1 KiB values:
+
+| Variant | Live Replace | Held Metadata | Held Mutate | Held INCR | Held Payload Clone |
+|---|---:|---:|---:|---:|---:|
+| seg_deep_hash | 485 ns/op | n/a | 2363 ns/op | 2390 ns/op | 97.62 MiB |
+| seg_entry_hash | 555 ns/op | 369 ns/op | 898 ns/op | 1107 ns/op | 9.31 MiB |
+
+4k keys, 64 KiB values, 512 segments:
+
+| Variant | Live Replace | Held Metadata | Held Mutate | Held INCR | Held Payload Clone |
+|---|---:|---:|---:|---:|---:|
+| seg_deep_hash | 6028 ns/op | n/a | 28,853 ns/op | 35,438 ns/op | 255.75 MiB |
+| seg_entry_hash | 1743 ns/op | 156 ns/op | 4997 ns/op | 4907 ns/op | 55.94 MiB |
+
+Decision: payload handles clearly help medium/large held-snapshot mutation
+windows, but the 64-byte run shows enough small-value live-operation risk that
+the production packet should not broadly wrap every object payload yet. Keep the
+model, keep production counters, and make the next payload packet narrower:
+large string payload handles, collection-specific payload handles, or a
+feature-flagged production layout probe before migration.
