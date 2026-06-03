@@ -76,6 +76,8 @@ pub(crate) struct CliArgs {
     pub(crate) lua_time_limit_ms: u64,
     pub(crate) config_path: Option<String>,
     pub(crate) unixsocket: Option<String>,
+    pub(crate) unixsocketperm: Option<u32>,
+    pub(crate) unixsocketgroup: Option<String>,
     pub(crate) startup_config_overrides: Vec<(String, String)>,
     pub(crate) key_load_delay: i64,
 }
@@ -117,6 +119,8 @@ impl Default for CliArgs {
             lua_time_limit_ms: redis_core::live_config::DEFAULT_LUA_TIME_LIMIT_MS,
             config_path: None,
             unixsocket: None,
+            unixsocketperm: None,
+            unixsocketgroup: None,
             startup_config_overrides: Vec::new(),
             key_load_delay: 0,
         }
@@ -266,7 +270,29 @@ pub(crate) fn parse_args(argv: Vec<String>) -> Result<CliArgs, String> {
                     .next()
                     .ok_or_else(|| "--unixsocket requires a value".to_string())?;
                 if !v.is_empty() {
-                    out.unixsocket = Some(v);
+                    out.unixsocket = Some(v.clone());
+                    out.startup_config_overrides
+                        .push(("unixsocket".to_string(), v));
+                }
+            }
+            "--unixsocketperm" => {
+                let v = it
+                    .next()
+                    .ok_or_else(|| "--unixsocketperm requires a value".to_string())?;
+                if let Ok(mode) = u32::from_str_radix(v.trim(), 8) {
+                    out.unixsocketperm = Some(mode);
+                    out.startup_config_overrides
+                        .push(("unixsocketperm".to_string(), v));
+                }
+            }
+            "--unixsocketgroup" => {
+                let v = it
+                    .next()
+                    .ok_or_else(|| "--unixsocketgroup requires a value".to_string())?;
+                if !v.is_empty() {
+                    out.unixsocketgroup = Some(v.clone());
+                    out.startup_config_overrides
+                        .push(("unixsocketgroup".to_string(), v));
                 }
             }
             "--rdb-disabled" => {
@@ -598,6 +624,16 @@ pub(crate) fn apply_config_file(args: &mut CliArgs, path: &Path) -> Result<(), S
                     args.unixsocket = Some(unquote_config_value(value));
                 }
             }
+            "unixsocketperm" => {
+                if let Ok(mode) = u32::from_str_radix(value.trim(), 8) {
+                    args.unixsocketperm = Some(mode);
+                }
+            }
+            "unixsocketgroup" => {
+                if !value.is_empty() {
+                    args.unixsocketgroup = Some(unquote_config_value(value));
+                }
+            }
             "maxclients" => {
                 if let Ok(v) = value.parse::<u64>() {
                     args.maxclients = v;
@@ -753,6 +789,8 @@ pub(crate) fn expose_config_file_value(key: &str) -> bool {
             | "maxmemory-clients"
             | "client-query-buffer-limit"
             | "unixsocket"
+            | "unixsocketperm"
+            | "unixsocketgroup"
             | "tls-port"
             | "tls-cert-file"
             | "tls-key-file"

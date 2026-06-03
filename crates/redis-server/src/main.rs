@@ -120,7 +120,12 @@ fn main() {
     install_shutdown_handler(Arc::clone(&shutdown));
     #[cfg(unix)]
     if let Some(path) = args.unixsocket.clone() {
-        spawn_unix_control_listener(path, Arc::clone(&shutdown));
+        spawn_unix_control_listener(
+            path,
+            args.unixsocketperm,
+            args.unixsocketgroup.clone(),
+            Arc::clone(&shutdown),
+        );
     }
     emit_startup_log();
 

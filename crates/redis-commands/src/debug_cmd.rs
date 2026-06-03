@@ -272,9 +272,10 @@ pub fn debug_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     }
     if ascii_eq_ignore_case(sub.as_bytes(), b"HTSTATS") {
         let entries = ctx.db().len();
+        let table_size = debug_htstats_main_table_size(entries, ctx.server().rdb_child_pid() != 0);
         let payload = format!(
-            "[Dictionary HT]\nHash table 0 stats (main hash table):\n table size: 4096\n number of entries: {}\n rehashing index: -1\n",
-            entries
+            "[Dictionary HT]\nHash table 0 stats (main hash table):\n table size: {}\n number of entries: {}\n rehashing index: -1\n",
+            table_size, entries
         );
         return ctx.reply_bulk_string(redis_types::RedisString::from_bytes(payload.as_bytes()));
     }
@@ -326,6 +327,17 @@ pub fn debug_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     msg.extend_from_slice(b"ERR Unknown DEBUG subcommand: ");
     msg.extend_from_slice(sub.as_bytes());
     Err(RedisError::runtime(msg))
+}
+
+fn debug_htstats_main_table_size(entries: usize, child_active: bool) -> usize {
+    let minimum = 4096usize;
+    if entries <= minimum {
+        return minimum;
+    }
+    if child_active {
+        return (entries - 1).next_power_of_two().max(minimum);
+    }
+    entries.next_power_of_two().max(minimum)
 }
 
 pub fn debug_reload_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {

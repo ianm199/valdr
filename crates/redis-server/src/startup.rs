@@ -2,7 +2,13 @@
 //! Module-level doc lives near the `mod` declaration in main.rs.
 #![allow(unused_imports, dead_code, unused_variables, unused_mut)]
 
+#[cfg(unix)]
+use std::collections::hash_map::DefaultHasher;
+#[cfg(unix)]
+use std::ffi::CString;
 use std::fs;
+#[cfg(unix)]
+use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -31,6 +37,10 @@ use redis_core::PersistenceStatus;
 use redis_core::{Client, Connection, RedisServer};
 use redis_protocol::frame::{encode_resp2, RespFrame};
 use redis_types::{RedisError, RedisResult, RedisString};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
+use std::os::unix::fs::{symlink, PermissionsExt};
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 
@@ -193,16 +203,40 @@ pub(crate) fn build_tls_startup(
 }
 
 #[cfg(unix)]
-pub(crate) fn spawn_unix_control_listener(path: String, shutdown: Arc<AtomicBool>) {
+pub(crate) fn spawn_unix_control_listener(
+    path: String,
+    perm: Option<u32>,
+    group: Option<String>,
+    shutdown: Arc<AtomicBool>,
+) {
     let path_for_thread = path.clone();
-    let _ = std::fs::remove_file(&path_for_thread);
-    let listener = match UnixListener::bind(&path_for_thread) {
+    let requested_path = PathBuf::from(&path_for_thread);
+    let bind_path = unix_socket_bind_target(&requested_path);
+    let _ = fs::remove_file(&requested_path);
+    if bind_path != requested_path {
+        let _ = fs::remove_file(&bind_path);
+    }
+    let listener = match UnixListener::bind(&bind_path) {
         Ok(listener) => listener,
         Err(e) => {
             eprintln!("redis-server: unixsocket {} bind failed: {}", path, e);
             return;
         }
     };
+    if bind_path != requested_path {
+        if let Some(parent) = requested_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Err(e) = symlink(&bind_path, &requested_path) {
+            eprintln!(
+                "redis-server: unixsocket {} alias to {} failed: {}",
+                requested_path.display(),
+                bind_path.display(),
+                e
+            );
+        }
+    }
+    configure_unix_socket_file(&bind_path, perm, group.as_deref());
     if let Err(e) = listener.set_nonblocking(true) {
         eprintln!("redis-server: unixsocket set_nonblocking failed: {}", e);
     }
@@ -227,6 +261,72 @@ pub(crate) fn spawn_unix_control_listener(path: String, shutdown: Arc<AtomicBool
             }
             let _ = std::fs::remove_file(&path_for_thread);
         });
+}
+
+#[cfg(unix)]
+fn unix_socket_bind_target(requested: &Path) -> PathBuf {
+    const UNIX_SOCKET_PATH_SOFT_LIMIT: usize = 100;
+    let requested_text = requested.to_string_lossy();
+    if requested_text.as_bytes().len() < UNIX_SOCKET_PATH_SOFT_LIMIT {
+        return requested.to_path_buf();
+    }
+
+    let mut hasher = DefaultHasher::new();
+    requested_text.hash(&mut hasher);
+    std::env::temp_dir().join(format!(
+        "valdr-usock-{}-{:016x}.sock",
+        std::process::id(),
+        hasher.finish()
+    ))
+}
+
+#[cfg(unix)]
+fn configure_unix_socket_file(path: &Path, perm: Option<u32>, group: Option<&str>) {
+    if let Some(mode) = perm {
+        let permissions = fs::Permissions::from_mode(mode & 0o777);
+        if let Err(e) = fs::set_permissions(path, permissions) {
+            eprintln!(
+                "redis-server: unixsocket {} chmod failed: {}",
+                path.display(),
+                e
+            );
+        }
+    }
+
+    let Some(group) = group.filter(|name| !name.is_empty()) else {
+        return;
+    };
+    let Some(gid) = unix_group_gid(group) else {
+        eprintln!("redis-server: unixsocket group {} not found", group);
+        return;
+    };
+    let Ok(c_path) = CString::new(path.as_os_str().as_bytes()) else {
+        eprintln!(
+            "redis-server: unixsocket {} chown skipped: path contains NUL",
+            path.display()
+        );
+        return;
+    };
+    let ret = unsafe { libc::chown(c_path.as_ptr(), !0 as libc::uid_t, gid) };
+    if ret != 0 {
+        eprintln!(
+            "redis-server: unixsocket {} chown group {} failed: {}",
+            path.display(),
+            group,
+            io::Error::last_os_error()
+        );
+    }
+}
+
+#[cfg(unix)]
+fn unix_group_gid(group: &str) -> Option<libc::gid_t> {
+    let c_group = CString::new(group).ok()?;
+    let ptr = unsafe { libc::getgrnam(c_group.as_ptr()) };
+    if ptr.is_null() {
+        None
+    } else {
+        Some(unsafe { (*ptr).gr_gid })
+    }
 }
 
 #[cfg(unix)]
@@ -520,12 +620,12 @@ pub(crate) fn dispatch_full_sync_transfer() {
             snapshot_offset
         );
     }
- // A client can enter WAIT while one replica is still in full-sync
- // therefore before `request_ack_from_replicas` will address it. Once
- // RDB plus catch-up backlog are queued, prompt replicas only if a WAIT or
- // WAITAOF waiter is actually present. Sending GETACK unconditionally
- // pollutes normal replication-stream assertions and diverges from Valkey's
- // "only request ACKs for blocked WAIT clients" behavior.
+    // A client can enter WAIT while one replica is still in full-sync
+    // therefore before `request_ack_from_replicas` will address it. Once
+    // RDB plus catch-up backlog are queued, prompt replicas only if a WAIT or
+    // WAITAOF waiter is actually present. Sending GETACK unconditionally
+    // pollutes normal replication-stream assertions and diverges from Valkey's
+    // "only request ACKs for blocked WAIT clients" behavior.
     if job.needs_getack_on_completion || blocked_replication_wait_any() {
         send_getack_to_online_replicas(&repl);
     }
@@ -1033,9 +1133,9 @@ pub(crate) fn run_client_loop(
                 }
             }
 
- // Batch all replies produced by commands already present in this
- // read. Draining query_buf per command also destroys pipelined
- // throughput by repeatedly memmoving the unread tail.
+            // Batch all replies produced by commands already present in this
+            // read. Draining query_buf per command also destroys pipelined
+            // throughput by repeatedly memmoving the unread tail.
             if client.should_close {
                 disconnect = true;
                 break;

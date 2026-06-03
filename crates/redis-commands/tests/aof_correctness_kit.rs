@@ -957,6 +957,40 @@ fn replay_preserves_past_expire_across_later_collection_mutation() {
     assert!(!dbs[0].exists_raw(&key));
 }
 
+#[test]
+fn replay_set_pxat_preserves_absolute_expire_from_rewrite_form() {
+    let scratch = Scratch::new("set_pxat_replay");
+    let aof_path = scratch.path("appendonly.aof");
+    let future_ms = current_ms() + 2_000_000;
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&encode_resp_command(&[
+        rs(b"SET"),
+        rs(b"y"),
+        rs(b"somevalue"),
+        rs(b"PXAT"),
+        rs(future_ms.to_string().as_bytes()),
+    ]));
+    bytes.extend_from_slice(&encode_resp_command(&[
+        rs(b"SET"),
+        rs(b"py"),
+        rs(b"somevalue"),
+        rs(b"PXAT"),
+        rs(future_ms.to_string().as_bytes()),
+    ]));
+    std::fs::write(&aof_path, &bytes).unwrap();
+
+    let mut dbs = vec![RedisDb::new(0)];
+    replay_aof_databases_with_options(&aof_path, &mut dbs, AofLoadOptions::default())
+        .expect("SET PXAT rewrite form should replay");
+
+    for key in [rs(b"y"), rs(b"py")] {
+        let obj = dbs[0]
+            .find(&key)
+            .expect("replay must create key from SET PXAT");
+        assert_eq!(obj.expire, future_ms, "SET PXAT must preserve expiry");
+    }
+}
+
 // ─── audit finding 5: MANIFEST round-trip + validation (GREEN-LOCK) ──────────
 // `encode_aof_manifest` / `load_aof_manifest` are private to aof.rs, so this
 // kit cannot call them directly without a production visibility change. Instead

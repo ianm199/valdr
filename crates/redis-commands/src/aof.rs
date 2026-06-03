@@ -2554,7 +2554,9 @@ fn dispatch_replay_command(
     match name_lower.as_slice() {
         b"set" if argv.len() >= 3 => {
             let key = argv[1].clone();
-            let val = RedisObject::new_string(argv[2].as_bytes());
+            let expire = replay_set_expire_ms(argv, db, &key)?;
+            let mut val = RedisObject::new_string(argv[2].as_bytes());
+            val.expire = expire;
             db.insert(key, val);
         }
         b"setex" if argv.len() >= 4 => {
@@ -2743,6 +2745,58 @@ fn dispatch_replay_command(
         }
     }
     Ok(())
+}
+
+fn replay_set_expire_ms(argv: &[RedisString], db: &RedisDb, key: &RedisString) -> io::Result<i64> {
+    let mut expire = EXPIRY_NONE;
+    let mut i = 3usize;
+    while i < argv.len() {
+        let option = argv[i].as_bytes();
+        if option.eq_ignore_ascii_case(b"keepttl") {
+            expire = db.find(key).map(|obj| obj.expire).unwrap_or(EXPIRY_NONE);
+            i += 1;
+            continue;
+        }
+        if option.eq_ignore_ascii_case(b"nx")
+            || option.eq_ignore_ascii_case(b"xx")
+            || option.eq_ignore_ascii_case(b"get")
+        {
+            i += 1;
+            continue;
+        }
+        let is_expiry_option = option.eq_ignore_ascii_case(b"ex")
+            || option.eq_ignore_ascii_case(b"px")
+            || option.eq_ignore_ascii_case(b"exat")
+            || option.eq_ignore_ascii_case(b"pxat");
+        if !is_expiry_option {
+            i += 1;
+            continue;
+        }
+
+        let Some(raw_value) = argv.get(i + 1) else {
+            return invalid_aof_command("SET has incomplete expiry option");
+        };
+        let value = std::str::from_utf8(raw_value.as_bytes())
+            .ok()
+            .and_then(|s| s.parse::<i64>().ok())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "SET has invalid expiry"))?;
+        if option.eq_ignore_ascii_case(b"ex") {
+            expire = current_ms().saturating_add(value.saturating_mul(1000));
+            i += 2;
+        } else if option.eq_ignore_ascii_case(b"px") {
+            expire = current_ms().saturating_add(value);
+            i += 2;
+        } else if option.eq_ignore_ascii_case(b"exat") {
+            expire = value.saturating_mul(1000);
+            i += 2;
+        } else if option.eq_ignore_ascii_case(b"pxat") {
+            expire = value;
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    Ok(expire)
 }
 
 fn invalid_aof_command<T>(msg: &'static str) -> io::Result<T> {
