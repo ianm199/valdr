@@ -1,0 +1,12 @@
+[package]
+name = "valdr-engine"
+version = "0.1.0-alpha.1"
+edition.workspace = true
+license.workspace = true
+description = "Wasm-safe embedded Valdr command-engine boundary for edge experiments."
+
+[dependencies]
+lua-rs-runtime = { workspace = true }
+redis-protocol = { workspace = true }
+redis-types = { workspace = true }
+serde_json = { workspace = true }

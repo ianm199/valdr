@@ -894,7 +894,7 @@ fn encode_backlen_size(len: usize) -> Option<usize> {
         Some(3)
     } else if len <= 268_435_455 {
         Some(4)
-    } else if len <= 34_359_738_367 {
+    } else if (len as u64) <= 34_359_738_367 {
         Some(5)
     } else {
         None

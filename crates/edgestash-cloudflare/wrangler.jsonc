@@ -1,0 +1,26 @@
+{
+  "name": "edgestash-valdr",
+  "main": "build/index.js",
+  "compatibility_date": "2026-06-11",
+  "workers_dev": true,
+  "build": {
+    "command": "cargo install -q \"worker-build@^0.8\" && worker-build --release"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "EDGESTASH",
+        "class_name": "EdgeStashObject"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["EdgeStashObject"]
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}
