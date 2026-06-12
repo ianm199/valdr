@@ -80,7 +80,9 @@ fn tenant_from_request(req: &Request) -> Result<Option<String>> {
 fn tenant_from_path(path: &str) -> Option<String> {
     let mut segments = path.trim_start_matches('/').split('/');
     match (segments.next(), segments.next(), segments.next()) {
-        (Some("v1"), Some("policy" | "limit" | "valdr"), Some(tenant)) if !tenant.is_empty() => {
+        (Some("v1"), Some("policy" | "limit" | "ai" | "valdr"), Some(tenant))
+            if !tenant.is_empty() =>
+        {
             Some(tenant.to_owned())
         }
         _ => None,
@@ -131,6 +133,10 @@ mod tests {
         );
         assert_eq!(
             tenant_from_path("/v1/limit/tenant-42"),
+            Some("tenant-42".to_owned())
+        );
+        assert_eq!(
+            tenant_from_path("/v1/ai/tenant-42"),
             Some("tenant-42".to_owned())
         );
         assert_eq!(

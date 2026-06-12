@@ -48,6 +48,17 @@ Expected limiter decisions:
 {"allowed":false,"capacity":10,"remaining":3,"reset_ms":2400,"retry_after_ms":700}
 ```
 
+The toy AI route uses the same Lua limiter as an API spend guard:
+
+```sh
+curl -sS -X POST "$BASE/v1/ai/tenant-42" \
+  -H "content-type: application/json" \
+  --data '{"now_millis":2000,"tokens":3,"prompt":"summarize invoices"}'
+```
+
+When allowed, it returns a deterministic fake completion plus the updated
+remaining-token decision. When denied, it returns `429` with the limiter state.
+
 Raw Valdr command pass-through is tenant-scoped:
 
 ```sh

@@ -169,13 +169,13 @@ and the crate checks for `wasm32-unknown-unknown`. The new Wrangler config also
 passes `wrangler deploy --dry-run`, which exercises `worker-build`, emits a
 Workers bundle, and confirms the `EDGESTASH` Durable Object binding. The
 local `wrangler dev` smoke fixture also passes, including the Lua limiter path
-through Worker -> Durable Object -> Valdr -> lua-rs-port and the tenant-scoped
-`/v1/valdr` command pass-through. The remaining edge proof is an actual
-deployment and latency measurement, not the Rust Wasm compile boundary. The
-older full `redis-commands` stack still fails before command logic because it
-pulls in native/non-browser dependencies such as `ring` and `getrandom` through
-`redis-core`; it also still compiles `mlua-sys` because Redis Functions remain
-mlua-backed in that crate.
+through Worker -> Durable Object -> Valdr -> lua-rs-port, the `/v1/ai/{tenant}`
+toy API-spend route, and the tenant-scoped `/v1/valdr` command pass-through.
+The remaining edge proof is deployed latency measurement, not the Rust Wasm
+compile boundary. The older full `redis-commands` stack still fails before
+command logic because it pulls in native/non-browser dependencies such as
+`ring` and `getrandom` through `redis-core`; it also still compiles `mlua-sys`
+because Redis Functions remain mlua-backed in that crate.
 
 ## Migration steps
 

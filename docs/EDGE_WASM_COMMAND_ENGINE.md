@@ -157,9 +157,10 @@ Checkpoint from 2026-06-11:
   `storage.get` / `storage.put` without introducing a provider SDK or native
   dependencies.
 - `edgestash-demo` now includes a provider-neutral HTTP route layer:
-  `PUT /v1/policy/{tenant}`, `POST /v1/limit/{tenant}`, and
-  `/v1/valdr/{tenant}/...` raw Upstash-style command pass-through. It compiles
-  to `wasm32-unknown-unknown` with the rest of the demo.
+  `PUT /v1/policy/{tenant}`, `POST /v1/limit/{tenant}`,
+  `POST /v1/ai/{tenant}`, and `/v1/valdr/{tenant}/...` raw Upstash-style
+  command pass-through. It compiles to `wasm32-unknown-unknown` with the rest of
+  the demo.
 - `crates/edgestash-cloudflare` now adds the first real Cloudflare host
   adapter. The Worker `fetch` handler routes each tenant to a Durable Object,
   the Durable Object restores the `valdr-engine` snapshot from
@@ -179,9 +180,10 @@ Checkpoint from 2026-06-11:
 - `npx wrangler dev --ip 127.0.0.1 --port 8787` plus
   `sh fixtures/smoke.sh` passes from `crates/edgestash-cloudflare`. The smoke
   installs tenant policy, runs two Lua limiter decisions through the Worker and
-  Durable Object, and verifies tenant-scoped `/v1/valdr` command pass-through.
-  The fixture creates a fresh tenant by default because local Durable Object
-  storage persists across dev runs.
+  Durable Object, exercises the `/v1/ai/{tenant}` toy API-spend route, and
+  verifies tenant-scoped `/v1/valdr` command pass-through. The fixture creates a
+  fresh tenant by default because local Durable Object storage persists across
+  dev runs.
 - `cargo check --target wasm32-unknown-unknown -p redis-types -p redis-protocol`
   passes.
 - `cargo check --target wasm32-unknown-unknown -p redis-ds` passes after making

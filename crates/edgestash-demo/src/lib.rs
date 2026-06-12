@@ -112,6 +112,13 @@ pub struct LimitDecision {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct DemoAiRequest {
+    now_millis: u64,
+    prompt: String,
+    tokens: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EdgeError {
     InvalidShardCount,
     JsonBody,
@@ -282,6 +289,47 @@ impl<S: ObjectStorage> EdgeObject<S> {
                 Ok(decision) => json_response(200, limit_decision_json(decision)),
                 Err(error) => edge_error_response(error),
             };
+        }
+
+        if segments.len() == 3 && segments[0] == "v1" && segments[1] == "ai" {
+            if request.method != EdgeHttpMethod::Post {
+                return http_error(405, "ERR AI route requires POST");
+            }
+            let demo = match demo_ai_from_json(request.body) {
+                Ok(demo) => demo,
+                Err(message) => return http_error(400, message),
+            };
+            let decision = match self.check(LimitRequest {
+                tenant_id: &segments[2],
+                now_millis: demo.now_millis,
+                cost: demo.tokens,
+            }) {
+                Ok(decision) => decision,
+                Err(error) => return edge_error_response(error),
+            };
+            if !decision.allowed {
+                return json_response(
+                    429,
+                    json!({
+                        "ok": false,
+                        "error": "rate_limited",
+                        "tenant": segments[2],
+                        "charged_tokens": 0,
+                        "limit": limit_decision_json(decision),
+                    }),
+                );
+            }
+            return json_response(
+                200,
+                json!({
+                    "ok": true,
+                    "tenant": segments[2],
+                    "model": "toy-edge-llm",
+                    "charged_tokens": demo.tokens,
+                    "completion": toy_completion(&demo.prompt),
+                    "limit": limit_decision_json(decision),
+                }),
+            );
         }
 
         if segments.len() >= 4 && segments[0] == "v1" && segments[1] == "valdr" {
@@ -541,6 +589,30 @@ fn limit_from_json<'a>(tenant_id: &'a str, body: &[u8]) -> Result<LimitRequest<'
     })
 }
 
+fn demo_ai_from_json(body: &[u8]) -> Result<DemoAiRequest, &'static str> {
+    let value: JsonValue = serde_json::from_slice(body).map_err(|_| "ERR invalid AI JSON")?;
+    let prompt = value
+        .get("prompt")
+        .and_then(JsonValue::as_str)
+        .ok_or("ERR missing prompt")?;
+    let tokens = value
+        .get("tokens")
+        .or_else(|| value.get("cost"))
+        .and_then(JsonValue::as_i64)
+        .ok_or("ERR missing tokens")?;
+    if tokens <= 0 {
+        return Err("ERR tokens must be positive");
+    }
+    Ok(DemoAiRequest {
+        now_millis: value
+            .get("now_millis")
+            .and_then(JsonValue::as_u64)
+            .ok_or("ERR missing now_millis")?,
+        prompt: prompt.to_owned(),
+        tokens,
+    })
+}
+
 fn required_i64(value: &JsonValue, field: &'static str) -> Result<i64, &'static str> {
     value
         .get(field)
@@ -563,6 +635,15 @@ fn limit_decision_json(decision: LimitDecision) -> JsonValue {
         "retry_after_ms": decision.retry_after_ms,
         "capacity": decision.capacity,
     })
+}
+
+fn toy_completion(prompt: &str) -> String {
+    let trimmed = prompt.trim();
+    if trimmed.is_empty() {
+        "EdgeStash accepted an empty prompt and charged the request.".to_owned()
+    } else {
+        format!("EdgeStash accepted: {trimmed}")
+    }
 }
 
 fn edge_error_response(error: EdgeError) -> EdgeHttpResponse {
@@ -991,6 +1072,72 @@ mod tests {
     }
 
     #[test]
+    fn http_ai_demo_route_spends_tokens_through_lua_limiter() {
+        let storage = MemoryObjectStorage::default();
+        let mut object = EdgeObject::open(storage).unwrap();
+
+        let policy = br#"{
+            "capacity": 10,
+            "refill_tokens": 5,
+            "refill_ms": 1000,
+            "ttl_ms": 60000
+        }"#;
+        assert_eq!(
+            object
+                .handle_http(EdgeHttpRequest::put("/v1/policy/tenant-42", policy))
+                .status,
+            200
+        );
+
+        let response = object.handle_http(EdgeHttpRequest::post(
+            "/v1/ai/tenant-42",
+            br#"{"now_millis":1000,"tokens":7,"prompt":"summarize invoices"}"#,
+        ));
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            serde_json::from_slice::<JsonValue>(&response.body).unwrap(),
+            json!({
+                "ok": true,
+                "tenant": "tenant-42",
+                "model": "toy-edge-llm",
+                "charged_tokens": 7,
+                "completion": "EdgeStash accepted: summarize invoices",
+                "limit": {
+                    "allowed": true,
+                    "remaining": 3,
+                    "reset_ms": 2400,
+                    "retry_after_ms": 0,
+                    "capacity": 10
+                }
+            })
+        );
+
+        let storage = object.into_storage();
+        let mut reopened = EdgeObject::open(storage).unwrap();
+        let response = reopened.handle_http(EdgeHttpRequest::post(
+            "/v1/ai/tenant-42",
+            br#"{"now_millis":1100,"tokens":7,"prompt":"summarize invoices"}"#,
+        ));
+        assert_eq!(response.status, 429);
+        assert_eq!(
+            serde_json::from_slice::<JsonValue>(&response.body).unwrap(),
+            json!({
+                "ok": false,
+                "error": "rate_limited",
+                "tenant": "tenant-42",
+                "charged_tokens": 0,
+                "limit": {
+                    "allowed": false,
+                    "remaining": 3,
+                    "reset_ms": 2400,
+                    "retry_after_ms": 700,
+                    "capacity": 10
+                }
+            })
+        );
+    }
+
+    #[test]
     fn http_routes_return_explicit_errors_for_bad_requests() {
         let mut object = EdgeObject::open(MemoryObjectStorage::default()).unwrap();
 
@@ -1009,6 +1156,16 @@ mod tests {
         assert_eq!(
             serde_json::from_slice::<JsonValue>(&response.body).unwrap(),
             json!({"error": "ERR missing refill_tokens"})
+        );
+
+        let response = object.handle_http(EdgeHttpRequest::post(
+            "/v1/ai/tenant-42",
+            br#"{"now_millis":1000,"tokens":0,"prompt":"hello"}"#,
+        ));
+        assert_eq!(response.status, 400);
+        assert_eq!(
+            serde_json::from_slice::<JsonValue>(&response.body).unwrap(),
+            json!({"error": "ERR tokens must be positive"})
         );
     }
 

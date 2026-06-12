@@ -30,6 +30,11 @@ second="$(curl -fsS -X POST "$BASE/v1/limit/$TENANT" \
   --data '{"now_millis":1100,"cost":7}')"
 expect second-limit '{"allowed":false,"capacity":10,"remaining":3,"reset_ms":2400,"retry_after_ms":700}' "$second"
 
+ai="$(curl -fsS -X POST "$BASE/v1/ai/$TENANT" \
+  -H 'content-type: application/json' \
+  --data '{"now_millis":2000,"tokens":3,"prompt":"summarize invoices"}')"
+expect ai-demo "{\"charged_tokens\":3,\"completion\":\"EdgeStash accepted: summarize invoices\",\"limit\":{\"allowed\":true,\"capacity\":10,\"remaining\":5,\"reset_ms\":3000,\"retry_after_ms\":0},\"model\":\"toy-edge-llm\",\"ok\":true,\"tenant\":\"$TENANT\"}" "$ai"
+
 set_value="$(curl -fsS "$BASE/v1/valdr/$TENANT/SET/raw%2Fkey/hello%20edge")"
 expect valdr-set '{"result":"OK"}' "$set_value"
 
