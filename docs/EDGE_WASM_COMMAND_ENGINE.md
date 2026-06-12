@@ -54,6 +54,42 @@ That means the first question is not "can this replace Upstash?" It is:
 
 > Can a useful Upstash-style workflow run without leaving the edge runtime?
 
+## Long-Term Vision
+
+The long-term goal is to make Valdr more than a server port. The durable
+artifact should be a portable command engine with Redis-compatible semantics
+where they are useful, safe-Rust Lua programmability, and explicit host
+capabilities for time, randomness, persistence, logging, and request limits.
+
+The deployment model should stay layered:
+
+```text
+valdr-engine
+  -> portable command execution, Lua, state, snapshots / journal hooks
+
+edge/native adapters
+  -> Worker + Durable Object, local process, browser, or other hosts
+
+storage backends
+  -> authoritative hot state where atomicity exists
+  -> snapshots / archives / replication logs where object storage fits
+```
+
+That keeps the product path open without pretending every backend has the same
+consistency model. Durable Objects are a good first authority for tenant-local
+atomic state. Object stores such as R2/S3 are better as snapshot, archive, or
+replication-log targets unless paired with a real serialization or lease layer.
+
+The important thesis is:
+
+> Valdr should be usable as a server when that is the right shape, but also as
+> an embeddable programmable state engine when the request is already executing
+> in a constrained host such as an edge runtime.
+
+Near-term work should harden this direction incrementally: split snapshot and
+journal storage traits, deploy latency/cold-start measurements, Lua library
+parity for `lua-rs-port`, and a broader but still intentional command subset.
+
 ## Target user
 
 The likely user is an infra/platform engineer already running application logic
