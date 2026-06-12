@@ -1,0 +1,15 @@
+[package]
+name = "edgestash-cloudflare"
+version = "0.1.0-alpha.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cloudflare Worker and Durable Object adapter for the EdgeStash Valdr demo."
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+edgestash-demo = { workspace = true }
+worker = "0.8.4"

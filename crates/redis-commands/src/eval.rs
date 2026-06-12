@@ -49,6 +49,9 @@ use redis_types::{RedisError, RedisResult, RedisString};
 
 use crate::dispatch::{command_acl_categories, command_is_denyoom, dispatch_command_name};
 
+#[cfg(feature = "lua-rs-engine")]
+mod lua_rs_backend;
+
 const LUA_REDIS_VERSION: &str = "7.0.0";
 const LUA_REDIS_VERSION_NUM: i64 = 7 << 16;
 const EVAL_SCRIPT_CACHE_LIMIT: usize = 500;
@@ -5076,6 +5079,18 @@ fn evalsha_command_impl(
 /// Shared body of `EVAL` and `EVALSHA`. Creates a fresh Lua state, applies
 /// the sandbox, installs `redis`, `KEYS`, `ARGV`, runs the script,
 /// converts the return value to a RESP frame written onto `reply_buf`.
+#[cfg(feature = "lua-rs-engine")]
+fn run_script(
+    ctx: &mut CommandContext<'_>,
+    script_bytes: &[u8],
+    keys: &[RedisString],
+    argv: &[RedisString],
+    read_only: bool,
+) -> RedisResult<()> {
+    lua_rs_backend::run_script_lua_rs(ctx, script_bytes, keys, argv, read_only)
+}
+
+#[cfg(not(feature = "lua-rs-engine"))]
 fn run_script(
     ctx: &mut CommandContext<'_>,
     script_bytes: &[u8],
@@ -5947,6 +5962,289 @@ mod tests {
         assert!(!bytes
             .windows(b"stack traceback".len())
             .any(|w| w == b"stack traceback"));
+    }
+
+    #[cfg(feature = "lua-rs-engine")]
+    #[test]
+    fn lua_rs_eval_smoke_covers_args_call_and_sha1hex() {
+        let mut client = redis_core::Client::new(81);
+        client.set_args(vec![
+            RedisString::from_bytes(b"EVAL"),
+            RedisString::from_bytes(
+                b"return {KEYS[1], ARGV[1], redis.call('ping').ok, redis.sha1hex('abc')}",
+            ),
+            RedisString::from_bytes(b"1"),
+            RedisString::from_bytes(b"k"),
+            RedisString::from_bytes(b"v"),
+        ]);
+        let mut ctx = CommandContext::new(&mut client);
+
+        eval_command(&mut ctx).unwrap();
+
+        assert_eq!(
+            client.drain_reply(),
+            b"*4\r\n$1\r\nk\r\n$1\r\nv\r\n$4\r\nPONG\r\n$40\r\na9993e364706816aba3e25717850c26c9cd0d89d\r\n"
+        );
+    }
+
+    #[cfg(feature = "lua-rs-engine")]
+    #[test]
+    fn lua_rs_eval_smoke_pcall_returns_error_table() {
+        let mut client = redis_core::Client::new(82);
+        client.set_args(vec![
+            RedisString::from_bytes(b"EVAL"),
+            RedisString::from_bytes(b"return redis.pcall('nosuchcommand').err"),
+            RedisString::from_bytes(b"0"),
+        ]);
+        let mut ctx = CommandContext::new(&mut client);
+
+        eval_command(&mut ctx).unwrap();
+
+        let reply = client.drain_reply();
+        assert!(reply.starts_with(b"$"));
+        assert!(reply
+            .windows(b"unknown command".len())
+            .any(|w| w.eq_ignore_ascii_case(b"unknown command")));
+    }
+
+    #[cfg(feature = "lua-rs-engine")]
+    #[test]
+    fn lua_rs_evalsha_runs_stateful_token_bucket_fixture() {
+        const TOKEN_BUCKET_SCRIPT: &[u8] = br#"
+            local key = KEYS[1]
+            local now = tonumber(ARGV[1])
+            local capacity = tonumber(ARGV[2])
+            local refill_tokens = tonumber(ARGV[3])
+            local refill_ms = tonumber(ARGV[4])
+            local cost = tonumber(ARGV[5])
+            local ttl_ms = tonumber(ARGV[6])
+
+            local function ceil_div(num, denom)
+                return math.floor((num + denom - 1) / denom)
+            end
+
+            local tokens = capacity
+            local updated_at = now
+            local raw = redis.call('GET', key)
+            if raw then
+                local sep = string.find(raw, ':', 1, true)
+                if sep then
+                    tokens = tonumber(string.sub(raw, 1, sep - 1))
+                    updated_at = tonumber(string.sub(raw, sep + 1))
+                end
+            end
+            if tokens == nil then tokens = capacity end
+            if updated_at == nil then updated_at = now end
+            if now < updated_at then updated_at = now end
+
+            local elapsed = now - updated_at
+            local refill = math.floor(elapsed * refill_tokens / refill_ms)
+            if refill > 0 then
+                tokens = tokens + refill
+                if tokens > capacity then tokens = capacity end
+                updated_at = updated_at + math.floor(refill * refill_ms / refill_tokens)
+            end
+
+            local allowed = 0
+            local retry_after = 0
+            if tokens >= cost then
+                tokens = tokens - cost
+                allowed = 1
+            else
+                local missing = cost - tokens
+                retry_after = updated_at + ceil_div(missing * refill_ms, refill_tokens) - now
+                if retry_after < 0 then retry_after = 0 end
+            end
+
+            local reset_ms = updated_at + ceil_div((capacity - tokens) * refill_ms, refill_tokens)
+            redis.call('SET', key, tostring(tokens) .. ':' .. tostring(updated_at), 'PX', ttl_ms)
+            return {'allowed', allowed, 'remaining', tokens, 'reset_ms', reset_ms, 'retry_after_ms', retry_after}
+        "#;
+
+        fn parse_loaded_sha(reply: &[u8]) -> Vec<u8> {
+            assert_eq!(reply.len(), 47, "unexpected SCRIPT LOAD reply: {reply:?}");
+            assert_eq!(&reply[..5], b"$40\r\n");
+            assert_eq!(&reply[45..], b"\r\n");
+            reply[5..45].to_vec()
+        }
+
+        fn evalsha_token_bucket(
+            ctx: &mut CommandContext<'_>,
+            sha: &[u8],
+            now_ms: &[u8],
+        ) -> Vec<u8> {
+            ctx.client_mut().set_args(vec![
+                RedisString::from_bytes(b"EVALSHA"),
+                RedisString::from_bytes(sha),
+                RedisString::from_bytes(b"1"),
+                RedisString::from_bytes(b"edge:tenant:42:tokens"),
+                RedisString::from_bytes(now_ms),
+                RedisString::from_bytes(b"10"),
+                RedisString::from_bytes(b"5"),
+                RedisString::from_bytes(b"1000"),
+                RedisString::from_bytes(b"7"),
+                RedisString::from_bytes(b"60000"),
+            ]);
+            evalsha_command(ctx).unwrap();
+            ctx.client_mut().drain_reply()
+        }
+
+        let mut client = redis_core::Client::new(83);
+        let mut db = RedisDb::new(0);
+        let mut ctx = CommandContext::with_db(&mut client, &mut db);
+
+        ctx.client_mut().set_args(vec![
+            RedisString::from_bytes(b"SCRIPT"),
+            RedisString::from_bytes(b"LOAD"),
+            RedisString::from_bytes(TOKEN_BUCKET_SCRIPT),
+        ]);
+        script_command(&mut ctx).unwrap();
+        let sha = parse_loaded_sha(&ctx.client_mut().drain_reply());
+
+        assert_eq!(
+            evalsha_token_bucket(&mut ctx, &sha, b"1000"),
+            b"*8\r\n$7\r\nallowed\r\n:1\r\n$9\r\nremaining\r\n:3\r\n$8\r\nreset_ms\r\n:2400\r\n$14\r\nretry_after_ms\r\n:0\r\n"
+        );
+        assert_eq!(
+            evalsha_token_bucket(&mut ctx, &sha, b"1100"),
+            b"*8\r\n$7\r\nallowed\r\n:0\r\n$9\r\nremaining\r\n:3\r\n$8\r\nreset_ms\r\n:2400\r\n$14\r\nretry_after_ms\r\n:700\r\n"
+        );
+        assert_eq!(
+            evalsha_token_bucket(&mut ctx, &sha, b"1800"),
+            b"*8\r\n$7\r\nallowed\r\n:1\r\n$9\r\nremaining\r\n:0\r\n$8\r\nreset_ms\r\n:3800\r\n$14\r\nretry_after_ms\r\n:0\r\n"
+        );
+    }
+
+    #[cfg(feature = "lua-rs-engine")]
+    #[test]
+    fn lua_rs_evalsha_reads_hash_policy_for_token_bucket_fixture() {
+        const HASH_POLICY_TOKEN_BUCKET_SCRIPT: &[u8] = br#"
+            local bucket_key = KEYS[1]
+            local policy_key = KEYS[2]
+            local now = tonumber(ARGV[1])
+            local cost = tonumber(ARGV[2])
+
+            local capacity = tonumber(redis.call('HGET', policy_key, 'capacity') or '10')
+            local refill_tokens = tonumber(redis.call('HGET', policy_key, 'refill_tokens') or '5')
+            local refill_ms = tonumber(redis.call('HGET', policy_key, 'refill_ms') or '1000')
+            local ttl_ms = tonumber(redis.call('HGET', policy_key, 'ttl_ms') or '60000')
+
+            local function ceil_div(num, denom)
+                return math.floor((num + denom - 1) / denom)
+            end
+
+            local tokens = capacity
+            local updated_at = now
+            local raw = redis.call('GET', bucket_key)
+            if raw then
+                local sep = string.find(raw, ':', 1, true)
+                if sep then
+                    tokens = tonumber(string.sub(raw, 1, sep - 1))
+                    updated_at = tonumber(string.sub(raw, sep + 1))
+                end
+            end
+            if tokens == nil then tokens = capacity end
+            if updated_at == nil then updated_at = now end
+            if now < updated_at then updated_at = now end
+
+            local elapsed = now - updated_at
+            local refill = math.floor(elapsed * refill_tokens / refill_ms)
+            if refill > 0 then
+                tokens = tokens + refill
+                if tokens > capacity then tokens = capacity end
+                updated_at = updated_at + math.floor(refill * refill_ms / refill_tokens)
+            end
+
+            local allowed = 0
+            local retry_after = 0
+            if tokens >= cost then
+                tokens = tokens - cost
+                allowed = 1
+            else
+                local missing = cost - tokens
+                retry_after = updated_at + ceil_div(missing * refill_ms, refill_tokens) - now
+                if retry_after < 0 then retry_after = 0 end
+            end
+
+            local reset_ms = updated_at + ceil_div((capacity - tokens) * refill_ms, refill_tokens)
+            redis.call('SET', bucket_key, tostring(tokens) .. ':' .. tostring(updated_at), 'PX', ttl_ms)
+            return {'allowed', allowed, 'remaining', tokens, 'reset_ms', reset_ms, 'retry_after_ms', retry_after, 'capacity', capacity}
+        "#;
+
+        fn parse_loaded_sha(reply: &[u8]) -> Vec<u8> {
+            assert_eq!(reply.len(), 47, "unexpected SCRIPT LOAD reply: {reply:?}");
+            assert_eq!(&reply[..5], b"$40\r\n");
+            assert_eq!(&reply[45..], b"\r\n");
+            reply[5..45].to_vec()
+        }
+
+        fn evalsha_policy_bucket(
+            ctx: &mut CommandContext<'_>,
+            sha: &[u8],
+            now_ms: &[u8],
+        ) -> Vec<u8> {
+            ctx.client_mut().set_args(vec![
+                RedisString::from_bytes(b"EVALSHA"),
+                RedisString::from_bytes(sha),
+                RedisString::from_bytes(b"2"),
+                RedisString::from_bytes(b"edge:tenant:42:tokens"),
+                RedisString::from_bytes(b"edge:tenant:42:policy"),
+                RedisString::from_bytes(now_ms),
+                RedisString::from_bytes(b"7"),
+            ]);
+            evalsha_command(ctx).unwrap();
+            ctx.client_mut().drain_reply()
+        }
+
+        let mut client = redis_core::Client::new(84);
+        let mut db = RedisDb::new(0);
+        let mut ctx = CommandContext::with_db(&mut client, &mut db);
+
+        ctx.client_mut().set_args(vec![
+            RedisString::from_bytes(b"HSET"),
+            RedisString::from_bytes(b"edge:tenant:42:policy"),
+            RedisString::from_bytes(b"capacity"),
+            RedisString::from_bytes(b"10"),
+            RedisString::from_bytes(b"refill_tokens"),
+            RedisString::from_bytes(b"5"),
+            RedisString::from_bytes(b"refill_ms"),
+            RedisString::from_bytes(b"1000"),
+            RedisString::from_bytes(b"ttl_ms"),
+            RedisString::from_bytes(b"60000"),
+        ]);
+        crate::hash::hset_command(&mut ctx).unwrap();
+        assert_eq!(ctx.client_mut().drain_reply(), b":4\r\n");
+
+        ctx.client_mut().set_args(vec![
+            RedisString::from_bytes(b"SCRIPT"),
+            RedisString::from_bytes(b"LOAD"),
+            RedisString::from_bytes(HASH_POLICY_TOKEN_BUCKET_SCRIPT),
+        ]);
+        script_command(&mut ctx).unwrap();
+        let sha = parse_loaded_sha(&ctx.client_mut().drain_reply());
+
+        assert_eq!(
+            evalsha_policy_bucket(&mut ctx, &sha, b"1000"),
+            b"*10\r\n$7\r\nallowed\r\n:1\r\n$9\r\nremaining\r\n:3\r\n$8\r\nreset_ms\r\n:2400\r\n$14\r\nretry_after_ms\r\n:0\r\n$8\r\ncapacity\r\n:10\r\n"
+        );
+        assert_eq!(
+            evalsha_policy_bucket(&mut ctx, &sha, b"1100"),
+            b"*10\r\n$7\r\nallowed\r\n:0\r\n$9\r\nremaining\r\n:3\r\n$8\r\nreset_ms\r\n:2400\r\n$14\r\nretry_after_ms\r\n:700\r\n$8\r\ncapacity\r\n:10\r\n"
+        );
+
+        ctx.client_mut().set_args(vec![
+            RedisString::from_bytes(b"HSET"),
+            RedisString::from_bytes(b"edge:tenant:42:policy"),
+            RedisString::from_bytes(b"capacity"),
+            RedisString::from_bytes(b"20"),
+        ]);
+        crate::hash::hset_command(&mut ctx).unwrap();
+        assert_eq!(ctx.client_mut().drain_reply(), b":0\r\n");
+
+        assert_eq!(
+            evalsha_policy_bucket(&mut ctx, &sha, b"1800"),
+            b"*10\r\n$7\r\nallowed\r\n:1\r\n$9\r\nremaining\r\n:0\r\n$8\r\nreset_ms\r\n:5800\r\n$14\r\nretry_after_ms\r\n:0\r\n$8\r\ncapacity\r\n:20\r\n"
+        );
     }
 
     #[test]

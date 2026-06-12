@@ -25,3 +25,7 @@ harness/bench/profiles/
 
 # stray build artifacts
 *.rlib
+
+# Cloudflare workers-rs output
+crates/edgestash-cloudflare/build/
+crates/edgestash-cloudflare/.wrangler/
