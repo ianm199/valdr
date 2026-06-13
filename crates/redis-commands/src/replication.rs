@@ -241,6 +241,7 @@ pub fn replconf_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
                     conn.last_ack_time_ms.store(now_ms, Ordering::Relaxed);
                 }
             }
+            repl.release_retained_history_ack(client_id, offset);
             maybe_wake_wait_clients();
             Ok(())
         }
@@ -464,10 +465,7 @@ pub fn failover_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             i += 2;
             continue;
         }
-        if ascii_eq_ignore_case(arg.as_bytes(), b"TO")
-            && i + 2 < ctx.arg_count()
-            && !has_target
-        {
+        if ascii_eq_ignore_case(arg.as_bytes(), b"TO") && i + 2 < ctx.arg_count() && !has_target {
             let _host = ctx.arg(i + 1usize)?;
             let _port = parse_i64(ctx.arg(i + 2usize)?.as_bytes())
                 .map_err(|_| RedisError::runtime(b"ERR value is not an integer or out of range"))?;
@@ -909,8 +907,7 @@ fn partial_in_window(repl: &Arc<ReplicationState>, provided: i64, master_offset:
     if provided > master_offset {
         return false;
     }
-    let (min, _, _, _) = repl.backlog_snapshot();
-    provided >= min
+    repl.can_read_history_range(provided, master_offset)
 }
 
 /// Look up `client_id`'s writer-thread mpsc sender through the shared pubsub

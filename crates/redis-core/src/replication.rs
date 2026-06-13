@@ -317,6 +317,26 @@ pub struct ReplBgsaveJob {
     pub needs_getack_on_completion: bool,
 }
 
+/// Immutable replication bytes retained after a full-sync RDB has been queued
+/// to one or more replicas. The bytes remain readable for PSYNC while at least
+/// one dependent replica may still need them to finish consuming the stream.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RetainedReplHistory {
+    /// Absolute offset of the first retained byte.
+    pub start_offset: i64,
+    /// RESP command stream bytes beginning at `start_offset`.
+    pub bytes: Vec<u8>,
+    /// Replica client ids that still pin this segment.
+    pub owners: Vec<ClientId>,
+}
+
+impl RetainedReplHistory {
+    /// Absolute offset one byte past the retained segment.
+    pub fn end_offset(&self) -> i64 {
+        self.start_offset.saturating_add(self.bytes.len() as i64)
+    }
+}
+
 /// Process-wide replication state.
 /// One instance is installed via [`install_replication_state`] at startup
 /// looked up everywhere through [`global_replication_state`].
@@ -348,6 +368,11 @@ pub struct ReplicationState {
     /// finished shipping the RDB and catch-up bytes to every waiter; then
     /// reset to `None`.
     pub repl_bgsave_job: Mutex<Option<ReplBgsaveJob>>,
+    /// Full-sync catch-up history retained after the BGSAVE job has been
+    /// consumed. This models Valkey's shared replication buffer lifetime well
+    /// enough for slow full-sync waiters and PSYNC decisions to keep seeing the
+    /// same bytes after the child exits.
+    pub retained_history: Mutex<Vec<RetainedReplHistory>>,
     /// Database id last emitted into the replication command stream.
     /// Upstream tracks this as `server.slaveseldb` so the first write after
     /// a replica attaches is prefixed with `SELECT <db>`, and later writes
@@ -395,6 +420,7 @@ impl ReplicationState {
             replica_link: AtomicU8::new(replica_link_code::CONNECT),
             repl_child_pid: AtomicI32::new(0),
             repl_bgsave_job: Mutex::new(None),
+            retained_history: Mutex::new(Vec::new()),
             selected_db: AtomicI32::new(-1),
             dialer_stop_flag: AtomicBool::new(false),
             dialer_epoch: AtomicU64::new(0),
@@ -520,60 +546,295 @@ impl ReplicationState {
     /// catch-up buffer for waiting replicas.
     pub fn backlog_snapshot(&self) -> (i64, i64, usize, usize) {
         let master = self.master_repl_offset.load(Ordering::Relaxed);
-        let (min, hist, size) = match self.backlog.lock() {
-            Ok(g) => (g.min_offset(), g.histlen, g.size),
+        let (backlog_min, backlog_hist, size, backlog_offset) = match self.backlog.lock() {
+            Ok(g) => (g.min_offset(), g.histlen, g.size, g.offset),
             Err(p) => {
                 let g = p.into_inner();
-                (g.min_offset(), g.histlen, g.size)
+                (g.min_offset(), g.histlen, g.size, g.offset)
             }
         };
-        let bgsave_min = match self.repl_bgsave_job.lock() {
-            Ok(g) => g
-                .as_ref()
-                .filter(|job| !job.catch_up_bytes.is_empty())
-                .map(|job| job.snapshot_offset),
-            Err(p) => p
-                .into_inner()
-                .as_ref()
-                .filter(|job| !job.catch_up_bytes.is_empty())
-                .map(|job| job.snapshot_offset),
-        };
-        if let Some(job_min) = bgsave_min.filter(|job_min| *job_min < min) {
-            let hist = master.saturating_sub(job_min).max(0) as usize;
-            return (job_min, master, hist, size);
+
+        let mut intervals = Vec::new();
+        if backlog_hist > 0 {
+            intervals.push((backlog_min, backlog_offset));
         }
+        match self.repl_bgsave_job.lock() {
+            Ok(g) => {
+                if let Some(job) = g.as_ref().filter(|job| !job.catch_up_bytes.is_empty()) {
+                    intervals.push((
+                        job.snapshot_offset,
+                        job.snapshot_offset
+                            .saturating_add(job.catch_up_bytes.len() as i64),
+                    ));
+                }
+            }
+            Err(p) => {
+                if let Some(job) = p
+                    .into_inner()
+                    .as_ref()
+                    .filter(|job| !job.catch_up_bytes.is_empty())
+                {
+                    intervals.push((
+                        job.snapshot_offset,
+                        job.snapshot_offset
+                            .saturating_add(job.catch_up_bytes.len() as i64),
+                    ));
+                }
+            }
+        }
+        match self.retained_history.lock() {
+            Ok(g) => {
+                for segment in g.iter().filter(|segment| !segment.bytes.is_empty()) {
+                    intervals.push((segment.start_offset, segment.end_offset()));
+                }
+            }
+            Err(p) => {
+                for segment in p
+                    .into_inner()
+                    .iter()
+                    .filter(|segment| !segment.bytes.is_empty())
+                {
+                    intervals.push((segment.start_offset, segment.end_offset()));
+                }
+            }
+        }
+
+        let min = contiguous_history_min(master, &intervals);
+        let hist = master.saturating_sub(min).max(0) as usize;
         (min, master, hist, size)
     }
 
     /// Read replication history from either the configured circular backlog or
-    /// the active full-sync catch-up buffer. Returns `None` when `offset` is
-    /// older than both readable windows or past the current master offset.
+    /// shared full-sync catch-up buffers. Returns `None` when `offset` is older
+    /// than every readable window, past the current master offset, or when the
+    /// requested range crosses a gap between retained history and the backlog.
     pub fn read_history_at(&self, offset: i64, max_len: usize) -> Option<Vec<u8>> {
-        let from_backlog = {
-            let guard = match self.backlog.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            guard.read_at(offset, max_len)
-        };
-        if from_backlog.is_some() {
-            return from_backlog;
+        let master = self.master_repl_offset.load(Ordering::Relaxed);
+        if offset > master {
+            return None;
+        }
+        if max_len == 0 {
+            return Some(Vec::new());
         }
 
-        let guard = match self.repl_bgsave_job.lock() {
+        let target_end = offset.saturating_add(max_len as i64).min(master);
+        let mut cursor = offset;
+        let mut out = Vec::with_capacity(target_end.saturating_sub(offset) as usize);
+        while cursor < target_end {
+            let remaining = target_end.saturating_sub(cursor) as usize;
+            let mut best: Option<Vec<u8>> = None;
+            let mut best_end = cursor;
+
+            {
+                let guard = match self.retained_history.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                for segment in guard.iter() {
+                    if segment.bytes.is_empty() {
+                        continue;
+                    }
+                    let segment_end = segment.end_offset();
+                    if cursor < segment.start_offset || cursor >= segment_end {
+                        continue;
+                    }
+                    let start = cursor.saturating_sub(segment.start_offset) as usize;
+                    let end = start.saturating_add(remaining).min(segment.bytes.len());
+                    let candidate_end = cursor.saturating_add((end - start) as i64);
+                    if candidate_end > best_end {
+                        best = Some(segment.bytes[start..end].to_vec());
+                        best_end = candidate_end;
+                    }
+                }
+            }
+
+            {
+                let guard = match self.repl_bgsave_job.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                if let Some(job) = guard.as_ref().filter(|job| !job.catch_up_bytes.is_empty()) {
+                    let job_end = job
+                        .snapshot_offset
+                        .saturating_add(job.catch_up_bytes.len() as i64);
+                    if cursor >= job.snapshot_offset && cursor < job_end {
+                        let start = cursor.saturating_sub(job.snapshot_offset) as usize;
+                        let end = start
+                            .saturating_add(remaining)
+                            .min(job.catch_up_bytes.len());
+                        let candidate_end = cursor.saturating_add((end - start) as i64);
+                        if candidate_end > best_end {
+                            best = Some(job.catch_up_bytes[start..end].to_vec());
+                            best_end = candidate_end;
+                        }
+                    }
+                }
+            }
+
+            let from_backlog = {
+                let guard = match self.backlog.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                guard.read_at(cursor, remaining)
+            };
+            if let Some(bytes) = from_backlog.filter(|bytes| !bytes.is_empty()) {
+                let candidate_end = cursor.saturating_add(bytes.len() as i64);
+                if candidate_end > best_end {
+                    best = Some(bytes);
+                }
+            }
+
+            let bytes = best?;
+            if bytes.is_empty() {
+                return None;
+            }
+            cursor = cursor.saturating_add(bytes.len() as i64);
+            out.extend_from_slice(&bytes);
+        }
+
+        Some(out)
+    }
+
+    /// True when the entire range `[offset, end_offset)` can be read from the
+    /// current replication history, including any retained full-sync segments.
+    pub fn can_read_history_range(&self, offset: i64, end_offset: i64) -> bool {
+        if offset > end_offset {
+            return false;
+        }
+        let master = self.master_repl_offset.load(Ordering::Relaxed);
+        if end_offset > master {
+            return false;
+        }
+        if offset == end_offset {
+            return true;
+        }
+
+        let mut intervals = Vec::new();
+        match self.backlog.lock() {
+            Ok(g) => {
+                if g.histlen > 0 {
+                    intervals.push((g.min_offset(), g.offset));
+                }
+            }
+            Err(p) => {
+                let g = p.into_inner();
+                if g.histlen > 0 {
+                    intervals.push((g.min_offset(), g.offset));
+                }
+            }
+        }
+        match self.repl_bgsave_job.lock() {
+            Ok(g) => {
+                if let Some(job) = g.as_ref().filter(|job| !job.catch_up_bytes.is_empty()) {
+                    intervals.push((
+                        job.snapshot_offset,
+                        job.snapshot_offset
+                            .saturating_add(job.catch_up_bytes.len() as i64),
+                    ));
+                }
+            }
+            Err(p) => {
+                if let Some(job) = p
+                    .into_inner()
+                    .as_ref()
+                    .filter(|job| !job.catch_up_bytes.is_empty())
+                {
+                    intervals.push((
+                        job.snapshot_offset,
+                        job.snapshot_offset
+                            .saturating_add(job.catch_up_bytes.len() as i64),
+                    ));
+                }
+            }
+        }
+        match self.retained_history.lock() {
+            Ok(g) => {
+                for segment in g.iter().filter(|segment| !segment.bytes.is_empty()) {
+                    intervals.push((segment.start_offset, segment.end_offset()));
+                }
+            }
+            Err(p) => {
+                for segment in p
+                    .into_inner()
+                    .iter()
+                    .filter(|segment| !segment.bytes.is_empty())
+                {
+                    intervals.push((segment.start_offset, segment.end_offset()));
+                }
+            }
+        }
+
+        range_covered_by_intervals(offset, end_offset, &intervals)
+    }
+
+    /// Retain a completed full-sync catch-up segment while the replicas that
+    /// received it may still be consuming those bytes from their sockets.
+    pub fn retain_fullsync_history(&self, start_offset: i64, bytes: Vec<u8>, owners: &[ClientId]) {
+        if bytes.is_empty() {
+            return;
+        }
+        let mut owners = owners.to_vec();
+        owners.sort_unstable();
+        owners.dedup();
+        if owners.is_empty() {
+            return;
+        }
+        let mut guard = match self.retained_history.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
-        let job = guard.as_ref()?;
-        if offset < job.snapshot_offset {
-            return None;
+        guard.push(RetainedReplHistory {
+            start_offset,
+            bytes,
+            owners,
+        });
+    }
+
+    /// Release retained history pinned by a disconnecting replica.
+    pub fn release_retained_history_for(&self, client_id: ClientId) {
+        let mut guard = match self.retained_history.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        for segment in guard.iter_mut() {
+            segment.owners.retain(|owner| *owner != client_id);
         }
-        let start = offset.saturating_sub(job.snapshot_offset) as usize;
-        if start > job.catch_up_bytes.len() {
-            return None;
+        guard.retain(|segment| !segment.owners.is_empty());
+    }
+
+    /// Release retained segments once a replica ACK proves it consumed through
+    /// the end of that segment.
+    pub fn release_retained_history_ack(&self, client_id: ClientId, offset: i64) {
+        let mut guard = match self.retained_history.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        for segment in guard.iter_mut() {
+            if offset >= segment.end_offset() {
+                segment.owners.retain(|owner| *owner != client_id);
+            }
         }
-        let end = start.saturating_add(max_len).min(job.catch_up_bytes.len());
-        Some(job.catch_up_bytes[start..end].to_vec())
+        guard.retain(|segment| !segment.owners.is_empty());
+    }
+
+    /// Bytes retained after full-sync transfer completion.
+    pub fn retained_repl_history_len(&self) -> usize {
+        match self.retained_history.lock() {
+            Ok(g) => g.iter().map(|segment| segment.bytes.len()).sum(),
+            Err(p) => p
+                .into_inner()
+                .iter()
+                .map(|segment| segment.bytes.len())
+                .sum(),
+        }
+    }
+
+    /// Bytes held outside the circular backlog for active and completed
+    /// full-sync catch-up windows.
+    pub fn replication_history_extra_len(&self) -> usize {
+        self.repl_bgsave_catchup_len()
+            .saturating_add(self.retained_repl_history_len())
     }
 
     /// Bytes currently held for in-flight full-sync catch-up.
@@ -757,6 +1018,7 @@ impl ReplicationState {
                 p.into_inner().remove(&client_id);
             }
         }
+        self.release_retained_history_for(client_id);
         if let Ok(mut guard) = crate::client_info::client_info_registry().lock() {
             guard.set_output_buffer_memory(client_id, 0);
         }
@@ -871,6 +1133,39 @@ impl ReplicationState {
             r.set_state(state);
         }
     }
+}
+
+fn contiguous_history_min(master: i64, intervals: &[(i64, i64)]) -> i64 {
+    let mut min = master;
+    loop {
+        let mut extended = false;
+        for (start, end) in intervals {
+            if *start < min && *end >= min {
+                min = *start;
+                extended = true;
+            }
+        }
+        if !extended {
+            return min;
+        }
+    }
+}
+
+fn range_covered_by_intervals(start: i64, end: i64, intervals: &[(i64, i64)]) -> bool {
+    let mut cursor = start;
+    while cursor < end {
+        let mut next = cursor;
+        for (segment_start, segment_end) in intervals {
+            if *segment_start <= cursor && *segment_end > next {
+                next = *segment_end;
+            }
+        }
+        if next == cursor {
+            return false;
+        }
+        cursor = next.min(end);
+    }
+    true
 }
 
 static GLOBAL_REPLICATION_STATE: OnceLock<Arc<ReplicationState>> = OnceLock::new();

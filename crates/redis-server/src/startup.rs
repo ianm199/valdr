@@ -604,6 +604,21 @@ pub(crate) fn dispatch_full_sync_transfer() {
     header.extend_from_slice(&rdb_bytes);
 
     let snapshot_offset = job.snapshot_offset;
+    let current_offset = repl.master_offset();
+    let catch_up = if current_offset > snapshot_offset {
+        if job.catch_up_bytes.is_empty() {
+            let guard = match repl.backlog.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            guard.read_at(snapshot_offset, (current_offset - snapshot_offset) as usize)
+        } else {
+            Some(job.catch_up_bytes.clone())
+        }
+    } else {
+        None
+    };
+    let mut history_owners = Vec::new();
     for client_id in &job.waiting_replicas {
         repl.set_replica_state(
             *client_id,
@@ -616,22 +631,18 @@ pub(crate) fn dispatch_full_sync_transfer() {
             );
             continue;
         }
-        let current_offset = repl.master_offset();
-        if current_offset > snapshot_offset {
-            let catch_up = if job.catch_up_bytes.is_empty() {
-                let guard = match repl.backlog.lock() {
-                    Ok(g) => g,
-                    Err(p) => p.into_inner(),
-                };
-                guard.read_at(snapshot_offset, (current_offset - snapshot_offset) as usize)
-            } else {
-                Some(job.catch_up_bytes.clone())
-            };
-            if let Some(bytes) = catch_up {
-                if !bytes.is_empty() {
-                    let _ = repl.send_to_replica(*client_id, bytes);
-                }
+        let mut catch_up_queued = catch_up.as_ref().is_none_or(|bytes| bytes.is_empty());
+        if let Some(bytes) = catch_up.as_ref().filter(|bytes| !bytes.is_empty()) {
+            catch_up_queued = repl.send_to_replica(*client_id, bytes.clone());
+            if !catch_up_queued {
+                eprintln!(
+                    "redis-server: full-sync catch-up send failed for replica client_id={}",
+                    client_id
+                );
             }
+        }
+        if catch_up_queued {
+            history_owners.push(*client_id);
         }
         repl.set_replica_state(*client_id, redis_core::replication::ReplicaState::Online);
         eprintln!(
@@ -640,6 +651,9 @@ pub(crate) fn dispatch_full_sync_transfer() {
             rdb_bytes.len(),
             snapshot_offset
         );
+    }
+    if let Some(bytes) = catch_up.filter(|bytes| !bytes.is_empty()) {
+        repl.retain_fullsync_history(snapshot_offset, bytes, &history_owners);
     }
     // A client can enter WAIT while one replica is still in full-sync
     // therefore before `request_ack_from_replicas` will address it. Once

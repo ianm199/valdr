@@ -72,7 +72,7 @@ Artifact:
 | `integration/block-repl` | 2/0 | Green | No-regression tripwire. |
 | `integration/replication-3` | 3/4 | Red | Expiry consistency, writable-replica expired-key behavior, and PFCOUNT expired-key/cache semantics. |
 | `integration/replication-4` | 15/2 | Red | SPOP rewrite cases now pass; remaining failures are divergence/default writable-replica cases. |
-| `integration/replication-buffer` | 3/15 | Red | Full-sync/BGSAVE setup reaches counted assertions; active BGSAVE catch-up now has a real shared buffer, but longer-lived global buffer lifetime/trimming, backlog growth/shrink, partial resync from retained buffered history, and replica output-buffer disconnect semantics remain unfinished. |
+| `integration/replication-buffer` | 4/15 | Red | Full-sync/BGSAVE setup reaches counted assertions; completed full-sync catch-up history is now retained while dependent replicas still pin it, but Valkey-style global replication-buffer memory, backlog outgrowth under slow replicas, partial resync across broader retained history, and output-buffer disconnect policy remain unfinished. |
 | `integration/replication` | no summary | Red | Aborts at `diskless replication child being killed is collected` with `child process exited abnormally`; diskless/full-sync behavior remains the frontier. |
 | `integration/replication-psync` | timeout | Red | Timed out at 300s; no-backlog/backlog-expired and diskless variants remain frontier. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
@@ -111,13 +111,14 @@ visible integration frontiers are now:
   diskless/full-sync windows behind `integration/replication`.
 - `R2-BGSAVE-CATCHUP`: active replication BGSAVE jobs now retain appended
   replication bytes outside the circular backlog and use that buffer for
-  post-RDB catch-up. The buffer is still scoped to the active job; Valkey-style
-  longer-lived shared-buffer retention and trimming remain open.
+  post-RDB catch-up. Completed full-sync catch-up bytes are now also retained
+  while dependent replicas still pin them.
 - `R3-RECONNECT-MATRIX`: extend the new master-side PSYNC decision matrix into
   live replica-dialer reconnect coverage before grinding `replication-psync`.
-- `R2-BUFFER-LIMITS`: accounting aliases and fan-out accounting are covered;
-  implement shared-buffer trimming and replica output-buffer disconnection
-  semantics behind `replication-buffer`.
+- `R2-BUFFER-LIMITS`: accounting aliases, fan-out accounting, and retained
+  full-sync history are covered; implement broader shared-buffer memory
+  accounting, backlog outgrowth under slow online replicas, and replica
+  output-buffer disconnection semantics behind `replication-buffer`.
 - `R4-WAIT/WAITAOF`: role-change unblock now covers both WAIT and WAITAOF for
   `REPLICAOF` topology changes; replica FACK/disconnect semantics remain open.
 - `R4-AOF-FULLSYNC`: `replication-aof-sync` is now green after full-sync RDB
@@ -369,6 +370,87 @@ Takeaway:
   `harness/oracle/results/tcl-survey/20260613T051700796223Z/result.json`.
   R3-BACKLOG-RESIZE needs longer-lived shared-buffer retention and
   offset-convergence work before it is safe to expose.
+
+### R2-RETAINED-FULLSYNC-HISTORY
+
+Status: first retained-history slice completed on 2026-06-13;
+`integration/replication-buffer` improved from 3/15 to 4/15 but remains red.
+
+Implementation:
+
+- Added `RetainedReplHistory`, an immutable shared replication-history segment
+  retained after a full-sync BGSAVE job has been consumed.
+- Full-sync transfer retains the completed catch-up bytes for replicas that
+  successfully had the RDB plus catch-up stream queued.
+- `REPLCONF ACK` releases a replica's retained-history pin once it has consumed
+  through the end of a retained segment; replica disconnect releases all of
+  that replica's pins.
+- `ReplicationState::read_history_at` can stitch retained full-sync history,
+  active BGSAVE catch-up bytes, and the circular backlog without cloning large
+  buffers for PSYNC decisions.
+- `INFO memory` counts retained full-sync history once as replication history
+  rather than once per dependent replica.
+- New deterministic `repl_buffer_kit.rs` covers retained history surviving job
+  completion, partial-resync reads from retained history plus backlog, release
+  on ACK/disconnect, one-copy accounting, and gap-aware PSYNC range coverage.
+
+Evidence:
+
+```bash
+cargo test -p redis-core replication::tests -- --nocapture
+cargo test -p redis-commands --test repl_buffer_kit -- --nocapture
+cargo test -p redis-commands --test repl_correctness_kit -- --nocapture
+cargo check -p redis-core -p redis-commands -p redis-server
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-buffer-retained-history-v2 \
+  --profile integration-repl \
+  --timeout-s 300 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replication-buffer \
+  --isolated-tests-copy \
+  --skip-build
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-buffer-retained-history-tripwire \
+  --profile integration-repl \
+  --timeout-s 240 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replication-2,integration/block-repl \
+  --isolated-tests-copy \
+  --skip-build
+```
+
+Results:
+
+- Core replication tests: 9 passed, 0 failed.
+- `repl_buffer_kit`: 3 passed, 0 failed.
+- `repl_correctness_kit`: 21 passed, 0 failed.
+- `cargo check -p redis-core -p redis-commands -p redis-server`: passed.
+- `cargo build --bin redis-server`: passed.
+- Focused `integration/replication-buffer`:
+  `harness/oracle/results/tcl-survey/20260613T135020603220Z/result.json`
+  reported 4 passed, 11 failed, 0 timed out, 0 without summary, and 0
+  abort/exception points.
+- Focused no-regression tripwire:
+  `harness/oracle/results/tcl-survey/20260613T135331346121Z/result.json`
+  reported `integration/replication-2` 7/0 and `integration/block-repl` 2/0.
+
+Takeaway:
+
+- A first implementation used the right retained-history state but cloned large
+  catch-up buffers while deciding whether PSYNC history was available. The
+  focused Tcl run exposed that as a no-summary offset-convergence regression:
+  `harness/oracle/results/tcl-survey/20260613T134424827847Z/result.json`.
+  The kept implementation checks interval coverage without copying payload
+  bytes, then materializes bytes only for the actual replay send.
+- The next useful `repl_buffer_kit` slice is broader online-replica shared
+  buffer ownership: retained full-sync history is now real, but slow online
+  replica output still does not make `repl_backlog_histlen` outgrow the
+  configured circular backlog the way Valkey's global replication buffer does.
 
 ### R4-AOF-FULLSYNC
 

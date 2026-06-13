@@ -242,15 +242,17 @@ Work packets:
   join the same job and receive the same snapshot plus catch-up backlog.
   Initial active-job catch-up buffering landed on 2026-06-13: writes appended
   while a replication BGSAVE is active are retained in the job and shipped
-  after the RDB payload even if the circular backlog wrapped. Longer-lived
-  shared-buffer retention after the job completes remains part of
-  `R2-BUFFER-LIMITS`.
+  after the RDB payload even if the circular backlog wrapped. Completed
+  full-sync catch-up history is now retained while dependent replicas still pin
+  it, and released on ACK/disconnect.
 - **R2-BUFFER-LIMITS:** implement replica output-buffer accounting and
   disconnection policy well enough for `replication-buffer` to count tests
   instead of dying in setup. Partial accounting surface landed on 2026-06-13:
   command fan-out now routes through the replica send/accounting helper and
   `INFO memory` exposes the Valkey-compatible replication-buffer field names.
-  Actual shared-buffer trimming, output-buffer disconnect policy, and the
+  The retained full-sync history slice moved `integration/replication-buffer`
+  to 4/15. Broader online-replica shared-buffer ownership, backlog histlen
+  outgrowth under slow replicas, output-buffer disconnect policy, and the full
   `replication-buffer` Tcl gate remain unfinished.
 
 Gate:
@@ -279,7 +281,8 @@ Work packets:
   failures back to an offset-convergence abort
   (`harness/oracle/results/tcl-survey/20260613T051700796223Z/result.json`).
   Do not expose this until the shared replication-buffer lifetime/trimming
-  model can retain history beyond the active BGSAVE job.
+  model covers online-replica output buffers as well as retained full-sync
+  history.
 - **R3-OFFSET-CONVERGENCE:** make `wait_for_ofs_sync` converge in high-volume
   tests; audit ACK timing, backlog offsets, and replica apply progress.
 - **R3-RECONNECT-MATRIX:** deterministic tests for reconnect within backlog,
