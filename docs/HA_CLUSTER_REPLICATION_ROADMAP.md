@@ -70,9 +70,10 @@ Current red/unfinished areas from the 2026-06-13 R0 dashboard in
 - Dual-server `integration/replication.tcl` and `replication-buffer.tcl` are
   still blocked by full-sync / diskless behavior and replication-buffer
   accounting semantics.
-- `replication-3` and `replication-4` are green on the current tree; keep the
-  command-propagation rewrite work as regression coverage rather than assuming
-  the older overnight failures still reproduce.
+- A rebuilt R1 gate now shows `replication-3` at 3/4 and `replication-4` at
+  15/2. The command-propagation rewrite cases are cleared, but
+  expiration/PFCOUNT semantics and divergence/writable-replica cases still need
+  work.
 - `replication-psync` still times out in the current full dashboard.
 - `replication-aof-sync` still exposes RDB/AOF reuse and diskless fallback
   failures.
@@ -178,11 +179,14 @@ Work packets:
   time. Completed on 2026-06-13; see
   [`REPLICATION_INTEGRATION_DASHBOARD.md`](REPLICATION_INTEGRATION_DASHBOARD.md).
 - **R1-SPOP-REWRITE:** rewrite `SPOP key count` into deterministic `SREM`
-  frames for the exact elements removed; full-count removals rewrite to
-  `DEL`/`UNLINK`. Completed on 2026-06-13; see
+  frames for the exact elements removed, split removals above 1024 members into
+  multiple `SREM` batches, and rewrite full-count removals to `DEL`/`UNLINK`.
+  Completed on 2026-06-13; see
   [`REPLICATION_INTEGRATION_DASHBOARD.md`](REPLICATION_INTEGRATION_DASHBOARD.md).
 - **R1-DB-SELECT:** ensure multi-DB replication delivery emits and applies
   `SELECT` consistently, including replica apply state after reconnect.
+  Dispatch-time fan-out coverage completed on 2026-06-13; reconnect/apply-state
+  coverage remains part of `R3-RECONNECT-MATRIX`.
 - **R1-NOOP-DIRTY:** keep no-op writes out of the replication stream by using a
   dirty-delta or equivalent mutation signal, not command metadata alone.
   Completed for `DEL`, `UNLINK`, `SREM`, `HDEL`, and `ZREM` on 2026-06-13; see

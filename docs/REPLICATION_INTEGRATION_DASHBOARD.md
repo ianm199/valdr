@@ -13,9 +13,10 @@ Fast deterministic gate:
 cargo test -p redis-commands --test repl_correctness_kit
 ```
 
-Result on 2026-06-13: 13 passed, 0 failed.
+Latest result on 2026-06-13 after the R1 propagation packets: 17 passed, 0
+failed.
 
-Full current integration dashboard:
+R0 full integration dashboard:
 
 ```bash
 harness/oracle/run-integration-repl-current.sh \
@@ -37,8 +38,32 @@ Artifacts:
 - Tripwire/result-writer verification:
   `harness/oracle/results/tcl-survey/20260613T003911251513Z/result.json`
 
-The full dashboard run completed before `tcl-survey.py` started writing the
-aggregate `result.json` file. Future runs write that file automatically.
+The full R0 dashboard run completed before `tcl-survey.py` started writing the
+aggregate `result.json` file. Future runs write that file automatically. Rows
+for `replication-3` and `replication-4` below use the newer rebuilt R1 gate:
+
+```bash
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-r1-integration-3-4-current \
+  --profile integration-repl \
+  --timeout-s 240 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replication-3,integration/replication-4 \
+  --isolated-tests-copy \
+  --skip-build
+```
+
+R1 rebuilt result on 2026-06-13:
+
+```text
+TCL survey: 2 files, 18 passed tests, 6 failed tests, 0 timed out,
+0 without summary, 12 parsed failure lines, 0 abort/exception points
+```
+
+Artifact:
+`harness/oracle/results/tcl-survey/20260613T005958508926Z/result.json`.
 
 ## Current Table
 
@@ -46,8 +71,8 @@ aggregate `result.json` file. Future runs write that file automatically.
 |---|---:|---|---|
 | `integration/replication-2` | 7/0 | Green | No-regression tripwire. |
 | `integration/block-repl` | 2/0 | Green | No-regression tripwire. |
-| `integration/replication-3` | 7/0 | Green | Earlier command-propagation failures are not present on this tree. |
-| `integration/replication-4` | 17/0 | Green | `DEBUG REPLICATE` path is no longer an abort frontier. |
+| `integration/replication-3` | 3/4 | Red | Expiry consistency, writable-replica expired-key behavior, and PFCOUNT expired-key/cache semantics. |
+| `integration/replication-4` | 15/2 | Red | SPOP rewrite cases now pass; remaining failures are divergence/default writable-replica cases. |
 | `integration/replication-buffer` | 2/13 | Red | Global replication buffer, backlog growth/shrink, and replica output-buffer limit semantics. |
 | `integration/replication` | no summary | Red | Aborts at `diskless replication child being killed is collected` with `child process exited abnormally`; diskless/full-sync behavior remains the frontier. |
 | `integration/replication-psync` | timeout | Red | Timed out at 300s; no-backlog/backlog-expired and diskless variants remain frontier. |
@@ -71,11 +96,13 @@ Evidence from the full dashboard run:
 
 ## Next Useful Packets
 
-The current dashboard changes the emphasis from the older overnight notes:
-`replication-3` and `replication-4` are green now. The next replication packets
-should still keep R1 command-propagation tests as regression coverage, but the
-largest visible integration frontiers are now:
+The R1 propagation packets cleared the known command-rewrite regressions, but
+the rebuilt `replication-3` / `replication-4` gate is not green. The largest
+visible integration frontiers are now:
 
+- Expiry-on-replica semantics: `replication-3` still fails master/replica
+  consistency with expire, writable replica expired-key behavior, and PFCOUNT
+  expired-key/cache cases.
 - `R3-RECONNECT-MATRIX`: clarify the remaining PSYNC no-backlog/backlog-expired
   cases in the deterministic kit before grinding `replication-psync`.
 - `R2-BUFFER-LIMITS`: implement/account for replication buffer and output-buffer
@@ -140,6 +167,8 @@ Implementation:
 - `SPOP key count` now suppresses no-op propagation for missing keys and
   `count == 0`.
 - Partial `SPOP key count` rewrites propagation to `SREM key <removed...>`.
+- Partial `SPOP key count` above 1024 removed elements propagates as multiple
+  `SREM` batches, matching the upstream command-stat expectation.
 - Full `SPOP key count` rewrites propagation to `DEL key` by default, or
   `UNLINK key` when `lazyfree-lazy-server-del` is configured as `yes`.
 
@@ -163,13 +192,23 @@ python3 harness/oracle/tcl-survey.py \
 
 Results:
 
-- `repl_correctness_kit`: 15 passed, 0 failed.
+- `repl_correctness_kit`: 17 passed, 0 failed after adding the 1024-member
+  batching guard and the DB SELECT guard.
 - `cargo check -p redis-commands`: passed.
 - `cargo build --bin redis-server`: passed.
 - Focused TCL:
   `harness/oracle/results/tcl-survey/20260613T004936241400Z/result.json`
   reported `unit/type/set` 115/0, `unit/type/hash` 83/0, and
   `unit/type/zset` 320/0.
+- Rebuilt `integration/replication-4` focused recheck:
+  `harness/oracle/results/tcl-survey/20260613T005920803425Z/result.json`
+  reported 14/3 and no longer reported the `spopwithcount rewrite srem
+  command` failure.
+- Rebuilt `integration/replication-3,replication-4` R1 gate:
+  `harness/oracle/results/tcl-survey/20260613T005958508926Z/result.json`
+  reported `replication-3` 3/4 and `replication-4` 15/2. The SPOP and debug
+  propagation cases passed; remaining failures are expiry/PFCOUNT semantics and
+  divergence/writable-replica cases.
 
 ### R1-TTL-REWRITE
 
@@ -206,3 +245,44 @@ Results:
 - Focused TCL:
   `harness/oracle/results/tcl-survey/20260613T005055896320Z/result.json`
   reported `unit/expire` 67/0.
+
+### R1-DB-SELECT
+
+Status: completed on 2026-06-13 for dispatch-time fan-out coverage.
+
+Implementation:
+
+- The shared replication fan-out path already prefixes a `SELECT <db>` frame
+  before the first write in a different logical DB.
+- `repl_correctness_kit.rs` now proves that the first DB 5 write emits
+  `SELECT 5` before the write, that consecutive DB 5 writes do not resend the
+  selector, and that switching back to DB 0 emits `SELECT 0` before the write.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands --test repl_correctness_kit
+cargo check -p redis-commands
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-r1-integration-3-4-current \
+  --profile integration-repl \
+  --timeout-s 240 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replication-3,integration/replication-4 \
+  --isolated-tests-copy \
+  --skip-build
+```
+
+Results:
+
+- `repl_correctness_kit`: 17 passed, 0 failed.
+- `cargo check -p redis-commands`: passed.
+- `cargo build --bin redis-server`: passed.
+- Focused TCL:
+  `harness/oracle/results/tcl-survey/20260613T005958508926Z/result.json`
+  reported `replication-3` 3/4 and `replication-4` 15/2. This is not an HA
+  claim; it is evidence that the R1 command propagation regressions are cleared
+  while expiration and divergence semantics remain.

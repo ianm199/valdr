@@ -119,7 +119,36 @@ impl Drop for ReplCapture {
 /// context shares the same pubsub registry (so the writer-thread sender exists)
 /// and the live `RedisServer`. Returns the reply bytes.
 fn dispatch_as_primary(client_id: u64, db: &mut RedisDb, cmd: &[&[u8]]) -> Vec<u8> {
+    dispatch_as_primary_argv(client_id, db, argv(cmd))
+}
+
+fn dispatch_as_primary_argv(client_id: u64, db: &mut RedisDb, args: Vec<RedisString>) -> Vec<u8> {
     let mut c = Client::new(client_id);
+    c.set_args(args);
+    let server = Arc::new(RedisServer::default());
+    let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
+    {
+        let mut ctx = redis_core::CommandContext::with_server(&mut c, db, server, pubsub);
+        let _ = dispatch(&mut ctx);
+    }
+    c.drain_reply()
+}
+
+fn count_subsequence(haystack: &[u8], needle: &[u8]) -> usize {
+    haystack
+        .windows(needle.len())
+        .filter(|w| *w == needle)
+        .count()
+}
+
+fn dispatch_as_primary_on_db(
+    client_id: u64,
+    db_id: u32,
+    db: &mut RedisDb,
+    cmd: &[&[u8]],
+) -> Vec<u8> {
+    let mut c = Client::new(client_id);
+    c.db_index = db_id;
     c.set_args(argv(cmd));
     let server = Arc::new(RedisServer::default());
     let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
@@ -410,6 +439,36 @@ fn r1_spop_rewrites_replication_to_deterministic_commands() {
             .any(|w| w == resp(&[b"SPOP", b"full", b"2"]).as_slice()),
         "full SPOP count itself must not be propagated"
     );
+
+    let mut sadd = vec![
+        RedisString::from_bytes(b"SADD"),
+        RedisString::from_bytes(b"batch"),
+    ];
+    for i in 0..1026 {
+        sadd.push(RedisString::from_vec(i.to_string().into_bytes()));
+    }
+    assert_eq!(dispatch_as_primary_argv(28, &mut db, sadd), b":1026\r\n");
+    let _ = cap.drain();
+
+    let reply = dispatch_as_primary(29, &mut db, &[b"SPOP", b"batch", b"1025"]);
+    assert!(
+        reply.starts_with(b"*1025\r\n"),
+        "large SPOP count reply should contain 1025 elements, got prefix {:?}",
+        String::from_utf8_lossy(&reply[..reply.len().min(32)])
+    );
+    let stream = cap.drain();
+    assert_eq!(
+        count_subsequence(&stream, b"$4\r\nSREM\r\n"),
+        2,
+        "SPOP count above 1024 must propagate in two SREM batches, got {:?}",
+        String::from_utf8_lossy(&stream[..stream.len().min(256)])
+    );
+    assert!(
+        !stream
+            .windows(resp(&[b"SPOP", b"batch", b"1025"]).len())
+            .any(|w| w == resp(&[b"SPOP", b"batch", b"1025"]).as_slice()),
+        "large SPOP count itself must not be propagated"
+    );
 }
 
 #[test]
@@ -477,6 +536,66 @@ fn r1_ttl_relative_writes_rewrite_to_absolute_propagation() {
             .windows(resp(&[b"GETEX", b"getex-rel", b"EX", b"60"]).len())
             .any(|w| w == resp(&[b"GETEX", b"getex-rel", b"EX", b"60"]).as_slice()),
         "relative GETEX EX form must not be propagated"
+    );
+}
+
+#[test]
+fn r1_db_select_precedes_db_switching_replication_stream() {
+    let _g = repl_guard();
+    let repl = global_replication_state();
+    repl.selected_db
+        .store(-1, std::sync::atomic::Ordering::SeqCst);
+    let cap = ReplCapture::attach(900_016, 0);
+    let mut db5 = RedisDb::new(5);
+
+    let reply = dispatch_as_primary_on_db(33, 5, &mut db5, &[b"SET", b"k5", b"v"]);
+    assert_eq!(reply, b"+OK\r\n");
+    let stream = cap.drain();
+    let select5 = resp(&[b"SELECT", b"5"]);
+    let set5 = resp(&[b"SET", b"k5", b"v"]);
+    let select_pos = stream
+        .windows(select5.len())
+        .position(|w| w == select5.as_slice())
+        .expect("first DB 5 write should emit SELECT 5");
+    let set_pos = stream
+        .windows(set5.len())
+        .position(|w| w == set5.as_slice())
+        .expect("first DB 5 write should emit SET");
+    assert!(
+        select_pos < set_pos,
+        "SELECT 5 must precede the DB 5 write, got {:?}",
+        String::from_utf8_lossy(&stream)
+    );
+
+    let reply = dispatch_as_primary_on_db(34, 5, &mut db5, &[b"SET", b"k5b", b"v"]);
+    assert_eq!(reply, b"+OK\r\n");
+    let stream = cap.drain();
+    assert!(
+        !stream
+            .windows(select5.len())
+            .any(|w| w == select5.as_slice()),
+        "consecutive writes in DB 5 should not resend SELECT 5, got {:?}",
+        String::from_utf8_lossy(&stream)
+    );
+
+    let mut db0 = RedisDb::new(0);
+    let reply = dispatch_as_primary_on_db(35, 0, &mut db0, &[b"SET", b"k0", b"v"]);
+    assert_eq!(reply, b"+OK\r\n");
+    let stream = cap.drain();
+    let select0 = resp(&[b"SELECT", b"0"]);
+    let set0 = resp(&[b"SET", b"k0", b"v"]);
+    let select_pos = stream
+        .windows(select0.len())
+        .position(|w| w == select0.as_slice())
+        .expect("switching back to DB 0 should emit SELECT 0");
+    let set_pos = stream
+        .windows(set0.len())
+        .position(|w| w == set0.as_slice())
+        .expect("DB 0 write should emit SET");
+    assert!(
+        select_pos < set_pos,
+        "SELECT 0 must precede the DB 0 write, got {:?}",
+        String::from_utf8_lossy(&stream)
     );
 }
 

@@ -374,6 +374,28 @@ fn lazyfree_lazy_server_del_enabled() -> bool {
         .eq_ignore_ascii_case("yes")
 }
 
+fn spop_srem_argv(key: &RedisString, elems: &[RedisString]) -> Vec<RedisString> {
+    let mut rewrite = Vec::with_capacity(elems.len() + 2);
+    rewrite.push(RedisString::from_bytes(b"SREM"));
+    rewrite.push(key.clone());
+    rewrite.extend(elems.iter().cloned());
+    rewrite
+}
+
+fn propagate_spop_srem_batches(ctx: &mut CommandContext, key: &RedisString, elems: &[RedisString]) {
+    const BATCH_SIZE: usize = 1024;
+    let db_id = ctx.selected_db_id();
+    let mut last_offset = 0;
+    for chunk in elems.chunks(BATCH_SIZE) {
+        last_offset =
+            crate::dispatch::propagate_command_from_wake(db_id, &spop_srem_argv(key, chunk));
+    }
+    if last_offset > 0 {
+        ctx.client_mut().last_write_repl_offset = last_offset;
+    }
+    ctx.client_mut().set_prevent_propagation();
+}
+
 /// SPOP key [count]
 /// Without `count`: replies with a single random member as a bulk string,
 /// or `$-1\r\n` when the key is absent. With `count`: replies with an
@@ -449,11 +471,11 @@ pub fn spop_command(ctx: &mut CommandContext) -> RedisResult<()> {
             ctx.client_mut()
                 .set_args(vec![RedisString::from_bytes(verb), key.clone()]);
         } else if let Some(elems) = popped.as_ref() {
-            let mut rewrite = Vec::with_capacity(elems.len() + 2);
-            rewrite.push(RedisString::from_bytes(b"SREM"));
-            rewrite.push(key.clone());
-            rewrite.extend(elems.iter().cloned());
-            ctx.client_mut().set_args(rewrite);
+            if elems.len() > 1024 {
+                propagate_spop_srem_batches(ctx, &key, elems);
+            } else {
+                ctx.client_mut().set_args(spop_srem_argv(&key, elems));
+            }
         }
     } else {
         ctx.client_mut().set_prevent_propagation();
