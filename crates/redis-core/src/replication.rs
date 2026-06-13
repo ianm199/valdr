@@ -437,6 +437,11 @@ pub struct ReplicationState {
     pub backlog_last_replica_disconnect_ms: AtomicI64,
     /// Connected replicas (master-assigned `client_id` → metadata).
     pub replicas: Mutex<HashMap<ClientId, ReplicaConn>>,
+    /// Hard output-buffer limit for explicitly private replica output. Shared
+    /// replication-stream bytes are reported as pending output memory, but are
+    /// allowed to exceed this when they remain backed by readable replication
+    /// history.
+    pub replica_output_buffer_hard_limit: AtomicUsize,
     /// REPLCONF metadata can arrive before PSYNC registers the `ReplicaConn`.
     /// Keep it keyed by client id and apply it when the replica is inserted.
     pending_replica_metadata: Mutex<HashMap<ClientId, PendingReplicaMetadata>>,
@@ -519,6 +524,7 @@ impl ReplicationState {
             backlog: Mutex::new(ReplBacklog::new(backlog_size)),
             backlog_last_replica_disconnect_ms: AtomicI64::new(-1),
             replicas: Mutex::new(HashMap::new()),
+            replica_output_buffer_hard_limit: AtomicUsize::new(256 * 1024 * 1024),
             pending_replica_metadata: Mutex::new(HashMap::new()),
             replica_of: Mutex::new(None),
             repl_state: AtomicU8::new(repl_state_code::MASTER),
@@ -611,6 +617,18 @@ impl ReplicationState {
             Ok(mut g) => g.resize_preserving_history(new_size),
             Err(p) => p.into_inner().resize_preserving_history(new_size),
         }
+    }
+
+    /// Update the hard output-buffer limit used for private replica output.
+    pub fn set_replica_output_buffer_hard_limit(&self, limit: usize) {
+        self.replica_output_buffer_hard_limit
+            .store(limit, Ordering::Relaxed);
+    }
+
+    /// Current hard output-buffer limit for private replica output.
+    pub fn replica_output_buffer_hard_limit(&self) -> usize {
+        self.replica_output_buffer_hard_limit
+            .load(Ordering::Relaxed)
     }
 
     fn clear_backlog_history_preserving_offset(&self) {
@@ -1683,18 +1701,18 @@ impl ReplicationState {
         })
     }
 
-    /// Send `bytes` through the outbound sender of the replica identified by
-    /// `client_id`, if it is still registered. Returns `true` on a successful
-    /// send (the send may still be queued in the writer thread but the channel
-    /// is alive). Returns `false` when the replica is gone or the channel is
-    /// closed.
-    pub fn send_to_replica(&self, client_id: ClientId, bytes: Vec<u8>) -> bool {
+    fn queue_replica_output(
+        &self,
+        client_id: ClientId,
+        bytes: Vec<u8>,
+        enforce_hard_limit: bool,
+    ) -> bool {
         let len = bytes.len();
         let guard = match self.replicas.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
-        match guard.get(&client_id) {
+        let send_result = match guard.get(&client_id) {
             Some(r) => {
                 if r.outbound_sender.send(bytes).is_ok() {
                     let pending = r
@@ -1704,12 +1722,76 @@ impl ReplicationState {
                     if let Ok(mut guard) = crate::client_info::client_info_registry().lock() {
                         guard.set_output_buffer_memory(client_id, pending);
                     }
-                    true
+                    let hard_limit = self.replica_output_buffer_hard_limit();
+                    if enforce_hard_limit && hard_limit > 0 && pending > hard_limit {
+                        Some((true, true))
+                    } else {
+                        Some((true, false))
+                    }
                 } else {
-                    false
+                    Some((false, false))
                 }
             }
+            None => None,
+        };
+        drop(guard);
+
+        match send_result {
+            Some((true, true)) => {
+                crate::metrics::server_metrics()
+                    .client_output_buffer_limit_disconnections
+                    .fetch_add(1, Ordering::Relaxed);
+                self.remove_replica(client_id);
+                false
+            }
+            Some((sent, false)) => sent,
+            Some((false, true)) => false,
             None => false,
+        }
+    }
+
+    /// Send shared replication-stream bytes through the outbound sender of the
+    /// replica identified by `client_id`. These bytes are accounted as pending
+    /// output for visibility, but are not themselves a hard-limit disconnect
+    /// trigger because upstream keeps them backed by shared replication history.
+    pub fn send_to_replica(&self, client_id: ClientId, bytes: Vec<u8>) -> bool {
+        self.queue_replica_output(client_id, bytes, false)
+    }
+
+    /// Send explicitly private output to a replica. Unlike normal replication
+    /// stream fan-out, this path enforces the replica hard output-buffer limit.
+    pub fn send_private_to_replica(&self, client_id: ClientId, bytes: Vec<u8>) -> bool {
+        self.queue_replica_output(client_id, bytes, true)
+    }
+
+    /// Mark bytes as drained from the replica's outbound writer. This keeps
+    /// `CLIENT LIST`/INFO-style memory reports tied to data still queued in
+    /// this process rather than monotonically accumulating every byte sent.
+    pub fn account_replica_output_drained(&self, client_id: ClientId, bytes: usize) -> usize {
+        let guard = match self.replicas.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let Some(replica) = guard.get(&client_id) else {
+            return 0;
+        };
+        let mut current = replica.pending_output_bytes.load(Ordering::Relaxed);
+        loop {
+            let next = current.saturating_sub(bytes);
+            match replica.pending_output_bytes.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    if let Ok(mut guard) = crate::client_info::client_info_registry().lock() {
+                        guard.set_output_buffer_memory(client_id, next);
+                    }
+                    return next;
+                }
+                Err(actual) => current = actual,
+            }
         }
     }
 

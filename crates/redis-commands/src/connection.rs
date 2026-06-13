@@ -1232,6 +1232,10 @@ mod tests {
         assert_eq!(pubsub.hard, 4096);
         assert_eq!(pubsub.soft, 2048);
         assert_eq!(pubsub.soft_seconds, 7);
+        assert_eq!(
+            redis_core::replication::global_replication_state().replica_output_buffer_hard_limit(),
+            2048
+        );
 
         assert_eq!(
             client_output_buffer_limit_config_string(),
@@ -1242,6 +1246,10 @@ mod tests {
             b"normal 0 0 0 slave 268435456 67108864 60 pubsub 33554432 8388608 60",
         )
         .unwrap();
+        assert_eq!(
+            redis_core::replication::global_replication_state().replica_output_buffer_hard_limit(),
+            268435456
+        );
     }
 }
 

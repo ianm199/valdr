@@ -72,7 +72,7 @@ Artifact:
 | `integration/block-repl` | 2/0 | Green | No-regression tripwire. |
 | `integration/replication-3` | 3/4 | Red | Expiry consistency, writable-replica expired-key behavior, and PFCOUNT expired-key/cache semantics. |
 | `integration/replication-4` | 15/2 | Red | SPOP rewrite cases now pass; remaining failures are divergence/default writable-replica cases. |
-| `integration/replication-buffer` | 4/11 | Red | Fresh post-PSYNC baseline still reaches counted assertions without timeout. Remaining failures are Valkey-style global replication-buffer memory, BGSAVE/slow-replica backlog outgrowth, partial resync across broader retained history, and output-buffer disconnect policy. |
+| `integration/replication-buffer` | 4/11 | Red | Fresh post-PSYNC baseline still reaches counted assertions without timeout. Shared vs private output-buffer semantics are now pinned in `repl_buffer_kit`; remaining failures are Valkey-style global replication-buffer memory, BGSAVE/slow-replica backlog outgrowth, partial resync across broader retained history, and typed live output-buffer disconnect/drain policy. |
 | `integration/replication` | no summary | Red | The failed full-sync cleanup packet moves past `diskless replication child being killed is collected`; the current abort is `Master stream is correctly processed while the replica has a script in -BUSY state` with `READONLY`. Diskless/script-busy full-sync apply remains the frontier. |
 | `integration/replication-psync` | 90/0 | Green | Focused gate is green after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support for the replica dialer. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
@@ -316,6 +316,82 @@ Results:
 - Focused dual-server tripwire:
   `harness/oracle/results/tcl-survey/20260613T050307837025Z/result.json`
   reported `integration/replication-2` 7/0 and `integration/block-repl` 2/0.
+
+2026-06-13 follow-up finding:
+
+- A per-key `rdb-key-save-delay` experiment confirmed that keeping replication
+  BGSAVE alive longer removes the `repl_backlog_histlen` outgrowth assertion
+  class, but it is not safe to land as a simple delay change. Uncapped and
+  capped variants either timed out the file or converted it to a no-summary
+  abort while exposing the deeper partial catch-up / offset-convergence
+  frontier.
+- Rejected experiment artifacts:
+  `harness/oracle/results/tcl-survey/20260613T170027355956Z/result.json`,
+  `harness/oracle/results/tcl-survey/20260613T170559847568Z/result.json`, and
+  `harness/oracle/results/tcl-survey/20260613T171218725380Z/result.json`.
+  Do not reintroduce this as a timing-only fix; the next useful packet needs a
+  deterministic full-sync lifecycle kit that can keep the BGSAVE state,
+  catch-up history, and replica offset convergence coherent together.
+
+### R2-BUFFER-SHARED-PRIVATE
+
+Status: deterministic kit slice completed on 2026-06-13; Tcl remains at the
+stable 4/11 `replication-buffer` baseline.
+
+Implementation:
+
+- `ReplicationState::send_to_replica` now explicitly represents shared
+  replication-stream output: bytes are still queued and reported as pending
+  replica output, but this path does not enforce the hard output-buffer limit.
+- `ReplicationState::send_private_to_replica` is the hard-limit-enforced path
+  for explicitly private replica output. Full-sync RDB bulk transfer now uses
+  this private path; post-RDB catch-up and normal command fan-out remain on the
+  shared path.
+- `CONFIG SET client-output-buffer-limit` mirrors the replica hard limit into
+  `ReplicationState`, and the connection config test now pins that hot update.
+- `repl_buffer_kit` now covers the upstream distinction that shared
+  replication history may exceed the private hard limit, while private queued
+  output disconnects only the offending replica and leaves healthy replicas
+  usable. The kit also includes an explicit drain API guard for future typed
+  writer integration.
+
+Evidence:
+
+```bash
+rustfmt --check \
+  crates/redis-core/src/replication.rs \
+  crates/redis-commands/src/client_limits.rs \
+  crates/redis-commands/src/config_cmd.rs \
+  crates/redis-commands/src/connection.rs \
+  crates/redis-commands/tests/repl_buffer_kit.rs \
+  crates/redis-server/src/startup.rs
+cargo test -p redis-commands --test repl_buffer_kit -- --nocapture
+cargo test -p redis-commands \
+  connection::tests::client_output_buffer_limit_updates_hot_snapshot \
+  -- --nocapture
+cargo check -p redis-core -p redis-commands -p redis-server
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --files integration/replication-buffer \
+  --profile integration-repl \
+  --runner-id repl-buffer-private-output-stability-rerun \
+  --timeout-s 300 \
+  --baseport 30179 \
+  --portcount 100 \
+  --skip-build
+```
+
+Results:
+
+- `repl_buffer_kit`: 4 passed, 0 failed.
+- Focused config test: passed.
+- `cargo check -p redis-core -p redis-commands -p redis-server`: passed.
+- `cargo build --bin redis-server`: passed.
+- Focused `integration/replication-buffer`:
+  `harness/oracle/results/tcl-survey/20260613T172143202124Z/result.json`
+  reported 4 passed, 11 failed, 0 timed out, 0 without summary. This is a
+  no-regression result against the post-PSYNC 4/11 baseline, not a pass-count
+  improvement.
 
 ### R2-BGSAVE-CATCHUP
 

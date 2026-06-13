@@ -6,8 +6,10 @@
 //! catch-up bytes.
 
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver};
 
+use redis_core::metrics::server_metrics;
 use redis_core::replication::{
     generate_runid, ReplBgsaveJob, ReplicaConn, ReplicaState, ReplicationState,
 };
@@ -144,4 +146,58 @@ fn retained_history_does_not_overclaim_after_backlog_wrap_creates_gap() {
         Some(b"abcdef".as_slice()),
         "the retained island is still directly readable for its own range"
     );
+}
+
+#[test]
+fn shared_stream_can_exceed_hard_limit_but_private_output_disconnects_offender() {
+    let st = ReplicationState::new(generate_runid(), 64);
+    st.set_replica_output_buffer_hard_limit(10);
+    let slow_rx = attach_replica(&st, 71, 0);
+    let healthy_rx = attach_replica(&st, 72, 0);
+    let before_disconnects = server_metrics()
+        .client_output_buffer_limit_disconnections
+        .load(Ordering::Relaxed);
+
+    assert!(
+        st.send_to_replica(71, b"abcdefghijkl".to_vec()),
+        "shared replication history may exceed the private hard limit"
+    );
+    assert!(st.send_to_replica(72, b"ABCDEFGH".to_vec()));
+    assert_eq!(st.connected_replicas(), 2);
+    {
+        let guard = st.replicas.lock().unwrap();
+        assert_eq!(guard[&71].pending_output_bytes.load(Ordering::Relaxed), 12);
+        assert_eq!(guard[&72].pending_output_bytes.load(Ordering::Relaxed), 8);
+    }
+    assert_eq!(
+        st.account_replica_output_drained(71, 12),
+        0,
+        "writer-side drain should clear reported replica output memory"
+    );
+
+    assert!(st.send_private_to_replica(71, b"abcdefgh".to_vec()));
+    assert!(
+        !st.send_private_to_replica(71, b"ijkl".to_vec()),
+        "private queued output crossing the hard limit should disconnect the offender"
+    );
+    assert_eq!(st.connected_replicas(), 1);
+    {
+        let guard = st.replicas.lock().unwrap();
+        assert!(!guard.contains_key(&71));
+        assert!(guard.contains_key(&72));
+        assert_eq!(guard[&72].pending_output_bytes.load(Ordering::Relaxed), 8);
+    }
+    assert_eq!(
+        server_metrics()
+            .client_output_buffer_limit_disconnections
+            .load(Ordering::Relaxed),
+        before_disconnects + 1
+    );
+
+    assert!(st.send_to_replica(72, b"Z".to_vec()));
+    assert_eq!(healthy_rx.recv().unwrap(), b"ABCDEFGH".to_vec());
+    assert_eq!(healthy_rx.recv().unwrap(), b"Z".to_vec());
+    assert_eq!(slow_rx.recv().unwrap(), b"abcdefghijkl".to_vec());
+    assert_eq!(slow_rx.recv().unwrap(), b"abcdefgh".to_vec());
+    assert_eq!(slow_rx.recv().unwrap(), b"ijkl".to_vec());
 }

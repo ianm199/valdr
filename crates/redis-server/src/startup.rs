@@ -620,7 +620,7 @@ pub(crate) fn dispatch_full_sync_transfer() {
             *client_id,
             redis_core::replication::ReplicaState::SendingRdb,
         );
-        if !repl.send_to_replica(*client_id, header.clone()) {
+        if !repl.send_private_to_replica(*client_id, header.clone()) {
             eprintln!(
                 "redis-server: full-sync RDB send failed for replica client_id={}",
                 client_id

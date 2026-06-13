@@ -1402,6 +1402,8 @@ pub fn apply_client_output_buffer_limit_config_set(value: &[u8]) -> RedisResult<
     };
     *guard = next;
     store_client_obuf_limit_snapshot(next);
+    redis_core::replication::global_replication_state()
+        .set_replica_output_buffer_hard_limit(next.replica.hard);
     Ok(())
 }
 

@@ -243,7 +243,12 @@ Work packets:
   waiters, removes temp RDB files, clears `repl_child_pid`, and allows later
   jobs to start; live `integration/replication` now reaches the later
   script-busy `READONLY` frontier instead of aborting at killed-child
-  collection.
+  collection. A later per-key `rdb-key-save-delay` experiment showed that
+  keeping BGSAVE alive longer can move the `repl_backlog_histlen` outgrowth
+  assertions, but timing-only changes either time out or no-summary abort the
+  file. The next packet must solve BGSAVE state lifetime, catch-up history, and
+  replica offset convergence together through `fullsync_lifecycle_kit` /
+  `repl_buffer_kit`.
 - **R2-PIGGYBACK:** replicas arriving during an in-flight replication BGSAVE
   join the same job and receive the same snapshot plus catch-up backlog.
   Initial active-job catch-up buffering landed on 2026-06-13: writes appended
@@ -260,8 +265,13 @@ Work packets:
   `INFO memory` exposes the Valkey-compatible replication-buffer field names.
   The retained full-sync history slice moved `integration/replication-buffer`
   to 4/15. Broader online-replica shared-buffer ownership, backlog histlen
-  outgrowth under slow replicas, output-buffer disconnect policy, and the full
-  `replication-buffer` Tcl gate remain unfinished.
+  outgrowth under slow replicas, typed writer-side drain accounting, and the
+  full `replication-buffer` Tcl gate remain unfinished. The 2026-06-13
+  shared/private output slice pins the key semantic distinction in
+  `repl_buffer_kit`: shared replication-stream bytes may exceed the replica
+  hard output-buffer limit while explicitly private output disconnects only the
+  offending replica. Full-sync RDB bulk now uses the private path; normal
+  command fan-out and post-RDB catch-up remain shared.
 
 Gate:
 
