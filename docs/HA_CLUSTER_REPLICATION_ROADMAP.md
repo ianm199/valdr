@@ -369,7 +369,9 @@ Work packets:
   `failover-in-progress` state, expose `master_failover_state` in
   `INFO replication`, and `FAILOVER ABORT` clears state and failover pause.
   This deliberately does not claim timeout/completion, blocked-client REDIRECT
-  unblocking, or role handoff yet.
+  unblocking, or role handoff yet. A follow-up runtime slice allows
+  `CLIENT CAPA REDIRECT` during failover pause while still pausing data reads,
+  moving the live frontier toward failover completion/unblock behavior.
 - **R5-REPLICA-PROMOTION:** `REPLICAOF NO ONE` promotion preserves data,
   replid/offset history, client-visible role, and write policy.
 - **R5-CLIENT-REDIRECT:** implement the client capability and redirect behavior

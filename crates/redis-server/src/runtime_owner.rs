@@ -2626,10 +2626,10 @@ fn pause_exempt_current_command(argv: &[RedisString]) -> bool {
         return true;
     };
     if name.eq_ignore_ascii_case(b"CLIENT") {
-        return argv
-            .get(1)
-            .map(|subcmd| subcmd.as_bytes().eq_ignore_ascii_case(b"UNPAUSE"))
-            .unwrap_or(false);
+        return argv.get(1).is_some_and(|subcmd| {
+            subcmd.as_bytes().eq_ignore_ascii_case(b"UNPAUSE")
+                || subcmd.as_bytes().eq_ignore_ascii_case(b"CAPA")
+        });
     }
     name.eq_ignore_ascii_case(b"INFO")
         || name.eq_ignore_ascii_case(b"PING")
@@ -2793,6 +2793,31 @@ mod tests {
         assert!(!replied.is_terminal());
         assert_eq!(closed.slot_id(), slot_id);
         assert!(closed.is_terminal());
+    }
+
+    #[test]
+    fn failover_pause_exempts_client_capa_but_pauses_data_reads() {
+        let mut capa = ClientSlot::new(SlotId::new(12), Client::new(120));
+        capa.stage_argv(vec![
+            RedisString::from_static(b"CLIENT"),
+            RedisString::from_static(b"CAPA"),
+            RedisString::from_static(b"REDIRECT"),
+        ]);
+        assert!(
+            !slot_command_is_paused(&capa, PAUSE_ACTION_CLIENT_ALL),
+            "CLIENT CAPA must remain available so redirect-aware clients can \
+             declare capability during failover"
+        );
+
+        let mut get = ClientSlot::new(SlotId::new(13), Client::new(121));
+        get.stage_argv(vec![
+            RedisString::from_static(b"GET"),
+            RedisString::from_static(b"foo"),
+        ]);
+        assert!(
+            slot_command_is_paused(&get, PAUSE_ACTION_CLIENT_ALL),
+            "data reads should still be paused during failover"
+        );
     }
 }
 

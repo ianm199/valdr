@@ -76,7 +76,7 @@ Artifact:
 | `integration/replication` | no summary | Red | The failed full-sync cleanup packet moves past `diskless replication child being killed is collected`; the current abort is `Master stream is correctly processed while the replica has a script in -BUSY state` with `READONLY`. Diskless/script-busy full-sync apply remains the frontier. |
 | `integration/replication-psync` | timeout | Red | Timed out at 300s; no-backlog/backlog-expired and diskless variants remain frontier. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
-| `integration/replica-redirect` | timeout | Red | `CLIENT CAPA REDIRECT` top-level and MULTI/EXEC replica redirect semantics now pass the early file assertions. `FAILOVER` now enters visible state instead of returning the parser-only unimplemented error; the file now times out in `client paused before and during failover-in-progress` waiting for blocked-client accounting. |
+| `integration/replica-redirect` | timeout | Red | `CLIENT CAPA REDIRECT` top-level and MULTI/EXEC replica redirect semantics now pass the early file assertions. `FAILOVER` now enters visible state instead of returning the parser-only unimplemented error; failover pause now lets `CLIENT CAPA` complete, moving the focused run from a blocked-client failure line to a silent timeout in the same failover test. |
 | `unit/wait` | 39/0 | Green | WAIT command suite passed after the R4 role-change unblock packet; WAITAOF/FACK edge cases still need separate coverage. |
 
 ## Temp RDB Cleanup
@@ -1077,6 +1077,16 @@ Results:
   timed out in `client paused before and during failover-in-progress` with
   `Timeout waiting for blocked clients`. This is a later semantic frontier
   than the earlier explicit unimplemented FAILOVER error.
+- Runtime-owner pause follow-up:
+  `cargo test -p redis-server failover_pause_exempts_client_capa -- --nocapture`
+  passed, proving `CLIENT CAPA REDIRECT` can complete during failover pause
+  while data reads are still paused.
+- Focused `integration/replica-redirect` after the `CLIENT CAPA` pause
+  exemption:
+  `harness/oracle/results/tcl-survey/20260613T145117971383Z/result.json`
+  timed out with 0 parsed failure lines and no stdout failure text. The next
+  frontier is likely failover completion/unblock, not the earlier
+  blocked-client count assertion.
 - An earlier focused run before making state persistent,
   `harness/oracle/results/tcl-survey/20260613T142430221015Z/result.json`,
   reached the same test but timed out at blocked-client wait because the
