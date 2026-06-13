@@ -103,6 +103,9 @@ visible integration frontiers are now:
 - Expiry-on-replica semantics: `replication-3` still fails master/replica
   consistency with expire, writable replica expired-key behavior, and PFCOUNT
   expired-key/cache cases.
+- `R2-RDB-BULK-FAITHFUL`: the old `REPLICAOF` pre-PSYNC `KEYS`/`DUMP` seed
+  shortcut is removed, so remaining full-sync work must pass through the
+  streamed RDB handoff path.
 - `R3-RECONNECT-MATRIX`: extend the new master-side PSYNC decision matrix into
   live replica-dialer reconnect coverage before grinding `replication-psync`.
 - `R2-BUFFER-LIMITS`: implement/account for replication buffer and output-buffer
@@ -111,6 +114,57 @@ visible integration frontiers are now:
   HA claim.
 
 ## Packet Evidence
+
+### R2-RDB-BULK-FAITHFUL
+
+Status: shortcut removal completed on 2026-06-13; full-sync integration remains
+red until the diskless / BGSAVE-window frontier is fixed.
+
+Implementation:
+
+- `REPLICAOF <host> <port>` no longer opens a separate client connection to the
+  primary to copy keyspace through `KEYS`, `PTTL`, and `DUMP`.
+- The replica bootstrap source of truth is now the PSYNC dialer reading the
+  `FULLRESYNC` RDB bulk and applying it through the runtime-owner `LoadRdb`
+  queue.
+- `replicaof_does_not_preseed_from_primary` binds a fake primary socket and
+  proves `REPLICAOF` does not open the old seed connection before the dialer
+  owns full sync.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands \
+  replication::tests::replicaof_does_not_preseed_from_primary \
+  -- --nocapture
+cargo test -p redis-commands replication::tests -- --nocapture
+cargo test -p redis-commands --test repl_correctness_kit
+cargo check -p redis-commands
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-r2-rdb-bulk-faithful-tripwire \
+  --profile integration-repl \
+  --timeout-s 240 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replication-2,integration/block-repl \
+  --isolated-tests-copy \
+  --skip-build
+```
+
+Results:
+
+- Focused no-preseed unit test: passed.
+- Full replication unit module: 11 passed, 0 failed.
+- `repl_correctness_kit`: 17 passed, 0 failed.
+- `cargo check -p redis-commands`: passed.
+- `cargo build --bin redis-server`: passed.
+- Focused dual-server tripwire:
+  `harness/oracle/results/tcl-survey/20260613T042054084579Z/result.json`
+  reported `integration/replication-2` 7/0 and `integration/block-repl` 2/0.
+- Dual-server `integration/replication` and `integration/replication-buffer`
+  remain the current red full-sync / buffer frontier from the R0 dashboard.
 
 ### R1-NOOP-DIRTY
 

@@ -4,20 +4,15 @@
 //! per-client outbound mpsc senders — the same writer-thread mechanism that
 //! PUBLISH and BLPOP wakes ride on.
 
-use std::io::{self, Read, Write};
-use std::net::TcpStream;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use redis_core::blocked_keys::{
     blocked_keys_index, deadline_from_timeout_secs, BlockedAction, BlockedWaiter,
 };
 use redis_core::client::ClientId;
-use redis_core::db::SETKEY_NO_SIGNAL;
-use redis_core::object::EXPIRY_NONE;
 use redis_core::pubsub_registry::PubSubRegistry;
-use redis_core::rdb::load_dump_payload;
 use redis_core::replication::{
     continue_reply, fullresync_reply, global_replication_state, ReplicaConn, ReplicaState,
     ReplicationState,
@@ -59,14 +54,8 @@ pub fn replicaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         String::from_utf8_lossy(host.as_bytes()),
         port
     );
-    if let Err(e) = seed_replica_keyspace_from_master(ctx, &host, port) {
-        eprintln!(
-            "redis-server: REPLICAOF {} {} - initial keyspace seed failed: {}",
-            String::from_utf8_lossy(host.as_bytes()),
-            port,
-            String::from_utf8_lossy(e.to_resp_payload().as_bytes())
-        );
-    }
+    // Full sync is owned by the PSYNC dialer/RDB apply path. Do not pre-seed
+    // with KEYS/DUMP here; that masks failures in the real full-sync handoff.
     match crate::replica_dialer::spawn_replica_dialer(host.clone(), port, dialer_epoch) {
         Ok(()) => {
             eprintln!(
@@ -85,203 +74,6 @@ pub fn replicaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         }
     }
     ctx.reply_simple_string(b"OK")
-}
-
-#[derive(Debug)]
-enum RespValue {
-    Simple(Vec<u8>),
-    Error(Vec<u8>),
-    Integer(i64),
-    Bulk(Option<Vec<u8>>),
-    Array(Vec<RespValue>),
-}
-
-struct RemoteDump {
-    db: u32,
-    key: RedisString,
-    expire_at: i64,
-    payload: Vec<u8>,
-}
-
-fn seed_replica_keyspace_from_master(
-    ctx: &mut CommandContext<'_>,
-    host: &RedisString,
-    port: u16,
-) -> RedisResult<()> {
-    let host_str = std::str::from_utf8(host.as_bytes())
-        .map_err(|_| RedisError::runtime(b"ERR invalid master host"))?;
-    let mut stream = TcpStream::connect((host_str, port)).map_err(|e| {
-        RedisError::runtime(format!("ERR master connect failed: {}", e).into_bytes())
-    })?;
-    let timeout = Some(Duration::from_secs(2));
-    let _ = stream.set_read_timeout(timeout);
-    let _ = stream.set_write_timeout(timeout);
-
-    let now = mstime();
-    let mut dumps = Vec::new();
-    for db in 0..ctx.database_count() as u32 {
-        expect_ok(send_remote_command(
-            &mut stream,
-            &[b"SELECT".as_slice(), db.to_string().as_bytes()],
-        )?)?;
-        let keys = match send_remote_command(&mut stream, &[b"KEYS".as_slice(), b"*".as_slice()])? {
-            RespValue::Array(items) => items
-                .into_iter()
-                .map(|item| match item {
-                    RespValue::Bulk(Some(bytes)) | RespValue::Simple(bytes) => {
-                        Ok(RedisString::from_vec(bytes))
-                    }
-                    other => Err(resp_type_error("KEYS", &other)),
-                })
-                .collect::<RedisResult<Vec<_>>>()?,
-            other => return Err(resp_type_error("KEYS", &other)),
-        };
-
-        for key in keys {
-            let ttl_ms =
-                match send_remote_command(&mut stream, &[b"PTTL".as_slice(), key.as_bytes()])? {
-                    RespValue::Integer(n) if n > 0 => n,
-                    RespValue::Integer(_) => 0,
-                    other => return Err(resp_type_error("PTTL", &other)),
-                };
-            let payload =
-                match send_remote_command(&mut stream, &[b"DUMP".as_slice(), key.as_bytes()])? {
-                    RespValue::Bulk(Some(bytes)) => bytes,
-                    RespValue::Bulk(None) => continue,
-                    other => return Err(resp_type_error("DUMP", &other)),
-                };
-            dumps.push(RemoteDump {
-                db,
-                key,
-                expire_at: if ttl_ms > 0 {
-                    now.saturating_add(ttl_ms)
-                } else {
-                    EXPIRY_NONE
-                },
-                payload,
-            });
-        }
-    }
-
-    let relaxed_version = ctx.live_config().rdb_version_check_relaxed();
-    ctx.for_each_db_mut(|db| db.clear())?;
-    for dump in dumps {
-        let obj = load_dump_payload(&dump.payload, relaxed_version)
-            .map_err(|_| RedisError::runtime(b"ERR Bad data format"))?;
-        ctx.with_db_index(dump.db, |db| {
-            db.set_key_with_known_expire(dump.key, obj, dump.expire_at, SETKEY_NO_SIGNAL);
-        })?;
-    }
-    Ok(())
-}
-
-fn resp_type_error(command: &str, value: &RespValue) -> RedisError {
-    RedisError::runtime(
-        format!(
-            "ERR unexpected {} reply while seeding replica: {:?}",
-            command, value
-        )
-        .into_bytes(),
-    )
-}
-
-fn expect_ok(value: RespValue) -> RedisResult<()> {
-    match value {
-        RespValue::Simple(bytes) if bytes.eq_ignore_ascii_case(b"OK") => Ok(()),
-        RespValue::Error(bytes) => Err(RedisError::runtime(bytes)),
-        other => Err(resp_type_error("SELECT", &other)),
-    }
-}
-
-fn send_remote_command(stream: &mut TcpStream, args: &[&[u8]]) -> RedisResult<RespValue> {
-    write_resp_array(stream, args)
-        .and_then(|_| read_resp_value(stream))
-        .map_err(|e| {
-            RedisError::runtime(format!("ERR replica seed I/O failed: {}", e).into_bytes())
-        })
-}
-
-fn write_resp_array(stream: &mut TcpStream, args: &[&[u8]]) -> io::Result<()> {
-    write!(stream, "*{}\r\n", args.len())?;
-    for arg in args {
-        write!(stream, "${}\r\n", arg.len())?;
-        stream.write_all(arg)?;
-        stream.write_all(b"\r\n")?;
-    }
-    stream.flush()
-}
-
-fn read_resp_value(stream: &mut TcpStream) -> io::Result<RespValue> {
-    let mut kind = [0u8; 1];
-    stream.read_exact(&mut kind)?;
-    match kind[0] {
-        b'+' => Ok(RespValue::Simple(read_resp_line(stream)?)),
-        b'-' => Ok(RespValue::Error(read_resp_line(stream)?)),
-        b':' => {
-            let line = read_resp_line(stream)?;
-            Ok(RespValue::Integer(parse_i64_line(&line)?))
-        }
-        b'$' => {
-            let line = read_resp_line(stream)?;
-            let len = parse_i64_line(&line)?;
-            if len < 0 {
-                return Ok(RespValue::Bulk(None));
-            }
-            let mut bytes = vec![0u8; len as usize];
-            stream.read_exact(&mut bytes)?;
-            read_expected_crlf(stream)?;
-            Ok(RespValue::Bulk(Some(bytes)))
-        }
-        b'*' => {
-            let line = read_resp_line(stream)?;
-            let len = parse_i64_line(&line)?;
-            if len < 0 {
-                return Ok(RespValue::Array(Vec::new()));
-            }
-            let mut items = Vec::with_capacity(len as usize);
-            for _ in 0..len {
-                items.push(read_resp_value(stream)?);
-            }
-            Ok(RespValue::Array(items))
-        }
-        other => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("unexpected RESP type byte {}", other),
-        )),
-    }
-}
-
-fn read_resp_line(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
-    let mut out = Vec::new();
-    let mut byte = [0u8; 1];
-    loop {
-        stream.read_exact(&mut byte)?;
-        if byte[0] == b'\r' {
-            stream.read_exact(&mut byte)?;
-            if byte[0] != b'\n' {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "bad RESP CRLF"));
-            }
-            return Ok(out);
-        }
-        out.push(byte[0]);
-    }
-}
-
-fn read_expected_crlf(stream: &mut TcpStream) -> io::Result<()> {
-    let mut crlf = [0u8; 2];
-    stream.read_exact(&mut crlf)?;
-    if crlf == *b"\r\n" {
-        Ok(())
-    } else {
-        Err(io::Error::new(io::ErrorKind::InvalidData, "bad RESP CRLF"))
-    }
-}
-
-fn parse_i64_line(line: &[u8]) -> io::Result<i64> {
-    let s = std::str::from_utf8(line)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "non-UTF8 integer"))?;
-    s.parse::<i64>()
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid integer"))
 }
 
 /// `ROLE` — return this node's replication role.
@@ -1123,11 +915,15 @@ fn ascii_lower(b: u8) -> u8 {
 mod tests {
     use super::*;
     use redis_core::{
-        blocked_keys::blocked_keys_index, Client, PubSubRegistry, RedisDb, RedisServer,
+        blocked_keys::blocked_keys_index, Client, PubSubRegistry, RedisDb, RedisObject, RedisServer,
     };
     use redis_types::RedisString;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::{Duration as StdDuration, Instant};
 
     #[test]
     fn replicaof_no_one_returns_ok() {
@@ -1140,6 +936,99 @@ mod tests {
         let mut ctx = CommandContext::new(&mut c);
         replicaof_command(&mut ctx).unwrap();
         assert_eq!(c.drain_reply(), b"+OK\r\n");
+    }
+
+    #[test]
+    fn replicaof_does_not_preseed_from_primary() {
+        global_replication_state().become_master();
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind fake primary");
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = mpsc::channel();
+        let fake_primary = thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + StdDuration::from_millis(300);
+            loop {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = tx.send(true);
+                        let _ = stream.set_read_timeout(Some(StdDuration::from_millis(50)));
+                        let mut buf = [0u8; 1024];
+                        loop {
+                            match stream.read(&mut buf) {
+                                Ok(0) => return,
+                                Ok(n) => {
+                                    let frame = &buf[..n];
+                                    if frame.windows(6).any(|w| w.eq_ignore_ascii_case(b"SELECT")) {
+                                        let _ = stream.write_all(b"+OK\r\n");
+                                    } else if frame
+                                        .windows(4)
+                                        .any(|w| w.eq_ignore_ascii_case(b"KEYS"))
+                                    {
+                                        let _ = stream.write_all(b"*0\r\n");
+                                    } else {
+                                        let _ = stream
+                                            .write_all(b"-ERR unexpected fake primary command\r\n");
+                                    }
+                                }
+                                Err(e)
+                                    if matches!(
+                                        e.kind(),
+                                        std::io::ErrorKind::WouldBlock
+                                            | std::io::ErrorKind::TimedOut
+                                    ) =>
+                                {
+                                    return;
+                                }
+                                Err(_) => return,
+                            }
+                        }
+                    }
+                    Err(e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            && Instant::now() < deadline =>
+                    {
+                        thread::sleep(StdDuration::from_millis(10));
+                    }
+                    Err(_) => {
+                        let _ = tx.send(false);
+                        return;
+                    }
+                }
+            }
+        });
+
+        let mut db = RedisDb::new(0);
+        db.add(
+            RedisString::from_bytes(b"local"),
+            RedisObject::new_string(b"value"),
+        );
+        let mut c = Client::new(33);
+        c.set_args(vec![
+            RedisString::from_bytes(b"REPLICAOF"),
+            RedisString::from_bytes(b"127.0.0.1"),
+            RedisString::from_vec(port.to_string().into_bytes()),
+        ]);
+        let server = Arc::new(RedisServer::default());
+        let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
+        {
+            let mut ctx = CommandContext::with_server(&mut c, &mut db, server, pubsub);
+            replicaof_command(&mut ctx).unwrap();
+        }
+
+        let saw_preseed_connection = rx.recv_timeout(StdDuration::from_secs(1)).unwrap_or(false);
+        fake_primary.join().unwrap();
+        global_replication_state().become_master();
+
+        assert_eq!(c.drain_reply(), b"+OK\r\n");
+        assert!(
+            !saw_preseed_connection,
+            "REPLICAOF should let the PSYNC dialer own full sync instead of opening a KEYS/DUMP seed connection"
+        );
+        let local = db
+            .lookup_key_read(b"local")
+            .expect("local key should survive until RDB apply replaces keyspace");
+        assert_eq!(local.string_bytes().as_ref(), b"value");
     }
 
     #[test]

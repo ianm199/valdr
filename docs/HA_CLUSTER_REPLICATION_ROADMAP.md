@@ -227,7 +227,10 @@ Work packets:
 
 - **R2-RDB-BULK-FAITHFUL:** make the replica consume the primary's full-sync
   RDB payload as the source of truth. Retire or quarantine the current
-  `KEYS`/`DUMP` seed path so it cannot mask full-sync bugs.
+  `KEYS`/`DUMP` seed path so it cannot mask full-sync bugs. Shortcut removal
+  completed on 2026-06-13; the PSYNC dialer / runtime-owner RDB apply path is
+  now the only bootstrap path, but the broader full-sync integration gate is
+  still red until the diskless / BGSAVE-window cases are fixed.
 - **R2-BGSAVE-WINDOW:** implement the observable `wait_bgsave` / diskless
   sync-delay window without violating the safe-Rust architecture. If fork is
   still used on Unix, provide a non-Unix thread/job fallback with the same state
