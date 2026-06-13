@@ -7,6 +7,7 @@ should tackle after the single-node alpha.
 [`TEST_AND_FEATURE_COVERAGE.md`](TEST_AND_FEATURE_COVERAGE.md),
 [`REPL_OBSERVABILITY_OVERNIGHT_PLAN.md`](REPL_OBSERVABILITY_OVERNIGHT_PLAN.md),
 [`REPLICATION_INTEGRATION_DASHBOARD.md`](REPLICATION_INTEGRATION_DASHBOARD.md),
+[`SENTINEL_INVENTORY.md`](SENTINEL_INVENTORY.md),
 [`AOF_ENDGAME_SPEC.md`](AOF_ENDGAME_SPEC.md), and
 [`EDGE_WASM_COMMAND_ENGINE.md`](EDGE_WASM_COMMAND_ENGINE.md).
 
@@ -368,6 +369,9 @@ server failover primitive is green, because existing clients understand
 Sentinel discovery.
 
 ### H1: Sentinel Command Inventory
+
+**Status:** completed on 2026-06-13. See
+[`SENTINEL_INVENTORY.md`](SENTINEL_INVENTORY.md).
 
 Work:
 

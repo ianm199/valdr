@@ -89,6 +89,24 @@ denominators, not runtime assertion counts.
 | `unclassified` | 2 | 0 | No product source blocks |
 | **Total** | **247** | **4,281** | |
 
+### Sentinel Sub-Buckets
+
+`sentinel_later` is split in
+[`SENTINEL_INVENTORY.md`](SENTINEL_INVENTORY.md) so future HA work can move
+one lane at a time without implying full Sentinel support.
+
+| Sentinel lane | Files | Source tests |
+|---|---:|---:|
+| Discovery and read-only introspection | 2 | 23 |
+| Deprecated command aliases | 1 | 4 |
+| Config and rewrite | 4 | 20 |
+| Replica topology reconfiguration | 2 | 10 |
+| Quorum and down detection | 4 | 12 |
+| Manual failover and selection | 4 | 19 |
+| Auth, ACL, and debug | 2 | 4 |
+| Harness/includes | 5 | 8 |
+| **Total** | **24** | **100** |
+
 ## Known Non-Blockers
 
 | Surface | Classification | Evidence |
