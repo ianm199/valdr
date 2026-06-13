@@ -75,7 +75,8 @@ Current red/unfinished areas from the 2026-06-13 R0 dashboard in
   15/2. The command-propagation rewrite cases are cleared, but
   expiration/PFCOUNT semantics and divergence/writable-replica cases still need
   work.
-- `replication-psync` still times out in the current full dashboard.
+- `replication-psync` now completes with 86/4 in the focused gate; delayed
+  reconnect variants still miss `sync_partial_ok`.
 - `replication-aof-sync` is green as of 2026-06-13 after full-sync RDB loads
   refresh appendonly manifests correctly.
 - `replica-redirect.tcl` needs real `FAILOVER` plus client redirect semantics.
@@ -300,8 +301,11 @@ Work packets:
   same-primary reconnect state while preventing stale PSYNC attempts against a
   new target. `psync_reconnect_kit.rs` now drives the live `psync_command`
   entrypoint for same-primary continue, backlog-expired fallback, wrong replid,
-  future offset, and fresh full-sync metrics. Live dialer/reconnect validation
-  remains behind `integration/replication-psync`.
+  future offset, and fresh full-sync metrics. A follow-up 2026-06-13 slice made
+  `CLIENT KILL <primary-addr>` on replicas request a dialer reconnect, moving
+  `integration/replication-psync` from timeout to a counted 86/4 result. The
+  remaining live frontier is delayed reconnects that still miss
+  `sync_partial_ok`.
 - **R3-METRICS:** keep `sync_full`, `sync_partial_ok`, `sync_partial_err`,
   master/replica offsets, lag, and backlog histlen faithful in `INFO`.
 

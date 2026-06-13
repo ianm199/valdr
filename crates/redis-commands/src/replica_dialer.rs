@@ -14,7 +14,7 @@
 //! exits immediately.
 
 use std::io::{self, Read, Write};
-use std::net::TcpStream;
+use std::net::{Shutdown, TcpStream};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, OnceLock};
@@ -208,6 +208,10 @@ fn run_replica_sink_loop(stream: &TcpStream, repl: &ReplicationState, dialer_epo
     let mut tmp = [0u8; 8192];
     loop {
         if !repl.dialer_epoch_is_current(dialer_epoch) {
+            return;
+        }
+        if repl.take_replica_link_drop_request() {
+            let _ = stream.shutdown(Shutdown::Both);
             return;
         }
         let n = match stream_read(stream, &mut tmp) {

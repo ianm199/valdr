@@ -12,7 +12,10 @@ use redis_core::replication::{
     global_replication_state, ReplicationState, DEFAULT_REPL_BACKLOG_SIZE,
 };
 use redis_core::{Client, PubSubRegistry, RedisDb, RedisServer};
+use redis_protocol::frame::{encode_resp2, RespFrame};
 use redis_types::RedisString;
+
+use redis_commands::dispatch::dispatch;
 
 fn psync_guard() -> MutexGuard<'static, ()> {
     static PSYNC_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
@@ -79,6 +82,23 @@ fn drive_psync(client_id: u64, args: Vec<Vec<u8>>) -> PsyncDrive {
         counters_before,
         counters_after,
     }
+}
+
+fn run_dispatch(client: &mut Client, db: &mut RedisDb, cmd: &[&[u8]]) -> Vec<u8> {
+    client.set_args(cmd.iter().map(|p| RedisString::from_bytes(p)).collect());
+    let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
+    let server = Arc::new(RedisServer::default());
+    let result = {
+        let mut ctx = redis_core::CommandContext::with_server(client, db, server, pubsub);
+        dispatch(&mut ctx)
+    };
+    let mut reply = client.drain_reply();
+    if let Err(err) = result {
+        if reply.is_empty() {
+            encode_resp2(&RespFrame::Error(err.to_resp_payload()), &mut reply);
+        }
+    }
+    reply
 }
 
 fn cleanup_repl_bgsave(repl: &Arc<ReplicationState>) {
@@ -226,14 +246,56 @@ fn target_change_clears_cached_reconnect_state_but_same_target_preserves_it() {
 
     let cached = [b'd'; 40];
     st.set_cached_primary_replid(cached);
-    st.master_repl_offset
-        .store(1234, std::sync::atomic::Ordering::Relaxed);
+    st.append_to_backlog(&resp(&[b"SET", b"old-primary", b"1"]));
+    let preserved_offset = st.master_offset();
 
     st.become_replica_of(arg(b"127.0.0.1"), 6379);
     assert_eq!(st.cached_primary_replid(), Some(cached));
-    assert_eq!(st.master_offset(), 1234);
+    assert_eq!(st.master_offset(), preserved_offset);
 
     st.become_replica_of(arg(b"127.0.0.2"), 6379);
     assert_eq!(st.cached_primary_replid(), None);
     assert_eq!(st.master_offset(), 0);
+    assert_eq!(
+        st.backlog_snapshot().2,
+        0,
+        "retargeting to a different primary must discard old backlog bytes"
+    );
+}
+
+#[test]
+fn client_kill_primary_addr_requests_replica_dialer_reconnect() {
+    let _g = psync_guard();
+    let repl = global_replication_state();
+    repl.become_master();
+    repl.become_replica_of(arg(b"127.0.0.1"), 6399);
+    assert!(!repl.take_replica_link_drop_request());
+
+    let mut client = Client::new(1_100_006);
+    client.addr = Some("127.0.0.1:55000".to_string());
+    let mut db = RedisDb::new(0);
+    let reply = run_dispatch(
+        &mut client,
+        &mut db,
+        &[b"CLIENT", b"KILL", b"127.0.0.1:6399"],
+    );
+
+    assert_eq!(reply, b"+OK\r\n");
+    assert!(
+        repl.take_replica_link_drop_request(),
+        "CLIENT KILL primary address should ask the dialer to reconnect"
+    );
+
+    let reply = run_dispatch(
+        &mut client,
+        &mut db,
+        &[b"CLIENT", b"KILL", b"127.0.0.1:6400"],
+    );
+    assert!(
+        String::from_utf8_lossy(&reply).contains("ERR No such client"),
+        "unmatched old-style CLIENT KILL should still report no client, got {:?}",
+        String::from_utf8_lossy(&reply)
+    );
+    assert!(!repl.take_replica_link_drop_request());
+    repl.become_master();
 }

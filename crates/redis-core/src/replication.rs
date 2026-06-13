@@ -435,6 +435,11 @@ pub struct ReplicationState {
     /// Set to `true` by `REPLICAOF NO ONE` to signal the running dialer thread
     /// to exit its reconnection loop immediately.
     pub dialer_stop_flag: AtomicBool,
+    /// Set by `CLIENT KILL <primary-addr>` on a replica. The outbound primary
+    /// connection is owned by the replica dialer rather than the runtime client
+    /// table, so CLIENT KILL asks the dialer to drop the current stream and loop
+    /// back through PSYNC.
+    pub replica_link_drop_requested: AtomicBool,
     /// Monotonic generation for replica-side dialer threads.
     /// `REPLICAOF <host> <port>` can retarget an already-running replica.
     /// A boolean stop flag is insufficient because the new dialer clears it
@@ -484,6 +489,7 @@ impl ReplicationState {
             retained_history: Mutex::new(Vec::new()),
             selected_db: AtomicI32::new(-1),
             dialer_stop_flag: AtomicBool::new(false),
+            replica_link_drop_requested: AtomicBool::new(false),
             dialer_epoch: AtomicU64::new(0),
             stat_sync_full: AtomicU64::new(0),
             stat_sync_partial_ok: AtomicU64::new(0),
@@ -556,6 +562,22 @@ impl ReplicationState {
         self.append_to_repl_bgsave_catchup(bytes);
         self.master_repl_offset.store(new_offset, Ordering::Relaxed);
         new_offset
+    }
+
+    fn clear_replication_history(&self) {
+        let size = match self.backlog.lock() {
+            Ok(g) => g.size,
+            Err(p) => p.into_inner().size,
+        };
+        match self.backlog.lock() {
+            Ok(mut g) => *g = ReplBacklog::new(size),
+            Err(p) => *p.into_inner() = ReplBacklog::new(size),
+        }
+        match self.retained_history.lock() {
+            Ok(mut g) => g.clear(),
+            Err(p) => p.into_inner().clear(),
+        }
+        self.master_repl_offset.store(0, Ordering::Relaxed);
     }
 
     fn append_to_repl_bgsave_catchup(&self, bytes: &[u8]) {
@@ -1113,6 +1135,8 @@ impl ReplicationState {
         self.abort_manual_failover();
         self.dialer_epoch.fetch_add(1, Ordering::SeqCst);
         self.dialer_stop_flag.store(true, Ordering::SeqCst);
+        self.replica_link_drop_requested
+            .store(false, Ordering::SeqCst);
         match self.replica_of.lock() {
             Ok(mut g) => *g = None,
             Err(p) => *p.into_inner() = None,
@@ -1144,6 +1168,8 @@ impl ReplicationState {
             .fetch_add(1, Ordering::SeqCst)
             .saturating_add(1);
         self.dialer_stop_flag.store(false, Ordering::SeqCst);
+        self.replica_link_drop_requested
+            .store(false, Ordering::SeqCst);
         let target_changed = match self.replica_of.lock() {
             Ok(mut g) => {
                 let changed = g
@@ -1166,7 +1192,7 @@ impl ReplicationState {
                 Ok(mut g) => *g = None,
                 Err(p) => *p.into_inner() = None,
             }
-            self.master_repl_offset.store(0, Ordering::Relaxed);
+            self.clear_replication_history();
         }
         self.repl_state
             .store(repl_state_code::REPLICA_CONNECTING, Ordering::Relaxed);
@@ -1175,12 +1201,24 @@ impl ReplicationState {
         epoch
     }
 
+    pub fn request_replica_link_drop(&self) {
+        self.replica_link_drop_requested
+            .store(true, Ordering::SeqCst);
+    }
+
+    pub fn take_replica_link_drop_request(&self) -> bool {
+        self.replica_link_drop_requested
+            .swap(false, Ordering::SeqCst)
+    }
+
     fn become_replica_of_for_failover(&self, host: RedisString, port: u16) -> u64 {
         let epoch = self
             .dialer_epoch
             .fetch_add(1, Ordering::SeqCst)
             .saturating_add(1);
         self.dialer_stop_flag.store(false, Ordering::SeqCst);
+        self.replica_link_drop_requested
+            .store(false, Ordering::SeqCst);
         match self.replica_of.lock() {
             Ok(mut g) => *g = Some((host, port)),
             Err(p) => *p.into_inner() = Some((host, port)),

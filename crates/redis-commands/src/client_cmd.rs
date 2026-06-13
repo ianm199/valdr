@@ -1295,7 +1295,9 @@ pub fn client_kill_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if !victim_ids.contains(&current_id) {
         kill_self = false;
     }
-    let mut killed = victim_ids.len() as i64;
+    let killed_replica_link = victim_ids.is_empty()
+        && maybe_request_replica_link_drop_for_kill(&filters);
+    let mut killed = victim_ids.len() as i64 + i64::from(killed_replica_link);
     if !old_style && client_kill_only_skipme_filter(&filters) {
         let connected = snapshots.len().min(i64::MAX as usize) as i64;
         killed = if filters.skipme == Some(true) {
@@ -1330,6 +1332,28 @@ pub fn client_kill_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         ctx.client_mut().should_close = true;
     }
     Ok(())
+}
+
+fn maybe_request_replica_link_drop_for_kill(filters: &ClientListFilters) -> bool {
+    let Some(addr) = filters.addr.as_deref() else {
+        return false;
+    };
+    let repl = redis_core::replication::global_replication_state();
+    if !repl.is_replica() {
+        return false;
+    }
+    let Some((host, port)) = repl.replica_of_target() else {
+        return false;
+    };
+    let mut expected = Vec::with_capacity(host.as_bytes().len() + 8);
+    expected.extend_from_slice(host.as_bytes());
+    expected.push(b':');
+    expected.extend_from_slice(port.to_string().as_bytes());
+    if addr != expected.as_slice() {
+        return false;
+    }
+    repl.request_replica_link_drop();
+    true
 }
 
 pub fn client_tracking_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
