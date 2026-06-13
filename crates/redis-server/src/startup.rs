@@ -24,6 +24,7 @@ use rustls::StreamOwned;
 use redis_commands::connection::get_max_clients;
 use redis_commands::{dispatch, pubsub};
 use redis_core::blocked_keys::{blocked_keys_index, blocked_replication_wait_any, current_time_ms};
+use redis_core::client::ReplicaReplyViolation;
 use redis_core::client_info::client_info_registry;
 use redis_core::command_context::CommandContext;
 use redis_core::databases::global_databases;
@@ -1464,6 +1465,7 @@ pub(crate) fn process_current_command_with_db(
         encode_resp2(&RespFrame::Error(payload), &mut client.reply_buf);
     }
     client.finish_command_reply(reply_start);
+    disconnect_replica_if_reply_generated(client, reply_start);
     if !client.blocked_on_keys {
         client.commands_processed = client.commands_processed.saturating_add(1);
     }
@@ -1523,10 +1525,49 @@ pub(crate) fn process_current_command_with_db_list(
         encode_resp2(&RespFrame::Error(payload), &mut client.reply_buf);
     }
     client.finish_command_reply(reply_start);
+    disconnect_replica_if_reply_generated(client, reply_start);
     if !client.blocked_on_keys {
         client.commands_processed = client.commands_processed.saturating_add(1);
     }
     client.reset_args();
+}
+
+fn disconnect_replica_if_reply_generated(client: &mut Client, reply_start: usize) {
+    let Some(violation) = client.take_replica_reply_violation_since(reply_start) else {
+        return;
+    };
+    log_replica_reply_violation(&violation);
+    client.should_close = true;
+}
+
+fn log_replica_reply_violation(violation: &ReplicaReplyViolation) {
+    let command = String::from_utf8_lossy(&violation.command);
+    let reply = resp_log_preview(&violation.reply);
+    println!(
+        "redis-server: Replica generated a reply to command '{}', disconnecting it: {}",
+        command, reply
+    );
+    if violation.is_error {
+        println!(
+            "redis-server: == CRITICAL == This primary is sending an error to its replica: {}",
+            reply
+        );
+    }
+    let _ = io::stdout().flush();
+}
+
+fn resp_log_preview(reply: &[u8]) -> String {
+    const MAX_LOG_REPLY: usize = 160;
+    let line_end = reply
+        .iter()
+        .position(|b| *b == b'\r' || *b == b'\n')
+        .unwrap_or(reply.len());
+    let mut line = reply[..line_end].to_vec();
+    if line.len() > MAX_LOG_REPLY {
+        line.truncate(MAX_LOG_REPLY);
+        line.extend_from_slice(b"...");
+    }
+    String::from_utf8_lossy(&line).into_owned()
 }
 
 pub(crate) fn lock_redis_db(db: &Arc<Mutex<RedisDb>>) -> MutexGuard<'_, RedisDb> {

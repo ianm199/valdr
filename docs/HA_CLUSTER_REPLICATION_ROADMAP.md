@@ -297,8 +297,15 @@ Work packets:
   replicas disconnect, made owner-loop and socket-loop cleanup signal useless
   replication BGSAVE children when `save` is disabled, and made replica-side
   full-sync RDB reads interruptible on `REPLICAOF NO ONE`. The focused Tcl
-  gate dropped the no-longer-useful child failure and now times out with 36
-  parsed failure lines.
+  gate dropped the no-longer-useful child failure. The next replica-link guard
+  slice made replica-link replies an explicit `Client` invariant, logs and
+  closes links that generate replies after `SYNC` / `PSYNC`, and turns
+  disallowed keyspace interaction into the expected critical error path. The
+  focused `integration/replication` gate now completes without timeout at
+  28/39, and all four `replica do not write the reply to the replication link`
+  assertions are gone. Remaining R2 work is still full-sync/diskless
+  correctness: old-data rollback, async-load exposure, DB-size drift, diskless
+  pipe/drop logs, cache-master replacement, and offset convergence.
 - **R2-BUFFER-LIMITS:** implement replica output-buffer accounting and
   disconnection policy well enough for `replication-buffer` to count tests
   instead of dying in setup. Partial accounting surface landed on 2026-06-13:

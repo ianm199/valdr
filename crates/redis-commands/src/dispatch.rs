@@ -418,7 +418,9 @@ pub fn dispatch(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         && !ctx.client_ref().replication_apply
         && !is_replica_allowed_command(name)
     {
-        return Ok(());
+        return Err(RedisError::runtime(
+            b"ERR Replica can't interact with the keyspace",
+        ));
     }
     let resolved_name = resolve_command_name(name);
     let dispatch_name = resolved_name.as_deref().unwrap_or(name);

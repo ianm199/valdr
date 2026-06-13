@@ -19,6 +19,7 @@ use redis_core::replication::{
     generate_runid, ReplBgsaveJob, ReplicaConn, ReplicaState, ReplicationState,
 };
 use redis_core::{Client, ClientId, PubSubRegistry, RedisServer};
+use redis_protocol::frame::{encode_resp2, RespFrame};
 use redis_types::RedisString;
 
 fn unique_temp_dir(name: &str) -> PathBuf {
@@ -139,6 +140,63 @@ fn fcall_reply(server: Arc<RedisServer>, db: &mut RedisDb, client_id: ClientId) 
     let mut client = Client::new(client_id);
     client.authenticated_user = Some(RedisString::from_static(b"default"));
     run_dispatch_with_server(&mut client, db, server, &[b"FCALL", b"fullsync_swap", b"0"])
+}
+
+fn dispatch_replica_link_command(client: &mut Client, db: &mut RedisDb, parts: &[&[u8]]) {
+    let reply_start = client.reply_buf.len();
+    client.is_replica = true;
+    client.set_args(parts.iter().map(|p| RedisString::from_bytes(p)).collect());
+    let server = Arc::new(RedisServer::default());
+    let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
+    let result = {
+        let mut ctx = redis_core::CommandContext::with_server(client, db, server, pubsub);
+        dispatch(&mut ctx)
+    };
+    if let Err(err) = result {
+        let payload = err.to_resp_payload();
+        encode_resp2(&RespFrame::Error(payload), &mut client.reply_buf);
+    }
+    client.finish_command_reply(reply_start);
+}
+
+#[test]
+fn replica_link_replies_are_protocol_violations() {
+    let _guard = global_repl_guard();
+    let mut db = RedisDb::new(0);
+
+    let mut ping = Client::new(9_301);
+    dispatch_replica_link_command(&mut ping, &mut db, &[b"PING"]);
+    let violation = ping
+        .take_replica_reply_violation_since(0)
+        .expect("replica PING reply should be a link violation");
+    assert_eq!(violation.command, b"ping");
+    assert_eq!(violation.reply, b"+PONG\r\n");
+    assert!(!violation.is_error);
+    assert!(ping.reply_buf.is_empty());
+
+    let mut get = Client::new(9_302);
+    dispatch_replica_link_command(&mut get, &mut db, &[b"GET", b"k"]);
+    let violation = get
+        .take_replica_reply_violation_since(0)
+        .expect("replica keyspace error should be a link violation");
+    assert_eq!(violation.command, b"get");
+    assert!(violation.is_error);
+    assert!(
+        violation
+            .reply
+            .windows(b"Replica can't interact with the keyspace".len())
+            .any(|w| w == b"Replica can't interact with the keyspace"),
+        "unexpected reply: {:?}",
+        String::from_utf8_lossy(&violation.reply)
+    );
+
+    let mut slowlog = Client::new(9_303);
+    dispatch_replica_link_command(&mut slowlog, &mut db, &[b"SLOWLOG", b"GET"]);
+    let violation = slowlog
+        .take_replica_reply_violation_since(0)
+        .expect("replica slowlog error should be a link violation");
+    assert_eq!(violation.command, b"slowlog|get");
+    assert!(violation.is_error);
 }
 
 #[test]

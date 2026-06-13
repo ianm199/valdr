@@ -62,52 +62,52 @@ fn append_decimal_i64(buf: &mut Vec<u8>, n: i64) {
 /// `multi.rs` ("MultiState and MultiCmd belong in redis-core/src/client.rs").
 /// Concrete shape preserved from the salvaged Phase A definition.
 pub struct MultiCmd {
- /// Positional arguments (argv[0] is the command name object).
+    /// Positional arguments (argv[0] is the command name object).
     pub argv: Vec<RedisObject>,
- /// Length in bytes of all argument strings combined.
+    /// Length in bytes of all argument strings combined.
     pub argv_len: i32,
- /// Number of arguments.
+    /// Number of arguments.
     pub argc: i32,
- /// Handler for this command (placeholder type).
+    /// Handler for this command (placeholder type).
     pub cmd: Option<CommandFn>,
- /// Cluster slot (−1 when clustering is disabled).
+    /// Cluster slot (−1 when clustering is disabled).
     pub slot: i32,
 }
 
 /// A single watched-key record, owned by `MultiState::watched_keys`.
 /// PORT NOTE: migrated from `redis-commands::multi`.
 pub struct WatchedKey {
- /// The watched key object.
+    /// The watched key object.
     pub key: RedisObject,
- /// Which database this watch is on.
+    /// Which database this watch is on.
     pub db_id: i32,
- /// True if the key was already expired when `watchForKey` was called.
+    /// True if the key was already expired when `watchForKey` was called.
     pub expired: bool,
 }
 
 /// Per-client MULTI/EXEC transaction state.
 /// PORT NOTE: migrated from `redis-commands::multi` per the architect TODO.
 pub struct MultiState {
- /// Queued commands.
+    /// Queued commands.
     pub commands: Vec<MultiCmd>,
- /// OR of all queued command flags.
+    /// OR of all queued command flags.
     pub cmd_flags: u64,
- /// OR of `~flags` for each queued command.
+    /// OR of `~flags` for each queued command.
     pub cmd_inv_flags: u64,
- /// Total argv byte-size across all queued commands.
+    /// Total argv byte-size across all queued commands.
     pub argv_len_sums: usize,
- /// Allocated capacity (mirrors C `alloc_count`).
+    /// Allocated capacity (mirrors C `alloc_count`).
     pub alloc_count: i32,
- /// Keys being watched for CAS semantics (client-side list).
+    /// Keys being watched for CAS semantics (client-side list).
     pub watched_keys: Vec<WatchedKey>,
- /// Per-db O(1) membership check: `db_id → set of watched key bytes`.
+    /// Per-db O(1) membership check: `db_id → set of watched key bytes`.
     pub watched_keys_by_db: HashMap<i32, HashSet<RedisString>>,
- /// The db id selected (via SELECT) inside this transaction.
+    /// The db id selected (via SELECT) inside this transaction.
     pub transaction_db_id: i32,
 }
 
 impl MultiState {
- /// Create a fresh `MultiState` for `db_id`.
+    /// Create a fresh `MultiState` for `db_id`.
     pub fn new(db_id: i32) -> Self {
         MultiState {
             commands: Vec::new(),
@@ -123,152 +123,159 @@ impl MultiState {
 }
 
 pub struct Client {
- /// Server-assigned client identifier (CLIENT ID).
+    /// Server-assigned client identifier (CLIENT ID).
     pub id: ClientId,
- /// Parsed args of the current command (cleared per command).
+    /// Parsed args of the current command (cleared per command).
     pub argv: Vec<RedisString>,
- /// Private parser scratch used to reuse argument allocations between
- /// commands while keeping `argv` logically empty after dispatch.
+    /// Private parser scratch used to reuse argument allocations between
+    /// commands while keeping `argv` logically empty after dispatch.
     argv_scratch: Vec<RedisString>,
- /// Pending reply bytes, drained by the I/O layer.
+    /// Pending reply bytes, drained by the I/O layer.
     pub reply_buf: Vec<u8>,
- /// Ranges in `reply_buf` that are Pub/Sub push replies from the current
- /// command and must bypass CLIENT REPLY OFF/SKIP.
+    /// Ranges in `reply_buf` that are Pub/Sub push replies from the current
+    /// command and must bypass CLIENT REPLY OFF/SKIP.
     push_reply_segments: Vec<(usize, usize)>,
- /// Tracking push frames deferred while an inner execution context is
- /// building a transaction or script reply.
+    /// Tracking push frames deferred while an inner execution context is
+    /// building a transaction or script reply.
     pending_tracking_pushes: Vec<RespFrame>,
- /// Selected database index (Phase 3 with RedisDb).
+    /// Selected database index (Phase 3 with RedisDb).
     pub db_index: u32,
- /// MULTI/EXEC transaction state (lazily initialised; `None` when the client
- /// is not in a transaction).
+    /// MULTI/EXEC transaction state (lazily initialised; `None` when the client
+    /// is not in a transaction).
     pub mstate: Option<Box<MultiState>>,
- /// Raw `argv` of each command queued inside a MULTI block.
- /// PORT NOTE: complements `mstate.commands` (which uses `RedisObject` /
- /// command-function-pointer shape from the salvaged C port). The Round 8b
- /// dispatch-level integration re-routes queued bytes through the same
- /// dispatcher used for non-MULTI commands, so it operates on raw
- /// `RedisString` argv vectors here.
+    /// Raw `argv` of each command queued inside a MULTI block.
+    /// PORT NOTE: complements `mstate.commands` (which uses `RedisObject` /
+    /// command-function-pointer shape from the salvaged C port). The Round 8b
+    /// dispatch-level integration re-routes queued bytes through the same
+    /// dispatcher used for non-MULTI commands, so it operates on raw
+    /// `RedisString` argv vectors here.
     pub queued_argvs: Vec<Vec<RedisString>>,
- /// Cluster slot for the current command (`-1` when clustering disabled).
- /// STUB — Phase B placeholder.
+    /// Cluster slot for the current command (`-1` when clustering disabled).
+    /// STUB — Phase B placeholder.
     pub slot: i32,
- /// Bitfield of per-client flags.
- /// STUB — Phase B placeholder. C: `clientFlags flag` bitfield.
+    /// Bitfield of per-client flags.
+    /// STUB — Phase B placeholder. C: `clientFlags flag` bitfield.
     pub flags: ClientFlags,
- /// Live transport for this client.
- /// `None` for pre-handshake clients, AOF/RDB pseudo-clients, and unit
- /// tests; `Some` for real network clients accepted by the event loop.
+    /// Live transport for this client.
+    /// `None` for pre-handshake clients, AOF/RDB pseudo-clients, and unit
+    /// tests; `Some` for real network clients accepted by the event loop.
     pub conn: Option<Connection>,
- /// Partial read buffer; bytes accumulated by the I/O layer between command
- /// boundaries.
- /// STUB — Phase B placeholder. The Wave A event loop owns this directly;
- /// later phases will move it onto Client for compatibility with the C
- /// `c->querybuf` field.
+    /// Partial read buffer; bytes accumulated by the I/O layer between command
+    /// boundaries.
+    /// STUB — Phase B placeholder. The Wave A event loop owns this directly;
+    /// later phases will move it onto Client for compatibility with the C
+    /// `c->querybuf` field.
     pub query_buf: Vec<u8>,
- /// Optional client name set via `CLIENT SETNAME`.
- /// `None` until the client invokes `CLIENT SETNAME`; cleared by `RESET`.
- /// Real Redis stores this as a byte string; arbitrary bytes are allowed
- /// except whitespace and special characters (validated at the setter).
+    /// Optional client name set via `CLIENT SETNAME`.
+    /// `None` until the client invokes `CLIENT SETNAME`; cleared by `RESET`.
+    /// Real Redis stores this as a byte string; arbitrary bytes are allowed
+    /// except whitespace and special characters (validated at the setter).
     pub name: Option<RedisString>,
- /// Connection-tear-down request flag (set by `QUIT`).
- /// The accept loop checks this after each dispatched command, flushes
- /// pending reply, and closes the socket when `true`.
+    /// Connection-tear-down request flag (set by `QUIT`).
+    /// The accept loop checks this after each dispatched command, flushes
+    /// pending reply, and closes the socket when `true`.
     pub should_close: bool,
- /// Peer address recorded at accept time (e.g. `"127.0.0.1:54231"`).
- /// Used by `CLIENT LIST` to fill the `addr=` field. `None` for clients
- /// that have no live transport (unit tests, pseudo-clients).
+    /// Peer address recorded at accept time (e.g. `"127.0.0.1:54231"`).
+    /// Used by `CLIENT LIST` to fill the `addr=` field. `None` for clients
+    /// that have no live transport (unit tests, pseudo-clients).
     pub addr: Option<String>,
- /// RESP protocol version negotiated by `HELLO` (2 or 3).
- /// Defaults to 2 (the version implied by every legacy RESP2 client).
+    /// RESP protocol version negotiated by `HELLO` (2 or 3).
+    /// Defaults to 2 (the version implied by every legacy RESP2 client).
     /// RESP3 upgrade path is a TODO.
     pub resp_proto: i32,
- /// CLIENT TRACKING visible state.
- /// This intentionally records only the per-client flags needed by CLIENT
- /// subcommands and diagnostics. The global invalidation table remains a
- /// separate architectural packet.
+    /// CLIENT TRACKING visible state.
+    /// This intentionally records only the per-client flags needed by CLIENT
+    /// subcommands and diagnostics. The global invalidation table remains a
+    /// separate architectural packet.
     pub tracking: ClientTrackingState,
- /// True after `CLIENT IMPORT-SOURCE ON`.
+    /// True after `CLIENT IMPORT-SOURCE ON`.
     pub import_source: bool,
- /// Set by a command handler when the current command had no effect on
- /// dataset and must therefore not be propagated to replicas or the AOF.
- /// Mirrors C's `CLIENT_PREVENT_PROP`. Reset at the top of `dispatch` for
- /// every command. A no-op write (e.g. `EXPIRE` on a missing key, `SET NX`
- /// that did not store) sets this so it does not leak into the replication
- /// stream, which `assert_replication_stream` asserts on exactly.
+    /// Set by a command handler when the current command had no effect on
+    /// dataset and must therefore not be propagated to replicas or the AOF.
+    /// Mirrors C's `CLIENT_PREVENT_PROP`. Reset at the top of `dispatch` for
+    /// every command. A no-op write (e.g. `EXPIRE` on a missing key, `SET NX`
+    /// that did not store) sets this so it does not leak into the replication
+    /// stream, which `assert_replication_stream` asserts on exactly.
     pub prevent_propagation: bool,
- /// The ACL username this client is authenticated as.
- /// `None` means the client has not yet authenticated (pre-AUTH state).
- /// `Some(name)` means the client has successfully authenticated as that
- /// user. The default user (`default on nopass`) grants immediate access on
- /// connect without requiring AUTH; the accept loop sets this
- /// `Some("default")` when the default user is enabled and has `nopass`.
- /// Authentication state persists across RESET (real Redis behaviour).
+    /// The ACL username this client is authenticated as.
+    /// `None` means the client has not yet authenticated (pre-AUTH state).
+    /// `Some(name)` means the client has successfully authenticated as that
+    /// user. The default user (`default on nopass`) grants immediate access on
+    /// connect without requiring AUTH; the accept loop sets this
+    /// `Some("default")` when the default user is enabled and has `nopass`.
+    /// Authentication state persists across RESET (real Redis behaviour).
     pub authenticated_user: Option<RedisString>,
- /// True after this connection has authenticated at least once.
- /// C Redis marks once-authenticated clients exempt from the tiny pre-AUTH
- /// output-buffer cap even after RESET drops them back into NOAUTH state.
+    /// True after this connection has authenticated at least once.
+    /// C Redis marks once-authenticated clients exempt from the tiny pre-AUTH
+    /// output-buffer cap even after RESET drops them back into NOAUTH state.
     pub ever_authenticated: bool,
- /// Channels this client is subscribed.
- /// Round 8a per-client pub/sub bookkeeping; mirrors the channel half
- /// `PubSubRegistry` so the read loop can tell when the client is
- /// subscribe mode without consulting the global lock.
+    /// Channels this client is subscribed.
+    /// Round 8a per-client pub/sub bookkeeping; mirrors the channel half
+    /// `PubSubRegistry` so the read loop can tell when the client is
+    /// subscribe mode without consulting the global lock.
     pub subscribed_channels: HashSet<RedisString>,
- /// Glob patterns this client is subscribed.
+    /// Glob patterns this client is subscribed.
     pub subscribed_patterns: HashSet<RedisString>,
- /// Shard channels this client is subscribed.
+    /// Shard channels this client is subscribed.
     pub subscribed_shard_channels: HashSet<RedisString>,
- /// True while the client is parked inside the global `BlockedKeysIndex`
- /// from a BLPOP / BRPOP / BLMOVE / BRPOPLPUSH / BLMPOP call.
- /// Set by the blocking command handler immediately before it returns
- /// without writing a reply; cleared by the wake hook in the LIST push
- /// path or the per-server timeout thread when those deliver the reply
- /// via the client's outbound mpsc.
+    /// True while the client is parked inside the global `BlockedKeysIndex`
+    /// from a BLPOP / BRPOP / BLMOVE / BRPOPLPUSH / BLMPOP call.
+    /// Set by the blocking command handler immediately before it returns
+    /// without writing a reply; cleared by the wake hook in the LIST push
+    /// path or the per-server timeout thread when those deliver the reply
+    /// via the client's outbound mpsc.
     pub blocked_on_keys: bool,
- /// Keys that need blocked-waiter wakes deferred until after EXEC drains.
- /// Populated by list push/move commands when `flag_deny_blocking` is set
- /// (i.e. the command is running inside an EXEC drain). After the drain
- /// completes and `flag_deny_blocking` is cleared, `exec_command` takes
- /// this vec and fires the real `wake_blocked_for_key` for each entry
- /// insertion order.
+    /// Keys that need blocked-waiter wakes deferred until after EXEC drains.
+    /// Populated by list push/move commands when `flag_deny_blocking` is set
+    /// (i.e. the command is running inside an EXEC drain). After the drain
+    /// completes and `flag_deny_blocking` is cleared, `exec_command` takes
+    /// this vec and fires the real `wake_blocked_for_key` for each entry
+    /// insertion order.
     pub pending_wakes: Vec<RedisString>,
- /// True once this client has completed the PSYNC handshake on the master
- /// side and is treated as a replica.
- /// When set, the dispatch path stops handing the client's argv
- /// command handlers (replicas do not issue commands to the master);
- /// reader thread keeps draining for REPLCONF ACK frames, which Wave B
- /// will parse. The flag is cleared on disconnect via the standard
- /// cleanup path.
+    /// True once this client has completed the PSYNC handshake on the master
+    /// side and is treated as a replica.
+    /// When set, the dispatch path stops handing the client's argv
+    /// command handlers (replicas do not issue commands to the master);
+    /// reader thread keeps draining for REPLCONF ACK frames, which Wave B
+    /// will parse. The flag is cleared on disconnect via the standard
+    /// cleanup path.
     pub is_replica: bool,
- /// True for the short-lived pseudo-client that applies commands received
- /// from an upstream primary's replication stream.
- /// This is deliberately separate from `is_replica`: `is_replica` means "a
- /// downstream replica connection to this server" and is allowed to send only
- /// REPLCONF/PING/QUIT. `replication_apply` means "execute the master's
- /// write locally without re-propagating or tripping replica read-only."
+    /// True for the short-lived pseudo-client that applies commands received
+    /// from an upstream primary's replication stream.
+    /// This is deliberately separate from `is_replica`: `is_replica` means "a
+    /// downstream replica connection to this server" and is allowed to send only
+    /// REPLCONF/PING/QUIT. `replication_apply` means "execute the master's
+    /// write locally without re-propagating or tripping replica read-only."
     pub replication_apply: bool,
- /// Replication offset after this client's last write was fed to replicas.
- /// Upstream stores this as `client.woff` and WAIT/WAITAOF wait for that
- /// client-specific offset, not the process-global latest replication
- /// offset. That distinction matters when a client calls WAIT without
- /// writing, while other clients continue to advance the stream.
+    /// Replication offset after this client's last write was fed to replicas.
+    /// Upstream stores this as `client.woff` and WAIT/WAITAOF wait for that
+    /// client-specific offset, not the process-global latest replication
+    /// offset. That distinction matters when a client calls WAIT without
+    /// writing, while other clients continue to advance the stream.
     pub last_write_repl_offset: i64,
- /// CLIENT CAPA REDIRECT visible capability bit.
+    /// CLIENT CAPA REDIRECT visible capability bit.
     pub capa_redirect: bool,
- /// Optional client library name set via `CLIENT SETINFO lib-name`.
+    /// Optional client library name set via `CLIENT SETINFO lib-name`.
     pub lib_name: Option<RedisString>,
- /// Optional client library version set via `CLIENT SETINFO lib-ver`.
+    /// Optional client library version set via `CLIENT SETINFO lib-ver`.
     pub lib_ver: Option<RedisString>,
- /// Bytes read from this client connection.
+    /// Bytes read from this client connection.
     pub net_input_bytes: u64,
- /// Bytes written to this client connection.
+    /// Bytes written to this client connection.
     pub net_output_bytes: u64,
- /// Commands completed by this client. The currently executing command is
- /// not counted until after its handler returns, matching CLIENT INFO.
+    /// Commands completed by this client. The currently executing command is
+    /// not counted until after its handler returns, matching CLIENT INFO.
     pub commands_processed: u64,
- /// Temporarily suppress MONITOR feed for nested execution contexts such as
- /// EXEC draining queued commands that were already logged at queue time.
+    /// Temporarily suppress MONITOR feed for nested execution contexts such as
+    /// EXEC draining queued commands that were already logged at queue time.
     pub suppress_monitor: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplicaReplyViolation {
+    pub command: Vec<u8>,
+    pub reply: Vec<u8>,
+    pub is_error: bool,
 }
 
 /// Per-client transient flags.
@@ -369,9 +376,9 @@ impl Client {
         }
     }
 
- /// Construct a `Client` bound to a live transport.
- /// The id is left as `0`; callers should call `RedisServer::alloc_client_id`
- /// and assign `client.id` if they need a unique identifier.
+    /// Construct a `Client` bound to a live transport.
+    /// The id is left as `0`; callers should call `RedisServer::alloc_client_id`
+    /// and assign `client.id` if they need a unique identifier.
     pub fn with_connection(conn: Connection) -> Self {
         let mut c = Self::new(0);
         c.conn = Some(conn);
@@ -428,8 +435,8 @@ impl Client {
         }
     }
 
- /// Mark the current command as a no-op so it is not propagated to replicas
- /// or the AOF. See `prevent_propagation`.
+    /// Mark the current command as a no-op so it is not propagated to replicas
+    /// or the AOF. See `prevent_propagation`.
     pub fn set_prevent_propagation(&mut self) {
         self.prevent_propagation = true;
     }
@@ -445,10 +452,10 @@ impl Client {
         self.authenticated_user = user;
     }
 
- /// Reset transient connection state, mirroring real Redis `RESET`.
- /// Clears the client name, MULTI transaction state, queued reply bytes,
- /// the selected database (back to 0), and per-client flags. The client
- /// id and live transport are preserved — the connection remains open.
+    /// Reset transient connection state, mirroring real Redis `RESET`.
+    /// Clears the client name, MULTI transaction state, queued reply bytes,
+    /// the selected database (back to 0), and per-client flags. The client
+    /// id and live transport are preserved — the connection remains open.
     pub fn reset_state(&mut self) {
         self.name = None;
         self.mstate = None;
@@ -474,10 +481,10 @@ impl Client {
         self.suppress_monitor = false;
     }
 
- /// Drop the client from the global blocked-keys index, if registered.
- /// Called from `RESET`, from the per-connection cleanup path when a
- /// socket closes, and after a successful BLPOP wake/timeout reply has
- /// been delivered through the outbound mpsc.
+    /// Drop the client from the global blocked-keys index, if registered.
+    /// Called from `RESET`, from the per-connection cleanup path when a
+    /// socket closes, and after a successful BLPOP wake/timeout reply has
+    /// been delivered through the outbound mpsc.
     pub fn clear_blocked_on_keys(&mut self) {
         if self.blocked_on_keys {
             self.blocked_on_keys = false;
@@ -487,31 +494,31 @@ impl Client {
         }
     }
 
- /// Total per-client pub/sub subscriptions across channels and patterns.
+    /// Total per-client pub/sub subscriptions across channels and patterns.
     pub fn pubsub_subscription_count(&self) -> usize {
         self.subscribed_channels.len()
             + self.subscribed_patterns.len()
             + self.subscribed_shard_channels.len()
     }
 
- /// Whether this client is currently in pub/sub subscribe mode.
+    /// Whether this client is currently in pub/sub subscribe mode.
     pub fn in_pubsub_mode(&self) -> bool {
         self.pubsub_subscription_count() > 0
     }
 
- /// Append an encoded RESP frame to the pending-reply buffer.
- /// Encoding follows the client's negotiated `resp_proto`: RESP3 emits
- /// the dedicated native frame shapes (`%`, `~`, `,`, `_`, `#`, `>`, …)
- /// while RESP2 degrades the RESP3-only variants to their nearest RESP2
- /// equivalent. The RESP2 wire bytes for the legacy frame variants are
- /// identical regardless of `resp_proto`.
+    /// Append an encoded RESP frame to the pending-reply buffer.
+    /// Encoding follows the client's negotiated `resp_proto`: RESP3 emits
+    /// the dedicated native frame shapes (`%`, `~`, `,`, `_`, `#`, `>`, …)
+    /// while RESP2 degrades the RESP3-only variants to their nearest RESP2
+    /// equivalent. The RESP2 wire bytes for the legacy frame variants are
+    /// identical regardless of `resp_proto`.
     pub fn write_frame(&mut self, frame: &RespFrame) {
         redis_protocol::encode_for_proto(frame, self.resp_proto, &mut self.reply_buf);
     }
 
- /// Append a Pub/Sub-style push frame.
- /// Valkey marks these writes with CLIENT_PUSHING, so reply silencing
- /// suppresses ordinary command replies without hiding notifications.
+    /// Append a Pub/Sub-style push frame.
+    /// Valkey marks these writes with CLIENT_PUSHING, so reply silencing
+    /// suppresses ordinary command replies without hiding notifications.
     pub fn write_push_frame(&mut self, frame: &RespFrame) {
         let start = self.reply_buf.len();
         redis_protocol::encode_for_proto(frame, self.resp_proto, &mut self.reply_buf);
@@ -521,8 +528,8 @@ impl Client {
         }
     }
 
- /// Queue a tracking push until the surrounding nested execution context is
- /// done writing its command reply.
+    /// Queue a tracking push until the surrounding nested execution context is
+    /// done writing its command reply.
     pub fn defer_tracking_push_frame(&mut self, frame: RespFrame) {
         self.pending_tracking_pushes.push(frame);
     }
@@ -531,7 +538,7 @@ impl Client {
         !self.pending_tracking_pushes.is_empty()
     }
 
- /// Append deferred tracking pushes after the surrounding command reply.
+    /// Append deferred tracking pushes after the surrounding command reply.
     pub fn flush_deferred_tracking_pushes(&mut self) {
         let pending = std::mem::take(&mut self.pending_tracking_pushes);
         for frame in pending {
@@ -539,7 +546,7 @@ impl Client {
         }
     }
 
- /// Finish one command's reply lifecycle, applying CLIENT REPLY OFF/SKIP.
+    /// Finish one command's reply lifecycle, applying CLIENT REPLY OFF/SKIP.
     pub fn finish_command_reply(&mut self, reply_start: usize) {
         if self.flags.reply_off || self.flags.reply_skip {
             self.suppress_non_push_reply_since(reply_start);
@@ -552,6 +559,31 @@ impl Client {
             self.flags.reply_skip = true;
             self.flags.reply_skip_next = false;
         }
+    }
+
+    pub fn take_replica_reply_violation_since(
+        &mut self,
+        reply_start: usize,
+    ) -> Option<ReplicaReplyViolation> {
+        if !self.is_replica
+            || self.replication_apply
+            || is_replica_handshake_command(&self.argv)
+            || self.reply_buf.len() <= reply_start
+        {
+            return None;
+        }
+
+        let reply = self.reply_buf[reply_start..].to_vec();
+        let is_error = reply.first() == Some(&b'-');
+        let command = replica_link_command_name(&self.argv);
+        self.reply_buf.truncate(reply_start);
+        self.push_reply_segments
+            .retain(|(_start, end)| *end <= reply_start);
+        Some(ReplicaReplyViolation {
+            command,
+            reply,
+            is_error,
+        })
     }
 
     fn suppress_non_push_reply_since(&mut self, reply_start: usize) {
@@ -602,7 +634,7 @@ impl Client {
         self.reply_buf.extend_from_slice(b"\r\n");
     }
 
- /// Append a RESP simple-string reply without constructing a `RespFrame`.
+    /// Append a RESP simple-string reply without constructing a `RespFrame`.
     pub fn write_simple_string(&mut self, bytes: &[u8]) {
         self.append_prefixed_line(b'+', bytes);
     }
@@ -611,17 +643,17 @@ impl Client {
         self.reply_buf.extend_from_slice(b"+PONG\r\n");
     }
 
- /// Append a RESP error reply without constructing a `RespFrame`.
+    /// Append a RESP error reply without constructing a `RespFrame`.
     pub fn write_error(&mut self, bytes: &[u8]) {
         self.append_prefixed_line(b'-', bytes);
     }
 
- /// Append a RESP integer reply without constructing a `RespFrame`.
+    /// Append a RESP integer reply without constructing a `RespFrame`.
     pub fn write_integer(&mut self, n: i64) {
         self.append_len_header_i64(b':', n);
     }
 
- /// Append a RESP bulk-string reply without constructing a `RespFrame`.
+    /// Append a RESP bulk-string reply without constructing a `RespFrame`.
     pub fn write_bulk(&mut self, bytes: &[u8]) {
         self.reply_buf.reserve(1 + 20 + 2 + bytes.len() + 2);
         self.reply_buf.push(b'$');
@@ -631,12 +663,12 @@ impl Client {
         self.reply_buf.extend_from_slice(b"\r\n");
     }
 
- /// Append a RESP bulk-string reply from a `RedisString` without cloning it.
+    /// Append a RESP bulk-string reply from a `RedisString` without cloning it.
     pub fn write_bulk_string(&mut self, s: &RedisString) {
         self.write_bulk(s.as_bytes());
     }
 
- /// Append a RESP bulk-string reply directly from argv without cloning it.
+    /// Append a RESP bulk-string reply directly from argv without cloning it.
     pub fn write_bulk_arg(&mut self, index: usize) -> bool {
         let Some(arg) = self.argv.get(index) else {
             return false;
@@ -651,7 +683,7 @@ impl Client {
         true
     }
 
- /// Append the protocol-appropriate null bulk reply.
+    /// Append the protocol-appropriate null bulk reply.
     pub fn write_null_bulk(&mut self) {
         if self.resp_proto == 3 {
             self.reply_buf.extend_from_slice(b"_\r\n");
@@ -660,7 +692,7 @@ impl Client {
         }
     }
 
- /// Append the protocol-appropriate null array reply.
+    /// Append the protocol-appropriate null array reply.
     pub fn write_null_array(&mut self) {
         if self.resp_proto == 3 {
             self.reply_buf.extend_from_slice(b"_\r\n");
@@ -669,18 +701,18 @@ impl Client {
         }
     }
 
- /// Append a RESP array header.
+    /// Append a RESP array header.
     pub fn write_array_header(&mut self, len: i64) {
         self.append_len_header_i64(b'*', len);
     }
 
- /// Append a RESP push header for RESP3 clients, or an array header for RESP2.
+    /// Append a RESP push header for RESP3 clients, or an array header for RESP2.
     pub fn write_push_or_array_header(&mut self, len: i64) {
         let prefix = if self.resp_proto == 3 { b'>' } else { b'*' };
         self.append_len_header_i64(prefix, len);
     }
 
- /// Append a RESP map header for RESP3 clients, or a flat array header for RESP2.
+    /// Append a RESP map header for RESP3 clients, or a flat array header for RESP2.
     pub fn write_map_header(&mut self, n_pairs: i64) {
         if self.resp_proto == 3 {
             self.append_len_header_i64(b'%', n_pairs);
@@ -689,101 +721,101 @@ impl Client {
         }
     }
 
- /// Append a RESP set header for RESP3 clients, or an array header for RESP2.
+    /// Append a RESP set header for RESP3 clients, or an array header for RESP2.
     pub fn write_set_header(&mut self, len: i64) {
         let prefix = if self.resp_proto == 3 { b'~' } else { b'*' };
         self.append_len_header_i64(prefix, len);
     }
 
- /// Drain the reply buffer; caller (I/O layer) writes to the socket.
+    /// Drain the reply buffer; caller (I/O layer) writes to the socket.
     pub fn drain_reply(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.reply_buf)
     }
 
- /// Whether the client is currently blocked (BLPOP, WAIT, etc).
- /// STUB — Phase B placeholder; real blocking state lives in a future
- /// `bstate` field tracking `flag.blocked` plus the per-blocktype payload.
+    /// Whether the client is currently blocked (BLPOP, WAIT, etc).
+    /// STUB — Phase B placeholder; real blocking state lives in a future
+    /// `bstate` field tracking `flag.blocked` plus the per-blocktype payload.
     pub fn is_blocked(&self) -> bool {
         false
     }
 
- /// Whether the client is in pub/sub mode (SUBSCRIBE / PSUBSCRIBE).
+    /// Whether the client is in pub/sub mode (SUBSCRIBE / PSUBSCRIBE).
     pub fn is_pubsub(&self) -> bool {
         self.in_pubsub_mode()
     }
 
- /// Whether the client is a replica (slave) connection.
- /// Set to true once the client completes the PSYNC handshake on
- /// master side (Session 3A). The dispatch path checks this flag
- /// rejects normal command bytes — replicas are write-only targets.
+    /// Whether the client is a replica (slave) connection.
+    /// Set to true once the client completes the PSYNC handshake on
+    /// master side (Session 3A). The dispatch path checks this flag
+    /// rejects normal command bytes — replicas are write-only targets.
     pub fn is_replica(&self) -> bool {
         self.is_replica
     }
 
- /// Whether the client carries the `must-obey` flag (used by AOF/RDB
- /// loaders and the master-link).
- /// STUB — Phase B placeholder.
+    /// Whether the client carries the `must-obey` flag (used by AOF/RDB
+    /// loaders and the master-link).
+    /// STUB — Phase B placeholder.
     pub fn must_obey(&self) -> bool {
         false
     }
 
- /// Blocking deadline in milliseconds (0 = block forever).
- /// STUB — Phase B placeholder; real value lives in the future `bstate`.
+    /// Blocking deadline in milliseconds (0 = block forever).
+    /// STUB — Phase B placeholder; real value lives in the future `bstate`.
     pub fn blocking_timeout(&self) -> i64 {
         0
     }
 
- /// Whether this client is currently registered in
- /// `clients_timeout_table` radix tree.
- /// STUB — Phase B placeholder; backing flag lands when bstate is added.
+    /// Whether this client is currently registered in
+    /// `clients_timeout_table` radix tree.
+    /// STUB — Phase B placeholder; backing flag lands when bstate is added.
     pub fn in_timeout_table(&self) -> bool {
         false
     }
 
- /// Set/clear the in-timeout-table flag.
- /// STUB — Phase B placeholder; no backing storage yet.
+    /// Set/clear the in-timeout-table flag.
+    /// STUB — Phase B placeholder; no backing storage yet.
     pub fn set_in_timeout_table(&mut self, _value: bool) {
         // TODO(port): persist on Client when bstate field is added.
     }
 
- /// Unix-time seconds of the last client interaction (read or write).
- /// STUB — Phase B placeholder; updated by the event loop in Phase 3.
+    /// Unix-time seconds of the last client interaction (read or write).
+    /// STUB — Phase B placeholder; updated by the event loop in Phase 3.
     pub fn last_interaction(&self) -> i64 {
         0
     }
 
- /// Client id accessor (mirrors the public `id` field; provided so call
- /// sites can use `client.id` interchangeably with `client.id`).
+    /// Client id accessor (mirrors the public `id` field; provided so call
+    /// sites can use `client.id` interchangeably with `client.id`).
     pub fn id(&self) -> ClientId {
         self.id
     }
 
- /// Database id (currently the same as `db_index` cast to `i32`).
- /// STUB — Phase B placeholder; real `RedisDb` reference comes
- /// `RedisServer` lookup by `db_index` in Phase 3.
+    /// Database id (currently the same as `db_index` cast to `i32`).
+    /// STUB — Phase B placeholder; real `RedisDb` reference comes
+    /// `RedisServer` lookup by `db_index` in Phase 3.
     pub fn db_id(&self) -> i32 {
         self.db_index as i32
     }
 
- /// Cluster slot of the current command.
+    /// Cluster slot of the current command.
     pub fn slot(&self) -> i32 {
         self.slot
     }
 
- /// Number of arguments in `argv` (alias of `arg_count`).
+    /// Number of arguments in `argv` (alias of `arg_count`).
     pub fn argc(&self) -> i32 {
         self.argv.len() as i32
     }
 
- /// Total byte-length of all `argv` entries.
- /// STUB — Phase B placeholder; real C value is maintained as `c->argv_len`.
+    /// Total byte-length of all `argv` entries.
+    /// STUB — Phase B placeholder; real C value is maintained as `c->argv_len`.
     pub fn argv_len(&self) -> i32 {
         self.argv.iter().map(|s| s.as_bytes().len() as i32).sum()
     }
 
- /// Move out the current argv and reset to empty.
- /// PORT NOTE: returns `Vec<RedisObject>` (not `Vec<RedisString>`) because
- /// translated MULTI code stores queued args as string-encoded objects.
+    /// Move out the current argv and reset to empty.
+    /// PORT NOTE: returns `Vec<RedisObject>` (not `Vec<RedisString>`) because
+    /// translated MULTI code stores queued args as string-encoded objects.
     pub fn take_argv(&mut self) -> Vec<RedisObject> {
         std::mem::take(&mut self.argv)
             .into_iter()
@@ -791,8 +823,8 @@ impl Client {
             .collect()
     }
 
- /// Current command function pointer.
- /// STUB — Phase B placeholder returning `None` until command dispatch lands.
+    /// Current command function pointer.
+    /// STUB — Phase B placeholder returning `None` until command dispatch lands.
     pub fn current_cmd_fn(&self) -> Option<CommandFn> {
         None
     }
@@ -835,28 +867,75 @@ impl Client {
         self.flags.lua = v;
     }
 
- /// Install commands[index].argv/argc/argv_len/cmd as the client's current
- /// command. STUB — Phase B placeholder.
+    /// Install commands[index].argv/argc/argv_len/cmd as the client's current
+    /// command. STUB — Phase B placeholder.
     pub fn set_current_queued_command(&mut self, _index: usize) {
         // TODO(port): wire when MULTI execution lands.
     }
 
- /// Save current argv/cmd back into commands[index]. STUB — Phase B
- /// placeholder.
+    /// Save current argv/cmd back into commands[index]. STUB — Phase B
+    /// placeholder.
     pub fn save_queued_command_state(&mut self, _index: usize) {
         // TODO(port): wire when MULTI execution lands.
     }
 
- /// Release the saved original argv. STUB — Phase B placeholder.
+    /// Release the saved original argv. STUB — Phase B placeholder.
     pub fn free_original_argv(&mut self) {
         // TODO(port): wire when MULTI execution lands.
     }
 
- /// Restore the original argv saved before MULTI execution. STUB — Phase B
- /// placeholder.
+    /// Restore the original argv saved before MULTI execution. STUB — Phase B
+    /// placeholder.
     pub fn restore_orig_argv(&mut self) {
         // TODO(port): wire when MULTI execution lands.
     }
+}
+
+fn is_replica_handshake_command(argv: &[RedisString]) -> bool {
+    let Some(cmd) = argv.first() else {
+        return false;
+    };
+    ascii_eq_ignore_case(cmd.as_bytes(), b"PSYNC") || ascii_eq_ignore_case(cmd.as_bytes(), b"SYNC")
+}
+
+fn replica_link_command_name(argv: &[RedisString]) -> Vec<u8> {
+    let Some(cmd) = argv.first() else {
+        return b"<unknown>".to_vec();
+    };
+    let cmd_bytes = cmd.as_bytes();
+    let mut out = ascii_lower_bytes(cmd_bytes);
+    if argv.len() > 1 && replica_link_log_includes_subcommand(cmd_bytes) {
+        out.push(b'|');
+        out.extend(ascii_lower_bytes(argv[1].as_bytes()));
+    }
+    out
+}
+
+fn replica_link_log_includes_subcommand(cmd: &[u8]) -> bool {
+    ascii_eq_ignore_case(cmd, b"ACL")
+        || ascii_eq_ignore_case(cmd, b"CLIENT")
+        || ascii_eq_ignore_case(cmd, b"CLUSTER")
+        || ascii_eq_ignore_case(cmd, b"COMMAND")
+        || ascii_eq_ignore_case(cmd, b"CONFIG")
+        || ascii_eq_ignore_case(cmd, b"FUNCTION")
+        || ascii_eq_ignore_case(cmd, b"LATENCY")
+        || ascii_eq_ignore_case(cmd, b"MEMORY")
+        || ascii_eq_ignore_case(cmd, b"MODULE")
+        || ascii_eq_ignore_case(cmd, b"PUBSUB")
+        || ascii_eq_ignore_case(cmd, b"SCRIPT")
+        || ascii_eq_ignore_case(cmd, b"SLOWLOG")
+        || ascii_eq_ignore_case(cmd, b"XINFO")
+}
+
+fn ascii_lower_bytes(bytes: &[u8]) -> Vec<u8> {
+    bytes.iter().map(|b| b.to_ascii_lowercase()).collect()
+}
+
+fn ascii_eq_ignore_case(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b.iter())
+            .all(|(x, y)| x.eq_ignore_ascii_case(y))
 }
 
 #[cfg(test)]
@@ -907,6 +986,57 @@ mod tests {
         c.write_simple_string(b"OK");
         c.finish_command_reply(start);
         assert_eq!(c.drain_reply(), b"+OK\r\n");
+    }
+
+    #[test]
+    fn replica_reply_violation_summarizes_and_clears_reply() {
+        let mut c = Client::new(1);
+        c.is_replica = true;
+        c.reply_buf.extend_from_slice(b"+prior\r\n");
+        let start = c.reply_buf.len();
+        c.set_args(vec![RedisString::from_static(b"PING")]);
+        c.write_pong();
+
+        let violation = c
+            .take_replica_reply_violation_since(start)
+            .expect("replica reply should be a protocol violation");
+        assert_eq!(violation.command, b"ping");
+        assert_eq!(violation.reply, b"+PONG\r\n");
+        assert!(!violation.is_error);
+        assert_eq!(c.reply_buf, b"+prior\r\n");
+    }
+
+    #[test]
+    fn replica_reply_violation_includes_known_subcommand() {
+        let mut c = Client::new(1);
+        c.is_replica = true;
+        c.set_args(vec![
+            RedisString::from_static(b"SLOWLOG"),
+            RedisString::from_static(b"GET"),
+        ]);
+        c.write_error(b"ERR Replica can't interact with the keyspace");
+
+        let violation = c
+            .take_replica_reply_violation_since(0)
+            .expect("error reply should be a protocol violation");
+        assert_eq!(violation.command, b"slowlog|get");
+        assert!(violation.is_error);
+        assert!(c.reply_buf.is_empty());
+    }
+
+    #[test]
+    fn replica_handshake_reply_is_not_a_violation() {
+        let mut c = Client::new(1);
+        c.is_replica = true;
+        c.set_args(vec![
+            RedisString::from_static(b"PSYNC"),
+            RedisString::from_static(b"?"),
+            RedisString::from_static(b"-1"),
+        ]);
+        c.write_simple_string(b"FULLRESYNC abc 0");
+
+        assert!(c.take_replica_reply_violation_since(0).is_none());
+        assert_eq!(c.reply_buf, b"+FULLRESYNC abc 0\r\n");
     }
 
     #[test]
