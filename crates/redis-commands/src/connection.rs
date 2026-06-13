@@ -322,6 +322,9 @@ fn config_set_allowed_during_loading(ctx: &CommandContext<'_>, normalized: &[u8]
     if ascii_eq_ignore_case(normalized, b"loglevel") {
         return true;
     }
+    if ascii_eq_ignore_case(normalized, b"key-load-delay") {
+        return true;
+    }
     ctx.server().persistence.async_loading()
         && (ascii_eq_ignore_case(normalized, b"lua-time-limit")
             || ascii_eq_ignore_case(normalized, b"busy-reply-threshold"))

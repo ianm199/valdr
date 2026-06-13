@@ -2422,7 +2422,9 @@ fn command_allowed_during_loading_by_args(ctx: &CommandContext<'_>) -> bool {
         let Some(key) = ctx.client_ref().arg(index) else {
             return false;
         };
-        if !ascii_eq_ignore_case(key.as_bytes(), b"loglevel") {
+        let key = key.as_bytes();
+        if !ascii_eq_ignore_case(key, b"loglevel") && !ascii_eq_ignore_case(key, b"key-load-delay")
+        {
             return false;
         }
         index += 2;

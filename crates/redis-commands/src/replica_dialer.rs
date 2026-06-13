@@ -230,11 +230,11 @@ fn publish_fullsync_loading_state_for_server(server: &RedisServer, async_loading
     match server.live_config.repl_diskless_load() {
         ReplDisklessLoadMode::Disabled => {}
         ReplDisklessLoadMode::Swapdb if async_loading => {
-            eprintln!("redis-server: Loading DB in memory");
+            println!("redis-server: Loading DB in memory");
             server.persistence.set_async_loading(true);
         }
         ReplDisklessLoadMode::Swapdb | ReplDisklessLoadMode::FlushBeforeLoad => {
-            eprintln!("redis-server: Loading DB in memory");
+            println!("redis-server: Loading DB in memory");
             server.persistence.set_loading(true);
         }
     }

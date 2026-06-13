@@ -1057,6 +1057,67 @@ Takeaway:
   finished generating the RDB, then keep the old DB/function view pinned until
   the incoming RDB is known to have completed successfully.
 
+### 2026-06-13 R2 follow-up: diskless loading log and config exceptions
+
+Scope:
+
+- Moved the compatibility `Loading DB in memory` message from stderr to stdout,
+  matching the Tcl harness log file it watches during diskless short-read and
+  replica-drop tests.
+- Allowed `CONFIG SET key-load-delay 0` through the loading gate. The upstream
+  diskless child-death test uses this debug/test knob while the replica is in
+  ordinary loading state.
+- Extended `fullsync_lifecycle_kit.rs` so `key-load-delay` remains available
+  during ordinary loading.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands --test fullsync_lifecycle_kit -- --nocapture
+cargo test -p redis-commands replica_dialer::tests -- --nocapture
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --files integration/replication \
+  --profile integration-repl \
+  --runner-id fullsync-loading-log-keydelay \
+  --timeout-s 300 \
+  --baseport 31779 \
+  --portcount 100 \
+  --skip-build
+python3 harness/oracle/tcl-survey.py \
+  --files integration/replication-2,integration/block-repl \
+  --profile integration-repl \
+  --runner-id fullsync-loading-log-tripwire \
+  --timeout-s 240 \
+  --baseport 31879 \
+  --portcount 100 \
+  --skip-build
+```
+
+Results:
+
+- `fullsync_lifecycle_kit`: 7 passed, 0 failed.
+- `replica_dialer::tests`: 3 passed, 0 failed.
+- `cargo build --bin redis-server`: passed.
+- Focused `integration/replication`:
+  `harness/oracle/results/tcl-survey/20260613T184830106513Z/result.json`
+  completed before the 300 second timeout, still without a parsed summary. It
+  reported 28 parsed failure lines and an abort/exception at
+  `replication child dies when parent is killed - diskless...` with
+  `child process exited abnormally.` This moves past the prior `key-load-delay`
+  LOADING exception and exposes the next child-death frontier.
+- Focused no-regression tripwire:
+  `harness/oracle/results/tcl-survey/20260613T185242660894Z/result.json`
+  reported `integration/replication-2` 7/0 and `integration/block-repl` 2/0.
+
+Takeaway:
+
+- Diskless loading observability is now closer to the upstream harness shape,
+  but the implementation still lacks the real child/pipe lifecycle semantics
+  those later tests assert. The next `fullsync_lifecycle_kit` slice should
+  model replication-child death and parent-death cleanup explicitly before
+  another full Tcl grind.
+
 ### R4-AOF-FULLSYNC
 
 Status: `integration/replication-aof-sync` green on 2026-06-13.

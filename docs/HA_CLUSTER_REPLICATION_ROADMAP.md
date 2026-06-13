@@ -280,7 +280,12 @@ Work packets:
   diskless-load mode slice added typed `repl-diskless-load` live config and
   mode-aware loading publication, clearing the different-replid
   `replica enter loading` assertion but not the broader aborted-load rollback
-  and pipe-drop log/state failures.
+  and pipe-drop log/state failures. A follow-up diskless loading slice moved
+  the compatibility `Loading DB in memory` message onto the stdout log stream
+  watched by the Tcl harness and allowed `CONFIG SET key-load-delay` through
+  ordinary loading, moving the focused gate to a later
+  `replication child dies when parent is killed` abort. True child/pipe
+  lifecycle semantics remain unfinished.
 - **R2-BUFFER-LIMITS:** implement replica output-buffer accounting and
   disconnection policy well enough for `replication-buffer` to count tests
   instead of dying in setup. Partial accounting surface landed on 2026-06-13:

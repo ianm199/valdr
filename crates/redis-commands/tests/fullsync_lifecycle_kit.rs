@@ -410,6 +410,20 @@ fn async_loading_serves_old_db_but_blocks_no_async_loading_commands() {
     server.persistence.set_loading(false);
     assert!(!server.persistence.loading());
     assert!(!server.persistence.async_loading());
+
+    server.persistence.set_loading(true);
+    let mut key_delay = Client::new(100);
+    let key_delay_reply = run_dispatch_with_server(
+        &mut key_delay,
+        &mut db,
+        Arc::clone(&server),
+        &[b"CONFIG", b"SET", b"key-load-delay", b"0"],
+    );
+    assert_eq!(
+        key_delay_reply, b"+OK\r\n",
+        "test load-delay tuning should remain available during ordinary loading"
+    );
+    server.persistence.set_loading(false);
 }
 
 #[test]
