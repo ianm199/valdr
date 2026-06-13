@@ -35,6 +35,22 @@ pub fn key_slot(key: &[u8]) -> u16 {
     crc16_xmodem(hashtag(key)) % CLUSTER_SLOTS
 }
 
+pub fn keys_cross_slot<'a, I>(keys: I) -> bool
+where
+    I: IntoIterator<Item = &'a [u8]>,
+{
+    let mut first_slot = None;
+    for key in keys {
+        let slot = key_slot(key);
+        match first_slot {
+            Some(first) if first != slot => return true,
+            Some(_) => {}
+            None => first_slot = Some(slot),
+        }
+    }
+    false
+}
+
 pub fn hashtag(key: &[u8]) -> &[u8] {
     let Some(open) = key.iter().position(|b| *b == b'{') else {
         return key;
@@ -88,6 +104,13 @@ mod tests {
         assert_eq!(key_slot(b"somekey"), 11_058);
         assert_eq!(key_slot(b"{user1000}.following"), 3_443);
         assert_eq!(key_slot(b"{user1000}.followers"), 3_443);
+    }
+
+    #[test]
+    fn cluster_crossslot_detection_respects_hash_tags() {
+        assert!(!keys_cross_slot([b"{u}:a".as_slice(), b"{u}:b".as_slice()]));
+        assert!(keys_cross_slot([b"{u}:a".as_slice(), b"{v}:b".as_slice()]));
+        assert!(!keys_cross_slot(std::iter::empty::<&[u8]>()));
     }
 
     #[test]

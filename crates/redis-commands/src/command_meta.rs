@@ -376,6 +376,9 @@ pub fn lookup_generated_command_for_getkeys(
     let expected_function = expected_command_function_name(parent);
     if ctx.arg_count() > 3 {
         let sub = ctx.arg(3)?.as_bytes();
+        if let Some(spec) = lookup_generated_subcommand_spec(parent, sub) {
+            return Ok(spec);
+        }
         if let Some(spec) = crate::generated::COMMANDS.iter().find(|spec| {
             ascii_eq_ignore_case(spec.name.as_bytes(), sub)
                 && ascii_eq_ignore_case(spec.function.as_bytes(), &expected_function)
@@ -390,6 +393,17 @@ pub fn lookup_generated_command_for_getkeys(
                 && ascii_eq_ignore_case(spec.function.as_bytes(), &expected_function)
         })
         .ok_or_else(|| RedisError::runtime(b"ERR Invalid command specified"))
+}
+
+pub fn lookup_generated_subcommand_spec(
+    parent: &[u8],
+    sub: &[u8],
+) -> Option<&'static crate::generated::GeneratedCommandSpec> {
+    crate::generated::COMMANDS.iter().find(|spec| {
+        spec.container
+            .is_some_and(|container| ascii_eq_ignore_case(container.as_bytes(), parent))
+            && ascii_eq_ignore_case(spec.name.as_bytes(), sub)
+    })
 }
 
 pub fn expected_command_function_name(command: &[u8]) -> Vec<u8> {
@@ -704,6 +718,75 @@ pub fn nonnegative_usize(n: i64) -> Option<usize> {
         Some(n as usize)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use redis_core::{Client, CommandContext};
+
+    fn command_getkeys_refs(parts: &[&[u8]]) -> RedisResult<Vec<CommandKeyRef>> {
+        let mut args = vec![
+            RedisString::from_bytes(b"COMMAND"),
+            RedisString::from_bytes(b"GETKEYS"),
+        ];
+        args.extend(parts.iter().map(|part| RedisString::from_bytes(part)));
+        let mut client = Client::new(1);
+        client.set_args(args);
+        let ctx = CommandContext::new(&mut client);
+        let spec = lookup_generated_command_for_getkeys(&ctx)?;
+        let command_argc = ctx.arg_count() - 2;
+        validate_command_getkeys_arity(spec.arity, command_argc)?;
+        command_key_refs(&ctx, spec, command_argc)
+    }
+
+    fn command_getkeys(parts: &[&[u8]]) -> RedisResult<Vec<Vec<u8>>> {
+        command_getkeys_refs(parts).map(|keys| {
+            keys.into_iter()
+                .map(|key_ref| key_ref.key.as_bytes().to_vec())
+                .collect()
+        })
+    }
+
+    #[test]
+    fn command_keyspec_audit_extracts_range_and_keynum_keys() {
+        assert_eq!(
+            command_getkeys(&[b"MGET", b"{u}:a", b"{u}:b"]).unwrap(),
+            vec![b"{u}:a".to_vec(), b"{u}:b".to_vec()]
+        );
+        assert_eq!(
+            command_getkeys(&[
+                b"EVAL",
+                b"return redis.call('get', KEYS[1])",
+                b"2",
+                b"a",
+                b"b"
+            ])
+            .unwrap(),
+            vec![b"a".to_vec(), b"b".to_vec()]
+        );
+    }
+
+    #[test]
+    fn command_keyspec_audit_maps_extracted_keys_to_cluster_slots() {
+        let same_slot = command_getkeys(&[b"MGET", b"{u}:a", b"{u}:b"]).unwrap();
+        assert!(!crate::cluster::keys_cross_slot(
+            same_slot.iter().map(Vec::as_slice)
+        ));
+
+        let cross_slot = command_getkeys(&[b"MGET", b"foo", b"bar"]).unwrap();
+        assert!(crate::cluster::keys_cross_slot(
+            cross_slot.iter().map(Vec::as_slice)
+        ));
+    }
+
+    #[test]
+    fn command_keyspec_audit_uses_generated_subcommand_containers() {
+        let spec = lookup_generated_subcommand_spec(b"CLUSTER", b"KEYSLOT")
+            .expect("CLUSTER KEYSLOT should be generated as a subcommand");
+        assert_eq!(spec.key_specs_json, "[]");
+        assert!(command_getkeys(&[b"CLUSTER", b"KEYSLOT", b"foo"]).is_err());
     }
 }
 

@@ -437,7 +437,9 @@ Work packets that can run early and mostly independently:
   focused module with tests against official vectors. Completed on
   2026-06-13 for `CLUSTER KEYSLOT`; this does not enable cluster mode.
 - **C0-KEYSPECS:** audit command key extraction for cluster routing. Multi-key
-  commands need `CROSSSLOT` behavior when keys span slots.
+  commands need `CROSSSLOT` behavior when keys span slots. Audit helpers and
+  tests completed on 2026-06-13; runtime `CROSSSLOT` enforcement remains part
+  of cluster-mode enablement.
 - **C0-CONFIG:** add config surface for cluster-enabled, node id, announced
   host/ports, and local slot ownership.
 - **C0-COVERAGE:** split `cluster_later` coverage into sub-buckets: keyslot,
@@ -458,13 +460,18 @@ Evidence:
 - Tests cover the standard CRC16 vector, known key-slot vectors, hashtag edge
   cases, direct handler execution, and dispatch through the parent `CLUSTER`
   command.
+- `command_meta.rs` now uses generated subcommand `container` metadata for
+  `COMMAND GETKEYS` lookup and adds audit tests for range specs, keynum specs,
+  generated no-key subcommands, and multi-key slot grouping.
 - Gate on 2026-06-13:
 
   ```bash
   cargo test -p redis-commands cluster -- --nocapture
+  cargo test -p redis-commands command_keyspec -- --nocapture
   ```
 
-  Result: 5 passed, 0 failed.
+  Results: cluster filter 7 passed, 0 failed; command-keyspec filter 3 passed,
+  0 failed.
 
 ### C1: Static Single-Node Cluster Compatibility
 
