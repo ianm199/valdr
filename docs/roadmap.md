@@ -9,10 +9,12 @@
   - Prove partial-resync (PSYNC) instead of always doing a full re-sync
   - Define and gate the production HA story separately from the single-node alpha
 - Add Clustering and HA to get closer to feature parity
+- Use the long-form HA/replication/cluster plan as the execution queue:
+  [HA_CLUSTER_REPLICATION_ROADMAP.md](HA_CLUSTER_REPLICATION_ROADMAP.md)
 
 ## Performance
 - FCALL is the last sub-parity command — Lua-VM per-call overhead, not data structures
-- Optional: I/O threads (Redis-style) for a throughput bump at high concurrency
+- Optional: I/O threads (Valkey-style) for a throughput bump at high concurrency
 - Support thread pooling 
 - Start to explore ways to increase performance, offering more users incentives to try this. Maybe more aggressive hotpaths or sharding than Valkey
 
