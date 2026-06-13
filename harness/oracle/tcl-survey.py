@@ -26,6 +26,9 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 REFERENCE = ROOT / "reference" / "valkey"
 RESULTS_ROOT = ROOT / "harness" / "oracle" / "results" / "tcl-survey"
+REPL_TEMP_DIR = ROOT / "crates" / "redis-commands"
+REPL_TEMP_GLOB = "temp-repl-*.rdb"
+REPL_TEMP_SAMPLE_LIMIT = 12
 DEFAULT_FILES = [
     "unit/bitops",
     "unit/bitfield",
@@ -202,6 +205,30 @@ def write_log(path: Path, result: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def cleanup_repl_temp_rdbs() -> dict[str, Any]:
+    """Remove replication full-sync temp files left behind by aborted TCL runs."""
+    removed: list[str] = []
+    errors: list[dict[str, str]] = []
+    for path in sorted(REPL_TEMP_DIR.glob(REPL_TEMP_GLOB)):
+        try:
+            path.unlink()
+            removed.append(str(path.relative_to(ROOT)))
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            errors.append({"path": str(path.relative_to(ROOT)), "error": str(exc)})
+    return {
+        "glob": str((REPL_TEMP_DIR / REPL_TEMP_GLOB).relative_to(ROOT)),
+        "removed": len(removed),
+        "removed_sample": removed[:REPL_TEMP_SAMPLE_LIMIT],
+        "errors": errors,
+    }
+
+
 def tcl_command(test_file: str, args: argparse.Namespace) -> list[str]:
     cmd = [
         "tclsh",
@@ -341,6 +368,10 @@ def main() -> int:
 
     run_id, run_dir = unique_run_dir(utc_stamp())
     run_dir.mkdir(parents=True, exist_ok=True)
+    repl_temp_cleanup: dict[str, Any] = {
+        "before_setup": cleanup_repl_temp_rdbs(),
+        "after_files": [],
+    }
 
     setup = setup_runner(args)
     write_log(run_dir / "setup.json", setup)
@@ -368,9 +399,15 @@ def main() -> int:
                 "kind": "tcl_survey",
                 "run_id": run_id,
                 "profile": args.profile,
+                "repl_temp_cleanup": repl_temp_cleanup,
                 "setup": {key: setup[key] for key in ("cmd", "returncode", "timed_out", "elapsed_s")},
             },
         }
+        result_path = run_dir / "result.json"
+        result["artifacts"].append(
+            {"kind": "tcl-survey-result", "path": str(result_path.relative_to(ROOT))}
+        )
+        write_json(result_path, result)
         print(json.dumps(result, sort_keys=True))
         return 0
 
@@ -410,6 +447,9 @@ def main() -> int:
             safe_name = test_file.replace("/", "__")
             cmd = tcl_command(test_file, args)
             proc = run_process(cmd, cwd=reference_cwd, env=env, timeout_s=args.timeout_s)
+            repl_temp_cleanup["after_files"].append(
+                {"test": test_file, **cleanup_repl_temp_rdbs()}
+            )
             log_path = run_dir / f"{safe_name}.json"
             write_log(log_path, proc)
             artifacts.append({"kind": "tcl-survey-log", "path": str(log_path.relative_to(ROOT)), "test": test_file})
@@ -538,12 +578,18 @@ def main() -> int:
             "isolated_tests_copy": args.isolated_tests_copy,
             "isolated_reference_root": isolated_root,
             "files": file_results,
+            "repl_temp_cleanup": repl_temp_cleanup,
             "deny_tags": args.deny_tags,
             "clients": args.clients,
             "timeout_s": args.timeout_s,
             "setup": {key: setup[key] for key in ("cmd", "returncode", "timed_out", "elapsed_s")},
         },
     }
+    result_path = run_dir / "result.json"
+    result["artifacts"].append(
+        {"kind": "tcl-survey-result", "path": str(result_path.relative_to(ROOT))}
+    )
+    write_json(result_path, result)
     print(json.dumps(result, sort_keys=True))
     return 0
 

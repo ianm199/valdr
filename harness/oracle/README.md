@@ -105,3 +105,16 @@ bash harness/oracle/smoke.sh --skip-build
 The corpus is intentionally small and byte-exact. It is the fast compatibility
 floor for local iteration; the TCL suite and RDB oracle provide broader
 coverage.
+
+## Replication TCL dashboard
+
+The current dual-server replication frontier is tracked by:
+
+```sh
+harness/oracle/run-integration-repl-current.sh --skip-build
+```
+
+That wrapper runs the in-scope `integration/replication*.tcl` files
+sequentially with `--clients 1` through `tcl-survey.py`. Do not run two
+dual-server replication TCL surveys concurrently; port and test-dir contention
+can create false failures.

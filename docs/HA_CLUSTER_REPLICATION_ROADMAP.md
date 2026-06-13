@@ -6,6 +6,7 @@ should tackle after the single-node alpha.
 **Related:** [`roadmap.md`](roadmap.md),
 [`TEST_AND_FEATURE_COVERAGE.md`](TEST_AND_FEATURE_COVERAGE.md),
 [`REPL_OBSERVABILITY_OVERNIGHT_PLAN.md`](REPL_OBSERVABILITY_OVERNIGHT_PLAN.md),
+[`REPLICATION_INTEGRATION_DASHBOARD.md`](REPLICATION_INTEGRATION_DASHBOARD.md),
 [`AOF_ENDGAME_SPEC.md`](AOF_ENDGAME_SPEC.md), and
 [`EDGE_WASM_COMMAND_ENGINE.md`](EDGE_WASM_COMMAND_ENGINE.md).
 
@@ -63,15 +64,19 @@ Existing replication work already landed:
 - Local `WAIT` / `WAITAOF` guards and wakeup mechanics.
 - RDB load/apply path for replica full sync exists in the runtime owner.
 
-Existing red/unfinished areas from
-[`REPL_OBSERVABILITY_OVERNIGHT_PLAN.md`](REPL_OBSERVABILITY_OVERNIGHT_PLAN.md):
+Current red/unfinished areas from the 2026-06-13 R0 dashboard in
+[`REPLICATION_INTEGRATION_DASHBOARD.md`](REPLICATION_INTEGRATION_DASHBOARD.md):
 
 - Dual-server `integration/replication.tcl` and `replication-buffer.tcl` are
-  still blocked by full-sync / diskless-sync-window behavior.
-- `replication-3` and `replication-4` still expose command-propagation rewrite
-  gaps such as relative TTL propagation and `SPOP <count>` rewriting.
+  still blocked by full-sync / diskless behavior and replication-buffer
+  accounting semantics.
+- `replication-3` and `replication-4` are green on the current tree; keep the
+  command-propagation rewrite work as regression coverage rather than assuming
+  the older overnight failures still reproduce.
+- `replication-psync` still times out in the current full dashboard.
+- `replication-aof-sync` still exposes RDB/AOF reuse and diskless fallback
+  failures.
 - `replica-redirect.tcl` needs real `FAILOVER` plus client redirect semantics.
-- `replication-psync` still has backlog-window and diskless-load variants.
 
 ## Execution Rules
 
@@ -133,6 +138,9 @@ evidence strong enough to move "Replication" from alpha to beta.
 ### R0: Baseline And Dashboard Hygiene
 
 **Why:** agents need a current scoreboard before changing behavior.
+
+**Status:** completed on 2026-06-13. See
+[`REPLICATION_INTEGRATION_DASHBOARD.md`](REPLICATION_INTEGRATION_DASHBOARD.md).
 
 Work:
 
