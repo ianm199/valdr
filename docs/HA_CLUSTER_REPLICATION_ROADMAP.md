@@ -234,7 +234,10 @@ Work packets:
 - **R2-BGSAVE-WINDOW:** implement the observable `wait_bgsave` / diskless
   sync-delay window without violating the safe-Rust architecture. If fork is
   still used on Unix, provide a non-Unix thread/job fallback with the same state
-  transitions.
+  transitions. The 2026-06-13 frontier packet now reports replication BGSAVE in
+  `INFO persistence` and honors the bounded `rdb-key-save-delay` debug window
+  for replication BGSAVE jobs, moving `integration/replication-buffer` from a
+  setup exception to a counted 3/15 result.
 - **R2-PIGGYBACK:** replicas arriving during an in-flight replication BGSAVE
   join the same job and receive the same snapshot plus catch-up backlog.
 - **R2-BUFFER-LIMITS:** implement replica output-buffer accounting and

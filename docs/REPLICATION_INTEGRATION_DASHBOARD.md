@@ -13,8 +13,7 @@ Fast deterministic gate:
 cargo test -p redis-commands --test repl_correctness_kit
 ```
 
-Latest result on 2026-06-13 after the R4 role-change unblock packet: 19
-passed, 0 failed.
+Latest result on 2026-06-13 after the R5 parser packet: 21 passed, 0 failed.
 
 R0 full integration dashboard:
 
@@ -73,7 +72,7 @@ Artifact:
 | `integration/block-repl` | 2/0 | Green | No-regression tripwire. |
 | `integration/replication-3` | 3/4 | Red | Expiry consistency, writable-replica expired-key behavior, and PFCOUNT expired-key/cache semantics. |
 | `integration/replication-4` | 15/2 | Red | SPOP rewrite cases now pass; remaining failures are divergence/default writable-replica cases. |
-| `integration/replication-buffer` | no summary after R2 shortcut removal; prior R0 was 2/13 | Red | Full-sync/BGSAVE setup now aborts before buffer assertions; global replication buffer, backlog growth/shrink, and replica output-buffer limit semantics remain unfinished. |
+| `integration/replication-buffer` | 3/15 | Red | Full-sync/BGSAVE setup now reaches counted assertions; global replication buffer, backlog growth/shrink, partial resync from buffered history, and replica output-buffer limit semantics remain unfinished. |
 | `integration/replication` | no summary | Red | Aborts at `diskless replication child being killed is collected` with `child process exited abnormally`; diskless/full-sync behavior remains the frontier. |
 | `integration/replication-psync` | timeout | Red | Timed out at 300s; no-backlog/backlog-expired and diskless variants remain frontier. |
 | `integration/replication-aof-sync` | 1/5 | Red | RDB-reuse-as-AOF-base and diskless AOF fallback behavior. |
@@ -107,6 +106,9 @@ visible integration frontiers are now:
 - `R2-RDB-BULK-FAITHFUL`: the old `REPLICAOF` pre-PSYNC `KEYS`/`DUMP` seed
   shortcut is removed, so remaining full-sync work must pass through the
   streamed RDB handoff path.
+- `R2-BGSAVE-WINDOW`: replication BGSAVE now reports through `INFO persistence`
+  and honors the bounded debug save delay; keep extending this into the
+  diskless/full-sync windows behind `integration/replication`.
 - `R3-RECONNECT-MATRIX`: extend the new master-side PSYNC decision matrix into
   live replica-dialer reconnect coverage before grinding `replication-psync`.
 - `R2-BUFFER-LIMITS`: accounting aliases and fan-out accounting are covered;
@@ -175,7 +177,8 @@ Results:
 ### R2-BUFFER-LIMITS
 
 Status: partial accounting surface completed on 2026-06-13; slow Tcl remains
-red and currently aborts before counted buffer assertions.
+red. It now reaches counted buffer assertions after the R2-BGSAVE-WINDOW
+packet.
 
 Implementation:
 
@@ -232,13 +235,74 @@ Results:
 - `repl_correctness_kit`: 18 passed, 0 failed.
 - `cargo check -p redis-commands`: passed.
 - `cargo build --bin redis-server`: passed.
-- `integration/replication-buffer`:
+- Earlier `integration/replication-buffer` run:
   `harness/oracle/results/tcl-survey/20260613T042757054194Z/result.json`
   reported no summary and an exception at `fail to sync with replicas`, before
-  the buffer assertions. This is blocked by the full-sync/BGSAVE frontier, not
-  evidence that buffer limits are correct.
+  the buffer assertions. The later R2-BGSAVE-WINDOW packet moved this frontier
+  to counted failures; this earlier result remains evidence only for the
+  fan-out accounting packet's original scope.
 - Focused dual-server tripwire:
   `harness/oracle/results/tcl-survey/20260613T042825912490Z/result.json`
+  reported `integration/replication-2` 7/0 and `integration/block-repl` 2/0.
+
+### R2-BGSAVE-WINDOW
+
+Status: partial full-sync frontier movement on 2026-06-13.
+
+Implementation:
+
+- `INFO persistence` now reports `rdb_bgsave_in_progress:1` when either the
+  ordinary user BGSAVE child or the replication BGSAVE child is active.
+- Replication BGSAVE jobs now honor the same bounded `rdb-key-save-delay`
+  debug window as ordinary BGSAVE. This makes the `wait_bgsave` / `sync`
+  state observable to upstream Tcl tests without relying on the RDB writer
+  racing slowly enough.
+- `info.rs` has a focused unit test for the replication-BGSAVE INFO flag.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands \
+  info::tests::info_persistence_counts_replication_bgsave_child \
+  -- --nocapture
+cargo test -p redis-commands --test repl_correctness_kit -- --nocapture
+cargo check -p redis-commands -p redis-server
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-frontier-buffer-bgsave-window \
+  --profile integration-repl \
+  --timeout-s 300 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replication-buffer \
+  --isolated-tests-copy \
+  --skip-build
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-frontier-buffer-window-tripwire \
+  --profile integration-repl \
+  --timeout-s 240 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replication-2,integration/block-repl \
+  --isolated-tests-copy \
+  --skip-build
+```
+
+Results:
+
+- Focused INFO persistence test: passed.
+- `repl_correctness_kit`: 21 passed, 0 failed.
+- `cargo check -p redis-commands -p redis-server`: passed.
+- `cargo build --bin redis-server`: passed.
+- Focused `integration/replication-buffer`:
+  `harness/oracle/results/tcl-survey/20260613T050038752302Z/result.json`
+  moved from no-summary setup exception to a counted `3/15` result. Remaining
+  failures are now buffer/backlog/partial-resync semantics, not the initial
+  BGSAVE sync-window assertion.
+- Focused dual-server tripwire:
+  `harness/oracle/results/tcl-survey/20260613T050307837025Z/result.json`
   reported `integration/replication-2` 7/0 and `integration/block-repl` 2/0.
 
 ### R1-NOOP-DIRTY

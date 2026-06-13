@@ -794,16 +794,18 @@ fn save_bgsave_child_databases(
     let _ = std::fs::remove_file(&temp_path);
     let _ = std::fs::remove_file(temp_path.with_extension("rdb.tmp"));
     save_rdb_databases(dbs, &temp_path)?;
-
-    let delay_us = crate::connection::rdb_key_save_delay_us();
-    if delay_us > 0 {
-        // Upstream's debug knob delays per key. For the shutdown frontier we
-        // need the same observable state: a live child with temp-<pid>.rdb
-        // present long enough for the parent to observe and clean it up.
-        thread::sleep(Duration::from_micros(delay_us.min(5_000_000)));
-    }
+    sleep_for_rdb_key_save_delay();
 
     std::fs::rename(&temp_path, final_path)
+}
+
+fn sleep_for_rdb_key_save_delay() {
+    let delay_us = crate::connection::rdb_key_save_delay_us();
+    if delay_us > 0 {
+        // Upstream's debug knob delays per key. Valdr caps it to keep the
+        // suite bounded while preserving the observable background-save window.
+        thread::sleep(Duration::from_micros(delay_us.min(5_000_000)));
+    }
 }
 
 /// Outcome of `bgsave_for_replication`.
@@ -860,11 +862,11 @@ pub fn bgsave_for_replication(
             let p = libc::fork();
             if p == 0 {
                 let dbs = snapshot.to_dbs();
-                let exit_code = if save_rdb_databases(&dbs, &path_for_child).is_ok() {
-                    0i32
-                } else {
-                    1i32
-                };
+                let save_result = save_rdb_databases(&dbs, &path_for_child);
+                if save_result.is_ok() {
+                    sleep_for_rdb_key_save_delay();
+                }
+                let exit_code = if save_result.is_ok() { 0i32 } else { 1i32 };
                 libc::_exit(exit_code);
             }
             p
@@ -903,6 +905,9 @@ pub fn bgsave_for_replication(
         .spawn(move || {
             let dbs = snapshot.to_dbs();
             let ok = save_rdb_databases(&dbs, &temp_for_thread).is_ok();
+            if ok {
+                sleep_for_rdb_key_save_delay();
+            }
             if !ok {
                 eprintln!("redis-server: BGSAVE-for-replication thread fallback save failed");
                 let _ = repl_for_thread.take_repl_bgsave_job();

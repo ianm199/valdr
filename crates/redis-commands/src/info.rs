@@ -391,10 +391,12 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
             "rdb_changes_since_last_save:{}\r",
             ctx.server().dirty()
         );
+        let repl_bgsave_in_progress =
+            redis_core::replication::global_replication_state().repl_child_pid() != 0;
         let _ = writeln!(
             buf,
             "rdb_bgsave_in_progress:{}\r",
-            (ctx.server().rdb_child_pid() != 0) as u8
+            (ctx.server().rdb_child_pid() != 0 || repl_bgsave_in_progress) as u8
         );
         let _ = writeln!(buf, "rdb_last_save_time:{}\r", last_save);
         let _ = writeln!(
@@ -818,6 +820,23 @@ mod tests {
         }
 
         drop(snapshot);
+    }
+
+    #[test]
+    fn info_persistence_counts_replication_bgsave_child() {
+        let repl = redis_core::replication::global_replication_state();
+        repl.set_repl_child_pid(4242);
+
+        let mut db = RedisDb::new(0);
+        let mut client = Client::new(980_779);
+        client.set_args(vec![arg(b"INFO"), arg(b"persistence")]);
+        let mut ctx = CommandContext::with_db(&mut client, &mut db);
+        info_command(&mut ctx).unwrap();
+        repl.set_repl_child_pid(0);
+
+        let reply = client.drain_reply();
+        let text = bulk_text(&reply);
+        assert_eq!(field_value(text, "rdb_bgsave_in_progress"), "1");
     }
 
     #[test]
