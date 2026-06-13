@@ -360,9 +360,13 @@ Work packets:
   private ownership, made INFO count shared stream memory once, wired
   successful writer sends to drain pending replica output, and moved focused
   `integration/replication-buffer` from 4/11 to 5/10. The two
-  backlog-histlen outgrowth assertions are now green; reclaim/shrink after the
-  last dependent replica disconnects or catches up remains the next
-  `repl_buffer_kit` frontier.
+  backlog-histlen outgrowth assertions are now green. The next reclaim slice
+  drops active BGSAVE catch-up bytes as soon as the last waiting replica
+  disconnects while leaving the job installed for child/temp-file cleanup,
+  moving focused `integration/replication-buffer` to 6/9. Remaining buffer
+  work is dual-channel global-buffer behavior, later slow-replica
+  output-buffer disconnect trimming, and broader partial-resync history
+  ownership.
 
 Gate:
 

@@ -1759,6 +1759,9 @@ impl ReplicationState {
         let before = job.waiting_replicas.len();
         job.waiting_replicas.retain(|id| *id != client_id);
         let was_waiter = job.waiting_replicas.len() != before;
+        if was_waiter && job.waiting_replicas.is_empty() {
+            job.catch_up_bytes.clear();
+        }
         (was_waiter, job.waiting_replicas.len(), job.child_pid)
     }
 

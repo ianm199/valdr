@@ -73,7 +73,7 @@ Artifact:
 | `integration/block-repl` | 2/0 | Green | Real `DEBUG DIGEST` plus single blocked-pop wake propagation now validates the list/zset blocking workload. |
 | `integration/replication-3` | 3/4 | Red | Expiry consistency, writable-replica expired-key behavior, and PFCOUNT expired-key/cache semantics. |
 | `integration/replication-4` | 15/2 | Red | SPOP rewrite cases now pass; remaining failures are divergence/default writable-replica cases. |
-| `integration/replication-buffer` | 5/10 | Red | Shared/private output ownership plus writer-side drain moved the two backlog-histlen outgrowth assertions green. Remaining failures are dual-channel global-buffer memory, shrink/reclaim after dependent replicas disconnect, partial resync across broader retained history, and output-buffer / PSYNC counter edge cases. |
+| `integration/replication-buffer` | 6/9 | Red | Shared/private output ownership, writer-side drain, and active full-sync catch-up release moved the backlog-histlen outgrowth assertions and the non-dual-channel shrink assertion green. Remaining failures are dual-channel global-buffer behavior, broader partial resync / backlog-memory shrink cases, and output-buffer / PSYNC counter edge cases. |
 | `integration/replication` | 40/27 | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, the first async-loading CONFIG exception, successful swapdb function-context mismatch, parent-killed child discovery, `repl-diskless-load on-empty-db`, no-longer-useful RDB child cancellation, all four replica-link reply-violation assertions, malformed-PSYNC-offset logging, chained replica `FLUSHDB` / `FLUSHALL` stream relay, `GETSET` rewrite, nonblocking `BRPOPLPUSH` / `BLMOVE` rewrite stats, and empty-blocking `BRPOPLPUSH` / `BLMOVE` commandstats via real digest waits. Remaining failures are counted full-sync, diskless pipe/drop, blocked-list role-change, cache-master, lazy-expire, and old-data rollback cases. |
 | `integration/replication-psync` | 90/0 | Green | Focused gate is green after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support for the replica dialer. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
@@ -723,6 +723,80 @@ Takeaway:
   `repl_buffer_kit` slice should model reclaim policy after the last dependent
   replica disconnects or catches up, including the distinction between retained
   full-sync history, active catch-up bytes, and per-replica output memory.
+
+### R2-BUFFER-ACTIVE-CATCHUP-RELEASE
+
+Status: active full-sync catch-up reclaim slice completed on 2026-06-13;
+`integration/replication-buffer` moved from 5/10 to 6/9.
+
+Implementation:
+
+- When the last replica waiting on an active replication BGSAVE disconnects,
+  `remove_repl_bgsave_waiter` now clears the job's `catch_up_bytes`
+  immediately.
+- The replication BGSAVE job itself remains installed so the reaper can still
+  collect the child, clean temp files, and report the useless-child signal
+  through the existing lifecycle path.
+- `repl_buffer_kit` now covers the active-job variant of the reclaim invariant:
+  one remaining waiter keeps active catch-up history readable, while removing
+  the last waiter releases the extra history bytes and leaves only the
+  circular backlog.
+
+Evidence:
+
+```bash
+rustfmt --check \
+  crates/redis-core/src/replication.rs \
+  crates/redis-commands/tests/repl_buffer_kit.rs
+cargo test -p redis-commands --test repl_buffer_kit -- --nocapture
+cargo test -p redis-core replication::tests -- --nocapture
+cargo check -p redis-core -p redis-commands -p redis-server
+cargo build --bin redis-server
+cargo test -p redis-commands --test repl_correctness_kit -- --nocapture
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-buffer-active-catchup-release \
+  --profile integration-repl \
+  --timeout-s 300 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replication-buffer \
+  --isolated-tests-copy \
+  --skip-build
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-buffer-active-catchup-release-tripwire \
+  --profile integration-repl \
+  --timeout-s 240 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replication-2,integration/block-repl \
+  --isolated-tests-copy \
+  --skip-build
+```
+
+Results:
+
+- `repl_buffer_kit`: 6 passed, 0 failed.
+- Core replication tests: 15 passed, 0 failed.
+- `cargo check -p redis-core -p redis-commands -p redis-server`: passed.
+- `cargo build --bin redis-server`: passed.
+- `repl_correctness_kit`: 29 passed, 0 failed.
+- Focused `integration/replication-buffer`:
+  `harness/oracle/results/tcl-survey/20260613T221649651682Z/result.json`
+  reported 6 passed, 9 failed, 0 timed out, 0 without summary. The
+  `Replication buffer will become smaller when no replica uses dualchannel no`
+  assertion is now absent from the failure list.
+- Focused no-regression tripwire:
+  `harness/oracle/results/tcl-survey/20260613T221917433378Z/result.json`
+  reported `integration/replication-2` 7/0 and `integration/block-repl` 2/0.
+
+Takeaway:
+
+- Active catch-up memory no longer waits for child collection once no replica
+  can consume it. The remaining shrink failures are in the dual-channel setup
+  and in the later slow-replica/output-buffer disconnect path, not this
+  active-job no-waiter case.
 
 ### R2-BGSAVE-CATCHUP
 

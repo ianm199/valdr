@@ -118,6 +118,50 @@ fn retained_history_is_counted_once_and_released_by_ack_or_disconnect() {
 }
 
 #[test]
+fn active_fullsync_catchup_releases_when_last_waiter_disconnects() {
+    let st = ReplicationState::new(generate_runid(), 4);
+    let _rx1 = attach_replica(&st, 91, 0);
+    let _rx2 = attach_replica(&st, 92, 0);
+    install_job(&st, vec![91, 92], 0);
+
+    st.append_to_backlog(b"abcdef");
+    assert_eq!(st.replication_history_extra_len(), 6);
+    assert_eq!(
+        st.read_history_at(0, 6).as_deref(),
+        Some(b"abcdef".as_slice())
+    );
+
+    let first = st.remove_replica(91);
+    assert!(first.was_repl_bgsave_waiter);
+    assert_eq!(first.remaining_repl_bgsave_waiters, 1);
+    assert_eq!(st.replication_history_extra_len(), 6);
+    assert_eq!(
+        st.read_history_at(0, 6).as_deref(),
+        Some(b"abcdef".as_slice()),
+        "one remaining waiter still pins active catch-up history"
+    );
+
+    let last = st.remove_replica(92);
+    assert!(last.was_repl_bgsave_waiter);
+    assert_eq!(last.remaining_repl_bgsave_waiters, 0);
+    assert_eq!(last.useless_repl_child_pid, Some(1));
+    assert_eq!(
+        st.replication_history_extra_len(),
+        0,
+        "no replica can use the active catch-up buffer after the last waiter disconnects"
+    );
+    assert!(
+        st.read_history_at(0, 6).is_none(),
+        "only the circular backlog remains after active catch-up release"
+    );
+    let job = st
+        .take_repl_bgsave_job()
+        .expect("job remains for reaper cleanup");
+    assert!(job.waiting_replicas.is_empty());
+    assert!(job.catch_up_bytes.is_empty());
+}
+
+#[test]
 fn retained_history_does_not_overclaim_after_backlog_wrap_creates_gap() {
     let st = ReplicationState::new(generate_runid(), 4);
     let _rx = attach_replica(&st, 61, 0);
