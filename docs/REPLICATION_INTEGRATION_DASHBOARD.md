@@ -170,3 +170,39 @@ Results:
   `harness/oracle/results/tcl-survey/20260613T004936241400Z/result.json`
   reported `unit/type/set` 115/0, `unit/type/hash` 83/0, and
   `unit/type/zset` 320/0.
+
+### R1-TTL-REWRITE
+
+Status: completed on 2026-06-13.
+
+Implementation:
+
+- EXPIRE-family commands propagate as `PEXPIREAT key <absolute-ms>`.
+- Expiry timestamps already in the past propagate as `UNLINK key`.
+- `SET` / `SETEX` / `PSETEX` relative expiry forms propagate as `SET ... PXAT
+  <absolute-ms>`.
+- `GETEX EX|PX` propagates as `PEXPIREAT key <absolute-ms>`.
+- `MSETEX EX|PX` propagates as `MSETEX ... PXAT <absolute-ms>`.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands --test repl_correctness_kit
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-r1-ttl-expire-baseline \
+  --profile single-node-repl \
+  --timeout-s 240 \
+  --baseport 45000 \
+  --portcount 3000 \
+  --clients 1 \
+  --files unit/expire \
+  --isolated-tests-copy \
+  --skip-build
+```
+
+Results:
+
+- `repl_correctness_kit`: 16 passed, 0 failed.
+- Focused TCL:
+  `harness/oracle/results/tcl-survey/20260613T005055896320Z/result.json`
+  reported `unit/expire` 67/0.

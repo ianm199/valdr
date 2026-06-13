@@ -412,6 +412,74 @@ fn r1_spop_rewrites_replication_to_deterministic_commands() {
     );
 }
 
+#[test]
+fn r1_ttl_relative_writes_rewrite_to_absolute_propagation() {
+    let _g = repl_guard();
+    let cap = ReplCapture::attach(900_015, 0);
+    let mut db = RedisDb::new(0);
+
+    assert_eq!(
+        dispatch_as_primary(28, &mut db, &[b"SET", b"ttl-key", b"value"]),
+        b"+OK\r\n"
+    );
+    let _ = cap.drain();
+
+    let reply = dispatch_as_primary(29, &mut db, &[b"EXPIRE", b"ttl-key", b"60"]);
+    assert_eq!(reply, b":1\r\n");
+    let stream = cap.drain();
+    assert!(
+        stream
+            .windows(b"PEXPIREAT".len())
+            .any(|w| w == b"PEXPIREAT"),
+        "relative EXPIRE must propagate as PEXPIREAT, got {:?}",
+        String::from_utf8_lossy(&stream)
+    );
+    assert!(
+        !stream
+            .windows(resp(&[b"EXPIRE", b"ttl-key", b"60"]).len())
+            .any(|w| w == resp(&[b"EXPIRE", b"ttl-key", b"60"]).as_slice()),
+        "relative EXPIRE itself must not be propagated"
+    );
+
+    let reply = dispatch_as_primary(30, &mut db, &[b"SET", b"set-rel", b"value", b"EX", b"60"]);
+    assert_eq!(reply, b"+OK\r\n");
+    let stream = cap.drain();
+    assert!(
+        stream.windows(b"PXAT".len()).any(|w| w == b"PXAT"),
+        "SET EX must propagate as SET PXAT, got {:?}",
+        String::from_utf8_lossy(&stream)
+    );
+    assert!(
+        !stream
+            .windows(resp(&[b"SET", b"set-rel", b"value", b"EX", b"60"]).len())
+            .any(|w| w == resp(&[b"SET", b"set-rel", b"value", b"EX", b"60"]).as_slice()),
+        "relative SET EX form must not be propagated"
+    );
+
+    assert_eq!(
+        dispatch_as_primary(31, &mut db, &[b"SET", b"getex-rel", b"value"]),
+        b"+OK\r\n"
+    );
+    let _ = cap.drain();
+
+    let reply = dispatch_as_primary(32, &mut db, &[b"GETEX", b"getex-rel", b"EX", b"60"]);
+    assert_eq!(reply, b"$5\r\nvalue\r\n");
+    let stream = cap.drain();
+    assert!(
+        stream
+            .windows(b"PEXPIREAT".len())
+            .any(|w| w == b"PEXPIREAT"),
+        "GETEX EX must propagate as PEXPIREAT, got {:?}",
+        String::from_utf8_lossy(&stream)
+    );
+    assert!(
+        !stream
+            .windows(resp(&[b"GETEX", b"getex-rel", b"EX", b"60"]).len())
+            .any(|w| w == resp(&[b"GETEX", b"getex-rel", b"EX", b"60"]).as_slice()),
+        "relative GETEX EX form must not be propagated"
+    );
+}
+
 // ─── Finding #2: IN-MULTI REPLICAOF ──────────────────────────────────────────
 
 /// AUDIT FINDING #2 (regression guard): queuing a write together with a role

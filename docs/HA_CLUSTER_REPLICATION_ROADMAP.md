@@ -175,7 +175,8 @@ Work packets:
 
 - **R1-TTL-REWRITE:** propagate relative-expiry writes as absolute `PEXPIREAT`
   / equivalent absolute forms so paused replicas do not re-anchor TTL at apply
-  time.
+  time. Completed on 2026-06-13; see
+  [`REPLICATION_INTEGRATION_DASHBOARD.md`](REPLICATION_INTEGRATION_DASHBOARD.md).
 - **R1-SPOP-REWRITE:** rewrite `SPOP key count` into deterministic `SREM`
   frames for the exact elements removed; full-count removals rewrite to
   `DEL`/`UNLINK`. Completed on 2026-06-13; see
