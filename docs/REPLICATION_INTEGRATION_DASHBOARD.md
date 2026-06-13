@@ -747,7 +747,76 @@ Takeaway:
   read-only replicas now run, script writes are still blocked for ordinary
   clients, and primary-link script writes apply locally. The next
   `fullsync_lifecycle_kit` slice should model diskless swapdb / async-loading
-  role state, especially the READONLY exception in the new abort test.
+  role state, especially the FCALL/read-only exception in the new abort test.
+
+### 2026-06-13 R2 follow-up: writable-replica FCALL preflight
+
+Scope:
+
+- Made FCALL and shebang-EVAL script read-only preflight honor
+  `replica-read-only no`, matching the generic write-command gate.
+- Applied the same shebang-EVAL condition in the `lua-rs` backend path so the
+  future Lua engine swap keeps the same replica-writable semantics.
+- Extended `fullsync_lifecycle_kit.rs` with a function case matching the Tcl
+  diskless swapdb frontier: a function loaded before demotion remains blocked
+  while `replica-read-only yes`, then runs once live config flips to
+  writable-replica mode.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands --test fullsync_lifecycle_kit -- --nocapture
+rustfmt --check \
+  crates/redis-commands/src/eval.rs \
+  crates/redis-commands/src/eval/lua_rs_backend.rs \
+  crates/redis-commands/tests/fullsync_lifecycle_kit.rs
+cargo test -p redis-commands eval::tests -- --nocapture
+cargo check -p redis-core -p redis-commands -p redis-server
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --files integration/replication \
+  --profile integration-repl \
+  --runner-id fullsync-writable-fcall \
+  --timeout-s 300 \
+  --baseport 30679 \
+  --portcount 100 \
+  --skip-build
+python3 harness/oracle/tcl-survey.py \
+  --files integration/replication-2,integration/block-repl \
+  --profile integration-repl \
+  --runner-id fullsync-writable-fcall-tripwire \
+  --timeout-s 240 \
+  --baseport 30779 \
+  --portcount 100 \
+  --skip-build
+```
+
+Results:
+
+- `fullsync_lifecycle_kit`: 4 passed, 0 failed.
+- `eval::tests`: 28 passed, 0 failed.
+- Targeted `rustfmt --check`: passed.
+- `cargo check -p redis-core -p redis-commands -p redis-server`: passed.
+- `cargo build --bin redis-server`: passed.
+- Focused `integration/replication`:
+  `harness/oracle/results/tcl-survey/20260613T175145745365Z/result.json`
+  completed without timing out but produced no parsed summary. It moved from
+  the previous `$replica fcall test 0` READONLY exception in
+  `Diskless load swapdb (async_loading): new database is exposed after
+  swapping` to a later async-loading aborted-branch exception:
+  `Replica didn't disconnect`, with 25 parsed failure lines.
+- Focused no-regression tripwire:
+  `harness/oracle/results/tcl-survey/20260613T175600712511Z/result.json`
+  reported `integration/replication-2` 7/0 and `integration/block-repl` 2/0.
+
+Takeaway:
+
+- Writable replicas now consistently bypass script/function preflight
+  READONLY checks while ordinary read-only replicas remain protected. The next
+  `fullsync_lifecycle_kit` slice should focus on explicit async-loading
+  abort/disconnect state: when the master kills the replica connection during
+  swapdb loading, Valdr must clear async-loading/loading state and expose the
+  old dataset.
 
 ### R4-AOF-FULLSYNC
 

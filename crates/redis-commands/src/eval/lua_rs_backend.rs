@@ -41,7 +41,11 @@ pub(super) fn run_script_lua_rs(
     if stale_replica_scripts_blocked(ctx) && !script_flags.allow_stale {
         return Err(stale_replica_masterdown_error());
     }
-    if replica_readonly_script_blocked(ctx) && !read_only && script_flags.has_shebang {
+    if replica_readonly_script_blocked(ctx)
+        && !read_only
+        && script_flags.has_shebang
+        && ctx.live_config().slave_read_only()
+    {
         return Err(replica_readonly_error());
     }
     if script_flags.has_shebang

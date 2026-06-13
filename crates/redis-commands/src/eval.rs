@@ -3162,7 +3162,11 @@ fn fcall_command_generic(ctx: &mut CommandContext<'_>, ro: bool) -> RedisResult<
     if stale_replica_scripts_blocked(ctx) && !definition.allow_stale {
         return Err(stale_replica_masterdown_error());
     }
-    if !ro && !definition.no_writes && replica_readonly_script_blocked(ctx) {
+    if !ro
+        && !definition.no_writes
+        && replica_readonly_script_blocked(ctx)
+        && ctx.live_config().slave_read_only()
+    {
         return Err(replica_readonly_error());
     }
 
@@ -5105,7 +5109,11 @@ fn run_script(
     if stale_replica_scripts_blocked(ctx) && !script_flags.allow_stale {
         return Err(stale_replica_masterdown_error());
     }
-    if replica_readonly_script_blocked(ctx) && !read_only && script_flags.has_shebang {
+    if replica_readonly_script_blocked(ctx)
+        && !read_only
+        && script_flags.has_shebang
+        && ctx.live_config().slave_read_only()
+    {
         return Err(replica_readonly_error());
     }
     if script_flags.has_shebang

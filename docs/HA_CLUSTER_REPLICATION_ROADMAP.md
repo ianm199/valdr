@@ -263,9 +263,10 @@ Work packets:
   the old keyspace. The script-busy full-sync frontier also moved: no-write
   EVAL can run on read-only replicas, script writes remain rejected for
   ordinary clients, and primary-link script writes apply locally. The live
-  `integration/replication` gate now reaches diskless swapdb async-loading
-  state, where the next READONLY exception must be reduced into a dedicated
-  kit slice.
+  `integration/replication` gate then reached diskless swapdb async-loading
+  state. A follow-up FCALL preflight slice made writable replicas honor
+  `replica-read-only no` for write-capable functions, moving the Tcl frontier
+  to async-loading abort/disconnect cleanup (`Replica didn't disconnect`).
 - **R2-BUFFER-LIMITS:** implement replica output-buffer accounting and
   disconnection policy well enough for `replication-buffer` to count tests
   instead of dying in setup. Partial accounting surface landed on 2026-06-13:

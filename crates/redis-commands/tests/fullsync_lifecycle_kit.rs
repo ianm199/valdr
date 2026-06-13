@@ -65,8 +65,17 @@ fn global_repl_guard() -> MutexGuard<'static, ()> {
 }
 
 fn run_dispatch(client: &mut Client, db: &mut RedisDb, parts: &[&[u8]]) -> Vec<u8> {
-    client.set_args(parts.iter().map(|p| RedisString::from_bytes(p)).collect());
     let server = Arc::new(RedisServer::default());
+    run_dispatch_with_server(client, db, server, parts)
+}
+
+fn run_dispatch_with_server(
+    client: &mut Client,
+    db: &mut RedisDb,
+    server: Arc<RedisServer>,
+    parts: &[&[u8]],
+) -> Vec<u8> {
+    client.set_args(parts.iter().map(|p| RedisString::from_bytes(p)).collect());
     let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
     let result = {
         let mut ctx = redis_core::CommandContext::with_server(client, db, server, pubsub);
@@ -231,4 +240,64 @@ fn primary_link_script_write_applies_on_readonly_replica() {
         String::from_utf8_lossy(&apply_reply)
     );
     assert_eq!(applied_value.as_deref(), Some(b"applied".as_slice()));
+}
+
+#[test]
+fn writable_replica_fcall_bypasses_script_readonly_preflight() {
+    let _guard = global_repl_guard();
+    let repl = global_replication_state();
+    let was_replica = repl.is_replica();
+    repl.become_master();
+
+    let server = Arc::new(RedisServer::default());
+    let mut db = RedisDb::new(0);
+    let library = b"#!lua name=fullsync_fcall\nserver.register_function('fullsync_fcall_read', function() return 'hello-from-function' end)";
+
+    let mut loader = Client::new(93);
+    loader.authenticated_user = Some(RedisString::from_static(b"default"));
+    let load_reply = run_dispatch_with_server(
+        &mut loader,
+        &mut db,
+        Arc::clone(&server),
+        &[b"FUNCTION", b"LOAD", b"REPLACE", library],
+    );
+
+    repl.become_replica_of(RedisString::from_static(b"127.0.0.1"), 6379);
+
+    let mut readonly = Client::new(94);
+    let readonly_reply = run_dispatch_with_server(
+        &mut readonly,
+        &mut db,
+        Arc::clone(&server),
+        &[b"FCALL", b"fullsync_fcall_read", b"0"],
+    );
+
+    server.live_config.set_slave_read_only(false);
+    let mut writable = Client::new(95);
+    let writable_reply = run_dispatch_with_server(
+        &mut writable,
+        &mut db,
+        Arc::clone(&server),
+        &[b"FCALL", b"fullsync_fcall_read", b"0"],
+    );
+
+    repl.become_master();
+    if was_replica {
+        repl.become_replica_of(RedisString::from_static(b"127.0.0.1"), 6379);
+    }
+
+    assert!(
+        !load_reply.starts_with(b"-"),
+        "function load should succeed before role flip, got {:?}",
+        String::from_utf8_lossy(&load_reply)
+    );
+    assert!(
+        readonly_reply.starts_with(b"-READONLY"),
+        "write-capable FCALL remains blocked while replica-read-only is yes, got {:?}",
+        String::from_utf8_lossy(&readonly_reply)
+    );
+    assert_eq!(
+        writable_reply, b"$19\r\nhello-from-function\r\n",
+        "replica-read-only no should allow FCALL through the script preflight"
+    );
 }
