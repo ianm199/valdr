@@ -327,6 +327,14 @@ fn deliver_to_waiter(db: &mut RedisDb, key: &RedisString, waiter: BlockedWaiter)
                     push_one(db, key, value, side);
                 } else {
                     crate::slowlog_cmd::record_blocked_slowlog_entry(waiter.client_id);
+                    let prop_cmd = match side {
+                        BlockedSide::Head => b"LPOP" as &[u8],
+                        BlockedSide::Tail => b"RPOP" as &[u8],
+                    };
+                    crate::dispatch::propagate_command_from_wake(
+                        db.id,
+                        &[RedisString::from_bytes(prop_cmd), key.clone()],
+                    );
                 }
             } else {
                 let take = count as usize;

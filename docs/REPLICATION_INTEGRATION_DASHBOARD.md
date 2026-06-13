@@ -13,8 +13,8 @@ Fast deterministic gate:
 cargo test -p redis-commands --test repl_correctness_kit
 ```
 
-Latest result on 2026-06-13 after the legacy command-rewrite packet:
-25 passed, 0 failed.
+Latest result on 2026-06-13 after the real digest / blocked-pop wake packet:
+29 passed, 0 failed.
 
 R0 full integration dashboard:
 
@@ -69,12 +69,12 @@ Artifact:
 
 | File | Current result | Status | Frontier |
 |---|---:|---|---|
-| `integration/replication-2` | 7/0 | Green | No-regression tripwire. |
-| `integration/block-repl` | 2/0 | Green | No-regression tripwire. |
+| `integration/replication-2` | 6/1 | Red | Real `DEBUG DIGEST` exposed the next frontier: complex-dataset replica catch-up is too slow for the fixed 500 ms post-write check. The latest dump showed the primary with thousands of keys while the replica had hundreds, so this is a throughput/catch-up kit target, not a command rewrite shape. |
+| `integration/block-repl` | 2/0 | Green | Real `DEBUG DIGEST` plus single blocked-pop wake propagation now validates the list/zset blocking workload. |
 | `integration/replication-3` | 3/4 | Red | Expiry consistency, writable-replica expired-key behavior, and PFCOUNT expired-key/cache semantics. |
 | `integration/replication-4` | 15/2 | Red | SPOP rewrite cases now pass; remaining failures are divergence/default writable-replica cases. |
 | `integration/replication-buffer` | 4/11 | Red | Fresh post-PSYNC baseline still reaches counted assertions without timeout. Shared vs private output-buffer semantics are now pinned in `repl_buffer_kit`; remaining failures are Valkey-style global replication-buffer memory, BGSAVE/slow-replica backlog outgrowth, partial resync across broader retained history, and typed live output-buffer disconnect/drain policy. |
-| `integration/replication` | 35/32 | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, the first async-loading CONFIG exception, successful swapdb function-context mismatch, parent-killed child discovery, `repl-diskless-load on-empty-db`, no-longer-useful RDB child cancellation, all four replica-link reply-violation assertions, malformed-PSYNC-offset logging, chained replica `FLUSHDB` / `FLUSHALL` stream relay, `GETSET` rewrite, and nonblocking `BRPOPLPUSH` / `BLMOVE` rewrite stats. Remaining failures are counted full-sync, diskless pipe/drop, blocked-empty move rewrite stats, blocked-list role-change, cache-master, lazy-expire, and old-data rollback cases. |
+| `integration/replication` | 40/27 | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, the first async-loading CONFIG exception, successful swapdb function-context mismatch, parent-killed child discovery, `repl-diskless-load on-empty-db`, no-longer-useful RDB child cancellation, all four replica-link reply-violation assertions, malformed-PSYNC-offset logging, chained replica `FLUSHDB` / `FLUSHALL` stream relay, `GETSET` rewrite, nonblocking `BRPOPLPUSH` / `BLMOVE` rewrite stats, and empty-blocking `BRPOPLPUSH` / `BLMOVE` commandstats via real digest waits. Remaining failures are counted full-sync, diskless pipe/drop, blocked-list role-change, cache-master, lazy-expire, and old-data rollback cases. |
 | `integration/replication-psync` | 90/0 | Green | Focused gate is green after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support for the replica dialer. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
 | `integration/replica-redirect` | timeout | Red | `CLIENT CAPA REDIRECT` top-level and MULTI/EXEC replica redirect semantics now pass the early file assertions. Manual `FAILOVER` now reaches timeout-driven handoff in Rust kits and a live two-process probe, including blocked `BRPOP` and paused `GET` REDIRECT after promotion. The official Tcl file still no-summary times out in the first failover test; side observation showed old primary `blocked_clients:2`, `paused_actions:all`, and `role:slave` while the target remained SIGSTOP'd. |
@@ -104,10 +104,15 @@ visible integration frontiers are now:
 - Expiry-on-replica semantics: `replication-3` still fails master/replica
   consistency with expire, writable replica expired-key behavior, and PFCOUNT
   expired-key/cache cases.
-- `R1-BLOCKED-MOVE-LIVE`: the byte-level kit now proves blocked wake
-  BRPOPLPUSH/BLMOVE rewrites, but live `integration/replication` still fails
-  the empty-blocking commandstats assertions. Build a live-server reproducer
-  around parked clients before changing more wake logic.
+- `R1-REPLICA-APPLY-THROUGHPUT`: real `DEBUG DIGEST` turned
+  `integration/replication-2` from a false green into a visible 6/1 frontier.
+  Build a deterministic catch-up/throughput kit around `createComplexDataset`
+  style bursts so the replica reaches the same key count within the upstream
+  500 ms window.
+- `R1-BLOCKING-WAKE-REWRITE`: empty-blocking `BRPOPLPUSH` / `BLMOVE` live
+  stats now pass, and the list/zset single-pop blocking workload is covered by
+  `block-repl`. Keep extending this family for `BLMPOP` / `BZMPOP` and
+  multi-key fairness before touching more blocked-client code.
 - `R2-RDB-BULK-FAITHFUL`: the old `REPLICAOF` pre-PSYNC `KEYS`/`DUMP` seed
   shortcut is removed, so remaining full-sync work must pass through the
   streamed RDB handoff path.
@@ -146,6 +151,72 @@ visible integration frontiers are now:
   REDIRECT unblocking, and promotion/demotion remain open.
 
 ## Packet Evidence
+
+### R1-REAL-DIGEST-BLOCKING-WAKE
+
+Status: integration advance completed on 2026-06-13.
+
+Implementation:
+
+- `DEBUG DIGEST` now hashes the live keyspace instead of returning the old
+  all-zero stub, so Tcl convergence checks wait for actual replica application.
+  The digest is deterministic across databases and object types; it omits TTL
+  timing metadata for now to avoid turning expiry jitter into false mismatches.
+- Empty-blocking `BRPOPLPUSH` / `BLMOVE` commandstats assertions now pass
+  because Tcl no longer exits the digest wait before the replica applies the
+  propagated `RPOPLPUSH` / `LMOVE`.
+- Single-element `BLPOP` / `BRPOP` wakes now propagate `LPOP` / `RPOP`.
+- Single-element `BZPOPMIN` / `BZPOPMAX` wakes now propagate `ZPOPMIN` /
+  `ZPOPMAX`.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands --test repl_correctness_kit -- --nocapture
+cargo test -p redis-core blocked_keys::tests -- --nocapture
+cargo test -p redis-core replication::tests -- --nocapture
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-debug-digest-blocking-pop \
+  --profile integration-repl \
+  --timeout-s 420 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replication \
+  --isolated-tests-copy \
+  --skip-build
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-blocking-pop-tripwire \
+  --profile integration-repl \
+  --timeout-s 240 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replication-2,integration/block-repl \
+  --isolated-tests-copy \
+  --skip-build
+```
+
+Results:
+
+- `repl_correctness_kit`: 29 passed, 0 failed.
+- `redis-core blocked_keys::tests`: 3 passed, 0 failed.
+- `redis-core replication::tests`: 15 passed, 0 failed.
+- `cargo build --bin redis-server`: passed.
+- Narrow Tcl probes showed:
+  `BRPOPLPUSH replication, when blocking against empty list` and
+  `BLMOVE (left, left) replication, when blocking against empty list` both
+  passing.
+- Focused `integration/replication`:
+  `harness/oracle/results/tcl-survey/20260613T214905151897Z/result.json`
+  reported 40 passed / 27 failed. This clears the five empty-blocking
+  `BRPOPLPUSH` / `BLMOVE` stats cases over the previous 35/32 result.
+- Focused tripwire:
+  `harness/oracle/results/tcl-survey/20260613T214753728213Z/result.json`
+  reported `integration/block-repl` 2/0. It also reported
+  `integration/replication-2` 6/1; the real digest exposed a separate
+  complex-dataset catch-up lag that was previously hidden by the zero digest.
 
 ### R1-LEGACY-COMMAND-REWRITE
 

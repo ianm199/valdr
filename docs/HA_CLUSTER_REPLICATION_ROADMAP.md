@@ -75,6 +75,11 @@ Current red/unfinished areas from the 2026-06-13 R0 dashboard in
   15/2. The command-propagation rewrite cases are cleared, but
   expiration/PFCOUNT semantics and divergence/writable-replica cases still need
   work.
+- `block-repl` is green at 2/0 with real `DEBUG DIGEST` after blocked list/zset
+  single-pop wakes began propagating their canonical nonblocking forms.
+- `replication-2` is now an honest 6/1 frontier with real `DEBUG DIGEST`; the
+  remaining failure is mostly complex-dataset replica catch-up lag after the
+  test's fixed 500 ms delay, not a false commandstats win.
 - `replication-psync` is green in the focused gate at 90/0 after live backlog
   resize, backlog TTL expiry, and delayed reconnect semantics landed.
 - `replication-aof-sync` is green as of 2026-06-13 after full-sync RDB loads
@@ -83,8 +88,10 @@ Current red/unfinished areas from the 2026-06-13 R0 dashboard in
 
 ## Execution Rules
 
-1. **Preserve current green gates.** `replication-2` and `block-repl` are
-   no-regression tripwires for replication work.
+1. **Preserve current green gates.** `block-repl`, `replication-psync`, and
+   `replication-aof-sync` are no-regression tripwires for replication work.
+   `replication-2` should be treated as the current replica catch-up frontier
+   now that `DEBUG DIGEST` is no longer a zero stub.
 2. **Use the fast kit first.** Build deterministic tests in
    `crates/redis-commands/tests/repl_correctness_kit.rs` before grinding slow
    TCL files.
@@ -199,10 +206,19 @@ Work packets:
 - **R1-LEGACY-COMMAND-REWRITE:** keep deprecated/blocking command forms out of
   the replication stream when Valkey rewrites them to canonical writes. The
   2026-06-13 packet covers `GETSET` to `SET`, immediate `BRPOPLPUSH` to
-  `RPOPLPUSH`, and immediate `BLMOVE` to `LMOVE`. The deterministic kit also
-  proves blocked wake `BRPOPLPUSH` / `BLMOVE` bytes, but live Tcl still fails
-  the empty-blocking commandstats assertions; a live parked-client reproducer
-  is the next step before changing more wake logic.
+  `RPOPLPUSH`, immediate `BLMOVE` to `LMOVE`, and blocked wake
+  `BRPOPLPUSH` / `BLMOVE` bytes. A later real-`DEBUG DIGEST` packet cleared
+  the live empty-blocking commandstats assertions by making Tcl wait for actual
+  replica application.
+- **R1-BLOCKING-WAKE-REWRITE:** keep blocked-client pop effects in the
+  replication stream. Completed for single `BLPOP` / `BRPOP` wakes as
+  `LPOP` / `RPOP` and single `BZPOPMIN` / `BZPOPMAX` wakes as `ZPOPMIN` /
+  `ZPOPMAX` on 2026-06-13. Extend this lane to counted/multi-key fairness
+  cases before changing more blocked-client scheduling.
+- **R1-REAL-DEBUG-DIGEST:** `DEBUG DIGEST` is now a deterministic keyspace hash
+  instead of an all-zero stub. This made `integration/replication` convergence
+  waits meaningful and exposed `replication-2` replica catch-up lag that needs
+  a throughput kit.
 - **R1-SCRIPT-FUNCTION-PROP:** verify script/function propagation semantics
   under `EVAL`, `EVALSHA`, `FCALL`, and write/no-write shebang flags. The
   Lua-originated empty `FLUSHDB` / `FLUSHALL` chained-replica case is now
@@ -483,7 +499,8 @@ python3 harness/oracle/tcl-survey.py --runner-id repl-failover \
 
 Replication can move beyond alpha only when:
 
-- `replication-2` and `block-repl` stay green.
+- `block-repl` stays green, and `replication-2` returns to green under the
+  real `DEBUG DIGEST` once the replica catch-up throughput frontier is fixed.
 - `replication-3` and `replication-4` have no known non-diskless failures, and
   `replication-psync` stays green.
 - Full sync works through the real RDB handoff path, not a seed shortcut.

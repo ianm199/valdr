@@ -2310,6 +2310,17 @@ pub fn deliver_zset_to_waiter(db: &mut RedisDb, key: &RedisString, waiter: Block
                     db.set_key(key.clone(), obj, 0);
                 }
             }
+        } else {
+            crate::slowlog_cmd::record_blocked_slowlog_entry(waiter.client_id);
+            let prop_cmd = if reverse {
+                b"ZPOPMAX" as &[u8]
+            } else {
+                b"ZPOPMIN" as &[u8]
+            };
+            crate::dispatch::propagate_command_from_wake(
+                db.id,
+                &[RedisString::from_bytes(prop_cmd), key.clone()],
+            );
         }
     } else {
         let pairs = zset_pop_many(db, key, reverse, count as usize);

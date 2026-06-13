@@ -31,6 +31,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use redis_core::blocked_keys::{blocked_keys_index, BlockedAction, BlockedSide, BlockedWaiter};
+use redis_core::metrics::{command_stats_snapshot, reset_command_stats};
 use redis_core::replication::{
     global_replication_state, ReplicaConn, ReplicaState, ReplicationState,
 };
@@ -167,6 +168,14 @@ fn assert_reply_contains(reply: &[u8], needle: &[u8]) {
     );
 }
 
+fn command_stat_calls(name: &[u8]) -> u64 {
+    command_stats_snapshot()
+        .into_iter()
+        .find(|stat| stat.name.eq_ignore_ascii_case(name))
+        .map(|stat| stat.calls)
+        .unwrap_or(0)
+}
+
 fn dispatch_as_primary_on_db(
     client_id: u64,
     db_id: u32,
@@ -237,6 +246,36 @@ fn dispatch_as_replica_apply_on_dbs(
     }
     *selected_db = c.db_index;
     c.drain_reply()
+}
+
+fn dispatch_as_primary_on_dbs(
+    client_id: u64,
+    dbs: &mut [RedisDb],
+    selected_db: &mut u32,
+    cmd: &[&[u8]],
+) -> Vec<u8> {
+    let mut c = Client::new(client_id);
+    c.db_index = *selected_db;
+    c.set_args(argv(cmd));
+    let server = Arc::new(RedisServer::default());
+    let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
+    {
+        let mut ctx =
+            redis_core::CommandContext::with_server_and_db_list(&mut c, dbs, server, pubsub);
+        let _ = dispatch(&mut ctx);
+    }
+    *selected_db = c.db_index;
+    c.drain_reply()
+}
+
+fn debug_digest(client_id: u64, dbs: &mut [RedisDb], selected_db: &mut u32) -> Vec<u8> {
+    let reply = dispatch_as_primary_on_dbs(client_id, dbs, selected_db, &[b"DEBUG", b"DIGEST"]);
+    assert!(
+        reply.starts_with(b"$40\r\n") && reply.ends_with(b"\r\n"),
+        "DEBUG DIGEST should return a 40-byte bulk string, got {:?}",
+        String::from_utf8_lossy(&reply)
+    );
+    reply[5..45].to_vec()
 }
 
 // ─── GREEN ANCHOR ────────────────────────────────────────────────────────────
@@ -916,6 +955,283 @@ fn r1_blocked_move_wake_rewrites_to_nonblocking_names() {
     assert!(
         !stream.windows(b"BLMOVE".len()).any(|w| w == b"BLMOVE"),
         "woken BLMOVE must not propagate blocking form"
+    );
+}
+
+#[test]
+fn r1_blocked_single_list_pop_wake_rewrites_to_nonblocking_names() {
+    let _g = repl_guard();
+    let cap = ReplCapture::attach(900_036, 0);
+    let mut db = RedisDb::new(0);
+
+    let key = RedisString::from_static(b"wake-blpop");
+    let (tx, rx) = mpsc::channel();
+    {
+        let mut idx = blocked_keys_index()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        idx.add(BlockedWaiter {
+            client_id: 910_036,
+            sender: tx,
+            keys: vec![key.clone()],
+            action: BlockedAction::Pop {
+                side: BlockedSide::Head,
+                count: 0,
+            },
+            deadline_ms: i64::MAX,
+            resp_proto: 2,
+            username: None,
+            redirect_on_role_change: false,
+        });
+    }
+    assert_eq!(
+        dispatch_as_primary(65, &mut db, &[b"LPUSH", b"wake-blpop", b"left"]),
+        b":1\r\n"
+    );
+    let reply = rx.recv_timeout(Duration::from_millis(100)).unwrap();
+    assert_reply_contains(&reply, b"left");
+    let stream = cap.drain();
+    assert!(
+        stream
+            .windows(resp(&[b"LPOP", b"wake-blpop"]).len())
+            .any(|w| w == resp(&[b"LPOP", b"wake-blpop"]).as_slice()),
+        "woken BLPOP must propagate as LPOP, got {:?}",
+        String::from_utf8_lossy(&stream)
+    );
+    assert!(
+        !stream.windows(b"BLPOP".len()).any(|w| w == b"BLPOP"),
+        "woken BLPOP must not propagate the blocking form"
+    );
+
+    let key = RedisString::from_static(b"wake-brpop");
+    let (tx, rx) = mpsc::channel();
+    {
+        let mut idx = blocked_keys_index()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        idx.add(BlockedWaiter {
+            client_id: 910_037,
+            sender: tx,
+            keys: vec![key.clone()],
+            action: BlockedAction::Pop {
+                side: BlockedSide::Tail,
+                count: 0,
+            },
+            deadline_ms: i64::MAX,
+            resp_proto: 2,
+            username: None,
+            redirect_on_role_change: false,
+        });
+    }
+    assert_eq!(
+        dispatch_as_primary(66, &mut db, &[b"RPUSH", b"wake-brpop", b"right"]),
+        b":1\r\n"
+    );
+    let reply = rx.recv_timeout(Duration::from_millis(100)).unwrap();
+    assert_reply_contains(&reply, b"right");
+    let stream = cap.drain();
+    assert!(
+        stream
+            .windows(resp(&[b"RPOP", b"wake-brpop"]).len())
+            .any(|w| w == resp(&[b"RPOP", b"wake-brpop"]).as_slice()),
+        "woken BRPOP must propagate as RPOP, got {:?}",
+        String::from_utf8_lossy(&stream)
+    );
+    assert!(
+        !stream.windows(b"BRPOP".len()).any(|w| w == b"BRPOP"),
+        "woken BRPOP must not propagate the blocking form"
+    );
+}
+
+#[test]
+fn r1_blocked_single_zset_pop_wake_rewrites_to_nonblocking_names() {
+    let _g = repl_guard();
+    let cap = ReplCapture::attach(900_037, 0);
+    let mut db = RedisDb::new(0);
+
+    let key = RedisString::from_static(b"wake-bzmin");
+    let (tx, rx) = mpsc::channel();
+    {
+        let mut idx = blocked_keys_index()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        idx.add(BlockedWaiter {
+            client_id: 910_038,
+            sender: tx,
+            keys: vec![key.clone()],
+            action: BlockedAction::ZSetPop {
+                reverse: false,
+                count: 0,
+            },
+            deadline_ms: i64::MAX,
+            resp_proto: 2,
+            username: None,
+            redirect_on_role_change: false,
+        });
+    }
+    assert_eq!(
+        dispatch_as_primary(67, &mut db, &[b"ZADD", b"wake-bzmin", b"1", b"min"]),
+        b":1\r\n"
+    );
+    let reply = rx.recv_timeout(Duration::from_millis(100)).unwrap();
+    assert_reply_contains(&reply, b"min");
+    let stream = cap.drain();
+    assert!(
+        stream
+            .windows(resp(&[b"ZPOPMIN", b"wake-bzmin"]).len())
+            .any(|w| w == resp(&[b"ZPOPMIN", b"wake-bzmin"]).as_slice()),
+        "woken BZPOPMIN must propagate as ZPOPMIN, got {:?}",
+        String::from_utf8_lossy(&stream)
+    );
+    assert!(
+        !stream.windows(b"BZPOPMIN".len()).any(|w| w == b"BZPOPMIN"),
+        "woken BZPOPMIN must not propagate the blocking form"
+    );
+
+    let key = RedisString::from_static(b"wake-bzmax");
+    let (tx, rx) = mpsc::channel();
+    {
+        let mut idx = blocked_keys_index()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        idx.add(BlockedWaiter {
+            client_id: 910_039,
+            sender: tx,
+            keys: vec![key.clone()],
+            action: BlockedAction::ZSetPop {
+                reverse: true,
+                count: 0,
+            },
+            deadline_ms: i64::MAX,
+            resp_proto: 2,
+            username: None,
+            redirect_on_role_change: false,
+        });
+    }
+    assert_eq!(
+        dispatch_as_primary(68, &mut db, &[b"ZADD", b"wake-bzmax", b"9", b"max"]),
+        b":1\r\n"
+    );
+    let reply = rx.recv_timeout(Duration::from_millis(100)).unwrap();
+    assert_reply_contains(&reply, b"max");
+    let stream = cap.drain();
+    assert!(
+        stream
+            .windows(resp(&[b"ZPOPMAX", b"wake-bzmax"]).len())
+            .any(|w| w == resp(&[b"ZPOPMAX", b"wake-bzmax"]).as_slice()),
+        "woken BZPOPMAX must propagate as ZPOPMAX, got {:?}",
+        String::from_utf8_lossy(&stream)
+    );
+    assert!(
+        !stream.windows(b"BZPOPMAX".len()).any(|w| w == b"BZPOPMAX"),
+        "woken BZPOPMAX must not propagate the blocking form"
+    );
+}
+
+#[test]
+fn r1_replica_apply_counts_wake_rewritten_move_commands() {
+    let _g = repl_guard();
+    reset_command_stats();
+
+    let mut db = RedisDb::new(0);
+    assert_eq!(
+        dispatch_as_replica_apply(49, &mut db, &[b"LPUSH", b"a", b"foo"]),
+        b":1\r\n"
+    );
+    assert_eq!(
+        dispatch_as_replica_apply(50, &mut db, &[b"RPOPLPUSH", b"a", b"b"]),
+        b"$3\r\nfoo\r\n"
+    );
+    assert_eq!(command_stat_calls(b"rpoplpush"), 1);
+    assert_eq!(command_stat_calls(b"lmove"), 0);
+
+    reset_command_stats();
+    let mut db = RedisDb::new(0);
+    assert_eq!(
+        dispatch_as_replica_apply(51, &mut db, &[b"LPUSH", b"c", b"bar"]),
+        b":1\r\n"
+    );
+    assert_eq!(
+        dispatch_as_replica_apply(52, &mut db, &[b"LMOVE", b"c", b"d", b"left", b"right"]),
+        b"$3\r\nbar\r\n"
+    );
+    assert_eq!(command_stat_calls(b"lmove"), 1);
+    assert_eq!(command_stat_calls(b"rpoplpush"), 0);
+
+    reset_command_stats();
+}
+
+#[test]
+fn r1_debug_digest_tracks_keyspace_mutations_for_replication_waits() {
+    let _g = repl_guard();
+    let mut primary_dbs: Vec<RedisDb> = (0..16).map(RedisDb::new).collect();
+    let mut replica_dbs: Vec<RedisDb> = (0..16).map(RedisDb::new).collect();
+    let mut primary_selected_db = 0;
+    let mut replica_selected_db = 0;
+
+    let empty_primary = debug_digest(53, &mut primary_dbs, &mut primary_selected_db);
+    let empty_replica = debug_digest(54, &mut replica_dbs, &mut replica_selected_db);
+    assert_eq!(
+        empty_primary, empty_replica,
+        "empty keyspaces should start with the same digest"
+    );
+    assert_ne!(
+        empty_primary, b"0000000000000000000000000000000000000000",
+        "DEBUG DIGEST must not be the old all-zero convergence stub"
+    );
+
+    assert_eq!(
+        dispatch_as_primary_on_dbs(
+            55,
+            &mut primary_dbs,
+            &mut primary_selected_db,
+            &[b"LPUSH", b"src", b"value"]
+        ),
+        b":1\r\n"
+    );
+    assert_ne!(
+        debug_digest(56, &mut primary_dbs, &mut primary_selected_db),
+        debug_digest(57, &mut replica_dbs, &mut replica_selected_db),
+        "digest must remain unequal until the replica applies the write"
+    );
+
+    assert_eq!(
+        dispatch_as_primary_on_dbs(
+            58,
+            &mut replica_dbs,
+            &mut replica_selected_db,
+            &[b"LPUSH", b"src", b"value"]
+        ),
+        b":1\r\n"
+    );
+    assert_eq!(
+        debug_digest(59, &mut primary_dbs, &mut primary_selected_db),
+        debug_digest(60, &mut replica_dbs, &mut replica_selected_db),
+        "matching keyspaces should converge once the same write is applied"
+    );
+
+    assert_eq!(
+        dispatch_as_primary_on_dbs(
+            61,
+            &mut primary_dbs,
+            &mut primary_selected_db,
+            &[b"SELECT", b"2"]
+        ),
+        b"+OK\r\n"
+    );
+    assert_eq!(
+        dispatch_as_primary_on_dbs(
+            62,
+            &mut primary_dbs,
+            &mut primary_selected_db,
+            &[b"SET", b"src", b"value"]
+        ),
+        b"+OK\r\n"
+    );
+    assert_ne!(
+        debug_digest(63, &mut primary_dbs, &mut primary_selected_db),
+        debug_digest(64, &mut replica_dbs, &mut replica_selected_db),
+        "the digest must include the DB id, not just key/value bytes"
     );
 }
 

@@ -30,7 +30,7 @@ use redis_core::networking::{
 };
 use redis_core::notify::{keyspace_events_string_to_flags, NOTIFY_EVICTED};
 use redis_core::object::object_compute_size;
-use redis_core::{CommandContext, PersistenceStatus, RedisDb};
+use redis_core::{CommandContext, PersistenceStatus, RedisDb, RedisObject};
 use redis_protocol::frame::RespFrame;
 use redis_types::{RedisError, RedisResult, RedisString};
 use serde_json::Value;
@@ -45,6 +45,101 @@ use crate::generated::{GeneratedCommandSpec, COMMANDS};
 use crate::listeners::*;
 use crate::live_config_handle;
 use crate::shutdown_signals::*;
+
+const DIGEST_FNV_OFFSET: u64 = 0xcbf29ce484222325;
+const DIGEST_FNV_PRIME: u64 = 0x100000001b3;
+
+fn digest_update_byte(hash: &mut u64, byte: u8) {
+    *hash ^= byte as u64;
+    *hash = hash.wrapping_mul(DIGEST_FNV_PRIME);
+}
+
+fn digest_update_bytes(hash: &mut u64, tag: &[u8], bytes: &[u8]) {
+    digest_update_byte(hash, 0xff);
+    for b in tag {
+        digest_update_byte(hash, *b);
+    }
+    digest_update_byte(hash, 0xfe);
+    for b in bytes.len().to_le_bytes() {
+        digest_update_byte(hash, b);
+    }
+    for b in bytes {
+        digest_update_byte(hash, *b);
+    }
+}
+
+fn digest_update_u64(hash: &mut u64, tag: &[u8], value: u64) {
+    digest_update_bytes(hash, tag, &value.to_le_bytes());
+}
+
+fn digest_object(hash: &mut u64, obj: &RedisObject) {
+    digest_update_bytes(hash, b"type", obj.type_name().as_bytes());
+    match obj.type_name() {
+        "string" => digest_update_bytes(hash, b"string", obj.string_bytes().as_ref()),
+        "list" => {
+            for value in obj.iter_list() {
+                digest_update_bytes(hash, b"list", value.as_bytes());
+            }
+        }
+        "set" => {
+            let mut values: Vec<&RedisString> = obj.iter_set().collect();
+            values.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+            for value in values {
+                digest_update_bytes(hash, b"set", value.as_bytes());
+            }
+        }
+        "hash" => {
+            let mut fields: Vec<(&RedisString, &RedisString)> = obj.iter_hash().collect();
+            fields.sort_by(|(a, _), (b, _)| a.as_bytes().cmp(b.as_bytes()));
+            for (field, value) in fields {
+                digest_update_bytes(hash, b"hfield", field.as_bytes());
+                digest_update_bytes(hash, b"hvalue", value.as_bytes());
+            }
+        }
+        "zset" => {
+            let mut values: Vec<(&RedisString, f64)> = obj.iter_zset().collect();
+            values.sort_by(|(am, ascore), (bm, bscore)| {
+                ascore
+                    .total_cmp(bscore)
+                    .then_with(|| am.as_bytes().cmp(bm.as_bytes()))
+            });
+            for (member, score) in values {
+                digest_update_bytes(hash, b"zmember", member.as_bytes());
+                digest_update_bytes(hash, b"zscore", &score.to_bits().to_le_bytes());
+            }
+        }
+        "stream" => {
+            if let Some(stream) = obj.stream() {
+                digest_update_bytes(hash, b"stream-last", &stream.last_id.to_display_bytes());
+                digest_update_u64(hash, b"stream-added", stream.entries_added);
+                for entry in &stream.entries {
+                    digest_update_bytes(hash, b"stream-id", &entry.id.to_display_bytes());
+                    for (field, value) in &entry.fields {
+                        digest_update_bytes(hash, b"sfield", field.as_bytes());
+                        digest_update_bytes(hash, b"svalue", value.as_bytes());
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn keyspace_digest(ctx: &mut CommandContext<'_>) -> RedisResult<Vec<u8>> {
+    let mut hash = DIGEST_FNV_OFFSET;
+    for db_id in 0..ctx.database_count() as u32 {
+        ctx.with_db_index(db_id, |db| {
+            let mut entries: Vec<(&RedisString, &RedisObject)> = db.iter_for_eviction().collect();
+            entries.sort_by(|(a, _), (b, _)| a.as_bytes().cmp(b.as_bytes()));
+            for (key, obj) in entries {
+                digest_update_u64(&mut hash, b"db", db_id as u64);
+                digest_update_bytes(&mut hash, b"key", key.as_bytes());
+                digest_object(&mut hash, obj);
+            }
+        })?;
+    }
+    Ok(format!("{hash:040x}").into_bytes())
+}
 
 pub fn debug_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ctx.arg_count() < 2 {
@@ -293,9 +388,8 @@ pub fn debug_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         return ctx.reply_bulk_string(redis_types::RedisString::from_bytes(&digest));
     }
     if ascii_eq_ignore_case(sub.as_bytes(), b"DIGEST") {
-        return ctx.reply_bulk_string(redis_types::RedisString::from_bytes(
-            b"0000000000000000000000000000000000000000",
-        ));
+        let digest = keyspace_digest(ctx)?;
+        return ctx.reply_bulk_string(redis_types::RedisString::from_bytes(&digest));
     }
     if ascii_eq_ignore_case(sub.as_bytes(), b"OBJECT") {
         if ctx.arg_count() != 3 {
