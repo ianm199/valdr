@@ -73,7 +73,7 @@ Artifact:
 | `integration/replication-3` | 3/4 | Red | Expiry consistency, writable-replica expired-key behavior, and PFCOUNT expired-key/cache semantics. |
 | `integration/replication-4` | 15/2 | Red | SPOP rewrite cases now pass; remaining failures are divergence/default writable-replica cases. |
 | `integration/replication-buffer` | 4/15 | Red | Full-sync/BGSAVE setup reaches counted assertions; completed full-sync catch-up history is now retained while dependent replicas still pin it, but Valkey-style global replication-buffer memory, backlog outgrowth under slow replicas, partial resync across broader retained history, and output-buffer disconnect policy remain unfinished. |
-| `integration/replication` | no summary | Red | Aborts at `diskless replication child being killed is collected` with `child process exited abnormally`; diskless/full-sync behavior remains the frontier. |
+| `integration/replication` | no summary | Red | The failed full-sync cleanup packet moves past `diskless replication child being killed is collected`; the current abort is `Master stream is correctly processed while the replica has a script in -BUSY state` with `READONLY`. Diskless/script-busy full-sync apply remains the frontier. |
 | `integration/replication-psync` | timeout | Red | Timed out at 300s; no-backlog/backlog-expired and diskless variants remain frontier. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
 | `integration/replica-redirect` | no summary | Red | `FAILOVER` is now parsed, but the file still aborts at `client paused before and during failover-in-progress` with explicit coordinated-failover-unimplemented error; redirect semantics also still fail earlier cases. |
@@ -108,7 +108,9 @@ visible integration frontiers are now:
   streamed RDB handoff path.
 - `R2-BGSAVE-WINDOW`: replication BGSAVE now reports through `INFO persistence`
   and honors the bounded debug save delay; keep extending this into the
-  diskless/full-sync windows behind `integration/replication`.
+  diskless/full-sync windows behind `integration/replication`. Failed
+  full-sync BGSAVE jobs now clean up waiters, temp files, and replication-child
+  state instead of poisoning later sync attempts.
 - `R2-BGSAVE-CATCHUP`: active replication BGSAVE jobs now retain appended
   replication bytes outside the circular backlog and use that buffer for
   post-RDB catch-up. Completed full-sync catch-up bytes are now also retained
@@ -451,6 +453,89 @@ Takeaway:
   buffer ownership: retained full-sync history is now real, but slow online
   replica output still does not make `repl_backlog_histlen` outgrow the
   configured circular backlog the way Valkey's global replication buffer does.
+
+### R2-FULLSYNC-LIFECYCLE-CLEANUP
+
+Status: first failed-job cleanup slice completed on 2026-06-13;
+`integration/replication` moves past the killed-child collection frontier but
+remains red at the later script-busy full-sync apply case.
+
+Implementation:
+
+- Added `ReplicationState::cleanup_failed_repl_bgsave_job` to drop waiting
+  replica records and remove both final and side temp RDB paths for failed
+  replication BGSAVE jobs.
+- Added `ReplicationState::abort_repl_bgsave_job` to consume the installed
+  job, run failed-job cleanup, and clear `repl_child_pid`.
+- The replication BGSAVE reaper now aborts failed child jobs through that shared
+  cleanup path for `waitpid` errors and nonzero child exits.
+- Full-sync transfer read failures now drop stale waiters and temp files instead
+  of only removing the temp RDB.
+- The non-Unix/thread fallback path also aborts the replication job on save or
+  thread-spawn failure.
+- New deterministic `fullsync_lifecycle_kit.rs` proves a failed full-sync job
+  cleans waiters, removes temp files, clears child state, and allows a later
+  job to install cleanly.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands --test fullsync_lifecycle_kit -- --nocapture
+cargo test -p redis-core replication::tests -- --nocapture
+cargo test -p redis-commands --test repl_correctness_kit -- --nocapture
+cargo test -p redis-commands --test repl_buffer_kit -- --nocapture
+cargo test -p redis-commands --test psync_reconnect_kit -- --nocapture
+cargo check -p redis-core -p redis-commands -p redis-server
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-fullsync-lifecycle-cleanup \
+  --profile integration-repl \
+  --timeout-s 300 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replication \
+  --isolated-tests-copy \
+  --skip-build
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-fullsync-lifecycle-tripwire \
+  --profile integration-repl \
+  --timeout-s 240 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replication-2,integration/block-repl \
+  --isolated-tests-copy \
+  --skip-build
+```
+
+Results:
+
+- `fullsync_lifecycle_kit`: 1 passed, 0 failed.
+- Core replication tests: 9 passed, 0 failed.
+- `repl_correctness_kit`: 21 passed, 0 failed.
+- `repl_buffer_kit`: 3 passed, 0 failed.
+- `psync_reconnect_kit`: 4 passed, 0 failed.
+- `cargo check -p redis-core -p redis-commands -p redis-server`: passed.
+- `cargo build --bin redis-server`: passed.
+- Focused `integration/replication`:
+  `harness/oracle/results/tcl-survey/20260613T140356504725Z/result.json`
+  still produced no parsed summary, but it moved from
+  `diskless replication child being killed is collected` /
+  `child process exited abnormally` to
+  `Master stream is correctly processed while the replica has a script in -BUSY state`
+  with `READONLY You can't write against a read only replica..`.
+- Focused no-regression tripwire:
+  `harness/oracle/results/tcl-survey/20260613T140731144046Z/result.json`
+  reported `integration/replication-2` 7/0 and `integration/block-repl` 2/0.
+
+Takeaway:
+
+- Failed replication BGSAVE jobs now have a single cleanup path that removes
+  stale full-sync waiters and child state. The next useful
+  `fullsync_lifecycle_kit` slice is script-busy full-sync application: the
+  replica must process the primary stream around `-BUSY` without issuing writes
+  through the normal read-only command path.
 
 ### R4-AOF-FULLSYNC
 

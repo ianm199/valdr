@@ -237,14 +237,21 @@ Work packets:
   transitions. The 2026-06-13 frontier packet now reports replication BGSAVE in
   `INFO persistence` and honors the bounded `rdb-key-save-delay` debug window
   for replication BGSAVE jobs, moving `integration/replication-buffer` from a
-  setup exception to a counted 3/15 result.
+  setup exception to a counted 3/15 result. The failed full-sync cleanup slice
+  now aborts failed replication BGSAVE jobs through one path that drops stale
+  waiters, removes temp RDB files, clears `repl_child_pid`, and allows later
+  jobs to start; live `integration/replication` now reaches the later
+  script-busy `READONLY` frontier instead of aborting at killed-child
+  collection.
 - **R2-PIGGYBACK:** replicas arriving during an in-flight replication BGSAVE
   join the same job and receive the same snapshot plus catch-up backlog.
   Initial active-job catch-up buffering landed on 2026-06-13: writes appended
   while a replication BGSAVE is active are retained in the job and shipped
   after the RDB payload even if the circular backlog wrapped. Completed
   full-sync catch-up history is now retained while dependent replicas still pin
-  it, and released on ACK/disconnect.
+  it, and released on ACK/disconnect. Failure cleanup is now explicit, but
+  script-busy full-sync apply and diskless short-read state transitions still
+  need dedicated kit coverage.
 - **R2-BUFFER-LIMITS:** implement replica output-buffer accounting and
   disconnection policy well enough for `replication-buffer` to count tests
   instead of dying in setup. Partial accounting surface landed on 2026-06-13:

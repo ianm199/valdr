@@ -554,8 +554,7 @@ pub(crate) fn spawn_repl_bgsave_reaper() {
                     "redis-server: repl-bgsave waitpid({}) failed: ret={}",
                     child_pid, ret
                 );
-                let _ = repl.take_repl_bgsave_job();
-                repl.set_repl_child_pid(0);
+                let _ = repl.abort_repl_bgsave_job();
                 continue;
             }
             let exited_ok = libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0;
@@ -564,10 +563,7 @@ pub(crate) fn spawn_repl_bgsave_reaper() {
                     "redis-server: BGSAVE-for-replication child {} exited with status {}",
                     child_pid, status
                 );
-                if let Some(job) = repl.take_repl_bgsave_job() {
-                    let _ = std::fs::remove_file(&job.temp_path);
-                }
-                repl.set_repl_child_pid(0);
+                let _ = repl.abort_repl_bgsave_job();
                 continue;
             }
             dispatch_full_sync_transfer();
@@ -596,7 +592,7 @@ pub(crate) fn dispatch_full_sync_transfer() {
                 job.temp_path.display(),
                 e
             );
-            let _ = std::fs::remove_file(&job.temp_path);
+            repl.cleanup_failed_repl_bgsave_job(&job);
             return;
         }
     };

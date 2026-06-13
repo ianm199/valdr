@@ -912,12 +912,11 @@ pub fn bgsave_for_replication(
             }
             if !ok {
                 eprintln!("redis-server: BGSAVE-for-replication thread fallback save failed");
-                let _ = repl_for_thread.take_repl_bgsave_job();
-                repl_for_thread.set_repl_child_pid(0);
+                let _ = repl_for_thread.abort_repl_bgsave_job();
             }
         });
     if spawn.is_err() {
-        let _ = repl.take_repl_bgsave_job();
+        let _ = repl.abort_repl_bgsave_job();
         return BgsaveForReplResult::Failed;
     }
     BgsaveForReplResult::Started

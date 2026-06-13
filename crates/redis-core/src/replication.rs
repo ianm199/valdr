@@ -1054,6 +1054,30 @@ impl ReplicationState {
         }
     }
 
+    /// Cleanup side effects for a failed replication BGSAVE job whose waiters
+    /// will not receive an RDB. The live connection cleanup path will close
+    /// sockets separately; this removes the replica records so stale
+    /// `wait_bgsave` entries do not poison later full syncs.
+    pub fn cleanup_failed_repl_bgsave_job(&self, job: &ReplBgsaveJob) {
+        for client_id in &job.waiting_replicas {
+            self.remove_replica(*client_id);
+        }
+        let _ = std::fs::remove_file(&job.temp_path);
+        let _ = std::fs::remove_file(job.temp_path.with_extension("rdb.tmp"));
+    }
+
+    /// Abort the currently-installed replication BGSAVE job, if any, and clear
+    /// process-wide replication-child state. Returns the consumed job so tests
+    /// and callers can inspect which waiters were dropped.
+    pub fn abort_repl_bgsave_job(&self) -> Option<ReplBgsaveJob> {
+        let job = self.take_repl_bgsave_job();
+        if let Some(job) = job.as_ref() {
+            self.cleanup_failed_repl_bgsave_job(job);
+        }
+        self.set_repl_child_pid(0);
+        job
+    }
+
     /// Append `client_id` to the current job's waiting-replica list when a
     /// fresh PSYNC arrives while a BGSAVE is already running. Returns `true`
     /// if a job exists (so the caller can skip starting a new one); `false`
