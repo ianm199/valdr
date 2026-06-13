@@ -69,7 +69,7 @@ Artifact:
 
 | File | Current result | Status | Frontier |
 |---|---:|---|---|
-| `integration/replication-2` | 6/1 | Red | Real `DEBUG DIGEST` exposed the next frontier: complex-dataset replica catch-up is too slow for the fixed 500 ms post-write check. The latest dump showed the primary with thousands of keys while the replica had hundreds, so this is a throughput/catch-up kit target, not a command rewrite shape. |
+| `integration/replication-2` | 7/0 | Green | Real `DEBUG DIGEST` remains active; replica apply batching removed the complex-dataset catch-up lag that had exposed the primary/replica key-count gap. |
 | `integration/block-repl` | 2/0 | Green | Real `DEBUG DIGEST` plus single blocked-pop wake propagation now validates the list/zset blocking workload. |
 | `integration/replication-3` | 3/4 | Red | Expiry consistency, writable-replica expired-key behavior, and PFCOUNT expired-key/cache semantics. |
 | `integration/replication-4` | 15/2 | Red | SPOP rewrite cases now pass; remaining failures are divergence/default writable-replica cases. |
@@ -104,15 +104,14 @@ visible integration frontiers are now:
 - Expiry-on-replica semantics: `replication-3` still fails master/replica
   consistency with expire, writable replica expired-key behavior, and PFCOUNT
   expired-key/cache cases.
-- `R1-REPLICA-APPLY-THROUGHPUT`: real `DEBUG DIGEST` turned
-  `integration/replication-2` from a false green into a visible 6/1 frontier.
-  Build a deterministic catch-up/throughput kit around `createComplexDataset`
-  style bursts so the replica reaches the same key count within the upstream
-  500 ms window.
 - `R1-BLOCKING-WAKE-REWRITE`: empty-blocking `BRPOPLPUSH` / `BLMOVE` live
   stats now pass, and the list/zset single-pop blocking workload is covered by
   `block-repl`. Keep extending this family for `BLMPOP` / `BZMPOP` and
   multi-key fairness before touching more blocked-client code.
+- `R1-REPLICA-APPLY-THROUGHPUT`: the first batching slice is complete and
+  restores `replication-2` to green under real digest. Keep this lane open for
+  bounded queue depth, batch-size metrics, and owner-loop fairness under slow
+  commands.
 - `R2-RDB-BULK-FAITHFUL`: the old `REPLICAOF` pre-PSYNC `KEYS`/`DUMP` seed
   shortcut is removed, so remaining full-sync work must pass through the
   streamed RDB handoff path.
@@ -151,6 +150,50 @@ visible integration frontiers are now:
   REDIRECT unblocking, and promotion/demotion remain open.
 
 ## Packet Evidence
+
+### R1-REPLICA-APPLY-BATCH
+
+Status: completed on 2026-06-13.
+
+Implementation:
+
+- The replica dialer now parses all complete frames already read from the
+  primary socket and submits them to RuntimeOwner as one ordered batch instead
+  of blocking on a completion channel for every single write.
+- `REPLCONF GETACK *` still flushes any pending command batch before replying,
+  preserving ACK ordering.
+- RuntimeOwner applies each batch in order while preserving the replica's
+  selected DB across commands and records the final applied replication offset.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands replica_dialer -- --nocapture
+cargo test -p redis-commands --test repl_correctness_kit -- --nocapture
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-apply-batch-tripwire \
+  --profile integration-repl \
+  --timeout-s 240 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replication-2,integration/block-repl \
+  --isolated-tests-copy \
+  --skip-build
+```
+
+Results:
+
+- `redis-commands replica_dialer`: 7 passed, 0 failed.
+- `repl_correctness_kit`: 29 passed, 0 failed.
+- `cargo build --bin redis-server`: passed.
+- Focused single-file probe:
+  `harness/oracle/results/tcl-survey/20260613T220012228979Z/result.json`
+  reported `integration/replication-2` 7/0.
+- Paired tripwire:
+  `harness/oracle/results/tcl-survey/20260613T220025361161Z/result.json`
+  reported `integration/replication-2` 7/0 and `integration/block-repl` 2/0.
 
 ### R1-REAL-DIGEST-BLOCKING-WAKE
 

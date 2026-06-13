@@ -1574,6 +1574,9 @@ impl RuntimeOwner {
                 redis_commands::replica_dialer::ReplicaApplyKind::Command(argv) => {
                     self.apply_replica_command(argv, registry, server)
                 }
+                redis_commands::replica_dialer::ReplicaApplyKind::CommandBatch(commands) => {
+                    self.apply_replica_command_batch(commands, registry, server)
+                }
                 redis_commands::replica_dialer::ReplicaApplyKind::LoadRdb(bytes) => {
                     self.load_replica_rdb(&bytes, server)
                 }
@@ -1611,6 +1614,20 @@ impl RuntimeOwner {
         self.replica_apply_db_index = client.db_index;
 
         !client.reply_buf.starts_with(b"-")
+    }
+
+    fn apply_replica_command_batch(
+        &mut self,
+        commands: Vec<Vec<RedisString>>,
+        registry: &Arc<Mutex<PubSubRegistry>>,
+        server: &Arc<redis_core::RedisServer>,
+    ) -> bool {
+        for argv in commands {
+            if !self.apply_replica_command(argv, registry, server) {
+                return false;
+            }
+        }
+        true
     }
 
     /// Load a full-resync RDB snapshot into the owned databases, replacing their

@@ -44,6 +44,7 @@ static RUNTIME_APPLY_TX: OnceLock<Sender<ReplicaApplyRequest>> = OnceLock::new()
 /// ownership boundary.
 pub enum ReplicaApplyKind {
     Command(Vec<RedisString>),
+    CommandBatch(Vec<Vec<RedisString>>),
     LoadRdb(Vec<u8>),
 }
 
@@ -268,6 +269,7 @@ fn wait_for_replica_dialer_pause(repl: &Arc<ReplicationState>, dialer_epoch: u64
 fn run_replica_sink_loop(stream: &TcpStream, repl: &ReplicationState, dialer_epoch: u64) {
     let mut read_buf = Vec::new();
     let mut tmp = [0u8; 8192];
+    let mut command_batch: Vec<(Vec<RedisString>, i64)> = Vec::new();
     loop {
         if !repl.dialer_epoch_is_current(dialer_epoch) {
             return;
@@ -293,43 +295,100 @@ fn run_replica_sink_loop(stream: &TcpStream, repl: &ReplicationState, dialer_epo
             return;
         }
         read_buf.extend_from_slice(&tmp[..n]);
-        loop {
-            match redis_protocol::parse_inline_or_multibulk(&read_buf) {
-                Ok(Some((argv, consumed))) => {
-                    if !repl.dialer_epoch_is_current(dialer_epoch) {
+        let frames = match parse_replica_frames(&mut read_buf, repl) {
+            Ok(frames) => frames,
+            Err(_) => return,
+        };
+        for frame in frames {
+            if !repl.dialer_epoch_is_current(dialer_epoch) {
+                return;
+            }
+            match frame {
+                ReplicaStreamFrame::Command { argv, offset_after } => {
+                    command_batch.push((argv, offset_after));
+                }
+                ReplicaStreamFrame::GetAck { offset_after } => {
+                    if !flush_replica_command_batch(stream, repl, dialer_epoch, &mut command_batch)
+                    {
                         return;
                     }
-                    let offset_after = repl
-                        .master_repl_offset
-                        .fetch_add(consumed as i64, Ordering::SeqCst)
-                        .saturating_add(consumed as i64);
-                    read_buf.drain(..consumed);
-                    if is_getack(&argv) {
-                        if stream_write(stream, &build_replconf_ack(offset_after)).is_err() {
-                            return;
-                        }
-                    } else {
-                        if !apply_command_via_runtime_owner(argv, offset_after) {
-                            return;
-                        }
-                        if !repl.dialer_epoch_is_current(dialer_epoch) {
-                            return;
-                        }
-                        // C Valkey replicas periodically ACK their processed
-                        // offset even when the primary did not send GETACK.
-                        // This eager ACK keeps script WAIT's non-blocking
-                        // path accurate without adding a second timer thread
-                        // to the RuntimeOwner-compatible dialer.
-                        if stream_write(stream, &build_replconf_ack(offset_after)).is_err() {
-                            return;
-                        }
+                    if stream_write(stream, &build_replconf_ack(offset_after)).is_err() {
+                        return;
                     }
                 }
-                Ok(None) => break,
-                Err(_) => return,
+            }
+        }
+        if !flush_replica_command_batch(stream, repl, dialer_epoch, &mut command_batch) {
+            return;
+        }
+    }
+}
+
+enum ReplicaStreamFrame {
+    Command {
+        argv: Vec<RedisString>,
+        offset_after: i64,
+    },
+    GetAck {
+        offset_after: i64,
+    },
+}
+
+fn parse_replica_frames(
+    read_buf: &mut Vec<u8>,
+    repl: &ReplicationState,
+) -> io::Result<Vec<ReplicaStreamFrame>> {
+    let mut frames = Vec::new();
+    loop {
+        match redis_protocol::parse_inline_or_multibulk(read_buf) {
+            Ok(Some((argv, consumed))) => {
+                let offset_after = repl
+                    .master_repl_offset
+                    .fetch_add(consumed as i64, Ordering::SeqCst)
+                    .saturating_add(consumed as i64);
+                read_buf.drain(..consumed);
+                if is_getack(&argv) {
+                    frames.push(ReplicaStreamFrame::GetAck { offset_after });
+                } else {
+                    frames.push(ReplicaStreamFrame::Command { argv, offset_after });
+                }
+            }
+            Ok(None) => return Ok(frames),
+            Err(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid replica stream frame",
+                ))
             }
         }
     }
+}
+
+fn flush_replica_command_batch(
+    stream: &TcpStream,
+    repl: &ReplicationState,
+    dialer_epoch: u64,
+    command_batch: &mut Vec<(Vec<RedisString>, i64)>,
+) -> bool {
+    let Some((_, offset_after)) = command_batch.last() else {
+        return true;
+    };
+    let offset_after = *offset_after;
+    let commands: Vec<Vec<RedisString>> = std::mem::take(command_batch)
+        .into_iter()
+        .map(|(argv, _)| argv)
+        .collect();
+    if !apply_command_batch_via_runtime_owner(commands, offset_after) {
+        return false;
+    }
+    if !repl.dialer_epoch_is_current(dialer_epoch) {
+        return false;
+    }
+    // C Valkey replicas periodically ACK their processed offset even when the
+    // primary did not send GETACK. This eager ACK keeps script WAIT's
+    // non-blocking path accurate without adding a second timer thread to the
+    // RuntimeOwner-compatible dialer.
+    stream_write(stream, &build_replconf_ack(offset_after)).is_ok()
 }
 
 /// Execute the PING / REPLCONF / PSYNC handshake over `stream`.
@@ -587,8 +646,14 @@ fn read_exact_from_stream_checked(
     Ok(())
 }
 
-fn apply_command_via_runtime_owner(argv: Vec<RedisString>, offset_after: i64) -> bool {
-    send_to_runtime_owner(ReplicaApplyKind::Command(argv), offset_after)
+fn apply_command_batch_via_runtime_owner(
+    commands: Vec<Vec<RedisString>>,
+    offset_after: i64,
+) -> bool {
+    if commands.is_empty() {
+        return true;
+    }
+    send_to_runtime_owner(ReplicaApplyKind::CommandBatch(commands), offset_after)
 }
 
 /// Hand the freshly-received full-resync RDB snapshot to the runtime owner so it
@@ -749,6 +814,109 @@ mod tests {
 
     fn local_state() -> ReplicationState {
         ReplicationState::new([b'1'; 40], 1024)
+    }
+
+    fn argv_bytes(argv: &[RedisString]) -> Vec<Vec<u8>> {
+        argv.iter().map(|arg| arg.as_bytes().to_vec()).collect()
+    }
+
+    #[test]
+    fn replica_stream_parser_collects_complete_frames_with_offsets() {
+        let repl = local_state();
+        let set_frame = build_multibulk(&[b"SET", b"k", b"v"]);
+        let incr_frame = build_multibulk(&[b"INCR", b"n"]);
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&set_frame);
+        buf.extend_from_slice(&incr_frame);
+
+        let frames = parse_replica_frames(&mut buf, &repl).unwrap();
+
+        assert!(buf.is_empty());
+        assert_eq!(frames.len(), 2);
+        match &frames[0] {
+            ReplicaStreamFrame::Command { argv, offset_after } => {
+                assert_eq!(
+                    argv_bytes(argv),
+                    vec![b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()]
+                );
+                assert_eq!(*offset_after, set_frame.len() as i64);
+            }
+            ReplicaStreamFrame::GetAck { .. } => panic!("SET parsed as GETACK"),
+        }
+        match &frames[1] {
+            ReplicaStreamFrame::Command { argv, offset_after } => {
+                assert_eq!(argv_bytes(argv), vec![b"INCR".to_vec(), b"n".to_vec()]);
+                assert_eq!(*offset_after, (set_frame.len() + incr_frame.len()) as i64);
+            }
+            ReplicaStreamFrame::GetAck { .. } => panic!("INCR parsed as GETACK"),
+        }
+        assert_eq!(
+            repl.master_repl_offset.load(Ordering::SeqCst),
+            (set_frame.len() + incr_frame.len()) as i64
+        );
+    }
+
+    #[test]
+    fn replica_stream_parser_keeps_partial_tail_for_next_read() {
+        let repl = local_state();
+        let set_frame = build_multibulk(&[b"SET", b"k", b"v"]);
+        let incr_frame = build_multibulk(&[b"INCR", b"n"]);
+        let partial_len = incr_frame.len() - 2;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&set_frame);
+        buf.extend_from_slice(&incr_frame[..partial_len]);
+
+        let frames = parse_replica_frames(&mut buf, &repl).unwrap();
+
+        assert_eq!(frames.len(), 1);
+        assert_eq!(buf, incr_frame[..partial_len]);
+        assert_eq!(
+            repl.master_repl_offset.load(Ordering::SeqCst),
+            set_frame.len() as i64
+        );
+    }
+
+    #[test]
+    fn replica_stream_parser_marks_getack_without_dropping_surrounding_commands() {
+        let repl = local_state();
+        let set_frame = build_multibulk(&[b"SET", b"k", b"v"]);
+        let getack_frame = build_multibulk(&[b"REPLCONF", b"GETACK", b"*"]);
+        let incr_frame = build_multibulk(&[b"INCR", b"n"]);
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&set_frame);
+        buf.extend_from_slice(&getack_frame);
+        buf.extend_from_slice(&incr_frame);
+
+        let frames = parse_replica_frames(&mut buf, &repl).unwrap();
+
+        assert!(buf.is_empty());
+        assert_eq!(frames.len(), 3);
+        match &frames[0] {
+            ReplicaStreamFrame::Command { argv, offset_after } => {
+                assert_eq!(
+                    argv_bytes(argv),
+                    vec![b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()]
+                );
+                assert_eq!(*offset_after, set_frame.len() as i64);
+            }
+            ReplicaStreamFrame::GetAck { .. } => panic!("SET parsed as GETACK"),
+        }
+        match &frames[1] {
+            ReplicaStreamFrame::GetAck { offset_after } => {
+                assert_eq!(*offset_after, (set_frame.len() + getack_frame.len()) as i64);
+            }
+            ReplicaStreamFrame::Command { .. } => panic!("GETACK parsed as command"),
+        }
+        match &frames[2] {
+            ReplicaStreamFrame::Command { argv, offset_after } => {
+                assert_eq!(argv_bytes(argv), vec![b"INCR".to_vec(), b"n".to_vec()]);
+                assert_eq!(
+                    *offset_after,
+                    (set_frame.len() + getack_frame.len() + incr_frame.len()) as i64
+                );
+            }
+            ReplicaStreamFrame::GetAck { .. } => panic!("INCR parsed as GETACK"),
+        }
     }
 
     #[test]
