@@ -13,8 +13,8 @@ Fast deterministic gate:
 cargo test -p redis-commands --test repl_correctness_kit
 ```
 
-Latest result on 2026-06-13 after the chained replica-apply relay packet:
-23 passed, 0 failed.
+Latest result on 2026-06-13 after the legacy command-rewrite packet:
+25 passed, 0 failed.
 
 R0 full integration dashboard:
 
@@ -74,7 +74,7 @@ Artifact:
 | `integration/replication-3` | 3/4 | Red | Expiry consistency, writable-replica expired-key behavior, and PFCOUNT expired-key/cache semantics. |
 | `integration/replication-4` | 15/2 | Red | SPOP rewrite cases now pass; remaining failures are divergence/default writable-replica cases. |
 | `integration/replication-buffer` | 4/11 | Red | Fresh post-PSYNC baseline still reaches counted assertions without timeout. Shared vs private output-buffer semantics are now pinned in `repl_buffer_kit`; remaining failures are Valkey-style global replication-buffer memory, BGSAVE/slow-replica backlog outgrowth, partial resync across broader retained history, and typed live output-buffer disconnect/drain policy. |
-| `integration/replication` | 29/38 | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, the first async-loading CONFIG exception, successful swapdb function-context mismatch, parent-killed child discovery, `repl-diskless-load on-empty-db`, no-longer-useful RDB child cancellation, all four replica-link reply-violation assertions, malformed-PSYNC-offset logging, and chained replica `FLUSHDB` / `FLUSHALL` stream relay. Remaining failures are counted full-sync, diskless pipe/drop, command-stat propagation, blocked-list rewrite, cache-master, lazy-expire, and old-data rollback cases. |
+| `integration/replication` | 35/32 | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, the first async-loading CONFIG exception, successful swapdb function-context mismatch, parent-killed child discovery, `repl-diskless-load on-empty-db`, no-longer-useful RDB child cancellation, all four replica-link reply-violation assertions, malformed-PSYNC-offset logging, chained replica `FLUSHDB` / `FLUSHALL` stream relay, `GETSET` rewrite, and nonblocking `BRPOPLPUSH` / `BLMOVE` rewrite stats. Remaining failures are counted full-sync, diskless pipe/drop, blocked-empty move rewrite stats, blocked-list role-change, cache-master, lazy-expire, and old-data rollback cases. |
 | `integration/replication-psync` | 90/0 | Green | Focused gate is green after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support for the replica dialer. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
 | `integration/replica-redirect` | timeout | Red | `CLIENT CAPA REDIRECT` top-level and MULTI/EXEC replica redirect semantics now pass the early file assertions. Manual `FAILOVER` now reaches timeout-driven handoff in Rust kits and a live two-process probe, including blocked `BRPOP` and paused `GET` REDIRECT after promotion. The official Tcl file still no-summary times out in the first failover test; side observation showed old primary `blocked_clients:2`, `paused_actions:all`, and `role:slave` while the target remained SIGSTOP'd. |
@@ -104,6 +104,10 @@ visible integration frontiers are now:
 - Expiry-on-replica semantics: `replication-3` still fails master/replica
   consistency with expire, writable replica expired-key behavior, and PFCOUNT
   expired-key/cache cases.
+- `R1-BLOCKED-MOVE-LIVE`: the byte-level kit now proves blocked wake
+  BRPOPLPUSH/BLMOVE rewrites, but live `integration/replication` still fails
+  the empty-blocking commandstats assertions. Build a live-server reproducer
+  around parked clients before changing more wake logic.
 - `R2-RDB-BULK-FAITHFUL`: the old `REPLICAOF` pre-PSYNC `KEYS`/`DUMP` seed
   shortcut is removed, so remaining full-sync work must pass through the
   streamed RDB handoff path.
@@ -142,6 +146,65 @@ visible integration frontiers are now:
   REDIRECT unblocking, and promotion/demotion remain open.
 
 ## Packet Evidence
+
+### R1-LEGACY-COMMAND-REWRITE
+
+Status: partial integration advance completed on 2026-06-13.
+
+Implementation:
+
+- `GETSET key value` now propagates as `SET key value`, so replicas count and
+  apply the canonical write form.
+- Immediate `BRPOPLPUSH` with data now propagates as `RPOPLPUSH`, and immediate
+  `BLMOVE` with data now propagates as `LMOVE`.
+- Blocked move waiters now remember whether they came from `BRPOPLPUSH` or
+  `BLMOVE`; the deterministic kit proves wake propagation emits
+  `RPOPLPUSH` for legacy waiters and `LMOVE` for BLMOVE waiters. The official
+  Tcl empty-blocking commandstats assertions still need a live-server follow-up.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands --test repl_correctness_kit -- --nocapture
+cargo test -p redis-core blocked_keys::tests -- --nocapture
+cargo test -p redis-core replication::tests -- --nocapture
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-command-rewrite-stats \
+  --profile integration-repl \
+  --timeout-s 420 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replication \
+  --isolated-tests-copy \
+  --skip-build
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-command-rewrite-tripwire \
+  --profile integration-repl \
+  --timeout-s 240 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replication-2,integration/block-repl \
+  --isolated-tests-copy \
+  --skip-build
+```
+
+Results:
+
+- `repl_correctness_kit`: 25 passed, 0 failed.
+- `redis-core blocked_keys::tests`: 3 passed, 0 failed.
+- `redis-core replication::tests`: 15 passed, 0 failed.
+- `cargo build --bin redis-server`: passed.
+- Focused `integration/replication`:
+  `harness/oracle/results/tcl-survey/20260613T205627898507Z/result.json`
+  reported 35 passed / 32 failed. `GETSET replication`, nonblocking
+  `BRPOPLPUSH replication, list exists`, and the four nonblocking
+  `BLMOVE ..., list exists` cases cleared.
+- Focused dual-server tripwire:
+  `harness/oracle/results/tcl-survey/20260613T210230529049Z/result.json`
+  reported `integration/replication-2` 7/0 and `integration/block-repl` 2/0.
 
 ### R2-CHAINED-REPLICA-FLUSH-RELAY
 

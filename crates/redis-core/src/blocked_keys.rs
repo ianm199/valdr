@@ -76,6 +76,7 @@ pub enum BlockedAction {
         side: BlockedSide,
         dst_key: RedisString,
         dst_side: BlockedSide,
+        legacy_rpoplpush: bool,
     },
     ZSetPop {
         reverse: bool,
@@ -103,14 +104,14 @@ pub enum BlockedAction {
 }
 
 impl BlockedAction {
- /// Return the RESP bytes to send when this waiter's deadline expires with
- /// no data delivered.
- /// BLPOP / BRPOP / BLMPOP: null array (`*-1\r\n`).
- /// BLMOVE / BRPOPLPUSH: null bulk (`$-1\r\n`).
- /// XREAD BLOCK: null bulk (`$-1\r\n`) — matches real Redis behaviour.
- /// WAIT timeout: integer reply of current acked-replica count (`:<n>\r\n`).
- /// The `acked_count` argument is only consulted for `Wait`; other variants
- /// ignore it.
+    /// Return the RESP bytes to send when this waiter's deadline expires with
+    /// no data delivered.
+    /// BLPOP / BRPOP / BLMPOP: null array (`*-1\r\n`).
+    /// BLMOVE / BRPOPLPUSH: null bulk (`$-1\r\n`).
+    /// XREAD BLOCK: null bulk (`$-1\r\n`) — matches real Redis behaviour.
+    /// WAIT timeout: integer reply of current acked-replica count (`:<n>\r\n`).
+    /// The `acked_count` argument is only consulted for `Wait`; other variants
+    /// ignore it.
     pub fn timeout_reply_bytes_with_count(&self, acked_count: usize) -> Vec<u8> {
         match self {
             BlockedAction::Pop { .. } => b"*-1\r\n".to_vec(),
@@ -125,10 +126,10 @@ impl BlockedAction {
         }
     }
 
- /// Return the RESP bytes to send when this waiter's deadline expires.
- /// Delegates to [`timeout_reply_bytes_with_count`] with zero for
- /// acked count. `Wait` waiters that call `take_expired` must use
- /// [`timeout_reply_bytes_with_count`] directly to pass the live count.
+    /// Return the RESP bytes to send when this waiter's deadline expires.
+    /// Delegates to [`timeout_reply_bytes_with_count`] with zero for
+    /// acked count. `Wait` waiters that call `take_expired` must use
+    /// [`timeout_reply_bytes_with_count`] directly to pass the live count.
     pub fn timeout_reply_bytes(&self) -> &'static [u8] {
         match self {
             BlockedAction::Pop { .. } => b"*-1\r\n",
@@ -141,10 +142,10 @@ impl BlockedAction {
         }
     }
 
- /// Whether this waiter should be unblocked when the key it waits on is
- /// deleted or otherwise stops existing. XREADGROUP must wake with a
- /// NOGROUP error in that case; plain XREAD and the list/zset pops keep
- /// waiting for data, so they are not "nokey" waiters.
+    /// Whether this waiter should be unblocked when the key it waits on is
+    /// deleted or otherwise stops existing. XREADGROUP must wake with a
+    /// NOGROUP error in that case; plain XREAD and the list/zset pops keep
+    /// waiting for data, so they are not "nokey" waiters.
     pub fn unblock_on_nokey(&self) -> bool {
         matches!(self, BlockedAction::StreamGroup { .. })
     }
@@ -175,9 +176,9 @@ impl BlockedKeysIndex {
         Self::default()
     }
 
- /// Register `waiter` under each of its keys, in order of arrival.
- /// Overwrites any prior waiter for the same `client_id` (callers must
- /// ensure a client never re-blocks while already parked).
+    /// Register `waiter` under each of its keys, in order of arrival.
+    /// Overwrites any prior waiter for the same `client_id` (callers must
+    /// ensure a client never re-blocks while already parked).
     pub fn add(&mut self, waiter: BlockedWaiter) {
         let cid = waiter.client_id;
         let already_registered = self.waiters.contains_key(&cid);
@@ -190,9 +191,9 @@ impl BlockedKeysIndex {
         }
     }
 
- /// Pop the FIFO-front waiter for `key` and return its full record.
- /// Also clears that client from every other key it was waiting on so a
- /// single push can never satisfy the same waiter twice across two keys.
+    /// Pop the FIFO-front waiter for `key` and return its full record.
+    /// Also clears that client from every other key it was waiting on so a
+    /// single push can never satisfy the same waiter twice across two keys.
     pub fn take_waiter(&mut self, key: &RedisString) -> Option<BlockedWaiter> {
         let cid = loop {
             let deque = self.keys.get_mut(key)?;
@@ -207,7 +208,7 @@ impl BlockedKeysIndex {
         self.remove_client(cid)
     }
 
- /// Remove `client_id` from every key queue and return its waiter record.
+    /// Remove `client_id` from every key queue and return its waiter record.
     pub fn remove_client(&mut self, client_id: ClientId) -> Option<BlockedWaiter> {
         let waiter = self.waiters.remove(&client_id)?;
         let _ = BLOCKED_KEYS_WAITERS.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
@@ -224,7 +225,7 @@ impl BlockedKeysIndex {
         Some(waiter)
     }
 
- /// Drain every waiter whose `deadline_ms` is `<= now_ms`.
+    /// Drain every waiter whose `deadline_ms` is `<= now_ms`.
     pub fn take_expired(&mut self, now_ms: i64) -> Vec<BlockedWaiter> {
         let expired: Vec<ClientId> = self
             .waiters
@@ -241,11 +242,11 @@ impl BlockedKeysIndex {
         out
     }
 
- /// Drain all `Stream` waiters for `key` whose `id_after` is strictly less
- /// than `new_id`, remove them from the index, and return their records.
- /// Unlike list pop semantics (FIFO, one waiter per element), XREAD BLOCK
- /// uses broadcast semantics: every blocked reader whose cursor is behind
- /// the new entry receives a wake, and all of them receive the same entry.
+    /// Drain all `Stream` waiters for `key` whose `id_after` is strictly less
+    /// than `new_id`, remove them from the index, and return their records.
+    /// Unlike list pop semantics (FIFO, one waiter per element), XREAD BLOCK
+    /// uses broadcast semantics: every blocked reader whose cursor is behind
+    /// the new entry receives a wake, and all of them receive the same entry.
     pub fn take_stream_waiters_for(
         &mut self,
         key: &RedisString,
@@ -272,10 +273,10 @@ impl BlockedKeysIndex {
         out
     }
 
- /// Drain all `StreamGroup` waiters for `key` whose `id_after` is strictly
- /// less than `new_id`, remove them from the index, and return their records.
- /// Used by XADD to broadcast a new entry to all blocked XREADGROUP clients
- /// whose consumer group cursor is behind the new entry.
+    /// Drain all `StreamGroup` waiters for `key` whose `id_after` is strictly
+    /// less than `new_id`, remove them from the index, and return their records.
+    /// Used by XADD to broadcast a new entry to all blocked XREADGROUP clients
+    /// whose consumer group cursor is behind the new entry.
     pub fn take_stream_group_waiters_for(
         &mut self,
         key: &RedisString,
@@ -302,10 +303,10 @@ impl BlockedKeysIndex {
         out
     }
 
- /// Drain all `StreamGroup` waiters for `key` regardless of their cursor,
- /// remove them from the index, and return their records.
- /// Used when the key is deleted, flushed, or the group is destroyed — any
- /// of these events should unblock all XREADGROUP waiters on that key.
+    /// Drain all `StreamGroup` waiters for `key` regardless of their cursor,
+    /// remove them from the index, and return their records.
+    /// Used when the key is deleted, flushed, or the group is destroyed — any
+    /// of these events should unblock all XREADGROUP waiters on that key.
     pub fn take_all_stream_group_waiters_for(&mut self, key: &RedisString) -> Vec<BlockedWaiter> {
         let client_ids: Vec<ClientId> = match self.keys.get(key) {
             None => return Vec::new(),
@@ -326,9 +327,9 @@ impl BlockedKeysIndex {
         out
     }
 
- /// Drain every `StreamGroup` waiter across all keys and return them.
- /// Used by FLUSHDB/FLUSHALL where every blocked XREADGROUP client must be
- /// woken with a NOGROUP error because all keys are gone.
+    /// Drain every `StreamGroup` waiter across all keys and return them.
+    /// Used by FLUSHDB/FLUSHALL where every blocked XREADGROUP client must be
+    /// woken with a NOGROUP error because all keys are gone.
     pub fn take_all_stream_group_waiters(&mut self) -> Vec<BlockedWaiter> {
         let cids: Vec<ClientId> = self
             .waiters
@@ -345,11 +346,11 @@ impl BlockedKeysIndex {
         out
     }
 
- /// Pop the FIFO-front `ZSetPop` waiter for `key` and return its full record.
- /// Skips any non-`ZSetPop` waiters at the head of the queue (they belong
- /// list commands that happen to share a key name). Removes the waiter
- /// every other key it was waiting on so a single ZADD can never satisfy
- /// same waiter twice.
+    /// Pop the FIFO-front `ZSetPop` waiter for `key` and return its full record.
+    /// Skips any non-`ZSetPop` waiters at the head of the queue (they belong
+    /// list commands that happen to share a key name). Removes the waiter
+    /// every other key it was waiting on so a single ZADD can never satisfy
+    /// same waiter twice.
     pub fn take_zset_waiter(&mut self, key: &RedisString) -> Option<BlockedWaiter> {
         let deque = self.keys.get(key)?;
         let cid = deque
@@ -381,19 +382,19 @@ impl BlockedKeysIndex {
         Some(waiter)
     }
 
- /// Peek at the FIFO-front `ZSetPop` waiter for `key` and return a clone.
- /// Does not remove the waiter from the index. Used by
- /// `zset::wake_blocked_zset_for_key` to drive the wake loop.
+    /// Peek at the FIFO-front `ZSetPop` waiter for `key` and return a clone.
+    /// Does not remove the waiter from the index. Used by
+    /// `zset::wake_blocked_zset_for_key` to drive the wake loop.
     pub fn peek_zset_waiter(&mut self, key: &RedisString) -> Option<BlockedWaiter> {
         self.take_zset_waiter(key)
     }
 
- /// Whether any waiter currently parks on `key`.
+    /// Whether any waiter currently parks on `key`.
     pub fn has_waiters_for(&self, key: &RedisString) -> bool {
         self.keys.get(key).is_some_and(|d| !d.is_empty())
     }
 
- /// Snapshot of every key that has at least one waiter.
+    /// Snapshot of every key that has at least one waiter.
     pub fn all_blocked_keys(&self) -> Vec<RedisString> {
         self.keys
             .keys()
@@ -406,17 +407,17 @@ impl BlockedKeysIndex {
             .collect()
     }
 
- /// Snapshot the number of currently-blocked clients (test/debug helper).
+    /// Snapshot the number of currently-blocked clients (test/debug helper).
     pub fn len(&self) -> usize {
         self.waiters.len()
     }
 
- /// Whether the index is empty.
+    /// Whether the index is empty.
     pub fn is_empty(&self) -> bool {
         self.waiters.is_empty()
     }
 
- /// Whether any client is blocked in WAIT or WAITAOF.
+    /// Whether any client is blocked in WAIT or WAITAOF.
     pub fn has_replication_waiters(&self) -> bool {
         self.waiters.values().any(|w| {
             matches!(
@@ -426,16 +427,16 @@ impl BlockedKeysIndex {
         })
     }
 
- /// Number of distinct keys that have at least one blocked client.
- /// Reported as `total_blocking_keys` in `INFO clients`.
+    /// Number of distinct keys that have at least one blocked client.
+    /// Reported as `total_blocking_keys` in `INFO clients`.
     pub fn total_blocking_keys(&self) -> usize {
         self.keys.values().filter(|q| !q.is_empty()).count()
     }
 
- /// Number of distinct blocking keys that have at least one client which
- /// should be unblocked even when the key does not exist (the "nokey"
- /// condition — currently XREADGROUP, which must wake with NOGROUP on
- /// delete/destroy). Reported as `total_blocking_keys_on_nokey`.
+    /// Number of distinct blocking keys that have at least one client which
+    /// should be unblocked even when the key does not exist (the "nokey"
+    /// condition — currently XREADGROUP, which must wake with NOGROUP on
+    /// delete/destroy). Reported as `total_blocking_keys_on_nokey`.
     pub fn total_blocking_keys_on_nokey(&self) -> usize {
         self.keys
             .values()
@@ -449,12 +450,12 @@ impl BlockedKeysIndex {
             .count()
     }
 
- /// Drain all `Wait` waiters whose required replica count is now satisfied.
- /// `acked_count_for` is a closure that, given a `target_offset`, returns
- /// the number of replicas whose acknowledged offset is `>= target_offset`.
- /// Waiters where that count reaches `numreplicas` are removed from
- /// index and returned to the caller; the caller should send an integer
- /// reply through each waiter's sender.
+    /// Drain all `Wait` waiters whose required replica count is now satisfied.
+    /// `acked_count_for` is a closure that, given a `target_offset`, returns
+    /// the number of replicas whose acknowledged offset is `>= target_offset`.
+    /// Waiters where that count reaches `numreplicas` are removed from
+    /// index and returned to the caller; the caller should send an integer
+    /// reply through each waiter's sender.
     pub fn take_satisfied_wait_waiters(
         &mut self,
         acked_count_for: impl Fn(i64) -> usize,
@@ -486,8 +487,8 @@ impl BlockedKeysIndex {
         out
     }
 
- /// Drain every `WaitAof` waiter whose local and replica fsync
- /// requirements are now satisfied.
+    /// Drain every `WaitAof` waiter whose local and replica fsync
+    /// requirements are now satisfied.
     pub fn take_satisfied_waitaof_waiters(
         &mut self,
         local_count_for: impl Fn(i64) -> usize,
@@ -522,9 +523,9 @@ impl BlockedKeysIndex {
         out
     }
 
- /// Drain WAITAOF waiters that require local AOF after appendonly was
- /// disabled. Upstream unblocks these with an error rather than waiting
- /// until their timeout.
+    /// Drain WAITAOF waiters that require local AOF after appendonly was
+    /// disabled. Upstream unblocks these with an error rather than waiting
+    /// until their timeout.
     pub fn take_waitaof_local_waiters(&mut self) -> Vec<BlockedWaiter> {
         let cids: Vec<ClientId> = self
             .waiters
@@ -561,8 +562,8 @@ impl BlockedKeysIndex {
         out
     }
 
- /// Drain every waiter blocked on replication progress. Used when the local
- /// server's replication topology changes underneath a WAIT/WAITAOF client.
+    /// Drain every waiter blocked on replication progress. Used when the local
+    /// server's replication topology changes underneath a WAIT/WAITAOF client.
     pub fn take_all_replication_waiters(&mut self) -> Vec<BlockedWaiter> {
         let cids: Vec<ClientId> = self
             .waiters
@@ -581,9 +582,9 @@ impl BlockedKeysIndex {
         out
     }
 
- /// Drain every data-command waiter that should receive a REDIRECT after a
- /// replication role change. READONLY stream waiters deliberately remain in the
- /// blocking index so they can be satisfied by later replicated writes.
+    /// Drain every data-command waiter that should receive a REDIRECT after a
+    /// replication role change. READONLY stream waiters deliberately remain in the
+    /// blocking index so they can be satisfied by later replicated writes.
     pub fn take_role_change_redirect_waiters(&mut self) -> Vec<BlockedWaiter> {
         let cids: Vec<ClientId> = self
             .waiters
@@ -599,8 +600,8 @@ impl BlockedKeysIndex {
         out
     }
 
- /// Remove a `Wait` waiter by client id without consulting the keys index
- /// (Wait waiters are not keyed — they park under a sentinel key).
+    /// Remove a `Wait` waiter by client id without consulting the keys index
+    /// (Wait waiters are not keyed — they park under a sentinel key).
     fn remove_wait_client(&mut self, client_id: ClientId) -> Option<BlockedWaiter> {
         let waiter = self.waiters.remove(&client_id)?;
         let _ = BLOCKED_KEYS_WAITERS.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {

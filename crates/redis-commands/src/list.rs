@@ -366,10 +366,12 @@ fn deliver_to_waiter(db: &mut RedisDb, key: &RedisString, waiter: BlockedWaiter)
             side,
             dst_key,
             dst_side,
+            legacy_rpoplpush,
         } => {
             let side = *side;
             let dst_key = dst_key.clone();
             let dst_side = *dst_side;
+            let legacy_rpoplpush = *legacy_rpoplpush;
             if let Some(dst_obj) = db.lookup_key_read(&dst_key) {
                 if !dst_obj.is_list() {
                     let wrong_type_reply =
@@ -404,24 +406,35 @@ fn deliver_to_waiter(db: &mut RedisDb, key: &RedisString, waiter: BlockedWaiter)
                 );
                 let _ = waiter.sender.send(payload);
             }
-            let from_side = match side {
-                BlockedSide::Head => b"left" as &[u8],
-                BlockedSide::Tail => b"right" as &[u8],
-            };
-            let to_side = match dst_side {
-                BlockedSide::Head => b"left" as &[u8],
-                BlockedSide::Tail => b"right" as &[u8],
-            };
-            crate::dispatch::propagate_command_from_wake(
-                db.id,
-                &[
-                    RedisString::from_bytes(b"LMOVE"),
-                    key.clone(),
-                    dst_key.clone(),
-                    RedisString::from_bytes(from_side),
-                    RedisString::from_bytes(to_side),
-                ],
-            );
+            if legacy_rpoplpush {
+                crate::dispatch::propagate_command_from_wake(
+                    db.id,
+                    &[
+                        RedisString::from_bytes(b"RPOPLPUSH"),
+                        key.clone(),
+                        dst_key.clone(),
+                    ],
+                );
+            } else {
+                let from_side = match side {
+                    BlockedSide::Head => b"left" as &[u8],
+                    BlockedSide::Tail => b"right" as &[u8],
+                };
+                let to_side = match dst_side {
+                    BlockedSide::Head => b"left" as &[u8],
+                    BlockedSide::Tail => b"right" as &[u8],
+                };
+                crate::dispatch::propagate_command_from_wake(
+                    db.id,
+                    &[
+                        RedisString::from_bytes(b"LMOVE"),
+                        key.clone(),
+                        dst_key.clone(),
+                        RedisString::from_bytes(from_side),
+                        RedisString::from_bytes(to_side),
+                    ],
+                );
+            }
             wake_blocked_for_key(db, &dst_key);
         }
         BlockedAction::ZSetPop { .. } => {
@@ -445,6 +458,10 @@ fn blocked_waiter_command_name(action: &BlockedAction) -> &'static [u8] {
             count: 0,
         } => b"brpop",
         BlockedAction::Pop { .. } => b"blmpop",
+        BlockedAction::Move {
+            legacy_rpoplpush: true,
+            ..
+        } => b"brpoplpush",
         BlockedAction::Move { .. } => b"blmove",
         _ => b"",
     }
@@ -1371,6 +1388,13 @@ fn position_to_side(p: ListPosition) -> BlockedSide {
     }
 }
 
+fn position_arg(p: ListPosition) -> &'static [u8] {
+    match p {
+        ListPosition::Head => b"left",
+        ListPosition::Tail => b"right",
+    }
+}
+
 fn reply_waitaof_zero(ctx: &mut CommandContext) -> RedisResult<()> {
     ctx.reply_array_header(2)?;
     ctx.reply_integer(0)?;
@@ -1572,7 +1596,17 @@ pub fn blmove_command(ctx: &mut CommandContext) -> RedisResult<()> {
         }
     };
     if has_data {
-        return lmove_generic(ctx, src_key, dst_key, wherefrom, whereto);
+        let result = lmove_generic(ctx, src_key.clone(), dst_key.clone(), wherefrom, whereto);
+        if result.is_ok() {
+            ctx.client_mut().set_args(vec![
+                RedisString::from_bytes(b"LMOVE"),
+                src_key,
+                dst_key,
+                RedisString::from_bytes(position_arg(wherefrom)),
+                RedisString::from_bytes(position_arg(whereto)),
+            ]);
+        }
+        return result;
     }
     park_blocked_client(
         ctx,
@@ -1581,6 +1615,7 @@ pub fn blmove_command(ctx: &mut CommandContext) -> RedisResult<()> {
             side: position_to_side(wherefrom),
             dst_key,
             dst_side: position_to_side(whereto),
+            legacy_rpoplpush: false,
         },
         timeout_secs,
     )
@@ -1605,13 +1640,21 @@ pub fn brpoplpush_command(ctx: &mut CommandContext) -> RedisResult<()> {
         }
     };
     if has_data {
-        return lmove_generic(
+        let result = lmove_generic(
             ctx,
-            src_key,
-            dst_key,
+            src_key.clone(),
+            dst_key.clone(),
             ListPosition::Tail,
             ListPosition::Head,
         );
+        if result.is_ok() {
+            ctx.client_mut().set_args(vec![
+                RedisString::from_bytes(b"RPOPLPUSH"),
+                src_key,
+                dst_key,
+            ]);
+        }
+        return result;
     }
     park_blocked_client(
         ctx,
@@ -1620,6 +1663,7 @@ pub fn brpoplpush_command(ctx: &mut CommandContext) -> RedisResult<()> {
             side: BlockedSide::Tail,
             dst_key,
             dst_side: BlockedSide::Head,
+            legacy_rpoplpush: true,
         },
         timeout_secs,
     )

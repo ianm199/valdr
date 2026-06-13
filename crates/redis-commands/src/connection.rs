@@ -979,6 +979,10 @@ pub fn auth_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 pub(crate) fn blocked_action_command_name(action: &BlockedAction) -> &'static [u8] {
     match action {
         BlockedAction::Pop { .. } => b"blpop",
+        BlockedAction::Move {
+            legacy_rpoplpush: true,
+            ..
+        } => b"brpoplpush",
         BlockedAction::Move { .. } => b"blmove",
         BlockedAction::ZSetPop { .. } => b"bzpopmin",
         BlockedAction::StreamGroup { .. } => b"xreadgroup",

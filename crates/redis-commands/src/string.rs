@@ -89,11 +89,11 @@ pub enum Unit {
 /// `parseExtendedCommandArgumentsOrReply`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandKind {
- /// SET: accepts NX, XX, IFEQ, GET, EX, PX, EXAT, PXAT, KEEPTTL.
+    /// SET: accepts NX, XX, IFEQ, GET, EX, PX, EXAT, PXAT, KEEPTTL.
     Set,
- /// GETEX: accepts PERSIST, EX, PX, EXAT, PXAT.
+    /// GETEX: accepts PERSIST, EX, PX, EXAT, PXAT.
     Get,
- /// MSETEX: accepts NX, XX, EX, PX, EXAT, PXAT, KEEPTTL.
+    /// MSETEX: accepts NX, XX, EX, PX, EXAT, PXAT, KEEPTTL.
     Mset,
 }
 
@@ -609,6 +609,8 @@ pub fn getset_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let obj = RedisObject::new_string_try_encoded(value.as_bytes());
     ctx.db_mut().set_key(key.clone(), obj, 0);
     ctx.notify_keyspace_event(NOTIFY_STRING, b"set", &key);
+    ctx.client_mut()
+        .set_args(vec![RedisString::from_bytes(b"SET"), key, value]);
     match prev {
         None => ctx.reply_null_bulk(),
         Some(b) => ctx.reply_bulk_string(RedisString::from_bytes(&b)),
@@ -1306,8 +1308,8 @@ pub fn lcs_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let alen = a.len();
     let blen = b.len();
 
- // LCS[i][j] = length of the LCS of a[0..i] and b[0..j], stored row-major
- // in a flat (alen+1)*(blen+1) table indexed as lcs[i*(blen+1) + j].
+    // LCS[i][j] = length of the LCS of a[0..i] and b[0..j], stored row-major
+    // in a flat (alen+1)*(blen+1) table indexed as lcs[i*(blen+1) + j].
     let width = blen + 1;
     let mut lcs = vec![0u32; (alen + 1) * width];
     for i in 1..=alen {
@@ -1326,7 +1328,7 @@ pub fn lcs_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let mut idx = total_len;
     let mut matches: Vec<LcsMatch> = Vec::new();
 
- // Sentinel: arange_start == alen means "no range currently open".
+    // Sentinel: arange_start == alen means "no range currently open".
     let mut i = alen;
     let mut k = blen;
     let mut arange_start = alen;

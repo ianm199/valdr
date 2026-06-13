@@ -196,6 +196,13 @@ Work packets:
   dirty-delta or equivalent mutation signal, not command metadata alone.
   Completed for `DEL`, `UNLINK`, `SREM`, `HDEL`, and `ZREM` on 2026-06-13; see
   [`REPLICATION_INTEGRATION_DASHBOARD.md`](REPLICATION_INTEGRATION_DASHBOARD.md).
+- **R1-LEGACY-COMMAND-REWRITE:** keep deprecated/blocking command forms out of
+  the replication stream when Valkey rewrites them to canonical writes. The
+  2026-06-13 packet covers `GETSET` to `SET`, immediate `BRPOPLPUSH` to
+  `RPOPLPUSH`, and immediate `BLMOVE` to `LMOVE`. The deterministic kit also
+  proves blocked wake `BRPOPLPUSH` / `BLMOVE` bytes, but live Tcl still fails
+  the empty-blocking commandstats assertions; a live parked-client reproducer
+  is the next step before changing more wake logic.
 - **R1-SCRIPT-FUNCTION-PROP:** verify script/function propagation semantics
   under `EVAL`, `EVALSHA`, `FCALL`, and write/no-write shebang flags. The
   Lua-originated empty `FLUSHDB` / `FLUSHALL` chained-replica case is now

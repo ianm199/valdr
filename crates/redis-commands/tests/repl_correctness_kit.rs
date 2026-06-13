@@ -30,6 +30,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
+use redis_core::blocked_keys::{blocked_keys_index, BlockedAction, BlockedSide, BlockedWaiter};
 use redis_core::replication::{
     global_replication_state, ReplicaConn, ReplicaState, ReplicationState,
 };
@@ -729,6 +730,192 @@ fn r1_ttl_relative_writes_rewrite_to_absolute_propagation() {
             .windows(resp(&[b"GETEX", b"getex-rel", b"EX", b"60"]).len())
             .any(|w| w == resp(&[b"GETEX", b"getex-rel", b"EX", b"60"]).as_slice()),
         "relative GETEX EX form must not be propagated"
+    );
+}
+
+#[test]
+fn r1_legacy_write_forms_rewrite_to_replica_command_names() {
+    let _g = repl_guard();
+    let repl = global_replication_state();
+    repl.become_master();
+    let cap = ReplCapture::attach(900_033, 0);
+    let mut db = RedisDb::new(0);
+
+    assert_eq!(
+        dispatch_as_primary(41, &mut db, &[b"SET", b"test", b"foo"]),
+        b"+OK\r\n"
+    );
+    let _ = cap.drain();
+    assert_eq!(
+        dispatch_as_primary(42, &mut db, &[b"GETSET", b"test", b"bar"]),
+        b"$3\r\nfoo\r\n"
+    );
+    let stream = cap.drain();
+    assert!(
+        stream
+            .windows(resp(&[b"SET", b"test", b"bar"]).len())
+            .any(|w| w == resp(&[b"SET", b"test", b"bar"]).as_slice()),
+        "GETSET must propagate as SET, got {:?}",
+        String::from_utf8_lossy(&stream)
+    );
+    assert!(
+        !stream
+            .windows(resp(&[b"GETSET", b"test", b"bar"]).len())
+            .any(|w| w == resp(&[b"GETSET", b"test", b"bar"]).as_slice()),
+        "GETSET itself must not be propagated"
+    );
+
+    assert_eq!(
+        dispatch_as_primary(43, &mut db, &[b"LPUSH", b"src", b"one"]),
+        b":1\r\n"
+    );
+    let _ = cap.drain();
+    assert_eq!(
+        dispatch_as_primary(44, &mut db, &[b"BRPOPLPUSH", b"src", b"dst", b"5"]),
+        b"$3\r\none\r\n"
+    );
+    let stream = cap.drain();
+    assert!(
+        stream
+            .windows(resp(&[b"RPOPLPUSH", b"src", b"dst"]).len())
+            .any(|w| w == resp(&[b"RPOPLPUSH", b"src", b"dst"]).as_slice()),
+        "BRPOPLPUSH with data must propagate as RPOPLPUSH, got {:?}",
+        String::from_utf8_lossy(&stream)
+    );
+    assert!(
+        !stream
+            .windows(b"BRPOPLPUSH".len())
+            .any(|w| w == b"BRPOPLPUSH"),
+        "blocking BRPOPLPUSH form must not be propagated"
+    );
+    assert!(
+        !stream.windows(b"LMOVE".len()).any(|w| w == b"LMOVE"),
+        "legacy BRPOPLPUSH must not be rewritten to LMOVE"
+    );
+
+    assert_eq!(
+        dispatch_as_primary(45, &mut db, &[b"LPUSH", b"src2", b"two"]),
+        b":1\r\n"
+    );
+    let _ = cap.drain();
+    assert_eq!(
+        dispatch_as_primary(
+            46,
+            &mut db,
+            &[b"BLMOVE", b"src2", b"dst2", b"LEFT", b"RIGHT", b"5"]
+        ),
+        b"$3\r\ntwo\r\n"
+    );
+    let stream = cap.drain();
+    assert!(
+        stream
+            .windows(resp(&[b"LMOVE", b"src2", b"dst2", b"left", b"right"]).len())
+            .any(|w| w == resp(&[b"LMOVE", b"src2", b"dst2", b"left", b"right"]).as_slice()),
+        "BLMOVE with data must propagate as LMOVE, got {:?}",
+        String::from_utf8_lossy(&stream)
+    );
+    assert!(
+        !stream.windows(b"BLMOVE".len()).any(|w| w == b"BLMOVE"),
+        "blocking BLMOVE form must not be propagated"
+    );
+}
+
+#[test]
+fn r1_blocked_move_wake_rewrites_to_nonblocking_names() {
+    let _g = repl_guard();
+    let repl = global_replication_state();
+    repl.become_master();
+    let cap = ReplCapture::attach(900_034, 0);
+    let mut db = RedisDb::new(0);
+
+    let src = RedisString::from_static(b"wake-src");
+    let dst = RedisString::from_static(b"wake-dst");
+    let (tx, rx) = mpsc::channel();
+    {
+        let mut idx = blocked_keys_index()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        idx.add(BlockedWaiter {
+            client_id: 910_034,
+            sender: tx,
+            keys: vec![src.clone()],
+            action: BlockedAction::Move {
+                side: BlockedSide::Tail,
+                dst_key: dst.clone(),
+                dst_side: BlockedSide::Head,
+                legacy_rpoplpush: true,
+            },
+            deadline_ms: i64::MAX,
+            resp_proto: 2,
+            username: None,
+            redirect_on_role_change: false,
+        });
+    }
+    assert_eq!(
+        dispatch_as_primary(47, &mut db, &[b"LPUSH", b"wake-src", b"one"]),
+        b":1\r\n"
+    );
+    assert_eq!(
+        rx.recv_timeout(Duration::from_millis(100)).unwrap(),
+        b"$3\r\none\r\n"
+    );
+    let stream = cap.drain();
+    assert!(
+        stream
+            .windows(resp(&[b"RPOPLPUSH", b"wake-src", b"wake-dst"]).len())
+            .any(|w| w == resp(&[b"RPOPLPUSH", b"wake-src", b"wake-dst"]).as_slice()),
+        "woken BRPOPLPUSH must propagate as RPOPLPUSH, got {:?}",
+        String::from_utf8_lossy(&stream)
+    );
+    assert!(
+        !stream.windows(b"LMOVE".len()).any(|w| w == b"LMOVE"),
+        "woken BRPOPLPUSH must not propagate as LMOVE"
+    );
+
+    let src = RedisString::from_static(b"wake-src2");
+    let dst = RedisString::from_static(b"wake-dst2");
+    let (tx, rx) = mpsc::channel();
+    {
+        let mut idx = blocked_keys_index()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        idx.add(BlockedWaiter {
+            client_id: 910_035,
+            sender: tx,
+            keys: vec![src.clone()],
+            action: BlockedAction::Move {
+                side: BlockedSide::Head,
+                dst_key: dst.clone(),
+                dst_side: BlockedSide::Tail,
+                legacy_rpoplpush: false,
+            },
+            deadline_ms: i64::MAX,
+            resp_proto: 2,
+            username: None,
+            redirect_on_role_change: false,
+        });
+    }
+    assert_eq!(
+        dispatch_as_primary(48, &mut db, &[b"LPUSH", b"wake-src2", b"two"]),
+        b":1\r\n"
+    );
+    assert_eq!(
+        rx.recv_timeout(Duration::from_millis(100)).unwrap(),
+        b"$3\r\ntwo\r\n"
+    );
+    let stream = cap.drain();
+    assert!(
+        stream
+            .windows(resp(&[b"LMOVE", b"wake-src2", b"wake-dst2", b"left", b"right"]).len())
+            .any(|w| {
+                w == resp(&[b"LMOVE", b"wake-src2", b"wake-dst2", b"left", b"right"]).as_slice()
+            }),
+        "woken BLMOVE must propagate as LMOVE, got {:?}",
+        String::from_utf8_lossy(&stream)
+    );
+    assert!(
+        !stream.windows(b"BLMOVE".len()).any(|w| w == b"BLMOVE"),
+        "woken BLMOVE must not propagate blocking form"
     );
 }
 
