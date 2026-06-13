@@ -184,6 +184,14 @@ pub fn exec_command(ctx: &mut CommandContext) -> RedisResult<()> {
         return Ok(());
     }
 
+    if let Some(reply) =
+        crate::dispatch::replica_redirect_reply_for_queued(ctx, &ctx.client_ref().queued_argvs)
+    {
+        reset_multi_state(ctx.client_mut());
+        ctx.client_mut().reply_buf.extend_from_slice(&reply);
+        return Ok(());
+    }
+
     if queued_has_denyoom_command(&ctx.client_ref().queued_argvs) {
         if let Some(reply) = enforce_maxmemory_gate(ctx, true) {
             reset_multi_state(ctx.client_mut());

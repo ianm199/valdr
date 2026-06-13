@@ -367,7 +367,12 @@ Work packets:
 - **R5-REPLICA-PROMOTION:** `REPLICAOF NO ONE` promotion preserves data,
   replid/offset history, client-visible role, and write policy.
 - **R5-CLIENT-REDIRECT:** implement the client capability and redirect behavior
-  needed by `replica-redirect.tcl`.
+  needed by `replica-redirect.tcl`. The first redirect-contract slice landed
+  on 2026-06-13: redirect-capable clients now get primary-target `REDIRECT`
+  replies for replica data commands, `READONLY` clients can keep local reads,
+  queue-time redirects dirty MULTI for `EXECABORT`, and queued writes redirect
+  at `EXEC` if the node became a replica after queueing. Remaining work is
+  failover-state driven pause/unblock behavior, not basic redirect formatting.
 - **R5-ABORT-ROLLBACK:** timeout and abort paths leave the topology in a
   coherent state.
 

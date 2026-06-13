@@ -76,7 +76,7 @@ Artifact:
 | `integration/replication` | no summary | Red | The failed full-sync cleanup packet moves past `diskless replication child being killed is collected`; the current abort is `Master stream is correctly processed while the replica has a script in -BUSY state` with `READONLY`. Diskless/script-busy full-sync apply remains the frontier. |
 | `integration/replication-psync` | timeout | Red | Timed out at 300s; no-backlog/backlog-expired and diskless variants remain frontier. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
-| `integration/replica-redirect` | no summary | Red | `FAILOVER` is now parsed, but the file still aborts at `client paused before and during failover-in-progress` with explicit coordinated-failover-unimplemented error; redirect semantics also still fail earlier cases. |
+| `integration/replica-redirect` | no summary | Red | `CLIENT CAPA REDIRECT` top-level and MULTI/EXEC replica redirect semantics now pass the early file assertions; the file still aborts at `client paused before and during failover-in-progress` with the explicit coordinated-failover-unimplemented error. |
 | `unit/wait` | 39/0 | Green | WAIT command suite passed after the R4 role-change unblock packet; WAITAOF/FACK edge cases still need separate coverage. |
 
 ## Temp RDB Cleanup
@@ -126,8 +126,9 @@ visible integration frontiers are now:
 - `R4-AOF-FULLSYNC`: `replication-aof-sync` is now green after full-sync RDB
   loads refresh appendonly manifests correctly.
 - `R5-MANUAL-FAILOVER`: server `FAILOVER` is now parser-only; the next useful
-  work is the real write pause, offset wait, promotion/demotion, and redirect
-  behavior needed by `replica-redirect`.
+  work is the real write pause, offset wait, promotion/demotion, and blocked
+  client handling needed by `replica-redirect`. The basic replica REDIRECT
+  contract for redirect-capable clients is now covered.
 
 ## Packet Evidence
 
@@ -927,3 +928,87 @@ Results:
   still has no summary for `integration/replica-redirect`; it now aborts with
   `ERR FAILOVER is parsed but coordinated failover is not implemented yet.`
   rather than `unknown command`.
+
+### R5-REDIRECT-CONTRACT
+
+Status: first client-visible redirect slice completed on 2026-06-13;
+`integration/replica-redirect` still aborts at the coordinated failover
+placeholder, but the earlier REDIRECT assertions now pass.
+
+Implementation:
+
+- Added `failover_redirect_kit.rs` as the deterministic inner loop for
+  redirect-capable clients on replicas.
+- Top-level dispatch now returns `-REDIRECT <host>:<port>` for data-access
+  commands from clients that declared `CLIENT CAPA REDIRECT` when this node is
+  a replica with a known primary target.
+- `READONLY` clients with redirect capability keep allowed read commands local
+  while write-like commands still redirect to the primary.
+- Non-data commands such as `PING`, and ordinary non-redirect clients, preserve
+  the existing replica behavior.
+- MULTI queue-time redirect now marks the transaction dirty so `EXEC` returns
+  `EXECABORT`, matching the Tcl case where a write is issued while already on a
+  replica.
+- If a write was queued while the node was primary and the node becomes a
+  replica before `EXEC`, `EXEC` returns `REDIRECT` for redirect-capable clients
+  instead of running the queued write locally.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands --test failover_redirect_kit -- --nocapture
+cargo test -p redis-commands --test repl_correctness_kit -- --nocapture
+cargo test -p redis-commands multi -- --nocapture
+cargo test -p redis-commands --test repl_buffer_kit -- --nocapture
+cargo test -p redis-commands --test psync_reconnect_kit -- --nocapture
+cargo test -p redis-commands --test fullsync_lifecycle_kit -- --nocapture
+cargo check -p redis-core -p redis-commands -p redis-server
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-r5-redirect-contract \
+  --profile integration-repl \
+  --timeout-s 300 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replica-redirect \
+  --isolated-tests-copy \
+  --skip-build
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-r5-redirect-tripwire \
+  --profile integration-repl \
+  --timeout-s 240 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replication-2,integration/block-repl \
+  --isolated-tests-copy \
+  --skip-build
+```
+
+Results:
+
+- `failover_redirect_kit`: 5 passed, 0 failed.
+- `repl_correctness_kit`: 21 passed, 0 failed.
+- MULTI filter: 8 passed across unit/integration kit filters, 0 failed.
+- `repl_buffer_kit`: 3 passed, 0 failed.
+- `psync_reconnect_kit`: 4 passed, 0 failed.
+- `fullsync_lifecycle_kit`: 1 passed, 0 failed.
+- `cargo check -p redis-core -p redis-commands -p redis-server`: passed.
+- `cargo build --bin redis-server`: passed.
+- Focused `integration/replica-redirect`:
+  `harness/oracle/results/tcl-survey/20260613T141710606290Z/result.json`
+  still produced no parsed summary and aborts at
+  `client paused before and during failover-in-progress` with
+  `ERR FAILOVER is parsed but coordinated failover is not implemented yet..`.
+  It reports 0 parsed failure lines before that abort.
+- Focused no-regression tripwire:
+  `harness/oracle/results/tcl-survey/20260613T141719342946Z/result.json`
+  reported `integration/replication-2` 7/0 and `integration/block-repl` 2/0.
+
+Takeaway:
+
+- The next useful `failover_redirect_kit` slice is not more top-level
+  REDIRECT formatting. It is explicit primary-side failover state:
+  write/client pause, waiting-for-sync, unblocking blocked clients with
+  REDIRECT, and eventual promotion/demotion handoff.

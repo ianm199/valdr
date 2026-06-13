@@ -458,6 +458,13 @@ pub fn dispatch(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
                         return Ok(());
                     }
                 }
+                if let Some(reply) = enforce_replica_redirect_gate(ctx, dispatch_name, metadata) {
+                    crate::multi::flag_transaction_dirty_exec(ctx.client_mut());
+                    record_command_stat(dispatch_name, 0, true, false);
+                    record_dispatch_error_reply(ctx, &reply);
+                    ctx.client_mut().reply_buf.extend_from_slice(&reply);
+                    return Ok(());
+                }
                 if let Some(reply) = enforce_maxmemory_gate(ctx, metadata.denyoom) {
                     crate::multi::flag_transaction_dirty_exec(ctx.client_mut());
                     record_command_stat(dispatch_name, 0, true, false);
@@ -618,6 +625,13 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
             ctx.client_mut().reply_buf.extend_from_slice(&noauth_reply);
             return Ok(());
         }
+    }
+
+    if let Some(reply) = enforce_replica_redirect_gate(ctx, name, metadata) {
+        record_command_stat(name, 0, true, false);
+        record_dispatch_error_reply(ctx, &reply);
+        ctx.client_mut().reply_buf.extend_from_slice(&reply);
+        return Ok(());
     }
 
     if let Some(reply) = enforce_replica_readonly_gate(ctx, name, metadata.write) {
@@ -1079,6 +1093,29 @@ pub(crate) fn stale_replica_blocked(ctx: &CommandContext<'_>) -> bool {
 /// write would be rejected under the current good-replica count, else None.
 pub(crate) fn min_replicas_write_blocked(ctx: &CommandContext<'_>) -> Option<Vec<u8>> {
     enforce_min_replicas_gate(ctx)
+}
+
+pub(crate) fn replica_redirect_reply_for_queued(
+    ctx: &CommandContext<'_>,
+    queued: &[Vec<RedisString>],
+) -> Option<Vec<u8>> {
+    if !replica_redirect_context_enabled(ctx) {
+        return None;
+    }
+    for argv in queued {
+        let Some(name) = argv.first() else {
+            continue;
+        };
+        let resolved_name = resolve_command_name(name.as_bytes());
+        let dispatch_name = resolved_name.as_deref().unwrap_or(name.as_bytes());
+        let Some(entry) = lookup_runtime_command(dispatch_name) else {
+            continue;
+        };
+        if command_needs_replica_redirect(ctx, entry.entry.name, entry.metadata) {
+            return replica_redirect_reply_to_primary();
+        }
+    }
+    None
 }
 
 pub(crate) fn command_acl_categories(name: &[u8]) -> Option<u64> {
@@ -2078,6 +2115,65 @@ fn is_always_allowed_for_authenticated(ctx: &CommandContext<'_>, name: &[u8]) ->
 /// to be skipped, and here we only block clients whose `is_replica` is false
 /// (i.e. normal user connections).
 /// `REPLICAOF` itself is always allowed so the operator can promote the server.
+fn enforce_replica_redirect_gate(
+    ctx: &CommandContext<'_>,
+    name: &[u8],
+    metadata: CommandMetadata,
+) -> Option<Vec<u8>> {
+    if !replica_redirect_context_enabled(ctx) {
+        return None;
+    }
+    if !command_needs_replica_redirect(ctx, name, metadata) {
+        return None;
+    }
+    replica_redirect_reply_to_primary()
+}
+
+fn replica_redirect_context_enabled(ctx: &CommandContext<'_>) -> bool {
+    use redis_core::replication::global_replication_state;
+    let repl = global_replication_state();
+    repl.is_replica()
+        && repl.replica_of_target().is_some()
+        && ctx.client_ref().capa_redirect
+        && !ctx.client_ref().is_replica
+        && !ctx.client_ref().replication_apply
+}
+
+fn command_needs_replica_redirect(
+    ctx: &CommandContext<'_>,
+    name: &[u8],
+    metadata: CommandMetadata,
+) -> bool {
+    if ascii_eq_ignore_case(name, b"REPLICAOF")
+        || ascii_eq_ignore_case(name, b"SLAVEOF")
+        || ascii_eq_ignore_case(name, b"READONLY")
+        || ascii_eq_ignore_case(name, b"READWRITE")
+    {
+        return false;
+    }
+
+    let write_like = metadata.write || metadata.may_replicate;
+    let data_access =
+        write_like || (metadata.acl_categories & (acl_category::READ | acl_category::WRITE)) != 0;
+    if !data_access {
+        return false;
+    }
+
+    !(ctx.client_ref().flags.readonly && !write_like)
+}
+
+fn replica_redirect_reply_to_primary() -> Option<Vec<u8>> {
+    use redis_core::replication::global_replication_state;
+    let (host, port) = global_replication_state().replica_of_target()?;
+    let mut reply = Vec::with_capacity(host.as_bytes().len() + 32);
+    reply.extend_from_slice(b"-REDIRECT ");
+    reply.extend_from_slice(host.as_bytes());
+    reply.push(b':');
+    reply.extend_from_slice(port.to_string().as_bytes());
+    reply.extend_from_slice(b"\r\n");
+    Some(reply)
+}
+
 fn enforce_replica_readonly_gate(
     ctx: &CommandContext<'_>,
     name: &[u8],
