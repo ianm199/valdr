@@ -306,6 +306,11 @@ pub struct ReplBgsaveJob {
     /// current master offset, so the replica receives every write that arrived
     /// during the snapshot window.
     pub snapshot_offset: i64,
+    /// Replication bytes appended after `snapshot_offset` while the snapshot
+    /// child is running. This is Valdr's shared full-sync catch-up buffer:
+    /// it lets waiters receive the complete post-RDB stream even when the
+    /// configured circular backlog has wrapped.
+    pub catch_up_bytes: Vec<u8>,
     /// Whether this full-sync was armed while a WAIT/WAITAOF client was
     /// blocked. The reaper uses this to prompt replicas for an ACK after
     /// RDB transfer without emitting GETACK for ordinary replication streams.
@@ -459,8 +464,22 @@ impl ReplicationState {
             Ok(mut g) => g.append(bytes),
             Err(p) => p.into_inner().append(bytes),
         };
+        self.append_to_repl_bgsave_catchup(bytes);
         self.master_repl_offset.store(new_offset, Ordering::Relaxed);
         new_offset
+    }
+
+    fn append_to_repl_bgsave_catchup(&self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        let mut guard = match self.repl_bgsave_job.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if let Some(job) = guard.as_mut() {
+            job.catch_up_bytes.extend_from_slice(bytes);
+        }
     }
 
     /// True when a successful write command needs replication-stream work.
@@ -495,9 +514,10 @@ impl ReplicationState {
         }
     }
 
-    /// Snapshot `(min_offset, master_offset, backlog_histlen, backlog_size)`
-    /// in one lock acquisition. Used by `INFO replication` so the four values
-    /// are consistent with each other.
+    /// Snapshot `(min_offset, master_offset, backlog_histlen, backlog_size)`.
+    /// During a full-sync BGSAVE, the readable history can extend past the
+    /// configured circular backlog because the active job holds a shared
+    /// catch-up buffer for waiting replicas.
     pub fn backlog_snapshot(&self) -> (i64, i64, usize, usize) {
         let master = self.master_repl_offset.load(Ordering::Relaxed);
         let (min, hist, size) = match self.backlog.lock() {
@@ -507,7 +527,64 @@ impl ReplicationState {
                 (g.min_offset(), g.histlen, g.size)
             }
         };
+        let bgsave_min = match self.repl_bgsave_job.lock() {
+            Ok(g) => g
+                .as_ref()
+                .filter(|job| !job.catch_up_bytes.is_empty())
+                .map(|job| job.snapshot_offset),
+            Err(p) => p
+                .into_inner()
+                .as_ref()
+                .filter(|job| !job.catch_up_bytes.is_empty())
+                .map(|job| job.snapshot_offset),
+        };
+        if let Some(job_min) = bgsave_min.filter(|job_min| *job_min < min) {
+            let hist = master.saturating_sub(job_min).max(0) as usize;
+            return (job_min, master, hist, size);
+        }
         (min, master, hist, size)
+    }
+
+    /// Read replication history from either the configured circular backlog or
+    /// the active full-sync catch-up buffer. Returns `None` when `offset` is
+    /// older than both readable windows or past the current master offset.
+    pub fn read_history_at(&self, offset: i64, max_len: usize) -> Option<Vec<u8>> {
+        let from_backlog = {
+            let guard = match self.backlog.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            guard.read_at(offset, max_len)
+        };
+        if from_backlog.is_some() {
+            return from_backlog;
+        }
+
+        let guard = match self.repl_bgsave_job.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let job = guard.as_ref()?;
+        if offset < job.snapshot_offset {
+            return None;
+        }
+        let start = offset.saturating_sub(job.snapshot_offset) as usize;
+        if start > job.catch_up_bytes.len() {
+            return None;
+        }
+        let end = start.saturating_add(max_len).min(job.catch_up_bytes.len());
+        Some(job.catch_up_bytes[start..end].to_vec())
+    }
+
+    /// Bytes currently held for in-flight full-sync catch-up.
+    pub fn repl_bgsave_catchup_len(&self) -> usize {
+        match self.repl_bgsave_job.lock() {
+            Ok(g) => g.as_ref().map_or(0, |job| job.catch_up_bytes.len()),
+            Err(p) => p
+                .into_inner()
+                .as_ref()
+                .map_or(0, |job| job.catch_up_bytes.len()),
+        }
     }
 
     /// True when this server is currently a replica of some master.
@@ -903,6 +980,31 @@ mod tests {
         assert_eq!(b.min_offset(), 4);
         assert_eq!(b.read_at(4, 4).as_deref(), Some(b"efgh".as_slice()));
         assert!(b.read_at(0, 4).is_none());
+    }
+
+    #[test]
+    fn bgsave_catchup_extends_history_beyond_circular_backlog() {
+        let st = ReplicationState::new(generate_runid(), 4);
+        st.install_repl_bgsave_job(ReplBgsaveJob {
+            child_pid: 1,
+            temp_path: PathBuf::from("temp-repl-test.rdb"),
+            waiting_replicas: vec![42],
+            snapshot_offset: 0,
+            catch_up_bytes: Vec::new(),
+            needs_getack_on_completion: false,
+        });
+
+        st.append_to_backlog(b"abcdef");
+        assert_eq!(st.backlog_snapshot(), (0, 6, 6, 4));
+        assert_eq!(
+            st.read_history_at(0, 6).as_deref(),
+            Some(b"abcdef".as_slice())
+        );
+
+        let job = st.take_repl_bgsave_job().expect("job still installed");
+        assert_eq!(job.catch_up_bytes, b"abcdef");
+        assert_eq!(st.backlog_snapshot(), (2, 6, 4, 4));
+        assert!(st.read_history_at(0, 1).is_none());
     }
 
     #[test]

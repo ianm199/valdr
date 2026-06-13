@@ -618,12 +618,14 @@ pub(crate) fn dispatch_full_sync_transfer() {
         }
         let current_offset = repl.master_offset();
         if current_offset > snapshot_offset {
-            let catch_up = {
+            let catch_up = if job.catch_up_bytes.is_empty() {
                 let guard = match repl.backlog.lock() {
                     Ok(g) => g,
                     Err(p) => p.into_inner(),
                 };
                 guard.read_at(snapshot_offset, (current_offset - snapshot_offset) as usize)
+            } else {
+                Some(job.catch_up_bytes.clone())
             };
             if let Some(bytes) = catch_up {
                 if !bytes.is_empty() {

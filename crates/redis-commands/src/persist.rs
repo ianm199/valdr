@@ -880,6 +880,7 @@ pub fn bgsave_for_replication(
                 temp_path,
                 waiting_replicas: vec![requesting_client_id],
                 snapshot_offset,
+                catch_up_bytes: Vec::new(),
                 needs_getack_on_completion: redis_core::blocked_keys::blocked_replication_wait_any(
                 ),
             });
@@ -898,6 +899,7 @@ pub fn bgsave_for_replication(
         temp_path,
         waiting_replicas: vec![requesting_client_id],
         snapshot_offset,
+        catch_up_bytes: Vec::new(),
         needs_getack_on_completion: redis_core::blocked_keys::blocked_replication_wait_any(),
     });
     let spawn = thread::Builder::new()

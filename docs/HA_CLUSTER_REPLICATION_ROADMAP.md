@@ -240,6 +240,11 @@ Work packets:
   setup exception to a counted 3/15 result.
 - **R2-PIGGYBACK:** replicas arriving during an in-flight replication BGSAVE
   join the same job and receive the same snapshot plus catch-up backlog.
+  Initial active-job catch-up buffering landed on 2026-06-13: writes appended
+  while a replication BGSAVE is active are retained in the job and shipped
+  after the RDB payload even if the circular backlog wrapped. Longer-lived
+  shared-buffer retention after the job completes remains part of
+  `R2-BUFFER-LIMITS`.
 - **R2-BUFFER-LIMITS:** implement replica output-buffer accounting and
   disconnection policy well enough for `replication-buffer` to count tests
   instead of dying in setup. Partial accounting surface landed on 2026-06-13:
@@ -269,6 +274,12 @@ Work packets:
 - **R3-DUAL-REPLID:** implement primary and secondary replication IDs plus
   failover-history windows where Valkey expects them.
 - **R3-BACKLOG-RESIZE:** make `repl-backlog-size` changes safe and observable.
+  A 2026-06-13 probe showed that simply resizing Valdr's circular backlog at
+  `CONFIG SET` time regresses `integration/replication-buffer` from counted
+  failures back to an offset-convergence abort
+  (`harness/oracle/results/tcl-survey/20260613T051700796223Z/result.json`).
+  Do not expose this until the shared replication-buffer lifetime/trimming
+  model can retain history beyond the active BGSAVE job.
 - **R3-OFFSET-CONVERGENCE:** make `wait_for_ofs_sync` converge in high-volume
   tests; audit ACK timing, backlog offsets, and replica apply progress.
 - **R3-RECONNECT-MATRIX:** deterministic tests for reconnect within backlog,

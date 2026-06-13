@@ -72,7 +72,7 @@ Artifact:
 | `integration/block-repl` | 2/0 | Green | No-regression tripwire. |
 | `integration/replication-3` | 3/4 | Red | Expiry consistency, writable-replica expired-key behavior, and PFCOUNT expired-key/cache semantics. |
 | `integration/replication-4` | 15/2 | Red | SPOP rewrite cases now pass; remaining failures are divergence/default writable-replica cases. |
-| `integration/replication-buffer` | 3/15 | Red | Full-sync/BGSAVE setup now reaches counted assertions; global replication buffer, backlog growth/shrink, partial resync from buffered history, and replica output-buffer limit semantics remain unfinished. |
+| `integration/replication-buffer` | 3/15 | Red | Full-sync/BGSAVE setup reaches counted assertions; active BGSAVE catch-up now has a real shared buffer, but longer-lived global buffer lifetime/trimming, backlog growth/shrink, partial resync from retained buffered history, and replica output-buffer disconnect semantics remain unfinished. |
 | `integration/replication` | no summary | Red | Aborts at `diskless replication child being killed is collected` with `child process exited abnormally`; diskless/full-sync behavior remains the frontier. |
 | `integration/replication-psync` | timeout | Red | Timed out at 300s; no-backlog/backlog-expired and diskless variants remain frontier. |
 | `integration/replication-aof-sync` | 1/5 | Red | RDB-reuse-as-AOF-base and diskless AOF fallback behavior. |
@@ -109,6 +109,10 @@ visible integration frontiers are now:
 - `R2-BGSAVE-WINDOW`: replication BGSAVE now reports through `INFO persistence`
   and honors the bounded debug save delay; keep extending this into the
   diskless/full-sync windows behind `integration/replication`.
+- `R2-BGSAVE-CATCHUP`: active replication BGSAVE jobs now retain appended
+  replication bytes outside the circular backlog and use that buffer for
+  post-RDB catch-up. The buffer is still scoped to the active job; Valkey-style
+  longer-lived shared-buffer retention and trimming remain open.
 - `R3-RECONNECT-MATRIX`: extend the new master-side PSYNC decision matrix into
   live replica-dialer reconnect coverage before grinding `replication-psync`.
 - `R2-BUFFER-LIMITS`: accounting aliases and fan-out accounting are covered;
@@ -304,6 +308,66 @@ Results:
 - Focused dual-server tripwire:
   `harness/oracle/results/tcl-survey/20260613T050307837025Z/result.json`
   reported `integration/replication-2` 7/0 and `integration/block-repl` 2/0.
+
+### R2-BGSAVE-CATCHUP
+
+Status: active-job catch-up foundation completed on 2026-06-13; slow Tcl
+remains red at the same counted `3/15` frontier.
+
+Implementation:
+
+- `ReplBgsaveJob` now owns a shared `catch_up_bytes` buffer.
+- Every replication backlog append also copies bytes into the active
+  replication-BGSAVE job, if one exists.
+- Full-sync transfer sends the job's catch-up bytes after the RDB payload
+  instead of relying only on the circular backlog.
+- Partial resync catch-up now reads through `ReplicationState::read_history_at`,
+  which can serve bytes from either the circular backlog or the active BGSAVE
+  catch-up buffer.
+- `INFO memory` accounts the active BGSAVE catch-up buffer as replication
+  backlog memory.
+
+Evidence:
+
+```bash
+cargo test -p redis-core replication::tests -- --nocapture
+cargo check -p redis-core -p redis-commands -p redis-server
+cargo test -p redis-commands --test repl_correctness_kit -- --nocapture
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-frontier-buffer-catchup-no-resize \
+  --profile integration-repl \
+  --timeout-s 300 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replication-buffer \
+  --isolated-tests-copy \
+  --skip-build
+```
+
+Results:
+
+- Core replication tests: 9 passed, 0 failed, including
+  `bgsave_catchup_extends_history_beyond_circular_backlog`.
+- `cargo check -p redis-core -p redis-commands -p redis-server`: passed.
+- `repl_correctness_kit`: 21 passed, 0 failed.
+- `cargo build --bin redis-server`: passed.
+- Focused `integration/replication-buffer`:
+  `harness/oracle/results/tcl-survey/20260613T052351201016Z/result.json`
+  reported the same counted `3/15` result with 0 timeouts, 0 no-summary files,
+  and 0 abort/exception points.
+
+Takeaway:
+
+- A runtime `CONFIG SET repl-backlog-size` resize probe was intentionally not
+  kept in this packet. With the current short-lived shared buffer, the probe
+  regressed `integration/replication-buffer` back to a no-summary
+  `Replica offset didn't catch up with the master after too long time`
+  exception:
+  `harness/oracle/results/tcl-survey/20260613T051700796223Z/result.json`.
+  R3-BACKLOG-RESIZE needs longer-lived shared-buffer retention and
+  offset-convergence work before it is safe to expose.
 
 ### R1-NOOP-DIRTY
 

@@ -282,7 +282,13 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let (mem_clients_normal, mem_clients_slaves) = client_memory_info_totals();
         let (_, _, backlog_histlen, backlog_size) =
             redis_core::replication::global_replication_state().backlog_snapshot();
-        let mem_replication_backlog = if backlog_histlen > 0 { backlog_size } else { 0 };
+        let repl_bgsave_catchup =
+            redis_core::replication::global_replication_state().repl_bgsave_catchup_len();
+        let mem_replication_backlog = if backlog_histlen > 0 {
+            backlog_size.saturating_add(repl_bgsave_catchup)
+        } else {
+            0
+        };
         let mem_replicas_repl_buffer = mem_clients_slaves;
         let mem_total_replication_buffers =
             mem_replication_backlog.saturating_add(mem_replicas_repl_buffer);
