@@ -239,7 +239,11 @@ Work packets:
   join the same job and receive the same snapshot plus catch-up backlog.
 - **R2-BUFFER-LIMITS:** implement replica output-buffer accounting and
   disconnection policy well enough for `replication-buffer` to count tests
-  instead of dying in setup.
+  instead of dying in setup. Partial accounting surface landed on 2026-06-13:
+  command fan-out now routes through the replica send/accounting helper and
+  `INFO memory` exposes the Valkey-compatible replication-buffer field names.
+  Actual shared-buffer trimming, output-buffer disconnect policy, and the
+  `replication-buffer` Tcl gate remain unfinished.
 
 Gate:
 

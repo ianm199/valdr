@@ -2391,33 +2391,42 @@ fn propagate_write_to_replicas(
         repl.append_to_backlog(select_bytes);
     }
     let offset = repl.append_to_backlog(&argv_bytes);
+    for client_id in online_replica_client_ids(repl) {
+        if let Some(select_bytes) = select_bytes.as_ref() {
+            if !repl.send_to_replica(client_id, select_bytes.clone()) {
+                eprintln!(
+                    "redis-server: replication SELECT fan-out failed for client {}",
+                    client_id
+                );
+                continue;
+            }
+        }
+        if !repl.send_to_replica(client_id, argv_bytes.clone()) {
+            eprintln!(
+                "redis-server: replication fan-out failed for client {}",
+                client_id
+            );
+        }
+    }
+    offset
+}
+
+fn online_replica_client_ids(
+    repl: &redis_core::replication::ReplicationState,
+) -> Vec<redis_core::client::ClientId> {
     let guard = match repl.replicas.lock() {
         Ok(g) => g,
         Err(p) => p.into_inner(),
     };
-    for conn in guard.values() {
-        if redis_core::replication::ReplicaState::from_u8(
-            conn.state.load(std::sync::atomic::Ordering::Acquire),
-        ) == redis_core::replication::ReplicaState::Online
-        {
-            if let Some(select_bytes) = select_bytes.as_ref() {
-                if conn.outbound_sender.send(select_bytes.clone()).is_err() {
-                    eprintln!(
-                        "redis-server: replication SELECT fan-out failed for client {}",
-                        conn.client_id
-                    );
-                    continue;
-                }
-            }
-            if conn.outbound_sender.send(argv_bytes.clone()).is_err() {
-                eprintln!(
-                    "redis-server: replication fan-out failed for client {}",
-                    conn.client_id
-                );
-            }
-        }
-    }
-    offset
+    guard
+        .values()
+        .filter(|conn| {
+            redis_core::replication::ReplicaState::from_u8(
+                conn.state.load(std::sync::atomic::Ordering::Acquire),
+            ) == redis_core::replication::ReplicaState::Online
+        })
+        .map(|conn| conn.client_id)
+        .collect()
 }
 
 /// Feed a synthesized write command to propagation surfaces from outside a
@@ -2472,19 +2481,11 @@ pub fn propagate_command_raw(argv: &[RedisString]) -> i64 {
 
     let argv_bytes = crate::aof::encode_resp_command(argv);
     let offset = repl.append_to_backlog(&argv_bytes);
-    let guard = match repl.replicas.lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    for conn in guard.values() {
-        if redis_core::replication::ReplicaState::from_u8(
-            conn.state.load(std::sync::atomic::Ordering::Acquire),
-        ) == redis_core::replication::ReplicaState::Online
-            && conn.outbound_sender.send(argv_bytes.clone()).is_err()
-        {
+    for client_id in online_replica_client_ids(&repl) {
+        if !repl.send_to_replica(client_id, argv_bytes.clone()) {
             eprintln!(
                 "redis-server: raw replication fan-out failed for client {}",
-                conn.client_id
+                client_id
             );
         }
     }

@@ -280,10 +280,16 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if want(b"memory") {
         let key_memory = approximate_memory_used(ctx.db());
         let (mem_clients_normal, mem_clients_slaves) = client_memory_info_totals();
+        let (_, _, backlog_histlen, backlog_size) =
+            redis_core::replication::global_replication_state().backlog_snapshot();
+        let mem_replication_backlog = if backlog_histlen > 0 { backlog_size } else { 0 };
+        let mem_replicas_repl_buffer = mem_clients_slaves;
+        let mem_total_replication_buffers =
+            mem_replication_backlog.saturating_add(mem_replicas_repl_buffer);
         let used_memory = ESTIMATED_SERVER_MEMORY_BASELINE
             .saturating_add(key_memory)
             .saturating_add(mem_clients_normal as u64)
-            .saturating_add(mem_clients_slaves as u64);
+            .saturating_add(mem_total_replication_buffers as u64);
         let used_memory_human = format_human_bytes(used_memory);
         let peak = metrics.max_clients_seen.load(Ordering::Relaxed);
         let (rss, rss_source) = match rss_bytes() {
@@ -334,6 +340,17 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let _ = writeln!(buf, "mem_overhead_db_hashtable_rehashing:{}\r", rehashing);
         let _ = writeln!(buf, "total_system_memory:0\r");
         let _ = writeln!(buf, "mem_not_counted_for_evict:{}\r", mem_clients_slaves);
+        let _ = writeln!(buf, "mem_replication_backlog:{}\r", mem_replication_backlog);
+        let _ = writeln!(
+            buf,
+            "mem_total_replication_buffers:{}\r",
+            mem_total_replication_buffers
+        );
+        let _ = writeln!(
+            buf,
+            "mem_replicas_repl_buffer:{}\r",
+            mem_replicas_repl_buffer
+        );
         let _ = writeln!(buf, "mem_clients_normal:{}\r", mem_clients_normal);
         let _ = writeln!(buf, "mem_clients_slaves:{}\r", mem_clients_slaves);
         let live_maxmemory = ctx.live_config().maxmemory();
@@ -739,7 +756,7 @@ fn ascii_lower(b: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use redis_core::{Client, RedisDb, RedisObject};
+    use redis_core::{client_info::client_info_registry, Client, RedisDb, RedisObject};
 
     fn arg(bytes: &[u8]) -> RedisString {
         RedisString::from_bytes(bytes)
@@ -801,6 +818,44 @@ mod tests {
         }
 
         drop(snapshot);
+    }
+
+    #[test]
+    fn info_memory_exposes_replication_buffer_fields() {
+        let replica_id = 980_777;
+        {
+            let mut replica = Client::new(replica_id);
+            replica.is_replica = true;
+            let mut guard = client_info_registry().lock().unwrap();
+            guard.register(replica_id, "127.0.0.1:0".to_string());
+            guard.update_client_metadata(&replica);
+            guard.set_output_buffer_memory(replica_id, 4096);
+        }
+
+        let mut db = RedisDb::new(0);
+        let mut client = Client::new(980_778);
+        client.set_args(vec![arg(b"INFO"), arg(b"memory")]);
+        let mut ctx = CommandContext::with_db(&mut client, &mut db);
+        info_command(&mut ctx).unwrap();
+
+        {
+            let mut guard = client_info_registry().lock().unwrap();
+            guard.deregister(replica_id);
+        }
+
+        let reply = client.drain_reply();
+        let text = bulk_text(&reply);
+        assert_eq!(field_value(text, "mem_replicas_repl_buffer"), "4096");
+        assert_eq!(field_value(text, "mem_clients_slaves"), "4096");
+        assert!(
+            field_value(text, "mem_total_replication_buffers")
+                .parse::<usize>()
+                .unwrap()
+                >= 4096
+        );
+        field_value(text, "mem_replication_backlog")
+            .parse::<usize>()
+            .expect("numeric replication backlog memory");
     }
 }
 

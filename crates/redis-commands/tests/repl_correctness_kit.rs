@@ -12,7 +12,7 @@
 //! dispatch tail (dispatch.rs:661-758)
 //! → propagate_write_to_replicas / propagate_command_from_wake
 //! → repl.append_to_backlog(...) (the backlog)
-//! → conn.outbound_sender.send(bytes) (per-replica mpsc)
+//! → repl.send_to_replica(bytes) (per-replica mpsc + output accounting)
 //! `ReplCapture` registers a real `ReplicaConn` in the *live global*
 //! `ReplicationState` whose `outbound_sender` is an mpsc whose receiver we own.
 //! After driving the live `dispatch`, draining that receiver yields the
@@ -25,6 +25,7 @@
 //! temp file, then replays it into a fresh DB and asserts key-for-key equality
 //! — the append→bytes→replay→assert-dbs-equal loop, on the live codec.
 
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
@@ -204,6 +205,31 @@ fn anchor_plain_set_propagates_verbatim() {
          captured: {:?}\n  expected frame: {:?}",
         String::from_utf8_lossy(&stream),
         String::from_utf8_lossy(&set_frame),
+    );
+}
+
+#[test]
+fn r2_replica_fanout_updates_pending_output_accounting() {
+    let _g = repl_guard();
+    let cap = ReplCapture::attach(900_002, global_replication_state().master_offset());
+    let mut db = RedisDb::new(0);
+
+    let reply = dispatch_as_primary(2, &mut db, &[b"SET", b"acct", b"value"]);
+    assert_eq!(reply, b"+OK\r\n", "SET should succeed");
+
+    let stream = cap.drain();
+    let pending = {
+        let guard = cap.repl.replicas.lock().unwrap();
+        guard
+            .get(&cap.client_id)
+            .expect("capture replica still registered")
+            .pending_output_bytes
+            .load(Ordering::Relaxed)
+    };
+    assert_eq!(
+        pending,
+        stream.len(),
+        "fan-out accounting should track queued replica bytes"
     );
 }
 

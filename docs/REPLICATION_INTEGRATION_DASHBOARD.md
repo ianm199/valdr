@@ -73,7 +73,7 @@ Artifact:
 | `integration/block-repl` | 2/0 | Green | No-regression tripwire. |
 | `integration/replication-3` | 3/4 | Red | Expiry consistency, writable-replica expired-key behavior, and PFCOUNT expired-key/cache semantics. |
 | `integration/replication-4` | 15/2 | Red | SPOP rewrite cases now pass; remaining failures are divergence/default writable-replica cases. |
-| `integration/replication-buffer` | 2/13 | Red | Global replication buffer, backlog growth/shrink, and replica output-buffer limit semantics. |
+| `integration/replication-buffer` | no summary after R2 shortcut removal; prior R0 was 2/13 | Red | Full-sync/BGSAVE setup now aborts before buffer assertions; global replication buffer, backlog growth/shrink, and replica output-buffer limit semantics remain unfinished. |
 | `integration/replication` | no summary | Red | Aborts at `diskless replication child being killed is collected` with `child process exited abnormally`; diskless/full-sync behavior remains the frontier. |
 | `integration/replication-psync` | timeout | Red | Timed out at 300s; no-backlog/backlog-expired and diskless variants remain frontier. |
 | `integration/replication-aof-sync` | 1/5 | Red | RDB-reuse-as-AOF-base and diskless AOF fallback behavior. |
@@ -108,7 +108,8 @@ visible integration frontiers are now:
   streamed RDB handoff path.
 - `R3-RECONNECT-MATRIX`: extend the new master-side PSYNC decision matrix into
   live replica-dialer reconnect coverage before grinding `replication-psync`.
-- `R2-BUFFER-LIMITS`: implement/account for replication buffer and output-buffer
+- `R2-BUFFER-LIMITS`: accounting aliases and fan-out accounting are covered;
+  implement shared-buffer trimming and replica output-buffer disconnection
   semantics behind `replication-buffer`.
 - `R5-FAILOVER-PARSER`: start failover syntax and faithful errors before any
   HA claim.
@@ -165,6 +166,75 @@ Results:
   reported `integration/replication-2` 7/0 and `integration/block-repl` 2/0.
 - Dual-server `integration/replication` and `integration/replication-buffer`
   remain the current red full-sync / buffer frontier from the R0 dashboard.
+
+### R2-BUFFER-LIMITS
+
+Status: partial accounting surface completed on 2026-06-13; slow Tcl remains
+red and currently aborts before counted buffer assertions.
+
+Implementation:
+
+- Ordinary command fan-out and raw synthesized propagation now route through
+  `ReplicationState::send_to_replica`, the same helper used by RDB/catch-up
+  sends, so `ReplicaConn::pending_output_bytes` and client output-memory
+  snapshots are updated consistently.
+- `INFO memory` now exposes Valkey-compatible
+  `mem_replication_backlog`, `mem_total_replication_buffers`, and
+  `mem_replicas_repl_buffer` fields. In Valdr's current model these are derived
+  from the active backlog allocation plus replica client/output memory; a true
+  shared pending-replication buffer is still future work.
+- `repl_correctness_kit.rs` covers the fan-out accounting path, and
+  `info.rs` covers the INFO memory field surface.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands --test repl_correctness_kit \
+  r2_replica_fanout_updates_pending_output_accounting \
+  -- --nocapture
+cargo test -p redis-commands \
+  info::tests::info_memory_exposes_replication_buffer_fields \
+  -- --nocapture
+cargo test -p redis-commands --test repl_correctness_kit
+cargo check -p redis-commands
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-r2-buffer-accounting \
+  --profile integration-repl \
+  --timeout-s 240 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replication-buffer \
+  --isolated-tests-copy \
+  --skip-build
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-r2-buffer-accounting-tripwire \
+  --profile integration-repl \
+  --timeout-s 240 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replication-2,integration/block-repl \
+  --isolated-tests-copy \
+  --skip-build
+```
+
+Results:
+
+- Focused fan-out accounting unit test: passed.
+- Focused INFO memory field unit test: passed.
+- `repl_correctness_kit`: 18 passed, 0 failed.
+- `cargo check -p redis-commands`: passed.
+- `cargo build --bin redis-server`: passed.
+- `integration/replication-buffer`:
+  `harness/oracle/results/tcl-survey/20260613T042757054194Z/result.json`
+  reported no summary and an exception at `fail to sync with replicas`, before
+  the buffer assertions. This is blocked by the full-sync/BGSAVE frontier, not
+  evidence that buffer limits are correct.
+- Focused dual-server tripwire:
+  `harness/oracle/results/tcl-survey/20260613T042825912490Z/result.json`
+  reported `integration/replication-2` 7/0 and `integration/block-repl` 2/0.
 
 ### R1-NOOP-DIRTY
 
