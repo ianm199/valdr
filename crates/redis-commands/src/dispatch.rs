@@ -62,6 +62,7 @@ struct CommandMetadata {
     monitor_admin: bool,
     stale: bool,
     loading: bool,
+    no_async_loading: bool,
     acl_categories: u64,
 }
 
@@ -472,7 +473,9 @@ pub fn dispatch(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
                     ctx.client_mut().reply_buf.extend_from_slice(&reply);
                     return Ok(());
                 }
-                if let Some(reply) = enforce_loading_gate(ctx, metadata.loading) {
+                if let Some(reply) =
+                    enforce_loading_gate(ctx, metadata.loading, metadata.no_async_loading)
+                {
                     crate::multi::flag_transaction_dirty_exec(ctx.client_mut());
                     record_command_stat(dispatch_name, 0, true, false);
                     record_dispatch_error_reply(ctx, &reply);
@@ -664,7 +667,7 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
         return Ok(());
     }
 
-    if let Some(reply) = enforce_loading_gate(ctx, metadata.loading) {
+    if let Some(reply) = enforce_loading_gate(ctx, metadata.loading, metadata.no_async_loading) {
         record_command_stat(name, 0, true, false);
         record_dispatch_error_reply(ctx, &reply);
         ctx.client_mut().reply_buf.extend_from_slice(&reply);
@@ -1301,6 +1304,7 @@ impl CommandMetadata {
                 CommandFlag::SKIP_MONITOR => self.skip_monitor = true,
                 CommandFlag::STALE => self.stale = true,
                 CommandFlag::LOADING => self.loading = true,
+                CommandFlag::NO_ASYNC_LOADING => self.no_async_loading = true,
                 _ => {}
             }
         }
@@ -2363,8 +2367,19 @@ fn enforce_busy_script_gate(
     Some(crate::eval::busy_script_error_reply())
 }
 
-fn enforce_loading_gate(ctx: &CommandContext<'_>, allow_loading_command: bool) -> Option<Vec<u8>> {
-    if !ctx.server().persistence.loading()
+fn enforce_loading_gate(
+    ctx: &CommandContext<'_>,
+    allow_loading_command: bool,
+    deny_async_loading_command: bool,
+) -> Option<Vec<u8>> {
+    let persistence = &ctx.server().persistence;
+    if persistence.async_loading() {
+        if deny_async_loading_command {
+            return Some(loading_error_reply());
+        }
+        return None;
+    }
+    if !persistence.loading()
         || allow_loading_command
         || command_allowed_during_loading_by_args(ctx)
     {

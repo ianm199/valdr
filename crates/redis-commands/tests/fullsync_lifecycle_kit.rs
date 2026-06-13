@@ -301,3 +301,76 @@ fn writable_replica_fcall_bypasses_script_readonly_preflight() {
         "replica-read-only no should allow FCALL through the script preflight"
     );
 }
+
+#[test]
+fn async_loading_serves_old_db_but_blocks_no_async_loading_commands() {
+    let server = Arc::new(RedisServer::default());
+    server.persistence.set_async_loading(true);
+
+    let mut db = RedisDb::new(0);
+    db.add(
+        RedisString::from_static(b"old-key"),
+        RedisObject::new_string(b"old-value"),
+    );
+
+    let mut reader = Client::new(96);
+    let get_reply = run_dispatch_with_server(
+        &mut reader,
+        &mut db,
+        Arc::clone(&server),
+        &[b"GET", b"old-key"],
+    );
+
+    let mut info = Client::new(97);
+    let info_reply = run_dispatch_with_server(
+        &mut info,
+        &mut db,
+        Arc::clone(&server),
+        &[b"INFO", b"persistence"],
+    );
+
+    let mut config = Client::new(98);
+    let config_reply = run_dispatch_with_server(
+        &mut config,
+        &mut db,
+        Arc::clone(&server),
+        &[b"CONFIG", b"SET", b"appendonly", b"no"],
+    );
+    let mut lua_limit = Client::new(99);
+    let lua_limit_reply = run_dispatch_with_server(
+        &mut lua_limit,
+        &mut db,
+        Arc::clone(&server),
+        &[b"CONFIG", b"SET", b"lua-time-limit", b"10"],
+    );
+
+    assert_eq!(get_reply, b"$9\r\nold-value\r\n");
+    assert!(
+        info_reply
+            .windows(b"loading:0".len())
+            .any(|w| w == b"loading:0"),
+        "INFO should hide ordinary loading during async loading: {:?}",
+        String::from_utf8_lossy(&info_reply)
+    );
+    assert!(
+        info_reply
+            .windows(b"async_loading:1".len())
+            .any(|w| w == b"async_loading:1"),
+        "INFO should expose async_loading: {:?}",
+        String::from_utf8_lossy(&info_reply)
+    );
+    assert!(
+        config_reply.starts_with(b"-LOADING"),
+        "NO_ASYNC_LOADING commands should be blocked during async loading, got {:?}",
+        String::from_utf8_lossy(&config_reply)
+    );
+    assert_eq!(
+        lua_limit_reply, b"+OK\r\n",
+        "safe script timeout tuning should remain available during async loading"
+    );
+    assert_eq!(server.live_config.lua_time_limit_ms(), 10);
+
+    server.persistence.set_loading(false);
+    assert!(!server.persistence.loading());
+    assert!(!server.persistence.async_loading());
+}

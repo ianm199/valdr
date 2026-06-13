@@ -148,25 +148,37 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
             PsyncOutcome::FullResync { offset, replid } => {
                 // Adopt the primary's replid so the next reconnect can request a
                 // partial resync against it.
+                let async_loading = repl.cached_primary_replid().is_some_and(|id| id == replid);
                 repl.set_cached_primary_replid(replid);
                 repl.set_replica_link(replica_link_code::TRANSFER);
+                publish_fullsync_loading_state(async_loading);
                 let rdb_bytes = match read_fullresync_rdb(&stream) {
                     Ok(bytes) => bytes,
                     Err(e) => {
                         eprintln!("redis-server: replica: RDB sink failed: {}", e);
+                        clear_fullsync_loading_state();
+                        repl.repl_state
+                            .store(repl_state_code::REPLICA_CONNECTING, Ordering::SeqCst);
+                        repl.set_replica_link(replica_link_code::CONNECT);
                         thread::sleep(Duration::from_millis(200));
                         continue;
                     }
                 };
 
                 if !repl.dialer_epoch_is_current(dialer_epoch) {
+                    clear_fullsync_loading_state();
                     return;
                 }
                 if !load_rdb_via_runtime_owner(rdb_bytes, offset) {
                     eprintln!("redis-server: replica: RDB load failed");
+                    clear_fullsync_loading_state();
+                    repl.repl_state
+                        .store(repl_state_code::REPLICA_CONNECTING, Ordering::SeqCst);
+                    repl.set_replica_link(replica_link_code::CONNECT);
                     thread::sleep(Duration::from_millis(200));
                     continue;
                 }
+                clear_fullsync_loading_state();
                 repl.master_repl_offset.store(offset, Ordering::SeqCst);
                 offset
             }
@@ -204,6 +216,20 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
             .store(repl_state_code::REPLICA_CONNECTING, Ordering::SeqCst);
         repl.set_replica_link(replica_link_code::CONNECT);
         thread::sleep(Duration::from_millis(200));
+    }
+}
+
+fn publish_fullsync_loading_state(async_loading: bool) {
+    if let Some(server) = GLOBAL_SERVER.get() {
+        if async_loading {
+            server.persistence.set_async_loading(true);
+        }
+    }
+}
+
+fn clear_fullsync_loading_state() {
+    if let Some(server) = GLOBAL_SERVER.get() {
+        server.persistence.set_loading(false);
     }
 }
 

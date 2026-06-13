@@ -53,6 +53,7 @@ impl PersistenceStatus {
 #[derive(Debug)]
 pub struct PersistenceState {
     loading: AtomicBool,
+    async_loading: AtomicBool,
     aof_state: AtomicU8,
     aof_rewrite_in_progress: AtomicBool,
     aof_rewrite_scheduled: AtomicBool,
@@ -73,6 +74,7 @@ impl Default for PersistenceState {
     fn default() -> Self {
         Self {
             loading: AtomicBool::new(false),
+            async_loading: AtomicBool::new(false),
             aof_state: AtomicU8::new(AofState::Off as u8),
             aof_rewrite_in_progress: AtomicBool::new(false),
             aof_rewrite_scheduled: AtomicBool::new(false),
@@ -102,6 +104,20 @@ impl PersistenceState {
 
     pub fn set_loading(&self, value: bool) {
         self.loading.store(value, Ordering::Relaxed);
+        if !value {
+            self.async_loading.store(false, Ordering::Relaxed);
+        }
+    }
+
+    pub fn async_loading(&self) -> bool {
+        self.async_loading.load(Ordering::Relaxed)
+    }
+
+    pub fn set_async_loading(&self, value: bool) {
+        self.async_loading.store(value, Ordering::Relaxed);
+        if value {
+            self.loading.store(true, Ordering::Relaxed);
+        }
     }
 
     pub fn aof_state(&self) -> AofState {

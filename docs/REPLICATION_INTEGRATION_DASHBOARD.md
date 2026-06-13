@@ -73,7 +73,7 @@ Artifact:
 | `integration/replication-3` | 3/4 | Red | Expiry consistency, writable-replica expired-key behavior, and PFCOUNT expired-key/cache semantics. |
 | `integration/replication-4` | 15/2 | Red | SPOP rewrite cases now pass; remaining failures are divergence/default writable-replica cases. |
 | `integration/replication-buffer` | 4/11 | Red | Fresh post-PSYNC baseline still reaches counted assertions without timeout. Shared vs private output-buffer semantics are now pinned in `repl_buffer_kit`; remaining failures are Valkey-style global replication-buffer memory, BGSAVE/slow-replica backlog outgrowth, partial resync across broader retained history, and typed live output-buffer disconnect/drain policy. |
-| `integration/replication` | no summary | Red | The failed full-sync cleanup packet moves past `diskless replication child being killed is collected`; the current abort is `Master stream is correctly processed while the replica has a script in -BUSY state` with `READONLY`. Diskless/script-busy full-sync apply remains the frontier. |
+| `integration/replication` | timeout/no summary | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, and the first async-loading CONFIG exception. The current focused run reaches later diskless swapdb and pipe-drop assertions before timing out. True swapdb staging, function-context replacement, and diskless short-read/drop cleanup remain the frontier. |
 | `integration/replication-psync` | 90/0 | Green | Focused gate is green after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support for the replica dialer. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
 | `integration/replica-redirect` | timeout | Red | `CLIENT CAPA REDIRECT` top-level and MULTI/EXEC replica redirect semantics now pass the early file assertions. Manual `FAILOVER` now reaches timeout-driven handoff in Rust kits and a live two-process probe, including blocked `BRPOP` and paused `GET` REDIRECT after promotion. The official Tcl file still no-summary times out in the first failover test; side observation showed old primary `blocked_clients:2`, `paused_actions:all`, and `role:slave` while the target remained SIGSTOP'd. |
@@ -110,7 +110,9 @@ visible integration frontiers are now:
   and honors the bounded debug save delay; keep extending this into the
   diskless/full-sync windows behind `integration/replication`. Failed
   full-sync BGSAVE jobs now clean up waiters, temp files, and replication-child
-  state instead of poisoning later sync attempts.
+  state instead of poisoning later sync attempts. Async-loading state is now
+  explicit in `INFO persistence` and dispatch, but true swapdb staging and
+  diskless pipe cleanup remain open.
 - `R2-BGSAVE-CATCHUP`: active replication BGSAVE jobs now retain appended
   replication bytes outside the circular backlog and use that buffer for
   post-RDB catch-up. Completed full-sync catch-up bytes are now also retained
@@ -817,6 +819,88 @@ Takeaway:
   abort/disconnect state: when the master kills the replica connection during
   swapdb loading, Valdr must clear async-loading/loading state and expose the
   old dataset.
+
+### 2026-06-13 R2 follow-up: async-loading state surface
+
+Scope:
+
+- Added an explicit `async_loading` bit to `PersistenceState`. Setting it also
+  marks the server as loading internally; clearing ordinary loading clears both
+  bits.
+- `INFO persistence` now reports `async_loading:1` while hiding ordinary
+  `loading:1` during async loading, matching the swapdb model where the old
+  dataset remains visible.
+- Dispatch now honors the command table's `NO_ASYNC_LOADING` flag separately
+  from ordinary loading. Normal reads can continue during async loading, while
+  unsafe commands still receive `-LOADING`.
+- Replica full-sync now publishes async-loading state for same-primary
+  replacement sync attempts and clears it on success, short read, load failure,
+  or canceled epoch.
+- `CONFIG SET lua-time-limit` and `busy-reply-threshold` remain available
+  during async loading so script-busy replication tests can tune the server,
+  while dangerous config such as `appendonly` stays blocked.
+- Extended `fullsync_lifecycle_kit.rs` with a deterministic async-loading case
+  proving old data remains readable, INFO exposes the right bits,
+  `NO_ASYNC_LOADING` commands are blocked, safe script timeout config works,
+  and clearing loading clears async-loading too.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands --test fullsync_lifecycle_kit -- --nocapture
+rustfmt --check \
+  crates/redis-core/src/persistence.rs \
+  crates/redis-commands/src/info.rs \
+  crates/redis-commands/src/dispatch.rs \
+  crates/redis-commands/src/replica_dialer.rs \
+  crates/redis-commands/src/connection.rs \
+  crates/redis-commands/tests/fullsync_lifecycle_kit.rs
+cargo test -p redis-commands eval::tests -- --nocapture
+cargo check -p redis-core -p redis-commands -p redis-server
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --files integration/replication \
+  --profile integration-repl \
+  --runner-id fullsync-async-loading-config \
+  --timeout-s 300 \
+  --baseport 31079 \
+  --portcount 100 \
+  --skip-build
+python3 harness/oracle/tcl-survey.py \
+  --files integration/replication-2,integration/block-repl \
+  --profile integration-repl \
+  --runner-id fullsync-async-loading-tripwire \
+  --timeout-s 240 \
+  --baseport 31179 \
+  --portcount 100 \
+  --skip-build
+```
+
+Results:
+
+- `fullsync_lifecycle_kit`: 5 passed, 0 failed.
+- `eval::tests`: 28 passed, 0 failed.
+- Targeted `rustfmt --check`: passed.
+- `cargo check -p redis-core -p redis-commands -p redis-server`: passed.
+- `cargo build --bin redis-server`: passed.
+- Focused `integration/replication`:
+  `harness/oracle/results/tcl-survey/20260613T180644028410Z/result.json`
+  timed out at 300 seconds with no parsed summary. It produced 26 parsed
+  failure lines, no exception, and no `abort_test`. This is not a pass, but it
+  moved past the earlier LOADING exceptions around async-loading script/config
+  handling.
+- Focused no-regression tripwire:
+  `harness/oracle/results/tcl-survey/20260613T181317455732Z/result.json`
+  reported `integration/replication-2` 7/0 and `integration/block-repl` 2/0.
+
+Takeaway:
+
+- Async-loading is now represented as a first-class state rather than an
+  accidental ordinary loading mode. The next full-sync lifecycle slice should
+  attack true diskless swapdb replacement: stage the incoming dataset and
+  functions away from the live old DB, swap both atomically on success, and make
+  short-read/drop paths clear replica link/loading state without leaving Tcl
+  waiters hanging.
 
 ### R4-AOF-FULLSYNC
 

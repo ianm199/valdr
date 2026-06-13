@@ -267,6 +267,13 @@ Work packets:
   state. A follow-up FCALL preflight slice made writable replicas honor
   `replica-read-only no` for write-capable functions, moving the Tcl frontier
   to async-loading abort/disconnect cleanup (`Replica didn't disconnect`).
+  The next async-loading slice added a first-class `PersistenceState`
+  `async_loading` bit, `INFO persistence` exposure, dispatch handling for
+  `NO_ASYNC_LOADING`, safe script-timeout CONFIG exceptions, and full-sync
+  success/failure cleanup. That moved the focused `integration/replication`
+  run past the LOADING exceptions but still timed out in later diskless swapdb
+  and pipe-drop assertions. True swapdb staging, function-context replacement,
+  and diskless short-read/drop state transitions remain unfinished.
 - **R2-BUFFER-LIMITS:** implement replica output-buffer accounting and
   disconnection policy well enough for `replication-buffer` to count tests
   instead of dying in setup. Partial accounting surface landed on 2026-06-13:

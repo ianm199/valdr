@@ -248,7 +248,8 @@ pub fn config_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             let key = ctx.arg_owned(i)?;
             let value = ctx.arg_owned(i + 1)?;
             let normalized = normalize_config_key(key.as_bytes());
-            if ctx.server().persistence.loading() && !ascii_eq_ignore_case(&normalized, b"loglevel")
+            if ctx.server().persistence.loading()
+                && !config_set_allowed_during_loading(ctx, &normalized)
             {
                 return Err(RedisError::loading());
             }
@@ -315,6 +316,15 @@ pub fn config_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     msg.extend_from_slice(sub_bytes);
     msg.push(b'\'');
     Err(RedisError::runtime(msg))
+}
+
+fn config_set_allowed_during_loading(ctx: &CommandContext<'_>, normalized: &[u8]) -> bool {
+    if ascii_eq_ignore_case(normalized, b"loglevel") {
+        return true;
+    }
+    ctx.server().persistence.async_loading()
+        && (ascii_eq_ignore_case(normalized, b"lua-time-limit")
+            || ascii_eq_ignore_case(normalized, b"busy-reply-threshold"))
 }
 
 /// Hard-coded list of (parameter, default value) pairs surfaced by CONFIG GET.

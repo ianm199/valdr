@@ -390,8 +390,14 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let aof_current_size = crate::aof::aof_writer()
             .map(|w| w.current_size())
             .unwrap_or_else(|| persistence.aof_current_size());
+        let async_loading = persistence.async_loading();
         let _ = writeln!(buf, "# Persistence\r");
-        let _ = writeln!(buf, "loading:{}\r", persistence.loading() as u8);
+        let _ = writeln!(
+            buf,
+            "loading:{}\r",
+            (persistence.loading() && !async_loading) as u8
+        );
+        let _ = writeln!(buf, "async_loading:{}\r", async_loading as u8);
         let _ = writeln!(
             buf,
             "rdb_changes_since_last_save:{}\r",
