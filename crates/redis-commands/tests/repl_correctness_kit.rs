@@ -672,26 +672,16 @@ fn finding2_write_after_inmulti_role_change_should_not_readonly() {
     );
 }
 
-// ─── Finding #3: REPLICA DISCARDS RDB ────────────────────────────────────────
+// ─── R2 FULL-SYNC RDB LOADER ANCHOR ──────────────────────────────────────────
 
-/// AUDIT FINDING #3 (#1 gap): the live replica dialer
-/// `handshake_sink_loop` (replica_dialer.rs:102, spawned by
-/// `spawn_replica_dialer` at L92) reads the master's FULLRESYNC RDB via
-/// `read_fullresync_rdb` (L135) and **discards** the returned `Vec<u8>` — only
-/// its `Err` is inspected. The one function that actually loads an RDB,
-/// `ingest_rdb` (L470), is called only from `dialer_loop` (L233), which has
-/// **zero callers** (verified: `grep -n dialer_loop` shows only its
-/// definition). So after a full sync the replica keyspace is empty rather than
-/// equal to the master's.
-/// `read_fullresync_rdb` and `ingest_rdb` are private, so this test pins
-/// reachable, deterministic seam: the RDB save→load round-trip (`save_rdb` →
-/// `load_into`) that `ingest_rdb` *would* drive faithfully reconstructs
-/// master keyspace. The test therefore PASSES (the loader works), and its
-/// doc-comment + the notes record that the bug is that the live sink loop never
-/// calls this loader. Classified green-already-correct for the loader;
-/// dead-code wiring gap is documented as inconclusive-at-this-level.
+/// Historical audit finding #3 found that the live replica dialer read the
+/// master's FULLRESYNC RDB bytes without applying them. The dialer now routes
+/// those bytes through the runtime-owner `LoadRdb` queue, so this test remains
+/// as the deterministic inner-loop anchor for the lower-level RDB
+/// save→load round-trip (`save_rdb` → `load_into`) that the live handoff
+/// depends on.
 #[test]
-fn finding3_rdb_roundtrip_reconstructs_keyspace_loader_is_dead_in_sink_loop() {
+fn r2_rdb_roundtrip_reconstructs_keyspace_loader() {
     let dir = unique_temp_dir("repl-kit-rdb");
     std::fs::create_dir_all(&dir).unwrap();
     let rdb_path = dir.join("dump.rdb");

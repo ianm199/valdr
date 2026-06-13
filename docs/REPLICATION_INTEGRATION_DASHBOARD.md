@@ -413,7 +413,8 @@ Results:
 
 ### R3-RECONNECT-MATRIX
 
-Status: completed on 2026-06-13 for master-side PSYNC decision coverage.
+Status: completed on 2026-06-13 for master-side PSYNC decision coverage;
+extended with replica target-change state hardening on 2026-06-13.
 
 Implementation:
 
@@ -425,6 +426,10 @@ Implementation:
 - Existing `repl_correctness_kit.rs` coverage still proves that a granted
   `+CONTINUE` replays the backlog catch-up bytes and that PSYNC counters move
   correctly for in-window, future-offset fallback, and fresh full sync.
+- Replica-side state now preserves cached primary replid/offset across
+  same-target reconnects, but clears them when `REPLICAOF` changes host or port.
+  This prevents a new primary from receiving stale PSYNC metadata while keeping
+  the live dialer eligible for partial resync after ordinary disconnects.
 
 Evidence:
 
@@ -433,13 +438,19 @@ cargo test -p redis-commands \
   replication::tests::psync_decision_matrix_covers_reconnect_edges \
   -- --nocapture
 cargo test -p redis-commands replication::tests::psync -- --nocapture
+cargo test -p redis-core \
+  replication::tests::target_change_resets_cached_partial_resync_state \
+  -- --nocapture
 cargo test -p redis-commands --test repl_correctness_kit
+cargo check -p redis-core -p redis-commands -p redis-server
 ```
 
 Results:
 
 - Focused decision-matrix unit test: passed.
 - Focused PSYNC unit filter: 2 passed, 0 failed.
-- `repl_correctness_kit`: 17 passed, 0 failed.
+- Focused target-change state unit test: passed.
+- `repl_correctness_kit`: 18 passed, 0 failed.
+- `cargo check -p redis-core -p redis-commands -p redis-server`: passed.
 - `integration/replication-psync` was not rerun in this packet; the R0
   dashboard timeout remains the current slow-suite frontier.

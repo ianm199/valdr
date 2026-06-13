@@ -271,7 +271,10 @@ Work packets:
 - **R3-RECONNECT-MATRIX:** deterministic tests for reconnect within backlog,
   reconnect outside backlog, wrong replid, future offset, empty backlog, and
   backlog wraparound. Master-side PSYNC decision coverage completed on
-  2026-06-13; live dialer/reconnect validation remains behind
+  2026-06-13. Replica-side target-change hardening now clears cached partial
+  resync metadata only when `REPLICAOF` points at a different primary, preserving
+  same-primary reconnect state while preventing stale PSYNC attempts against a
+  new target. Live dialer/reconnect validation remains behind
   `integration/replication-psync`.
 - **R3-METRICS:** keep `sync_full`, `sync_partial_ok`, `sync_partial_err`,
   master/replica offsets, lag, and backlog histlen faithful in `INFO`.

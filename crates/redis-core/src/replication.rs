@@ -28,16 +28,16 @@ pub const DEFAULT_REPL_BACKLOG_SIZE: usize = 1024 * 1024;
 /// Replication role / connection state codes stored
 /// [`ReplicationState::repl_state`].
 pub mod repl_state_code {
- /// Server is operating as a master (default at startup). Replicas may
- /// attach. The server itself does not connect to any upstream.
+    /// Server is operating as a master (default at startup). Replicas may
+    /// attach. The server itself does not connect to any upstream.
     pub const MASTER: u8 = 0;
- /// Server has been told to `REPLICAOF host port` and is in the middle
- /// dialling the master; replica-side handshake has not finished. Wave C
- /// owns the transitions out of this state.
+    /// Server has been told to `REPLICAOF host port` and is in the middle
+    /// dialling the master; replica-side handshake has not finished. Wave C
+    /// owns the transitions out of this state.
     pub const REPLICA_CONNECTING: u8 = 1;
- /// Replica-side handshake completed, applying streamed commands. Wave C
- /// owns this state. The struct fields are wired so Wave C can flip
- /// without changing the shape.
+    /// Replica-side handshake completed, applying streamed commands. Wave C
+    /// owns this state. The struct fields are wired so Wave C can flip
+    /// without changing the shape.
     pub const REPLICA_ONLINE: u8 = 2;
 }
 
@@ -47,20 +47,20 @@ pub mod repl_state_code {
 /// faithful mirror of the C `server.repl_state` handshake phases so `ROLE`
 /// reports `connect`/`connecting`/`handshake`/`sync`/`connected` like Valkey.
 pub mod replica_link_code {
- /// Not connected; the dialer is between reconnect attempts (`connect`).
+    /// Not connected; the dialer is between reconnect attempts (`connect`).
     pub const CONNECT: u8 = 0;
- /// A TCP connection to the primary is being established (`connecting`).
+    /// A TCP connection to the primary is being established (`connecting`).
     pub const CONNECTING: u8 = 1;
- /// Connected; PING/REPLCONF/PSYNC exchange in progress and the replica is
- /// awaiting the `+FULLRESYNC`/`+CONTINUE` reply (`handshake`).
+    /// Connected; PING/REPLCONF/PSYNC exchange in progress and the replica is
+    /// awaiting the `+FULLRESYNC`/`+CONTINUE` reply (`handshake`).
     pub const HANDSHAKE: u8 = 2;
- /// `+FULLRESYNC` received; the RDB bulk payload is being received (`sync`).
+    /// `+FULLRESYNC` received; the RDB bulk payload is being received (`sync`).
     pub const TRANSFER: u8 = 3;
- /// RDB loaded; streaming live command deltas (`connected`).
+    /// RDB loaded; streaming live command deltas (`connected`).
     pub const CONNECTED: u8 = 4;
 
- /// Map a link-state code to the `ROLE` reply spelling used by upstream
- /// `replicaStateToString`.
+    /// Map a link-state code to the `ROLE` reply spelling used by upstream
+    /// `replicaStateToString`.
     pub fn as_role_str(code: u8) -> &'static str {
         match code {
             CONNECT => "connect",
@@ -79,23 +79,23 @@ pub mod replica_link_code {
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplicaState {
- /// Replica is waiting for the master's BGSAVE child to finish so the RDB
- /// snapshot can be shipped. Backlog deltas accumulated during the BGSAVE
- /// are held back until after the snapshot is delivered.
+    /// Replica is waiting for the master's BGSAVE child to finish so the RDB
+    /// snapshot can be shipped. Backlog deltas accumulated during the BGSAVE
+    /// are held back until after the snapshot is delivered.
     WaitingBgsave = 0,
- /// RDB snapshot is being streamed to the replica.
+    /// RDB snapshot is being streamed to the replica.
     SendingRdb = 1,
- /// RDB delivered. Replica is consuming backlog deltas in real time.
+    /// RDB delivered. Replica is consuming backlog deltas in real time.
     Online = 2,
- /// Replica disconnected. The entry stays in the registry until
- /// reader thread reaps it.
+    /// Replica disconnected. The entry stays in the registry until
+    /// reader thread reaps it.
     Disconnected = 3,
 }
 
 impl ReplicaState {
- /// Reconstruct from the wire-stored discriminant. Unknown values map
- /// `Disconnected` rather than panicking; the registry is allowed to hold
- /// `Disconnected` entries that are later swept by the reaper.
+    /// Reconstruct from the wire-stored discriminant. Unknown values map
+    /// `Disconnected` rather than panicking; the registry is allowed to hold
+    /// `Disconnected` entries that are later swept by the reaper.
     pub fn from_u8(v: u8) -> Self {
         match v {
             0 => Self::WaitingBgsave,
@@ -105,9 +105,9 @@ impl ReplicaState {
         }
     }
 
- /// Canonical string spelling used by the `INFO replication` `state=` field
- /// (`wait_bgsave`, `send_bulk`, `online`, `disconnected`). Matches
- /// upstream `slave_state_str` output.
+    /// Canonical string spelling used by the `INFO replication` `state=` field
+    /// (`wait_bgsave`, `send_bulk`, `online`, `disconnected`). Matches
+    /// upstream `slave_state_str` output.
     pub fn as_info_str(self) -> &'static str {
         match self {
             Self::WaitingBgsave => "wait_bgsave",
@@ -123,24 +123,24 @@ impl ReplicaState {
 /// counter (`offset`) of the next-write position; partial-resync decides
 /// whether a replica's requested offset lies inside the live window.
 pub struct ReplBacklog {
- /// Allocated capacity. Once non-zero this never changes; CONFIG SET
- /// `repl-backlog-size` allocates a fresh `ReplBacklog` rather than
- /// re-sizing the live buffer.
+    /// Allocated capacity. Once non-zero this never changes; CONFIG SET
+    /// `repl-backlog-size` allocates a fresh `ReplBacklog` rather than
+    /// re-sizing the live buffer.
     pub size: usize,
- /// Raw buffer of length `size`. The circular index for absolute offset
- /// `off` is `(off % size as i64) as usize` once `histlen` reaches `size`.
+    /// Raw buffer of length `size`. The circular index for absolute offset
+    /// `off` is `(off % size as i64) as usize` once `histlen` reaches `size`.
     pub buffer: Vec<u8>,
- /// Absolute offset of the next byte the buffer will receive. Equals
- /// total number of bytes ever appended.
+    /// Absolute offset of the next byte the buffer will receive. Equals
+    /// total number of bytes ever appended.
     pub offset: i64,
- /// Number of valid bytes currently in the buffer (saturates at `size`).
+    /// Number of valid bytes currently in the buffer (saturates at `size`).
     pub histlen: usize,
 }
 
 impl ReplBacklog {
- /// Allocate a backlog of `size` bytes. The buffer is filled with zeros up
- /// front so the circular wrap-around does not need a separate
- /// "initialised up to" cursor.
+    /// Allocate a backlog of `size` bytes. The buffer is filled with zeros up
+    /// front so the circular wrap-around does not need a separate
+    /// "initialised up to" cursor.
     pub fn new(size: usize) -> Self {
         Self {
             size,
@@ -150,10 +150,10 @@ impl ReplBacklog {
         }
     }
 
- /// Append `bytes` to the backlog and return the new absolute offset.
- /// When `bytes.len` exceeds `size`, only the trailing `size` bytes are
- /// retained (the older portion is effectively overwritten by the wrap).
- /// Callers should still pass the full slice.
+    /// Append `bytes` to the backlog and return the new absolute offset.
+    /// When `bytes.len` exceeds `size`, only the trailing `size` bytes are
+    /// retained (the older portion is effectively overwritten by the wrap).
+    /// Callers should still pass the full slice.
     pub fn append(&mut self, bytes: &[u8]) -> i64 {
         if self.size == 0 {
             self.offset = self.offset.saturating_add(bytes.len() as i64);
@@ -169,15 +169,15 @@ impl ReplBacklog {
         self.offset
     }
 
- /// Lowest absolute offset still readable from the backlog. A replica that
- /// asks for an offset below this must full-resync.
+    /// Lowest absolute offset still readable from the backlog. A replica that
+    /// asks for an offset below this must full-resync.
     pub fn min_offset(&self) -> i64 {
         self.offset.saturating_sub(self.histlen as i64)
     }
 
- /// Read up to `max_len` bytes starting at absolute `offset`. Returns
- /// `None` when `offset` falls outside the live window (either below
- /// `min_offset` or above the current write head).
+    /// Read up to `max_len` bytes starting at absolute `offset`. Returns
+    /// `None` when `offset` falls outside the live window (either below
+    /// `min_offset` or above the current write head).
     pub fn read_at(&self, offset: i64, max_len: usize) -> Option<Vec<u8>> {
         if offset < self.min_offset() || offset > self.offset {
             return None;
@@ -201,41 +201,41 @@ impl ReplBacklog {
 /// `PubSubRegistry::register_sender` installs at connection accept time —
 /// see [`steal_replica_sender`] for the lookup pattern.
 pub struct ReplicaConn {
- /// Replica's master-assigned client id (same id the regular dispatch
- /// path issued for this socket).
+    /// Replica's master-assigned client id (same id the regular dispatch
+    /// path issued for this socket).
     pub client_id: ClientId,
- /// Discriminant of [`ReplicaState`] — see [`ReplicaState::from_u8`].
+    /// Discriminant of [`ReplicaState`] — see [`ReplicaState::from_u8`].
     pub state: AtomicU8,
- /// Last replication offset the replica acknowledged via REPLCONF ACK.
- /// Wave B's REPLCONF ACK handler updates this; for now it just tracks
- /// the snapshot/partial-resync starting offset.
+    /// Last replication offset the replica acknowledged via REPLCONF ACK.
+    /// Wave B's REPLCONF ACK handler updates this; for now it just tracks
+    /// the snapshot/partial-resync starting offset.
     pub offset: AtomicI64,
- /// Last replication offset the replica reported as fsynced to its AOF via
- /// `REPLCONF ACK <off> FACK <aof-off>`. `-1` means the replica has not
- /// advertised an AOF fsync offset, which matches upstream's "AOF disabled"
- /// sentinel.
+    /// Last replication offset the replica reported as fsynced to its AOF via
+    /// `REPLCONF ACK <off> FACK <aof-off>`. `-1` means the replica has not
+    /// advertised an AOF fsync offset, which matches upstream's "AOF disabled"
+    /// sentinel.
     pub aof_offset: AtomicI64,
- /// Listening port the replica is exposing for client connections, set by
- /// `REPLCONF listening-port <port>` (Wave B). 0 until reported.
+    /// Listening port the replica is exposing for client connections, set by
+    /// `REPLCONF listening-port <port>` (Wave B). 0 until reported.
     pub listening_port: AtomicU16,
- /// Capability flags reported by the replica via `REPLCONF capa`. Wave B
- /// parses the symbolic names (`eof`, `psync2`, …) into bits.
+    /// Capability flags reported by the replica via `REPLCONF capa`. Wave B
+    /// parses the symbolic names (`eof`, `psync2`, …) into bits.
     pub capa_flags: AtomicU32,
- /// Unix millisecond timestamp of the last REPLCONF ACK seen from
- /// replica. Drives the `lag` field in `INFO replication`.
+    /// Unix millisecond timestamp of the last REPLCONF ACK seen from
+    /// replica. Drives the `lag` field in `INFO replication`.
     pub last_ack_time_ms: AtomicI64,
- /// Approximate bytes queued to the replica writer thread. This mirrors
- /// backlog that Valkey reports as slave/client output memory so INFO can
- /// exclude it from key-eviction pressure.
+    /// Approximate bytes queued to the replica writer thread. This mirrors
+    /// backlog that Valkey reports as slave/client output memory so INFO can
+    /// exclude it from key-eviction pressure.
     pub pending_output_bytes: AtomicUsize,
- /// Outbound mpsc sender — the writer-thread channel the master pushes
- /// backlog deltas and the RDB blob through.
+    /// Outbound mpsc sender — the writer-thread channel the master pushes
+    /// backlog deltas and the RDB blob through.
     pub outbound_sender: Sender<Vec<u8>>,
 }
 
 impl ReplicaConn {
- /// Construct a fresh replica record. The caller is responsible for
- /// inserting it into [`ReplicationState::replicas`].
+    /// Construct a fresh replica record. The caller is responsible for
+    /// inserting it into [`ReplicationState::replicas`].
     pub fn new(
         client_id: ClientId,
         state: ReplicaState,
@@ -255,33 +255,33 @@ impl ReplicaConn {
         }
     }
 
- /// Read the replica's current state.
+    /// Read the replica's current state.
     pub fn state(&self) -> ReplicaState {
         ReplicaState::from_u8(self.state.load(Ordering::Relaxed))
     }
 
- /// Update the replica's state. Caller is responsible for ordering this
- /// with any side-effects on the outbound writer.
+    /// Update the replica's state. Caller is responsible for ordering this
+    /// with any side-effects on the outbound writer.
     pub fn set_state(&self, state: ReplicaState) {
         self.state.store(state as u8, Ordering::Relaxed);
     }
 
- /// Read the last acknowledged offset.
+    /// Read the last acknowledged offset.
     pub fn offset(&self) -> i64 {
         self.offset.load(Ordering::Relaxed)
     }
 
- /// Read the last acknowledged AOF-fsynced offset.
+    /// Read the last acknowledged AOF-fsynced offset.
     pub fn aof_offset(&self) -> i64 {
         self.aof_offset.load(Ordering::Relaxed)
     }
 
- /// Listening port reported by the replica via REPLCONF.
+    /// Listening port reported by the replica via REPLCONF.
     pub fn listening_port(&self) -> u16 {
         self.listening_port.load(Ordering::Relaxed)
     }
 
- /// Capability flag bitset reported by the replica via REPLCONF capa.
+    /// Capability flag bitset reported by the replica via REPLCONF capa.
     pub fn capa_flags(&self) -> u32 {
         self.capa_flags.load(Ordering::Relaxed)
     }
@@ -293,22 +293,22 @@ impl ReplicaConn {
 /// they join the same job's `waiting_replicas` list — every waiter gets
 /// same RDB and the same catch-up window once the child exits successfully.
 pub struct ReplBgsaveJob {
- /// PID of the forked child writing the RDB.
+    /// PID of the forked child writing the RDB.
     pub child_pid: i32,
- /// Path of the temp RDB file the child is producing. Deleted after
- /// transfer completes (success or failure).
+    /// Path of the temp RDB file the child is producing. Deleted after
+    /// transfer completes (success or failure).
     pub temp_path: PathBuf,
- /// `client_id`s of replicas waiting for this RDB to land. New replicas
- /// joining mid-snapshot are appended to this list.
+    /// `client_id`s of replicas waiting for this RDB to land. New replicas
+    /// joining mid-snapshot are appended to this list.
     pub waiting_replicas: Vec<ClientId>,
- /// Master replication offset at the moment the BGSAVE was forked. Catch-up
- /// backlog after the RDB send streams bytes from this offset to
- /// current master offset, so the replica receives every write that arrived
- /// during the snapshot window.
+    /// Master replication offset at the moment the BGSAVE was forked. Catch-up
+    /// backlog after the RDB send streams bytes from this offset to
+    /// current master offset, so the replica receives every write that arrived
+    /// during the snapshot window.
     pub snapshot_offset: i64,
- /// Whether this full-sync was armed while a WAIT/WAITAOF client was
- /// blocked. The reaper uses this to prompt replicas for an ACK after
- /// RDB transfer without emitting GETACK for ordinary replication streams.
+    /// Whether this full-sync was armed while a WAIT/WAITAOF client was
+    /// blocked. The reaper uses this to prompt replicas for an ACK after
+    /// RDB transfer without emitting GETACK for ordinary replication streams.
     pub needs_getack_on_completion: bool,
 }
 
@@ -316,69 +316,69 @@ pub struct ReplBgsaveJob {
 /// One instance is installed via [`install_replication_state`] at startup
 /// looked up everywhere through [`global_replication_state`].
 pub struct ReplicationState {
- /// 40-byte lowercase hex run id generated once at startup. Identifies
- /// this server's replication history; replicas embed it in PSYNC so a
- /// partial resync only succeeds when the run id matches.
+    /// 40-byte lowercase hex run id generated once at startup. Identifies
+    /// this server's replication history; replicas embed it in PSYNC so a
+    /// partial resync only succeeds when the run id matches.
     pub runid: [u8; 40],
- /// Total bytes ever appended to the replication stream. Equals
- /// backlog's `offset` after every append.
+    /// Total bytes ever appended to the replication stream. Equals
+    /// backlog's `offset` after every append.
     pub master_repl_offset: AtomicI64,
- /// The backlog circular buffer.
+    /// The backlog circular buffer.
     pub backlog: Mutex<ReplBacklog>,
- /// Connected replicas (master-assigned `client_id` → metadata).
+    /// Connected replicas (master-assigned `client_id` → metadata).
     pub replicas: Mutex<HashMap<ClientId, ReplicaConn>>,
- /// `Some((host, port))` when this server has been told `REPLICAOF host
- /// port`; `None` when it is operating as a primary.
+    /// `Some((host, port))` when this server has been told `REPLICAOF host
+    /// port`; `None` when it is operating as a primary.
     pub replica_of: Mutex<Option<(RedisString, u16)>>,
- /// Top-level role/state code; see [`repl_state_code`].
+    /// Top-level role/state code; see [`repl_state_code`].
     pub repl_state: AtomicU8,
- /// Fine-grained replica-side link phase; see [`replica_link_code`]. Set by
- /// the dialer for `ROLE`-reply observability only. Meaningless on a primary.
+    /// Fine-grained replica-side link phase; see [`replica_link_code`]. Set by
+    /// the dialer for `ROLE`-reply observability only. Meaningless on a primary.
     pub replica_link: AtomicU8,
- /// PID of the in-flight BGSAVE-for-replication child, or 0 when no such
- /// child is running. Tracked separately from `RedisServer::rdb_child_pid`
- /// so a user-issued `BGSAVE` does not interfere with replica full-sync.
+    /// PID of the in-flight BGSAVE-for-replication child, or 0 when no such
+    /// child is running. Tracked separately from `RedisServer::rdb_child_pid`
+    /// so a user-issued `BGSAVE` does not interfere with replica full-sync.
     pub repl_child_pid: AtomicI32,
- /// Active full-sync job. `Some` from the fork until the reaper has
- /// finished shipping the RDB and catch-up bytes to every waiter; then
- /// reset to `None`.
+    /// Active full-sync job. `Some` from the fork until the reaper has
+    /// finished shipping the RDB and catch-up bytes to every waiter; then
+    /// reset to `None`.
     pub repl_bgsave_job: Mutex<Option<ReplBgsaveJob>>,
- /// Database id last emitted into the replication command stream.
- /// Upstream tracks this as `server.slaveseldb` so the first write after
- /// a replica attaches is prefixed with `SELECT <db>`, and later writes
- /// only pay the SELECT frame when the selected DB changes.
+    /// Database id last emitted into the replication command stream.
+    /// Upstream tracks this as `server.slaveseldb` so the first write after
+    /// a replica attaches is prefixed with `SELECT <db>`, and later writes
+    /// only pay the SELECT frame when the selected DB changes.
     pub selected_db: AtomicI32,
- /// Set to `true` by `REPLICAOF NO ONE` to signal the running dialer thread
- /// to exit its reconnection loop immediately.
+    /// Set to `true` by `REPLICAOF NO ONE` to signal the running dialer thread
+    /// to exit its reconnection loop immediately.
     pub dialer_stop_flag: AtomicBool,
- /// Monotonic generation for replica-side dialer threads.
- /// `REPLICAOF <host> <port>` can retarget an already-running replica.
- /// A boolean stop flag is insufficient because the new dialer clears it
- /// while the old dialer may still be reading from the previous master.
- /// Dialers capture this epoch at spawn and must stop applying bytes or
- /// sending ACKs once it changes.
+    /// Monotonic generation for replica-side dialer threads.
+    /// `REPLICAOF <host> <port>` can retarget an already-running replica.
+    /// A boolean stop flag is insufficient because the new dialer clears it
+    /// while the old dialer may still be reading from the previous master.
+    /// Dialers capture this epoch at spawn and must stop applying bytes or
+    /// sending ACKs once it changes.
     pub dialer_epoch: AtomicU64,
- /// `INFO stats sync_full` — count of full resyncs served to replicas
- /// (mirrors C `server.stat_sync_full`).
+    /// `INFO stats sync_full` — count of full resyncs served to replicas
+    /// (mirrors C `server.stat_sync_full`).
     pub stat_sync_full: AtomicU64,
- /// `INFO stats sync_partial_ok` — count of successful partial resyncs
- /// (`+CONTINUE`), mirrors C `server.stat_sync_partial_ok`.
+    /// `INFO stats sync_partial_ok` — count of successful partial resyncs
+    /// (`+CONTINUE`), mirrors C `server.stat_sync_partial_ok`.
     pub stat_sync_partial_ok: AtomicU64,
- /// `INFO stats sync_partial_err` — count of partial-resync requests that
- /// could not be satisfied and fell back to full resync (mirrors C
- /// `server.stat_sync_partial_err`).
+    /// `INFO stats sync_partial_err` — count of partial-resync requests that
+    /// could not be satisfied and fell back to full resync (mirrors C
+    /// `server.stat_sync_partial_err`).
     pub stat_sync_partial_err: AtomicU64,
- /// The primary replid the replica adopted from the last `+FULLRESYNC`
- /// reply. `None` until the first full sync completes. On reconnect the
- /// dialer echoes this in `PSYNC <replid> <offset>` so the primary's
- /// run-id check can grant a `+CONTINUE` partial resync.
+    /// The primary replid the replica adopted from the last `+FULLRESYNC`
+    /// reply. `None` until the first full sync completes. On reconnect the
+    /// dialer echoes this in `PSYNC <replid> <offset>` so the primary's
+    /// run-id check can grant a `+CONTINUE` partial resync.
     pub cached_primary_replid: Mutex<Option<[u8; 40]>>,
 }
 
 impl ReplicationState {
- /// Allocate state for a fresh standalone primary. `backlog_size` is
- /// usually [`DEFAULT_REPL_BACKLOG_SIZE`]; CLI / CONFIG SET feeds an
- /// override at startup.
+    /// Allocate state for a fresh standalone primary. `backlog_size` is
+    /// usually [`DEFAULT_REPL_BACKLOG_SIZE`]; CLI / CONFIG SET feeds an
+    /// override at startup.
     pub fn new(runid: [u8; 40], backlog_size: usize) -> Self {
         Self {
             runid,
@@ -400,23 +400,23 @@ impl ReplicationState {
         }
     }
 
- /// Increment the full-resync served counter (`INFO sync_full`).
+    /// Increment the full-resync served counter (`INFO sync_full`).
     pub fn incr_sync_full(&self) {
         self.stat_sync_full.fetch_add(1, Ordering::Relaxed);
     }
 
- /// Increment the successful partial-resync counter (`INFO sync_partial_ok`).
+    /// Increment the successful partial-resync counter (`INFO sync_partial_ok`).
     pub fn incr_sync_partial_ok(&self) {
         self.stat_sync_partial_ok.fetch_add(1, Ordering::Relaxed);
     }
 
- /// Increment the failed partial-resync counter (`INFO sync_partial_err`).
+    /// Increment the failed partial-resync counter (`INFO sync_partial_err`).
     pub fn incr_sync_partial_err(&self) {
         self.stat_sync_partial_err.fetch_add(1, Ordering::Relaxed);
     }
 
- /// Snapshot of the three sync counters as
- /// `(sync_full, sync_partial_ok, sync_partial_err)` for `INFO stats`.
+    /// Snapshot of the three sync counters as
+    /// `(sync_full, sync_partial_ok, sync_partial_err)` for `INFO stats`.
     pub fn sync_counters(&self) -> (u64, u64, u64) {
         (
             self.stat_sync_full.load(Ordering::Relaxed),
@@ -425,7 +425,7 @@ impl ReplicationState {
         )
     }
 
- /// Adopt the primary's replid from a `+FULLRESYNC` reply (replica side).
+    /// Adopt the primary's replid from a `+FULLRESYNC` reply (replica side).
     pub fn set_cached_primary_replid(&self, replid: [u8; 40]) {
         match self.cached_primary_replid.lock() {
             Ok(mut g) => *g = Some(replid),
@@ -433,8 +433,8 @@ impl ReplicationState {
         }
     }
 
- /// The cached primary replid for a partial-resync `PSYNC`, if a full sync
- /// has completed at least once.
+    /// The cached primary replid for a partial-resync `PSYNC`, if a full sync
+    /// has completed at least once.
     pub fn cached_primary_replid(&self) -> Option<[u8; 40]> {
         match self.cached_primary_replid.lock() {
             Ok(g) => *g,
@@ -442,18 +442,18 @@ impl ReplicationState {
         }
     }
 
- /// Return the run id as a `&[u8; 40]` for callers that want to embed it
- /// in a reply line.
+    /// Return the run id as a `&[u8; 40]` for callers that want to embed it
+    /// in a reply line.
     pub fn runid(&self) -> &[u8; 40] {
         &self.runid
     }
 
- /// Current master replication offset.
+    /// Current master replication offset.
     pub fn master_offset(&self) -> i64 {
         self.master_repl_offset.load(Ordering::Relaxed)
     }
 
- /// Append `bytes` to the backlog and bump the master offset.
+    /// Append `bytes` to the backlog and bump the master offset.
     pub fn append_to_backlog(&self, bytes: &[u8]) -> i64 {
         let new_offset = match self.backlog.lock() {
             Ok(mut g) => g.append(bytes),
@@ -463,11 +463,11 @@ impl ReplicationState {
         new_offset
     }
 
- /// True when a successful write command needs replication-stream work.
- /// Upstream Valkey does not format and feed the replication stream when it
- /// is a standalone primary with AOF off, no backlog, and no connected
- /// replicas. The Rust port always has a `ReplBacklog` value allocated for
- /// simpler ownership, so "backlog exists" maps to "history is active".
+    /// True when a successful write command needs replication-stream work.
+    /// Upstream Valkey does not format and feed the replication stream when it
+    /// is a standalone primary with AOF off, no backlog, and no connected
+    /// replicas. The Rust port always has a `ReplBacklog` value allocated for
+    /// simpler ownership, so "backlog exists" maps to "history is active".
     pub fn should_propagate_writes(&self) -> bool {
         if self.repl_state.load(Ordering::Relaxed) != repl_state_code::MASTER {
             return false;
@@ -495,9 +495,9 @@ impl ReplicationState {
         }
     }
 
- /// Snapshot `(min_offset, master_offset, backlog_histlen, backlog_size)`
- /// in one lock acquisition. Used by `INFO replication` so the four values
- /// are consistent with each other.
+    /// Snapshot `(min_offset, master_offset, backlog_histlen, backlog_size)`
+    /// in one lock acquisition. Used by `INFO replication` so the four values
+    /// are consistent with each other.
     pub fn backlog_snapshot(&self) -> (i64, i64, usize, usize) {
         let master = self.master_repl_offset.load(Ordering::Relaxed);
         let (min, hist, size) = match self.backlog.lock() {
@@ -510,12 +510,12 @@ impl ReplicationState {
         (min, master, hist, size)
     }
 
- /// True when this server is currently a replica of some master.
+    /// True when this server is currently a replica of some master.
     pub fn is_replica(&self) -> bool {
         self.repl_state.load(Ordering::Relaxed) != repl_state_code::MASTER
     }
 
- /// Configured master address `(host, port)` when in replica mode.
+    /// Configured master address `(host, port)` when in replica mode.
     pub fn replica_of_target(&self) -> Option<(RedisString, u16)> {
         match self.replica_of.lock() {
             Ok(g) => g.clone(),
@@ -523,9 +523,9 @@ impl ReplicationState {
         }
     }
 
- /// Switch this server out of replica mode (`REPLICAOF NO ONE`). Resets
- /// `replica_of` to `None` and `repl_state` to MASTER. Signals the running
- /// dialer thread to exit via `dialer_stop_flag`.
+    /// Switch this server out of replica mode (`REPLICAOF NO ONE`). Resets
+    /// `replica_of` to `None` and `repl_state` to MASTER. Signals the running
+    /// dialer thread to exit via `dialer_stop_flag`.
     pub fn become_master(&self) {
         self.dialer_epoch.fetch_add(1, Ordering::SeqCst);
         self.dialer_stop_flag.store(true, Ordering::SeqCst);
@@ -539,29 +539,49 @@ impl ReplicationState {
             .store(replica_link_code::CONNECT, Ordering::Relaxed);
     }
 
- /// Publish the fine-grained replica link phase (see [`replica_link_code`]).
- /// Dialer-only; primaries never call this.
+    /// Publish the fine-grained replica link phase (see [`replica_link_code`]).
+    /// Dialer-only; primaries never call this.
     pub fn set_replica_link(&self, code: u8) {
         self.replica_link.store(code, Ordering::Relaxed);
     }
 
- /// Current replica link phase rendered as the `ROLE`-reply state string.
+    /// Current replica link phase rendered as the `ROLE`-reply state string.
     pub fn replica_link_str(&self) -> &'static str {
         replica_link_code::as_role_str(self.replica_link.load(Ordering::Relaxed))
     }
 
- /// Configure this server as a replica of `(host, port)` and move
- /// top-level state to `REPLICA_CONNECTING`. Clears the dialer stop flag so
- /// a freshly-spawned dialer thread is not immediately told to quit.
+    /// Configure this server as a replica of `(host, port)` and move
+    /// top-level state to `REPLICA_CONNECTING`. Clears the dialer stop flag so
+    /// a freshly-spawned dialer thread is not immediately told to quit.
     pub fn become_replica_of(&self, host: RedisString, port: u16) -> u64 {
         let epoch = self
             .dialer_epoch
             .fetch_add(1, Ordering::SeqCst)
             .saturating_add(1);
         self.dialer_stop_flag.store(false, Ordering::SeqCst);
-        match self.replica_of.lock() {
-            Ok(mut g) => *g = Some((host, port)),
-            Err(p) => *p.into_inner() = Some((host, port)),
+        let target_changed = match self.replica_of.lock() {
+            Ok(mut g) => {
+                let changed = g
+                    .as_ref()
+                    .is_none_or(|(old_host, old_port)| old_host != &host || *old_port != port);
+                *g = Some((host, port));
+                changed
+            }
+            Err(p) => {
+                let mut g = p.into_inner();
+                let changed = g
+                    .as_ref()
+                    .is_none_or(|(old_host, old_port)| old_host != &host || *old_port != port);
+                *g = Some((host, port));
+                changed
+            }
+        };
+        if target_changed {
+            match self.cached_primary_replid.lock() {
+                Ok(mut g) => *g = None,
+                Err(p) => *p.into_inner() = None,
+            }
+            self.master_repl_offset.store(0, Ordering::Relaxed);
         }
         self.repl_state
             .store(repl_state_code::REPLICA_CONNECTING, Ordering::Relaxed);
@@ -570,17 +590,17 @@ impl ReplicationState {
         epoch
     }
 
- /// True if a replica-side dialer captured the currently-active generation.
+    /// True if a replica-side dialer captured the currently-active generation.
     pub fn dialer_epoch_is_current(&self, epoch: u64) -> bool {
         !self.dialer_stop_flag.load(Ordering::SeqCst)
             && self.dialer_epoch.load(Ordering::SeqCst) == epoch
     }
 
- /// Snapshot of the connected replicas in a stable, sorted order keyed by
- /// `client_id`. Each entry is rendered as a tuple of fields ready for
- /// `INFO replication`'s `slave0:` / `slave1:` lines.
- /// Returned tuple shape:
- /// `(client_id, state_str, listening_port, offset, last_ack_ms)`.
+    /// Snapshot of the connected replicas in a stable, sorted order keyed by
+    /// `client_id`. Each entry is rendered as a tuple of fields ready for
+    /// `INFO replication`'s `slave0:` / `slave1:` lines.
+    /// Returned tuple shape:
+    /// `(client_id, state_str, listening_port, offset, last_ack_ms)`.
     pub fn replicas_snapshot(&self) -> Vec<(ClientId, &'static str, u16, i64, i64)> {
         let guard = match self.replicas.lock() {
             Ok(g) => g,
@@ -602,8 +622,8 @@ impl ReplicationState {
         out
     }
 
- /// Count of currently-connected replicas. Reads the registry length under
- /// the mutex; cheap because the entries are small.
+    /// Count of currently-connected replicas. Reads the registry length under
+    /// the mutex; cheap because the entries are small.
     pub fn connected_replicas(&self) -> usize {
         match self.replicas.lock() {
             Ok(g) => g.len(),
@@ -611,7 +631,7 @@ impl ReplicationState {
         }
     }
 
- /// Count online replicas whose last ACK lag is within `max_lag_secs`.
+    /// Count online replicas whose last ACK lag is within `max_lag_secs`.
     pub fn good_replicas_count(&self, max_lag_secs: u64) -> usize {
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -634,9 +654,9 @@ impl ReplicationState {
             .count()
     }
 
- /// Register `replica` under its `client_id`. Replaces any prior entry for
- /// the same id (clients can only PSYNC once per connection so this
- /// should not race in practice).
+    /// Register `replica` under its `client_id`. Replaces any prior entry for
+    /// the same id (clients can only PSYNC once per connection so this
+    /// should not race in practice).
     pub fn add_replica(&self, replica: ReplicaConn) {
         let cid = replica.client_id;
         match self.replicas.lock() {
@@ -649,8 +669,8 @@ impl ReplicationState {
         }
     }
 
- /// Drop the replica record for `client_id`, if present. Called from
- /// per-connection cleanup path when a replica disconnects.
+    /// Drop the replica record for `client_id`, if present. Called from
+    /// per-connection cleanup path when a replica disconnects.
     pub fn remove_replica(&self, client_id: ClientId) {
         match self.replicas.lock() {
             Ok(mut g) => {
@@ -665,19 +685,19 @@ impl ReplicationState {
         }
     }
 
- /// PID of the in-flight BGSAVE-for-replication child, or 0 when no such
- /// child is running.
+    /// PID of the in-flight BGSAVE-for-replication child, or 0 when no such
+    /// child is running.
     pub fn repl_child_pid(&self) -> i32 {
         self.repl_child_pid.load(Ordering::SeqCst)
     }
 
- /// Record the PID of the newly-forked BGSAVE-for-replication child.
+    /// Record the PID of the newly-forked BGSAVE-for-replication child.
     pub fn set_repl_child_pid(&self, pid: i32) {
         self.repl_child_pid.store(pid, Ordering::SeqCst);
     }
 
- /// Install a fresh `ReplBgsaveJob`. Called from `bgsave_for_replication`
- /// once the fork has returned a child PID.
+    /// Install a fresh `ReplBgsaveJob`. Called from `bgsave_for_replication`
+    /// once the fork has returned a child PID.
     pub fn install_repl_bgsave_job(&self, job: ReplBgsaveJob) {
         match self.repl_bgsave_job.lock() {
             Ok(mut g) => *g = Some(job),
@@ -685,9 +705,9 @@ impl ReplicationState {
         }
     }
 
- /// Remove and return the current `ReplBgsaveJob`. Called by the reaper
- /// after the child exits so the temp file path and waiting-replica list
- /// can be consumed without holding the mutex through the I/O.
+    /// Remove and return the current `ReplBgsaveJob`. Called by the reaper
+    /// after the child exits so the temp file path and waiting-replica list
+    /// can be consumed without holding the mutex through the I/O.
     pub fn take_repl_bgsave_job(&self) -> Option<ReplBgsaveJob> {
         match self.repl_bgsave_job.lock() {
             Ok(mut g) => g.take(),
@@ -695,10 +715,10 @@ impl ReplicationState {
         }
     }
 
- /// Append `client_id` to the current job's waiting-replica list when a
- /// fresh PSYNC arrives while a BGSAVE is already running. Returns `true`
- /// if a job exists (so the caller can skip starting a new one); `false`
- /// when no job is in flight.
+    /// Append `client_id` to the current job's waiting-replica list when a
+    /// fresh PSYNC arrives while a BGSAVE is already running. Returns `true`
+    /// if a job exists (so the caller can skip starting a new one); `false`
+    /// when no job is in flight.
     pub fn enqueue_repl_waiter(&self, client_id: ClientId) -> bool {
         let mut guard = match self.repl_bgsave_job.lock() {
             Ok(g) => g,
@@ -715,9 +735,9 @@ impl ReplicationState {
         }
     }
 
- /// Snapshot of waiting-replica `client_id`s without taking the job.
- /// Used by the reaper when it wants to walk the waiters and ship bytes
- /// without removing the job mid-flight.
+    /// Snapshot of waiting-replica `client_id`s without taking the job.
+    /// Used by the reaper when it wants to walk the waiters and ship bytes
+    /// without removing the job mid-flight.
     pub fn repl_bgsave_job_snapshot(&self) -> Option<(PathBuf, Vec<ClientId>, i64)> {
         let guard = match self.repl_bgsave_job.lock() {
             Ok(g) => g,
@@ -732,11 +752,11 @@ impl ReplicationState {
         })
     }
 
- /// Send `bytes` through the outbound sender of the replica identified by
- /// `client_id`, if it is still registered. Returns `true` on a successful
- /// send (the send may still be queued in the writer thread but the channel
- /// is alive). Returns `false` when the replica is gone or the channel is
- /// closed.
+    /// Send `bytes` through the outbound sender of the replica identified by
+    /// `client_id`, if it is still registered. Returns `true` on a successful
+    /// send (the send may still be queued in the writer thread but the channel
+    /// is alive). Returns `false` when the replica is gone or the channel is
+    /// closed.
     pub fn send_to_replica(&self, client_id: ClientId, bytes: Vec<u8>) -> bool {
         let len = bytes.len();
         let guard = match self.replicas.lock() {
@@ -762,9 +782,9 @@ impl ReplicationState {
         }
     }
 
- /// Mark a replica's state, no-op when the entry is gone. Used by
- /// full-sync transfer path to step replicas through WaitingBgsave →
- /// SendingRdb → Online.
+    /// Mark a replica's state, no-op when the entry is gone. Used by
+    /// full-sync transfer path to step replicas through WaitingBgsave →
+    /// SendingRdb → Online.
     pub fn set_replica_state(&self, client_id: ClientId, state: ReplicaState) {
         let guard = match self.replicas.lock() {
             Ok(g) => g,
@@ -927,6 +947,27 @@ mod tests {
         st.repl_state
             .store(repl_state_code::REPLICA_ONLINE, Ordering::Relaxed);
         assert!(!st.should_propagate_writes());
+    }
+
+    #[test]
+    fn target_change_resets_cached_partial_resync_state() {
+        let st = ReplicationState::new(generate_runid(), 1024);
+        st.become_replica_of(RedisString::from_bytes(b"127.0.0.1"), 6379);
+
+        let cached = [b'a'; 40];
+        st.set_cached_primary_replid(cached);
+        st.master_repl_offset.store(1234, Ordering::Relaxed);
+
+        let same_epoch = st.become_replica_of(RedisString::from_bytes(b"127.0.0.1"), 6379);
+        assert_eq!(st.cached_primary_replid(), Some(cached));
+        assert_eq!(st.master_offset(), 1234);
+        assert!(st.dialer_epoch_is_current(same_epoch));
+
+        let changed_epoch = st.become_replica_of(RedisString::from_bytes(b"127.0.0.2"), 6379);
+        assert_eq!(st.cached_primary_replid(), None);
+        assert_eq!(st.master_offset(), 0);
+        assert!(!st.dialer_epoch_is_current(same_epoch));
+        assert!(st.dialer_epoch_is_current(changed_epoch));
     }
 
     #[test]
