@@ -22,7 +22,8 @@ use std::thread;
 use std::time::Duration;
 
 use redis_core::replication::{
-    global_replication_state, repl_state_code, replica_link_code, ReplicationState,
+    failover_state_code, global_replication_state, repl_state_code, replica_link_code,
+    ReplicationState,
 };
 use redis_core::server::RedisServer;
 use redis_types::RedisString;
@@ -141,8 +142,8 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
 
         let online_offset = match outcome {
             PsyncOutcome::FullResync { offset, replid } => {
- // Adopt the primary's replid so the next reconnect can request a
- // partial resync against it.
+                // Adopt the primary's replid so the next reconnect can request a
+                // partial resync against it.
                 repl.set_cached_primary_replid(replid);
                 repl.set_replica_link(replica_link_code::TRANSFER);
                 let rdb_bytes = match read_fullresync_rdb(&stream) {
@@ -166,9 +167,9 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
                 offset
             }
             PsyncOutcome::Continue { offset } => {
- // Partial resync: no RDB. The backlog catch-up bytes arrive inline
- // on the same stream and are consumed by the sink loop below, which
- // advances the offset as it applies them. The keyspace is preserved.
+                // Partial resync: no RDB. The backlog catch-up bytes arrive inline
+                // on the same stream and are consumed by the sink loop below, which
+                // advances the offset as it applies them. The keyspace is preserved.
                 eprintln!(
                     "redis-server: replica: +CONTINUE partial resync from offset {}",
                     offset
@@ -182,6 +183,7 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
         repl.repl_state
             .store(repl_state_code::REPLICA_ONLINE, Ordering::SeqCst);
         repl.set_replica_link(replica_link_code::CONNECTED);
+        complete_manual_failover_after_psync(&repl);
 
         let periodic_ack_stream = stream.try_clone().ok();
         if let Some(ack_stream) = periodic_ack_stream {
@@ -247,11 +249,11 @@ fn run_replica_sink_loop(stream: &TcpStream, repl: &ReplicationState, dialer_epo
                         if !repl.dialer_epoch_is_current(dialer_epoch) {
                             return;
                         }
- // C Valkey replicas periodically ACK their processed
- // offset even when the primary did not send GETACK.
- // This eager ACK keeps script WAIT's non-blocking
- // path accurate without adding a second timer thread
- // to the RuntimeOwner-compatible dialer.
+                        // C Valkey replicas periodically ACK their processed
+                        // offset even when the primary did not send GETACK.
+                        // This eager ACK keeps script WAIT's non-blocking
+                        // path accurate without adding a second timer thread
+                        // to the RuntimeOwner-compatible dialer.
                         if stream_write(stream, &build_replconf_ack(offset_after)).is_err() {
                             return;
                         }
@@ -332,34 +334,52 @@ fn run_handshake(
         ));
     }
 
- // Attempt a partial resync when we have already completed a full sync with
- // this primary (we cached its replid) and hold a concrete offset. The
- // primary grants `+CONTINUE` if our offset is still inside its backlog
- // window; otherwise it falls back to `+FULLRESYNC`. This is independent of
- // the live `repl_state`, which the dialer resets to CONNECTING on every
- // disconnect — so partial resync survives a dropped link.
-    let our_offset = repl.master_repl_offset.load(Ordering::SeqCst);
-    let cached_replid = repl.cached_primary_replid();
-    if let (Some(replid), true) = (cached_replid, our_offset > 0) {
-        let offset_str = our_offset.to_string();
-        send_multibulk(stream, &[b"PSYNC", &replid, offset_str.as_bytes()])?;
-    } else {
-        send_multibulk(stream, &[b"PSYNC", b"?", b"-1"])?;
-    }
+    // Attempt a partial resync when we have already completed a full sync with
+    // this primary (we cached its replid) and hold a concrete offset. The
+    // primary grants `+CONTINUE` if our offset is still inside its backlog
+    // window; otherwise it falls back to `+FULLRESYNC`. This is independent of
+    // the live `repl_state`, which the dialer resets to CONNECTING on every
+    // disconnect — so partial resync survives a dropped link.
+    let psync_args = select_psync_args(repl);
+    send_multibulk_vec(stream, &psync_args)?;
 
     let reply = read_line(stream)?;
     parse_psync_reply(&reply)
+}
+
+fn select_psync_args(repl: &ReplicationState) -> Vec<Vec<u8>> {
+    let our_offset = repl.master_repl_offset.load(Ordering::SeqCst);
+    let cached_replid = repl.cached_primary_replid();
+    let failover = repl.manual_failover_state(0) == failover_state_code::FAILOVER_IN_PROGRESS;
+    if let Some(replid) = cached_replid.filter(|_| failover || our_offset > 0) {
+        let mut args = vec![b"PSYNC".to_vec(), replid.to_vec(), our_offset.to_string().into_bytes()];
+        if failover {
+            args.push(b"FAILOVER".to_vec());
+        }
+        return args;
+    }
+    vec![b"PSYNC".to_vec(), b"?".to_vec(), b"-1".to_vec()]
+}
+
+fn complete_manual_failover_after_psync(repl: &Arc<ReplicationState>) {
+    if !repl.complete_manual_failover() {
+        return;
+    }
+    crate::replication::redirect_blocked_clients_after_failover();
+    if let Some(server) = GLOBAL_SERVER.get() {
+        redis_core::networking::clear_failover_pause(server);
+    }
 }
 
 /// The two PSYNC outcomes the replica must handle differently: a `+FULLRESYNC`
 /// is followed by an RDB bulk payload (replace the keyspace); a `+CONTINUE`
 /// streams backlog catch-up bytes inline with no RDB (keep the keyspace).
 enum PsyncOutcome {
- /// `+FULLRESYNC <replid> <offset>` — adopt `replid`, read the RDB, reset
- /// the offset to `offset`.
+    /// `+FULLRESYNC <replid> <offset>` — adopt `replid`, read the RDB, reset
+    /// the offset to `offset`.
     FullResync { offset: i64, replid: [u8; 40] },
- /// `+CONTINUE [<replid>]` — partial resync accepted; resume from `offset`
- /// (the replica's current offset). No RDB follows.
+    /// `+CONTINUE [<replid>]` — partial resync accepted; resume from `offset`
+    /// (the replica's current offset). No RDB follows.
     Continue { offset: i64 },
 }
 
@@ -518,6 +538,11 @@ fn send_multibulk(stream: &TcpStream, parts: &[&[u8]]) -> io::Result<()> {
     stream_write(stream, &msg)
 }
 
+fn send_multibulk_vec(stream: &TcpStream, parts: &[Vec<u8>]) -> io::Result<()> {
+    let borrowed: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
+    send_multibulk(stream, &borrowed)
+}
+
 /// Build a RESP multibulk byte string from `parts`.
 fn build_multibulk(parts: &[&[u8]]) -> Vec<u8> {
     let mut buf = Vec::new();
@@ -596,6 +621,43 @@ fn stream_read_slice(stream: &TcpStream, buf: &mut [u8]) -> io::Result<usize> {
         .try_clone()
         .map_err(|e| io::Error::new(e.kind(), format!("stream clone: {}", e)))?;
     s.read(buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn local_state() -> ReplicationState {
+        ReplicationState::new([b'1'; 40], 1024)
+    }
+
+    #[test]
+    fn psync_args_use_fresh_sync_without_cached_offset() {
+        let repl = local_state();
+        assert_eq!(
+            select_psync_args(&repl),
+            vec![b"PSYNC".to_vec(), b"?".to_vec(), b"-1".to_vec()]
+        );
+    }
+
+    #[test]
+    fn psync_args_include_failover_even_at_zero_offset() {
+        let repl = local_state();
+        let cached = [b'a'; 40];
+        repl.set_cached_primary_replid(cached);
+        repl.failover_state
+            .store(failover_state_code::FAILOVER_IN_PROGRESS, Ordering::Relaxed);
+
+        assert_eq!(
+            select_psync_args(&repl),
+            vec![
+                b"PSYNC".to_vec(),
+                cached.to_vec(),
+                b"0".to_vec(),
+                b"FAILOVER".to_vec()
+            ]
+        );
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────

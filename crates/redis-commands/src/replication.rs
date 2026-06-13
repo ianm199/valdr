@@ -14,8 +14,8 @@ use redis_core::blocked_keys::{
 use redis_core::client::ClientId;
 use redis_core::pubsub_registry::PubSubRegistry;
 use redis_core::replication::{
-    continue_reply, fullresync_reply, global_replication_state, ReplicaConn, ReplicaState,
-    ReplicationState,
+    continue_reply, fullresync_reply, global_replication_state, ManualFailoverAdvance, ReplicaConn,
+    ReplicaState, ReplicationState,
 };
 use redis_core::util::mstime;
 use redis_core::CommandContext;
@@ -131,11 +131,17 @@ fn is_no_one(host: &[u8], port: &[u8]) -> bool {
 /// run id matches ours and its offset is still inside the live backlog
 /// window. Registers a `ReplicaConn` entry in the global registry.
 pub fn psync_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
-    if ctx.arg_count() != 3 {
+    if ctx.arg_count() != 3 && ctx.arg_count() != 4 {
         return Err(RedisError::wrong_number_of_args(b"psync"));
     }
     let provided_runid = ctx.arg_owned(1usize)?;
     let provided_offset = parse_offset(ctx.arg_owned(2usize)?.as_bytes())?;
+    if ctx.arg_count() == 4 {
+        if !ascii_eq_ignore_case(ctx.arg(3usize)?.as_bytes(), b"FAILOVER") {
+            return Err(RedisError::runtime(b"ERR syntax error"));
+        }
+        return handle_psync_failover(ctx, provided_runid.as_bytes(), provided_offset);
+    }
     handle_psync(ctx, provided_runid.as_bytes(), provided_offset, true)
 }
 
@@ -184,6 +190,8 @@ pub fn replconf_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
                 };
                 if let Some(conn) = guard.get(&client_id) {
                     conn.listening_port.store(port, Ordering::Relaxed);
+                } else {
+                    repl.record_replica_listening_port(client_id, port);
                 }
             }
             ctx.reply_simple_string(b"OK")
@@ -202,6 +210,8 @@ pub fn replconf_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
                 };
                 if let Some(conn) = guard.get(&client_id) {
                     conn.capa_flags.fetch_or(bit, Ordering::Relaxed);
+                } else {
+                    repl.record_replica_capa_flags(client_id, bit);
                 }
                 i += 1;
             }
@@ -337,6 +347,7 @@ pub fn wait_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         deadline_ms: deadline_from_timeout_secs(timeout_secs),
         resp_proto: ctx.client_ref().resp_proto,
         username: ctx.client_ref().authenticated_user.clone(),
+        redirect_on_role_change: false,
     };
     {
         let mut idx = match blocked_keys_index().lock() {
@@ -436,10 +447,9 @@ pub fn waitaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 
 /// `FAILOVER [TO <HOST> <PORT> [FORCE]] [ABORT] [TIMEOUT <timeout>]`
 ///
-/// Parser/state guard only. Valdr does not yet implement the coordinated
-/// failover state machine, so syntactically valid requests stop at the same
-/// early state checks as Valkey and then return an explicit unsupported error
-/// instead of pretending failover has started.
+/// Parser and first state-machine step for Valkey-style coordinated failover.
+/// The live runtime periodically calls [`drive_manual_failover_once`] to advance
+/// waiting-for-sync into handoff when a replica catches up or FORCE times out.
 pub fn failover_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     let repl = global_replication_state();
     if ctx.arg_count() == 2 && ascii_eq_ignore_case(ctx.arg(1usize)?.as_bytes(), b"ABORT") {
@@ -490,6 +500,9 @@ pub fn failover_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         return Err(RedisError::runtime(b"ERR syntax error"));
     }
 
+    if repl.manual_failover_active() {
+        return Err(RedisError::runtime(b"ERR FAILOVER already in progress."));
+    }
     if repl.is_replica() {
         return Err(RedisError::runtime(
             b"ERR FAILOVER is not valid when server is a replica.",
@@ -505,11 +518,48 @@ pub fn failover_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             b"ERR FAILOVER with force option requires both a timeout and target HOST and IP.",
         ));
     }
+    if let Some(target) = target.as_ref() {
+        if !repl.manual_failover_target_online(target) {
+            return Err(RedisError::runtime(
+                b"ERR FAILOVER target HOST and PORT is not a replica.",
+            ));
+        }
+    }
 
     let now = mstime();
     repl.begin_manual_failover(target, timeout_ms, force, now);
-    redis_core::networking::apply_failover_pause(ctx.server(), now.saturating_add(60_000));
+    redis_core::networking::apply_failover_write_pause(ctx.server(), i64::MAX);
     ctx.reply_simple_string(b"OK")
+}
+
+pub fn drive_manual_failover_once(server: &Arc<redis_core::RedisServer>) -> bool {
+    let repl = global_replication_state();
+    match repl.advance_manual_failover(mstime()) {
+        ManualFailoverAdvance::Noop => false,
+        ManualFailoverAdvance::Aborted => {
+            redis_core::networking::clear_failover_pause(server);
+            true
+        }
+        ManualFailoverAdvance::Started {
+            host,
+            port,
+            dialer_epoch,
+        } => {
+            redis_core::networking::apply_failover_pause(server, i64::MAX);
+            match crate::replica_dialer::spawn_replica_dialer(host.clone(), port, dialer_epoch) {
+                Ok(()) => {}
+                Err(err) => {
+                    eprintln!(
+                        "redis-server: FAILOVER handoff dialer to {}:{} failed: {}",
+                        String::from_utf8_lossy(host.as_bytes()),
+                        port,
+                        err
+                    );
+                }
+            }
+            true
+        }
+    }
 }
 
 fn block_waitaof_waiter(
@@ -548,6 +598,7 @@ fn block_waitaof_waiter(
         deadline_ms: deadline_from_timeout_secs(timeout_secs),
         resp_proto: ctx.client_ref().resp_proto,
         username: ctx.client_ref().authenticated_user.clone(),
+        redirect_on_role_change: false,
     };
     {
         let mut idx = match blocked_keys_index().lock() {
@@ -696,6 +747,31 @@ pub fn unblock_replication_role_change() {
     }
 }
 
+pub fn redirect_blocked_clients_after_failover() {
+    let Some((host, port)) = global_replication_state().replica_of_target() else {
+        return;
+    };
+    let waiters = {
+        let mut idx = match blocked_keys_index().lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        idx.take_role_change_redirect_waiters()
+    };
+    if waiters.is_empty() {
+        return;
+    }
+    let mut reply = Vec::with_capacity(host.as_bytes().len() + 32);
+    reply.extend_from_slice(b"-REDIRECT ");
+    reply.extend_from_slice(host.as_bytes());
+    reply.push(b':');
+    reply.extend_from_slice(port.to_string().as_bytes());
+    reply.extend_from_slice(b"\r\n");
+    for waiter in waiters {
+        let _ = waiter.sender.send(reply.clone());
+    }
+}
+
 /// Ask attached replicas to report their current processed offset.
 /// a client blocks in WAIT/WAITAOF. Without this prompt a caught-up replica may
 /// not send an ACK before the WAIT timeout, leaving tests stuck at zero acks.
@@ -838,6 +914,64 @@ fn handle_psync(
 
     arm_full_sync_bgsave(ctx, &repl, client_id, snapshot_offset);
     Ok(())
+}
+
+fn handle_psync_failover(
+    ctx: &mut CommandContext<'_>,
+    provided_runid: &[u8],
+    provided_offset: i64,
+) -> RedisResult<()> {
+    let repl = global_replication_state();
+    if !repl.is_replica() {
+        return Err(RedisError::runtime(
+            b"ERR PSYNC FAILOVER can't be sent to a master.",
+        ));
+    }
+    if !psync_failover_replid_matches(&repl, provided_runid) {
+        return Err(RedisError::runtime(
+            b"ERR PSYNC FAILOVER replid must match my replid.",
+        ));
+    }
+
+    repl.become_master();
+    let master_offset = repl.master_offset();
+    if provided_offset >= 0 && partial_in_window(&repl, provided_offset, master_offset) {
+        repl.incr_sync_partial_ok();
+        let client_id = ctx.client_ref().id();
+        let outbound = steal_outbound_sender(ctx.pubsub.as_ref(), client_id);
+        if let Some(sender) = outbound {
+            register_replica(
+                &repl,
+                client_id,
+                ReplicaState::Online,
+                provided_offset,
+                sender,
+            );
+        }
+        let line = continue_reply(&repl.runid());
+        ctx.client_mut().reply_buf.extend_from_slice(&line);
+        ctx.client_mut().is_replica = true;
+        if master_offset > provided_offset {
+            if let Some(bytes) =
+                repl.read_history_at(provided_offset, (master_offset - provided_offset) as usize)
+            {
+                if !bytes.is_empty() {
+                    let _ = repl.send_to_replica(client_id, bytes);
+                }
+            }
+        }
+        return Ok(());
+    }
+
+    handle_psync(ctx, provided_runid, provided_offset, true)
+}
+
+fn psync_failover_replid_matches(repl: &Arc<ReplicationState>, provided_runid: &[u8]) -> bool {
+    if provided_runid == &repl.runid()[..] {
+        return true;
+    }
+    repl.cached_primary_replid()
+        .is_some_and(|cached| provided_runid == &cached[..])
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

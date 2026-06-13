@@ -964,6 +964,7 @@ impl RuntimeOwner {
         while !shutdown.load(Ordering::SeqCst) {
             let mut progressed = false;
 
+            progressed |= redis_commands::replication::drive_manual_failover_once(&server);
             progressed |= owner.active_expire_step(&server);
             progressed |= owner.drain_debug_loadaof_jobs(poll.registry(), &server);
             progressed |= owner.drain_replica_apply_requests(&registry, &server);
@@ -996,6 +997,7 @@ impl RuntimeOwner {
             );
             progressed |= owner.install_pending_dynamic_listeners(&mut listeners, poll.registry());
             progressed |= owner.drain_foreign_payloads(poll.registry());
+            progressed |= redis_commands::replication::drive_manual_failover_once(&server);
             progressed |= owner.drain_debug_loadaof_jobs(poll.registry(), &server);
             progressed |= owner.drain_replica_apply_requests(&registry, &server);
             progressed |= owner.dispatch_scheduled_commands(poll.registry(), &registry, &server);

@@ -1443,6 +1443,7 @@ fn park_blocked_client(
         deadline_ms: deadline_from_timeout_secs(timeout_secs),
         resp_proto: ctx.client_ref().resp_proto,
         username: ctx.client_ref().authenticated_user.clone(),
+        redirect_on_role_change: ctx.client_ref().capa_redirect,
     };
     {
         let mut idx = match blocked_keys_index().lock() {

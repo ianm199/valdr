@@ -1618,6 +1618,20 @@ pub fn apply_client_pause(server: &RedisServer, end: i64, pause_all: bool) {
     refresh_cached_paused_actions(server, &events, crate::util::mstime());
 }
 
+pub fn apply_failover_write_pause(server: &RedisServer, end: i64) {
+    let mut events = server
+        .pause_events
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    pause_actions(
+        &mut events,
+        PausePurpose::DuringFailover,
+        end,
+        PAUSE_ACTIONS_CLIENT_WRITE_SET,
+    );
+    refresh_cached_paused_actions(server, &events, crate::util::mstime());
+}
+
 pub fn apply_failover_pause(server: &RedisServer, end: i64) {
     let mut events = server
         .pause_events

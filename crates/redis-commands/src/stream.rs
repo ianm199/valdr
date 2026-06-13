@@ -91,9 +91,9 @@ fn parse_range_bound(arg: &[u8], side: BoundSide) -> Result<Bound, RedisError> {
 /// request auto-generation via the `<ms>-*` form.
 #[derive(Debug, Clone, Copy)]
 enum XaddIdSpec {
- /// Fully-explicit `<ms>-<seq>` or bare `<ms>` (seq defaults to 0).
+    /// Fully-explicit `<ms>-<seq>` or bare `<ms>` (seq defaults to 0).
     Explicit(StreamId),
- /// `<ms>-*` — ms is given; seq is auto-generated relative to `last_id`.
+    /// `<ms>-*` — ms is given; seq is auto-generated relative to `last_id`.
     Partial { ms: u64 },
 }
 
@@ -456,9 +456,9 @@ fn drain_front(stream: &mut InlineStream, count: usize) -> usize {
         return 0;
     }
     let count = count.min(stream.entries.len());
- // Trimming (XTRIM / XADD MAXLEN|MINID) removes entries from the front but,
- // unlike XDEL, does NOT advance max_deleted_entry_id. Only
- // XDEL and XSETID move the tombstone.
+    // Trimming (XTRIM / XADD MAXLEN|MINID) removes entries from the front but,
+    // unlike XDEL, does NOT advance max_deleted_entry_id. Only
+    // XDEL and XSETID move the tombstone.
     stream.entries.drain(0..count);
     count
 }
@@ -601,9 +601,9 @@ pub fn xadd_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
     ctx.notify_keyspace_event(NOTIFY_STREAM, b"xadd", &key_for_wake);
 
- // Propagate the auto-generated ID explicitly so replicas/AOF store the same
- // ID rather than re-generating their own. Mirrors `rewriteClientCommandArgument`
- // for the ID in `xaddCommand`.
+    // Propagate the auto-generated ID explicitly so replicas/AOF store the same
+    // ID rather than re-generating their own. Mirrors `rewriteClientCommandArgument`
+    // for the ID in `xaddCommand`.
     if id_autogen {
         let argc = ctx.arg_count();
         let mut new_argv: Vec<RedisString> = Vec::with_capacity(argc);
@@ -758,12 +758,12 @@ pub fn wake_blocked_xreadgroup_for_key(db: &mut RedisDb, key: &RedisString) {
     if waiters.is_empty() {
         return;
     }
- // A single new entry is delivered to at most one consumer per group:
- // first waiter (FIFO) whose group cursor is still behind the entry. Once a
- // group's cursor advances past the entry, later waiters of that same group
- // find no new data and must stay blocked — re-registered with their
- // original deadline so their BLOCK timeout is preserved (matches
- // upstream "reprocessing" semantics in handleClientsBlockedOnKey).
+    // A single new entry is delivered to at most one consumer per group:
+    // first waiter (FIFO) whose group cursor is still behind the entry. Once a
+    // group's cursor advances past the entry, later waiters of that same group
+    // find no new data and must stay blocked — re-registered with their
+    // original deadline so their BLOCK timeout is preserved (matches
+    // upstream "reprocessing" semantics in handleClientsBlockedOnKey).
     let mut to_reblock: Vec<BlockedWaiter> = Vec::new();
     for waiter in waiters {
         let (group, consumer, id_after, count, noack) = match &waiter.action {
@@ -1246,12 +1246,12 @@ pub fn xtrim_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
 #[derive(Debug, Clone, Copy)]
 enum ReadStartId {
- /// `$` — only entries strictly after the current `last_id`.
+    /// `$` — only entries strictly after the current `last_id`.
     Now,
- /// `+` — return the last entry in the stream (resolved to `last_id - 1`
- /// so the XREAD "strictly greater than" logic includes the last entry).
+    /// `+` — return the last entry in the stream (resolved to `last_id - 1`
+    /// so the XREAD "strictly greater than" logic includes the last entry).
     LastEntry,
- /// Explicit id; XREAD returns entries with id strictly greater than this.
+    /// Explicit id; XREAD returns entries with id strictly greater than this.
     After(StreamId),
 }
 
@@ -1304,6 +1304,8 @@ fn park_xread_block(
                 deadline_ms,
                 resp_proto: ctx.client_ref().resp_proto,
                 username: ctx.client_ref().authenticated_user.clone(),
+                redirect_on_role_change: ctx.client_ref().capa_redirect
+                    && !ctx.client_ref().flags.readonly,
             };
             idx.add(waiter);
         }
@@ -1488,7 +1490,7 @@ pub fn xinfo_command(ctx: &mut CommandContext) -> RedisResult<()> {
                 return Err(RedisError::wrong_number_of_args(b"xinfo"));
             }
             let key = ctx.arg_owned(2usize)?;
- // XINFO STREAM <key> [FULL [COUNT <n>]]
+            // XINFO STREAM <key> [FULL [COUNT <n>]]
             let argc = ctx.arg_count();
             if argc > 3 {
                 if ctx.arg(3)?.as_bytes().eq_ignore_ascii_case(b"FULL") {
@@ -1599,8 +1601,8 @@ fn touch_or_create_consumer(group: &mut ConsumerGroup, name: &RedisString, now_m
     let exists = group.consumers.contains_key(name);
     if !exists {
         let mut consumer = Consumer::new(name.clone(), now_ms);
- // it only advances once the consumer actually receives entries, so
- // XINFO `inactive` reports -1 until the first real delivery.
+        // it only advances once the consumer actually receives entries, so
+        // XINFO `inactive` reports -1 until the first real delivery.
         consumer.active_time_ms = -1;
         group.consumers.insert(name.clone(), consumer);
     } else if let Some(c) = group.consumers.get_mut(name) {
@@ -1944,9 +1946,9 @@ fn xgroup_delconsumer(ctx: &mut CommandContext) -> RedisResult<()> {
 
 #[derive(Debug, Clone, Copy)]
 enum GroupReadStartId {
- /// `>` — deliver new entries with id > group.last_delivered_id.
+    /// `>` — deliver new entries with id > group.last_delivered_id.
     New,
- /// Explicit id — re-read entries from the consumer PEL with id >= this.
+    /// Explicit id — re-read entries from the consumer PEL with id >= this.
     From(StreamId),
 }
 
@@ -2064,7 +2066,7 @@ pub fn xreadgroup_command(ctx: &mut CommandContext) -> RedisResult<()> {
                     None => slice_len,
                     Some(n) => (n as usize).min(slice_len),
                 };
- // seen-time) on every call, even when no new entries exist.
+                // seen-time) on every call, even when no new entries exist.
                 {
                     let group = stream
                         .groups
@@ -2085,7 +2087,7 @@ pub fn xreadgroup_command(ctx: &mut CommandContext) -> RedisResult<()> {
                     .groups
                     .get_mut(&group_name)
                     .expect("group existence checked above");
- // active-time advances only on real delivery.
+                // active-time advances only on real delivery.
                 if let Some(consumer) = group.consumers.get_mut(&consumer_name) {
                     consumer.active_time_ms = now;
                 }
@@ -2233,6 +2235,7 @@ pub fn xreadgroup_command(ctx: &mut CommandContext) -> RedisResult<()> {
                                 deadline_ms,
                                 resp_proto: ctx.client_ref().resp_proto,
                                 username: ctx.client_ref().authenticated_user.clone(),
+                                redirect_on_role_change: ctx.client_ref().capa_redirect,
                             };
                             idx.add(waiter);
                         }
@@ -2640,9 +2643,9 @@ pub fn xclaim_command(ctx: &mut CommandContext) -> RedisResult<()> {
         if in_pel && prev_idle < min_idle {
             continue;
         }
- // Entry was trimmed/deleted from the stream: drop the NACK from
- // group + owning-consumer PEL and skip it (no reassign, absent from
- // reply). C: streamClaimEntry discards claims for vanished entries.
+        // Entry was trimmed/deleted from the stream: drop the NACK from
+        // group + owning-consumer PEL and skip it (no reassign, absent from
+        // reply). C: streamClaimEntry discards claims for vanished entries.
         if stream_entry.is_none() {
             pel_remove(group, id);
             continue;
@@ -2722,8 +2725,8 @@ pub fn xautoclaim_command(ctx: &mut CommandContext) -> RedisResult<()> {
                     return Err(RedisError::syntax(b"syntax error"));
                 }
                 let n = parse_strict_i64(ctx.arg(idx + 1)?.as_bytes())?;
- // COUNT is bounded by LONG_MAX/16 so
- // internal `count * attempts_factor` scan budget cannot overflow.
+                // COUNT is bounded by LONG_MAX/16 so
+                // internal `count * attempts_factor` scan budget cannot overflow.
                 const MAX_COUNT: i64 = i64::MAX / 16;
                 if n <= 0 || n > MAX_COUNT {
                     return Err(RedisError::runtime(b"ERR COUNT must be > 0"));
@@ -2880,8 +2883,8 @@ pub fn xsetid_command(ctx: &mut CommandContext) -> RedisResult<()> {
                     return Err(RedisError::syntax(b"syntax error"));
                 }
                 let m = parse_explicit_id(ctx.arg(i + 1)?.as_bytes())?;
- // the new last-id cannot be below
- // provided max_deleted_entry_id.
+                // the new last-id cannot be below
+                // provided max_deleted_entry_id.
                 if new_id < m {
                     return Err(RedisError::runtime(
                         b"ERR The ID specified in XSETID is smaller than the provided max_deleted_entry_id",
@@ -2897,8 +2900,8 @@ pub fn xsetid_command(ctx: &mut CommandContext) -> RedisResult<()> {
         Some(s) => s,
         None => return Err(RedisError::runtime(b"ERR no such key")),
     };
- // new last-id cannot be below the current
- // max_deleted_entry_id.
+    // new last-id cannot be below the current
+    // max_deleted_entry_id.
     if new_id < stream.max_deleted_id {
         return Err(RedisError::runtime(
             b"ERR The ID specified in XSETID is smaller than current max_deleted_entry_id",
@@ -2910,7 +2913,7 @@ pub fn xsetid_command(ctx: &mut CommandContext) -> RedisResult<()> {
                 b"ERR The ID specified in XSETID is smaller than the target stream top item",
             ));
         }
- // entries_added (if provided) cannot be lower than the stream length.
+        // entries_added (if provided) cannot be lower than the stream length.
         if let Some(ea) = entries_added {
             if stream.entries.len() as u64 > ea {
                 return Err(RedisError::runtime(
@@ -3052,7 +3055,7 @@ fn xinfo_stream_full(ctx: &mut CommandContext, key: &RedisString, count: i64) ->
         let mut groups: Vec<GroupSnap> = Vec::with_capacity(group_names.len());
         for gname in group_names {
             let g = &stream.groups[gname];
- // group PEL entry -> owning consumer (PelEntry has no consumer ref).
+            // group PEL entry -> owning consumer (PelEntry has no consumer ref).
             let mut gpel: Vec<(StreamId, RedisString, i64, u64)> = Vec::new();
             for pe in g.pel.iter().take(limit) {
                 let owner = g
@@ -3227,7 +3230,7 @@ fn xinfo_consumers(ctx: &mut CommandContext) -> RedisResult<()> {
     ctx.reply_array_header(snapshot.len())?;
     for (name, pending, seen, active) in &snapshot {
         let idle = (now - *seen).max(0);
- // active < 0 is the never-delivered sentinel; XINFO reports -1.
+        // active < 0 is the never-delivered sentinel; XINFO reports -1.
         let inactive = if *active < 0 {
             -1
         } else {

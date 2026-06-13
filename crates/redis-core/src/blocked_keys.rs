@@ -160,6 +160,7 @@ pub struct BlockedWaiter {
     pub deadline_ms: i64,
     pub resp_proto: i32,
     pub username: Option<RedisString>,
+    pub redirect_on_role_change: bool,
 }
 
 /// Server-wide blocked-keys index.
@@ -580,6 +581,24 @@ impl BlockedKeysIndex {
         out
     }
 
+ /// Drain every data-command waiter that should receive a REDIRECT after a
+ /// replication role change. READONLY stream waiters deliberately remain in the
+ /// blocking index so they can be satisfied by later replicated writes.
+    pub fn take_role_change_redirect_waiters(&mut self) -> Vec<BlockedWaiter> {
+        let cids: Vec<ClientId> = self
+            .waiters
+            .iter()
+            .filter_map(|(cid, w)| w.redirect_on_role_change.then_some(*cid))
+            .collect();
+        let mut out = Vec::with_capacity(cids.len());
+        for cid in cids {
+            if let Some(w) = self.remove_client(cid) {
+                out.push(w);
+            }
+        }
+        out
+    }
+
  /// Remove a `Wait` waiter by client id without consulting the keys index
  /// (Wait waiters are not keyed — they park under a sentinel key).
     fn remove_wait_client(&mut self, client_id: ClientId) -> Option<BlockedWaiter> {
@@ -648,6 +667,7 @@ mod tests {
             deadline_ms: deadline,
             resp_proto: 2,
             username: None,
+            redirect_on_role_change: false,
         }
     }
 

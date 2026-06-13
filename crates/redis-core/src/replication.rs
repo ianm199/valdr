@@ -99,6 +99,31 @@ pub struct ManualFailoverState {
     pub force: bool,
 }
 
+/// Result of one deterministic manual-failover state-machine tick.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManualFailoverAdvance {
+    Noop,
+    Aborted,
+    Started {
+        host: RedisString,
+        port: u16,
+        dialer_epoch: u64,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct ManualFailoverTarget {
+    host: RedisString,
+    port: u16,
+    caught_up: bool,
+}
+
+#[derive(Debug, Default, Clone)]
+struct PendingReplicaMetadata {
+    listening_port: Option<u16>,
+    capa_flags: u32,
+}
+
 /// Per-replica connection state. Drives whether the master will stream
 /// backlog to a given replica yet (it has to wait for the BGSAVE RDB transfer
 /// to land first when full-syncing).
@@ -378,6 +403,9 @@ pub struct ReplicationState {
     pub backlog: Mutex<ReplBacklog>,
     /// Connected replicas (master-assigned `client_id` → metadata).
     pub replicas: Mutex<HashMap<ClientId, ReplicaConn>>,
+    /// REPLCONF metadata can arrive before PSYNC registers the `ReplicaConn`.
+    /// Keep it keyed by client id and apply it when the replica is inserted.
+    pending_replica_metadata: Mutex<HashMap<ClientId, PendingReplicaMetadata>>,
     /// `Some((host, port))` when this server has been told `REPLICAOF host
     /// port`; `None` when it is operating as a primary.
     pub replica_of: Mutex<Option<(RedisString, u16)>>,
@@ -447,6 +475,7 @@ impl ReplicationState {
             master_repl_offset: AtomicI64::new(0),
             backlog: Mutex::new(ReplBacklog::new(backlog_size)),
             replicas: Mutex::new(HashMap::new()),
+            pending_replica_metadata: Mutex::new(HashMap::new()),
             replica_of: Mutex::new(None),
             repl_state: AtomicU8::new(repl_state_code::MASTER),
             replica_link: AtomicU8::new(replica_link_code::CONNECT),
@@ -887,9 +916,8 @@ impl ReplicationState {
         self.repl_state.load(Ordering::Relaxed) != repl_state_code::MASTER
     }
 
-    /// Start a primary-side manual failover request. `force` requests move
-    /// directly into `failover-in-progress`; otherwise the primary first waits
-    /// for replica sync.
+    /// Start a primary-side manual failover request. Valkey always begins in
+    /// `waiting-for-sync`; FORCE only changes what the timeout tick does.
     pub fn begin_manual_failover(
         &self,
         target: Option<(RedisString, u16)>,
@@ -913,13 +941,84 @@ impl ReplicationState {
                 force,
             });
         }
-        let state = if force {
-            failover_state_code::FAILOVER_IN_PROGRESS
-        } else {
-            failover_state_code::WAITING_FOR_SYNC
-        };
+        let state = failover_state_code::WAITING_FOR_SYNC;
         self.failover_state.store(state, Ordering::Relaxed);
         state
+    }
+
+    /// Whether another manual failover request is already visible.
+    pub fn manual_failover_active(&self) -> bool {
+        self.failover_state.load(Ordering::Relaxed) != failover_state_code::NO_FAILOVER
+    }
+
+    /// Return true if a requested FAILOVER target maps to an online replica.
+    /// The Rust port currently persists the replica listening port but not the
+    /// peer host, so the port is the authoritative matching key for now.
+    pub fn manual_failover_target_online(&self, target: &(RedisString, u16)) -> bool {
+        let guard = match self.replicas.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard.values().any(|replica| {
+            replica.state() == ReplicaState::Online && replica.listening_port() == target.1
+        })
+    }
+
+    /// Advance a manual failover. When a target is caught up, or when FORCE's
+    /// timeout expires, the old primary demotes itself to a replica of the
+    /// chosen target while preserving its own replid/offset for the upcoming
+    /// `PSYNC ... FAILOVER` handshake.
+    pub fn advance_manual_failover(&self, now_ms: i64) -> ManualFailoverAdvance {
+        if self.failover_state.load(Ordering::Relaxed) != failover_state_code::WAITING_FOR_SYNC {
+            return ManualFailoverAdvance::Noop;
+        }
+        let details = match self.manual_failover.lock() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
+        };
+        let Some(details) = details else {
+            self.failover_state
+                .store(failover_state_code::NO_FAILOVER, Ordering::Relaxed);
+            return ManualFailoverAdvance::Noop;
+        };
+
+        let target = self.find_manual_failover_target(&details);
+        if let Some(target) = target.as_ref().filter(|target| target.caught_up) {
+            return self.start_manual_failover_to(target.host.clone(), target.port);
+        }
+
+        let timed_out = details.deadline_ms > 0 && details.deadline_ms <= now_ms;
+        if !timed_out {
+            return ManualFailoverAdvance::Noop;
+        }
+        if details.force {
+            if let Some((host, port)) = details.target {
+                return self.start_manual_failover_to(host, port);
+            }
+        }
+
+        self.abort_manual_failover();
+        ManualFailoverAdvance::Aborted
+    }
+
+    /// Clear manual-failover bookkeeping after the demoted old primary receives
+    /// an accepted PSYNC reply from the promoted target.
+    pub fn complete_manual_failover(&self) -> bool {
+        let previous = self.failover_state.compare_exchange(
+            failover_state_code::FAILOVER_IN_PROGRESS,
+            failover_state_code::NO_FAILOVER,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+        if previous.is_err() {
+            return false;
+        }
+        let mut guard = match self.manual_failover.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard.take();
+        true
     }
 
     /// Abort the active manual failover request, if any. Returns `true` when a
@@ -945,6 +1044,58 @@ impl ReplicationState {
 
     pub fn manual_failover_state_str(&self, now_ms: i64) -> &'static str {
         failover_state_code::as_info_str(self.manual_failover_state(now_ms))
+    }
+
+    fn find_manual_failover_target(
+        &self,
+        details: &ManualFailoverState,
+    ) -> Option<ManualFailoverTarget> {
+        let master_offset = self.master_offset();
+        let guard = match self.replicas.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+
+        if let Some((host, port)) = details.target.as_ref() {
+            return guard
+                .values()
+                .find(|replica| {
+                    replica.state() == ReplicaState::Online && replica.listening_port() == *port
+                })
+                .map(|replica| ManualFailoverTarget {
+                    host: host.clone(),
+                    port: *port,
+                    caught_up: replica.offset() == master_offset,
+                });
+        }
+
+        guard
+            .values()
+            .filter(|replica| replica.state() == ReplicaState::Online)
+            .filter(|replica| replica.offset() == master_offset)
+            .find_map(|replica| {
+                let port = replica.listening_port();
+                if port == 0 {
+                    return None;
+                }
+                Some(ManualFailoverTarget {
+                    host: RedisString::from_static(b"127.0.0.1"),
+                    port,
+                    caught_up: true,
+                })
+            })
+    }
+
+    fn start_manual_failover_to(&self, host: RedisString, port: u16) -> ManualFailoverAdvance {
+        self.failover_state
+            .store(failover_state_code::FAILOVER_IN_PROGRESS, Ordering::Relaxed);
+        self.set_cached_primary_replid(self.runid);
+        let dialer_epoch = self.become_replica_of_for_failover(host.clone(), port);
+        ManualFailoverAdvance::Started {
+            host,
+            port,
+            dialer_epoch,
+        }
     }
 
     /// Configured master address `(host, port)` when in replica mode.
@@ -1024,6 +1175,23 @@ impl ReplicationState {
         epoch
     }
 
+    fn become_replica_of_for_failover(&self, host: RedisString, port: u16) -> u64 {
+        let epoch = self
+            .dialer_epoch
+            .fetch_add(1, Ordering::SeqCst)
+            .saturating_add(1);
+        self.dialer_stop_flag.store(false, Ordering::SeqCst);
+        match self.replica_of.lock() {
+            Ok(mut g) => *g = Some((host, port)),
+            Err(p) => *p.into_inner() = Some((host, port)),
+        }
+        self.repl_state
+            .store(repl_state_code::REPLICA_CONNECTING, Ordering::Relaxed);
+        self.replica_link
+            .store(replica_link_code::CONNECT, Ordering::Relaxed);
+        epoch
+    }
+
     /// True if a replica-side dialer captured the currently-active generation.
     pub fn dialer_epoch_is_current(&self, epoch: u64) -> bool {
         !self.dialer_stop_flag.load(Ordering::SeqCst)
@@ -1093,12 +1261,46 @@ impl ReplicationState {
     /// should not race in practice).
     pub fn add_replica(&self, replica: ReplicaConn) {
         let cid = replica.client_id;
+        self.apply_pending_replica_metadata(&replica);
         match self.replicas.lock() {
             Ok(mut g) => {
                 g.insert(cid, replica);
             }
             Err(p) => {
                 p.into_inner().insert(cid, replica);
+            }
+        }
+    }
+
+    pub fn record_replica_listening_port(&self, client_id: ClientId, port: u16) {
+        let mut guard = match self.pending_replica_metadata.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard.entry(client_id).or_default().listening_port = Some(port);
+    }
+
+    pub fn record_replica_capa_flags(&self, client_id: ClientId, flags: u32) {
+        let mut guard = match self.pending_replica_metadata.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard.entry(client_id).or_default().capa_flags |= flags;
+    }
+
+    fn apply_pending_replica_metadata(&self, replica: &ReplicaConn) {
+        let metadata = match self.pending_replica_metadata.lock() {
+            Ok(mut g) => g.remove(&replica.client_id),
+            Err(p) => p.into_inner().remove(&replica.client_id),
+        };
+        if let Some(metadata) = metadata {
+            if let Some(port) = metadata.listening_port {
+                replica.listening_port.store(port, Ordering::Relaxed);
+            }
+            if metadata.capa_flags != 0 {
+                replica
+                    .capa_flags
+                    .fetch_or(metadata.capa_flags, Ordering::Relaxed);
             }
         }
     }
@@ -1115,6 +1317,14 @@ impl ReplicationState {
             }
         }
         self.release_retained_history_for(client_id);
+        match self.pending_replica_metadata.lock() {
+            Ok(mut g) => {
+                g.remove(&client_id);
+            }
+            Err(p) => {
+                p.into_inner().remove(&client_id);
+            }
+        }
         if let Ok(mut guard) = crate::client_info::client_info_registry().lock() {
             guard.set_output_buffer_memory(client_id, 0);
         }

@@ -368,10 +368,11 @@ Work packets:
   connected replicas now enter visible `waiting-for-sync` or
   `failover-in-progress` state, expose `master_failover_state` in
   `INFO replication`, and `FAILOVER ABORT` clears state and failover pause.
-  This deliberately does not claim timeout/completion, blocked-client REDIRECT
-  unblocking, or role handoff yet. A follow-up runtime slice allows
-  `CLIENT CAPA REDIRECT` during failover pause while still pausing data reads,
-  moving the live frontier toward failover completion/unblock behavior.
+  Follow-up 2026-06-13 slices added timeout-driven handoff, `PSYNC ... FAILOVER`
+  target promotion, old-primary demotion, failover pause clearing, and
+  zero-offset partial-sync handoff. A live two-process probe now proves a forced
+  failover from `127.0.0.1:27379` to `127.0.0.1:27380` can redirect both a
+  blocked `BRPOP` client and a `GET` client paused during failover-in-progress.
 - **R5-REPLICA-PROMOTION:** `REPLICAOF NO ONE` promotion preserves data,
   replid/offset history, client-visible role, and write policy.
 - **R5-CLIENT-REDIRECT:** implement the client capability and redirect behavior
@@ -380,7 +381,10 @@ Work packets:
   replies for replica data commands, `READONLY` clients can keep local reads,
   queue-time redirects dirty MULTI for `EXECABORT`, and queued writes redirect
   at `EXEC` if the node became a replica after queueing. Remaining work is
-  failover-state driven pause/unblock behavior, not basic redirect formatting.
+  the official Tcl file's no-summary timeout, not basic redirect formatting.
+  Evidence from `repl-failover-observe-hang` shows the old primary reporting
+  `blocked_clients:2`, `paused_actions:all`, and `role:slave` while the Tcl
+  harness still timed out before resuming the paused target process.
 - **R5-ABORT-ROLLBACK:** timeout and abort paths leave the topology in a
   coherent state.
 
@@ -700,6 +704,7 @@ end with a short evidence note in this document or a linked packet doc.
 | `R1-TTL-REWRITE` | Propagate relative TTL writes as absolute expiry | string/db/expire propagation | repl kit + replication-3/4 |
 | `R1-DB-SELECT` | Fix multi-DB replica apply and stream `SELECT` coverage | replication apply/runtime owner | repl kit |
 | `R3-RECONNECT-MATRIX` | Add deterministic PSYNC edge-case tests | repl kit only first | repl kit |
+| `R5-REPLICA-REDIRECT-HARNESS` | Convert the remaining `replica-redirect.tcl` no-summary timeout into a parsed failure or pass | harness observation + failover kit | failover_redirect_kit + focused Tcl |
 | `C0-HASHSLOT` | Implement hash slot calculation and vectors | new cluster module | cargo tests |
 | `C0-KEYSPECS` | Audit key extraction / CROSSSLOT requirements | command metadata docs/tests | cargo tests |
 | `H1-SENTINEL-INVENTORY` | Bucket Sentinel TCL and command surface | docs/harness only | no code gate |
