@@ -76,7 +76,7 @@ Artifact:
 | `integration/replication` | no summary | Red | The failed full-sync cleanup packet moves past `diskless replication child being killed is collected`; the current abort is `Master stream is correctly processed while the replica has a script in -BUSY state` with `READONLY`. Diskless/script-busy full-sync apply remains the frontier. |
 | `integration/replication-psync` | timeout | Red | Timed out at 300s; no-backlog/backlog-expired and diskless variants remain frontier. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
-| `integration/replica-redirect` | timeout | Red | `CLIENT CAPA REDIRECT` top-level and MULTI/EXEC replica redirect semantics now pass the early file assertions. `FAILOVER` now enters visible state instead of returning the parser-only unimplemented error; failover pause now lets `CLIENT CAPA` complete, moving the focused run from a blocked-client failure line to a silent timeout in the same failover test. |
+| `integration/replica-redirect` | timeout | Red | `CLIENT CAPA REDIRECT` top-level and MULTI/EXEC replica redirect semantics now pass the early file assertions. Manual `FAILOVER` now reaches timeout-driven handoff in Rust kits and a live two-process probe, including blocked `BRPOP` and paused `GET` REDIRECT after promotion. The official Tcl file still no-summary times out in the first failover test; side observation showed old primary `blocked_clients:2`, `paused_actions:all`, and `role:slave` while the target remained SIGSTOP'd. |
 | `unit/wait` | 39/0 | Green | WAIT command suite passed after the R4 role-change unblock packet; WAITAOF/FACK edge cases still need separate coverage. |
 
 ## Temp RDB Cleanup
@@ -1100,8 +1100,90 @@ Results:
 
 Takeaway:
 
-- The next slice needs a live-runtime blocked-client kit, not more command
-  parser work. The core state is now explicit; the missing behavior is making
-  failover pause count and unblock the exact clients that
-  `replica-redirect.tcl` expects, then implementing timeout/completion and role
-  handoff.
+- Superseded by the follow-up handoff packet below. The live-runtime
+  blocked-client kit/probe now exists and proves the production redirect path;
+  the remaining `replica-redirect.tcl` issue is converting the no-summary Tcl
+  timeout into a parsed assertion or pass.
+
+### 2026-06-13 R5 follow-up: manual failover handoff and blocked REDIRECT
+
+Scope:
+
+- Added pending `REPLCONF listening-port` / `capa` metadata so `FAILOVER TO`
+  can target replicas whose metadata arrives before `PSYNC` registers
+  `ReplicaConn`.
+- Added timeout-driven manual failover advancement in the runtime owner:
+  `waiting-for-sync` starts with write pause, `failover-in-progress` uses
+  all-client pause, and the old primary demotes to the selected replica.
+- Added `PSYNC <cached-replid> <offset> FAILOVER` selection, including the
+  zero-offset case, so the target promotes and grants `+CONTINUE` during manual
+  failover.
+- Added blocked waiter metadata for failover role changes. Redirect-capable
+  blocking pop/zset clients and non-readonly stream readers drain with
+  `-REDIRECT host:port`; readonly `XREAD` waiters remain blocked.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands --test failover_redirect_kit -- --nocapture
+cargo test -p redis-commands replica_dialer::tests -- --nocapture
+cargo test -p redis-core replication::tests -- --nocapture
+cargo test -p redis-core blocked_keys::tests -- --nocapture
+cargo test -p redis-commands --test repl_correctness_kit -- --nocapture
+cargo test -p redis-commands --test psync_reconnect_kit -- --nocapture
+cargo test -p redis-commands --test repl_buffer_kit -- --nocapture
+cargo test -p redis-commands --test fullsync_lifecycle_kit -- --nocapture
+cargo check -p redis-core -p redis-commands -p redis-server
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-failover-blocked-redirect \
+  --profile integration-repl \
+  --files integration/replica-redirect \
+  --timeout-s 180 \
+  --baseport 27479 \
+  --portcount 100 \
+  --skip-build
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-failover-observe-hang \
+  --profile integration-repl \
+  --files integration/replica-redirect \
+  --timeout-s 90 \
+  --baseport 27779 \
+  --portcount 100 \
+  --skip-build
+```
+
+Results:
+
+- `failover_redirect_kit`: 11 passed, 0 failed.
+- `replica_dialer::tests`: 2 passed, 0 failed.
+- Core replication tests: 9 passed, 0 failed.
+- Core blocked-key tests: 3 passed, 0 failed.
+- `repl_correctness_kit`: 21 passed, 0 failed.
+- `psync_reconnect_kit`: 4 passed, 0 failed.
+- `repl_buffer_kit`: 3 passed, 0 failed.
+- `fullsync_lifecycle_kit`: 1 passed, 0 failed.
+- `cargo check -p redis-core -p redis-commands -p redis-server`: passed.
+- `cargo build --bin redis-server`: passed.
+- Live two-process probe on ports `27379/27380`: passed. A blocked
+  redirect-capable `BRPOP` and a redirect-capable `GET` issued during
+  `failover-in-progress` both received `-REDIRECT 127.0.0.1:27380`; old primary
+  reported `role:slave`, `master_failover_state:no-failover`, and
+  `master_port:27380`; target reported `role:master`.
+- Focused `integration/replica-redirect`
+  `harness/oracle/results/tcl-survey/20260613T152950464324Z/result.json`:
+  timed out after 180s, no parsed failures, no summary.
+- Side-observed focused run
+  `harness/oracle/results/tcl-survey/20260613T153506959193Z/result.json`:
+  timed out after 90s, no parsed failures. During the run, external `INFO`
+  showed the old primary at `blocked_clients:2`, `paused_actions:all`,
+  `role:slave`, and `master_failover_state:failover-in-progress` while the
+  target process was still SIGSTOP'd.
+
+Takeaway:
+
+- The server-side handoff and blocked-client redirect semantics now have Rust
+  and live-process evidence. The remaining Tcl frontier is harness-facing or a
+  narrower client-lifecycle edge: explain why the official script does not
+  execute `resume_process` despite externally visible `blocked_clients:2`, then
+  turn that no-summary timeout into a parsed assertion or pass.
