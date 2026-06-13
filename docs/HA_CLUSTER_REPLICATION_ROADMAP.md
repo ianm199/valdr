@@ -328,7 +328,10 @@ the server primitive before implementing an orchestrator.
 Work packets:
 
 - **R5-FAILOVER-PARSER:** implement `FAILOVER` syntax and errors without
-  claiming failover yet.
+  claiming failover yet. The first 2026-06-13 packet registers server
+  `FAILOVER`, validates `TO`, `TIMEOUT`, `FORCE`, and `ABORT` syntax, returns
+  faithful replica/no-replica early errors, and stops with an explicit
+  unimplemented error before any coordinated failover state machine begins.
 - **R5-MANUAL-FAILOVER:** primary can coordinate a manual failover to a chosen
   replica: pause writes, wait for offset, promote replica, demote old primary.
 - **R5-REPLICA-PROMOTION:** `REPLICAOF NO ONE` promotion preserves data,

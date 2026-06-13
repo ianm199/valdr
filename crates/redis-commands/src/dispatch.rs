@@ -3622,6 +3622,10 @@ pub static HANDLERS: &[DispatchEntry] = &[
         name: b"WAITAOF",
         handler: crate::replication::waitaof_command,
     },
+    DispatchEntry {
+        name: b"FAILOVER",
+        handler: crate::replication::failover_command,
+    },
     // ── BLOOM FILTER (RedisBloom BF.* — overnight agent) ──────────────────
     DispatchEntry {
         name: b"BF.RESERVE",

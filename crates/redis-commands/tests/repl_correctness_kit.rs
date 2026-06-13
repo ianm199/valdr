@@ -135,11 +135,35 @@ fn dispatch_as_primary_argv(client_id: u64, db: &mut RedisDb, args: Vec<RedisStr
     c.drain_reply()
 }
 
+fn dispatch_result_as_primary(client_id: u64, db: &mut RedisDb, cmd: &[&[u8]]) -> Vec<u8> {
+    let mut c = Client::new(client_id);
+    c.set_args(argv(cmd));
+    let server = Arc::new(RedisServer::default());
+    let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
+    let result = {
+        let mut ctx = redis_core::CommandContext::with_server(&mut c, db, server, pubsub);
+        dispatch(&mut ctx)
+    };
+    match result {
+        Ok(()) => c.drain_reply(),
+        Err(err) => err.to_resp_payload().as_bytes().to_vec(),
+    }
+}
+
 fn count_subsequence(haystack: &[u8], needle: &[u8]) -> usize {
     haystack
         .windows(needle.len())
         .filter(|w| *w == needle)
         .count()
+}
+
+fn assert_reply_contains(reply: &[u8], needle: &[u8]) {
+    assert!(
+        reply.windows(needle.len()).any(|w| w == needle),
+        "reply {:?} did not contain {:?}",
+        String::from_utf8_lossy(reply),
+        String::from_utf8_lossy(needle),
+    );
 }
 
 fn dispatch_as_primary_on_db(
@@ -1142,6 +1166,67 @@ fn p4_wait_and_waitaof_waiters_unblock_on_role_change() {
             String::from_utf8_lossy(&reply),
         );
     }
+}
+
+// ─── R5 FAILOVER parser-only groundwork ─────────────────────────────────────
+
+#[test]
+fn r5_failover_parser_registered_and_rejects_no_replica_state() {
+    let _g = repl_guard();
+    global_replication_state().become_master();
+
+    let mut db = RedisDb::new(0);
+    let reply = dispatch_result_as_primary(990_001, &mut db, &[b"FAILOVER"]);
+    assert_reply_contains(&reply, b"FAILOVER requires connected replicas.");
+    assert!(
+        !reply.windows(b"unknown command".len())
+            .any(|w| w.eq_ignore_ascii_case(b"unknown command")),
+        "FAILOVER should be registered, got {:?}",
+        String::from_utf8_lossy(&reply),
+    );
+
+    let abort = dispatch_result_as_primary(990_002, &mut db, &[b"FAILOVER", b"ABORT"]);
+    assert_reply_contains(&abort, b"No failover in progress.");
+
+    let bad_timeout = dispatch_result_as_primary(
+        990_003,
+        &mut db,
+        &[b"FAILOVER", b"TIMEOUT", b"0"],
+    );
+    assert_reply_contains(&bad_timeout, b"FAILOVER timeout must be greater than 0");
+
+    let bad_target = dispatch_result_as_primary(990_004, &mut db, &[b"FAILOVER", b"TO", b"host"]);
+    assert_reply_contains(&bad_target, b"syntax error");
+}
+
+#[test]
+fn r5_failover_parser_keeps_state_and_capability_boundaries() {
+    let _g = repl_guard();
+    let repl = global_replication_state();
+    repl.become_replica_of(RedisString::from_bytes(b"127.0.0.1"), 6379);
+
+    let mut db = RedisDb::new(0);
+    let as_replica = dispatch_result_as_primary(990_005, &mut db, &[b"FAILOVER"]);
+    assert_reply_contains(&as_replica, b"FAILOVER is not valid when server is a replica.");
+
+    repl.become_master();
+    let _capture = ReplCapture::attach(990_006, repl.master_offset());
+
+    let force_without_timeout = dispatch_result_as_primary(
+        990_007,
+        &mut db,
+        &[b"FAILOVER", b"TO", b"127.0.0.1", b"6379", b"FORCE"],
+    );
+    assert_reply_contains(
+        &force_without_timeout,
+        b"FAILOVER with force option requires both a timeout and target HOST and IP.",
+    );
+
+    let would_start_real_failover = dispatch_result_as_primary(990_008, &mut db, &[b"FAILOVER"]);
+    assert_reply_contains(
+        &would_start_real_failover,
+        b"FAILOVER is parsed but coordinated failover is not implemented yet.",
+    );
 }
 
 // ─── AOF round-trip (green capability) ───────────────────────────────────────

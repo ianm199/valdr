@@ -433,6 +433,78 @@ pub fn waitaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     ctx.reply_integer(ackreplicas)
 }
 
+/// `FAILOVER [TO <HOST> <PORT> [FORCE]] [ABORT] [TIMEOUT <timeout>]`
+///
+/// Parser/state guard only. Valdr does not yet implement the coordinated
+/// failover state machine, so syntactically valid requests stop at the same
+/// early state checks as Valkey and then return an explicit unsupported error
+/// instead of pretending failover has started.
+pub fn failover_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
+    if ctx.arg_count() == 2 && ascii_eq_ignore_case(ctx.arg(1usize)?.as_bytes(), b"ABORT") {
+        return Err(RedisError::runtime(b"ERR No failover in progress."));
+    }
+
+    let mut timeout_ms: i64 = 0;
+    let mut has_target = false;
+    let mut force = false;
+    let mut i = 1usize;
+    while i < ctx.arg_count() {
+        let arg = ctx.arg(i)?;
+        if ascii_eq_ignore_case(arg.as_bytes(), b"TIMEOUT")
+            && i + 1 < ctx.arg_count()
+            && timeout_ms == 0
+        {
+            timeout_ms = parse_i64(ctx.arg(i + 1usize)?.as_bytes())
+                .map_err(|_| RedisError::runtime(b"ERR value is not an integer or out of range"))?;
+            if timeout_ms <= 0 {
+                return Err(RedisError::runtime(
+                    b"ERR FAILOVER timeout must be greater than 0",
+                ));
+            }
+            i += 2;
+            continue;
+        }
+        if ascii_eq_ignore_case(arg.as_bytes(), b"TO")
+            && i + 2 < ctx.arg_count()
+            && !has_target
+        {
+            let _host = ctx.arg(i + 1usize)?;
+            let _port = parse_i64(ctx.arg(i + 2usize)?.as_bytes())
+                .map_err(|_| RedisError::runtime(b"ERR value is not an integer or out of range"))?;
+            has_target = true;
+            i += 3;
+            continue;
+        }
+        if ascii_eq_ignore_case(arg.as_bytes(), b"FORCE") && !force {
+            force = true;
+            i += 1;
+            continue;
+        }
+        return Err(RedisError::runtime(b"ERR syntax error"));
+    }
+
+    let repl = global_replication_state();
+    if repl.is_replica() {
+        return Err(RedisError::runtime(
+            b"ERR FAILOVER is not valid when server is a replica.",
+        ));
+    }
+    if repl.connected_replicas() == 0 {
+        return Err(RedisError::runtime(
+            b"ERR FAILOVER requires connected replicas.",
+        ));
+    }
+    if force && (timeout_ms == 0 || !has_target) {
+        return Err(RedisError::runtime(
+            b"ERR FAILOVER with force option requires both a timeout and target HOST and IP.",
+        ));
+    }
+
+    Err(RedisError::runtime(
+        b"ERR FAILOVER is parsed but coordinated failover is not implemented yet.",
+    ))
+}
+
 fn block_waitaof_waiter(
     ctx: &mut CommandContext<'_>,
     target_offset: i64,

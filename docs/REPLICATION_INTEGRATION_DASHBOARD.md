@@ -77,7 +77,7 @@ Artifact:
 | `integration/replication` | no summary | Red | Aborts at `diskless replication child being killed is collected` with `child process exited abnormally`; diskless/full-sync behavior remains the frontier. |
 | `integration/replication-psync` | timeout | Red | Timed out at 300s; no-backlog/backlog-expired and diskless variants remain frontier. |
 | `integration/replication-aof-sync` | 1/5 | Red | RDB-reuse-as-AOF-base and diskless AOF fallback behavior. |
-| `integration/replica-redirect` | no summary | Red | Aborts at `client paused before and during failover-in-progress`; `FAILOVER` is still unknown. |
+| `integration/replica-redirect` | no summary | Red | `FAILOVER` is now parsed, but the file still aborts at `client paused before and during failover-in-progress` with explicit coordinated-failover-unimplemented error; redirect semantics also still fail earlier cases. |
 | `unit/wait` | 39/0 | Green | WAIT command suite passed after the R4 role-change unblock packet; WAITAOF/AOF integration still tracked by `replication-aof-sync`. |
 
 ## Temp RDB Cleanup
@@ -115,8 +115,9 @@ visible integration frontiers are now:
 - `R4-WAIT/WAITAOF`: role-change unblock now covers both WAIT and WAITAOF for
   `REPLICAOF` topology changes; replica FACK/disconnect semantics and
   `replication-aof-sync` remain open.
-- `R5-FAILOVER-PARSER`: start failover syntax and faithful errors before any
-  HA claim.
+- `R5-MANUAL-FAILOVER`: server `FAILOVER` is now parser-only; the next useful
+  work is the real write pause, offset wait, promotion/demotion, and redirect
+  behavior needed by `replica-redirect`.
 
 ## Packet Evidence
 
@@ -509,3 +510,49 @@ Results:
   reported `unit/wait` 39/0.
 - `integration/replication-aof-sync` was not rerun in this packet and remains
   at the current 1/5 frontier.
+
+### R5-FAILOVER-PARSER
+
+Status: parser-only progress on 2026-06-13; no HA/failover claim.
+
+Implementation:
+
+- Server `FAILOVER` is registered in the runtime dispatch table.
+- The parser accepts the Valkey server syntax:
+  `FAILOVER [TO <HOST> <PORT> [FORCE]] [ABORT] [TIMEOUT <timeout>]`.
+- `ABORT`, invalid `TIMEOUT`, incomplete `TO`, replica-mode, no-replica, and
+  `FORCE` precondition errors are covered.
+- A syntactically valid command that would need the real coordinated failover
+  state machine returns an explicit unimplemented error instead of starting any
+  fake role transition.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands --test repl_correctness_kit failover -- --nocapture
+cargo test -p redis-commands --test repl_correctness_kit -- --nocapture
+cargo check -p redis-core -p redis-commands -p redis-server
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-r5-failover-parser \
+  --profile integration-repl \
+  --timeout-s 300 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replica-redirect \
+  --isolated-tests-copy \
+  --skip-build
+```
+
+Results:
+
+- Focused failover parser filter: 2 passed, 0 failed.
+- `repl_correctness_kit`: 21 passed, 0 failed.
+- `cargo check -p redis-core -p redis-commands -p redis-server`: passed.
+- `cargo build --bin redis-server`: passed.
+- Focused TCL:
+  `harness/oracle/results/tcl-survey/20260613T044419486652Z/result.json`
+  still has no summary for `integration/replica-redirect`; it now aborts with
+  `ERR FAILOVER is parsed but coordinated failover is not implemented yet.`
+  rather than `unknown command`.
