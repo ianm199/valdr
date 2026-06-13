@@ -2620,6 +2620,10 @@ pub static HANDLERS: &[DispatchEntry] = &[
         handler: crate::connection::client_command,
     },
     DispatchEntry {
+        name: b"CLUSTER",
+        handler: crate::cluster::cluster_command,
+    },
+    DispatchEntry {
         name: b"DEBUG",
         handler: crate::connection::debug_command,
     },

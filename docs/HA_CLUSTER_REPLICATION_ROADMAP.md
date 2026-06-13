@@ -434,7 +434,8 @@ different consistency model and its own client contract.
 Work packets that can run early and mostly independently:
 
 - **C0-HASHSLOT:** implement CRC16 slot calculation and hashtag extraction in a
-  focused module with tests against official vectors.
+  focused module with tests against official vectors. Completed on
+  2026-06-13 for `CLUSTER KEYSLOT`; this does not enable cluster mode.
 - **C0-KEYSPECS:** audit command key extraction for cluster routing. Multi-key
   commands need `CROSSSLOT` behavior when keys span slots.
 - **C0-CONFIG:** add config surface for cluster-enabled, node id, announced
@@ -449,6 +450,21 @@ Gate:
 cargo test -p redis-core cluster
 cargo test -p redis-commands cluster
 ```
+
+Evidence:
+
+- `crates/redis-commands/src/cluster.rs` implements CRC16/XMODEM, Valkey-style
+  hashtag extraction, and `CLUSTER KEYSLOT`.
+- Tests cover the standard CRC16 vector, known key-slot vectors, hashtag edge
+  cases, direct handler execution, and dispatch through the parent `CLUSTER`
+  command.
+- Gate on 2026-06-13:
+
+  ```bash
+  cargo test -p redis-commands cluster -- --nocapture
+  ```
+
+  Result: 5 passed, 0 failed.
 
 ### C1: Static Single-Node Cluster Compatibility
 

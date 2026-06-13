@@ -13,6 +13,7 @@ pub mod bitops;
 pub mod bloom;
 pub mod client_cmd;
 pub mod client_limits;
+pub mod cluster;
 pub mod command_meta;
 pub mod config_cmd;
 pub mod connection;
