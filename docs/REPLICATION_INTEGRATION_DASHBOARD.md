@@ -696,7 +696,8 @@ Results:
 ### R3-RECONNECT-MATRIX
 
 Status: completed on 2026-06-13 for master-side PSYNC decision coverage;
-extended with replica target-change state hardening on 2026-06-13.
+extended with replica target-change state hardening and a standalone
+`psync_reconnect_kit` on 2026-06-13.
 
 Implementation:
 
@@ -712,6 +713,10 @@ Implementation:
   same-target reconnects, but clears them when `REPLICAOF` changes host or port.
   This prevents a new primary from receiving stale PSYNC metadata while keeping
   the live dialer eligible for partial resync after ordinary disconnects.
+- `psync_reconnect_kit.rs` now drives the real `psync_command` entrypoint for
+  same-primary `+CONTINUE`, backlog-expired `+FULLRESYNC`, wrong replid, future
+  offset, and fresh `PSYNC ? -1` metric behavior. It also keeps the
+  target-change cache rule in a deterministic standalone kit.
 
 Evidence:
 
@@ -723,7 +728,9 @@ cargo test -p redis-commands replication::tests::psync -- --nocapture
 cargo test -p redis-core \
   replication::tests::target_change_resets_cached_partial_resync_state \
   -- --nocapture
+cargo test -p redis-commands --test psync_reconnect_kit -- --nocapture
 cargo test -p redis-commands --test repl_correctness_kit
+cargo test -p redis-commands --test repl_buffer_kit -- --nocapture
 cargo check -p redis-core -p redis-commands -p redis-server
 ```
 
@@ -732,7 +739,9 @@ Results:
 - Focused decision-matrix unit test: passed.
 - Focused PSYNC unit filter: 2 passed, 0 failed.
 - Focused target-change state unit test: passed.
-- `repl_correctness_kit`: 18 passed, 0 failed.
+- `psync_reconnect_kit`: 4 passed, 0 failed.
+- `repl_correctness_kit`: 21 passed, 0 failed.
+- `repl_buffer_kit`: 3 passed, 0 failed.
 - `cargo check -p redis-core -p redis-commands -p redis-server`: passed.
 - `integration/replication-psync` was not rerun in this packet; the R0
   dashboard timeout remains the current slow-suite frontier.
