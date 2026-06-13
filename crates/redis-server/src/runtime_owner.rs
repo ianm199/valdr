@@ -1573,7 +1573,7 @@ impl RuntimeOwner {
                     self.apply_replica_command(argv, registry, server)
                 }
                 redis_commands::replica_dialer::ReplicaApplyKind::LoadRdb(bytes) => {
-                    self.load_replica_rdb(&bytes)
+                    self.load_replica_rdb(&bytes, server)
                 }
             };
             let _ = request.done.send(ok);
@@ -1616,22 +1616,87 @@ impl RuntimeOwner {
     /// the only thread allowed to mutate `self.dbs`, so the load happens here.
     /// The bytes are staged through a temp file because the RDB loader reads
     /// from a path.
-    fn load_replica_rdb(&mut self, bytes: &[u8]) -> bool {
+    fn load_replica_rdb(&mut self, bytes: &[u8], server: &Arc<redis_core::RedisServer>) -> bool {
         let temp_path =
             std::env::temp_dir().join(format!("valdr-replica-incoming-{}.rdb", std::process::id()));
         if let Err(e) = std::fs::write(&temp_path, bytes) {
             eprintln!("redis-server: replica: staging incoming RDB failed: {}", e);
             return false;
         }
+        for db in &mut self.dbs {
+            db.clear();
+        }
         let result = redis_core::rdb::load_into_dbs(&mut self.dbs, &temp_path);
         let _ = std::fs::remove_file(&temp_path);
         match result {
             Ok(msg) => {
                 eprintln!("redis-server: replica: full-resync RDB loaded: {}", msg);
-                true
+                self.refresh_replica_aof_after_fullsync(bytes, server)
             }
             Err(e) => {
                 eprintln!("redis-server: replica: full-resync RDB load failed: {}", e);
+                false
+            }
+        }
+    }
+
+    fn refresh_replica_aof_after_fullsync(
+        &mut self,
+        rdb_bytes: &[u8],
+        server: &Arc<redis_core::RedisServer>,
+    ) -> bool {
+        let cfg = Arc::clone(&server.live_config);
+        if !cfg.appendonly() {
+            return true;
+        }
+
+        let dir = PathBuf::from(cfg.rdb_dir());
+        let filename = cfg.appendfilename();
+        let dirname = cfg.appenddirname();
+        let fsync_policy = cfg.appendfsync();
+        let use_rdb_preamble = cfg.aof_use_rdb_preamble();
+        let result = if use_rdb_preamble && !cfg.repl_diskless_sync() {
+            let result = redis_commands::aof::install_fullsync_rdb_as_manifest_base(
+                &dir,
+                &filename,
+                &dirname,
+                rdb_bytes,
+                fsync_policy,
+            );
+            if result.is_ok() {
+                let msg = "redis-server: Reused RDB file from primary sync as AOF base file";
+                eprintln!("{}", msg);
+                println!("{}", msg);
+            }
+            result
+        } else {
+            redis_commands::aof::rewrite_manifest_aof_from_dbs(
+                &dir,
+                &filename,
+                &dirname,
+                &self.dbs,
+                fsync_policy,
+                use_rdb_preamble,
+            )
+        };
+
+        match result {
+            Ok((base_size, current_size)) => {
+                server.persistence.set_aof_base_size(base_size);
+                server.persistence.set_aof_current_size(current_size);
+                server
+                    .persistence
+                    .set_aof_last_bgrewrite_status(redis_core::PersistenceStatus::Ok);
+                true
+            }
+            Err(err) => {
+                eprintln!(
+                    "redis-server: replica full-sync AOF refresh failed: {}",
+                    err
+                );
+                server
+                    .persistence
+                    .set_aof_last_bgrewrite_status(redis_core::PersistenceStatus::Err);
                 false
             }
         }

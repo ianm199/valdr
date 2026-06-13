@@ -175,6 +175,8 @@ fn main() {
         redis_commands::connection::set_startup_config_override(key, value);
         if key.eq_ignore_ascii_case("save") {
             live_config.set_save_enabled(value.split_whitespace().next().is_some());
+        } else if key.eq_ignore_ascii_case("repl-diskless-sync") {
+            live_config.set_repl_diskless_sync(value.eq_ignore_ascii_case("yes"));
         }
     }
     redis_core::acl::install_acl_state();

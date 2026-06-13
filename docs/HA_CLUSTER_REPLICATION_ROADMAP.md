@@ -76,8 +76,8 @@ Current red/unfinished areas from the 2026-06-13 R0 dashboard in
   expiration/PFCOUNT semantics and divergence/writable-replica cases still need
   work.
 - `replication-psync` still times out in the current full dashboard.
-- `replication-aof-sync` still exposes RDB/AOF reuse and diskless fallback
-  failures.
+- `replication-aof-sync` is green as of 2026-06-13 after full-sync RDB loads
+  refresh appendonly manifests correctly.
 - `replica-redirect.tcl` needs real `FAILOVER` plus client redirect semantics.
 
 ## Execution Rules
@@ -321,7 +321,11 @@ Work packets:
   topology changes, while preserving the existing `appendonly no` WAITAOF
   error path; `FAILOVER` and disconnect coverage remain future packets.
 - **R4-PERSISTENCE-MATRIX:** cross-check AOF/RDB/replication interactions from
-  [`AOF_ENDGAME_SPEC.md`](AOF_ENDGAME_SPEC.md).
+  [`AOF_ENDGAME_SPEC.md`](AOF_ENDGAME_SPEC.md). The 2026-06-13 AOF full-sync
+  packet made `integration/replication-aof-sync` green by replacing stale
+  replica keyspace on full-sync RDB load, reusing disk-based RDB payloads as
+  `.base.rdb` files when safe, and falling back to manifest rewrite for
+  diskless sync.
 
 Gate:
 

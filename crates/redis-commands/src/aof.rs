@@ -1613,6 +1613,85 @@ pub fn open_manifest_current_incr_writer(
     Ok((writer, base_size, current_size))
 }
 
+/// Replace the manifest BASE with an RDB file received during replica full
+/// sync, then open a fresh active INCR for writes that arrive after the sync.
+pub fn install_fullsync_rdb_as_manifest_base(
+    dir: &Path,
+    appendfilename: &str,
+    appenddirname: &str,
+    rdb_bytes: &[u8],
+    fsync_policy: u8,
+) -> io::Result<(u64, u64)> {
+    let aof_dir = dir.join(appenddirname);
+    std::fs::create_dir_all(&aof_dir)?;
+    let manifest_path = aof_manifest_path(dir, appendfilename, appenddirname);
+    let previous_manifest = if manifest_path.exists() {
+        load_aof_manifest(&manifest_path)?
+    } else {
+        AofManifest::default()
+    };
+
+    if let Some(previous_writer) = aof_writer() {
+        previous_writer.flush()?;
+    }
+
+    let base_seq = previous_manifest.next_base_seq();
+    let incr_seq = previous_manifest.next_incr_seq();
+    let base_name = format!("{}.{}.base.rdb", appendfilename, base_seq).into_bytes();
+    let incr_name = format!("{}.{}{}", appendfilename, incr_seq, INCR_AOF_SUFFIX).into_bytes();
+    let base_path = manifest_file_path(&aof_dir, &base_name);
+    let incr_path = manifest_file_path(&aof_dir, &incr_name);
+    let temp_base_path = aof_dir.join(format!(
+        "temp-fullsync-rdb-base-{}-{}.rdb",
+        std::process::id(),
+        base_seq
+    ));
+
+    std::fs::write(&temp_base_path, rdb_bytes)?;
+    sync_existing_file(&temp_base_path)?;
+    sync_parent_dir(&temp_base_path)?;
+    std::fs::rename(&temp_base_path, &base_path)?;
+    sync_parent_dir(&base_path)?;
+
+    let writer = Arc::new(AofWriter::open_truncate(&incr_path, fsync_policy)?);
+    let published_manifest = AofManifest {
+        base: Some(AofManifestFile {
+            name: base_name.clone(),
+            seq: base_seq,
+            file_type: AofManifestFileType::Base,
+        }),
+        history: Vec::new(),
+        incr: vec![AofManifestFile {
+            name: incr_name,
+            seq: incr_seq,
+            file_type: AofManifestFileType::Incr,
+        }],
+    };
+    persist_aof_manifest(
+        &manifest_path,
+        &published_manifest,
+        "manifest-fullsync-rdb-base",
+    )?;
+
+    let base_size = base_path.metadata().map(|m| m.len()).unwrap_or(0);
+    writer.set_current_size(base_size);
+    install_aof_writer(writer);
+
+    let previous_files: Vec<AofManifestFile> = previous_manifest
+        .load_sequence()
+        .into_iter()
+        .cloned()
+        .collect();
+    if let Err(err) = delete_aof_history_files(&aof_dir, &previous_files) {
+        eprintln!(
+            "redis-server: AOF full-sync history cleanup failed: {}",
+            err
+        );
+    }
+
+    Ok((base_size, base_size))
+}
+
 /// Open a fresh active INCR and synchronously persist a manifest that names it.
 ///
 /// This is the crash-safety boundary that lets `BGREWRITEAOF` return before the
@@ -2480,6 +2559,49 @@ fn manifest_error_at(msg: &'static str, line_num: usize, line: &[u8]) -> io::Err
             String::from_utf8_lossy(line)
         ),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fullsync_rdb_manifest_base_installs_base_and_incr() {
+        let dir = std::env::temp_dir().join(format!(
+            "valdr-aof-fullsync-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let rdb_bytes = b"REDIS0011fake-rdb-for-manifest-test";
+        let (base_size, current_size) = install_fullsync_rdb_as_manifest_base(
+            &dir,
+            "appendonly.aof",
+            "appendonlydir",
+            rdb_bytes,
+            FSYNC_NO,
+        )
+        .unwrap();
+
+        let manifest_path = aof_manifest_path(&dir, "appendonly.aof", "appendonlydir");
+        let manifest = load_aof_manifest(&manifest_path).unwrap();
+        let base = manifest.base.expect("base entry");
+        assert!(base.name.ends_with(b".base.rdb"));
+        assert_eq!(manifest.incr.len(), 1);
+        assert!(manifest.incr[0].name.ends_with(b".incr.aof"));
+        assert_eq!(base_size, rdb_bytes.len() as u64);
+        assert_eq!(current_size, rdb_bytes.len() as u64);
+
+        let base_path = manifest_file_path(&dir.join("appendonlydir"), &base.name);
+        assert_eq!(std::fs::read(base_path).unwrap(), rdb_bytes);
+
+        remove_aof_writer();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// Route `argv` through the full command-dispatch machinery against `db`.

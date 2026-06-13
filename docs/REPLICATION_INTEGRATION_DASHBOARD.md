@@ -75,9 +75,9 @@ Artifact:
 | `integration/replication-buffer` | 3/15 | Red | Full-sync/BGSAVE setup reaches counted assertions; active BGSAVE catch-up now has a real shared buffer, but longer-lived global buffer lifetime/trimming, backlog growth/shrink, partial resync from retained buffered history, and replica output-buffer disconnect semantics remain unfinished. |
 | `integration/replication` | no summary | Red | Aborts at `diskless replication child being killed is collected` with `child process exited abnormally`; diskless/full-sync behavior remains the frontier. |
 | `integration/replication-psync` | timeout | Red | Timed out at 300s; no-backlog/backlog-expired and diskless variants remain frontier. |
-| `integration/replication-aof-sync` | 1/5 | Red | RDB-reuse-as-AOF-base and diskless AOF fallback behavior. |
+| `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
 | `integration/replica-redirect` | no summary | Red | `FAILOVER` is now parsed, but the file still aborts at `client paused before and during failover-in-progress` with explicit coordinated-failover-unimplemented error; redirect semantics also still fail earlier cases. |
-| `unit/wait` | 39/0 | Green | WAIT command suite passed after the R4 role-change unblock packet; WAITAOF/AOF integration still tracked by `replication-aof-sync`. |
+| `unit/wait` | 39/0 | Green | WAIT command suite passed after the R4 role-change unblock packet; WAITAOF/FACK edge cases still need separate coverage. |
 
 ## Temp RDB Cleanup
 
@@ -119,8 +119,9 @@ visible integration frontiers are now:
   implement shared-buffer trimming and replica output-buffer disconnection
   semantics behind `replication-buffer`.
 - `R4-WAIT/WAITAOF`: role-change unblock now covers both WAIT and WAITAOF for
-  `REPLICAOF` topology changes; replica FACK/disconnect semantics and
-  `replication-aof-sync` remain open.
+  `REPLICAOF` topology changes; replica FACK/disconnect semantics remain open.
+- `R4-AOF-FULLSYNC`: `replication-aof-sync` is now green after full-sync RDB
+  loads refresh appendonly manifests correctly.
 - `R5-MANUAL-FAILOVER`: server `FAILOVER` is now parser-only; the next useful
   work is the real write pause, offset wait, promotion/demotion, and redirect
   behavior needed by `replica-redirect`.
@@ -368,6 +369,72 @@ Takeaway:
   `harness/oracle/results/tcl-survey/20260613T051700796223Z/result.json`.
   R3-BACKLOG-RESIZE needs longer-lived shared-buffer retention and
   offset-convergence work before it is safe to expose.
+
+### R4-AOF-FULLSYNC
+
+Status: `integration/replication-aof-sync` green on 2026-06-13.
+
+Implementation:
+
+- Replica full-sync RDB loading now replaces the existing replica keyspace
+  before applying the incoming RDB, so stale local keys do not survive a full
+  sync or later restart.
+- Appendonly replicas refresh their manifest after a successful full-sync RDB
+  load. Disk-based, RDB-preamble-enabled sync publishes the received RDB bytes
+  as a fresh `.base.rdb` plus active `.incr.aof`; other full-sync modes run the
+  existing manifest rewrite fallback from the loaded DBs.
+- Startup config exposure now carries `repl-diskless-sync` into `LiveConfig`,
+  allowing the AOF refresh path to distinguish the disk-based reuse case from
+  diskless fallback in the Tcl topology.
+- `aof.rs` has a focused unit test for publishing a full-sync RDB manifest
+  base plus active incr file.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands \
+  aof::tests::fullsync_rdb_manifest_base_installs_base_and_incr \
+  -- --nocapture
+cargo check -p redis-core -p redis-commands -p redis-server
+cargo test -p redis-commands --test aof_correctness_kit -- --nocapture
+cargo test -p redis-commands --test repl_correctness_kit -- --nocapture
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-aof-fullsync-base-refresh-3 \
+  --profile integration-repl \
+  --timeout-s 180 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replication-aof-sync \
+  --isolated-tests-copy \
+  --skip-build
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-aof-fullsync-base-refresh-tripwire \
+  --profile integration-repl \
+  --timeout-s 240 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replication-2,integration/block-repl \
+  --isolated-tests-copy \
+  --skip-build
+```
+
+Results:
+
+- Focused AOF manifest unit test: passed.
+- `cargo check -p redis-core -p redis-commands -p redis-server`: passed.
+- `aof_correctness_kit`: 18 passed, 0 failed.
+- `repl_correctness_kit`: 21 passed, 0 failed.
+- `cargo build --bin redis-server`: passed.
+- Focused `integration/replication-aof-sync`:
+  `harness/oracle/results/tcl-survey/20260613T053525324235Z/result.json`
+  reported 6 passed, 0 failed, 0 timed out, 0 no-summary files, and 0
+  abort/exception points.
+- Focused tripwire:
+  `harness/oracle/results/tcl-survey/20260613T053539524508Z/result.json`
+  reported `integration/replication-2` 7/0 and `integration/block-repl` 2/0.
 
 ### R1-NOOP-DIRTY
 
