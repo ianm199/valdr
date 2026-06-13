@@ -292,8 +292,13 @@ Work packets:
   window, and accepted `repl-diskless-load on-empty-db`. The focused
   `integration/replication` gate now has no abort/exception point and times
   out later in replication-link/cache-master territory; async rollback,
-  diskless pipe logs, and no-longer-useful RDB child cancellation are still
-  open.
+  diskless pipe logs, and no-longer-useful RDB child cancellation remained
+  open. The next child-lifetime slice pruned active full-sync waiter lists when
+  replicas disconnect, made owner-loop and socket-loop cleanup signal useless
+  replication BGSAVE children when `save` is disabled, and made replica-side
+  full-sync RDB reads interruptible on `REPLICAOF NO ONE`. The focused Tcl
+  gate dropped the no-longer-useful child failure and now times out with 36
+  parsed failure lines.
 - **R2-BUFFER-LIMITS:** implement replica output-buffer accounting and
   disconnection policy well enough for `replication-buffer` to count tests
   instead of dying in setup. Partial accounting surface landed on 2026-06-13:

@@ -153,11 +153,15 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
                 repl.set_cached_primary_replid(replid);
                 repl.set_replica_link(replica_link_code::TRANSFER);
                 publish_fullsync_loading_state(async_loading);
-                let rdb_bytes = match read_fullresync_rdb(&stream) {
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+                let rdb_bytes = match read_fullresync_rdb(&stream, &repl, dialer_epoch) {
                     Ok(bytes) => bytes,
                     Err(e) => {
                         eprintln!("redis-server: replica: RDB sink failed: {}", e);
                         clear_fullsync_loading_state();
+                        if !repl.dialer_epoch_is_current(dialer_epoch) {
+                            return;
+                        }
                         repl.repl_state
                             .store(repl_state_code::REPLICA_CONNECTING, Ordering::SeqCst);
                         repl.set_replica_link(replica_link_code::CONNECT);
@@ -497,8 +501,12 @@ fn parse_replid(runid: &str) -> Option<[u8; 40]> {
 }
 
 /// Read the `$<size>\r\n<rdb-bytes>` bulk payload that follows `+FULLRESYNC`.
-fn read_fullresync_rdb(stream: &TcpStream) -> io::Result<Vec<u8>> {
-    let header = read_line(stream)?;
+fn read_fullresync_rdb(
+    stream: &TcpStream,
+    repl: &ReplicationState,
+    dialer_epoch: u64,
+) -> io::Result<Vec<u8>> {
+    let header = read_line_checked(stream, repl, dialer_epoch)?;
     let header_str = std::str::from_utf8(&header)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "non-UTF8 RDB header"))?
         .trim();
@@ -514,8 +522,69 @@ fn read_fullresync_rdb(stream: &TcpStream) -> io::Result<Vec<u8>> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "cannot parse RDB size"))?;
 
     let mut buf = vec![0u8; size];
-    read_exact_from_stream(stream, &mut buf)?;
+    read_exact_from_stream_checked(stream, &mut buf, repl, dialer_epoch)?;
     Ok(buf)
+}
+
+fn read_line_checked(
+    stream: &TcpStream,
+    repl: &ReplicationState,
+    dialer_epoch: u64,
+) -> io::Result<Vec<u8>> {
+    let mut byte = [0u8; 1];
+    loop {
+        let mut line = Vec::new();
+        loop {
+            read_exact_from_stream_checked(stream, &mut byte, repl, dialer_epoch)?;
+            if byte[0] == b'\n' {
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+                break;
+            }
+            line.push(byte[0]);
+        }
+        if !line.is_empty() {
+            return Ok(line);
+        }
+    }
+}
+
+fn read_exact_from_stream_checked(
+    stream: &TcpStream,
+    buf: &mut [u8],
+    repl: &ReplicationState,
+    dialer_epoch: u64,
+) -> io::Result<()> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        if !repl.dialer_epoch_is_current(dialer_epoch) || repl.take_replica_link_drop_request() {
+            let _ = stream.shutdown(Shutdown::Both);
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "replica full-sync read interrupted by role change",
+            ));
+        }
+        match stream_read_slice(stream, &mut buf[filled..]) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "EOF reading RDB",
+                ));
+            }
+            Ok(n) => filled += n,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 fn apply_command_via_runtime_owner(argv: Vec<RedisString>, offset_after: i64) -> bool {
@@ -645,22 +714,6 @@ fn read_line(stream: &TcpStream) -> io::Result<Vec<u8>> {
     }
 }
 
-/// Read exactly `buf.len` bytes from the stream.
-fn read_exact_from_stream(stream: &TcpStream, buf: &mut [u8]) -> io::Result<()> {
-    let mut filled = 0;
-    while filled < buf.len() {
-        let n = stream_read_slice(stream, &mut buf[filled..])?;
-        if n == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "EOF reading RDB",
-            ));
-        }
-        filled += n;
-    }
-    Ok(())
-}
-
 fn stream_write(stream: &TcpStream, data: &[u8]) -> io::Result<()> {
     let mut s = stream
         .try_clone()
@@ -692,6 +745,7 @@ fn stream_read_slice(stream: &TcpStream, buf: &mut [u8]) -> io::Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
 
     fn local_state() -> ReplicationState {
         ReplicationState::new([b'1'; 40], 1024)
@@ -760,6 +814,38 @@ mod tests {
         publish_fullsync_loading_state_for_server(&server, false);
         assert!(server.persistence.loading());
         assert!(!server.persistence.async_loading());
+    }
+
+    #[test]
+    fn fullsync_rdb_read_exits_when_dialer_epoch_changes() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let writer = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept client");
+            stream_write(&stream, b"$5\r\n").expect("write RDB bulk header");
+            thread::sleep(Duration::from_millis(250));
+        });
+
+        let stream = TcpStream::connect(addr).expect("connect test stream");
+        stream
+            .set_read_timeout(Some(Duration::from_millis(20)))
+            .expect("set read timeout");
+        let repl = Arc::new(local_state());
+        let dialer_epoch = repl.dialer_epoch.load(Ordering::SeqCst);
+        let repl_for_interrupt = Arc::clone(&repl);
+        let interrupter = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            repl_for_interrupt
+                .dialer_epoch
+                .fetch_add(1, Ordering::SeqCst);
+        });
+
+        let err = read_fullresync_rdb(&stream, &repl, dialer_epoch)
+            .expect_err("epoch change should interrupt full-sync read");
+        assert_eq!(err.kind(), io::ErrorKind::Interrupted);
+
+        let _ = interrupter.join();
+        let _ = writer.join();
     }
 }
 

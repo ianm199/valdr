@@ -1197,7 +1197,7 @@ pub(crate) fn run_client_loop(
 
     let id = client.id;
     let _ = pubsub::drop_client_from_registry(&registry, id);
-    redis_core::replication::global_replication_state().remove_replica(id);
+    remove_replica_for_disconnect(id, &server);
     redis_core::tracking::remove_runtime_client_tracking(id);
     redis_core::db::watched_keys_index_remove_client(id);
     let _ = redis_core::db::watched_keys_take_dirty(id);
@@ -1372,7 +1372,7 @@ pub(crate) fn run_client_loop_tls(
     let _ = peer_addr;
     let id = client.id;
     let _ = pubsub::drop_client_from_registry(&registry, id);
-    redis_core::replication::global_replication_state().remove_replica(id);
+    remove_replica_for_disconnect(id, &server);
     redis_core::tracking::remove_runtime_client_tracking(id);
     redis_core::db::watched_keys_index_remove_client(id);
     let _ = redis_core::db::watched_keys_take_dirty(id);
@@ -1382,6 +1382,26 @@ pub(crate) fn run_client_loop_tls(
     }
     drop(outbound_tx);
     server_metrics().on_disconnect();
+}
+
+fn remove_replica_for_disconnect(id: u64, server: &redis_core::RedisServer) {
+    let repl = redis_core::replication::global_replication_state();
+    let outcome = repl.remove_replica(id);
+    let Some(child_pid) = outcome.useless_repl_child_pid else {
+        return;
+    };
+    if server.live_config.save_enabled() {
+        return;
+    }
+
+    #[cfg(unix)]
+    unsafe {
+        let _ = libc::kill(child_pid as libc::pid_t, libc::SIGUSR1);
+    }
+    eprintln!(
+        "redis-server: replication BGSAVE child {} has no waiting replicas; cancellation requested",
+        child_pid
+    );
 }
 
 /// Route the current `client.argv` through the dispatcher, locking the selected

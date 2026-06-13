@@ -246,6 +246,55 @@ fn killed_repl_child_is_collected_and_later_fullsync_can_deliver() {
 }
 
 #[test]
+fn last_fullsync_waiter_disconnect_marks_repl_child_useless() {
+    let st = ReplicationState::new(generate_runid(), 4);
+    let dir = unique_temp_dir("fullsync-useless-child");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let temp_path = dir.join("temp-repl-useless.rdb");
+    std::fs::write(&temp_path, b"partial rdb").expect("write temp rdb");
+
+    let _rx1 = attach_waiting_replica(&st, 83, 0);
+    let _rx2 = attach_waiting_replica(&st, 84, 0);
+    install_job_with_pid(&st, 221, temp_path.clone(), vec![83, 84]);
+
+    let first = st.remove_replica(83);
+    assert!(first.removed);
+    assert!(first.was_repl_bgsave_waiter);
+    assert_eq!(first.remaining_repl_bgsave_waiters, 1);
+    assert_eq!(first.useless_repl_child_pid, None);
+    assert_eq!(st.repl_child_pid(), 221);
+    let snapshot = st
+        .repl_bgsave_job_snapshot()
+        .expect("job should remain while one waiter still needs it");
+    assert_eq!(snapshot.1, vec![84]);
+
+    let last = st.remove_replica(84);
+    assert!(last.removed);
+    assert!(last.was_repl_bgsave_waiter);
+    assert_eq!(last.remaining_repl_bgsave_waiters, 0);
+    assert_eq!(last.useless_repl_child_pid, Some(221));
+    assert_eq!(
+        st.repl_child_pid(),
+        221,
+        "core reports the useless child but leaves OS reaping to the server"
+    );
+    let empty_job = st
+        .repl_bgsave_job_snapshot()
+        .expect("server still needs the job until waitpid collects the child");
+    assert!(empty_job.1.is_empty());
+
+    let collected = st
+        .collect_failed_repl_bgsave_child_exit(221)
+        .expect("signaled useless child should be collected");
+    assert!(collected.waiting_replicas.is_empty());
+    assert_eq!(st.repl_child_pid(), 0);
+    assert!(st.repl_bgsave_job_snapshot().is_none());
+    assert!(!temp_path.exists());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn replica_rdb_replacement_is_atomic_on_failed_incoming_fullsync() {
     let dir = unique_temp_dir("fullsync-atomic-rdb");
     std::fs::create_dir_all(&dir).expect("create temp dir");

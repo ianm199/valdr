@@ -410,6 +410,16 @@ pub struct ReplFullsyncTransferOutcome {
     pub needs_getack_on_completion: bool,
 }
 
+/// Result of dropping a replica connection from primary-side replication
+/// state.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ReplicaRemovalOutcome {
+    pub removed: bool,
+    pub was_repl_bgsave_waiter: bool,
+    pub remaining_repl_bgsave_waiters: usize,
+    pub useless_repl_child_pid: Option<i32>,
+}
+
 /// Immutable replication bytes retained after a full-sync RDB has been queued
 /// to one or more replicas. The bytes remain readable for PSYNC while at least
 /// one dependent replica may still need them to finish consuming the stream.
@@ -1572,13 +1582,13 @@ impl ReplicationState {
 
     /// Drop the replica record for `client_id`, if present. Called from
     /// per-connection cleanup path when a replica disconnects.
-    pub fn remove_replica(&self, client_id: ClientId) {
+    pub fn remove_replica(&self, client_id: ClientId) -> ReplicaRemovalOutcome {
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
         let mut idle_since_ms = now_ms;
-        let arm_backlog_ttl = match self.replicas.lock() {
+        let (removed, arm_backlog_ttl) = match self.replicas.lock() {
             Ok(mut g) => {
                 let removed_ack = g
                     .get(&client_id)
@@ -1588,7 +1598,7 @@ impl ReplicationState {
                     idle_since_ms = ack;
                 }
                 let removed = g.remove(&client_id).is_some();
-                removed && g.is_empty()
+                (removed, removed && g.is_empty())
             }
             Err(p) => {
                 let mut g = p.into_inner();
@@ -1600,7 +1610,7 @@ impl ReplicationState {
                     idle_since_ms = ack;
                 }
                 let removed = g.remove(&client_id).is_some();
-                removed && g.is_empty()
+                (removed, removed && g.is_empty())
             }
         };
         if arm_backlog_ttl {
@@ -1619,6 +1629,35 @@ impl ReplicationState {
         if let Ok(mut guard) = crate::client_info::client_info_registry().lock() {
             guard.set_output_buffer_memory(client_id, 0);
         }
+        let (was_repl_bgsave_waiter, remaining_repl_bgsave_waiters, child_pid) =
+            self.remove_repl_bgsave_waiter(client_id);
+        ReplicaRemovalOutcome {
+            removed,
+            was_repl_bgsave_waiter,
+            remaining_repl_bgsave_waiters,
+            useless_repl_child_pid: if was_repl_bgsave_waiter
+                && remaining_repl_bgsave_waiters == 0
+                && child_pid != 0
+            {
+                Some(child_pid)
+            } else {
+                None
+            },
+        }
+    }
+
+    fn remove_repl_bgsave_waiter(&self, client_id: ClientId) -> (bool, usize, i32) {
+        let mut guard = match self.repl_bgsave_job.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let Some(job) = guard.as_mut() else {
+            return (false, 0, 0);
+        };
+        let before = job.waiting_replicas.len();
+        job.waiting_replicas.retain(|id| *id != client_id);
+        let was_waiter = job.waiting_replicas.len() != before;
+        (was_waiter, job.waiting_replicas.len(), job.child_pid)
     }
 
     /// PID of the in-flight BGSAVE-for-replication child, or 0 when no such

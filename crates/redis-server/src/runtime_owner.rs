@@ -1006,12 +1006,12 @@ impl RuntimeOwner {
             progressed |= owner.install_pending_dynamic_listeners(&mut listeners, poll.registry());
             owner.sweep_output_buffer_limits();
             progressed |= owner.enforce_client_memory_limits(&server);
-            progressed |= owner.cleanup_closed_clients(poll.registry(), &registry);
+            progressed |= owner.cleanup_closed_clients(poll.registry(), &registry, &server);
 
             let _ = progressed;
         }
 
-        owner.close_all_clients(poll.registry(), &registry);
+        owner.close_all_clients(poll.registry(), &registry, &server);
     }
 
     fn install_pending_dynamic_listeners(
@@ -2406,6 +2406,7 @@ impl RuntimeOwner {
         &mut self,
         poll_registry: &MioRegistry,
         registry: &Arc<Mutex<PubSubRegistry>>,
+        server: &Arc<redis_core::RedisServer>,
     ) -> bool {
         let mut to_remove = Vec::new();
         for slot in self.slots.iter().flatten() {
@@ -2421,7 +2422,7 @@ impl RuntimeOwner {
                 if let Some(stream) = slot.stream.as_mut() {
                     let _ = poll_registry.deregister(stream);
                 }
-                cleanup_slot(slot, registry);
+                cleanup_slot(slot, registry, server);
             }
         }
         progressed
@@ -2431,6 +2432,7 @@ impl RuntimeOwner {
         &mut self,
         poll_registry: &MioRegistry,
         registry: &Arc<Mutex<PubSubRegistry>>,
+        server: &Arc<redis_core::RedisServer>,
     ) {
         let ids: Vec<SlotId> = self.slots.iter().flatten().map(ClientSlot::id).collect();
         for slot_id in ids {
@@ -2439,7 +2441,7 @@ impl RuntimeOwner {
                 if let Some(stream) = slot.stream.as_mut() {
                     let _ = poll_registry.deregister(stream);
                 }
-                cleanup_slot(slot, registry);
+                cleanup_slot(slot, registry, server);
             }
         }
     }
@@ -2652,11 +2654,15 @@ fn pause_exempt_current_command(argv: &[RedisString]) -> bool {
         || name.eq_ignore_ascii_case(b"RESET")
 }
 
-fn cleanup_slot(mut slot: ClientSlot, registry: &Arc<Mutex<PubSubRegistry>>) {
+fn cleanup_slot(
+    mut slot: ClientSlot,
+    registry: &Arc<Mutex<PubSubRegistry>>,
+    server: &redis_core::RedisServer,
+) {
     let id = slot.client.id;
     slot.clear_pause_postponed();
     let _ = redis_commands::pubsub::drop_client_from_registry(registry, id);
-    redis_core::replication::global_replication_state().remove_replica(id);
+    remove_replica_for_disconnect(id, server);
     redis_core::tracking::remove_runtime_client_tracking(id);
     redis_core::db::watched_keys_index_remove_client(id);
     let _ = redis_core::db::watched_keys_take_dirty(id);
@@ -2668,6 +2674,26 @@ fn cleanup_slot(mut slot: ClientSlot, registry: &Arc<Mutex<PubSubRegistry>>) {
         let _ = stream.shutdown(Shutdown::Both);
     }
     server_metrics().on_disconnect();
+}
+
+fn remove_replica_for_disconnect(id: u64, server: &redis_core::RedisServer) {
+    let repl = redis_core::replication::global_replication_state();
+    let outcome = repl.remove_replica(id);
+    let Some(child_pid) = outcome.useless_repl_child_pid else {
+        return;
+    };
+    if server.live_config.save_enabled() {
+        return;
+    }
+
+    #[cfg(unix)]
+    unsafe {
+        let _ = libc::kill(child_pid as libc::pid_t, libc::SIGUSR1);
+    }
+    eprintln!(
+        "redis-server: replication BGSAVE child {} has no waiting replicas; cancellation requested",
+        child_pid
+    );
 }
 
 #[cfg(test)]

@@ -73,7 +73,7 @@ Artifact:
 | `integration/replication-3` | 3/4 | Red | Expiry consistency, writable-replica expired-key behavior, and PFCOUNT expired-key/cache semantics. |
 | `integration/replication-4` | 15/2 | Red | SPOP rewrite cases now pass; remaining failures are divergence/default writable-replica cases. |
 | `integration/replication-buffer` | 4/11 | Red | Fresh post-PSYNC baseline still reaches counted assertions without timeout. Shared vs private output-buffer semantics are now pinned in `repl_buffer_kit`; remaining failures are Valkey-style global replication-buffer memory, BGSAVE/slow-replica backlog outgrowth, partial resync across broader retained history, and typed live output-buffer disconnect/drain policy. |
-| `integration/replication` | timeout/no summary | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, the first async-loading CONFIG exception, successful swapdb function-context mismatch, parent-killed child discovery, and `repl-diskless-load on-empty-db` config parsing. The current focused run times out without an abort after later replication-link assertions. |
+| `integration/replication` | timeout/no summary | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, the first async-loading CONFIG exception, successful swapdb function-context mismatch, parent-killed child discovery, `repl-diskless-load on-empty-db`, and no-longer-useful RDB child cancellation. The current focused run times out without an abort after later replication-link assertions. |
 | `integration/replication-psync` | 90/0 | Green | Focused gate is green after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support for the replica dialer. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
 | `integration/replica-redirect` | timeout | Red | `CLIENT CAPA REDIRECT` top-level and MULTI/EXEC replica redirect semantics now pass the early file assertions. Manual `FAILOVER` now reaches timeout-driven handoff in Rust kits and a live two-process probe, including blocked `BRPOP` and paused `GET` REDIRECT after promotion. The official Tcl file still no-summary times out in the first failover test; side observation showed old primary `blocked_clients:2`, `paused_actions:all`, and `role:slave` while the target remained SIGSTOP'd. |
@@ -1191,8 +1191,74 @@ Takeaway:
   can now observe the delayed replication child, parent death no longer aborts
   the file, and `on-empty-db` is accepted. Remaining `integration/replication`
   work is now beyond child collection: async rollback/DB-size drift, diskless
-  pipe logs, killing no-longer-useful RDB children, cache-master handoff, and
-  later replication-link behavior.
+  pipe logs, cache-master handoff, and later replication-link behavior.
+
+### 2026-06-13 R2 follow-up: cancel useless full-sync children
+
+Scope:
+
+- `ReplicationState::remove_replica` now prunes active full-sync waiter lists
+  and returns a typed `ReplicaRemovalOutcome`.
+- Runtime-owner and thread-per-connection cleanup paths now request
+  replication BGSAVE child cancellation when the last full-sync waiter leaves
+  and normal `save` rules are disabled. If `save` remains configured, Valdr
+  preserves the child to match the upstream test's "still useful for save"
+  expectation.
+- Replica-side full-sync RDB reads now use bounded read timeouts and check the
+  dialer epoch/drop flag. This lets `REPLICAOF NO ONE` interrupt an in-flight
+  RDB receive and close the primary socket promptly instead of waiting for the
+  old primary to finish sending the RDB.
+- Extended `fullsync_lifecycle_kit.rs` with a two-waiter case that proves only
+  the final waiter disconnect marks the replication child useless.
+- Added a `replica_dialer::tests` socket-pair case proving a full-sync RDB read
+  exits with `Interrupted` when the dialer epoch changes mid-read.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands replica_dialer::tests -- --nocapture
+cargo test -p redis-commands --test fullsync_lifecycle_kit -- --nocapture
+cargo test -p redis-core replication::tests -- --nocapture
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --files integration/replication \
+  --profile integration-repl \
+  --runner-id fullsync-useless-child-runtime \
+  --timeout-s 420 \
+  --baseport 32479 \
+  --portcount 100 \
+  --skip-build
+python3 harness/oracle/tcl-survey.py \
+  --files integration/replication-2,integration/block-repl \
+  --profile integration-repl \
+  --runner-id fullsync-useless-child-tripwire \
+  --timeout-s 240 \
+  --baseport 32579 \
+  --portcount 100 \
+  --skip-build
+```
+
+Results:
+
+- `replica_dialer::tests`: 4 passed, 0 failed.
+- `fullsync_lifecycle_kit`: 9 passed, 0 failed.
+- `redis-core replication::tests`: 15 passed, 0 failed.
+- `cargo build --bin redis-server`: passed.
+- Focused `integration/replication`:
+  `harness/oracle/results/tcl-survey/20260613T193718529072Z/result.json`
+  timed out at 420 seconds, still without a parsed summary, but had no abort
+  test and no exception. Parsed failure lines dropped from 37 to 36; the
+  `Kill rdb child process if its dumping RDB is not useful` failure is gone.
+- Focused no-regression tripwire:
+  `harness/oracle/results/tcl-survey/20260613T194426703275Z/result.json`
+  reported `integration/replication-2` 7/0 and `integration/block-repl` 2/0.
+
+Takeaway:
+
+- Full-sync child lifetime is now tied to active waiters rather than stale job
+  membership. The remaining `integration/replication` failures are concentrated
+  in async rollback/DB-size drift, diskless pipe observability, cache-master
+  handoff, and replication-link reply validation.
 
 ### R4-AOF-FULLSYNC
 
