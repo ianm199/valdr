@@ -703,13 +703,19 @@ pub fn bgsave_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         let pid = unsafe {
             let p = libc::fork();
             if p == 0 {
+                let parent_pid = libc::getppid();
+                arm_child_parent_death_signal();
+                if child_parent_is_gone(parent_pid) {
+                    libc::_exit(1);
+                }
                 let dbs = snapshot.to_dbs();
                 let child_pid = libc::getpid();
-                let exit_code = if save_bgsave_child_databases(&dbs, &path, child_pid).is_ok() {
-                    0i32
-                } else {
-                    1i32
-                };
+                let exit_code =
+                    if save_bgsave_child_databases(&dbs, &path, child_pid, parent_pid).is_ok() {
+                        0i32
+                    } else {
+                        1i32
+                    };
                 libc::_exit(exit_code);
             }
             p
@@ -730,6 +736,7 @@ pub fn bgsave_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             let dbs = snapshot.to_dbs();
             match save_rdb_databases_with_current_functions(&dbs, &path) {
                 Ok(()) => {
+                    sleep_for_rdb_key_save_delay_for_dbs(&dbs);
                     let now = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .map(|d| d.as_secs() as i64)
@@ -798,22 +805,71 @@ fn save_bgsave_child_databases(
     dbs: &[RedisDb],
     final_path: &Path,
     child_pid: i32,
+    parent_pid: libc::pid_t,
 ) -> std::io::Result<()> {
     let temp_path = bgsave_temp_path(final_path, child_pid);
     let _ = std::fs::remove_file(&temp_path);
     let _ = std::fs::remove_file(temp_path.with_extension("rdb.tmp"));
     save_rdb_databases_with_current_functions(dbs, &temp_path)?;
-    sleep_for_rdb_key_save_delay();
+    if !sleep_for_rdb_key_save_delay_with_parent(parent_pid, rdb_snapshot_key_count(dbs)) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "parent process exited during BGSAVE",
+        ));
+    }
 
     std::fs::rename(&temp_path, final_path)
 }
 
-fn sleep_for_rdb_key_save_delay() {
+fn sleep_for_rdb_key_save_delay_for_dbs(dbs: &[RedisDb]) {
+    let _ = sleep_for_rdb_key_save_delay_checked(rdb_snapshot_key_count(dbs), || false);
+}
+
+fn rdb_snapshot_key_count(dbs: &[RedisDb]) -> usize {
+    dbs.iter().map(RedisDb::len).sum::<usize>().max(1)
+}
+
+fn sleep_for_rdb_key_save_delay_checked(
+    key_count: usize,
+    mut should_abort: impl FnMut() -> bool,
+) -> bool {
     let delay_us = crate::connection::rdb_key_save_delay_us();
-    if delay_us > 0 {
-        // Upstream's debug knob delays per key. Valdr caps it to keep the
-        // suite bounded while preserving the observable background-save window.
-        thread::sleep(Duration::from_micros(delay_us.min(5_000_000)));
+    if delay_us == 0 {
+        return !should_abort();
+    }
+
+    // Upstream's debug knob delays per key. Valdr caps it to keep the suite
+    // bounded while preserving the observable background-save window. Sleep in
+    // small chunks so fork children can exit promptly when their parent dies.
+    let mut remaining =
+        ((delay_us as u128).saturating_mul(key_count as u128)).min(5_000_000) as u64;
+    while remaining > 0 {
+        if should_abort() {
+            return false;
+        }
+        let chunk = remaining.min(10_000);
+        thread::sleep(Duration::from_micros(chunk));
+        remaining -= chunk;
+    }
+    !should_abort()
+}
+
+#[cfg(unix)]
+fn sleep_for_rdb_key_save_delay_with_parent(parent_pid: libc::pid_t, key_count: usize) -> bool {
+    sleep_for_rdb_key_save_delay_checked(key_count, || child_parent_is_gone(parent_pid))
+}
+
+#[cfg(unix)]
+fn child_parent_is_gone(parent_pid: libc::pid_t) -> bool {
+    parent_pid <= 1 || unsafe { libc::getppid() != parent_pid }
+}
+
+#[cfg(unix)]
+fn arm_child_parent_death_signal() {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        let _ = libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
     }
 }
 
@@ -870,10 +926,25 @@ pub fn bgsave_for_replication(
         let pid = unsafe {
             let p = libc::fork();
             if p == 0 {
+                let parent_pid = libc::getppid();
+                arm_child_parent_death_signal();
+                if child_parent_is_gone(parent_pid) {
+                    libc::_exit(1);
+                }
                 let dbs = snapshot.to_dbs();
-                let save_result = save_rdb_databases_with_current_functions(&dbs, &path_for_child);
-                if save_result.is_ok() {
-                    sleep_for_rdb_key_save_delay();
+                let mut save_result =
+                    save_rdb_databases_with_current_functions(&dbs, &path_for_child);
+                if save_result.is_ok()
+                    && !sleep_for_rdb_key_save_delay_with_parent(
+                        parent_pid,
+                        rdb_snapshot_key_count(&dbs),
+                    )
+                {
+                    let _ = std::fs::remove_file(&path_for_child);
+                    save_result = Err(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "parent process exited during BGSAVE-for-replication",
+                    ));
                 }
                 let exit_code = if save_result.is_ok() { 0i32 } else { 1i32 };
                 libc::_exit(exit_code);
@@ -917,7 +988,7 @@ pub fn bgsave_for_replication(
             let dbs = snapshot.to_dbs();
             let ok = save_rdb_databases_with_current_functions(&dbs, &temp_for_thread).is_ok();
             if ok {
-                sleep_for_rdb_key_save_delay();
+                sleep_for_rdb_key_save_delay_for_dbs(&dbs);
             }
             if !ok {
                 eprintln!("redis-server: BGSAVE-for-replication thread fallback save failed");
@@ -1186,6 +1257,14 @@ mod tests {
         server.subtract_dirty_saturating(server.persistence.rdb_dirty_before_bgsave());
 
         assert_eq!(server.dirty(), 3);
+    }
+
+    #[test]
+    fn checked_rdb_delay_aborts_when_parent_death_is_observed() {
+        assert!(
+            !sleep_for_rdb_key_save_delay_checked(1, || true),
+            "fork children must be able to abort even when the debug delay is zero"
+        );
     }
 }
 

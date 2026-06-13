@@ -399,6 +399,17 @@ pub struct ReplBgsaveJob {
     pub needs_getack_on_completion: bool,
 }
 
+/// Summary of a completed full-sync RDB transfer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplFullsyncTransferOutcome {
+    pub delivered_replicas: Vec<ClientId>,
+    pub failed_replicas: Vec<ClientId>,
+    pub snapshot_offset: i64,
+    pub rdb_len: usize,
+    pub retained_catchup_len: usize,
+    pub needs_getack_on_completion: bool,
+}
+
 /// Immutable replication bytes retained after a full-sync RDB has been queued
 /// to one or more replicas. The bytes remain readable for PSYNC while at least
 /// one dependent replica may still need them to finish consuming the stream.
@@ -1662,6 +1673,87 @@ impl ReplicationState {
         }
         self.set_repl_child_pid(0);
         job
+    }
+
+    /// Collect a failed BGSAVE-for-replication child exit. `child_pid` must
+    /// match the currently-published child; stale observations from a previous
+    /// job are ignored so they cannot tear down a later full sync.
+    pub fn collect_failed_repl_bgsave_child_exit(&self, child_pid: i32) -> Option<ReplBgsaveJob> {
+        if child_pid == 0 || self.repl_child_pid() != child_pid {
+            return None;
+        }
+        self.abort_repl_bgsave_job()
+    }
+
+    /// Complete a successful BGSAVE-for-replication job after the caller has
+    /// read the generated RDB bytes. This queues the private RDB bulk, queues
+    /// shared catch-up bytes, marks successful replicas online, and retains
+    /// the catch-up segment while those replicas may still need it.
+    pub fn complete_repl_bgsave_transfer(
+        &self,
+        job: ReplBgsaveJob,
+        rdb_bytes: Vec<u8>,
+    ) -> ReplFullsyncTransferOutcome {
+        let mut header = format!("${}\r\n", rdb_bytes.len()).into_bytes();
+        header.extend_from_slice(&rdb_bytes);
+
+        let snapshot_offset = job.snapshot_offset;
+        let current_offset = self.master_offset();
+        let catch_up = if current_offset > snapshot_offset {
+            if job.catch_up_bytes.is_empty() {
+                let guard = match self.backlog.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                guard.read_at(snapshot_offset, (current_offset - snapshot_offset) as usize)
+            } else {
+                Some(job.catch_up_bytes.clone())
+            }
+        } else {
+            None
+        };
+
+        let mut delivered_replicas = Vec::new();
+        let mut failed_replicas = Vec::new();
+        for client_id in &job.waiting_replicas {
+            self.set_replica_state(*client_id, ReplicaState::SendingRdb);
+            if !self.send_private_to_replica(*client_id, header.clone()) {
+                failed_replicas.push(*client_id);
+                continue;
+            }
+
+            let mut catch_up_queued = catch_up.as_ref().is_none_or(|bytes| bytes.is_empty());
+            if let Some(bytes) = catch_up.as_ref().filter(|bytes| !bytes.is_empty()) {
+                catch_up_queued = self.send_to_replica(*client_id, bytes.clone());
+                if !catch_up_queued {
+                    failed_replicas.push(*client_id);
+                }
+            }
+
+            if catch_up_queued {
+                delivered_replicas.push(*client_id);
+            }
+            self.set_replica_state(*client_id, ReplicaState::Online);
+        }
+
+        let retained_catchup_len = match catch_up.filter(|bytes| !bytes.is_empty()) {
+            Some(bytes) => {
+                let len = bytes.len();
+                self.retain_fullsync_history(snapshot_offset, bytes, &delivered_replicas);
+                len
+            }
+            None => 0,
+        };
+        self.set_repl_child_pid(0);
+
+        ReplFullsyncTransferOutcome {
+            delivered_replicas,
+            failed_replicas,
+            snapshot_offset,
+            rdb_len: rdb_bytes.len(),
+            retained_catchup_len,
+            needs_getack_on_completion: job.needs_getack_on_completion,
+        }
     }
 
     /// Append `client_id` to the current job's waiting-replica list when a

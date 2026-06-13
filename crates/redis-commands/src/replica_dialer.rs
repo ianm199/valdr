@@ -233,7 +233,9 @@ fn publish_fullsync_loading_state_for_server(server: &RedisServer, async_loading
             println!("redis-server: Loading DB in memory");
             server.persistence.set_async_loading(true);
         }
-        ReplDisklessLoadMode::Swapdb | ReplDisklessLoadMode::FlushBeforeLoad => {
+        ReplDisklessLoadMode::Swapdb
+        | ReplDisklessLoadMode::FlushBeforeLoad
+        | ReplDisklessLoadMode::OnEmptyDb => {
             println!("redis-server: Loading DB in memory");
             server.persistence.set_loading(true);
         }
@@ -747,6 +749,14 @@ mod tests {
         server
             .live_config
             .set_repl_diskless_load(ReplDisklessLoadMode::FlushBeforeLoad);
+        publish_fullsync_loading_state_for_server(&server, false);
+        assert!(server.persistence.loading());
+        assert!(!server.persistence.async_loading());
+
+        server.persistence.set_loading(false);
+        server
+            .live_config
+            .set_repl_diskless_load(ReplDisklessLoadMode::OnEmptyDb);
         publish_fullsync_loading_state_for_server(&server, false);
         assert!(server.persistence.loading());
         assert!(!server.persistence.async_loading());

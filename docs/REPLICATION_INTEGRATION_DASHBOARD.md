@@ -73,7 +73,7 @@ Artifact:
 | `integration/replication-3` | 3/4 | Red | Expiry consistency, writable-replica expired-key behavior, and PFCOUNT expired-key/cache semantics. |
 | `integration/replication-4` | 15/2 | Red | SPOP rewrite cases now pass; remaining failures are divergence/default writable-replica cases. |
 | `integration/replication-buffer` | 4/11 | Red | Fresh post-PSYNC baseline still reaches counted assertions without timeout. Shared vs private output-buffer semantics are now pinned in `repl_buffer_kit`; remaining failures are Valkey-style global replication-buffer memory, BGSAVE/slow-replica backlog outgrowth, partial resync across broader retained history, and typed live output-buffer disconnect/drain policy. |
-| `integration/replication` | timeout/no summary | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, the first async-loading CONFIG exception, and the successful swapdb function-context mismatch. The current focused run times out after old-dataset exposure/DB-size drift on async failure plus diskless short-read/drop log-state assertions. |
+| `integration/replication` | timeout/no summary | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, the first async-loading CONFIG exception, successful swapdb function-context mismatch, parent-killed child discovery, and `repl-diskless-load on-empty-db` config parsing. The current focused run times out without an abort after later replication-link assertions. |
 | `integration/replication-psync` | 90/0 | Green | Focused gate is green after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support for the replica dialer. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
 | `integration/replica-redirect` | timeout | Red | `CLIENT CAPA REDIRECT` top-level and MULTI/EXEC replica redirect semantics now pass the early file assertions. Manual `FAILOVER` now reaches timeout-driven handoff in Rust kits and a live two-process probe, including blocked `BRPOP` and paused `GET` REDIRECT after promotion. The official Tcl file still no-summary times out in the first failover test; side observation showed old primary `blocked_clients:2`, `paused_actions:all`, and `role:slave` while the target remained SIGSTOP'd. |
@@ -107,8 +107,8 @@ visible integration frontiers are now:
   shortcut is removed, so remaining full-sync work must pass through the
   streamed RDB handoff path.
 - `R2-BGSAVE-WINDOW`: replication BGSAVE now reports through `INFO persistence`
-  and honors the bounded debug save delay; keep extending this into the
-  diskless/full-sync windows behind `integration/replication`. Failed
+  and honors the bounded per-key debug save-delay window; keep extending this
+  into the diskless/full-sync windows behind `integration/replication`. Failed
   full-sync BGSAVE jobs now clean up waiters, temp files, and replication-child
   state instead of poisoning later sync attempts. Async-loading state is now
   explicit in `INFO persistence` and dispatch. Successful full-sync RDB
@@ -1117,6 +1117,82 @@ Takeaway:
   those later tests assert. The next `fullsync_lifecycle_kit` slice should
   model replication-child death and parent-death cleanup explicitly before
   another full Tcl grind.
+
+### 2026-06-13 R2 follow-up: parent-death child cleanup
+
+Scope:
+
+- Factored successful full-sync transfer side effects into
+  `ReplicationState::complete_repl_bgsave_transfer`, giving the Rust kits a
+  deterministic way to prove RDB bulk delivery, catch-up delivery, online
+  transition, and retained catch-up history after a prior failed child.
+- Added `ReplicationState::collect_failed_repl_bgsave_child_exit` so stale
+  child-exit observations cannot tear down a later full-sync job.
+- Made forked BGSAVE and BGSAVE-for-replication children notice parent death
+  while sleeping in the debug save-delay window. On Linux this also arms a
+  parent-death signal; on Unix generally the child polls for parent PID
+  changes.
+- Changed `rdb-key-save-delay` from a single post-save sleep into a bounded
+  per-key-equivalent delay based on snapshot key count, capped at five seconds.
+  This keeps upstream child-observability tests meaningful without making the
+  suite unbounded.
+- Accepted `repl-diskless-load on-empty-db` as a live config value. Valdr
+  currently treats it conservatively like ordinary loading until the dialer has
+  a true empty-DB predicate.
+- Extended `fullsync_lifecycle_kit.rs` with a killed-child collection case and
+  `on-empty-db` config coverage.
+
+Evidence:
+
+```bash
+cargo test -p redis-core replication::tests -- --nocapture
+cargo test -p redis-commands persist::tests -- --nocapture
+cargo test -p redis-commands --test fullsync_lifecycle_kit -- --nocapture
+cargo test -p redis-commands replica_dialer::tests -- --nocapture
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --files integration/replication \
+  --profile integration-repl \
+  --runner-id fullsync-child-exit-onempty \
+  --timeout-s 360 \
+  --baseport 32179 \
+  --portcount 100 \
+  --skip-build
+python3 harness/oracle/tcl-survey.py \
+  --files integration/replication-2,integration/block-repl \
+  --profile integration-repl \
+  --runner-id fullsync-child-exit-tripwire \
+  --timeout-s 240 \
+  --baseport 32279 \
+  --portcount 100 \
+  --skip-build
+```
+
+Results:
+
+- `redis-core replication::tests`: 15 passed, 0 failed.
+- `persist::tests`: 4 passed, 0 failed.
+- `fullsync_lifecycle_kit`: 8 passed, 0 failed.
+- `replica_dialer::tests`: 3 passed, 0 failed.
+- `cargo build --bin redis-server`: passed.
+- Focused `integration/replication`:
+  `harness/oracle/results/tcl-survey/20260613T191404820272Z/result.json`
+  timed out at 360 seconds, still without a parsed summary, but had no abort
+  test and no exception. It reported 37 parsed failure lines and reached later
+  replication-link assertions after the previous parent-killed child and
+  `repl-diskless-load on-empty-db` abort points.
+- Focused no-regression tripwire:
+  `harness/oracle/results/tcl-survey/20260613T192012094878Z/result.json`
+  reported `integration/replication-2` 7/0 and `integration/block-repl` 2/0.
+
+Takeaway:
+
+- The upstream-style process-observability frontier moved: `get_child_pid`
+  can now observe the delayed replication child, parent death no longer aborts
+  the file, and `on-empty-db` is accepted. Remaining `integration/replication`
+  work is now beyond child collection: async rollback/DB-size drift, diskless
+  pipe logs, killing no-longer-useful RDB children, cache-master handoff, and
+  later replication-link behavior.
 
 ### R4-AOF-FULLSYNC
 

@@ -98,6 +98,7 @@ pub enum ReplDisklessLoadMode {
     Disabled = 0,
     Swapdb = 1,
     FlushBeforeLoad = 2,
+    OnEmptyDb = 3,
 }
 
 impl ReplDisklessLoadMode {
@@ -108,6 +109,8 @@ impl ReplDisklessLoadMode {
             Some(Self::Swapdb)
         } else if value.eq_ignore_ascii_case(b"flush-before-load") {
             Some(Self::FlushBeforeLoad)
+        } else if value.eq_ignore_ascii_case(b"on-empty-db") {
+            Some(Self::OnEmptyDb)
         } else {
             None
         }
@@ -118,6 +121,7 @@ impl ReplDisklessLoadMode {
             Self::Disabled => "disabled",
             Self::Swapdb => "swapdb",
             Self::FlushBeforeLoad => "flush-before-load",
+            Self::OnEmptyDb => "on-empty-db",
         }
     }
 
@@ -125,6 +129,7 @@ impl ReplDisklessLoadMode {
         match value {
             1 => Self::Swapdb,
             2 => Self::FlushBeforeLoad,
+            3 => Self::OnEmptyDb,
             _ => Self::Disabled,
         }
     }

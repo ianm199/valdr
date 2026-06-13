@@ -285,7 +285,15 @@ Work packets:
   watched by the Tcl harness and allowed `CONFIG SET key-load-delay` through
   ordinary loading, moving the focused gate to a later
   `replication child dies when parent is killed` abort. True child/pipe
-  lifecycle semantics remain unfinished.
+  lifecycle semantics remain unfinished. The next child-lifecycle slice moved
+  successful transfer side effects into a deterministic `ReplicationState`
+  helper, made failed child collection ignore stale PIDs, made fork children
+  exit promptly when their parent dies during the bounded debug save-delay
+  window, and accepted `repl-diskless-load on-empty-db`. The focused
+  `integration/replication` gate now has no abort/exception point and times
+  out later in replication-link/cache-master territory; async rollback,
+  diskless pipe logs, and no-longer-useful RDB child cancellation are still
+  open.
 - **R2-BUFFER-LIMITS:** implement replica output-buffer accounting and
   disconnection policy well enough for `replication-buffer` to count tests
   instead of dying in setup. Partial accounting surface landed on 2026-06-13:

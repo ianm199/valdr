@@ -29,26 +29,40 @@ fn unique_temp_dir(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("valdr-{name}-{}-{nanos}", std::process::id()))
 }
 
-fn attach_waiting_replica(st: &ReplicationState, client_id: ClientId, offset: i64) {
-    let (tx, _rx) = mpsc::channel();
+fn attach_waiting_replica(
+    st: &ReplicationState,
+    client_id: ClientId,
+    offset: i64,
+) -> mpsc::Receiver<Vec<u8>> {
+    let (tx, rx) = mpsc::channel();
     st.add_replica(ReplicaConn::new(
         client_id,
         ReplicaState::WaitingBgsave,
         offset,
         tx,
     ));
+    rx
 }
 
 fn install_job(st: &ReplicationState, temp_path: PathBuf, waiters: Vec<ClientId>) {
+    install_job_with_pid(st, 99, temp_path, waiters);
+}
+
+fn install_job_with_pid(
+    st: &ReplicationState,
+    child_pid: i32,
+    temp_path: PathBuf,
+    waiters: Vec<ClientId>,
+) {
     st.install_repl_bgsave_job(ReplBgsaveJob {
-        child_pid: 99,
+        child_pid,
         temp_path,
         waiting_replicas: waiters,
         snapshot_offset: st.master_offset(),
         catch_up_bytes: Vec::new(),
         needs_getack_on_completion: false,
     });
-    st.set_repl_child_pid(99);
+    st.set_repl_child_pid(child_pid);
 }
 
 fn assert_string_value(db: &RedisDb, key: &[u8], expected: &[u8]) {
@@ -172,6 +186,60 @@ fn failed_fullsync_job_cleans_waiters_temp_files_and_child_state() {
         .repl_bgsave_job_snapshot()
         .expect("later full-sync job should install cleanly");
     assert_eq!(next.1, vec![73]);
+
+    let _ = st.abort_repl_bgsave_job();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn killed_repl_child_is_collected_and_later_fullsync_can_deliver() {
+    let st = ReplicationState::new(generate_runid(), 4);
+    let dir = unique_temp_dir("fullsync-killed-child");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+
+    let dead_path = dir.join("temp-repl-dead.rdb");
+    std::fs::write(&dead_path, b"partial rdb").expect("write temp rdb");
+    std::fs::write(dead_path.with_extension("rdb.tmp"), b"partial tmp").expect("write tmp rdb");
+    let _dead_rx = attach_waiting_replica(&st, 81, 0);
+    install_job_with_pid(&st, 111, dead_path.clone(), vec![81]);
+
+    let collected = st
+        .collect_failed_repl_bgsave_child_exit(111)
+        .expect("matching killed child should be collected");
+    assert_eq!(collected.waiting_replicas, vec![81]);
+    assert_eq!(st.repl_child_pid(), 0);
+    assert_eq!(
+        st.connected_replicas(),
+        0,
+        "wait_bgsave replica from killed child must be dropped"
+    );
+    assert!(st.repl_bgsave_job_snapshot().is_none());
+    assert!(!dead_path.exists());
+    assert!(!dead_path.with_extension("rdb.tmp").exists());
+    assert!(
+        st.collect_failed_repl_bgsave_child_exit(111).is_none(),
+        "stale child-exit observations must not tear down later jobs"
+    );
+
+    let rx = attach_waiting_replica(&st, 82, st.master_offset());
+    let next_path = dir.join("temp-repl-next.rdb");
+    install_job_with_pid(&st, 112, next_path, vec![82]);
+    st.append_to_backlog(b"abc");
+    let job = st.take_repl_bgsave_job().expect("later job should exist");
+    let outcome = st.complete_repl_bgsave_transfer(job, b"RDB".to_vec());
+
+    assert_eq!(outcome.delivered_replicas, vec![82]);
+    assert!(outcome.failed_replicas.is_empty());
+    assert_eq!(outcome.retained_catchup_len, 3);
+    assert_eq!(st.repl_child_pid(), 0);
+    assert_eq!(st.connected_replicas(), 1);
+    {
+        let guard = st.replicas.lock().unwrap();
+        assert_eq!(guard[&82].state(), ReplicaState::Online);
+    }
+    assert_eq!(rx.recv().unwrap(), b"$3\r\nRDB".to_vec());
+    assert_eq!(rx.recv().unwrap(), b"abc".to_vec());
+    assert_eq!(st.read_history_at(0, 3).as_deref(), Some(b"abc".as_slice()));
 
     let _ = st.abort_repl_bgsave_job();
     let _ = std::fs::remove_dir_all(&dir);
@@ -445,14 +513,6 @@ fn repl_diskless_load_config_updates_live_mode() {
         Arc::clone(&server),
         &[b"CONFIG", b"GET", b"repl-diskless-load"],
     );
-    let mut invalid = Client::new(121);
-    let invalid_reply = run_dispatch_with_server(
-        &mut invalid,
-        &mut db,
-        Arc::clone(&server),
-        &[b"CONFIG", b"SET", b"repl-diskless-load", b"bogus"],
-    );
-
     assert_eq!(set_reply, b"+OK\r\n");
     assert_eq!(
         server.live_config.repl_diskless_load(),
@@ -465,6 +525,27 @@ fn repl_diskless_load_config_updates_live_mode() {
         "CONFIG GET should expose the live diskless-load mode: {:?}",
         String::from_utf8_lossy(&get_reply)
     );
+
+    let mut on_empty = Client::new(122);
+    let on_empty_reply = run_dispatch_with_server(
+        &mut on_empty,
+        &mut db,
+        Arc::clone(&server),
+        &[b"CONFIG", b"SET", b"repl-diskless-load", b"on-empty-db"],
+    );
+    assert_eq!(on_empty_reply, b"+OK\r\n");
+    assert_eq!(
+        server.live_config.repl_diskless_load(),
+        ReplDisklessLoadMode::OnEmptyDb
+    );
+
+    let mut invalid = Client::new(121);
+    let invalid_reply = run_dispatch_with_server(
+        &mut invalid,
+        &mut db,
+        Arc::clone(&server),
+        &[b"CONFIG", b"SET", b"repl-diskless-load", b"bogus"],
+    );
     assert!(
         invalid_reply.starts_with(b"-ERR"),
         "invalid diskless-load mode should be rejected, got {:?}",
@@ -472,7 +553,7 @@ fn repl_diskless_load_config_updates_live_mode() {
     );
     assert_eq!(
         server.live_config.repl_diskless_load(),
-        ReplDisklessLoadMode::Swapdb
+        ReplDisklessLoadMode::OnEmptyDb
     );
 }
 
