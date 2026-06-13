@@ -674,10 +674,80 @@ Takeaway:
 - Replica full-sync application now has an atomic keyspace replacement boundary
   for corrupt or short incoming RDBs. This completes the
   `fullsync_lifecycle_kit` case "replica full-sync failure does not replace
-  good old data unless the incoming RDB is valid." The broader
-  `integration/replication` gate remains blocked at script-busy stream apply,
-  so the next full-sync lifecycle slice should model primary-link command
-  application around BUSY/script state instead of touching RDB replacement.
+  good old data unless the incoming RDB is valid." The follow-up
+  script-readonly packet below moved the broader `integration/replication`
+  gate past the script-busy stream apply abort; the next full-sync lifecycle
+  slice is now diskless swapdb / async-loading state.
+
+### 2026-06-13 R2 follow-up: replica script readonly boundaries
+
+Scope:
+
+- Relaxed the non-shebang EVAL preflight on read-only replicas so ordinary
+  no-write scripts can execute locally. Actual script writes are still rejected
+  at `redis.call` / `redis.pcall` command re-entry.
+- Extended the same script-readonly predicate to exempt the primary-link
+  `replication_apply` pseudo-client, matching the generic dispatch read-only
+  guard. This lets commands received from the upstream primary apply locally
+  without tripping client-facing read-only replica errors.
+- Extended `fullsync_lifecycle_kit.rs` to cover all three boundaries:
+  ordinary no-write EVAL is allowed on a read-only replica, ordinary script
+  writes are rejected, and primary-link script writes apply to the replica DB.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands --test fullsync_lifecycle_kit -- --nocapture
+rustfmt --check \
+  crates/redis-commands/src/eval.rs \
+  crates/redis-commands/tests/fullsync_lifecycle_kit.rs
+cargo test -p redis-commands eval::tests -- --nocapture
+cargo check -p redis-core -p redis-commands -p redis-server
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --files integration/replication \
+  --profile integration-repl \
+  --runner-id fullsync-script-readonly \
+  --timeout-s 300 \
+  --baseport 30479 \
+  --portcount 100 \
+  --skip-build
+python3 harness/oracle/tcl-survey.py \
+  --files integration/replication-2,integration/block-repl \
+  --profile integration-repl \
+  --runner-id fullsync-script-readonly-tripwire \
+  --timeout-s 240 \
+  --baseport 30579 \
+  --portcount 100 \
+  --skip-build
+```
+
+Results:
+
+- `fullsync_lifecycle_kit`: 3 passed, 0 failed.
+- `eval::tests`: 28 passed, 0 failed.
+- Targeted `rustfmt --check`: passed.
+- `cargo check -p redis-core -p redis-commands -p redis-server`: passed.
+- `cargo build --bin redis-server`: passed.
+- Focused `integration/replication`:
+  `harness/oracle/results/tcl-survey/20260613T174350907420Z/result.json`
+  completed without timing out but produced no parsed summary. It moved from
+  the previous `Master stream is correctly processed while the replica has a
+  script in -BUSY state` READONLY abort to
+  `Diskless load swapdb (async_loading): new database is exposed after
+  swapping`, still with a READONLY exception and 21 parsed failure lines.
+- Focused no-regression tripwire:
+  `harness/oracle/results/tcl-survey/20260613T174744082067Z/result.json`
+  reported `integration/replication-2` 7/0 and `integration/block-repl` 2/0.
+
+Takeaway:
+
+- The script-busy replication frontier was a client-facing EVAL preflight
+  problem, not only a primary-link apply problem. Non-writing scripts on
+  read-only replicas now run, script writes are still blocked for ordinary
+  clients, and primary-link script writes apply locally. The next
+  `fullsync_lifecycle_kit` slice should model diskless swapdb / async-loading
+  role state, especially the READONLY exception in the new abort test.
 
 ### R4-AOF-FULLSYNC
 

@@ -7,14 +7,17 @@
 
 use std::path::PathBuf;
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use redis_commands::dispatch::dispatch;
 use redis_core::db::RedisDb;
 use redis_core::object::RedisObject;
+use redis_core::replication::global_replication_state;
 use redis_core::replication::{
     generate_runid, ReplBgsaveJob, ReplicaConn, ReplicaState, ReplicationState,
 };
-use redis_core::ClientId;
+use redis_core::{Client, ClientId, PubSubRegistry, RedisServer};
 use redis_types::RedisString;
 
 fn unique_temp_dir(name: &str) -> PathBuf {
@@ -51,6 +54,31 @@ fn assert_string_value(db: &RedisDb, key: &[u8], expected: &[u8]) {
     let key = RedisString::from_bytes(key);
     let obj = db.find(&key).expect("key should exist");
     assert_eq!(obj.as_string_bytes(), Some(expected));
+}
+
+fn global_repl_guard() -> MutexGuard<'static, ()> {
+    static REPL_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+    match REPL_GUARD.get_or_init(|| Mutex::new(())).lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    }
+}
+
+fn run_dispatch(client: &mut Client, db: &mut RedisDb, parts: &[&[u8]]) -> Vec<u8> {
+    client.set_args(parts.iter().map(|p| RedisString::from_bytes(p)).collect());
+    let server = Arc::new(RedisServer::default());
+    let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
+    let result = {
+        let mut ctx = redis_core::CommandContext::with_server(client, db, server, pubsub);
+        dispatch(&mut ctx)
+    };
+    if let Err(err) = result {
+        let payload = err.to_resp_payload();
+        client.reply_buf.push(b'-');
+        client.reply_buf.extend_from_slice(payload.as_bytes());
+        client.reply_buf.extend_from_slice(b"\r\n");
+    }
+    client.drain_reply()
 }
 
 #[test]
@@ -149,4 +177,58 @@ fn replica_rdb_replacement_is_atomic_on_failed_incoming_fullsync() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn primary_link_script_write_applies_on_readonly_replica() {
+    let _guard = global_repl_guard();
+    let repl = global_replication_state();
+    let was_replica = repl.is_replica();
+    repl.become_replica_of(RedisString::from_static(b"127.0.0.1"), 6379);
+
+    let no_write_script = b"return 'replica-local-read'";
+    let script = b"return redis.call('SET','from-primary','applied')";
+
+    let mut readonly_db = RedisDb::new(0);
+    let mut readonly = Client::new(90);
+    let readonly_reply = run_dispatch(
+        &mut readonly,
+        &mut readonly_db,
+        &[b"EVAL", no_write_script, b"0"],
+    );
+
+    let mut ordinary_db = RedisDb::new(0);
+    let mut ordinary = Client::new(91);
+    let ordinary_reply = run_dispatch(&mut ordinary, &mut ordinary_db, &[b"EVAL", script, b"0"]);
+
+    let mut apply_db = RedisDb::new(0);
+    let mut apply = Client::new(92);
+    apply.replication_apply = true;
+    apply.authenticated_user = Some(RedisString::from_static(b"default"));
+    let apply_reply = run_dispatch(&mut apply, &mut apply_db, &[b"EVAL", script, b"0"]);
+    let applied_value = apply_db
+        .find(&RedisString::from_static(b"from-primary"))
+        .and_then(|obj| obj.as_string_bytes().map(|bytes| bytes.to_vec()));
+
+    repl.become_master();
+    if was_replica {
+        repl.become_replica_of(RedisString::from_static(b"127.0.0.1"), 6379);
+    }
+
+    assert!(
+        !readonly_reply.starts_with(b"-READONLY"),
+        "ordinary no-write scripts are allowed on read-only replicas, got {:?}",
+        String::from_utf8_lossy(&readonly_reply)
+    );
+    assert!(
+        ordinary_reply.starts_with(b"-READONLY"),
+        "ordinary read-only replica clients must still reject script writes, got {:?}",
+        String::from_utf8_lossy(&ordinary_reply)
+    );
+    assert!(
+        !apply_reply.starts_with(b"-READONLY"),
+        "primary-link script application must bypass read-only client guards, got {:?}",
+        String::from_utf8_lossy(&apply_reply)
+    );
+    assert_eq!(applied_value.as_deref(), Some(b"applied".as_slice()));
 }

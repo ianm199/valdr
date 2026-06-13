@@ -2694,7 +2694,9 @@ fn stale_replica_scripts_blocked(ctx: &CommandContext<'_>) -> bool {
 }
 
 fn replica_readonly_script_blocked(ctx: &CommandContext<'_>) -> bool {
-    redis_core::replication::global_replication_state().is_replica() && !ctx.client_ref().is_replica
+    redis_core::replication::global_replication_state().is_replica()
+        && !ctx.client_ref().is_replica
+        && !ctx.client_ref().replication_apply
 }
 
 fn replica_readonly_error() -> RedisError {
@@ -5103,10 +5105,7 @@ fn run_script(
     if stale_replica_scripts_blocked(ctx) && !script_flags.allow_stale {
         return Err(stale_replica_masterdown_error());
     }
-    if replica_readonly_script_blocked(ctx)
-        && !read_only
-        && (!ctx.client_ref().flag_deny_blocking() || script_flags.has_shebang)
-    {
+    if replica_readonly_script_blocked(ctx) && !read_only && script_flags.has_shebang {
         return Err(replica_readonly_error());
     }
     if script_flags.has_shebang

@@ -260,7 +260,12 @@ Work packets:
   need dedicated kit coverage. The incoming replica RDB replacement boundary is
   now atomic: corrupt or short full-sync RDB bytes are staged and rejected
   without clearing the previous replica dataset, while a valid snapshot replaces
-  the old keyspace.
+  the old keyspace. The script-busy full-sync frontier also moved: no-write
+  EVAL can run on read-only replicas, script writes remain rejected for
+  ordinary clients, and primary-link script writes apply locally. The live
+  `integration/replication` gate now reaches diskless swapdb async-loading
+  state, where the next READONLY exception must be reduced into a dedicated
+  kit slice.
 - **R2-BUFFER-LIMITS:** implement replica output-buffer accounting and
   disconnection policy well enough for `replication-buffer` to count tests
   instead of dying in setup. Partial accounting surface landed on 2026-06-13:
