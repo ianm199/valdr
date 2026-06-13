@@ -183,6 +183,7 @@ pub fn replconf_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
                 .ok_or_else(|| RedisError::runtime(b"ERR invalid port number"))?;
             let repl = global_replication_state();
             let client_id = ctx.client_ref().id();
+            repl.remove_stale_replicas_with_listening_port(port, client_id);
             {
                 let guard = match repl.replicas.lock() {
                     Ok(g) => g,
@@ -841,6 +842,7 @@ fn handle_psync(
     send_fullresync_line: bool,
 ) -> RedisResult<()> {
     let repl = global_replication_state();
+    repl.expire_backlog_if_idle(mstime(), ctx.live_config().repl_backlog_ttl());
     let our_runid = repl.runid();
     let master_offset = repl.master_offset();
     let decision = decide_psync(

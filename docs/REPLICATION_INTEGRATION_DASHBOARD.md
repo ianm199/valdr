@@ -74,7 +74,7 @@ Artifact:
 | `integration/replication-4` | 15/2 | Red | SPOP rewrite cases now pass; remaining failures are divergence/default writable-replica cases. |
 | `integration/replication-buffer` | 4/15 | Red | Full-sync/BGSAVE setup reaches counted assertions; completed full-sync catch-up history is now retained while dependent replicas still pin it, but Valkey-style global replication-buffer memory, backlog outgrowth under slow replicas, partial resync across broader retained history, and output-buffer disconnect policy remain unfinished. |
 | `integration/replication` | no summary | Red | The failed full-sync cleanup packet moves past `diskless replication child being killed is collected`; the current abort is `Master stream is correctly processed while the replica has a script in -BUSY state` with `READONLY`. Diskless/script-busy full-sync apply remains the frontier. |
-| `integration/replication-psync` | 86/4 | Red | The replica-side `CLIENT KILL <master>` path now asks the dialer to reconnect, moving the file from timeout/no-summary to counted coverage. Remaining failures are the four `ok after delay` variants asserting `sync_partial_ok > 0`; delayed reconnects still full-resync in some diskless/swapdb combinations. |
+| `integration/replication-psync` | 90/0 | Green | Focused gate is green after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support for the replica dialer. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
 | `integration/replica-redirect` | timeout | Red | `CLIENT CAPA REDIRECT` top-level and MULTI/EXEC replica redirect semantics now pass the early file assertions. Manual `FAILOVER` now reaches timeout-driven handoff in Rust kits and a live two-process probe, including blocked `BRPOP` and paused `GET` REDIRECT after promotion. The official Tcl file still no-summary times out in the first failover test; side observation showed old primary `blocked_clients:2`, `paused_actions:all`, and `role:slave` while the target remained SIGSTOP'd. |
 | `unit/wait` | 39/0 | Green | WAIT command suite passed after the R4 role-change unblock packet; WAITAOF/FACK edge cases still need separate coverage. |
@@ -1245,3 +1245,60 @@ Takeaway:
   history, offset, and cached replid state through `DEBUG SLEEP` / delayed
   reconnect windows so the `ok after delay` variants get `+CONTINUE` instead of
   full resync.
+
+### 2026-06-13 R3 follow-up: live backlog resize and TTL expiry
+
+Scope:
+
+- `CONFIG SET repl-backlog-size` now resizes the live circular backlog while
+  preserving readable history, so delayed reconnect windows can actually use the
+  configured 100 MB backlog in the upstream PSYNC matrix.
+- `repl-backlog-ttl` is now represented in live config and enforced
+  opportunistically before PSYNC decisions. Expiry clears readable history while
+  preserving the master offset, so concrete old-offset PSYNC attempts fall back
+  to full resync and increment `sync_partial_err`.
+- Replica reconnect cleanup now removes stale master-side `ReplicaConn` entries
+  that advertise the same listening port, and normal disconnect expiry is armed
+  from the removed replica's last ACK time.
+- `DEBUG SLEEP` on a replica pauses the background replica dialer, matching the
+  upstream single-threaded delay that the Tcl `backlog expired` cases depend on.
+
+Evidence:
+
+```bash
+cargo test -p redis-core replication::tests -- --nocapture
+cargo test -p redis-commands --test psync_reconnect_kit -- --nocapture
+cargo test -p redis-commands replica_dialer::tests -- --nocapture
+cargo check -p redis-core -p redis-commands -p redis-server
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --files integration/replication-psync \
+  --profile integration-repl \
+  --runner-id repl-psync-backlog-resize-ttl-pause \
+  --timeout-s 240 \
+  --baseport 29379 \
+  --portcount 100 \
+  --skip-build
+```
+
+Results:
+
+- Core replication tests: 15 passed, 0 failed.
+- `psync_reconnect_kit`: 7 passed, 0 failed.
+- `replica_dialer::tests`: 2 passed, 0 failed.
+- `cargo check -p redis-core -p redis-commands -p redis-server`: passed.
+- `cargo build --bin redis-server`: passed.
+- Live two-process probe on ports `29279/29280`: during the delayed reconnect,
+  `connected_slaves` dropped to 0 and the reconnect moved `sync_partial_err` to
+  1 before full resync.
+- Focused `integration/replication-psync`
+  `harness/oracle/results/tcl-survey/20260613T162716653643Z/result.json`:
+  completed in 211s with 90 passed, 0 failed, 0 timeouts, and 0 no-summary
+  files.
+
+Takeaway:
+
+- `integration/replication-psync` is now a green tripwire. Future PSYNC work can
+  move from reconnect basics to dual replication IDs and failover-history
+  windows instead of repeatedly rediscovering backlog sizing, TTL, and delayed
+  reconnect mechanics.

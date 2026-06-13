@@ -171,11 +171,12 @@ pub struct LiveConfig {
     pub auto_aof_rewrite_percentage: AtomicU64,
  /// Auto AOF rewrite minimum size in bytes.
     pub auto_aof_rewrite_min_size: AtomicU64,
- /// Size of the replication backlog circular buffer
- /// (`repl-backlog-size` config key). Default 1 MiB. Reducing it does
- /// not shrink the live buffer until the next `ReplicationState` is
- /// rebuilt; see `replication.rs`.
+    /// Size of the replication backlog circular buffer
+    /// (`repl-backlog-size` config key). Default 1 MiB.
     pub repl_backlog_size: AtomicU64,
+    /// Seconds to retain the replication backlog after the last replica
+    /// disconnects (`repl-backlog-ttl`). 0 disables expiry.
+    pub repl_backlog_ttl: AtomicU64,
  /// Replica idle-link timeout in seconds (`repl-timeout`). Default 60.
  /// Consumed by Wave B's replica-health watchdog; readback only here.
     pub repl_timeout: AtomicU64,
@@ -306,6 +307,8 @@ pub const DEFAULT_AUTO_AOF_REWRITE_MIN_SIZE: u64 = 64 * 1024 * 1024;
 
 /// Default `repl-backlog-size` (1 MiB).
 pub const DEFAULT_REPL_BACKLOG_SIZE: u64 = 1024 * 1024;
+/// Default `repl-backlog-ttl` in seconds.
+pub const DEFAULT_REPL_BACKLOG_TTL: u64 = 3600;
 
 /// Default `repl-timeout` (60 seconds).
 pub const DEFAULT_REPL_TIMEOUT: u64 = 60;
@@ -358,6 +361,7 @@ impl Default for LiveConfig {
             auto_aof_rewrite_percentage: AtomicU64::new(DEFAULT_AUTO_AOF_REWRITE_PERCENTAGE),
             auto_aof_rewrite_min_size: AtomicU64::new(DEFAULT_AUTO_AOF_REWRITE_MIN_SIZE),
             repl_backlog_size: AtomicU64::new(DEFAULT_REPL_BACKLOG_SIZE),
+            repl_backlog_ttl: AtomicU64::new(DEFAULT_REPL_BACKLOG_TTL),
             repl_timeout: AtomicU64::new(DEFAULT_REPL_TIMEOUT),
             repl_min_replicas_to_write: AtomicU64::new(0),
             repl_min_replicas_max_lag: AtomicU64::new(10),
@@ -837,16 +841,27 @@ impl LiveConfig {
             .store(value, Ordering::Relaxed);
     }
 
- /// Configured replication backlog size in bytes (`repl-backlog-size`).
+    /// Configured replication backlog size in bytes (`repl-backlog-size`).
     pub fn repl_backlog_size(&self) -> u64 {
         self.repl_backlog_size.load(Ordering::Relaxed)
     }
 
- /// Update the configured replication backlog size. Note that the live
- /// backlog is not resized in place; consumers consult this for new
- /// allocations only.
+    /// Update the configured replication backlog size. Command handlers are
+    /// responsible for resizing the live replication backlog alongside this
+    /// stored value.
     pub fn set_repl_backlog_size(&self, n: u64) {
         self.repl_backlog_size.store(n, Ordering::Relaxed);
+    }
+
+    /// Configured replication backlog idle TTL in seconds
+    /// (`repl-backlog-ttl`).
+    pub fn repl_backlog_ttl(&self) -> u64 {
+        self.repl_backlog_ttl.load(Ordering::Relaxed)
+    }
+
+    /// Update the configured replication backlog idle TTL. 0 disables expiry.
+    pub fn set_repl_backlog_ttl(&self, n: u64) {
+        self.repl_backlog_ttl.store(n, Ordering::Relaxed);
     }
 
  /// Replica idle-link timeout in seconds (`repl-timeout`).

@@ -174,9 +174,8 @@ impl ReplicaState {
 /// counter (`offset`) of the next-write position; partial-resync decides
 /// whether a replica's requested offset lies inside the live window.
 pub struct ReplBacklog {
-    /// Allocated capacity. Once non-zero this never changes; CONFIG SET
-    /// `repl-backlog-size` allocates a fresh `ReplBacklog` rather than
-    /// re-sizing the live buffer.
+    /// Allocated capacity. CONFIG SET `repl-backlog-size` can resize the live
+    /// buffer while preserving the newest readable bytes.
     pub size: usize,
     /// Raw buffer of length `size`. The circular index for absolute offset
     /// `off` is `(off % size as i64) as usize` once `histlen` reaches `size`.
@@ -220,6 +219,35 @@ impl ReplBacklog {
         self.offset
     }
 
+    /// Resize the live circular buffer while retaining as much recent history
+    /// as the new capacity allows.
+    pub fn resize_preserving_history(&mut self, new_size: usize) {
+        if new_size == self.size {
+            return;
+        }
+
+        let old_offset = self.offset;
+        let keep = self.histlen.min(new_size);
+        let start = old_offset.saturating_sub(keep as i64);
+        let bytes = if keep == 0 {
+            Vec::new()
+        } else {
+            self.read_at(start, keep).unwrap_or_default()
+        };
+
+        self.size = new_size;
+        self.buffer = vec![0u8; new_size];
+        self.offset = old_offset;
+        self.histlen = keep;
+        if new_size == 0 {
+            return;
+        }
+        for (i, b) in bytes.iter().enumerate() {
+            let abs = start as usize + i;
+            self.buffer[abs % new_size] = *b;
+        }
+    }
+
     /// Lowest absolute offset still readable from the backlog. A replica that
     /// asks for an offset below this must full-resync.
     pub fn min_offset(&self) -> i64 {
@@ -237,6 +265,9 @@ impl ReplBacklog {
         let n = available.min(max_len);
         if n == 0 {
             return Some(Vec::new());
+        }
+        if self.size == 0 {
+            return None;
         }
         let mut out = Vec::with_capacity(n);
         for i in 0..n {
@@ -401,6 +432,9 @@ pub struct ReplicationState {
     pub master_repl_offset: AtomicI64,
     /// The backlog circular buffer.
     pub backlog: Mutex<ReplBacklog>,
+    /// Unix millisecond timestamp when the last replica disconnected, or -1
+    /// when backlog idle expiry is not armed.
+    pub backlog_last_replica_disconnect_ms: AtomicI64,
     /// Connected replicas (master-assigned `client_id` → metadata).
     pub replicas: Mutex<HashMap<ClientId, ReplicaConn>>,
     /// REPLCONF metadata can arrive before PSYNC registers the `ReplicaConn`.
@@ -440,6 +474,10 @@ pub struct ReplicationState {
     /// table, so CLIENT KILL asks the dialer to drop the current stream and loop
     /// back through PSYNC.
     pub replica_link_drop_requested: AtomicBool,
+    /// Unix millisecond deadline until which the replica dialer should not
+    /// reconnect. DEBUG SLEEP uses this to mimic upstream's single-threaded
+    /// pause even though this port owns replication I/O in a background thread.
+    pub replica_dialer_pause_until_ms: AtomicI64,
     /// Monotonic generation for replica-side dialer threads.
     /// `REPLICAOF <host> <port>` can retarget an already-running replica.
     /// A boolean stop flag is insufficient because the new dialer clears it
@@ -479,6 +517,7 @@ impl ReplicationState {
             runid,
             master_repl_offset: AtomicI64::new(0),
             backlog: Mutex::new(ReplBacklog::new(backlog_size)),
+            backlog_last_replica_disconnect_ms: AtomicI64::new(-1),
             replicas: Mutex::new(HashMap::new()),
             pending_replica_metadata: Mutex::new(HashMap::new()),
             replica_of: Mutex::new(None),
@@ -490,6 +529,7 @@ impl ReplicationState {
             selected_db: AtomicI32::new(-1),
             dialer_stop_flag: AtomicBool::new(false),
             replica_link_drop_requested: AtomicBool::new(false),
+            replica_dialer_pause_until_ms: AtomicI64::new(0),
             dialer_epoch: AtomicU64::new(0),
             stat_sync_full: AtomicU64::new(0),
             stat_sync_partial_ok: AtomicU64::new(0),
@@ -564,6 +604,63 @@ impl ReplicationState {
         new_offset
     }
 
+    /// Resize the live replication backlog while preserving the newest bytes
+    /// still useful for partial resync.
+    pub fn resize_backlog_preserving_history(&self, new_size: usize) {
+        match self.backlog.lock() {
+            Ok(mut g) => g.resize_preserving_history(new_size),
+            Err(p) => p.into_inner().resize_preserving_history(new_size),
+        }
+    }
+
+    fn clear_backlog_history_preserving_offset(&self) {
+        let master = self.master_repl_offset.load(Ordering::Relaxed);
+        let size = match self.backlog.lock() {
+            Ok(g) => g.size,
+            Err(p) => p.into_inner().size,
+        };
+        match self.backlog.lock() {
+            Ok(mut g) => {
+                *g = ReplBacklog::new(size);
+                g.offset = master;
+            }
+            Err(p) => {
+                let mut g = p.into_inner();
+                *g = ReplBacklog::new(size);
+                g.offset = master;
+            }
+        }
+        match self.retained_history.lock() {
+            Ok(mut g) => g.clear(),
+            Err(p) => p.into_inner().clear(),
+        }
+    }
+
+    /// Expire the replication backlog after it has been idle without replicas
+    /// for `ttl_secs`. Returns true when readable history was discarded.
+    pub fn expire_backlog_if_idle(&self, now_ms: i64, ttl_secs: u64) -> bool {
+        if ttl_secs == 0 || self.connected_replicas() > 0 {
+            return false;
+        }
+        let idle_since = self
+            .backlog_last_replica_disconnect_ms
+            .load(Ordering::Relaxed);
+        if idle_since < 0 {
+            return false;
+        }
+        let ttl_ms = i64::try_from(ttl_secs)
+            .unwrap_or(i64::MAX / 1000)
+            .saturating_mul(1000);
+        if now_ms.saturating_sub(idle_since) < ttl_ms {
+            return false;
+        }
+
+        self.clear_backlog_history_preserving_offset();
+        self.backlog_last_replica_disconnect_ms
+            .store(-1, Ordering::Relaxed);
+        true
+    }
+
     fn clear_replication_history(&self) {
         let size = match self.backlog.lock() {
             Ok(g) => g.size,
@@ -577,6 +674,8 @@ impl ReplicationState {
             Ok(mut g) => g.clear(),
             Err(p) => p.into_inner().clear(),
         }
+        self.backlog_last_replica_disconnect_ms
+            .store(-1, Ordering::Relaxed);
         self.master_repl_offset.store(0, Ordering::Relaxed);
     }
 
@@ -791,9 +890,6 @@ impl ReplicationState {
         if end_offset > master {
             return false;
         }
-        if offset == end_offset {
-            return true;
-        }
 
         let mut intervals = Vec::new();
         match self.backlog.lock() {
@@ -848,6 +944,12 @@ impl ReplicationState {
                     intervals.push((segment.start_offset, segment.end_offset()));
                 }
             }
+        }
+
+        if offset == end_offset {
+            return intervals
+                .iter()
+                .any(|(start, end)| *start <= offset && offset <= *end);
         }
 
         range_covered_by_intervals(offset, end_offset, &intervals)
@@ -1204,11 +1306,39 @@ impl ReplicationState {
     pub fn request_replica_link_drop(&self) {
         self.replica_link_drop_requested
             .store(true, Ordering::SeqCst);
+        self.repl_state
+            .store(repl_state_code::REPLICA_CONNECTING, Ordering::SeqCst);
+        self.replica_link
+            .store(replica_link_code::CONNECT, Ordering::SeqCst);
     }
 
     pub fn take_replica_link_drop_request(&self) -> bool {
         self.replica_link_drop_requested
             .swap(false, Ordering::SeqCst)
+    }
+
+    /// Pause replica reconnect attempts until `until_ms`.
+    pub fn pause_replica_dialer_until(&self, until_ms: i64) {
+        let mut current = self.replica_dialer_pause_until_ms.load(Ordering::Relaxed);
+        while until_ms > current {
+            match self.replica_dialer_pause_until_ms.compare_exchange_weak(
+                current,
+                until_ms,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    /// Milliseconds remaining in the current replica-dialer pause window.
+    pub fn replica_dialer_pause_remaining_ms(&self, now_ms: i64) -> i64 {
+        self.replica_dialer_pause_until_ms
+            .load(Ordering::Relaxed)
+            .saturating_sub(now_ms)
+            .max(0)
     }
 
     fn become_replica_of_for_failover(&self, host: RedisString, port: u16) -> u64 {
@@ -1300,6 +1430,8 @@ impl ReplicationState {
     pub fn add_replica(&self, replica: ReplicaConn) {
         let cid = replica.client_id;
         self.apply_pending_replica_metadata(&replica);
+        self.backlog_last_replica_disconnect_ms
+            .store(-1, Ordering::Relaxed);
         match self.replicas.lock() {
             Ok(mut g) => {
                 g.insert(cid, replica);
@@ -1316,6 +1448,72 @@ impl ReplicationState {
             Err(p) => p.into_inner(),
         };
         guard.entry(client_id).or_default().listening_port = Some(port);
+    }
+
+    /// A reconnecting replica advertises the same listening port before PSYNC.
+    /// If the old TCP cleanup has not removed its prior `ReplicaConn` yet,
+    /// drop that stale entry so PSYNC decisions see the real no-replica idle
+    /// window.
+    pub fn remove_stale_replicas_with_listening_port(
+        &self,
+        port: u16,
+        current_client_id: ClientId,
+    ) -> usize {
+        if port == 0 {
+            return 0;
+        }
+
+        let mut removed = Vec::new();
+        let mut oldest_ack_ms: Option<i64> = None;
+        let empty_after_remove = match self.replicas.lock() {
+            Ok(mut g) => {
+                for (cid, replica) in g.iter() {
+                    if *cid != current_client_id && replica.listening_port() == port {
+                        removed.push(*cid);
+                        let ack = replica.last_ack_time_ms.load(Ordering::Relaxed);
+                        if ack > 0 {
+                            oldest_ack_ms = Some(oldest_ack_ms.map_or(ack, |old| old.min(ack)));
+                        }
+                    }
+                }
+                for cid in &removed {
+                    g.remove(cid);
+                }
+                !removed.is_empty() && g.is_empty()
+            }
+            Err(p) => {
+                let mut g = p.into_inner();
+                for (cid, replica) in g.iter() {
+                    if *cid != current_client_id && replica.listening_port() == port {
+                        removed.push(*cid);
+                        let ack = replica.last_ack_time_ms.load(Ordering::Relaxed);
+                        if ack > 0 {
+                            oldest_ack_ms = Some(oldest_ack_ms.map_or(ack, |old| old.min(ack)));
+                        }
+                    }
+                }
+                for cid in &removed {
+                    g.remove(cid);
+                }
+                !removed.is_empty() && g.is_empty()
+            }
+        };
+
+        if empty_after_remove {
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            self.backlog_last_replica_disconnect_ms
+                .store(oldest_ack_ms.unwrap_or(now_ms), Ordering::Relaxed);
+        }
+        for cid in &removed {
+            self.release_retained_history_for(*cid);
+            if let Ok(mut guard) = crate::client_info::client_info_registry().lock() {
+                guard.set_output_buffer_memory(*cid, 0);
+            }
+        }
+        removed.len()
     }
 
     pub fn record_replica_capa_flags(&self, client_id: ClientId, flags: u32) {
@@ -1346,13 +1544,39 @@ impl ReplicationState {
     /// Drop the replica record for `client_id`, if present. Called from
     /// per-connection cleanup path when a replica disconnects.
     pub fn remove_replica(&self, client_id: ClientId) {
-        match self.replicas.lock() {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let mut idle_since_ms = now_ms;
+        let arm_backlog_ttl = match self.replicas.lock() {
             Ok(mut g) => {
-                g.remove(&client_id);
+                let removed_ack = g
+                    .get(&client_id)
+                    .map(|replica| replica.last_ack_time_ms.load(Ordering::Relaxed))
+                    .filter(|ack| *ack > 0);
+                if let Some(ack) = removed_ack {
+                    idle_since_ms = ack;
+                }
+                let removed = g.remove(&client_id).is_some();
+                removed && g.is_empty()
             }
             Err(p) => {
-                p.into_inner().remove(&client_id);
+                let mut g = p.into_inner();
+                let removed_ack = g
+                    .get(&client_id)
+                    .map(|replica| replica.last_ack_time_ms.load(Ordering::Relaxed))
+                    .filter(|ack| *ack > 0);
+                if let Some(ack) = removed_ack {
+                    idle_since_ms = ack;
+                }
+                let removed = g.remove(&client_id).is_some();
+                removed && g.is_empty()
             }
+        };
+        if arm_backlog_ttl {
+            self.backlog_last_replica_disconnect_ms
+                .store(idle_since_ms, Ordering::Relaxed);
         }
         self.release_retained_history_for(client_id);
         match self.pending_replica_metadata.lock() {
@@ -1643,6 +1867,93 @@ mod tests {
         assert_eq!(b.min_offset(), 4);
         assert_eq!(b.read_at(4, 4).as_deref(), Some(b"efgh".as_slice()));
         assert!(b.read_at(0, 4).is_none());
+    }
+
+    #[test]
+    fn backlog_resize_grow_preserves_old_offsets() {
+        let mut b = ReplBacklog::new(4);
+        b.append(b"abcd");
+        b.resize_preserving_history(8);
+        b.append(b"efgh");
+
+        assert_eq!(b.offset, 8);
+        assert_eq!(b.min_offset(), 0);
+        assert_eq!(b.read_at(0, 8).as_deref(), Some(b"abcdefgh".as_slice()));
+    }
+
+    #[test]
+    fn backlog_resize_shrink_keeps_newest_bytes() {
+        let mut b = ReplBacklog::new(8);
+        b.append(b"abcdefgh");
+        b.resize_preserving_history(4);
+
+        assert_eq!(b.offset, 8);
+        assert_eq!(b.min_offset(), 4);
+        assert_eq!(b.read_at(4, 4).as_deref(), Some(b"efgh".as_slice()));
+        assert!(b.read_at(0, 1).is_none());
+    }
+
+    #[test]
+    fn idle_backlog_expiry_discards_history_but_preserves_master_offset() {
+        let st = ReplicationState::new(generate_runid(), 16);
+        st.append_to_backlog(b"abcdef");
+        st.backlog_last_replica_disconnect_ms
+            .store(1_000, Ordering::Relaxed);
+
+        assert!(!st.expire_backlog_if_idle(1_999, 1));
+        assert!(st.can_read_history_range(0, 6));
+        assert!(st.can_read_history_range(6, 6));
+
+        assert!(st.expire_backlog_if_idle(2_000, 1));
+        assert_eq!(st.master_offset(), 6);
+        assert_eq!(st.backlog_snapshot(), (6, 6, 0, 16));
+        assert!(!st.can_read_history_range(0, 6));
+        assert!(!st.can_read_history_range(6, 6));
+    }
+
+    #[test]
+    fn duplicate_listening_port_removes_stale_replica_and_arms_idle_time() {
+        let st = ReplicationState::new(generate_runid(), 16);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let replica = ReplicaConn::new(42, ReplicaState::Online, 0, tx);
+        replica.listening_port.store(6380, Ordering::Relaxed);
+        replica.last_ack_time_ms.store(1_234, Ordering::Relaxed);
+        st.add_replica(replica);
+
+        assert_eq!(st.connected_replicas(), 1);
+        assert_eq!(st.remove_stale_replicas_with_listening_port(6380, 43), 1);
+        assert_eq!(st.connected_replicas(), 0);
+        assert_eq!(
+            st.backlog_last_replica_disconnect_ms
+                .load(Ordering::Relaxed),
+            1_234
+        );
+    }
+
+    #[test]
+    fn remove_last_replica_arms_idle_time_from_last_ack() {
+        let st = ReplicationState::new(generate_runid(), 16);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let replica = ReplicaConn::new(42, ReplicaState::Online, 0, tx);
+        replica.last_ack_time_ms.store(4_321, Ordering::Relaxed);
+        st.add_replica(replica);
+
+        st.remove_replica(42);
+        assert_eq!(st.connected_replicas(), 0);
+        assert_eq!(
+            st.backlog_last_replica_disconnect_ms
+                .load(Ordering::Relaxed),
+            4_321
+        );
+    }
+
+    #[test]
+    fn replica_dialer_pause_deadline_only_extends() {
+        let st = ReplicationState::new(generate_runid(), 16);
+        st.pause_replica_dialer_until(2_000);
+        st.pause_replica_dialer_until(1_500);
+        assert_eq!(st.replica_dialer_pause_remaining_ms(1_250), 750);
+        assert_eq!(st.replica_dialer_pause_remaining_ms(2_000), 0);
     }
 
     #[test]

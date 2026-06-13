@@ -5,6 +5,7 @@
 //! that should not depend on the process-global replication state.
 
 use std::path::Path;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
@@ -51,7 +52,11 @@ struct PsyncDrive {
     counters_after: (u64, u64, u64),
 }
 
-fn drive_psync(client_id: u64, args: Vec<Vec<u8>>) -> PsyncDrive {
+fn drive_psync_with_server(
+    client_id: u64,
+    args: Vec<Vec<u8>>,
+    server: Arc<RedisServer>,
+) -> PsyncDrive {
     let repl = global_replication_state();
     let counters_before = repl.sync_counters();
     let (tx, rx) = mpsc::channel();
@@ -61,7 +66,6 @@ fn drive_psync(client_id: u64, args: Vec<Vec<u8>>) -> PsyncDrive {
     let mut c = Client::new(client_id);
     c.set_args(args.into_iter().map(RedisString::from_vec).collect());
     let mut db = RedisDb::new(0);
-    let server = Arc::new(RedisServer::default());
     {
         let mut ctx =
             redis_core::CommandContext::with_server(&mut c, &mut db, server, pubsub.clone());
@@ -82,6 +86,10 @@ fn drive_psync(client_id: u64, args: Vec<Vec<u8>>) -> PsyncDrive {
         counters_before,
         counters_after,
     }
+}
+
+fn drive_psync(client_id: u64, args: Vec<Vec<u8>>) -> PsyncDrive {
+    drive_psync_with_server(client_id, args, Arc::new(RedisServer::default()))
 }
 
 fn run_dispatch(client: &mut Client, db: &mut RedisDb, cmd: &[&[u8]]) -> Vec<u8> {
@@ -116,6 +124,32 @@ fn cleanup_repl_bgsave(repl: &Arc<ReplicationState>) {
         }
     }
     repl.set_repl_child_pid(0);
+}
+
+fn reset_global_primary(repl: &Arc<ReplicationState>, backlog_size: usize) {
+    cleanup_repl_bgsave(repl);
+    repl.resize_backlog_preserving_history(backlog_size);
+    repl.become_replica_of(arg(b"psync-kit-reset"), 1);
+    repl.become_master();
+}
+
+struct GlobalReplReset {
+    repl: Arc<ReplicationState>,
+}
+
+impl GlobalReplReset {
+    fn new(repl: &Arc<ReplicationState>) -> Self {
+        reset_global_primary(repl, DEFAULT_REPL_BACKLOG_SIZE);
+        Self {
+            repl: Arc::clone(repl),
+        }
+    }
+}
+
+impl Drop for GlobalReplReset {
+    fn drop(&mut self) {
+        reset_global_primary(&self.repl, DEFAULT_REPL_BACKLOG_SIZE);
+    }
 }
 
 #[test]
@@ -154,6 +188,88 @@ fn same_primary_reconnect_gets_continue_and_replays_catchup() {
     );
     assert_eq!(drive.counters_after.0, drive.counters_before.0);
     assert_eq!(drive.counters_after.2, drive.counters_before.2);
+}
+
+#[test]
+fn config_set_backlog_size_expands_live_psync_window() {
+    let _g = psync_guard();
+    let repl = global_replication_state();
+    let _reset = GlobalReplReset::new(&repl);
+
+    let expanded = DEFAULT_REPL_BACKLOG_SIZE + 2048;
+    let expanded_arg = expanded.to_string();
+    let mut client = Client::new(1_100_007);
+    let mut db = RedisDb::new(0);
+    let reply = run_dispatch(
+        &mut client,
+        &mut db,
+        &[
+            b"CONFIG",
+            b"SET",
+            b"repl-backlog-size",
+            expanded_arg.as_bytes(),
+        ],
+    );
+
+    assert_eq!(reply, b"+OK\r\n");
+    assert_eq!(repl.backlog_snapshot().3, expanded);
+
+    let provided = repl.master_offset();
+    let bytes = vec![b'z'; DEFAULT_REPL_BACKLOG_SIZE + 1024];
+    repl.append_to_backlog(&bytes);
+    assert!(
+        repl.backlog_snapshot().0 <= provided,
+        "expanded backlog should retain offset {provided}; snapshot {:?}",
+        repl.backlog_snapshot()
+    );
+
+    let runid = runid_string(&repl);
+    let drive = drive_psync(
+        1_100_008,
+        vec![b"PSYNC".to_vec(), runid, provided.to_string().into_bytes()],
+    );
+
+    assert!(
+        drive.reply.starts_with(b"+CONTINUE"),
+        "expanded live backlog should allow partial resync, got {:?}",
+        String::from_utf8_lossy(&drive.reply)
+    );
+    assert_eq!(
+        drive.sent.len(),
+        bytes.len(),
+        "+CONTINUE should replay the retained bytes"
+    );
+    assert_eq!(drive.counters_after.1, drive.counters_before.1 + 1);
+    assert_eq!(drive.counters_after.0, drive.counters_before.0);
+}
+
+#[test]
+fn idle_backlog_ttl_expiry_falls_back_to_fullresync_and_counts_partial_error() {
+    let _g = psync_guard();
+    let repl = global_replication_state();
+    let _reset = GlobalReplReset::new(&repl);
+
+    let provided = repl.master_offset();
+    repl.append_to_backlog(&resp(&[b"SET", b"ttl-expiry", b"1"]));
+    repl.backlog_last_replica_disconnect_ms
+        .store(redis_core::util::mstime() - 2_000, Ordering::Relaxed);
+
+    let server = Arc::new(RedisServer::default());
+    server.live_config.set_repl_backlog_ttl(1);
+    let runid = runid_string(&repl);
+    let drive = drive_psync_with_server(
+        1_100_009,
+        vec![b"PSYNC".to_vec(), runid, provided.to_string().into_bytes()],
+        server,
+    );
+
+    assert!(
+        drive.reply.starts_with(b"+FULLRESYNC"),
+        "idle backlog TTL expiry should force full resync, got {:?}",
+        String::from_utf8_lossy(&drive.reply)
+    );
+    assert_eq!(drive.counters_after.0, drive.counters_before.0 + 1);
+    assert_eq!(drive.counters_after.2, drive.counters_before.2 + 1);
 }
 
 #[test]

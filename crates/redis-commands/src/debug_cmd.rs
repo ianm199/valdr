@@ -62,6 +62,11 @@ pub fn debug_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             return Err(RedisError::runtime(b"ERR value is not a valid float"));
         }
         let dur = std::time::Duration::from_secs_f64(secs);
+        let repl = redis_core::replication::global_replication_state();
+        if repl.is_replica() {
+            let pause_ms = dur.as_millis().min(i64::MAX as u128) as i64;
+            repl.pause_replica_dialer_until(redis_core::util::mstime().saturating_add(pause_ms));
+        }
         std::thread::sleep(dur);
         return ctx.reply_simple_string(b"OK");
     }

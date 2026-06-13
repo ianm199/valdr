@@ -75,8 +75,8 @@ Current red/unfinished areas from the 2026-06-13 R0 dashboard in
   15/2. The command-propagation rewrite cases are cleared, but
   expiration/PFCOUNT semantics and divergence/writable-replica cases still need
   work.
-- `replication-psync` now completes with 86/4 in the focused gate; delayed
-  reconnect variants still miss `sync_partial_ok`.
+- `replication-psync` is green in the focused gate at 90/0 after live backlog
+  resize, backlog TTL expiry, and delayed reconnect semantics landed.
 - `replication-aof-sync` is green as of 2026-06-13 after full-sync RDB loads
   refresh appendonly manifests correctly.
 - `replica-redirect.tcl` needs real `FAILOVER` plus client redirect semantics.
@@ -284,13 +284,11 @@ Work packets:
 - **R3-DUAL-REPLID:** implement primary and secondary replication IDs plus
   failover-history windows where Valkey expects them.
 - **R3-BACKLOG-RESIZE:** make `repl-backlog-size` changes safe and observable.
-  A 2026-06-13 probe showed that simply resizing Valdr's circular backlog at
-  `CONFIG SET` time regresses `integration/replication-buffer` from counted
-  failures back to an offset-convergence abort
-  (`harness/oracle/results/tcl-survey/20260613T051700796223Z/result.json`).
-  Do not expose this until the shared replication-buffer lifetime/trimming
-  model covers online-replica output buffers as well as retained full-sync
-  history.
+  Completed for the live PSYNC path on 2026-06-13: `CONFIG SET` now resizes the
+  live circular backlog while preserving readable bytes, and the focused
+  `integration/replication-psync` gate is green with the upstream 100 MB
+  backlog matrix. The broader `replication-buffer` shared-buffer/output-buffer
+  memory model remains separate R2/R6 work.
 - **R3-OFFSET-CONVERGENCE:** make `wait_for_ofs_sync` converge in high-volume
   tests; audit ACK timing, backlog offsets, and replica apply progress.
 - **R3-RECONNECT-MATRIX:** deterministic tests for reconnect within backlog,
@@ -303,9 +301,12 @@ Work packets:
   entrypoint for same-primary continue, backlog-expired fallback, wrong replid,
   future offset, and fresh full-sync metrics. A follow-up 2026-06-13 slice made
   `CLIENT KILL <primary-addr>` on replicas request a dialer reconnect, moving
-  `integration/replication-psync` from timeout to a counted 86/4 result. The
-  remaining live frontier is delayed reconnects that still miss
-  `sync_partial_ok`.
+  `integration/replication-psync` from timeout to a counted 86/4 result. A later
+  2026-06-13 slice added live backlog resize, `repl-backlog-ttl` expiry, stale
+  replica-entry cleanup by listening port, and `DEBUG SLEEP` pause support for
+  the background dialer; the focused `integration/replication-psync` gate now
+  passes 90/90 at
+  `harness/oracle/results/tcl-survey/20260613T162716653643Z/result.json`.
 - **R3-METRICS:** keep `sync_full`, `sync_partial_ok`, `sync_partial_err`,
   master/replica offsets, lag, and backlog histlen faithful in `INFO`.
 
@@ -408,8 +409,8 @@ python3 harness/oracle/tcl-survey.py --runner-id repl-failover \
 Replication can move beyond alpha only when:
 
 - `replication-2` and `block-repl` stay green.
-- `replication-3`, `replication-4`, and `replication-psync` have no known
-  non-diskless failures.
+- `replication-3` and `replication-4` have no known non-diskless failures, and
+  `replication-psync` stays green.
 - Full sync works through the real RDB handoff path, not a seed shortcut.
 - `WAIT` and `WAITAOF` behavior is documented and gated.
 - README wording lists exact unsupported variants, if any.

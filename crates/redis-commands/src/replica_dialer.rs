@@ -26,6 +26,7 @@ use redis_core::replication::{
     ReplicationState,
 };
 use redis_core::server::RedisServer;
+use redis_core::util::mstime;
 use redis_types::RedisString;
 
 static GLOBAL_SERVER: OnceLock<Arc<RedisServer>> = OnceLock::new();
@@ -107,6 +108,9 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
     let repl = global_replication_state();
     loop {
         if !repl.dialer_epoch_is_current(dialer_epoch) {
+            return;
+        }
+        if !wait_for_replica_dialer_pause(&repl, dialer_epoch) {
             return;
         }
 
@@ -200,6 +204,19 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
             .store(repl_state_code::REPLICA_CONNECTING, Ordering::SeqCst);
         repl.set_replica_link(replica_link_code::CONNECT);
         thread::sleep(Duration::from_millis(200));
+    }
+}
+
+fn wait_for_replica_dialer_pause(repl: &Arc<ReplicationState>, dialer_epoch: u64) -> bool {
+    loop {
+        if !repl.dialer_epoch_is_current(dialer_epoch) {
+            return false;
+        }
+        let remaining = repl.replica_dialer_pause_remaining_ms(mstime());
+        if remaining <= 0 {
+            return true;
+        }
+        thread::sleep(Duration::from_millis((remaining as u64).min(50)));
     }
 }
 
@@ -356,7 +373,11 @@ fn select_psync_args(repl: &ReplicationState) -> Vec<Vec<u8>> {
     let cached_replid = repl.cached_primary_replid();
     let failover = repl.manual_failover_state(0) == failover_state_code::FAILOVER_IN_PROGRESS;
     if let Some(replid) = cached_replid.filter(|_| failover || our_offset > 0) {
-        let mut args = vec![b"PSYNC".to_vec(), replid.to_vec(), our_offset.to_string().into_bytes()];
+        let mut args = vec![
+            b"PSYNC".to_vec(),
+            replid.to_vec(),
+            our_offset.to_string().into_bytes(),
+        ];
         if failover {
             args.push(b"FAILOVER".to_vec());
         }

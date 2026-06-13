@@ -143,6 +143,7 @@ pub fn default_config_pairs() -> &'static [(&'static str, &'static str)] {
         ("tls-ciphersuites", ""),
         ("tls-prefer-server-ciphers", "no"),
         ("repl-backlog-size", "1048576"),
+        ("repl-backlog-ttl", "3600"),
         ("repl-timeout", "60"),
         ("replicaof", ""),
         ("slaveof", ""),
@@ -247,6 +248,7 @@ pub fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)>
     let live_auto_aof_rewrite_percentage = cfg.auto_aof_rewrite_percentage().to_string();
     let live_auto_aof_rewrite_min_size = cfg.auto_aof_rewrite_min_size().to_string();
     let live_repl_backlog_size = cfg.repl_backlog_size().to_string();
+    let live_repl_backlog_ttl = cfg.repl_backlog_ttl().to_string();
     let live_repl_timeout = cfg.repl_timeout().to_string();
     let live_min_replicas_to_write = cfg.repl_min_replicas_to_write().to_string();
     let live_min_replicas_max_lag = cfg.repl_min_replicas_max_lag().to_string();
@@ -340,6 +342,7 @@ pub fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)>
             "auto-aof-rewrite-percentage" => Some(live_auto_aof_rewrite_percentage.clone()),
             "auto-aof-rewrite-min-size" => Some(live_auto_aof_rewrite_min_size.clone()),
             "repl-backlog-size" => Some(live_repl_backlog_size.clone()),
+            "repl-backlog-ttl" => Some(live_repl_backlog_ttl.clone()),
             "repl-timeout" => Some(live_repl_timeout.clone()),
             "min-replicas-to-write" | "min-slaves-to-write" => {
                 Some(live_min_replicas_to_write.clone())
@@ -595,6 +598,7 @@ pub fn config_value_is_live_only(key: &[u8]) -> bool {
         b"auto-aof-rewrite-percentage",
         b"auto-aof-rewrite-min-size",
         b"repl-backlog-size",
+        b"repl-backlog-ttl",
         b"repl-timeout",
         b"min-replicas-to-write",
         b"min-slaves-to-write",
@@ -651,6 +655,20 @@ pub fn validate_config_set_pair(key: &[u8], value: &[u8]) -> RedisResult<()> {
     if ascii_eq_ignore_case(key, b"client-query-buffer-limit") && parse_memsize(value).is_none() {
         return Err(RedisError::runtime(
             b"ERR CONFIG SET failed (possibly related to argument 'client-query-buffer-limit')",
+        ));
+    }
+    if ascii_eq_ignore_case(key, b"repl-backlog-size")
+        && parse_memsize(value)
+            .and_then(|n| usize::try_from(n).ok())
+            .is_none()
+    {
+        return Err(RedisError::runtime(
+            b"ERR CONFIG SET failed (possibly related to argument 'repl-backlog-size')",
+        ));
+    }
+    if ascii_eq_ignore_case(key, b"repl-backlog-ttl") && parse_usize_strict(value).is_none() {
+        return Err(RedisError::runtime(
+            b"ERR CONFIG SET failed (possibly related to argument 'repl-backlog-ttl')",
         ));
     }
     if ascii_eq_ignore_case(key, b"bind") && !valid_bind_config_value(value) {
@@ -1034,6 +1052,15 @@ pub fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
         b"repl-backlog-size" => {
             if let Some(n) = parse_memsize(value) {
                 cfg.set_repl_backlog_size(n);
+                if let Ok(size) = usize::try_from(n) {
+                    redis_core::replication::global_replication_state()
+                        .resize_backlog_preserving_history(size);
+                }
+            }
+        }
+        b"repl-backlog-ttl" => {
+            if let Some(n) = parse_usize_strict(value) {
+                cfg.set_repl_backlog_ttl(n as u64);
             }
         }
         b"repl-timeout" => {
