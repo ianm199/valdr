@@ -240,6 +240,38 @@ pub fn load_into_dbs(dbs: &mut [RedisDb], path: &Path) -> io::Result<String> {
     load_into_dbs_with_options(dbs, path, RdbLoadOptions::default())
 }
 
+/// Load an RDB file into a staged DB vector and atomically replace `dbs` only
+/// after the whole file validates and loads successfully.
+///
+/// `load_into_dbs` is intentionally incremental because startup/import callers
+/// own their target DB lifecycle. A replica full-sync needs a stricter
+/// all-or-nothing boundary: a corrupt or short incoming RDB must not destroy
+/// the replica's previous dataset before the primary link reports failure.
+pub fn load_into_dbs_replacing(dbs: &mut [RedisDb], path: &Path) -> io::Result<String> {
+    load_into_dbs_replacing_with_options(dbs, path, RdbLoadOptions::default())
+}
+
+/// Load an RDB file with explicit options, replacing `dbs` only on success.
+pub fn load_into_dbs_replacing_with_options(
+    dbs: &mut [RedisDb],
+    path: &Path,
+    options: RdbLoadOptions,
+) -> io::Result<String> {
+    if dbs.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "RDB load requires at least one database",
+        ));
+    }
+
+    let mut staged: Vec<RedisDb> = (0..dbs.len()).map(|id| RedisDb::new(id as u32)).collect();
+    let msg = load_into_dbs_with_options(&mut staged, path, options)?;
+    for (dst, src) in dbs.iter_mut().zip(staged.into_iter()) {
+        *dst = src;
+    }
+    Ok(msg)
+}
+
 /// Load an RDB file at `path` with explicit load options.
 pub fn load_into_dbs_with_options(
     dbs: &mut [RedisDb],

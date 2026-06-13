@@ -257,7 +257,10 @@ Work packets:
   full-sync catch-up history is now retained while dependent replicas still pin
   it, and released on ACK/disconnect. Failure cleanup is now explicit, but
   script-busy full-sync apply and diskless short-read state transitions still
-  need dedicated kit coverage.
+  need dedicated kit coverage. The incoming replica RDB replacement boundary is
+  now atomic: corrupt or short full-sync RDB bytes are staged and rejected
+  without clearing the previous replica dataset, while a valid snapshot replaces
+  the old keyspace.
 - **R2-BUFFER-LIMITS:** implement replica output-buffer accounting and
   disconnection policy well enough for `replication-buffer` to count tests
   instead of dying in setup. Partial accounting surface landed on 2026-06-13:

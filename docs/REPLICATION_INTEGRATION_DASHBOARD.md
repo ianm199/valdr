@@ -617,6 +617,68 @@ Takeaway:
   replica must process the primary stream around `-BUSY` without issuing writes
   through the normal read-only command path.
 
+### 2026-06-13 R2 follow-up: atomic incoming replica RDB replacement
+
+Scope:
+
+- Added `redis_core::rdb::load_into_dbs_replacing`, an all-or-nothing load
+  helper that stages a full incoming RDB into fresh logical DBs and swaps it
+  into the caller only after the entire file validates and loads.
+- Changed the replica runtime-owner full-sync apply path to use that helper
+  instead of clearing the live replica keyspace before calling the incremental
+  RDB loader.
+- Extended `fullsync_lifecycle_kit.rs` with a deterministic case proving a
+  corrupt incoming full-sync RDB leaves the existing replica data intact, while
+  a valid incoming RDB replaces the old dataset and drops keys absent from the
+  snapshot.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands --test fullsync_lifecycle_kit -- --nocapture
+rustfmt --check \
+  crates/redis-core/src/rdb/load.rs \
+  crates/redis-core/src/rdb/mod.rs \
+  crates/redis-server/src/runtime_owner.rs \
+  crates/redis-commands/tests/fullsync_lifecycle_kit.rs
+cargo test -p redis-core rdb::load -- --nocapture
+cargo check -p redis-core -p redis-commands -p redis-server
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --files integration/replication \
+  --profile integration-repl \
+  --runner-id fullsync-atomic-rdb \
+  --timeout-s 300 \
+  --baseport 30279 \
+  --portcount 100 \
+  --skip-build
+```
+
+Results:
+
+- `fullsync_lifecycle_kit`: 2 passed, 0 failed.
+- Core RDB load tests: 5 passed, 0 failed.
+- Targeted `rustfmt --check`: passed.
+- `cargo check -p redis-core -p redis-commands -p redis-server`: passed.
+- `cargo build --bin redis-server`: passed.
+- Focused `integration/replication`:
+  `harness/oracle/results/tcl-survey/20260613T173112222872Z/result.json`
+  completed without timing out but produced no parsed summary. It still aborts
+  at `Master stream is correctly processed while the replica has a script in
+  -BUSY state` with
+  `READONLY You can't write against a read only replica..`, plus 19 parsed
+  failure lines before the abort.
+
+Takeaway:
+
+- Replica full-sync application now has an atomic keyspace replacement boundary
+  for corrupt or short incoming RDBs. This completes the
+  `fullsync_lifecycle_kit` case "replica full-sync failure does not replace
+  good old data unless the incoming RDB is valid." The broader
+  `integration/replication` gate remains blocked at script-busy stream apply,
+  so the next full-sync lifecycle slice should model primary-link command
+  application around BUSY/script state instead of touching RDB replacement.
+
 ### R4-AOF-FULLSYNC
 
 Status: `integration/replication-aof-sync` green on 2026-06-13.

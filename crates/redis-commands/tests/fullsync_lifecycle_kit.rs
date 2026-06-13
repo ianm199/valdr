@@ -9,10 +9,13 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use redis_core::db::RedisDb;
+use redis_core::object::RedisObject;
 use redis_core::replication::{
     generate_runid, ReplBgsaveJob, ReplicaConn, ReplicaState, ReplicationState,
 };
 use redis_core::ClientId;
+use redis_types::RedisString;
 
 fn unique_temp_dir(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -42,6 +45,12 @@ fn install_job(st: &ReplicationState, temp_path: PathBuf, waiters: Vec<ClientId>
         needs_getack_on_completion: false,
     });
     st.set_repl_child_pid(99);
+}
+
+fn assert_string_value(db: &RedisDb, key: &[u8], expected: &[u8]) {
+    let key = RedisString::from_bytes(key);
+    let obj = db.find(&key).expect("key should exist");
+    assert_eq!(obj.as_string_bytes(), Some(expected));
 }
 
 #[test]
@@ -91,5 +100,53 @@ fn failed_fullsync_job_cleans_waiters_temp_files_and_child_state() {
     assert_eq!(next.1, vec![73]);
 
     let _ = st.abort_repl_bgsave_job();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn replica_rdb_replacement_is_atomic_on_failed_incoming_fullsync() {
+    let dir = unique_temp_dir("fullsync-atomic-rdb");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let bad_path = dir.join("bad-incoming.rdb");
+    let good_path = dir.join("good-incoming.rdb");
+    std::fs::write(&bad_path, b"REDIS0011short").expect("write corrupt RDB");
+
+    let mut current = vec![RedisDb::new(0), RedisDb::new(1)];
+    current[0].add(
+        RedisString::from_static(b"stable"),
+        RedisObject::new_string(b"old"),
+    );
+    current[1].add(
+        RedisString::from_static(b"other-db"),
+        RedisObject::new_string(b"old-db1"),
+    );
+
+    let err = redis_core::rdb::load_into_dbs_replacing(&mut current, &bad_path)
+        .expect_err("corrupt incoming RDB must fail");
+    assert!(
+        err.to_string().contains("short") || err.to_string().contains("EOF"),
+        "unexpected corrupt RDB error: {err}"
+    );
+    assert_string_value(&current[0], b"stable", b"old");
+    assert_string_value(&current[1], b"other-db", b"old-db1");
+
+    let mut incoming = vec![RedisDb::new(0), RedisDb::new(1)];
+    incoming[0].add(
+        RedisString::from_static(b"stable"),
+        RedisObject::new_string(b"new"),
+    );
+    redis_core::rdb::save_rdb_databases(&incoming, &good_path).expect("save valid incoming RDB");
+
+    let msg = redis_core::rdb::load_into_dbs_replacing(&mut current, &good_path)
+        .expect("valid incoming RDB should replace current data");
+    assert!(msg.contains("1 keys"));
+    assert_string_value(&current[0], b"stable", b"new");
+    assert!(
+        current[1]
+            .find(&RedisString::from_static(b"other-db"))
+            .is_none(),
+        "successful replacement should drop keys absent from the incoming RDB"
+    );
+
     let _ = std::fs::remove_dir_all(&dir);
 }

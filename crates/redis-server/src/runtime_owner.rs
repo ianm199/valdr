@@ -1625,10 +1625,7 @@ impl RuntimeOwner {
             eprintln!("redis-server: replica: staging incoming RDB failed: {}", e);
             return false;
         }
-        for db in &mut self.dbs {
-            db.clear();
-        }
-        let result = redis_core::rdb::load_into_dbs(&mut self.dbs, &temp_path);
+        let result = redis_core::rdb::load_into_dbs_replacing(&mut self.dbs, &temp_path);
         let _ = std::fs::remove_file(&temp_path);
         match result {
             Ok(msg) => {
