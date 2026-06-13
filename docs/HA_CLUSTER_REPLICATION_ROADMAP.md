@@ -187,14 +187,19 @@ Work packets:
   [`REPLICATION_INTEGRATION_DASHBOARD.md`](REPLICATION_INTEGRATION_DASHBOARD.md).
 - **R1-DB-SELECT:** ensure multi-DB replication delivery emits and applies
   `SELECT` consistently, including replica apply state after reconnect.
-  Dispatch-time fan-out coverage completed on 2026-06-13; reconnect/apply-state
-  coverage remains part of `R3-RECONNECT-MATRIX`.
+  Dispatch-time fan-out coverage completed on 2026-06-13. Chained
+  replica-apply selected-DB state also landed on 2026-06-13: a downstream
+  full-sync from a replica now starts from the upstream stream DB instead of
+  emitting an extra first `SELECT 9`. Broader reconnect/apply-state coverage
+  remains part of `R3-RECONNECT-MATRIX`.
 - **R1-NOOP-DIRTY:** keep no-op writes out of the replication stream by using a
   dirty-delta or equivalent mutation signal, not command metadata alone.
   Completed for `DEL`, `UNLINK`, `SREM`, `HDEL`, and `ZREM` on 2026-06-13; see
   [`REPLICATION_INTEGRATION_DASHBOARD.md`](REPLICATION_INTEGRATION_DASHBOARD.md).
 - **R1-SCRIPT-FUNCTION-PROP:** verify script/function propagation semantics
-  under `EVAL`, `EVALSHA`, `FCALL`, and write/no-write shebang flags.
+  under `EVAL`, `EVALSHA`, `FCALL`, and write/no-write shebang flags. The
+  Lua-originated empty `FLUSHDB` / `FLUSHALL` chained-replica case is now
+  covered; broader script/function propagation remains open.
 
 Gate:
 
@@ -255,9 +260,11 @@ Work packets:
   while a replication BGSAVE is active are retained in the job and shipped
   after the RDB payload even if the circular backlog wrapped. Completed
   full-sync catch-up history is now retained while dependent replicas still pin
-  it, and released on ACK/disconnect. Failure cleanup is now explicit, but
-  script-busy full-sync apply and diskless short-read state transitions still
-  need dedicated kit coverage. The incoming replica RDB replacement boundary is
+  it, and released on ACK/disconnect. Replica-applied commands now relay to
+  downstream replicas when stream consumers exist, including empty direct and
+  Lua-originated flushes. Failure cleanup is now explicit, but script-busy
+  full-sync apply and diskless short-read state transitions still need
+  dedicated kit coverage. The incoming replica RDB replacement boundary is
   now atomic: corrupt or short full-sync RDB bytes are staged and rejected
   without clearing the previous replica dataset, while a valid snapshot replaces
   the old keyspace. The script-busy full-sync frontier also moved: no-write

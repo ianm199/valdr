@@ -492,6 +492,10 @@ pub struct ReplicationState {
     /// a replica attaches is prefixed with `SELECT <db>`, and later writes
     /// only pay the SELECT frame when the selected DB changes.
     pub selected_db: AtomicI32,
+    /// Database id currently selected by the upstream primary stream on a
+    /// replica. Full-sync RDBs carry this as `repl-stream-db`; downstream
+    /// command streams must treat it as already selected after the RDB load.
+    primary_stream_db: AtomicI32,
     /// Set to `true` by `REPLICAOF NO ONE` to signal the running dialer thread
     /// to exit its reconnection loop immediately.
     pub dialer_stop_flag: AtomicBool,
@@ -554,6 +558,7 @@ impl ReplicationState {
             repl_bgsave_job: Mutex::new(None),
             retained_history: Mutex::new(Vec::new()),
             selected_db: AtomicI32::new(-1),
+            primary_stream_db: AtomicI32::new(0),
             dialer_stop_flag: AtomicBool::new(false),
             replica_link_drop_requested: AtomicBool::new(false),
             replica_dialer_pause_until_ms: AtomicI64::new(0),
@@ -716,6 +721,8 @@ impl ReplicationState {
         self.backlog_last_replica_disconnect_ms
             .store(-1, Ordering::Relaxed);
         self.master_repl_offset.store(0, Ordering::Relaxed);
+        self.selected_db.store(-1, Ordering::Relaxed);
+        self.primary_stream_db.store(0, Ordering::Relaxed);
     }
 
     fn append_to_repl_bgsave_catchup(&self, bytes: &[u8]) {
@@ -741,6 +748,38 @@ impl ReplicationState {
             return false;
         }
 
+        self.has_replication_stream_consumers()
+    }
+
+    /// True when a command received from an upstream primary must be relayed to
+    /// downstream replicas. Ordinary client writes on replicas are still
+    /// suppressed; this is only for the `replication_apply` pseudo-client.
+    pub fn should_relay_replica_apply_writes(&self) -> bool {
+        self.has_replication_stream_consumers()
+    }
+
+    /// Remember the DB currently selected by the upstream primary stream. This
+    /// advances on replica-applied `SELECT` commands even when no downstream
+    /// replica is attached yet.
+    pub fn remember_primary_stream_db(&self, db: u32) {
+        let db = i32::try_from(db).unwrap_or(i32::MAX);
+        self.primary_stream_db.store(db, Ordering::Release);
+    }
+
+    /// Reset the downstream command-stream selected DB when starting a full
+    /// sync. Primaries start unknown (`-1`) so the next write emits `SELECT`;
+    /// replicas start from the upstream stream DB because their RDB snapshot
+    /// advertises that selected DB to downstream replicas.
+    pub fn reset_selected_db_for_full_resync(&self) {
+        let selected = if self.replica_of_target().is_some() {
+            self.primary_stream_db.load(Ordering::Acquire)
+        } else {
+            -1
+        };
+        self.selected_db.store(selected, Ordering::Release);
+    }
+
+    fn has_replication_stream_consumers(&self) -> bool {
         let has_replicas = match self.replicas.lock() {
             Ok(g) => !g.is_empty(),
             Err(p) => !p.into_inner().is_empty(),

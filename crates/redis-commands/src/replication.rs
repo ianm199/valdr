@@ -904,8 +904,7 @@ fn handle_psync(
     repl.incr_sync_full();
 
     let snapshot_offset = master_offset;
-    repl.selected_db
-        .store(-1, std::sync::atomic::Ordering::Release);
+    repl.reset_selected_db_for_full_resync();
     if let Some(sender) = outbound {
         register_replica(
             &repl,

@@ -201,6 +201,43 @@ fn dispatch_as_exec_drain(client_id: u64, db: &mut RedisDb, cmd: &[&[u8]]) -> Ve
     c.drain_reply()
 }
 
+fn dispatch_as_replica_apply(client_id: u64, db: &mut RedisDb, cmd: &[&[u8]]) -> Vec<u8> {
+    let mut c = Client::new(client_id);
+    c.replication_apply = true;
+    c.db_index = db.id;
+    c.set_authenticated_user(Some(RedisString::from_static(b"default")));
+    c.set_args(argv(cmd));
+    let server = Arc::new(RedisServer::default());
+    let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
+    {
+        let mut ctx = redis_core::CommandContext::with_server(&mut c, db, server, pubsub);
+        let _ = dispatch(&mut ctx);
+    }
+    c.drain_reply()
+}
+
+fn dispatch_as_replica_apply_on_dbs(
+    client_id: u64,
+    dbs: &mut [RedisDb],
+    selected_db: &mut u32,
+    cmd: &[&[u8]],
+) -> Vec<u8> {
+    let mut c = Client::new(client_id);
+    c.replication_apply = true;
+    c.db_index = *selected_db;
+    c.set_authenticated_user(Some(RedisString::from_static(b"default")));
+    c.set_args(argv(cmd));
+    let server = Arc::new(RedisServer::default());
+    let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
+    {
+        let mut ctx =
+            redis_core::CommandContext::with_server_and_db_list(&mut c, dbs, server, pubsub);
+        let _ = dispatch(&mut ctx);
+    }
+    *selected_db = c.db_index;
+    c.drain_reply()
+}
+
 // ─── GREEN ANCHOR ────────────────────────────────────────────────────────────
 
 /// GREEN ANCHOR — proves the capture mechanism is faithful before any red test
@@ -255,6 +292,112 @@ fn r2_replica_fanout_updates_pending_output_accounting() {
         stream.len(),
         "fan-out accounting should track queued replica bytes"
     );
+}
+
+#[test]
+fn replica_apply_relays_empty_flushes_to_downstream_replicas() {
+    let _g = repl_guard();
+    let repl = global_replication_state();
+    repl.become_master();
+    let cap = ReplCapture::attach(900_031, 0);
+    repl.become_replica_of(RedisString::from_static(b"127.0.0.1"), 6379);
+
+    let mut db = RedisDb::new(0);
+    assert_eq!(
+        dispatch_as_replica_apply(31, &mut db, &[b"FLUSHDB"]),
+        b"+OK\r\n"
+    );
+    assert_eq!(
+        dispatch_as_replica_apply(32, &mut db, &[b"FLUSHALL"]),
+        b"+OK\r\n"
+    );
+    assert_eq!(
+        dispatch_as_replica_apply(33, &mut db, &[b"EVAL", b"redis.call('flushdb')", b"0"]),
+        b"+OK\r\n"
+    );
+    assert_eq!(
+        dispatch_as_replica_apply(34, &mut db, &[b"EVAL", b"redis.call('flushall')", b"0"]),
+        b"+OK\r\n"
+    );
+
+    let stream = cap.drain();
+    let flushdb = resp(&[b"FLUSHDB"]);
+    let flushall = resp(&[b"FLUSHALL"]);
+    let flushdb_script = resp(&[b"flushdb"]);
+    let flushall_script = resp(&[b"flushall"]);
+    assert_eq!(
+        count_subsequence(&stream, &flushdb),
+        1,
+        "replica apply must relay direct FLUSHDB to downstream replicas, got {:?}",
+        String::from_utf8_lossy(&stream)
+    );
+    assert_eq!(
+        count_subsequence(&stream, &flushdb_script),
+        1,
+        "replica apply must relay script FLUSHDB to downstream replicas, got {:?}",
+        String::from_utf8_lossy(&stream)
+    );
+    assert_eq!(
+        count_subsequence(&stream, &flushall),
+        1,
+        "replica apply must relay direct FLUSHALL to downstream replicas, got {:?}",
+        String::from_utf8_lossy(&stream)
+    );
+    assert_eq!(
+        count_subsequence(&stream, &flushall_script),
+        1,
+        "replica apply must relay script FLUSHALL to downstream replicas, got {:?}",
+        String::from_utf8_lossy(&stream)
+    );
+
+    repl.become_master();
+}
+
+#[test]
+fn replica_fullsync_stream_starts_at_upstream_selected_db() {
+    let _g = repl_guard();
+    let repl = global_replication_state();
+    repl.become_master();
+    repl.become_replica_of(RedisString::from_static(b"127.0.0.1"), 6379);
+
+    let mut dbs: Vec<RedisDb> = (0..16).map(RedisDb::new).collect();
+    let mut selected_db = 0;
+    assert_eq!(
+        dispatch_as_replica_apply_on_dbs(35, &mut dbs, &mut selected_db, &[b"SELECT", b"9"]),
+        b"+OK\r\n"
+    );
+    assert_eq!(selected_db, 9);
+
+    repl.reset_selected_db_for_full_resync();
+    let cap = ReplCapture::attach(900_032, 0);
+    assert_eq!(
+        dispatch_as_replica_apply_on_dbs(
+            36,
+            &mut dbs,
+            &mut selected_db,
+            &[b"SET", b"key", b"value"]
+        ),
+        b"+OK\r\n"
+    );
+
+    let stream = cap.drain();
+    let select9 = resp(&[b"SELECT", b"9"]);
+    assert!(
+        !stream
+            .windows(select9.len())
+            .any(|w| w == select9.as_slice()),
+        "full-sync from a replica should treat the upstream stream DB as already selected, got {:?}",
+        String::from_utf8_lossy(&stream)
+    );
+    assert!(
+        stream
+            .windows(resp(&[b"SET", b"key", b"value"]).len())
+            .any(|w| w == resp(&[b"SET", b"key", b"value"]).as_slice()),
+        "replica-applied DB 9 write should still relay downstream, got {:?}",
+        String::from_utf8_lossy(&stream)
+    );
+
+    repl.become_master();
 }
 
 // ─── R1-NOOP-DIRTY: no-op write propagation guards ─────────────────────────

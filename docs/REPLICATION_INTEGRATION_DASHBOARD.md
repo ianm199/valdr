@@ -13,7 +13,8 @@ Fast deterministic gate:
 cargo test -p redis-commands --test repl_correctness_kit
 ```
 
-Latest result on 2026-06-13 after the R5 parser packet: 21 passed, 0 failed.
+Latest result on 2026-06-13 after the chained replica-apply relay packet:
+23 passed, 0 failed.
 
 R0 full integration dashboard:
 
@@ -73,7 +74,7 @@ Artifact:
 | `integration/replication-3` | 3/4 | Red | Expiry consistency, writable-replica expired-key behavior, and PFCOUNT expired-key/cache semantics. |
 | `integration/replication-4` | 15/2 | Red | SPOP rewrite cases now pass; remaining failures are divergence/default writable-replica cases. |
 | `integration/replication-buffer` | 4/11 | Red | Fresh post-PSYNC baseline still reaches counted assertions without timeout. Shared vs private output-buffer semantics are now pinned in `repl_buffer_kit`; remaining failures are Valkey-style global replication-buffer memory, BGSAVE/slow-replica backlog outgrowth, partial resync across broader retained history, and typed live output-buffer disconnect/drain policy. |
-| `integration/replication` | 28/39 | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, the first async-loading CONFIG exception, successful swapdb function-context mismatch, parent-killed child discovery, `repl-diskless-load on-empty-db`, no-longer-useful RDB child cancellation, all four replica-link reply-violation assertions, and the malformed-PSYNC-offset log assertion. Remaining failures are counted full-sync, diskless pipe/drop, command-stat propagation, blocked-list rewrite, cache-master, lazy-expire, and old-data rollback cases. |
+| `integration/replication` | 29/38 | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, the first async-loading CONFIG exception, successful swapdb function-context mismatch, parent-killed child discovery, `repl-diskless-load on-empty-db`, no-longer-useful RDB child cancellation, all four replica-link reply-violation assertions, malformed-PSYNC-offset logging, and chained replica `FLUSHDB` / `FLUSHALL` stream relay. Remaining failures are counted full-sync, diskless pipe/drop, command-stat propagation, blocked-list rewrite, cache-master, lazy-expire, and old-data rollback cases. |
 | `integration/replication-psync` | 90/0 | Green | Focused gate is green after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support for the replica dialer. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
 | `integration/replica-redirect` | timeout | Red | `CLIENT CAPA REDIRECT` top-level and MULTI/EXEC replica redirect semantics now pass the early file assertions. Manual `FAILOVER` now reaches timeout-driven handoff in Rust kits and a live two-process probe, including blocked `BRPOP` and paused `GET` REDIRECT after promotion. The official Tcl file still no-summary times out in the first failover test; side observation showed old primary `blocked_clients:2`, `paused_actions:all`, and `role:slave` while the target remained SIGSTOP'd. |
@@ -114,7 +115,10 @@ visible integration frontiers are now:
   explicit in `INFO persistence` and dispatch. Successful full-sync RDB
   replacement now carries function payloads too, and replica-link replies are
   now detected, logged, and disconnected instead of being flushed to the link.
-  Async failure rollback and diskless pipe cleanup remain open.
+  Chained replica apply now relays empty `FLUSHDB` / `FLUSHALL`, including
+  Lua-originated flushes, and initializes downstream stream DB state from the
+  upstream selected DB. Async failure rollback and diskless pipe cleanup remain
+  open.
 - `R2-BGSAVE-CATCHUP`: active replication BGSAVE jobs now retain appended
   replication bytes outside the circular backlog and use that buffer for
   post-RDB catch-up. Completed full-sync catch-up bytes are now also retained
@@ -138,6 +142,62 @@ visible integration frontiers are now:
   REDIRECT unblocking, and promotion/demotion remain open.
 
 ## Packet Evidence
+
+### R2-CHAINED-REPLICA-FLUSH-RELAY
+
+Status: completed on 2026-06-13.
+
+Implementation:
+
+- `replication_apply` commands may now fan out to downstream replicas when a
+  replica has stream consumers, rather than being suppressed as ordinary
+  replica writes.
+- Lua inner writes no longer inherit the EXEC drain suppression that blocked
+  script-originated flush propagation.
+- Replica-applied `SELECT` updates the remembered upstream stream DB, and a
+  downstream full-sync from a replica starts the command stream at that DB
+  instead of emitting a spurious first `SELECT 9`.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands --test repl_correctness_kit -- --nocapture
+cargo test -p redis-core replication::tests -- --nocapture
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-replica-apply-flush-select-state \
+  --profile integration-repl \
+  --timeout-s 420 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replication \
+  --isolated-tests-copy \
+  --skip-build
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-replica-apply-flush-tripwire \
+  --profile integration-repl \
+  --timeout-s 240 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replication-2,integration/block-repl \
+  --isolated-tests-copy \
+  --skip-build
+```
+
+Results:
+
+- `repl_correctness_kit`: 23 passed, 0 failed.
+- `redis-core replication::tests`: 15 passed, 0 failed.
+- `cargo build --bin redis-server`: passed.
+- Focused `integration/replication`:
+  `harness/oracle/results/tcl-survey/20260613T204411632115Z/result.json`
+  reported 29 passed / 38 failed; `FLUSHDB / FLUSHALL should replicate`
+  cleared.
+- Focused dual-server tripwire:
+  `harness/oracle/results/tcl-survey/20260613T204905111041Z/result.json`
+  reported `integration/replication-2` 7/0 and `integration/block-repl` 2/0.
 
 ### R2-RDB-BULK-FAITHFUL
 

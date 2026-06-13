@@ -779,17 +779,21 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
     } else {
         None
     };
-    let replication =
-        if propagate_write && !ctx.client_ref().is_replica && !ctx.client_ref().replication_apply {
-            let repl = redis_core::replication::global_replication_state();
-            if repl.should_propagate_writes() || aof.is_some() {
-                Some(repl)
-            } else {
-                None
-            }
+    let replication = if propagate_write && !ctx.client_ref().is_replica {
+        let repl = redis_core::replication::global_replication_state();
+        let should_fanout = if ctx.client_ref().replication_apply {
+            repl.should_relay_replica_apply_writes()
+        } else {
+            repl.should_propagate_writes() || aof.is_some()
+        };
+        if should_fanout {
+            Some(repl)
         } else {
             None
-        };
+        }
+    } else {
+        None
+    };
 
     let mut argv_snapshot: Option<Vec<RedisString>> = None;
     let successful_complete = result.is_ok() && !command_blocked;
@@ -813,6 +817,10 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
     }
 
     if successful_complete {
+        if ctx.client_ref().replication_apply {
+            redis_core::replication::global_replication_state()
+                .remember_primary_stream_db(ctx.selected_db_id());
+        }
         ctx.apply_client_tracking_after_command(name, metadata.write);
         if let Some(elapsed_micros) = elapsed_micros {
             let argv = argv_snapshot
@@ -1030,7 +1038,7 @@ fn should_propagate_write_command(ctx: &CommandContext<'_>, original_name: &[u8]
     if ctx.client_ref().prevent_propagation() {
         return false;
     }
-    if ctx.client_ref().flag_deny_blocking() {
+    if ctx.client_ref().flag_deny_blocking() && !ctx.client_ref().flag_lua() {
         return false;
     }
     if original_name.eq_ignore_ascii_case(b"GETEX") {
