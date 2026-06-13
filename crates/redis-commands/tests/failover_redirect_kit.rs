@@ -6,9 +6,11 @@
 //! READONLY clients, and MULTI/EXEC transitions are covered without spawning a
 //! two-server topology.
 
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
-use redis_core::replication::global_replication_state;
+use redis_core::replication::{global_replication_state, ReplicaConn, ReplicaState};
+use redis_core::ClientId;
 use redis_core::{Client, PubSubRegistry, RedisDb, RedisServer};
 use redis_protocol::frame::{encode_resp2, RespFrame};
 use redis_types::RedisString;
@@ -45,8 +47,16 @@ fn argv(parts: &[&[u8]]) -> Vec<RedisString> {
 }
 
 fn run(client: &mut Client, db: &mut RedisDb, cmd: &[&[u8]]) -> Vec<u8> {
+    run_with_server(client, db, Arc::new(RedisServer::default()), cmd)
+}
+
+fn run_with_server(
+    client: &mut Client,
+    db: &mut RedisDb,
+    server: Arc<RedisServer>,
+    cmd: &[&[u8]],
+) -> Vec<u8> {
     client.set_args(argv(cmd));
-    let server = Arc::new(RedisServer::default());
     let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
     let result = {
         let mut ctx = redis_core::CommandContext::with_server(client, db, server, pubsub);
@@ -59,6 +69,30 @@ fn run(client: &mut Client, db: &mut RedisDb, cmd: &[&[u8]]) -> Vec<u8> {
         }
     }
     reply
+}
+
+struct AttachedReplica {
+    client_id: ClientId,
+}
+
+impl AttachedReplica {
+    fn online(client_id: ClientId) -> Self {
+        let (tx, _rx) = mpsc::channel();
+        let repl = global_replication_state();
+        repl.add_replica(ReplicaConn::new(
+            client_id,
+            ReplicaState::Online,
+            repl.master_offset(),
+            tx,
+        ));
+        Self { client_id }
+    }
+}
+
+impl Drop for AttachedReplica {
+    fn drop(&mut self) {
+        global_replication_state().remove_replica(self.client_id);
+    }
 }
 
 fn assert_reply(reply: &[u8], expected: &[u8]) {
@@ -75,6 +109,15 @@ fn assert_starts_with(reply: &[u8], expected: &[u8]) {
     assert!(
         reply.starts_with(expected),
         "reply {:?} did not start with {:?}",
+        String::from_utf8_lossy(reply),
+        String::from_utf8_lossy(expected)
+    );
+}
+
+fn assert_contains(reply: &[u8], expected: &[u8]) {
+    assert!(
+        reply.windows(expected.len()).any(|w| w == expected),
+        "reply {:?} did not contain {:?}",
         String::from_utf8_lossy(reply),
         String::from_utf8_lossy(expected)
     );
@@ -181,4 +224,95 @@ fn queue_time_redirect_marks_transaction_dirty_for_execabort() {
         &exec,
         b"-EXECABORT Transaction discarded because of previous errors.",
     );
+}
+
+#[test]
+fn failover_without_force_enters_waiting_for_sync_and_abort_clears_pause() {
+    let _guard = repl_guard();
+    let repl = global_replication_state();
+    repl.become_master();
+    let _replica = AttachedReplica::online(1_010_006);
+    let server = Arc::new(RedisServer::default());
+    let mut client = Client::new(1_010_007);
+    let mut db = RedisDb::new(0);
+
+    assert_reply(
+        &run_with_server(&mut client, &mut db, Arc::clone(&server), &[b"FAILOVER"]),
+        b"+OK\r\n",
+    );
+    assert_contains(
+        &run_with_server(
+            &mut client,
+            &mut db,
+            Arc::clone(&server),
+            &[b"INFO", b"replication"],
+        ),
+        b"master_failover_state:waiting-for-sync",
+    );
+    let clients = run_with_server(
+        &mut client,
+        &mut db,
+        Arc::clone(&server),
+        &[b"INFO", b"clients"],
+    );
+    assert_contains(&clients, b"paused_reason:failover");
+    assert_contains(&clients, b"paused_actions:all");
+
+    assert_reply(
+        &run_with_server(
+            &mut client,
+            &mut db,
+            Arc::clone(&server),
+            &[b"FAILOVER", b"ABORT"],
+        ),
+        b"+OK\r\n",
+    );
+    assert_contains(
+        &run_with_server(
+            &mut client,
+            &mut db,
+            Arc::clone(&server),
+            &[b"INFO", b"replication"],
+        ),
+        b"master_failover_state:no-failover",
+    );
+    assert_contains(
+        &run_with_server(&mut client, &mut db, server, &[b"INFO", b"clients"]),
+        b"paused_reason:none",
+    );
+}
+
+#[test]
+fn force_failover_with_target_enters_failover_in_progress() {
+    let _guard = repl_guard();
+    let repl = global_replication_state();
+    repl.become_master();
+    let _replica = AttachedReplica::online(1_010_008);
+    let server = Arc::new(RedisServer::default());
+    let mut client = Client::new(1_010_009);
+    let mut db = RedisDb::new(0);
+
+    assert_reply(
+        &run_with_server(
+            &mut client,
+            &mut db,
+            Arc::clone(&server),
+            &[
+                b"FAILOVER",
+                b"TO",
+                b"127.0.0.1",
+                b"6385",
+                b"TIMEOUT",
+                b"500",
+                b"FORCE",
+            ],
+        ),
+        b"+OK\r\n",
+    );
+    assert_contains(
+        &run_with_server(&mut client, &mut db, server, &[b"INFO", b"replication"]),
+        b"master_failover_state:failover-in-progress",
+    );
+
+    let _ = repl.abort_manual_failover();
 }

@@ -1179,7 +1179,8 @@ fn r5_failover_parser_registered_and_rejects_no_replica_state() {
     let reply = dispatch_result_as_primary(990_001, &mut db, &[b"FAILOVER"]);
     assert_reply_contains(&reply, b"FAILOVER requires connected replicas.");
     assert!(
-        !reply.windows(b"unknown command".len())
+        !reply
+            .windows(b"unknown command".len())
             .any(|w| w.eq_ignore_ascii_case(b"unknown command")),
         "FAILOVER should be registered, got {:?}",
         String::from_utf8_lossy(&reply),
@@ -1188,11 +1189,8 @@ fn r5_failover_parser_registered_and_rejects_no_replica_state() {
     let abort = dispatch_result_as_primary(990_002, &mut db, &[b"FAILOVER", b"ABORT"]);
     assert_reply_contains(&abort, b"No failover in progress.");
 
-    let bad_timeout = dispatch_result_as_primary(
-        990_003,
-        &mut db,
-        &[b"FAILOVER", b"TIMEOUT", b"0"],
-    );
+    let bad_timeout =
+        dispatch_result_as_primary(990_003, &mut db, &[b"FAILOVER", b"TIMEOUT", b"0"]);
     assert_reply_contains(&bad_timeout, b"FAILOVER timeout must be greater than 0");
 
     let bad_target = dispatch_result_as_primary(990_004, &mut db, &[b"FAILOVER", b"TO", b"host"]);
@@ -1207,7 +1205,10 @@ fn r5_failover_parser_keeps_state_and_capability_boundaries() {
 
     let mut db = RedisDb::new(0);
     let as_replica = dispatch_result_as_primary(990_005, &mut db, &[b"FAILOVER"]);
-    assert_reply_contains(&as_replica, b"FAILOVER is not valid when server is a replica.");
+    assert_reply_contains(
+        &as_replica,
+        b"FAILOVER is not valid when server is a replica.",
+    );
 
     repl.become_master();
     let _capture = ReplCapture::attach(990_006, repl.master_offset());
@@ -1223,10 +1224,8 @@ fn r5_failover_parser_keeps_state_and_capability_boundaries() {
     );
 
     let would_start_real_failover = dispatch_result_as_primary(990_008, &mut db, &[b"FAILOVER"]);
-    assert_reply_contains(
-        &would_start_real_failover,
-        b"FAILOVER is parsed but coordinated failover is not implemented yet.",
-    );
+    assert_eq!(would_start_real_failover, b"+OK\r\n");
+    repl.abort_manual_failover();
 }
 
 // ─── AOF round-trip (green capability) ───────────────────────────────────────

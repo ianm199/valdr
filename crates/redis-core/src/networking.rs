@@ -1618,6 +1618,29 @@ pub fn apply_client_pause(server: &RedisServer, end: i64, pause_all: bool) {
     refresh_cached_paused_actions(server, &events, crate::util::mstime());
 }
 
+pub fn apply_failover_pause(server: &RedisServer, end: i64) {
+    let mut events = server
+        .pause_events
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    pause_actions(
+        &mut events,
+        PausePurpose::DuringFailover,
+        end,
+        PAUSE_ACTIONS_CLIENT_ALL_SET,
+    );
+    refresh_cached_paused_actions(server, &events, crate::util::mstime());
+}
+
+pub fn clear_failover_pause(server: &RedisServer) {
+    let mut events = server
+        .pause_events
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    unpause_actions(&mut events, PausePurpose::DuringFailover);
+    refresh_cached_paused_actions(server, &events, crate::util::mstime());
+}
+
 /// CLIENT UNPAUSE
 /// Clears the client-command pause and (via the gate) resumes any postponed clients.
 pub fn client_unpause_command(ctx: &mut CommandContext) -> RedisResult<()> {

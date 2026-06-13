@@ -610,6 +610,11 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
             .unwrap_or(0);
         let _ = writeln!(buf, "# Replication\r");
         let _ = writeln!(buf, "role:{}\r", role);
+        let _ = writeln!(
+            buf,
+            "master_failover_state:{}\r",
+            repl.manual_failover_state_str(now_ms)
+        );
         if let Some((host, port)) = repl.replica_of_target() {
             let _ = writeln!(
                 buf,

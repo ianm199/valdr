@@ -76,7 +76,7 @@ Artifact:
 | `integration/replication` | no summary | Red | The failed full-sync cleanup packet moves past `diskless replication child being killed is collected`; the current abort is `Master stream is correctly processed while the replica has a script in -BUSY state` with `READONLY`. Diskless/script-busy full-sync apply remains the frontier. |
 | `integration/replication-psync` | timeout | Red | Timed out at 300s; no-backlog/backlog-expired and diskless variants remain frontier. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
-| `integration/replica-redirect` | no summary | Red | `CLIENT CAPA REDIRECT` top-level and MULTI/EXEC replica redirect semantics now pass the early file assertions; the file still aborts at `client paused before and during failover-in-progress` with the explicit coordinated-failover-unimplemented error. |
+| `integration/replica-redirect` | timeout | Red | `CLIENT CAPA REDIRECT` top-level and MULTI/EXEC replica redirect semantics now pass the early file assertions. `FAILOVER` now enters visible state instead of returning the parser-only unimplemented error; the file now times out in `client paused before and during failover-in-progress` waiting for blocked-client accounting. |
 | `unit/wait` | 39/0 | Green | WAIT command suite passed after the R4 role-change unblock packet; WAITAOF/FACK edge cases still need separate coverage. |
 
 ## Temp RDB Cleanup
@@ -125,10 +125,13 @@ visible integration frontiers are now:
   `REPLICAOF` topology changes; replica FACK/disconnect semantics remain open.
 - `R4-AOF-FULLSYNC`: `replication-aof-sync` is now green after full-sync RDB
   loads refresh appendonly manifests correctly.
-- `R5-MANUAL-FAILOVER`: server `FAILOVER` is now parser-only; the next useful
-  work is the real write pause, offset wait, promotion/demotion, and blocked
-  client handling needed by `replica-redirect`. The basic replica REDIRECT
-  contract for redirect-capable clients is now covered.
+- `R5-MANUAL-FAILOVER`: server `FAILOVER` now has parser coverage and visible
+  state; the next useful work is real write pause, offset wait,
+  promotion/demotion, and blocked-client handling needed by
+  `replica-redirect`. The basic replica REDIRECT contract for redirect-capable
+  clients is now covered, and `FAILOVER` exposes `waiting-for-sync` /
+  `failover-in-progress`. Pause accounting, timeout handling, blocked-client
+  REDIRECT unblocking, and promotion/demotion remain open.
 
 ## Packet Evidence
 
@@ -1012,3 +1015,83 @@ Takeaway:
   REDIRECT formatting. It is explicit primary-side failover state:
   write/client pause, waiting-for-sync, unblocking blocked clients with
   REDIRECT, and eventual promotion/demotion handoff.
+
+### R5-FAILOVER-VISIBLE-STATE
+
+Status: first visible primary-side failover state slice completed on
+2026-06-13. This is still not manual failover: it starts and aborts explicit
+state and pause, but does not complete timeout, promotion, demotion, or blocked
+client REDIRECT unblocking.
+
+Implementation:
+
+- Added primary-side manual failover state to `ReplicationState`:
+  `no-failover`, `waiting-for-sync`, and `failover-in-progress`.
+- `FAILOVER` with connected replicas now returns `OK` and enters visible state
+  instead of returning the old coordinated-failover-unimplemented error.
+- `FAILOVER TO <host> <port> TIMEOUT <ms> FORCE` enters
+  `failover-in-progress`; non-force `FAILOVER` enters `waiting-for-sync`.
+- `FAILOVER ABORT` now clears the manual failover state and failover pause.
+- `INFO replication` exposes `master_failover_state`.
+- Added failover pause helpers in `redis-core::networking` so the state can
+  use the existing runtime pause machinery.
+- `failover_redirect_kit.rs` now covers visible state, failover pause
+  observability, and ABORT cleanup in addition to redirect-capable client
+  behavior.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands --test failover_redirect_kit -- --nocapture
+cargo test -p redis-commands --test repl_correctness_kit -- --nocapture
+cargo test -p redis-core replication::tests -- --nocapture
+cargo test -p redis-commands --test repl_buffer_kit -- --nocapture
+cargo test -p redis-commands --test psync_reconnect_kit -- --nocapture
+cargo test -p redis-commands --test fullsync_lifecycle_kit -- --nocapture
+cargo check -p redis-core -p redis-commands -p redis-server
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-r5-failover-state-freshbase \
+  --profile integration-repl \
+  --timeout-s 90 \
+  --baseport 52000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replica-redirect \
+  --isolated-tests-copy \
+  --skip-build
+```
+
+Results:
+
+- `failover_redirect_kit`: 7 passed, 0 failed.
+- `repl_correctness_kit`: 21 passed, 0 failed.
+- Core replication tests: 9 passed, 0 failed.
+- `repl_buffer_kit`: 3 passed, 0 failed.
+- `psync_reconnect_kit`: 4 passed, 0 failed.
+- `fullsync_lifecycle_kit`: 1 passed, 0 failed.
+- `cargo check -p redis-core -p redis-commands -p redis-server`: passed.
+- `cargo build --bin redis-server`: passed.
+- Focused `integration/replica-redirect`:
+  `harness/oracle/results/tcl-survey/20260613T144457545119Z/result.json`
+  timed out in `client paused before and during failover-in-progress` with
+  `Timeout waiting for blocked clients`. This is a later semantic frontier
+  than the earlier explicit unimplemented FAILOVER error.
+- An earlier focused run before making state persistent,
+  `harness/oracle/results/tcl-survey/20260613T142430221015Z/result.json`,
+  reached the same test but timed out at blocked-client wait because the
+  failover pause expired too quickly for `TIMEOUT 100`.
+- Follow-up tripwire attempts
+  `harness/oracle/results/tcl-survey/20260613T143600515176Z/result.json`,
+  `harness/oracle/results/tcl-survey/20260613T144733225968Z/result.json`, and
+  `harness/oracle/results/tcl-survey/20260613T144747353291Z/result.json` were
+  inconclusive harness runs: startup/port-selection failures occurred before
+  useful replication assertions were parsed.
+
+Takeaway:
+
+- The next slice needs a live-runtime blocked-client kit, not more command
+  parser work. The core state is now explicit; the missing behavior is making
+  failover pause count and unblock the exact clients that
+  `replica-redirect.tcl` expects, then implementing timeout/completion and role
+  handoff.

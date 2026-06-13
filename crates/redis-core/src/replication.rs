@@ -73,6 +73,32 @@ pub mod replica_link_code {
     }
 }
 
+/// Primary-side manual failover state exposed as `master_failover_state` in
+/// `INFO replication`.
+pub mod failover_state_code {
+    pub const NO_FAILOVER: u8 = 0;
+    pub const WAITING_FOR_SYNC: u8 = 1;
+    pub const FAILOVER_IN_PROGRESS: u8 = 2;
+
+    pub fn as_info_str(code: u8) -> &'static str {
+        match code {
+            WAITING_FOR_SYNC => "waiting-for-sync",
+            FAILOVER_IN_PROGRESS => "failover-in-progress",
+            _ => "no-failover",
+        }
+    }
+}
+
+/// Bookkeeping for a parser-accepted manual FAILOVER request. This is not a
+/// full HA state machine yet; it gives the command, INFO, and client-pause
+/// paths a concrete state object to build on.
+#[derive(Debug, Clone)]
+pub struct ManualFailoverState {
+    pub target: Option<(RedisString, u16)>,
+    pub deadline_ms: i64,
+    pub force: bool,
+}
+
 /// Per-replica connection state. Drives whether the master will stream
 /// backlog to a given replica yet (it has to wait for the BGSAVE RDB transfer
 /// to land first when full-syncing).
@@ -403,6 +429,12 @@ pub struct ReplicationState {
     /// dialer echoes this in `PSYNC <replid> <offset>` so the primary's
     /// run-id check can grant a `+CONTINUE` partial resync.
     pub cached_primary_replid: Mutex<Option<[u8; 40]>>,
+    /// Primary-side manual FAILOVER state. `NO_FAILOVER` means no operator
+    /// failover is active; the other states are visible in INFO and drive the
+    /// failover client-pause gate.
+    pub failover_state: AtomicU8,
+    /// Details for the active manual failover request, if any.
+    pub manual_failover: Mutex<Option<ManualFailoverState>>,
 }
 
 impl ReplicationState {
@@ -428,6 +460,8 @@ impl ReplicationState {
             stat_sync_partial_ok: AtomicU64::new(0),
             stat_sync_partial_err: AtomicU64::new(0),
             cached_primary_replid: Mutex::new(None),
+            failover_state: AtomicU8::new(failover_state_code::NO_FAILOVER),
+            manual_failover: Mutex::new(None),
         }
     }
 
@@ -853,6 +887,66 @@ impl ReplicationState {
         self.repl_state.load(Ordering::Relaxed) != repl_state_code::MASTER
     }
 
+    /// Start a primary-side manual failover request. `force` requests move
+    /// directly into `failover-in-progress`; otherwise the primary first waits
+    /// for replica sync.
+    pub fn begin_manual_failover(
+        &self,
+        target: Option<(RedisString, u16)>,
+        timeout_ms: i64,
+        force: bool,
+        now_ms: i64,
+    ) -> u8 {
+        let deadline_ms = if timeout_ms > 0 {
+            now_ms.saturating_add(timeout_ms)
+        } else {
+            0
+        };
+        {
+            let mut guard = match self.manual_failover.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            *guard = Some(ManualFailoverState {
+                target,
+                deadline_ms,
+                force,
+            });
+        }
+        let state = if force {
+            failover_state_code::FAILOVER_IN_PROGRESS
+        } else {
+            failover_state_code::WAITING_FOR_SYNC
+        };
+        self.failover_state.store(state, Ordering::Relaxed);
+        state
+    }
+
+    /// Abort the active manual failover request, if any. Returns `true` when a
+    /// request was actually in progress.
+    pub fn abort_manual_failover(&self) -> bool {
+        let previous = self
+            .failover_state
+            .swap(failover_state_code::NO_FAILOVER, Ordering::Relaxed);
+        let mut guard = match self.manual_failover.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let had_details = guard.take().is_some();
+        previous != failover_state_code::NO_FAILOVER || had_details
+    }
+
+    /// Current manual failover state code. Timeout/completion handling is a
+    /// future state-machine packet; the state remains visible until ABORT or a
+    /// role-change path clears it.
+    pub fn manual_failover_state(&self, _now_ms: i64) -> u8 {
+        self.failover_state.load(Ordering::Relaxed)
+    }
+
+    pub fn manual_failover_state_str(&self, now_ms: i64) -> &'static str {
+        failover_state_code::as_info_str(self.manual_failover_state(now_ms))
+    }
+
     /// Configured master address `(host, port)` when in replica mode.
     pub fn replica_of_target(&self) -> Option<(RedisString, u16)> {
         match self.replica_of.lock() {
@@ -865,6 +959,7 @@ impl ReplicationState {
     /// `replica_of` to `None` and `repl_state` to MASTER. Signals the running
     /// dialer thread to exit via `dialer_stop_flag`.
     pub fn become_master(&self) {
+        self.abort_manual_failover();
         self.dialer_epoch.fetch_add(1, Ordering::SeqCst);
         self.dialer_stop_flag.store(true, Ordering::SeqCst);
         match self.replica_of.lock() {
@@ -892,6 +987,7 @@ impl ReplicationState {
     /// top-level state to `REPLICA_CONNECTING`. Clears the dialer stop flag so
     /// a freshly-spawned dialer thread is not immediately told to quit.
     pub fn become_replica_of(&self, host: RedisString, port: u16) -> u64 {
+        self.abort_manual_failover();
         let epoch = self
             .dialer_epoch
             .fetch_add(1, Ordering::SeqCst)

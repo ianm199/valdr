@@ -364,6 +364,12 @@ Work packets:
   unimplemented error before any coordinated failover state machine begins.
 - **R5-MANUAL-FAILOVER:** primary can coordinate a manual failover to a chosen
   replica: pause writes, wait for offset, promote replica, demote old primary.
+  The first state slice landed on 2026-06-13: valid `FAILOVER` requests with
+  connected replicas now enter visible `waiting-for-sync` or
+  `failover-in-progress` state, expose `master_failover_state` in
+  `INFO replication`, and `FAILOVER ABORT` clears state and failover pause.
+  This deliberately does not claim timeout/completion, blocked-client REDIRECT
+  unblocking, or role handoff yet.
 - **R5-REPLICA-PROMOTION:** `REPLICAOF NO ONE` promotion preserves data,
   replid/offset history, client-visible role, and write policy.
 - **R5-CLIENT-REDIRECT:** implement the client capability and redirect behavior
