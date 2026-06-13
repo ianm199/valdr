@@ -266,9 +266,9 @@ fn field_expiry_ms(dbid: u32, key: &RedisString, field: &RedisString) -> Option<
 }
 
 fn purge_expired_hash_fields(ctx: &mut CommandContext, key: &RedisString) -> RedisResult<()> {
- // Fast path: when no hash-field TTL has ever been created, there is nothing
- // to purge — skip the clock read, the global HASH_FIELD_EXPIRES lock,
- // the full-index scan that would otherwise run on every hash write.
+    // Fast path: when no hash-field TTL has ever been created, there is nothing
+    // to purge — skip the clock read, the global HASH_FIELD_EXPIRES lock,
+    // the full-index scan that would otherwise run on every hash write.
     if !HASH_FIELD_EXPIRES_PRESENT.load(Ordering::Relaxed) {
         return Ok(());
     }
@@ -1059,7 +1059,10 @@ pub fn hdel_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let dbid = ctx.selected_db_id();
     let removed: i64 = {
         let map = match as_hash_mut(ctx.db_mut().lookup_key_write(&key))? {
-            None => return ctx.reply_integer(0),
+            None => {
+                ctx.client_mut().set_prevent_propagation();
+                return ctx.reply_integer(0);
+            }
             Some(h) => h,
         };
         let mut count: i64 = 0;
@@ -1083,6 +1086,8 @@ pub fn hdel_command(ctx: &mut CommandContext) -> RedisResult<()> {
         if empty_after {
             ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", &key);
         }
+    } else {
+        ctx.client_mut().set_prevent_propagation();
     }
     ctx.reply_integer(removed)
 }
@@ -1512,8 +1517,8 @@ pub fn hincrbyfloat_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let key = ctx.arg_owned(1usize)?;
     let field = ctx.arg_owned(2usize)?;
     let delta = parse_incr_f64(ctx.arg(3)?.as_bytes())?;
- // reject a NaN/Inf increment before touching the key, so
- // `HINCRBYFLOAT k f +inf` errors and leaves the key uncreated.
+    // reject a NaN/Inf increment before touching the key, so
+    // `HINCRBYFLOAT k f +inf` errors and leaves the key uncreated.
     if delta.is_nan() || delta.is_infinite() {
         return Err(RedisError::runtime(b"ERR value is NaN or Infinity"));
     }
@@ -1600,7 +1605,7 @@ fn hrandfield_duplicate_emit_cap(
         .iter()
         .map(|(f, v)| {
             if with_values && resp3 {
- // Two-element array header plus field and value bulks.
+                // Two-element array header plus field and value bulks.
                 4 + hrandfield_bulk_len(f) + hrandfield_bulk_len(v)
             } else if with_values {
                 hrandfield_bulk_len(f) + hrandfield_bulk_len(v)

@@ -178,17 +178,11 @@ fn anchor_plain_set_propagates_verbatim() {
     );
 }
 
-// ─── Finding #1: NO-OP-IN-MULTI PROPAGATION ─────────────────────────────────
+// ─── R1-NOOP-DIRTY: no-op write propagation guards ─────────────────────────
 
-/// AUDIT FINDING #1 (active bug): dispatch.rs has no `server.dirty`-delta gate
-/// around the handler call (~L616/L661), and `multi.rs::run_one_queued`
-/// (L293) decides propagation purely from `command_is_write_or_may_replicate`
-/// + `prevent_propagation`. `db.rs::del_generic_command` (L1278) never calls
-/// `set_prevent_propagation()` on a zero-delete no-op (see the TODO at L1296:
-/// "server.dirty++"). So a no-op `DEL missing` inside MULTI/EXEC is wrongly
-/// propagated.
-/// Expected:
-/// no-op DEL must NOT appear in the replication stream.
+/// R1-NOOP-DIRTY regression guard: no-op DEL inside MULTI/EXEC must not appear
+/// in the replication stream. The implementation uses command-local
+/// `prevent_propagation` as the mutation signal for commands that return 0.
 #[test]
 fn finding1_noop_del_in_multi_must_not_propagate() {
     let _g = repl_guard();
@@ -227,14 +221,7 @@ fn finding1_noop_del_in_multi_must_not_propagate() {
     );
 }
 
-// ─── Finding #1b: NO-OP-AT-TOP-LEVEL PROPAGATION (companion) ─────────────────
-
-/// AUDIT FINDING #1 (companion, top-level path): the same missing
-/// `server.dirty` gate at the dispatch tail (dispatch.rs:661 only checks
-/// `should_propagate_write_command`, which checks `prevent_propagation` —
-/// never set by the no-op DEL). A top-level no-op `DEL missing` is wrongly
-/// propagated too. Pinned separately so a fix that only patches the MULTI path
-/// still flags the top-level leak.
+/// R1-NOOP-DIRTY companion guard for the top-level dispatch path.
 #[test]
 fn finding1b_noop_del_top_level_must_not_propagate() {
     let _g = repl_guard();
@@ -253,6 +240,93 @@ fn finding1b_noop_del_top_level_must_not_propagate() {
         "top-level no-op DEL must NOT be propagated, but it appears in the \
          replication stream.\n  captured: {:?}",
         String::from_utf8_lossy(&stream),
+    );
+}
+
+#[test]
+fn r1_noop_delete_style_writes_must_not_propagate() {
+    let _g = repl_guard();
+    let cap = ReplCapture::attach(900_013, 0);
+    let mut db = RedisDb::new(0);
+
+    let srem_missing = resp(&[b"SREM", b"missing-set", b"member"]);
+    let reply = dispatch_as_primary(13, &mut db, &[b"SREM", b"missing-set", b"member"]);
+    assert_eq!(reply, b":0\r\n");
+    let stream = cap.drain();
+    assert!(
+        !stream
+            .windows(srem_missing.len())
+            .any(|w| w == srem_missing.as_slice()),
+        "no-op SREM against a missing key must not propagate"
+    );
+
+    let hdel_missing = resp(&[b"HDEL", b"missing-hash", b"field"]);
+    let reply = dispatch_as_primary(14, &mut db, &[b"HDEL", b"missing-hash", b"field"]);
+    assert_eq!(reply, b":0\r\n");
+    let stream = cap.drain();
+    assert!(
+        !stream
+            .windows(hdel_missing.len())
+            .any(|w| w == hdel_missing.as_slice()),
+        "no-op HDEL against a missing key must not propagate"
+    );
+
+    let zrem_missing = resp(&[b"ZREM", b"missing-zset", b"member"]);
+    let reply = dispatch_as_primary(15, &mut db, &[b"ZREM", b"missing-zset", b"member"]);
+    assert_eq!(reply, b":0\r\n");
+    let stream = cap.drain();
+    assert!(
+        !stream
+            .windows(zrem_missing.len())
+            .any(|w| w == zrem_missing.as_slice()),
+        "no-op ZREM against a missing key must not propagate"
+    );
+
+    assert_eq!(
+        dispatch_as_primary(16, &mut db, &[b"SADD", b"set", b"present"]),
+        b":1\r\n"
+    );
+    assert_eq!(
+        dispatch_as_primary(17, &mut db, &[b"HSET", b"hash", b"field", b"value"]),
+        b":1\r\n"
+    );
+    assert_eq!(
+        dispatch_as_primary(18, &mut db, &[b"ZADD", b"zset", b"1", b"member"]),
+        b":1\r\n"
+    );
+    let _ = cap.drain();
+
+    let srem_absent = resp(&[b"SREM", b"set", b"absent"]);
+    let reply = dispatch_as_primary(19, &mut db, &[b"SREM", b"set", b"absent"]);
+    assert_eq!(reply, b":0\r\n");
+    let stream = cap.drain();
+    assert!(
+        !stream
+            .windows(srem_absent.len())
+            .any(|w| w == srem_absent.as_slice()),
+        "no-op SREM against an existing set must not propagate"
+    );
+
+    let hdel_absent = resp(&[b"HDEL", b"hash", b"absent"]);
+    let reply = dispatch_as_primary(20, &mut db, &[b"HDEL", b"hash", b"absent"]);
+    assert_eq!(reply, b":0\r\n");
+    let stream = cap.drain();
+    assert!(
+        !stream
+            .windows(hdel_absent.len())
+            .any(|w| w == hdel_absent.as_slice()),
+        "no-op HDEL against an existing hash must not propagate"
+    );
+
+    let zrem_absent = resp(&[b"ZREM", b"zset", b"absent"]);
+    let reply = dispatch_as_primary(21, &mut db, &[b"ZREM", b"zset", b"absent"]);
+    assert_eq!(reply, b":0\r\n");
+    let stream = cap.drain();
+    assert!(
+        !stream
+            .windows(zrem_absent.len())
+            .any(|w| w == zrem_absent.as_slice()),
+        "no-op ZREM against an existing sorted set must not propagate"
     );
 }
 

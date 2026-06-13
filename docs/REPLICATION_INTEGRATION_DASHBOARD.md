@@ -82,3 +82,50 @@ largest visible integration frontiers are now:
   semantics behind `replication-buffer`.
 - `R5-FAILOVER-PARSER`: start failover syntax and faithful errors before any
   HA claim.
+
+## Packet Evidence
+
+### R1-NOOP-DIRTY
+
+Status: completed on 2026-06-13 for the covered deletion-style no-op writes.
+
+Implementation:
+
+- `DEL` / `UNLINK` already suppressed no-op propagation.
+- `SREM`, `HDEL`, and `ZREM` now call `prevent_propagation` when the key is
+  missing or no requested member/field is removed.
+- `repl_correctness_kit.rs` covers top-level no-op `DEL`, no-op `DEL` inside
+  `MULTI` / `EXEC`, and missing/existing-container no-op `SREM`, `HDEL`, and
+  `ZREM`.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands --test repl_correctness_kit
+cargo check -p redis-commands
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-r1-noop-single-node-repl \
+  --profile single-node-repl \
+  --timeout-s 180 \
+  --baseport 45000 \
+  --portcount 3000 \
+  --clients 1 \
+  --files unit/type/set,unit/type/hash,unit/type/zset \
+  --isolated-tests-copy \
+  --skip-build
+```
+
+Results:
+
+- `repl_correctness_kit`: 14 passed, 0 failed.
+- `cargo check -p redis-commands`: passed.
+- `cargo build --bin redis-server`: passed.
+- Focused TCL:
+  `harness/oracle/results/tcl-survey/20260613T004416973596Z/result.json`
+  reported `unit/type/hash` 83/0, `unit/type/zset` 320/0, and
+  `unit/type/set` 114/1.
+
+The remaining `unit/type/set` failure is
+`SPOP new implementation: code path #1 propagate as DEL or UNLINK`, which is
+the next `R1-SPOP-REWRITE` packet rather than a no-op dirty failure.

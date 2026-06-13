@@ -182,6 +182,8 @@ Work packets:
   `SELECT` consistently, including replica apply state after reconnect.
 - **R1-NOOP-DIRTY:** keep no-op writes out of the replication stream by using a
   dirty-delta or equivalent mutation signal, not command metadata alone.
+  Completed for `DEL`, `UNLINK`, `SREM`, `HDEL`, and `ZREM` on 2026-06-13; see
+  [`REPLICATION_INTEGRATION_DASHBOARD.md`](REPLICATION_INTEGRATION_DASHBOARD.md).
 - **R1-SCRIPT-FUNCTION-PROP:** verify script/function propagation semantics
   under `EVAL`, `EVALSHA`, `FCALL`, and write/no-write shebang flags.
 

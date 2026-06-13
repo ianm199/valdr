@@ -453,7 +453,10 @@ pub fn zrem_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
     let removed = {
         let zset = match as_zset_mut(ctx.db_mut().lookup_key_write(&key))? {
-            None => return ctx.reply_integer(0),
+            None => {
+                ctx.client_mut().set_prevent_propagation();
+                return ctx.reply_integer(0);
+            }
             Some(z) => z,
         };
         let mut count: i64 = 0;
@@ -471,6 +474,8 @@ pub fn zrem_command(ctx: &mut CommandContext) -> RedisResult<()> {
         if now_empty {
             ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", &key);
         }
+    } else {
+        ctx.client_mut().set_prevent_propagation();
     }
     ctx.reply_integer(removed)
 }

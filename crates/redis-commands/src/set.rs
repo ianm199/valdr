@@ -265,7 +265,10 @@ pub fn srem_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
     let removed = {
         let h = match as_set_mut(ctx.db_mut().lookup_key_write(&key))? {
-            None => return ctx.reply_integer(0),
+            None => {
+                ctx.client_mut().set_prevent_propagation();
+                return ctx.reply_integer(0);
+            }
             Some(h) => h,
         };
         let mut count: i64 = 0;
@@ -288,6 +291,8 @@ pub fn srem_command(ctx: &mut CommandContext) -> RedisResult<()> {
         if empty_after {
             ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", &key);
         }
+    } else {
+        ctx.client_mut().set_prevent_propagation();
     }
     ctx.reply_integer(removed)
 }
