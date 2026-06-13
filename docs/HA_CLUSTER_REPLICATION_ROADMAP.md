@@ -262,7 +262,9 @@ Work packets:
   tests; audit ACK timing, backlog offsets, and replica apply progress.
 - **R3-RECONNECT-MATRIX:** deterministic tests for reconnect within backlog,
   reconnect outside backlog, wrong replid, future offset, empty backlog, and
-  backlog wraparound.
+  backlog wraparound. Master-side PSYNC decision coverage completed on
+  2026-06-13; live dialer/reconnect validation remains behind
+  `integration/replication-psync`.
 - **R3-METRICS:** keep `sync_full`, `sync_partial_ok`, `sync_partial_err`,
   master/replica offsets, lag, and backlog histlen faithful in `INFO`.
 

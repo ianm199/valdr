@@ -103,8 +103,8 @@ visible integration frontiers are now:
 - Expiry-on-replica semantics: `replication-3` still fails master/replica
   consistency with expire, writable replica expired-key behavior, and PFCOUNT
   expired-key/cache cases.
-- `R3-RECONNECT-MATRIX`: clarify the remaining PSYNC no-backlog/backlog-expired
-  cases in the deterministic kit before grinding `replication-psync`.
+- `R3-RECONNECT-MATRIX`: extend the new master-side PSYNC decision matrix into
+  live replica-dialer reconnect coverage before grinding `replication-psync`.
 - `R2-BUFFER-LIMITS`: implement/account for replication buffer and output-buffer
   semantics behind `replication-buffer`.
 - `R5-FAILOVER-PARSER`: start failover syntax and faithful errors before any
@@ -286,3 +286,36 @@ Results:
   reported `replication-3` 3/4 and `replication-4` 15/2. This is not an HA
   claim; it is evidence that the R1 command propagation regressions are cleared
   while expiration and divergence semantics remain.
+
+### R3-RECONNECT-MATRIX
+
+Status: completed on 2026-06-13 for master-side PSYNC decision coverage.
+
+Implementation:
+
+- `handle_psync` now routes through a small decision helper that preserves the
+  existing behavior while making reconnect cases directly testable.
+- Unit coverage now exercises fresh full sync, caught-up empty-backlog
+  reconnect, in-window reconnect, wrong replid, future offset, old offset after
+  backlog wraparound, and the first retained offset after wraparound.
+- Existing `repl_correctness_kit.rs` coverage still proves that a granted
+  `+CONTINUE` replays the backlog catch-up bytes and that PSYNC counters move
+  correctly for in-window, future-offset fallback, and fresh full sync.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands \
+  replication::tests::psync_decision_matrix_covers_reconnect_edges \
+  -- --nocapture
+cargo test -p redis-commands replication::tests::psync -- --nocapture
+cargo test -p redis-commands --test repl_correctness_kit
+```
+
+Results:
+
+- Focused decision-matrix unit test: passed.
+- Focused PSYNC unit filter: 2 passed, 0 failed.
+- `repl_correctness_kit`: 17 passed, 0 failed.
+- `integration/replication-psync` was not rerun in this packet; the R0
+  dashboard timeout remains the current slow-suite frontier.

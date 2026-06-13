@@ -887,16 +887,18 @@ fn handle_psync(
     let repl = global_replication_state();
     let our_runid = repl.runid();
     let master_offset = repl.master_offset();
-
-    let runid_matches = provided_runid == &our_runid[..] || provided_runid == b"?";
-    let can_partial = runid_matches
-        && provided_offset >= 0
-        && partial_in_window(&repl, provided_offset, master_offset);
+    let decision = decide_psync(
+        &repl,
+        our_runid,
+        provided_runid,
+        provided_offset,
+        master_offset,
+    );
 
     let client_id = ctx.client_ref().id();
     let outbound = steal_outbound_sender(ctx.pubsub.as_ref(), client_id);
 
-    if can_partial {
+    if matches!(decision, PsyncDecision::Continue) {
         repl.incr_sync_partial_ok();
         if let Some(sender) = outbound {
             register_replica(
@@ -931,7 +933,12 @@ fn handle_psync(
     // but could not be served from the live backlog window: count it as a
     // partial-resync error before falling back to a full resync, mirroring C
     // `masterTryPartialResynchronization` → `server.stat_sync_partial_err++`.
-    if provided_runid != b"?" && provided_offset >= 0 && !can_partial {
+    if matches!(
+        decision,
+        PsyncDecision::FullResync {
+            count_partial_err: true
+        }
+    ) {
         repl.incr_sync_partial_err();
     }
     repl.incr_sync_full();
@@ -956,6 +963,31 @@ fn handle_psync(
 
     arm_full_sync_bgsave(ctx, &repl, client_id, snapshot_offset);
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PsyncDecision {
+    Continue,
+    FullResync { count_partial_err: bool },
+}
+
+fn decide_psync(
+    repl: &Arc<ReplicationState>,
+    our_runid: &[u8; 40],
+    provided_runid: &[u8],
+    provided_offset: i64,
+    master_offset: i64,
+) -> PsyncDecision {
+    let runid_matches = provided_runid == &our_runid[..] || provided_runid == b"?";
+    if runid_matches
+        && provided_offset >= 0
+        && partial_in_window(repl, provided_offset, master_offset)
+    {
+        return PsyncDecision::Continue;
+    }
+    PsyncDecision::FullResync {
+        count_partial_err: provided_runid != b"?" && provided_offset >= 0,
+    }
 }
 
 /// Either join an in-flight BGSAVE-for-replication job or kick off a new one
@@ -1108,6 +1140,62 @@ mod tests {
         let mut ctx = CommandContext::new(&mut c);
         replicaof_command(&mut ctx).unwrap();
         assert_eq!(c.drain_reply(), b"+OK\r\n");
+    }
+
+    #[test]
+    fn psync_decision_matrix_covers_reconnect_edges() {
+        let st = Arc::new(ReplicationState::new([b'a'; 40], 8));
+        let runid = *st.runid();
+
+        assert_eq!(
+            decide_psync(&st, &runid, b"?", -1, st.master_offset()),
+            PsyncDecision::FullResync {
+                count_partial_err: false
+            },
+            "fresh PSYNC should full-resync without counting a partial error"
+        );
+        assert_eq!(
+            decide_psync(&st, &runid, &runid, 0, st.master_offset()),
+            PsyncDecision::Continue,
+            "a caught-up reconnect at offset 0 should not need an RDB"
+        );
+
+        st.append_to_backlog(b"abcdefgh");
+        let master = st.master_offset();
+        assert_eq!(
+            decide_psync(&st, &runid, &runid, 4, master),
+            PsyncDecision::Continue,
+            "offset inside the live backlog window should partial-resync"
+        );
+        assert_eq!(
+            decide_psync(&st, &runid, &[b'b'; 40], 4, master),
+            PsyncDecision::FullResync {
+                count_partial_err: true
+            },
+            "wrong replid should fall back and count a partial-resync error"
+        );
+        assert_eq!(
+            decide_psync(&st, &runid, &runid, master + 1, master),
+            PsyncDecision::FullResync {
+                count_partial_err: true
+            },
+            "future offsets cannot be served from the backlog"
+        );
+
+        st.append_to_backlog(b"ijklmnop");
+        let master = st.master_offset();
+        assert_eq!(
+            decide_psync(&st, &runid, &runid, 0, master),
+            PsyncDecision::FullResync {
+                count_partial_err: true
+            },
+            "offsets below the wrapped backlog window should full-resync"
+        );
+        assert_eq!(
+            decide_psync(&st, &runid, &runid, 8, master),
+            PsyncDecision::Continue,
+            "the first retained byte after wraparound should partial-resync"
+        );
     }
 
     #[test]
