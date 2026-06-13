@@ -356,6 +356,34 @@ fn wrong_replid_future_offset_and_fresh_sync_have_distinct_metrics() {
 }
 
 #[test]
+fn malformed_psync_offset_errors_without_fullsync_side_effects() {
+    let _g = psync_guard();
+    let repl = global_replication_state();
+    let _reset = GlobalReplReset::new(&repl);
+    let counters_before = repl.sync_counters();
+    let replicas_before = repl.connected_replicas();
+
+    let mut client = Client::new(1_100_010);
+    let mut db = RedisDb::new(0);
+    let reply = run_dispatch(
+        &mut client,
+        &mut db,
+        &[b"PSYNC", b"replicationid", b"offset_str"],
+    );
+
+    assert!(
+        reply
+            .windows(b"ERR value is not an integer or out of range".len())
+            .any(|w| w == b"ERR value is not an integer or out of range"),
+        "malformed PSYNC offset should return the parser error, got {:?}",
+        String::from_utf8_lossy(&reply)
+    );
+    assert!(!client.is_replica);
+    assert_eq!(repl.sync_counters(), counters_before);
+    assert_eq!(repl.connected_replicas(), replicas_before);
+}
+
+#[test]
 fn target_change_clears_cached_reconnect_state_but_same_target_preserves_it() {
     let st = ReplicationState::new([b'c'; 40], 64);
     st.become_replica_of(arg(b"127.0.0.1"), 6379);

@@ -4,6 +4,7 @@
 //! per-client outbound mpsc senders — the same writer-thread mechanism that
 //! PUBLISH and BLPOP wakes ride on.
 
+use std::io::Write;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -135,7 +136,13 @@ pub fn psync_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         return Err(RedisError::wrong_number_of_args(b"psync"));
     }
     let provided_runid = ctx.arg_owned(1usize)?;
-    let provided_offset = parse_offset(ctx.arg_owned(2usize)?.as_bytes())?;
+    let provided_offset = match parse_offset(ctx.arg_owned(2usize)?.as_bytes()) {
+        Ok(offset) => offset,
+        Err(err) => {
+            log_wrong_psync_offset(ctx.client_ref().id());
+            return Err(err);
+        }
+    };
     if ctx.arg_count() == 4 {
         if !ascii_eq_ignore_case(ctx.arg(3usize)?.as_bytes(), b"FAILOVER") {
             return Err(RedisError::runtime(b"ERR syntax error"));
@@ -1098,6 +1105,15 @@ fn parse_offset(bytes: &[u8]) -> RedisResult<i64> {
         .map_err(|_| RedisError::runtime(b"ERR value is not an integer or out of range"))
 }
 
+fn log_wrong_psync_offset(client_id: ClientId) {
+    println!("{}", wrong_psync_offset_log_line(client_id));
+    let _ = std::io::stdout().flush();
+}
+
+fn wrong_psync_offset_log_line(client_id: ClientId) -> String {
+    format!("redis-server: Replica {client_id} asks for synchronization but with a wrong offset")
+}
+
 /// Parse a TCP port literal. Returns `None` on parse failure or out-of-range.
 fn parse_port(bytes: &[u8]) -> Option<u16> {
     let s = std::str::from_utf8(bytes).ok()?;
@@ -1318,6 +1334,12 @@ mod tests {
         let reply = c.drain_reply();
         assert!(reply.starts_with(b"+FULLRESYNC "), "reply: {:?}", reply);
         assert!(c.is_replica);
+    }
+
+    #[test]
+    fn wrong_psync_offset_log_line_matches_upstream_pattern() {
+        let line = wrong_psync_offset_log_line(42);
+        assert!(line.contains("Replica 42 asks for synchronization but with a wrong offset"));
     }
 
     #[test]

@@ -73,7 +73,7 @@ Artifact:
 | `integration/replication-3` | 3/4 | Red | Expiry consistency, writable-replica expired-key behavior, and PFCOUNT expired-key/cache semantics. |
 | `integration/replication-4` | 15/2 | Red | SPOP rewrite cases now pass; remaining failures are divergence/default writable-replica cases. |
 | `integration/replication-buffer` | 4/11 | Red | Fresh post-PSYNC baseline still reaches counted assertions without timeout. Shared vs private output-buffer semantics are now pinned in `repl_buffer_kit`; remaining failures are Valkey-style global replication-buffer memory, BGSAVE/slow-replica backlog outgrowth, partial resync across broader retained history, and typed live output-buffer disconnect/drain policy. |
-| `integration/replication` | 28/39 | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, the first async-loading CONFIG exception, successful swapdb function-context mismatch, parent-killed child discovery, `repl-diskless-load on-empty-db`, no-longer-useful RDB child cancellation, and all four replica-link reply-violation assertions. Remaining failures are counted full-sync, diskless pipe/drop, command-stat propagation, blocked-list rewrite, cache-master, lazy-expire, and old-data rollback cases. |
+| `integration/replication` | 28/39 | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, the first async-loading CONFIG exception, successful swapdb function-context mismatch, parent-killed child discovery, `repl-diskless-load on-empty-db`, no-longer-useful RDB child cancellation, all four replica-link reply-violation assertions, and the malformed-PSYNC-offset log assertion. Remaining failures are counted full-sync, diskless pipe/drop, command-stat propagation, blocked-list rewrite, cache-master, lazy-expire, and old-data rollback cases. |
 | `integration/replication-psync` | 90/0 | Green | Focused gate is green after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support for the replica dialer. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
 | `integration/replica-redirect` | timeout | Red | `CLIENT CAPA REDIRECT` top-level and MULTI/EXEC replica redirect semantics now pass the early file assertions. Manual `FAILOVER` now reaches timeout-driven handoff in Rust kits and a live two-process probe, including blocked `BRPOP` and paused `GET` REDIRECT after promotion. The official Tcl file still no-summary times out in the first failover test; side observation showed old primary `blocked_clients:2`, `paused_actions:all`, and `role:slave` while the target remained SIGSTOP'd. |
@@ -2120,3 +2120,81 @@ Takeaway:
   diskless pipe/drop logs, full-sync rollback, command stats for rewritten
   blocking-list commands, cache-master handling, lazy expire, and old-data
   exposure during failed/async loads.
+
+### 2026-06-13 R3 malformed PSYNC offset log
+
+Scope:
+
+- Malformed `PSYNC <replid> <offset>` offsets still return
+  `ERR value is not an integer or out of range`, but now also emit the
+  Valkey-compatible stdout diagnostic watched by `integration/replication`:
+  `Replica <id> asks for synchronization but with a wrong offset`.
+- `psync_reconnect_kit` now proves malformed offsets do not turn the client
+  into a replica, do not register full-sync waiters, and do not perturb PSYNC
+  counters.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands \
+  replication::tests::wrong_psync_offset_log_line_matches_upstream_pattern \
+  -- --nocapture
+cargo test -p redis-commands --test psync_reconnect_kit -- --nocapture
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-psync-wrong-offset-log \
+  --profile integration-repl \
+  --timeout-s 420 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replication \
+  --isolated-tests-copy \
+  --skip-build
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-psync-wrong-offset-psync-gate \
+  --profile integration-repl \
+  --timeout-s 240 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replication-psync \
+  --isolated-tests-copy \
+  --skip-build
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-psync-wrong-offset-tripwire \
+  --profile integration-repl \
+  --timeout-s 240 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replication-2,integration/block-repl \
+  --isolated-tests-copy \
+  --skip-build
+```
+
+Results:
+
+- Focused wrong-offset unit test: passed.
+- `psync_reconnect_kit`: 8 passed, 0 failed.
+- `cargo build --bin redis-server`: passed.
+- Focused `integration/replication`
+  `harness/oracle/results/tcl-survey/20260613T201024847711Z/result.json`:
+  completed with 28 passed, 39 failed, 0 timed out, 0 without summary, and 0
+  abort/exception points. The `PSYNC with wrong offset should throw error`
+  failure is gone from the failure list; the aggregate pass count is unchanged
+  because a count-sensitive BLMOVE assertion reappeared in this run.
+- Focused `integration/replication-psync`
+  `harness/oracle/results/tcl-survey/20260613T201550387200Z/result.json`:
+  stayed green at 90 passed, 0 failed.
+- Focused no-regression tripwire:
+  `harness/oracle/results/tcl-survey/20260613T201925262632Z/result.json`
+  reported `integration/replication-2` 7/0 and `integration/block-repl` 2/0.
+
+Takeaway:
+
+- The malformed-offset parser path is now faithful enough for the
+  `integration/replication` log assertion, while the broader PSYNC reconnect
+  gate remains green. The remaining red `integration/replication` work is not
+  PSYNC parser behavior; it is the full-sync, diskless, blocked-list, and
+  rollback surface already tracked above.
