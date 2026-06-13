@@ -310,6 +310,14 @@ pub struct ReplicaConn {
     /// backlog that Valkey reports as slave/client output memory so INFO can
     /// exclude it from key-eviction pressure.
     pub pending_output_bytes: AtomicUsize,
+    /// Portion of [`Self::pending_output_bytes`] queued through the shared
+    /// replication-stream path. Multiple replicas may wait on the same stream
+    /// bytes, so INFO replication-buffer memory counts these bytes once via
+    /// [`ReplicationState::replica_output_memory_snapshot`].
+    pub shared_output_bytes: AtomicUsize,
+    /// Portion of [`Self::pending_output_bytes`] queued through explicitly
+    /// private output such as a full-sync RDB bulk transfer.
+    pub private_output_bytes: AtomicUsize,
     /// Outbound mpsc sender — the writer-thread channel the master pushes
     /// backlog deltas and the RDB blob through.
     pub outbound_sender: Sender<Vec<u8>>,
@@ -333,6 +341,8 @@ impl ReplicaConn {
             capa_flags: AtomicU32::new(0),
             last_ack_time_ms: AtomicI64::new(0),
             pending_output_bytes: AtomicUsize::new(0),
+            shared_output_bytes: AtomicUsize::new(0),
+            private_output_bytes: AtomicUsize::new(0),
             outbound_sender,
         }
     }
@@ -418,6 +428,35 @@ pub struct ReplicaRemovalOutcome {
     pub was_repl_bgsave_waiter: bool,
     pub remaining_repl_bgsave_waiters: usize,
     pub useless_repl_child_pid: Option<i32>,
+}
+
+/// Snapshot of replica output memory split by Valkey's logical ownership
+/// model. `total_output_bytes` is the per-client pending total visible through
+/// CLIENT LIST, while `replication_buffer_bytes` counts shared stream bytes
+/// once plus all private replica output for INFO memory.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ReplicaOutputMemory {
+    pub shared_output_bytes: usize,
+    pub private_output_bytes: usize,
+    pub total_output_bytes: usize,
+}
+
+impl ReplicaOutputMemory {
+    pub fn replication_buffer_bytes(self) -> usize {
+        self.shared_output_bytes
+            .saturating_add(self.private_output_bytes)
+    }
+}
+
+fn saturating_drain_atomic_usize(cell: &AtomicUsize, bytes: usize) -> usize {
+    let mut current = cell.load(Ordering::Relaxed);
+    loop {
+        let next = current.saturating_sub(bytes);
+        match cell.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return current.saturating_sub(next),
+            Err(actual) => current = actual,
+        }
+    }
 }
 
 /// Immutable replication bytes retained after a full-sync RDB has been queued
@@ -1100,6 +1139,30 @@ impl ReplicationState {
     pub fn replication_history_extra_len(&self) -> usize {
         self.repl_bgsave_catchup_len()
             .saturating_add(self.retained_repl_history_len())
+    }
+
+    /// Snapshot pending replica output memory. Shared replication-stream bytes
+    /// are represented by the largest per-replica shared queue because all
+    /// attached replicas read from one logical stream buffer; explicitly
+    /// private bytes remain per-replica.
+    pub fn replica_output_memory_snapshot(&self) -> ReplicaOutputMemory {
+        let guard = match self.replicas.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let mut shared = 0usize;
+        let mut private = 0usize;
+        let mut total = 0usize;
+        for replica in guard.values() {
+            shared = shared.max(replica.shared_output_bytes.load(Ordering::Relaxed));
+            private = private.saturating_add(replica.private_output_bytes.load(Ordering::Relaxed));
+            total = total.saturating_add(replica.pending_output_bytes.load(Ordering::Relaxed));
+        }
+        ReplicaOutputMemory {
+            shared_output_bytes: shared,
+            private_output_bytes: private,
+            total_output_bytes: total,
+        }
     }
 
     /// Bytes currently held for in-flight full-sync catch-up.
@@ -1871,12 +1934,7 @@ impl ReplicationState {
         })
     }
 
-    fn queue_replica_output(
-        &self,
-        client_id: ClientId,
-        bytes: Vec<u8>,
-        enforce_hard_limit: bool,
-    ) -> bool {
+    fn queue_replica_output(&self, client_id: ClientId, bytes: Vec<u8>, private: bool) -> bool {
         let len = bytes.len();
         let guard = match self.replicas.lock() {
             Ok(g) => g,
@@ -1889,11 +1947,16 @@ impl ReplicationState {
                         .pending_output_bytes
                         .fetch_add(len, Ordering::Relaxed)
                         .saturating_add(len);
+                    if private {
+                        r.private_output_bytes.fetch_add(len, Ordering::Relaxed);
+                    } else {
+                        r.shared_output_bytes.fetch_add(len, Ordering::Relaxed);
+                    }
                     if let Ok(mut guard) = crate::client_info::client_info_registry().lock() {
                         guard.set_output_buffer_memory(client_id, pending);
                     }
                     let hard_limit = self.replica_output_buffer_hard_limit();
-                    if enforce_hard_limit && hard_limit > 0 && pending > hard_limit {
+                    if private && hard_limit > 0 && pending > hard_limit {
                         Some((true, true))
                     } else {
                         Some((true, false))
@@ -1955,6 +2018,14 @@ impl ReplicationState {
                 Ordering::Relaxed,
             ) {
                 Ok(_) => {
+                    let mut remaining = current.saturating_sub(next);
+                    let shared_drain =
+                        saturating_drain_atomic_usize(&replica.shared_output_bytes, remaining);
+                    remaining = remaining.saturating_sub(shared_drain);
+                    if remaining > 0 {
+                        let _ =
+                            saturating_drain_atomic_usize(&replica.private_output_bytes, remaining);
+                    }
                     if let Ok(mut guard) = crate::client_info::client_info_registry().lock() {
                         guard.set_output_buffer_memory(client_id, next);
                     }

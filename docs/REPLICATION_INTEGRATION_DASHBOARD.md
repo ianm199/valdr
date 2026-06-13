@@ -73,7 +73,7 @@ Artifact:
 | `integration/block-repl` | 2/0 | Green | Real `DEBUG DIGEST` plus single blocked-pop wake propagation now validates the list/zset blocking workload. |
 | `integration/replication-3` | 3/4 | Red | Expiry consistency, writable-replica expired-key behavior, and PFCOUNT expired-key/cache semantics. |
 | `integration/replication-4` | 15/2 | Red | SPOP rewrite cases now pass; remaining failures are divergence/default writable-replica cases. |
-| `integration/replication-buffer` | 4/11 | Red | Fresh post-PSYNC baseline still reaches counted assertions without timeout. Shared vs private output-buffer semantics are now pinned in `repl_buffer_kit`; remaining failures are Valkey-style global replication-buffer memory, BGSAVE/slow-replica backlog outgrowth, partial resync across broader retained history, and typed live output-buffer disconnect/drain policy. |
+| `integration/replication-buffer` | 5/10 | Red | Shared/private output ownership plus writer-side drain moved the two backlog-histlen outgrowth assertions green. Remaining failures are dual-channel global-buffer memory, shrink/reclaim after dependent replicas disconnect, partial resync across broader retained history, and output-buffer / PSYNC counter edge cases. |
 | `integration/replication` | 40/27 | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, the first async-loading CONFIG exception, successful swapdb function-context mismatch, parent-killed child discovery, `repl-diskless-load on-empty-db`, no-longer-useful RDB child cancellation, all four replica-link reply-violation assertions, malformed-PSYNC-offset logging, chained replica `FLUSHDB` / `FLUSHALL` stream relay, `GETSET` rewrite, nonblocking `BRPOPLPUSH` / `BLMOVE` rewrite stats, and empty-blocking `BRPOPLPUSH` / `BLMOVE` commandstats via real digest waits. Remaining failures are counted full-sync, diskless pipe/drop, blocked-list role-change, cache-master, lazy-expire, and old-data rollback cases. |
 | `integration/replication-psync` | 90/0 | Green | Focused gate is green after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support for the replica dialer. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
@@ -633,6 +633,96 @@ Results:
   reported 4 passed, 11 failed, 0 timed out, 0 without summary. This is a
   no-regression result against the post-PSYNC 4/11 baseline, not a pass-count
   improvement.
+
+### R2-BUFFER-SHARED-OUTPUT-DRAIN
+
+Status: shared output-memory accounting slice completed on 2026-06-13;
+`integration/replication-buffer` moved from 4/11 to 5/10.
+
+Implementation:
+
+- `ReplicaConn` now tracks shared replication-stream output separately from
+  explicitly private replica output while preserving the existing per-replica
+  pending-output total for client visibility.
+- `ReplicationState::replica_output_memory_snapshot` counts shared stream
+  bytes once, pinned by the slowest dependent replica, while private output is
+  still summed per replica.
+- `INFO memory` now derives `mem_replicas_repl_buffer` from the replication
+  state's logical shared/private snapshot instead of blindly reusing
+  `mem_clients_slaves`.
+- Plain TCP and TLS writer loops now call
+  `account_replica_output_drained` after successful outbound writes, so healthy
+  replicas stop pinning old output memory once the writer drains it.
+- `repl_buffer_kit` adds a deterministic case proving shared output is counted
+  once, remains pinned while one replica is slow, drains after the last
+  dependent replica catches up, and still counts private output per replica.
+
+Evidence:
+
+```bash
+rustfmt --check \
+  crates/redis-core/src/replication.rs \
+  crates/redis-commands/src/info.rs \
+  crates/redis-commands/tests/repl_buffer_kit.rs \
+  crates/redis-server/src/startup.rs
+cargo test -p redis-commands --test repl_buffer_kit -- --nocapture
+cargo test -p redis-commands \
+  info::tests::info_memory_exposes_replication_buffer_fields \
+  -- --nocapture
+cargo test -p redis-core replication::tests -- --nocapture
+cargo check -p redis-core -p redis-commands -p redis-server
+cargo test -p redis-server -- --nocapture
+cargo test -p redis-commands --test repl_correctness_kit -- --nocapture
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-buffer-shared-output-drain \
+  --profile integration-repl \
+  --timeout-s 300 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replication-buffer \
+  --isolated-tests-copy \
+  --skip-build
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-buffer-shared-output-drain-tripwire \
+  --profile integration-repl \
+  --timeout-s 240 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replication-2,integration/block-repl \
+  --isolated-tests-copy \
+  --skip-build
+```
+
+Results:
+
+- `repl_buffer_kit`: 5 passed, 0 failed.
+- Focused INFO memory test: passed.
+- Core replication tests: 15 passed, 0 failed.
+- `cargo check -p redis-core -p redis-commands -p redis-server`: passed.
+- `redis-server` unit tests: 11 passed, 0 failed.
+- `repl_correctness_kit`: 29 passed, 0 failed.
+- `cargo build --bin redis-server`: passed.
+- Focused `integration/replication-buffer`:
+  `harness/oracle/results/tcl-survey/20260613T221012325316Z/result.json`
+  reported 5 passed, 10 failed, 0 timed out, 0 without summary. The two
+  `Replication backlog size can outgrow the backlog limit config` assertions
+  are now absent from the failure list. One `Replication buffer will become
+  smaller when no replica uses dualchannel no` assertion is now exposed as a
+  remaining reclaim/shrink failure.
+- Focused no-regression tripwire:
+  `harness/oracle/results/tcl-survey/20260613T221254578531Z/result.json`
+  reported `integration/replication-2` 7/0 and `integration/block-repl` 2/0.
+
+Takeaway:
+
+- The live server now has enough shared-output accounting and writer-side drain
+  behavior for the slow-replica backlog outgrowth class to pass. The next
+  `repl_buffer_kit` slice should model reclaim policy after the last dependent
+  replica disconnects or catches up, including the distinction between retained
+  full-sync history, active catch-up bytes, and per-replica output memory.
 
 ### R2-BGSAVE-CATCHUP
 

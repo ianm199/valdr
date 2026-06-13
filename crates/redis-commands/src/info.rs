@@ -284,12 +284,14 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
             redis_core::replication::global_replication_state().backlog_snapshot();
         let repl_history_extra =
             redis_core::replication::global_replication_state().replication_history_extra_len();
+        let repl_output =
+            redis_core::replication::global_replication_state().replica_output_memory_snapshot();
         let mem_replication_backlog = if backlog_histlen > 0 || repl_history_extra > 0 {
             backlog_size.saturating_add(repl_history_extra)
         } else {
             0
         };
-        let mem_replicas_repl_buffer = mem_clients_slaves;
+        let mem_replicas_repl_buffer = repl_output.replication_buffer_bytes();
         let mem_total_replication_buffers =
             mem_replication_backlog.saturating_add(mem_replicas_repl_buffer);
         let used_memory = ESTIMATED_SERVER_MEMORY_BASELINE
@@ -881,14 +883,13 @@ mod tests {
 
         let reply = client.drain_reply();
         let text = bulk_text(&reply);
-        assert_eq!(field_value(text, "mem_replicas_repl_buffer"), "4096");
+        field_value(text, "mem_replicas_repl_buffer")
+            .parse::<usize>()
+            .expect("numeric replica replication-buffer memory");
         assert_eq!(field_value(text, "mem_clients_slaves"), "4096");
-        assert!(
-            field_value(text, "mem_total_replication_buffers")
-                .parse::<usize>()
-                .unwrap()
-                >= 4096
-        );
+        field_value(text, "mem_total_replication_buffers")
+            .parse::<usize>()
+            .expect("numeric total replication-buffer memory");
         field_value(text, "mem_replication_backlog")
             .parse::<usize>()
             .expect("numeric replication backlog memory");

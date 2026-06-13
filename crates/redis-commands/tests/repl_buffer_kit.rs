@@ -149,6 +149,54 @@ fn retained_history_does_not_overclaim_after_backlog_wrap_creates_gap() {
 }
 
 #[test]
+fn shared_replica_output_memory_is_counted_once_and_drains_by_slowest_replica() {
+    let st = ReplicationState::new(generate_runid(), 64);
+    let _rx1 = attach_replica(&st, 81, 0);
+    let _rx2 = attach_replica(&st, 82, 0);
+
+    assert!(st.send_to_replica(81, b"shared-block".to_vec()));
+    assert!(st.send_to_replica(82, b"shared-block".to_vec()));
+
+    let mem = st.replica_output_memory_snapshot();
+    assert_eq!(mem.shared_output_bytes, 12);
+    assert_eq!(mem.private_output_bytes, 0);
+    assert_eq!(
+        mem.total_output_bytes, 24,
+        "CLIENT-style output memory remains per replica"
+    );
+    assert_eq!(
+        mem.replication_buffer_bytes(),
+        12,
+        "shared replication-stream bytes are one logical buffer"
+    );
+
+    assert_eq!(st.account_replica_output_drained(81, 12), 0);
+    let mem = st.replica_output_memory_snapshot();
+    assert_eq!(
+        mem.shared_output_bytes, 12,
+        "one slow replica still pins the shared stream bytes"
+    );
+    assert_eq!(mem.total_output_bytes, 12);
+
+    assert_eq!(st.account_replica_output_drained(82, 12), 0);
+    let mem = st.replica_output_memory_snapshot();
+    assert_eq!(mem.shared_output_bytes, 0);
+    assert_eq!(mem.total_output_bytes, 0);
+
+    assert!(st.send_private_to_replica(81, b"private-a".to_vec()));
+    assert!(st.send_private_to_replica(82, b"private-bb".to_vec()));
+    let mem = st.replica_output_memory_snapshot();
+    assert_eq!(mem.shared_output_bytes, 0);
+    assert_eq!(mem.private_output_bytes, 19);
+    assert_eq!(mem.total_output_bytes, 19);
+    assert_eq!(
+        mem.replication_buffer_bytes(),
+        19,
+        "private replica output is still counted per waiting replica"
+    );
+}
+
+#[test]
 fn shared_stream_can_exceed_hard_limit_but_private_output_disconnects_offender() {
     let st = ReplicationState::new(generate_runid(), 64);
     st.set_replica_output_buffer_hard_limit(10);

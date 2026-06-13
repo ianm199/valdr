@@ -966,7 +966,11 @@ pub(crate) fn serve_tls(
 /// Spawn a writer thread that drains an `mpsc::Receiver<Vec<u8>>` and writes
 /// each payload to the TCP stream. Returns the matching sender that the read
 /// loop and the pub/sub registry both hold.
-pub(crate) fn spawn_writer(mut writer: TcpStream, peer: String) -> Sender<Vec<u8>> {
+pub(crate) fn spawn_writer(
+    mut writer: TcpStream,
+    peer: String,
+    client_id: redis_core::ClientId,
+) -> Sender<Vec<u8>> {
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
     let _ = thread::Builder::new()
         .name(format!("writer-{}", peer))
@@ -978,6 +982,8 @@ pub(crate) fn spawn_writer(mut writer: TcpStream, peer: String) -> Sender<Vec<u8
                 if writer.write_all(&payload).is_err() {
                     break;
                 }
+                redis_core::replication::global_replication_state()
+                    .account_replica_output_drained(client_id, payload.len());
             }
             let _ = writer.shutdown(std::net::Shutdown::Both);
         });
@@ -1006,7 +1012,7 @@ pub(crate) fn handle_connection(
             return;
         }
     };
-    let outbound = spawn_writer(writer_clone, peer_addr.clone());
+    let outbound = spawn_writer(writer_clone, peer_addr.clone(), id);
 
     if let Ok(mut guard) = registry.lock() {
         guard.register_sender(id, outbound.clone());
@@ -1240,6 +1246,8 @@ pub(crate) fn run_client_loop_tls(
             if conn.write_all(&payload).is_err() {
                 break;
             }
+            redis_core::replication::global_replication_state()
+                .account_replica_output_drained(client.id, payload.len());
         }
 
         let conn = match client.conn.as_mut() {
@@ -1344,6 +1352,8 @@ pub(crate) fn run_client_loop_tls(
                             disconnect = true;
                             break;
                         }
+                        redis_core::replication::global_replication_state()
+                            .account_replica_output_drained(client.id, payload.len());
                     }
                     None => {
                         disconnect = true;

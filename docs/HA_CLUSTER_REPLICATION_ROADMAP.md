@@ -355,7 +355,14 @@ Work packets:
   `repl_buffer_kit`: shared replication-stream bytes may exceed the replica
   hard output-buffer limit while explicitly private output disconnects only the
   offending replica. Full-sync RDB bulk now uses the private path; normal
-  command fan-out and post-RDB catch-up remain shared.
+  command fan-out and post-RDB catch-up remain shared. A later
+  shared-output/drain slice split replica pending output into shared and
+  private ownership, made INFO count shared stream memory once, wired
+  successful writer sends to drain pending replica output, and moved focused
+  `integration/replication-buffer` from 4/11 to 5/10. The two
+  backlog-histlen outgrowth assertions are now green; reclaim/shrink after the
+  last dependent replica disconnects or catches up remains the next
+  `repl_buffer_kit` frontier.
 
 Gate:
 
