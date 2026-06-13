@@ -302,7 +302,10 @@ Work packets:
 - **R4-WAITAOF-REPLICA:** finish replica AOF fsync acknowledgement semantics
   across `FACK`, `appendonly` state changes, and role changes.
 - **R4-ROLE-CHANGE-UNBLOCK:** unblock or error waiters correctly on
-  `REPLICAOF`, `FAILOVER`, disconnect, and `appendonly no`.
+  `REPLICAOF`, `FAILOVER`, disconnect, and `appendonly no`. The first
+  2026-06-13 packet drains both `WAIT` and `WAITAOF` waiters on `REPLICAOF`
+  topology changes, while preserving the existing `appendonly no` WAITAOF
+  error path; `FAILOVER` and disconnect coverage remain future packets.
 - **R4-PERSISTENCE-MATRIX:** cross-check AOF/RDB/replication interactions from
   [`AOF_ENDGAME_SPEC.md`](AOF_ENDGAME_SPEC.md).
 

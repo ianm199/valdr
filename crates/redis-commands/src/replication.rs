@@ -35,6 +35,9 @@ pub fn replicaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     let repl = global_replication_state();
 
     if is_no_one(host.as_bytes(), port_str.as_bytes()) {
+        if repl.is_replica() || repl.replica_of_target().is_some() {
+            unblock_replication_role_change();
+        }
         repl.become_master();
         return ctx.reply_simple_string(b"OK");
     }
@@ -47,7 +50,13 @@ pub fn replicaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             ));
         }
     };
-    unblock_waitaof_role_change();
+    let topology_changed = repl
+        .replica_of_target()
+        .as_ref()
+        .is_none_or(|(old_host, old_port)| old_host != &host || *old_port != port);
+    if topology_changed {
+        unblock_replication_role_change();
+    }
     let dialer_epoch = repl.become_replica_of(host.clone(), port);
     println!(
         "redis-server: Connecting to PRIMARY {}:{}",
@@ -592,13 +601,13 @@ pub fn unblock_waitaof_local_disabled() {
     }
 }
 
-pub fn unblock_waitaof_role_change() {
+pub fn unblock_replication_role_change() {
     let waiters = {
         let mut idx = match blocked_keys_index().lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
-        idx.take_all_waitaof_waiters()
+        idx.take_all_replication_waiters()
     };
     for waiter in waiters {
         let _ = waiter.sender.send(

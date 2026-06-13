@@ -560,6 +560,26 @@ impl BlockedKeysIndex {
         out
     }
 
+ /// Drain every waiter blocked on replication progress. Used when the local
+ /// server's replication topology changes underneath a WAIT/WAITAOF client.
+    pub fn take_all_replication_waiters(&mut self) -> Vec<BlockedWaiter> {
+        let cids: Vec<ClientId> = self
+            .waiters
+            .iter()
+            .filter_map(|(cid, w)| match &w.action {
+                BlockedAction::Wait { .. } | BlockedAction::WaitAof { .. } => Some(*cid),
+                _ => None,
+            })
+            .collect();
+        let mut out = Vec::with_capacity(cids.len());
+        for cid in cids {
+            if let Some(w) = self.remove_wait_client(cid) {
+                out.push(w);
+            }
+        }
+        out
+    }
+
  /// Remove a `Wait` waiter by client id without consulting the keys index
  /// (Wait waiters are not keyed — they park under a sentinel key).
     fn remove_wait_client(&mut self, client_id: ClientId) -> Option<BlockedWaiter> {

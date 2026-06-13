@@ -1061,6 +1061,89 @@ fn p4_waitaof_local_waiter_unblocks_when_appendonly_disabled() {
     );
 }
 
+#[test]
+fn p4_wait_and_waitaof_waiters_unblock_on_role_change() {
+    let _g = repl_guard();
+    global_replication_state().become_master();
+    redis_commands::aof::remove_aof_writer();
+
+    let server = Arc::new(RedisServer::default());
+    let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
+    let (wait_tx, wait_rx) = mpsc::channel();
+    let (waitaof_tx, waitaof_rx) = mpsc::channel();
+    let wait_client_id = 980_004;
+    let waitaof_client_id = 980_005;
+    {
+        let mut guard = pubsub.lock().unwrap();
+        guard.register_sender(wait_client_id, wait_tx);
+        guard.register_sender(waitaof_client_id, waitaof_tx);
+    }
+
+    let mut wait_client = Client::new(wait_client_id);
+    wait_client.last_write_repl_offset = 42;
+    wait_client.set_args(argv(&[b"WAIT", b"1", b"0"]));
+    let mut wait_db = RedisDb::new(0);
+    {
+        let mut ctx = redis_core::CommandContext::with_server(
+            &mut wait_client,
+            &mut wait_db,
+            server.clone(),
+            pubsub.clone(),
+        );
+        redis_commands::replication::wait_command(&mut ctx).expect("wait");
+    }
+    assert!(
+        wait_client.blocked_on_keys,
+        "WAIT should block before role-change unblock"
+    );
+
+    let mut waitaof_client = Client::new(waitaof_client_id);
+    waitaof_client.last_write_repl_offset = 42;
+    waitaof_client.set_args(argv(&[b"WAITAOF", b"0", b"1", b"0"]));
+    let mut waitaof_db = RedisDb::new(0);
+    {
+        let mut ctx = redis_core::CommandContext::with_server(
+            &mut waitaof_client,
+            &mut waitaof_db,
+            server,
+            pubsub,
+        );
+        redis_commands::replication::waitaof_command(&mut ctx).expect("waitaof");
+    }
+    assert!(
+        waitaof_client.blocked_on_keys,
+        "WAITAOF should block before role-change unblock"
+    );
+
+    global_replication_state().become_replica_of(RedisString::from_bytes(b"127.0.0.1"), 6379);
+    let mut role_change_client = Client::new(980_006);
+    role_change_client.set_args(argv(&[b"REPLICAOF", b"NO", b"ONE"]));
+    let mut role_change_db = RedisDb::new(0);
+    {
+        let mut ctx = redis_core::CommandContext::with_server(
+            &mut role_change_client,
+            &mut role_change_db,
+            Arc::new(RedisServer::default()),
+            Arc::new(Mutex::new(PubSubRegistry::new())),
+        );
+        redis_commands::replication::replicaof_command(&mut ctx).expect("replicaof no one");
+    }
+    assert_eq!(role_change_client.drain_reply(), b"+OK\r\n");
+
+    for (name, rx) in [("WAIT", wait_rx), ("WAITAOF", waitaof_rx)] {
+        let reply = rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap_or_else(|_| panic!("{name} waiter should be unblocked"));
+        assert!(
+            reply.starts_with(
+                b"-UNBLOCKED force unblock from blocking operation, instance state changed"
+            ),
+            "{name} role-change unblock reply was {:?}",
+            String::from_utf8_lossy(&reply),
+        );
+    }
+}
+
 // ─── AOF round-trip (green capability) ───────────────────────────────────────
 
 /// GREEN — AOF append→bytes→replay→assert-dbs-equal on the live codec.

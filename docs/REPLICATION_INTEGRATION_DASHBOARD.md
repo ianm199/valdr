@@ -13,8 +13,8 @@ Fast deterministic gate:
 cargo test -p redis-commands --test repl_correctness_kit
 ```
 
-Latest result on 2026-06-13 after the R1 propagation packets: 17 passed, 0
-failed.
+Latest result on 2026-06-13 after the R4 role-change unblock packet: 19
+passed, 0 failed.
 
 R0 full integration dashboard:
 
@@ -78,6 +78,7 @@ Artifact:
 | `integration/replication-psync` | timeout | Red | Timed out at 300s; no-backlog/backlog-expired and diskless variants remain frontier. |
 | `integration/replication-aof-sync` | 1/5 | Red | RDB-reuse-as-AOF-base and diskless AOF fallback behavior. |
 | `integration/replica-redirect` | no summary | Red | Aborts at `client paused before and during failover-in-progress`; `FAILOVER` is still unknown. |
+| `unit/wait` | 39/0 | Green | WAIT command suite passed after the R4 role-change unblock packet; WAITAOF/AOF integration still tracked by `replication-aof-sync`. |
 
 ## Temp RDB Cleanup
 
@@ -111,6 +112,9 @@ visible integration frontiers are now:
 - `R2-BUFFER-LIMITS`: accounting aliases and fan-out accounting are covered;
   implement shared-buffer trimming and replica output-buffer disconnection
   semantics behind `replication-buffer`.
+- `R4-WAIT/WAITAOF`: role-change unblock now covers both WAIT and WAITAOF for
+  `REPLICAOF` topology changes; replica FACK/disconnect semantics and
+  `replication-aof-sync` remain open.
 - `R5-FAILOVER-PARSER`: start failover syntax and faithful errors before any
   HA claim.
 
@@ -454,3 +458,54 @@ Results:
 - `cargo check -p redis-core -p redis-commands -p redis-server`: passed.
 - `integration/replication-psync` was not rerun in this packet; the R0
   dashboard timeout remains the current slow-suite frontier.
+
+### R4-ROLE-CHANGE-UNBLOCK
+
+Status: partial R4 progress on 2026-06-13.
+
+Implementation:
+
+- `BlockedKeysIndex` can now drain every replication-progress waiter, covering
+  both `WAIT` and `WAITAOF`.
+- `REPLICAOF` topology changes now unblock those waiters with the existing
+  `UNBLOCKED force unblock from blocking operation, instance state changed`
+  error payload.
+- `appendonly no` still uses the narrower WAITAOF-local error path, so plain
+  WAIT clients are not disturbed by AOF-only configuration changes.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands --test repl_correctness_kit \
+  p4_wait_and_waitaof_waiters_unblock_on_role_change \
+  -- --nocapture
+cargo test -p redis-core blocked_keys -- --nocapture
+cargo test -p redis-commands --test repl_correctness_kit -- --nocapture
+cargo test -p redis-commands replication::tests::wait -- --nocapture
+cargo check -p redis-core -p redis-commands -p redis-server
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-r4-wait-role-change \
+  --profile integration-repl \
+  --timeout-s 240 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files unit/wait \
+  --isolated-tests-copy \
+  --skip-build
+```
+
+Results:
+
+- Focused repl-kit role-change test: passed.
+- Core blocked-key unit filter: 3 passed, 0 failed.
+- `repl_correctness_kit`: 19 passed, 0 failed.
+- WAIT/WAITAOF unit filter: 6 passed, 0 failed.
+- `cargo check -p redis-core -p redis-commands -p redis-server`: passed.
+- `cargo build --bin redis-server`: passed.
+- Focused TCL:
+  `harness/oracle/results/tcl-survey/20260613T043825663450Z/result.json`
+  reported `unit/wait` 39/0.
+- `integration/replication-aof-sync` was not rerun in this packet and remains
+  at the current 1/5 frontier.
