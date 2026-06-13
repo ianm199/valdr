@@ -330,6 +330,88 @@ fn r1_noop_delete_style_writes_must_not_propagate() {
     );
 }
 
+#[test]
+fn r1_spop_rewrites_replication_to_deterministic_commands() {
+    let _g = repl_guard();
+    let cap = ReplCapture::attach(900_014, 0);
+    let mut db = RedisDb::new(0);
+
+    assert_eq!(
+        dispatch_as_primary(22, &mut db, &[b"SADD", b"single", b"only"]),
+        b":1\r\n"
+    );
+    let _ = cap.drain();
+
+    let reply = dispatch_as_primary(23, &mut db, &[b"SPOP", b"single"]);
+    assert_eq!(reply, b"$4\r\nonly\r\n");
+    let stream = cap.drain();
+    assert!(
+        stream
+            .windows(resp(&[b"SREM", b"single", b"only"]).len())
+            .any(|w| w == resp(&[b"SREM", b"single", b"only"]).as_slice()),
+        "single-element SPOP must propagate as SREM, got {:?}",
+        String::from_utf8_lossy(&stream)
+    );
+    assert!(
+        !stream
+            .windows(resp(&[b"SPOP", b"single"]).len())
+            .any(|w| w == resp(&[b"SPOP", b"single"]).as_slice()),
+        "SPOP itself must not be propagated"
+    );
+
+    assert_eq!(
+        dispatch_as_primary(24, &mut db, &[b"SADD", b"partial", b"a", b"b", b"c"]),
+        b":3\r\n"
+    );
+    let _ = cap.drain();
+
+    let reply = dispatch_as_primary(25, &mut db, &[b"SPOP", b"partial", b"2"]);
+    assert!(
+        reply.starts_with(b"*2\r\n"),
+        "SPOP count reply should contain two elements, got {:?}",
+        String::from_utf8_lossy(&reply)
+    );
+    let stream = cap.drain();
+    assert!(
+        stream.windows(b"SREM".len()).any(|w| w == b"SREM"),
+        "partial SPOP count must propagate as SREM, got {:?}",
+        String::from_utf8_lossy(&stream)
+    );
+    assert!(
+        !stream
+            .windows(resp(&[b"SPOP", b"partial", b"2"]).len())
+            .any(|w| w == resp(&[b"SPOP", b"partial", b"2"]).as_slice()),
+        "SPOP count itself must not be propagated"
+    );
+
+    assert_eq!(
+        dispatch_as_primary(26, &mut db, &[b"SADD", b"full", b"x", b"y"]),
+        b":2\r\n"
+    );
+    let _ = cap.drain();
+
+    let reply = dispatch_as_primary(27, &mut db, &[b"SPOP", b"full", b"2"]);
+    assert!(
+        reply.starts_with(b"*2\r\n"),
+        "full SPOP count reply should contain two elements, got {:?}",
+        String::from_utf8_lossy(&reply)
+    );
+    let stream = cap.drain();
+    assert!(
+        stream
+            .windows(resp(&[b"DEL", b"full"]).len())
+            .any(|w| w == resp(&[b"DEL", b"full"]).as_slice()),
+        "full SPOP count must propagate as DEL by default, got {:?}",
+        String::from_utf8_lossy(&stream)
+    );
+    assert!(
+        !stream
+            .windows(resp(&[b"SPOP", b"full", b"2"]).len())
+            .any(|w| w == resp(&[b"SPOP", b"full", b"2"]).as_slice()),
+        "full SPOP count itself must not be propagated"
+    );
+}
+
 // ─── Finding #2: IN-MULTI REPLICAOF ──────────────────────────────────────────
 
 /// AUDIT FINDING #2 (regression guard): queuing a write together with a role

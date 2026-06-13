@@ -129,3 +129,44 @@ Results:
 The remaining `unit/type/set` failure is
 `SPOP new implementation: code path #1 propagate as DEL or UNLINK`, which is
 the next `R1-SPOP-REWRITE` packet rather than a no-op dirty failure.
+
+### R1-SPOP-REWRITE
+
+Status: completed on 2026-06-13.
+
+Implementation:
+
+- `SPOP key` now rewrites propagation to `SREM key <removed-member>`.
+- `SPOP key count` now suppresses no-op propagation for missing keys and
+  `count == 0`.
+- Partial `SPOP key count` rewrites propagation to `SREM key <removed...>`.
+- Full `SPOP key count` rewrites propagation to `DEL key` by default, or
+  `UNLINK key` when `lazyfree-lazy-server-del` is configured as `yes`.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands --test repl_correctness_kit
+cargo check -p redis-commands
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-r1-spop-three-type-recheck \
+  --profile single-node-repl \
+  --timeout-s 180 \
+  --baseport 45000 \
+  --portcount 3000 \
+  --clients 1 \
+  --files unit/type/set,unit/type/hash,unit/type/zset \
+  --isolated-tests-copy \
+  --skip-build
+```
+
+Results:
+
+- `repl_correctness_kit`: 15 passed, 0 failed.
+- `cargo check -p redis-commands`: passed.
+- `cargo build --bin redis-server`: passed.
+- Focused TCL:
+  `harness/oracle/results/tcl-survey/20260613T004936241400Z/result.json`
+  reported `unit/type/set` 115/0, `unit/type/hash` 83/0, and
+  `unit/type/zset` 320/0.

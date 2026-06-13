@@ -369,6 +369,11 @@ pub fn scard_command(ctx: &mut CommandContext) -> RedisResult<()> {
     ctx.reply_integer(len)
 }
 
+fn lazyfree_lazy_server_del_enabled() -> bool {
+    crate::config_cmd::config_override_or_default(b"lazyfree-lazy-server-del", "no")
+        .eq_ignore_ascii_case("yes")
+}
+
 /// SPOP key [count]
 /// Without `count`: replies with a single random member as a bulk string,
 /// or `$-1\r\n` when the key is absent. With `count`: replies with an
@@ -392,15 +397,18 @@ pub fn spop_command(ctx: &mut CommandContext) -> RedisResult<()> {
         None
     };
 
+    let mut full_count_pop = false;
     let popped: Option<Vec<RedisString>> = {
         let h = as_set_mut(ctx.db_mut().lookup_key_write(&key))?;
         match h {
             None => None,
             Some(h) => {
+                let size_before = h.len();
                 let take = match count {
-                    None => 1usize.min(h.len()),
-                    Some(n) => (n as usize).min(h.len()),
+                    None => 1usize.min(size_before),
+                    Some(n) => (n as usize).min(size_before),
                 };
+                full_count_pop = count.is_some() && take > 0 && take == size_before;
                 let mut rng = time_seed();
                 let mut all: Vec<RedisString> = h.iter().cloned().collect();
                 for i in 0..take.min(all.len()) {
@@ -429,6 +437,26 @@ pub fn spop_command(ctx: &mut CommandContext) -> RedisResult<()> {
         if empty_after {
             ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", &key);
         }
+    }
+
+    if did_pop {
+        if full_count_pop {
+            let verb = if lazyfree_lazy_server_del_enabled() {
+                b"UNLINK".as_slice()
+            } else {
+                b"DEL".as_slice()
+            };
+            ctx.client_mut()
+                .set_args(vec![RedisString::from_bytes(verb), key.clone()]);
+        } else if let Some(elems) = popped.as_ref() {
+            let mut rewrite = Vec::with_capacity(elems.len() + 2);
+            rewrite.push(RedisString::from_bytes(b"SREM"));
+            rewrite.push(key.clone());
+            rewrite.extend(elems.iter().cloned());
+            ctx.client_mut().set_args(rewrite);
+        }
+    } else {
+        ctx.client_mut().set_prevent_propagation();
     }
 
     match (count, popped) {

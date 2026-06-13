@@ -177,7 +177,9 @@ Work packets:
   / equivalent absolute forms so paused replicas do not re-anchor TTL at apply
   time.
 - **R1-SPOP-REWRITE:** rewrite `SPOP key count` into deterministic `SREM`
-  frames for the exact elements removed.
+  frames for the exact elements removed; full-count removals rewrite to
+  `DEL`/`UNLINK`. Completed on 2026-06-13; see
+  [`REPLICATION_INTEGRATION_DASHBOARD.md`](REPLICATION_INTEGRATION_DASHBOARD.md).
 - **R1-DB-SELECT:** ensure multi-DB replication delivery emits and applies
   `SELECT` consistently, including replica apply state after reconnect.
 - **R1-NOOP-DIRTY:** keep no-op writes out of the replication stream by using a
