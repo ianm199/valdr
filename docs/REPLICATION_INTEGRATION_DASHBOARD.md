@@ -72,7 +72,7 @@ Artifact:
 | `integration/block-repl` | 2/0 | Green | No-regression tripwire. |
 | `integration/replication-3` | 3/4 | Red | Expiry consistency, writable-replica expired-key behavior, and PFCOUNT expired-key/cache semantics. |
 | `integration/replication-4` | 15/2 | Red | SPOP rewrite cases now pass; remaining failures are divergence/default writable-replica cases. |
-| `integration/replication-buffer` | 4/15 | Red | Full-sync/BGSAVE setup reaches counted assertions; completed full-sync catch-up history is now retained while dependent replicas still pin it, but Valkey-style global replication-buffer memory, backlog outgrowth under slow replicas, partial resync across broader retained history, and output-buffer disconnect policy remain unfinished. |
+| `integration/replication-buffer` | 4/11 | Red | Fresh post-PSYNC baseline still reaches counted assertions without timeout. Remaining failures are Valkey-style global replication-buffer memory, BGSAVE/slow-replica backlog outgrowth, partial resync across broader retained history, and output-buffer disconnect policy. |
 | `integration/replication` | no summary | Red | The failed full-sync cleanup packet moves past `diskless replication child being killed is collected`; the current abort is `Master stream is correctly processed while the replica has a script in -BUSY state` with `READONLY`. Diskless/script-busy full-sync apply remains the frontier. |
 | `integration/replication-psync` | 90/0 | Green | Focused gate is green after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support for the replica dialer. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
@@ -1302,3 +1302,31 @@ Takeaway:
   move from reconnect basics to dual replication IDs and failover-history
   windows instead of repeatedly rediscovering backlog sizing, TTL, and delayed
   reconnect mechanics.
+
+### 2026-06-13 R2 baseline after PSYNC green
+
+Evidence:
+
+```bash
+python3 harness/oracle/tcl-survey.py \
+  --files integration/replication-buffer \
+  --profile integration-repl \
+  --runner-id repl-buffer-post-psync-green-baseline \
+  --timeout-s 300 \
+  --baseport 29479 \
+  --portcount 100 \
+  --skip-build
+```
+
+Result:
+
+- `harness/oracle/results/tcl-survey/20260613T163420334540Z/result.json`:
+  completed in 131s with 4 passed, 11 failed, 0 timeouts, and 0 no-summary
+  files.
+
+Takeaway:
+
+- The next replication-buffer packet should be designed as a real shared-buffer
+  and output-buffer-lifetime slice. The failure shape is no longer a harness
+  timeout; it is counted assertions around shared memory, slow-replica backlog
+  outgrowth, retained-history partial resync, and output-buffer limit policy.
