@@ -276,7 +276,11 @@ Work packets:
   full-sync replacement carry function libraries with the DB replacement plan,
   removing the successful-swap `hello1`/`hello2` mismatch from the focused Tcl
   failures. Async failure rollback, old-dataset exposure, DB-size drift, and
-  diskless short-read/drop state transitions remain unfinished.
+  diskless short-read/drop state transitions remain unfinished. A later
+  diskless-load mode slice added typed `repl-diskless-load` live config and
+  mode-aware loading publication, clearing the different-replid
+  `replica enter loading` assertion but not the broader aborted-load rollback
+  and pipe-drop log/state failures.
 - **R2-BUFFER-LIMITS:** implement replica output-buffer accounting and
   disconnection policy well enough for `replication-buffer` to count tests
   instead of dying in setup. Partial accounting surface landed on 2026-06-13:

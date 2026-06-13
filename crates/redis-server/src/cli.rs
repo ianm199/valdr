@@ -796,6 +796,7 @@ pub(crate) fn expose_config_file_value(key: &str) -> bool {
             | "rdb-key-save-delay"
             | "rdb-version-check"
             | "repl-diskless-sync"
+            | "repl-diskless-load"
             | "hash-seed"
             | "maxmemory"
             | "maxmemory-policy"

@@ -45,9 +45,9 @@ pub enum MaxmemoryPolicyCode {
 }
 
 impl MaxmemoryPolicyCode {
- /// Parse the canonical config-string form (`noeviction`, `allkeys-lru`, …)
- /// into a discriminant. Returns `None` for unknown spellings; callers should
- /// surface that as a config-syntax error rather than silently defaulting.
+    /// Parse the canonical config-string form (`noeviction`, `allkeys-lru`, …)
+    /// into a discriminant. Returns `None` for unknown spellings; callers should
+    /// surface that as a config-syntax error rather than silently defaulting.
     pub fn parse(name: &[u8]) -> Option<Self> {
         match name {
             b"noeviction" => Some(Self::NoEviction),
@@ -62,8 +62,8 @@ impl MaxmemoryPolicyCode {
         }
     }
 
- /// Inverse of `parse`: render the discriminant as the canonical
- /// config-string spelling for CONFIG GET readback.
+    /// Inverse of `parse`: render the discriminant as the canonical
+    /// config-string spelling for CONFIG GET readback.
     pub fn as_config_str(self) -> &'static str {
         match self {
             Self::NoEviction => "noeviction",
@@ -77,7 +77,7 @@ impl MaxmemoryPolicyCode {
         }
     }
 
- /// Reconstruct from the wire-stored discriminant.
+    /// Reconstruct from the wire-stored discriminant.
     pub fn from_u8(value: u8) -> Self {
         match value {
             1 => Self::AllkeysLru,
@@ -92,6 +92,44 @@ impl MaxmemoryPolicyCode {
     }
 }
 
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplDisklessLoadMode {
+    Disabled = 0,
+    Swapdb = 1,
+    FlushBeforeLoad = 2,
+}
+
+impl ReplDisklessLoadMode {
+    pub fn parse(value: &[u8]) -> Option<Self> {
+        if value.eq_ignore_ascii_case(b"disabled") {
+            Some(Self::Disabled)
+        } else if value.eq_ignore_ascii_case(b"swapdb") {
+            Some(Self::Swapdb)
+        } else if value.eq_ignore_ascii_case(b"flush-before-load") {
+            Some(Self::FlushBeforeLoad)
+        } else {
+            None
+        }
+    }
+
+    pub const fn as_config_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Swapdb => "swapdb",
+            Self::FlushBeforeLoad => "flush-before-load",
+        }
+    }
+
+    pub const fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Swapdb,
+            2 => Self::FlushBeforeLoad,
+            _ => Self::Disabled,
+        }
+    }
+}
+
 /// Server-wide live configuration.
 /// All numeric fields are per-field atomics so reads are lock-free in hot
 /// paths. The `requirepass` field is variable-length (a `RedisString`) so it
@@ -99,19 +137,19 @@ impl MaxmemoryPolicyCode {
 pub struct LiveConfig {
     pub maxmemory: AtomicU64,
     pub maxmemory_policy: AtomicU8,
- /// Client-memory eviction limit (`maxmemory-clients`). Positive values are
- /// absolute bytes; negative values are percentages of `maxmemory`.
+    /// Client-memory eviction limit (`maxmemory-clients`). Positive values are
+    /// absolute bytes; negative values are percentages of `maxmemory`.
     pub maxmemory_clients: AtomicI64,
     pub maxclients: AtomicU64,
     pub requirepass: Mutex<Option<RedisString>>,
- /// Password this instance uses when authenticating to its configured
- /// primary (`primaryauth` / legacy `masterauth`).
+    /// Password this instance uses when authenticating to its configured
+    /// primary (`primaryauth` / legacy `masterauth`).
     pub primaryauth: Mutex<Option<RedisString>>,
     pub notify_keyspace_events_flags: AtomicU32,
     pub slowlog_threshold_micros: AtomicI64,
     pub slowlog_max_len: AtomicUsize,
- /// Cached threshold used by command dispatch to decide whether it needs a
- /// slowlog duration timer. `-1` means slowlog cannot currently record.
+    /// Cached threshold used by command dispatch to decide whether it needs a
+    /// slowlog duration timer. `-1` means slowlog cannot currently record.
     slowlog_timing_threshold_micros: AtomicI64,
     pub active_expire_effort: AtomicU8,
     pub hz: AtomicU32,
@@ -123,53 +161,53 @@ pub struct LiveConfig {
     pub set_max_listpack_value: AtomicUsize,
     pub zset_max_listpack_entries: AtomicUsize,
     pub zset_max_listpack_value: AtomicUsize,
- /// Sparse HyperLogLog byte limit before promotion to dense.
+    /// Sparse HyperLogLog byte limit before promotion to dense.
     pub hll_sparse_max_bytes: AtomicUsize,
- /// Directory where the RDB file is written (`dir` config key).
+    /// Directory where the RDB file is written (`dir` config key).
     pub rdb_dir: Mutex<String>,
- /// Filename for the RDB dump (`dbfilename` config key).
+    /// Filename for the RDB dump (`dbfilename` config key).
     pub rdb_filename: Mutex<String>,
- /// Whether RDB save rules are configured (`save` config key).
+    /// Whether RDB save rules are configured (`save` config key).
     pub save_enabled: AtomicBool,
- /// Unix timestamp (seconds) of the last successful RDB save.
+    /// Unix timestamp (seconds) of the last successful RDB save.
     pub last_save_unix: AtomicI64,
- /// LFU logarithmic counter growth factor (`lfu-log-factor` config key).
- /// Higher values make the counter saturate more slowly. Default 10.
+    /// LFU logarithmic counter growth factor (`lfu-log-factor` config key).
+    /// Higher values make the counter saturate more slowly. Default 10.
     pub lfu_log_factor: AtomicU32,
- /// Minutes between LFU counter decay ticks (`lfu-decay-time` config key).
- /// Default 1.
+    /// Minutes between LFU counter decay ticks (`lfu-decay-time` config key).
+    /// Default 1.
     pub lfu_decay_time: AtomicU32,
- /// TLS listener port (`tls-port` config key). 0 = disabled.
+    /// TLS listener port (`tls-port` config key). 0 = disabled.
     pub tls_port: AtomicU16,
- /// Path to the PEM certificate chain for the TLS listener.
+    /// Path to the PEM certificate chain for the TLS listener.
     pub tls_cert_file: Mutex<Option<PathBuf>>,
- /// Path to the PEM private key for the TLS listener.
+    /// Path to the PEM private key for the TLS listener.
     pub tls_key_file: Mutex<Option<PathBuf>>,
- /// Path to the PEM CA bundle used for mTLS client verification.
+    /// Path to the PEM CA bundle used for mTLS client verification.
     pub tls_ca_cert_file: Mutex<Option<PathBuf>>,
- /// mTLS client-auth policy: 0 = no, 1 = yes (require cert), 2 = optional.
+    /// mTLS client-auth policy: 0 = no, 1 = yes (require cert), 2 = optional.
     pub tls_auth_clients: AtomicU8,
- /// Allowed TLS protocol versions (`tls-protocols` config key). Empty string
- /// means "all rustls-supported versions" (TLS 1.2 + TLS 1.3). Non-empty is a
- /// space-separated subset, e.g. `"TLSv1.2"` or `"TLSv1.2 TLSv1.3"`.
+    /// Allowed TLS protocol versions (`tls-protocols` config key). Empty string
+    /// means "all rustls-supported versions" (TLS 1.2 + TLS 1.3). Non-empty is a
+    /// space-separated subset, e.g. `"TLSv1.2"` or `"TLSv1.2 TLSv1.3"`.
     pub tls_protocols: Mutex<String>,
- /// Whether AOF persistence is enabled (`appendonly` config key).
+    /// Whether AOF persistence is enabled (`appendonly` config key).
     pub appendonly: AtomicBool,
- /// AOF filename relative to `rdb_dir` (`appendfilename` config key).
+    /// AOF filename relative to `rdb_dir` (`appendfilename` config key).
     pub appendfilename: Mutex<String>,
- /// AOF multi-part directory name (`appenddirname` config key).
+    /// AOF multi-part directory name (`appenddirname` config key).
     pub appenddirname: Mutex<String>,
- /// fsync policy: 0=no, 1=everysec, 2=always (`appendfsync` config key).
+    /// fsync policy: 0=no, 1=everysec, 2=always (`appendfsync` config key).
     pub appendfsync: AtomicU8,
- /// Whether startup accepts an otherwise-valid AOF truncated at EOF.
+    /// Whether startup accepts an otherwise-valid AOF truncated at EOF.
     pub aof_load_truncated: AtomicBool,
- /// Whether AOF rewrite may emit an RDB preamble.
+    /// Whether AOF rewrite may emit an RDB preamble.
     pub aof_use_rdb_preamble: AtomicBool,
- /// Whether AOF writes include `#TS:<unix-seconds>` annotations.
+    /// Whether AOF writes include `#TS:<unix-seconds>` annotations.
     pub aof_timestamp_enabled: AtomicBool,
- /// Auto AOF rewrite threshold percentage.
+    /// Auto AOF rewrite threshold percentage.
     pub auto_aof_rewrite_percentage: AtomicU64,
- /// Auto AOF rewrite minimum size in bytes.
+    /// Auto AOF rewrite minimum size in bytes.
     pub auto_aof_rewrite_min_size: AtomicU64,
     /// Size of the replication backlog circular buffer
     /// (`repl-backlog-size` config key). Default 1 MiB.
@@ -177,42 +215,46 @@ pub struct LiveConfig {
     /// Seconds to retain the replication backlog after the last replica
     /// disconnects (`repl-backlog-ttl`). 0 disables expiry.
     pub repl_backlog_ttl: AtomicU64,
- /// Replica idle-link timeout in seconds (`repl-timeout`). Default 60.
- /// Consumed by Wave B's replica-health watchdog; readback only here.
+    /// Replica idle-link timeout in seconds (`repl-timeout`). Default 60.
+    /// Consumed by Wave B's replica-health watchdog; readback only here.
     pub repl_timeout: AtomicU64,
- /// Minimum number of good replicas required before accepting writes
- /// (`min-replicas-to-write` / `min-slaves-to-write`). Default 0 disables
- /// the check.
+    /// Minimum number of good replicas required before accepting writes
+    /// (`min-replicas-to-write` / `min-slaves-to-write`). Default 0 disables
+    /// the check.
     pub repl_min_replicas_to_write: AtomicU64,
- /// Maximum acceptable replica lag in seconds for the min-replicas write
- /// gate (`min-replicas-max-lag` / `min-slaves-max-lag`). Default 10.
+    /// Maximum acceptable replica lag in seconds for the min-replicas write
+    /// gate (`min-replicas-max-lag` / `min-slaves-max-lag`). Default 10.
     pub repl_min_replicas_max_lag: AtomicU64,
- /// Disable per-write TCP_NODELAY on the replication link
- /// (`repl-disable-tcp-nodelay`). Default `false`. Wave B/C may consume
- /// this once the master-link socket is owned.
+    /// Disable per-write TCP_NODELAY on the replication link
+    /// (`repl-disable-tcp-nodelay`). Default `false`. Wave B/C may consume
+    /// this once the master-link socket is owned.
     pub repl_disable_tcp_nodelay: AtomicBool,
- /// Replicas may serve read commands (`slave-read-only`/`replica-read-only`).
- /// Default `true`; matches real Redis.
+    /// Replicas may serve read commands (`slave-read-only`/`replica-read-only`).
+    /// Default `true`; matches real Redis.
     pub slave_read_only: AtomicBool,
- /// Replicas may serve commands while the master link is down
- /// (`replica-serve-stale-data`/`slave-serve-stale-data`). Default `true`.
+    /// Replicas may serve commands while the master link is down
+    /// (`replica-serve-stale-data`/`slave-serve-stale-data`). Default `true`.
     pub replica_serve_stale_data: AtomicBool,
- /// Enable Lua 5.1 APIs that upstream marks insecure/deprecated
- /// (`lua-enable-insecure-api`). Default `false`.
+    /// Enable Lua 5.1 APIs that upstream marks insecure/deprecated
+    /// (`lua-enable-insecure-api`). Default `false`.
     pub lua_enable_insecure_api: AtomicBool,
- /// Slow-script busy threshold in milliseconds (`lua-time-limit` /
- /// `busy-reply-threshold`). Default 5000.
+    /// Slow-script busy threshold in milliseconds (`lua-time-limit` /
+    /// `busy-reply-threshold`). Default 5000.
     pub lua_time_limit_ms: AtomicU64,
- /// Whether the primary is in import mode (`import-mode` config key).
+    /// Whether the primary is in import mode (`import-mode` config key).
     pub import_mode: AtomicBool,
- /// Optional availability-zone string surfaced by HELLO.
+    /// Optional availability-zone string surfaced by HELLO.
     pub availability_zone: Mutex<String>,
- /// Send the RDB snapshot diskless during full resync
- /// (`repl-diskless-sync`). Default `true`. No-op until Wave B wires
- /// actual snapshot transfer.
+    /// Send the RDB snapshot diskless during full resync
+    /// (`repl-diskless-sync`). Default `true`. No-op until Wave B wires
+    /// actual snapshot transfer.
     pub repl_diskless_sync: AtomicBool,
- /// Accept future DUMP/RESTORE payload RDB versions
- /// (`rdb-version-check relaxed`). Default strict.
+    /// Replica load behavior for diskless full sync (`repl-diskless-load`).
+    /// Default `disabled` matches Valkey and avoids ordinary full-sync LOADING
+    /// state unless the user explicitly selects a diskless-load mode.
+    pub repl_diskless_load: AtomicU8,
+    /// Accept future DUMP/RESTORE payload RDB versions
+    /// (`rdb-version-check relaxed`). Default strict.
     pub rdb_version_check_relaxed: AtomicBool,
 }
 
@@ -236,12 +278,12 @@ impl SlowlogTimingGate {
         Self { threshold_micros }
     }
 
- /// Whether dispatch must capture a command duration for slowlog.
+    /// Whether dispatch must capture a command duration for slowlog.
     pub const fn should_time(self) -> bool {
         self.threshold_micros >= 0
     }
 
- /// Whether a measured command duration should be recorded.
+    /// Whether a measured command duration should be recorded.
     pub const fn should_record(self, elapsed_micros: u64) -> bool {
         self.threshold_micros >= 0 && elapsed_micros >= self.threshold_micros as u64
     }
@@ -373,6 +415,7 @@ impl Default for LiveConfig {
             import_mode: AtomicBool::new(false),
             availability_zone: Mutex::new(String::new()),
             repl_diskless_sync: AtomicBool::new(true),
+            repl_diskless_load: AtomicU8::new(ReplDisklessLoadMode::Disabled as u8),
             rdb_version_check_relaxed: AtomicBool::new(false),
         }
     }
@@ -416,9 +459,9 @@ impl LiveConfig {
         self.maxclients.store(n, Ordering::Relaxed);
     }
 
- /// Snapshot the requirepass secret (cloned out so the lock is released).
- /// Returns `None` when no password is configured; otherwise the bytes set
- /// by the most recent `CONFIG SET requirepass...`.
+    /// Snapshot the requirepass secret (cloned out so the lock is released).
+    /// Returns `None` when no password is configured; otherwise the bytes set
+    /// by the most recent `CONFIG SET requirepass...`.
     pub fn requirepass(&self) -> Option<RedisString> {
         match self.requirepass.lock() {
             Ok(g) => g.clone(),
@@ -426,8 +469,8 @@ impl LiveConfig {
         }
     }
 
- /// Update the requirepass secret. Pass `None` (or an empty `RedisString`)
- /// to disable authentication.
+    /// Update the requirepass secret. Pass `None` (or an empty `RedisString`)
+    /// to disable authentication.
     pub fn set_requirepass(&self, secret: Option<RedisString>) {
         let value = match secret {
             Some(s) if s.as_bytes().is_empty() => None,
@@ -439,7 +482,7 @@ impl LiveConfig {
         }
     }
 
- /// Snapshot the password used for AUTH during replica handshakes.
+    /// Snapshot the password used for AUTH during replica handshakes.
     pub fn primaryauth(&self) -> Option<RedisString> {
         match self.primaryauth.lock() {
             Ok(g) => g.clone(),
@@ -447,7 +490,7 @@ impl LiveConfig {
         }
     }
 
- /// Update the primary authentication secret. Empty disables it.
+    /// Update the primary authentication secret. Empty disables it.
     pub fn set_primaryauth(&self, secret: Option<RedisString>) {
         let value = match secret {
             Some(s) if s.as_bytes().is_empty() => None,
@@ -593,7 +636,7 @@ impl LiveConfig {
         self.hll_sparse_max_bytes.store(n, Ordering::Relaxed);
     }
 
- /// Return the current `dir` setting for RDB/AOF files.
+    /// Return the current `dir` setting for RDB/AOF files.
     pub fn rdb_dir(&self) -> String {
         match self.rdb_dir.lock() {
             Ok(g) => g.clone(),
@@ -601,7 +644,7 @@ impl LiveConfig {
         }
     }
 
- /// Update the `dir` setting.
+    /// Update the `dir` setting.
     pub fn set_rdb_dir(&self, dir: String) {
         match self.rdb_dir.lock() {
             Ok(mut g) => *g = dir,
@@ -609,7 +652,7 @@ impl LiveConfig {
         }
     }
 
- /// Return the current `dbfilename` setting.
+    /// Return the current `dbfilename` setting.
     pub fn rdb_filename(&self) -> String {
         match self.rdb_filename.lock() {
             Ok(g) => g.clone(),
@@ -617,7 +660,7 @@ impl LiveConfig {
         }
     }
 
- /// Update the `dbfilename` setting.
+    /// Update the `dbfilename` setting.
     pub fn set_rdb_filename(&self, name: String) {
         match self.rdb_filename.lock() {
             Ok(mut g) => *g = name,
@@ -633,13 +676,13 @@ impl LiveConfig {
         self.save_enabled.store(enabled, Ordering::Relaxed);
     }
 
- /// Return the Unix timestamp (seconds) of the last successful RDB save, or
- /// 0 if no save has occurred this session.
+    /// Return the Unix timestamp (seconds) of the last successful RDB save, or
+    /// 0 if no save has occurred this session.
     pub fn last_save_unix(&self) -> i64 {
         self.last_save_unix.load(Ordering::Relaxed)
     }
 
- /// Record the timestamp of a successful RDB save.
+    /// Record the timestamp of a successful RDB save.
     pub fn set_last_save_unix(&self, ts: i64) {
         self.last_save_unix.store(ts, Ordering::Relaxed);
     }
@@ -660,17 +703,17 @@ impl LiveConfig {
         self.lfu_decay_time.store(minutes, Ordering::Relaxed);
     }
 
- /// Current TLS listener port. Returns 0 when TLS is disabled.
+    /// Current TLS listener port. Returns 0 when TLS is disabled.
     pub fn tls_port(&self) -> u16 {
         self.tls_port.load(Ordering::Relaxed)
     }
 
- /// Update the TLS listener port. 0 disables TLS.
+    /// Update the TLS listener port. 0 disables TLS.
     pub fn set_tls_port(&self, port: u16) {
         self.tls_port.store(port, Ordering::Relaxed);
     }
 
- /// Snapshot the TLS certificate file path.
+    /// Snapshot the TLS certificate file path.
     pub fn tls_cert_file(&self) -> Option<PathBuf> {
         match self.tls_cert_file.lock() {
             Ok(g) => g.clone(),
@@ -678,7 +721,7 @@ impl LiveConfig {
         }
     }
 
- /// Update the TLS certificate file path.
+    /// Update the TLS certificate file path.
     pub fn set_tls_cert_file(&self, path: Option<PathBuf>) {
         match self.tls_cert_file.lock() {
             Ok(mut g) => *g = path,
@@ -686,7 +729,7 @@ impl LiveConfig {
         }
     }
 
- /// Snapshot the TLS private key file path.
+    /// Snapshot the TLS private key file path.
     pub fn tls_key_file(&self) -> Option<PathBuf> {
         match self.tls_key_file.lock() {
             Ok(g) => g.clone(),
@@ -694,7 +737,7 @@ impl LiveConfig {
         }
     }
 
- /// Update the TLS private key file path.
+    /// Update the TLS private key file path.
     pub fn set_tls_key_file(&self, path: Option<PathBuf>) {
         match self.tls_key_file.lock() {
             Ok(mut g) => *g = path,
@@ -702,7 +745,7 @@ impl LiveConfig {
         }
     }
 
- /// Snapshot the TLS CA certificate file path used for mTLS.
+    /// Snapshot the TLS CA certificate file path used for mTLS.
     pub fn tls_ca_cert_file(&self) -> Option<PathBuf> {
         match self.tls_ca_cert_file.lock() {
             Ok(g) => g.clone(),
@@ -710,7 +753,7 @@ impl LiveConfig {
         }
     }
 
- /// Update the TLS CA certificate file path.
+    /// Update the TLS CA certificate file path.
     pub fn set_tls_ca_cert_file(&self, path: Option<PathBuf>) {
         match self.tls_ca_cert_file.lock() {
             Ok(mut g) => *g = path,
@@ -718,18 +761,18 @@ impl LiveConfig {
         }
     }
 
- /// mTLS client-auth policy: 0 = no (default), 1 = yes (require cert),
- /// 2 = optional.
+    /// mTLS client-auth policy: 0 = no (default), 1 = yes (require cert),
+    /// 2 = optional.
     pub fn tls_auth_clients(&self) -> u8 {
         self.tls_auth_clients.load(Ordering::Relaxed)
     }
 
- /// Update the mTLS client-auth policy.
+    /// Update the mTLS client-auth policy.
     pub fn set_tls_auth_clients(&self, mode: u8) {
         self.tls_auth_clients.store(mode, Ordering::Relaxed);
     }
 
- /// Snapshot the configured TLS protocol versions string.
+    /// Snapshot the configured TLS protocol versions string.
     pub fn tls_protocols(&self) -> String {
         match self.tls_protocols.lock() {
             Ok(g) => g.clone(),
@@ -737,9 +780,9 @@ impl LiveConfig {
         }
     }
 
- /// Update the configured TLS protocol versions string. Empty means "default
- /// (all rustls-supported)". Validation of the contents happens at rebuild
- /// time in `redis_core::tls::rebuild_from_live`.
+    /// Update the configured TLS protocol versions string. Empty means "default
+    /// (all rustls-supported)". Validation of the contents happens at rebuild
+    /// time in `redis_core::tls::rebuild_from_live`.
     pub fn set_tls_protocols(&self, versions: String) {
         match self.tls_protocols.lock() {
             Ok(mut g) => *g = versions,
@@ -747,17 +790,17 @@ impl LiveConfig {
         }
     }
 
- /// Whether AOF persistence is currently enabled.
+    /// Whether AOF persistence is currently enabled.
     pub fn appendonly(&self) -> bool {
         self.appendonly.load(Ordering::Relaxed)
     }
 
- /// Enable or disable AOF persistence.
+    /// Enable or disable AOF persistence.
     pub fn set_appendonly(&self, enabled: bool) {
         self.appendonly.store(enabled, Ordering::Relaxed);
     }
 
- /// Return the current AOF filename.
+    /// Return the current AOF filename.
     pub fn appendfilename(&self) -> String {
         match self.appendfilename.lock() {
             Ok(g) => g.clone(),
@@ -765,7 +808,7 @@ impl LiveConfig {
         }
     }
 
- /// Update the AOF filename.
+    /// Update the AOF filename.
     pub fn set_appendfilename(&self, name: String) {
         match self.appendfilename.lock() {
             Ok(mut g) => *g = name,
@@ -773,7 +816,7 @@ impl LiveConfig {
         }
     }
 
- /// Return the current AOF directory name.
+    /// Return the current AOF directory name.
     pub fn appenddirname(&self) -> String {
         match self.appenddirname.lock() {
             Ok(g) => g.clone(),
@@ -781,7 +824,7 @@ impl LiveConfig {
         }
     }
 
- /// Update the AOF directory name.
+    /// Update the AOF directory name.
     pub fn set_appenddirname(&self, name: String) {
         match self.appenddirname.lock() {
             Ok(mut g) => *g = name,
@@ -789,12 +832,12 @@ impl LiveConfig {
         }
     }
 
- /// Return the fsync policy code (0=no, 1=everysec, 2=always).
+    /// Return the fsync policy code (0=no, 1=everysec, 2=always).
     pub fn appendfsync(&self) -> u8 {
         self.appendfsync.load(Ordering::Relaxed)
     }
 
- /// Update the fsync policy.
+    /// Update the fsync policy.
     pub fn set_appendfsync(&self, policy: u8) {
         self.appendfsync.store(policy, Ordering::Relaxed);
     }
@@ -864,12 +907,12 @@ impl LiveConfig {
         self.repl_backlog_ttl.store(n, Ordering::Relaxed);
     }
 
- /// Replica idle-link timeout in seconds (`repl-timeout`).
+    /// Replica idle-link timeout in seconds (`repl-timeout`).
     pub fn repl_timeout(&self) -> u64 {
         self.repl_timeout.load(Ordering::Relaxed)
     }
 
- /// Update the replica idle-link timeout.
+    /// Update the replica idle-link timeout.
     pub fn set_repl_timeout(&self, n: u64) {
         self.repl_timeout.store(n, Ordering::Relaxed);
     }
@@ -890,24 +933,24 @@ impl LiveConfig {
         self.repl_min_replicas_max_lag.store(n, Ordering::Relaxed);
     }
 
- /// Whether the replication link disables per-write TCP_NODELAY
- /// (`repl-disable-tcp-nodelay`).
+    /// Whether the replication link disables per-write TCP_NODELAY
+    /// (`repl-disable-tcp-nodelay`).
     pub fn repl_disable_tcp_nodelay(&self) -> bool {
         self.repl_disable_tcp_nodelay.load(Ordering::Relaxed)
     }
 
- /// Update the repl-disable-tcp-nodelay flag.
+    /// Update the repl-disable-tcp-nodelay flag.
     pub fn set_repl_disable_tcp_nodelay(&self, v: bool) {
         self.repl_disable_tcp_nodelay.store(v, Ordering::Relaxed);
     }
 
- /// Whether replicas may serve read commands (`slave-read-only`/
- /// `replica-read-only`).
+    /// Whether replicas may serve read commands (`slave-read-only`/
+    /// `replica-read-only`).
     pub fn slave_read_only(&self) -> bool {
         self.slave_read_only.load(Ordering::Relaxed)
     }
 
- /// Update the slave-read-only flag.
+    /// Update the slave-read-only flag.
     pub fn set_slave_read_only(&self, v: bool) {
         self.slave_read_only.store(v, Ordering::Relaxed);
     }
@@ -958,30 +1001,40 @@ impl LiveConfig {
         }
     }
 
- /// Whether full-resync RDB transfer uses the diskless path
- /// (`repl-diskless-sync`).
+    /// Whether full-resync RDB transfer uses the diskless path
+    /// (`repl-diskless-sync`).
     pub fn repl_diskless_sync(&self) -> bool {
         self.repl_diskless_sync.load(Ordering::Relaxed)
     }
 
- /// Update the repl-diskless-sync flag.
+    /// Update the repl-diskless-sync flag.
     pub fn set_repl_diskless_sync(&self, v: bool) {
         self.repl_diskless_sync.store(v, Ordering::Relaxed);
     }
 
- /// Whether RESTORE accepts future DUMP payload RDB versions.
+    /// Diskless full-sync load behavior (`repl-diskless-load`).
+    pub fn repl_diskless_load(&self) -> ReplDisklessLoadMode {
+        ReplDisklessLoadMode::from_u8(self.repl_diskless_load.load(Ordering::Relaxed))
+    }
+
+    /// Update the diskless full-sync load behavior.
+    pub fn set_repl_diskless_load(&self, mode: ReplDisklessLoadMode) {
+        self.repl_diskless_load.store(mode as u8, Ordering::Relaxed);
+    }
+
+    /// Whether RESTORE accepts future DUMP payload RDB versions.
     pub fn rdb_version_check_relaxed(&self) -> bool {
         self.rdb_version_check_relaxed.load(Ordering::Relaxed)
     }
 
- /// Update `rdb-version-check`: false = strict, true = relaxed.
+    /// Update `rdb-version-check`: false = strict, true = relaxed.
     pub fn set_rdb_version_check_relaxed(&self, relaxed: bool) {
         self.rdb_version_check_relaxed
             .store(relaxed, Ordering::Relaxed);
     }
 
- /// Snapshot of encoding thresholds — convenience for the encoding
- /// heuristics in `object.rs` that historically held a single struct.
+    /// Snapshot of encoding thresholds — convenience for the encoding
+    /// heuristics in `object.rs` that historically held a single struct.
     pub fn encoding_thresholds(&self) -> EncodingThresholdsSnapshot {
         EncodingThresholdsSnapshot {
             hash_max_listpack_entries: self.hash_max_listpack_entries(),

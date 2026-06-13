@@ -177,6 +177,12 @@ fn main() {
             live_config.set_save_enabled(value.split_whitespace().next().is_some());
         } else if key.eq_ignore_ascii_case("repl-diskless-sync") {
             live_config.set_repl_diskless_sync(value.eq_ignore_ascii_case("yes"));
+        } else if key.eq_ignore_ascii_case("repl-diskless-load") {
+            if let Some(mode) =
+                redis_core::live_config::ReplDisklessLoadMode::parse(value.as_bytes())
+            {
+                live_config.set_repl_diskless_load(mode);
+            }
         }
     }
     redis_core::acl::install_acl_state();

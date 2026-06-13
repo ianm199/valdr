@@ -23,7 +23,7 @@ use redis_core::acl::{
 use redis_core::blocked_keys::{blocked_keys_index, BlockedAction};
 use redis_core::client_info::client_info_registry;
 use redis_core::eviction::{try_evict_to_fit, EvictionOutcome};
-use redis_core::live_config::{LiveConfig, MaxmemoryPolicyCode};
+use redis_core::live_config::{LiveConfig, MaxmemoryPolicyCode, ReplDisklessLoadMode};
 use redis_core::metrics::{
     record_acl_access_denied_auth, record_blocked_command_rejected, record_error_reply,
     server_metrics,
@@ -160,6 +160,7 @@ pub fn default_config_pairs() -> &'static [(&'static str, &'static str)] {
         ("lua-time-limit", "5000"),
         ("busy-reply-threshold", "5000"),
         ("repl-diskless-sync", "yes"),
+        ("repl-diskless-load", "disabled"),
     ]
 }
 
@@ -278,6 +279,7 @@ pub fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)>
     } else {
         "no".to_string()
     };
+    let live_repl_diskless_load = cfg.repl_diskless_load().as_config_str().to_string();
     let live_rdb_version_check = if cfg.rdb_version_check_relaxed() {
         "relaxed".to_string()
     } else {
@@ -358,6 +360,7 @@ pub fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)>
             "lua-enable-insecure-api" => Some(live_lua_enable_insecure_api.clone()),
             "lua-time-limit" | "busy-reply-threshold" => Some(live_lua_time_limit.clone()),
             "repl-diskless-sync" => Some(live_repl_diskless.clone()),
+            "repl-diskless-load" => Some(live_repl_diskless_load.clone()),
             "rdb-version-check" => Some(live_rdb_version_check.clone()),
             "client-output-buffer-limit" => Some(live_client_obuf_limit.clone()),
             "client-query-buffer-limit" => Some(live_client_query_buffer_limit.clone()),
@@ -613,6 +616,7 @@ pub fn config_value_is_live_only(key: &[u8]) -> bool {
         b"lua-time-limit",
         b"busy-reply-threshold",
         b"repl-diskless-sync",
+        b"repl-diskless-load",
         b"rdb-version-check",
         b"client-output-buffer-limit",
     ];
@@ -669,6 +673,13 @@ pub fn validate_config_set_pair(key: &[u8], value: &[u8]) -> RedisResult<()> {
     if ascii_eq_ignore_case(key, b"repl-backlog-ttl") && parse_usize_strict(value).is_none() {
         return Err(RedisError::runtime(
             b"ERR CONFIG SET failed (possibly related to argument 'repl-backlog-ttl')",
+        ));
+    }
+    if ascii_eq_ignore_case(key, b"repl-diskless-load")
+        && ReplDisklessLoadMode::parse(value).is_none()
+    {
+        return Err(RedisError::runtime(
+            b"ERR CONFIG SET failed (possibly related to argument 'repl-diskless-load')",
         ));
     }
     if ascii_eq_ignore_case(key, b"bind") && !valid_bind_config_value(value) {
@@ -1099,6 +1110,11 @@ pub fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
         }
         b"repl-diskless-sync" => {
             cfg.set_repl_diskless_sync(value == b"yes");
+        }
+        b"repl-diskless-load" => {
+            if let Some(mode) = ReplDisklessLoadMode::parse(value) {
+                cfg.set_repl_diskless_load(mode);
+            }
         }
         b"rdb-version-check" => {
             if ascii_eq_ignore_case(value, b"relaxed") {

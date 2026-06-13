@@ -21,6 +21,7 @@ use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::Duration;
 
+use redis_core::live_config::ReplDisklessLoadMode;
 use redis_core::replication::{
     failover_state_code, global_replication_state, repl_state_code, replica_link_code,
     ReplicationState,
@@ -221,8 +222,20 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
 
 fn publish_fullsync_loading_state(async_loading: bool) {
     if let Some(server) = GLOBAL_SERVER.get() {
-        if async_loading {
+        publish_fullsync_loading_state_for_server(server, async_loading);
+    }
+}
+
+fn publish_fullsync_loading_state_for_server(server: &RedisServer, async_loading: bool) {
+    match server.live_config.repl_diskless_load() {
+        ReplDisklessLoadMode::Disabled => {}
+        ReplDisklessLoadMode::Swapdb if async_loading => {
+            eprintln!("redis-server: Loading DB in memory");
             server.persistence.set_async_loading(true);
+        }
+        ReplDisklessLoadMode::Swapdb | ReplDisklessLoadMode::FlushBeforeLoad => {
+            eprintln!("redis-server: Loading DB in memory");
+            server.persistence.set_loading(true);
         }
     }
 }
@@ -708,6 +721,35 @@ mod tests {
                 b"FAILOVER".to_vec()
             ]
         );
+    }
+
+    #[test]
+    fn diskless_load_mode_controls_fullsync_loading_state() {
+        let server = RedisServer::default();
+
+        publish_fullsync_loading_state_for_server(&server, true);
+        assert!(!server.persistence.loading());
+        assert!(!server.persistence.async_loading());
+
+        server
+            .live_config
+            .set_repl_diskless_load(ReplDisklessLoadMode::Swapdb);
+        publish_fullsync_loading_state_for_server(&server, true);
+        assert!(server.persistence.loading());
+        assert!(server.persistence.async_loading());
+
+        server.persistence.set_loading(false);
+        publish_fullsync_loading_state_for_server(&server, false);
+        assert!(server.persistence.loading());
+        assert!(!server.persistence.async_loading());
+
+        server.persistence.set_loading(false);
+        server
+            .live_config
+            .set_repl_diskless_load(ReplDisklessLoadMode::FlushBeforeLoad);
+        publish_fullsync_loading_state_for_server(&server, false);
+        assert!(server.persistence.loading());
+        assert!(!server.persistence.async_loading());
     }
 }
 

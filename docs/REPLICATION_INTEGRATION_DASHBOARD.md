@@ -990,6 +990,73 @@ Takeaway:
   async replication fails, and explicit diskless short-read/drop loading logs
   plus replica-link cleanup.
 
+### 2026-06-13 R2 follow-up: diskless-load mode surface
+
+Scope:
+
+- Added a typed `repl-diskless-load` live config with `disabled`, `swapdb`, and
+  `flush-before-load` modes.
+- `CONFIG GET/SET repl-diskless-load` now reads and updates that live mode, and
+  startup config overrides preserve it.
+- Replica full-sync loading publication now consults the mode instead of
+  guessing only from matching replids:
+  `disabled` stays quiet, `swapdb` publishes `async_loading` when the replid
+  matches and ordinary `loading` otherwise, and `flush-before-load` publishes
+  ordinary `loading`.
+- Added focused Rust coverage for CONFIG mode updates and for the dialer
+  loading-state decision.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands --test fullsync_lifecycle_kit -- --nocapture
+cargo test -p redis-commands replica_dialer::tests -- --nocapture
+cargo check -p redis-core -p redis-commands -p redis-server
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --files integration/replication \
+  --profile integration-repl \
+  --runner-id fullsync-diskless-load-mode \
+  --timeout-s 300 \
+  --baseport 31479 \
+  --portcount 100 \
+  --skip-build
+python3 harness/oracle/tcl-survey.py \
+  --files integration/replication-2,integration/block-repl \
+  --profile integration-repl \
+  --runner-id fullsync-diskless-load-mode-tripwire \
+  --timeout-s 240 \
+  --baseport 31579 \
+  --portcount 100 \
+  --skip-build
+```
+
+Results:
+
+- `fullsync_lifecycle_kit`: 7 passed, 0 failed.
+- `replica_dialer::tests`: 3 passed, 0 failed.
+- `cargo check -p redis-core -p redis-commands -p redis-server`: passed.
+- `cargo build --bin redis-server`: passed.
+- Focused `integration/replication`:
+  `harness/oracle/results/tcl-survey/20260613T183500712105Z/result.json`
+  timed out at 300 seconds with no parsed summary, 26 parsed failure lines,
+  no exception, and no `abort_test`. The prior
+  `Diskless load swapdb (different replid): replica enter loading` failure is
+  gone. The run still fails old-dataset exposure after aborted loads and still
+  misses some `Loading DB in memory` log waits; it also reaches the next
+  `diskless fast replicas drop during rdb pipe` assertion.
+- Focused no-regression tripwire:
+  `harness/oracle/results/tcl-survey/20260613T184041873115Z/result.json`
+  reported `integration/replication-2` 7/0 and `integration/block-repl` 2/0.
+
+Takeaway:
+
+- The server now has the right live knob for diskless-load semantics, and the
+  dialer no longer publishes ordinary loading for default full sync. The next
+  useful slice should make the loading window observable before the primary has
+  finished generating the RDB, then keep the old DB/function view pinned until
+  the incoming RDB is known to have completed successfully.
+
 ### R4-AOF-FULLSYNC
 
 Status: `integration/replication-aof-sync` green on 2026-06-13.

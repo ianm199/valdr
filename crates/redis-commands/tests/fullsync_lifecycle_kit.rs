@@ -12,6 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use redis_commands::dispatch::dispatch;
 use redis_core::db::RedisDb;
+use redis_core::live_config::ReplDisklessLoadMode;
 use redis_core::object::RedisObject;
 use redis_core::replication::global_replication_state;
 use redis_core::replication::{
@@ -409,6 +410,56 @@ fn async_loading_serves_old_db_but_blocks_no_async_loading_commands() {
     server.persistence.set_loading(false);
     assert!(!server.persistence.loading());
     assert!(!server.persistence.async_loading());
+}
+
+#[test]
+fn repl_diskless_load_config_updates_live_mode() {
+    let server = Arc::new(RedisServer::default());
+    let mut db = RedisDb::new(0);
+
+    let mut setter = Client::new(119);
+    let set_reply = run_dispatch_with_server(
+        &mut setter,
+        &mut db,
+        Arc::clone(&server),
+        &[b"CONFIG", b"SET", b"repl-diskless-load", b"swapdb"],
+    );
+    let mut getter = Client::new(120);
+    let get_reply = run_dispatch_with_server(
+        &mut getter,
+        &mut db,
+        Arc::clone(&server),
+        &[b"CONFIG", b"GET", b"repl-diskless-load"],
+    );
+    let mut invalid = Client::new(121);
+    let invalid_reply = run_dispatch_with_server(
+        &mut invalid,
+        &mut db,
+        Arc::clone(&server),
+        &[b"CONFIG", b"SET", b"repl-diskless-load", b"bogus"],
+    );
+
+    assert_eq!(set_reply, b"+OK\r\n");
+    assert_eq!(
+        server.live_config.repl_diskless_load(),
+        ReplDisklessLoadMode::Swapdb
+    );
+    assert!(
+        get_reply
+            .windows(b"swapdb".len())
+            .any(|window| window == b"swapdb"),
+        "CONFIG GET should expose the live diskless-load mode: {:?}",
+        String::from_utf8_lossy(&get_reply)
+    );
+    assert!(
+        invalid_reply.starts_with(b"-ERR"),
+        "invalid diskless-load mode should be rejected, got {:?}",
+        String::from_utf8_lossy(&invalid_reply)
+    );
+    assert_eq!(
+        server.live_config.repl_diskless_load(),
+        ReplDisklessLoadMode::Swapdb
+    );
 }
 
 #[test]
