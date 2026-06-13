@@ -27,6 +27,18 @@ pub struct RdbLoadStats {
     pub keys_loaded: i64,
 }
 
+#[derive(Debug)]
+pub struct RdbLoadOutcome {
+    pub message: String,
+    pub function_payloads: Vec<Vec<u8>>,
+}
+
+#[derive(Debug)]
+pub struct RdbReplacementPlan {
+    pub dbs: Vec<RedisDb>,
+    pub outcome: RdbLoadOutcome,
+}
+
 pub fn set_skip_checksum_validation(skip: bool) {
     SKIP_CHECKSUM_VALIDATION.store(skip, Ordering::Relaxed);
 }
@@ -257,19 +269,40 @@ pub fn load_into_dbs_replacing_with_options(
     path: &Path,
     options: RdbLoadOptions,
 ) -> io::Result<String> {
-    if dbs.is_empty() {
+    let plan = load_replacement_plan_with_options(dbs.len(), path, options)?;
+    for (dst, src) in dbs.iter_mut().zip(plan.dbs.into_iter()) {
+        *dst = src;
+    }
+    Ok(plan.outcome.message)
+}
+
+/// Load an RDB into fresh DBs and return a replacement plan without mutating
+/// the caller's live DB slice.
+pub fn load_replacement_plan(db_count: usize, path: &Path) -> io::Result<RdbReplacementPlan> {
+    load_replacement_plan_with_options(db_count, path, RdbLoadOptions::default())
+}
+
+/// Load an RDB into fresh DBs with explicit options and collect opaque function
+/// payloads. Callers can validate/prepare command-layer state before swapping
+/// this plan into the live server.
+pub fn load_replacement_plan_with_options(
+    db_count: usize,
+    path: &Path,
+    options: RdbLoadOptions,
+) -> io::Result<RdbReplacementPlan> {
+    if db_count == 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "RDB load requires at least one database",
         ));
     }
 
-    let mut staged: Vec<RedisDb> = (0..dbs.len()).map(|id| RedisDb::new(id as u32)).collect();
-    let msg = load_into_dbs_with_options(&mut staged, path, options)?;
-    for (dst, src) in dbs.iter_mut().zip(staged.into_iter()) {
-        *dst = src;
-    }
-    Ok(msg)
+    let mut staged: Vec<RedisDb> = (0..db_count).map(|id| RedisDb::new(id as u32)).collect();
+    let outcome = load_into_dbs_collecting_functions(&mut staged, path, options)?;
+    Ok(RdbReplacementPlan {
+        dbs: staged,
+        outcome,
+    })
 }
 
 /// Load an RDB file at `path` with explicit load options.
@@ -278,6 +311,17 @@ pub fn load_into_dbs_with_options(
     path: &Path,
     options: RdbLoadOptions,
 ) -> io::Result<String> {
+    Ok(load_into_dbs_collecting_functions(dbs, path, options)?.message)
+}
+
+/// Load an RDB file and return opaque function-library payloads encountered in
+/// the stream. This crate does not parse those payloads; the command crate owns
+/// function-library semantics.
+pub fn load_into_dbs_collecting_functions(
+    dbs: &mut [RedisDb],
+    path: &Path,
+    options: RdbLoadOptions,
+) -> io::Result<RdbLoadOutcome> {
     store_last_load_stats(RdbLoadStats::default());
     if dbs.is_empty() {
         return Err(io::Error::new(
@@ -330,6 +374,7 @@ pub fn load_into_dbs_with_options(
     let mut keys_loaded: i64 = 0;
     let mut keys_expired: i64 = 0;
     let mut selected_db: usize = 0;
+    let mut function_payloads: Vec<Vec<u8>> = Vec::new();
 
     loop {
         let opcode = read_byte(&mut reader)?;
@@ -387,10 +432,11 @@ pub fn load_into_dbs_with_options(
                 read_byte(&mut reader)?;
             }
 
-            RDB_OPCODE_MODULE_AUX
-            | RDB_OPCODE_FUNCTION2
-            | RDB_OPCODE_SLOT_INFO
-            | RDB_OPCODE_SLOT_IMPORT => {
+            RDB_OPCODE_FUNCTION2 => {
+                function_payloads.push(read_rdb_string(&mut reader)?);
+            }
+
+            RDB_OPCODE_MODULE_AUX | RDB_OPCODE_SLOT_INFO | RDB_OPCODE_SLOT_IMPORT => {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
                     format!("RDB opcode 0x{:02x} not supported in Round 18", opcode),
@@ -448,10 +494,13 @@ pub fn load_into_dbs_with_options(
         keys_loaded,
     });
 
-    Ok(format!(
-        "DB loaded from RDB version {} — {} keys",
-        version, keys_loaded
-    ))
+    Ok(RdbLoadOutcome {
+        message: format!(
+            "DB loaded from RDB version {} — {} keys",
+            version, keys_loaded
+        ),
+        function_payloads,
+    })
 }
 
 const CHECK_FOREIGN_MIN: u16 = 12;
@@ -557,10 +606,10 @@ pub fn check_rdb_file(path: &Path) -> RdbCheckReport {
                     read_byte(&mut reader)?;
                 }
                 RDB_OPCODE_EOF => break,
-                RDB_OPCODE_MODULE_AUX
-                | RDB_OPCODE_FUNCTION2
-                | RDB_OPCODE_SLOT_INFO
-                | RDB_OPCODE_SLOT_IMPORT => {
+                RDB_OPCODE_FUNCTION2 => {
+                    skip_rdb_string(&mut reader)?;
+                }
+                RDB_OPCODE_MODULE_AUX | RDB_OPCODE_SLOT_INFO | RDB_OPCODE_SLOT_IMPORT => {
                     return Err(io::Error::new(
                         io::ErrorKind::Unsupported,
                         format!("unsupported RDB opcode 0x{:02x}", opcode),

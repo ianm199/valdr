@@ -28,7 +28,8 @@ use redis_core::client::ClientId;
 use redis_core::db::{RedisDb, LOOKUP_NOTOUCH};
 use redis_core::object::{object_set_lru_or_lfu, EXPIRY_NONE};
 use redis_core::rdb::{
-    create_dump_payload, load_dump_payload, rdb_path, save_rdb_databases, verify_dump_payload,
+    create_dump_payload, load_dump_payload, rdb_path, save_rdb_databases_with_functions,
+    verify_dump_payload,
 };
 use redis_core::replication::{global_replication_state, ReplBgsaveJob};
 use redis_core::util::mstime;
@@ -39,6 +40,14 @@ use redis_types::{RedisError, RedisResult, RedisString};
 use crate::aof::aof_writer;
 
 static MIGRATE_CACHED_SOCKETS: AtomicUsize = AtomicUsize::new(0);
+
+pub(crate) fn save_rdb_databases_with_current_functions(
+    dbs: &[RedisDb],
+    path: &Path,
+) -> std::io::Result<()> {
+    let function_payloads = crate::eval::function_rdb_payloads();
+    save_rdb_databases_with_functions(dbs, &function_payloads, path)
+}
 
 pub fn migrate_cached_sockets() -> usize {
     MIGRATE_CACHED_SOCKETS.load(Ordering::Relaxed)
@@ -97,7 +106,7 @@ pub fn save_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 
     let snapshot = ctx.snapshot_all_dbs()?;
     let snapshot_dbs = snapshot.to_dbs();
-    let result = save_rdb_databases(&snapshot_dbs, &path);
+    let result = save_rdb_databases_with_current_functions(&snapshot_dbs, &path);
 
     match result {
         Ok(()) => {
@@ -719,7 +728,7 @@ pub fn bgsave_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         .name("bgsave".to_string())
         .spawn(move || {
             let dbs = snapshot.to_dbs();
-            match save_rdb_databases(&dbs, &path) {
+            match save_rdb_databases_with_current_functions(&dbs, &path) {
                 Ok(()) => {
                     let now = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
@@ -793,7 +802,7 @@ fn save_bgsave_child_databases(
     let temp_path = bgsave_temp_path(final_path, child_pid);
     let _ = std::fs::remove_file(&temp_path);
     let _ = std::fs::remove_file(temp_path.with_extension("rdb.tmp"));
-    save_rdb_databases(dbs, &temp_path)?;
+    save_rdb_databases_with_current_functions(dbs, &temp_path)?;
     sleep_for_rdb_key_save_delay();
 
     std::fs::rename(&temp_path, final_path)
@@ -862,7 +871,7 @@ pub fn bgsave_for_replication(
             let p = libc::fork();
             if p == 0 {
                 let dbs = snapshot.to_dbs();
-                let save_result = save_rdb_databases(&dbs, &path_for_child);
+                let save_result = save_rdb_databases_with_current_functions(&dbs, &path_for_child);
                 if save_result.is_ok() {
                     sleep_for_rdb_key_save_delay();
                 }
@@ -906,7 +915,7 @@ pub fn bgsave_for_replication(
         .name("bgsave-repl".to_string())
         .spawn(move || {
             let dbs = snapshot.to_dbs();
-            let ok = save_rdb_databases(&dbs, &temp_for_thread).is_ok();
+            let ok = save_rdb_databases_with_current_functions(&dbs, &temp_for_thread).is_ok();
             if ok {
                 sleep_for_rdb_key_save_delay();
             }

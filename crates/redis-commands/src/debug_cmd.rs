@@ -413,12 +413,14 @@ pub fn debug_reload_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if !nosave {
         let snapshot = ctx.snapshot_all_dbs()?;
         let snapshot_dbs = snapshot.to_dbs();
-        redis_core::rdb::save_rdb_databases(&snapshot_dbs, &path).map_err(|e| {
-            ctx.server()
-                .persistence
-                .set_rdb_last_bgsave_status(PersistenceStatus::Err);
-            RedisError::runtime(format!("ERR DEBUG RELOAD SAVE failed: {}", e).into_bytes())
-        })?;
+        crate::persist::save_rdb_databases_with_current_functions(&snapshot_dbs, &path).map_err(
+            |e| {
+                ctx.server()
+                    .persistence
+                    .set_rdb_last_bgsave_status(PersistenceStatus::Err);
+                RedisError::runtime(format!("ERR DEBUG RELOAD SAVE failed: {}", e).into_bytes())
+            },
+        )?;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)

@@ -1793,7 +1793,7 @@ pub fn complete_manifest_aof_rewrite(
     let history = rewrite_history_files(&preliminary_manifest, &plan);
 
     if plan.use_rdb_preamble {
-        redis_core::rdb::save_rdb_databases(dbs, &plan.temp_base_path)?;
+        crate::persist::save_rdb_databases_with_current_functions(dbs, &plan.temp_base_path)?;
         maybe_inject_aof_fault("base-rdb-before-sync")?;
         sync_existing_file(&plan.temp_base_path)?;
         maybe_inject_aof_fault("base-rdb-before-dir-sync")?;
@@ -1903,7 +1903,7 @@ pub fn rewrite_manifest_aof_disabled_from_dbs(
     ));
 
     if use_rdb_preamble {
-        redis_core::rdb::save_rdb_databases(dbs, &temp_base_path)?;
+        crate::persist::save_rdb_databases_with_current_functions(dbs, &temp_base_path)?;
         sync_existing_file(&temp_base_path)?;
     } else {
         write_base_aof_file(&temp_base_path, dbs)?;
@@ -2252,7 +2252,18 @@ fn load_manifest_files(
                     aof_preamble: true,
                     relaxed_version_check: false,
                 };
-                redis_core::rdb::load_into_dbs_with_options(dbs, &path, rdb_options)?;
+                let plan = redis_core::rdb::load_replacement_plan_with_options(
+                    dbs.len(),
+                    &path,
+                    rdb_options,
+                )?;
+                let functions =
+                    crate::eval::prepare_rdb_function_replacement(&plan.outcome.function_payloads)
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+                for (dst, src) in dbs.iter_mut().zip(plan.dbs.into_iter()) {
+                    *dst = src;
+                }
+                crate::eval::install_rdb_function_replacement(functions);
             }
             AofManifestFileType::Base | AofManifestFileType::Incr => {
                 let mut file_options = options.clone();

@@ -21,8 +21,8 @@ use super::crc::crc64;
 use super::hash::save_hash_object;
 use super::header::{
     write_aux_fields, write_magic, write_rdb_string, RDB_OPCODE_EOF, RDB_OPCODE_EXPIRETIME_MS,
-    RDB_OPCODE_RESIZEDB, RDB_OPCODE_SELECTDB, RDB_TYPE_BLOOM_NATIVE, RDB_TYPE_HASH,
-    RDB_TYPE_JSON_NATIVE, RDB_TYPE_LIST, RDB_TYPE_SET, RDB_TYPE_STREAM_LISTPACKS_3,
+    RDB_OPCODE_FUNCTION2, RDB_OPCODE_RESIZEDB, RDB_OPCODE_SELECTDB, RDB_TYPE_BLOOM_NATIVE,
+    RDB_TYPE_HASH, RDB_TYPE_JSON_NATIVE, RDB_TYPE_LIST, RDB_TYPE_SET, RDB_TYPE_STREAM_LISTPACKS_3,
     RDB_TYPE_STRING, RDB_TYPE_ZSET_2,
 };
 use super::list::save_list_object;
@@ -32,9 +32,14 @@ use super::string::save_string_object;
 use super::varint::write_len;
 use super::zset::save_zset_object;
 
-fn write_rdb_dbs_to_buf(dbs: &[RedisDb], buf: &mut Vec<u8>) -> io::Result<()> {
+fn write_rdb_dbs_to_buf(
+    dbs: &[RedisDb],
+    function_payloads: &[Vec<u8>],
+    buf: &mut Vec<u8>,
+) -> io::Result<()> {
     write_magic(buf)?;
     write_aux_fields(buf)?;
+    write_rdb_function_payloads(function_payloads, buf)?;
 
     for db in dbs {
         if db.size() == 0 {
@@ -71,6 +76,17 @@ fn write_rdb_dbs_to_buf(dbs: &[RedisDb], buf: &mut Vec<u8>) -> io::Result<()> {
     let checksum = crc64(0, buf);
     buf.write_all(&checksum.to_le_bytes())?;
 
+    Ok(())
+}
+
+fn write_rdb_function_payloads(
+    function_payloads: &[Vec<u8>],
+    buf: &mut impl Write,
+) -> io::Result<()> {
+    for payload in function_payloads {
+        buf.write_all(&[RDB_OPCODE_FUNCTION2])?;
+        write_rdb_string(buf, payload)?;
+    }
     Ok(())
 }
 
@@ -178,8 +194,21 @@ pub fn save_rdb(db: &RedisDb, path: &Path) -> io::Result<()> {
 
 /// Save every non-empty logical DB to `path`.
 pub fn save_rdb_databases(dbs: &[RedisDb], path: &Path) -> io::Result<()> {
+    save_rdb_databases_with_functions(dbs, &[], path)
+}
+
+/// Save databases plus opaque function-library payloads to `path`.
+///
+/// `redis-core` intentionally treats function payloads as bytes. The command
+/// crate owns Lua/function parsing and supplies the payload for native saves,
+/// replica full sync, and startup restore.
+pub fn save_rdb_databases_with_functions(
+    dbs: &[RedisDb],
+    function_payloads: &[Vec<u8>],
+    path: &Path,
+) -> io::Result<()> {
     let mut buf: Vec<u8> = Vec::with_capacity(256);
-    write_rdb_dbs_to_buf(dbs, &mut buf)?;
+    write_rdb_dbs_to_buf(dbs, function_payloads, &mut buf)?;
 
     let tmp_path = path.with_extension("rdb.tmp");
     {

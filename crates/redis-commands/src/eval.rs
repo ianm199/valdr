@@ -93,6 +93,10 @@ struct LoadedFunctionLibrary {
     script_checks: FunctionScriptChecks,
 }
 
+pub struct PreparedFunctionLibraries {
+    libraries: Vec<LoadedFunctionLibrary>,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct FunctionScriptChecks {
     synthetic_infinite_loop: bool,
@@ -2669,6 +2673,40 @@ fn decode_function_dump_inner(payload: &[u8]) -> Option<Vec<LoadedFunctionLibrar
 
 fn function_dump_payload_error() -> RedisError {
     RedisError::runtime(b"ERR DUMP payload version or checksum are wrong")
+}
+
+pub fn function_rdb_payloads() -> Vec<Vec<u8>> {
+    let libraries = snapshot_function_libraries();
+    if libraries.is_empty() {
+        Vec::new()
+    } else {
+        vec![encode_function_dump(&libraries)]
+    }
+}
+
+pub fn prepare_rdb_function_replacement(
+    payloads: &[Vec<u8>],
+) -> RedisResult<PreparedFunctionLibraries> {
+    let mut prepared = HashMap::new();
+    for payload in payloads {
+        for library in decode_function_dump(payload)? {
+            install_function_library(&mut prepared, library, false, false)?;
+        }
+    }
+    Ok(PreparedFunctionLibraries {
+        libraries: prepared.into_values().collect(),
+    })
+}
+
+pub fn install_rdb_function_replacement(prepared: PreparedFunctionLibraries) {
+    let mut guard = match function_libraries().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    guard.clear();
+    for library in prepared.libraries {
+        guard.insert(library.name.clone(), library);
+    }
 }
 
 fn function_restore_arity_error() -> RedisError {

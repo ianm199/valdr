@@ -56,6 +56,14 @@ fn assert_string_value(db: &RedisDb, key: &[u8], expected: &[u8]) {
     assert_eq!(obj.as_string_bytes(), Some(expected));
 }
 
+fn assert_key_missing(db: &RedisDb, key: &[u8]) {
+    assert!(
+        db.find(&RedisString::from_bytes(key)).is_none(),
+        "key should be absent: {:?}",
+        String::from_utf8_lossy(key)
+    );
+}
+
 fn global_repl_guard() -> MutexGuard<'static, ()> {
     static REPL_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
     match REPL_GUARD.get_or_init(|| Mutex::new(())).lock() {
@@ -88,6 +96,34 @@ fn run_dispatch_with_server(
         client.reply_buf.extend_from_slice(b"\r\n");
     }
     client.drain_reply()
+}
+
+fn load_library(
+    server: Arc<RedisServer>,
+    db: &mut RedisDb,
+    client_id: ClientId,
+    code: &[u8],
+) -> Vec<u8> {
+    let mut client = Client::new(client_id);
+    client.authenticated_user = Some(RedisString::from_static(b"default"));
+    run_dispatch_with_server(
+        &mut client,
+        db,
+        server,
+        &[b"FUNCTION", b"LOAD", b"REPLACE", code],
+    )
+}
+
+fn flush_functions(server: Arc<RedisServer>, db: &mut RedisDb, client_id: ClientId) -> Vec<u8> {
+    let mut client = Client::new(client_id);
+    client.authenticated_user = Some(RedisString::from_static(b"default"));
+    run_dispatch_with_server(&mut client, db, server, &[b"FUNCTION", b"FLUSH", b"SYNC"])
+}
+
+fn fcall_reply(server: Arc<RedisServer>, db: &mut RedisDb, client_id: ClientId) -> Vec<u8> {
+    let mut client = Client::new(client_id);
+    client.authenticated_user = Some(RedisString::from_static(b"default"));
+    run_dispatch_with_server(&mut client, db, server, &[b"FCALL", b"fullsync_swap", b"0"])
 }
 
 #[test]
@@ -373,4 +409,111 @@ fn async_loading_serves_old_db_but_blocks_no_async_loading_commands() {
     server.persistence.set_loading(false);
     assert!(!server.persistence.loading());
     assert!(!server.persistence.async_loading());
+}
+
+#[test]
+fn successful_swapdb_fullsync_replaces_dataset_and_functions_together() {
+    let _guard = global_repl_guard();
+    let repl = global_replication_state();
+    let was_replica = repl.is_replica();
+    repl.become_master();
+
+    let server = Arc::new(RedisServer::default());
+    let old_library = b"#!lua name=fullsync_swap_lib\nserver.register_function('fullsync_swap', function() return 'hello1' end)";
+    let new_library = b"#!lua name=fullsync_swap_lib\nserver.register_function('fullsync_swap', function() return 'hello2' end)";
+
+    let mut live_db = RedisDb::new(0);
+    let _ = flush_functions(Arc::clone(&server), &mut live_db, 110);
+    assert!(
+        !load_library(Arc::clone(&server), &mut live_db, 111, old_library).starts_with(b"-"),
+        "old function library should load"
+    );
+    assert_eq!(
+        fcall_reply(Arc::clone(&server), &mut live_db, 112),
+        b"$6\r\nhello1\r\n"
+    );
+
+    assert!(
+        !load_library(Arc::clone(&server), &mut live_db, 113, new_library).starts_with(b"-"),
+        "new function library should load for incoming snapshot encoding"
+    );
+    let incoming_function_payloads = redis_commands::eval::function_rdb_payloads();
+    assert!(!incoming_function_payloads.is_empty());
+
+    assert!(
+        !load_library(Arc::clone(&server), &mut live_db, 114, old_library).starts_with(b"-"),
+        "live function library should be restored before incoming full sync"
+    );
+    assert_eq!(
+        fcall_reply(Arc::clone(&server), &mut live_db, 115),
+        b"$6\r\nhello1\r\n"
+    );
+
+    let dir = unique_temp_dir("fullsync-swapdb-functions");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let bad_function_path = dir.join("bad-functions.rdb");
+    let good_path = dir.join("good-functions.rdb");
+
+    let mut current = vec![RedisDb::new(0)];
+    current[0].add(
+        RedisString::from_static(b"old-key"),
+        RedisObject::new_string(b"old-value"),
+    );
+    let mut incoming = vec![RedisDb::new(0)];
+    incoming[0].add(
+        RedisString::from_static(b"new-key"),
+        RedisObject::new_string(b"new-value"),
+    );
+
+    redis_core::rdb::save_rdb_databases_with_functions(
+        &incoming,
+        &[b"not-a-function-dump".to_vec()],
+        &bad_function_path,
+    )
+    .expect("bad-function RDB should still serialize as an opaque payload");
+    let bad_plan = redis_core::rdb::load_replacement_plan(current.len(), &bad_function_path)
+        .expect("DB plan should load before function payload validation");
+    assert!(
+        redis_commands::eval::prepare_rdb_function_replacement(
+            &bad_plan.outcome.function_payloads,
+        )
+        .is_err(),
+        "invalid incoming function payload should reject the whole replacement"
+    );
+    assert_string_value(&current[0], b"old-key", b"old-value");
+    assert_eq!(
+        fcall_reply(Arc::clone(&server), &mut live_db, 116),
+        b"$6\r\nhello1\r\n",
+        "old function must remain live after rejected function payload"
+    );
+
+    redis_core::rdb::save_rdb_databases_with_functions(
+        &incoming,
+        &incoming_function_payloads,
+        &good_path,
+    )
+    .expect("good incoming RDB should serialize");
+    let good_plan = redis_core::rdb::load_replacement_plan(current.len(), &good_path)
+        .expect("good incoming RDB should stage");
+    let prepared = redis_commands::eval::prepare_rdb_function_replacement(
+        &good_plan.outcome.function_payloads,
+    )
+    .expect("incoming functions should prepare");
+    current = good_plan.dbs;
+    redis_commands::eval::install_rdb_function_replacement(prepared);
+
+    assert_key_missing(&current[0], b"old-key");
+    assert_string_value(&current[0], b"new-key", b"new-value");
+    assert_eq!(
+        fcall_reply(Arc::clone(&server), &mut live_db, 117),
+        b"$6\r\nhello2\r\n",
+        "successful replacement should expose incoming functions"
+    );
+
+    let _ = flush_functions(Arc::clone(&server), &mut live_db, 118);
+    let _ = std::fs::remove_dir_all(&dir);
+    repl.become_master();
+    if was_replica {
+        repl.become_replica_of(RedisString::from_static(b"127.0.0.1"), 6379);
+    }
 }

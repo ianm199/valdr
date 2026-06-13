@@ -73,7 +73,7 @@ Artifact:
 | `integration/replication-3` | 3/4 | Red | Expiry consistency, writable-replica expired-key behavior, and PFCOUNT expired-key/cache semantics. |
 | `integration/replication-4` | 15/2 | Red | SPOP rewrite cases now pass; remaining failures are divergence/default writable-replica cases. |
 | `integration/replication-buffer` | 4/11 | Red | Fresh post-PSYNC baseline still reaches counted assertions without timeout. Shared vs private output-buffer semantics are now pinned in `repl_buffer_kit`; remaining failures are Valkey-style global replication-buffer memory, BGSAVE/slow-replica backlog outgrowth, partial resync across broader retained history, and typed live output-buffer disconnect/drain policy. |
-| `integration/replication` | timeout/no summary | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, and the first async-loading CONFIG exception. The current focused run reaches later diskless swapdb and pipe-drop assertions before timing out. True swapdb staging, function-context replacement, and diskless short-read/drop cleanup remain the frontier. |
+| `integration/replication` | timeout/no summary | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, the first async-loading CONFIG exception, and the successful swapdb function-context mismatch. The current focused run times out after old-dataset exposure/DB-size drift on async failure plus diskless short-read/drop log-state assertions. |
 | `integration/replication-psync` | 90/0 | Green | Focused gate is green after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support for the replica dialer. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
 | `integration/replica-redirect` | timeout | Red | `CLIENT CAPA REDIRECT` top-level and MULTI/EXEC replica redirect semantics now pass the early file assertions. Manual `FAILOVER` now reaches timeout-driven handoff in Rust kits and a live two-process probe, including blocked `BRPOP` and paused `GET` REDIRECT after promotion. The official Tcl file still no-summary times out in the first failover test; side observation showed old primary `blocked_clients:2`, `paused_actions:all`, and `role:slave` while the target remained SIGSTOP'd. |
@@ -111,7 +111,8 @@ visible integration frontiers are now:
   diskless/full-sync windows behind `integration/replication`. Failed
   full-sync BGSAVE jobs now clean up waiters, temp files, and replication-child
   state instead of poisoning later sync attempts. Async-loading state is now
-  explicit in `INFO persistence` and dispatch, but true swapdb staging and
+  explicit in `INFO persistence` and dispatch. Successful full-sync RDB
+  replacement now carries function payloads too, but async failure rollback and
   diskless pipe cleanup remain open.
 - `R2-BGSAVE-CATCHUP`: active replication BGSAVE jobs now retain appended
   replication bytes outside the circular backlog and use that buffer for
@@ -897,10 +898,97 @@ Takeaway:
 
 - Async-loading is now represented as a first-class state rather than an
   accidental ordinary loading mode. The next full-sync lifecycle slice should
-  attack true diskless swapdb replacement: stage the incoming dataset and
-  functions away from the live old DB, swap both atomically on success, and make
-  short-read/drop paths clear replica link/loading state without leaving Tcl
-  waiters hanging.
+  attack true diskless swapdb replacement: stage the incoming dataset away from
+  the live old DB, swap atomically on success, and make short-read/drop paths
+  clear replica link/loading state without leaving Tcl waiters hanging.
+
+### 2026-06-13 R2 follow-up: full-sync function payload replacement
+
+Scope:
+
+- Added optional opaque `FUNCTION2` payload support to the native RDB writer.
+  `redis-core` still treats the payload as bytes; `redis-commands::eval` owns
+  function-library encoding and decoding.
+- Added RDB load replacement plans that stage DBs and collect function payloads
+  before mutating the caller's live DB slice.
+- RuntimeOwner full-sync load now stages the incoming DBs, prepares the
+  incoming function registry, then swaps both into live state only after both
+  phases succeed. Bad function payloads reject the full replacement and leave
+  old data/functions live.
+- Native `SAVE`, `BGSAVE`, replication BGSAVE, signal-shutdown RDB saves, and
+  AOF RDB-preamble bases now include current function payloads.
+- Startup RDB load and AOF RDB-base replay now install the function registry
+  carried by native RDB files.
+- Extended `fullsync_lifecycle_kit.rs` with a deterministic swapdb/function
+  case proving invalid function payloads do not replace old state, while a
+  valid incoming snapshot replaces old keys and old functions together.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands --test fullsync_lifecycle_kit -- --nocapture
+rustfmt \
+  crates/redis-core/src/rdb/save.rs \
+  crates/redis-core/src/rdb/load.rs \
+  crates/redis-core/src/rdb/mod.rs \
+  crates/redis-commands/src/eval.rs \
+  crates/redis-commands/src/persist.rs \
+  crates/redis-commands/src/aof.rs \
+  crates/redis-commands/src/debug_cmd.rs \
+  crates/redis-server/src/runtime_owner.rs \
+  crates/redis-server/src/main.rs \
+  crates/redis-server/src/startup.rs \
+  crates/redis-commands/tests/fullsync_lifecycle_kit.rs
+cargo check -p redis-core -p redis-commands -p redis-server
+cargo test -p redis-core rdb:: -- --nocapture
+cargo test -p redis-commands eval::tests -- --nocapture
+cargo test -p redis-commands aof::tests -- --nocapture
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --files integration/replication \
+  --profile integration-repl \
+  --runner-id fullsync-function-swap \
+  --timeout-s 300 \
+  --baseport 31279 \
+  --portcount 100 \
+  --skip-build
+python3 harness/oracle/tcl-survey.py \
+  --files integration/replication-2,integration/block-repl \
+  --profile integration-repl \
+  --runner-id fullsync-function-swap-tripwire \
+  --timeout-s 240 \
+  --baseport 31379 \
+  --portcount 100 \
+  --skip-build
+```
+
+Results:
+
+- `fullsync_lifecycle_kit`: 6 passed, 0 failed.
+- `cargo check -p redis-core -p redis-commands -p redis-server`: passed.
+- Core RDB tests: 60 passed, 0 failed.
+- `eval::tests`: 28 passed, 0 failed.
+- `aof::tests`: 1 passed, 0 failed.
+- `cargo build --bin redis-server`: passed.
+- Focused `integration/replication`:
+  `harness/oracle/results/tcl-survey/20260613T182229376236Z/result.json`
+  timed out at 300 seconds with no parsed summary, 26 parsed failure lines,
+  no exception, and no `abort_test`. The previous successful-swap assertion
+  `Diskless load swapdb (async_loading): new database is exposed after
+  swapping` and its `hello1`/`hello2` mismatch are gone from the parsed
+  failures.
+- Focused no-regression tripwire:
+  `harness/oracle/results/tcl-survey/20260613T182747183795Z/result.json`
+  reported `integration/replication-2` 7/0 and `integration/block-repl` 2/0.
+
+Takeaway:
+
+- Native RDB/full-sync now treats functions as part of the replacement state.
+  The remaining swapdb work is not successful function replacement; it is
+  failure isolation. The next kit slice should model the current failures:
+  `dbsize` drift while async loading is in progress, old key exposure after
+  async replication fails, and explicit diskless short-read/drop loading logs
+  plus replica-link cleanup.
 
 ### R4-AOF-FULLSYNC
 

@@ -298,16 +298,36 @@ fn main() {
                 relaxed_version_check: live_config.rdb_version_check_relaxed(),
                 ..Default::default()
             };
-            match redis_core::rdb::load_into_dbs_with_options(
-                &mut owner_dbs,
+            match redis_core::rdb::load_replacement_plan_with_options(
+                owner_dbs.len(),
                 &rdb_path,
                 rdb_options,
             ) {
-                Ok(msg) => {
+                Ok(plan) => {
+                    let functions = match redis_commands::eval::prepare_rdb_function_replacement(
+                        &plan.outcome.function_payloads,
+                    ) {
+                        Ok(functions) => functions,
+                        Err(e) => {
+                            println!(
+                                "redis-server: RDB function load failed ({}): {}",
+                                rdb_path.display(),
+                                e
+                            );
+                            println!(
+                                "redis-server: Fatal error loading the DB, check server logs. Exiting."
+                            );
+                            let _ = io::stdout().flush();
+                            std::process::exit(1);
+                        }
+                    };
                     let stats = redis_core::rdb::last_load_stats();
                     server
                         .persistence
                         .set_rdb_last_load_stats(stats.keys_expired, stats.keys_loaded);
+                    let msg = plan.outcome.message;
+                    owner_dbs = plan.dbs;
+                    redis_commands::eval::install_rdb_function_replacement(functions);
                     println!("redis-server: {}", msg);
                 }
                 Err(e) => {

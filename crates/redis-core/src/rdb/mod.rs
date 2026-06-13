@@ -24,12 +24,15 @@ pub mod ziplist;
 pub mod zset;
 
 pub use load::{
-    last_load_stats, load_dump_payload, load_into, load_into_dbs, load_into_dbs_replacing,
-    load_into_dbs_replacing_with_options, load_into_dbs_with_options, load_value_payload,
-    verify_dump_payload, RdbLoadOptions, RdbLoadStats,
+    last_load_stats, load_dump_payload, load_into, load_into_dbs,
+    load_into_dbs_collecting_functions, load_into_dbs_replacing,
+    load_into_dbs_replacing_with_options, load_into_dbs_with_options, load_replacement_plan,
+    load_replacement_plan_with_options, load_value_payload, verify_dump_payload, RdbLoadOptions,
+    RdbLoadOutcome, RdbLoadStats, RdbReplacementPlan,
 };
 pub use save::{
     create_dump_payload, rdb_type_for_object, save_object_payload, save_rdb, save_rdb_databases,
+    save_rdb_databases_with_functions,
 };
 
 use std::path::PathBuf;

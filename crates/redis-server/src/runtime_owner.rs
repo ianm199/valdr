@@ -1625,18 +1625,32 @@ impl RuntimeOwner {
             eprintln!("redis-server: replica: staging incoming RDB failed: {}", e);
             return false;
         }
-        let result = redis_core::rdb::load_into_dbs_replacing(&mut self.dbs, &temp_path);
+        let result = redis_core::rdb::load_replacement_plan(self.dbs.len(), &temp_path);
         let _ = std::fs::remove_file(&temp_path);
-        match result {
-            Ok(msg) => {
-                eprintln!("redis-server: replica: full-resync RDB loaded: {}", msg);
-                self.refresh_replica_aof_after_fullsync(bytes, server)
-            }
+        let plan = match result {
+            Ok(plan) => plan,
             Err(e) => {
                 eprintln!("redis-server: replica: full-resync RDB load failed: {}", e);
-                false
+                return false;
             }
-        }
+        };
+        let functions = match redis_commands::eval::prepare_rdb_function_replacement(
+            &plan.outcome.function_payloads,
+        ) {
+            Ok(functions) => functions,
+            Err(e) => {
+                eprintln!(
+                    "redis-server: replica: full-resync function load failed: {}",
+                    e
+                );
+                return false;
+            }
+        };
+        let msg = plan.outcome.message;
+        self.dbs = plan.dbs;
+        redis_commands::eval::install_rdb_function_replacement(functions);
+        eprintln!("redis-server: replica: full-resync RDB loaded: {}", msg);
+        self.refresh_replica_aof_after_fullsync(bytes, server)
     }
 
     fn refresh_replica_aof_after_fullsync(

@@ -845,7 +845,8 @@ fn save_rdb_for_signal_shutdown(
     let snapshot = redis_core::KeyspaceSnapshot::new(snapshot_dbs, Duration::ZERO);
     let dbs = snapshot.to_dbs();
     let path = redis_core::rdb::rdb_path(&live_config.rdb_dir(), &live_config.rdb_filename());
-    match redis_core::rdb::save_rdb_databases(&dbs, &path) {
+    let function_payloads = redis_commands::eval::function_rdb_payloads();
+    match redis_core::rdb::save_rdb_databases_with_functions(&dbs, &function_payloads, &path) {
         Ok(()) => true,
         Err(err) => {
             redis_commands::connection::log_server_notice(&format!(
