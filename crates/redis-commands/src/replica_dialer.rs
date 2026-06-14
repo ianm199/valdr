@@ -161,18 +161,15 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
                     let rdb_bytes = match read_fullresync_rdb(&stream, &repl, dialer_epoch) {
                         Ok(bytes) => bytes,
                         Err(e) => {
-                            if is_handshake_timeout_error(&e) {
-                                log_handshake_failure(&e);
-                            } else {
-                                eprintln!("redis-server: replica: RDB sink failed: {}", e);
-                            }
-                            clear_fullsync_loading_state();
-                            if !repl.dialer_epoch_is_current(dialer_epoch) {
+                            log_fullsync_rdb_read_failure(&e);
+                            if recover_from_fullsync_rdb_read_failure(
+                                &repl,
+                                GLOBAL_SERVER.get().map(|server| server.as_ref()),
+                                dialer_epoch,
+                            ) == FullsyncRdbFailureAction::Stop
+                            {
                                 return;
                             }
-                            repl.repl_state
-                                .store(repl_state_code::REPLICA_CONNECTING, Ordering::SeqCst);
-                            repl.set_replica_link(replica_link_code::CONNECT);
                             thread::sleep(Duration::from_millis(200));
                             continue;
                         }
@@ -274,6 +271,45 @@ fn clear_fullsync_loading_state() {
     if let Some(server) = GLOBAL_SERVER.get() {
         server.persistence.set_loading(false);
     }
+}
+
+pub fn fullsync_rdb_failure_log_line(err: &io::Error) -> String {
+    if is_handshake_timeout_error(err) {
+        HANDSHAKE_TIMEOUT_LOG.to_string()
+    } else {
+        format!("redis-server: Internal error in RDB transfer: {err}")
+    }
+}
+
+fn log_fullsync_rdb_read_failure(err: &io::Error) {
+    eprintln!("{}", fullsync_rdb_failure_log_line(err));
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FullsyncRdbFailureAction {
+    Retry,
+    Stop,
+}
+
+/// Recover replica-side state after the primary drops or stalls during the
+/// full-sync RDB payload. The key invariant is that diskless-style loading
+/// state is cleared and the replica returns to the reconnect loop unless a
+/// newer dialer generation has already taken over.
+pub fn recover_from_fullsync_rdb_read_failure(
+    repl: &ReplicationState,
+    server: Option<&RedisServer>,
+    dialer_epoch: u64,
+) -> FullsyncRdbFailureAction {
+    if let Some(server) = server {
+        server.persistence.set_loading(false);
+    }
+    if !repl.dialer_epoch_is_current(dialer_epoch) {
+        return FullsyncRdbFailureAction::Stop;
+    }
+    repl.repl_state
+        .store(repl_state_code::REPLICA_CONNECTING, Ordering::SeqCst);
+    repl.set_replica_link(replica_link_code::CONNECT);
+    FullsyncRdbFailureAction::Retry
 }
 
 fn wait_for_replica_dialer_pause(repl: &Arc<ReplicationState>, dialer_epoch: u64) -> bool {

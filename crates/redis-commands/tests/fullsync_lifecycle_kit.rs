@@ -5,7 +5,9 @@
 //! before those socket-level cases can be made reliable: a failed replication
 //! BGSAVE must not leave stale waiters or temp files behind.
 
+use std::io;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -16,7 +18,8 @@ use redis_core::live_config::ReplDisklessLoadMode;
 use redis_core::object::RedisObject;
 use redis_core::replication::global_replication_state;
 use redis_core::replication::{
-    generate_runid, replica_link_code, ReplBgsaveJob, ReplicaConn, ReplicaState, ReplicationState,
+    generate_runid, repl_state_code, replica_link_code, ReplBgsaveJob, ReplicaConn, ReplicaState,
+    ReplicationState,
 };
 use redis_core::{Client, ClientId, PubSubRegistry, RedisServer};
 use redis_protocol::frame::{encode_resp2, RespFrame};
@@ -836,6 +839,76 @@ fn async_loading_serves_old_db_but_blocks_no_async_loading_commands() {
         "test load-delay tuning should remain available during ordinary loading"
     );
     server.persistence.set_loading(false);
+}
+
+#[test]
+fn diskless_fullsync_short_read_clears_loading_and_retries_without_replacing_data() {
+    let repl = ReplicationState::new(generate_runid(), 64);
+    let server = RedisServer::default();
+    server
+        .live_config
+        .set_repl_diskless_load(ReplDisklessLoadMode::Swapdb);
+    let epoch = repl.become_replica_of(RedisString::from_static(b"127.0.0.1"), 6379);
+    repl.set_cached_primary_replid([b'a'; 40]);
+    repl.set_replica_link(replica_link_code::TRANSFER);
+    server.persistence.set_async_loading(true);
+
+    let mut current = vec![RedisDb::new(0)];
+    current[0].add(
+        RedisString::from_static(b"stable"),
+        RedisObject::new_string(b"old"),
+    );
+
+    let action = redis_commands::replica_dialer::recover_from_fullsync_rdb_read_failure(
+        &repl,
+        Some(&server),
+        epoch,
+    );
+
+    assert_eq!(
+        action,
+        redis_commands::replica_dialer::FullsyncRdbFailureAction::Retry
+    );
+    assert!(
+        !server.persistence.loading(),
+        "dropped diskless full sync must clear ordinary loading"
+    );
+    assert!(
+        !server.persistence.async_loading(),
+        "dropped same-primary swapdb full sync must clear async loading"
+    );
+    assert_eq!(
+        repl.repl_state.load(Ordering::SeqCst),
+        repl_state_code::REPLICA_CONNECTING
+    );
+    assert_eq!(repl.replica_link_str(), "connect");
+    assert_string_value(&current[0], b"stable", b"old");
+
+    let short_read_log = redis_commands::replica_dialer::fullsync_rdb_failure_log_line(
+        &io::Error::new(io::ErrorKind::UnexpectedEof, "EOF reading RDB"),
+    );
+    assert!(
+        short_read_log.contains("Internal error in RDB"),
+        "upstream short-read Tcl waits for this log family, got: {short_read_log}"
+    );
+    let timeout_log = redis_commands::replica_dialer::fullsync_rdb_failure_log_line(
+        &io::Error::new(io::ErrorKind::TimedOut, "Timeout connecting to the PRIMARY"),
+    );
+    assert_eq!(
+        timeout_log,
+        "redis-server: Timeout connecting to the PRIMARY"
+    );
+
+    let stale = redis_commands::replica_dialer::recover_from_fullsync_rdb_read_failure(
+        &repl,
+        Some(&server),
+        epoch.saturating_sub(1),
+    );
+    assert_eq!(
+        stale,
+        redis_commands::replica_dialer::FullsyncRdbFailureAction::Stop,
+        "a stale dialer must not reset state owned by a newer generation"
+    );
 }
 
 #[test]
