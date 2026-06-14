@@ -48,6 +48,18 @@ fn resp(parts: &[&[u8]]) -> Vec<u8> {
     out
 }
 
+fn fullresync_offset(reply: &[u8]) -> i64 {
+    let text = std::str::from_utf8(reply).expect("FULLRESYNC reply should be UTF-8");
+    let mut fields = text.split_whitespace();
+    assert_eq!(fields.next(), Some("+FULLRESYNC"));
+    let _runid = fields.next().expect("FULLRESYNC runid");
+    fields
+        .next()
+        .expect("FULLRESYNC offset")
+        .parse::<i64>()
+        .expect("FULLRESYNC offset should parse")
+}
+
 struct PsyncDrive {
     reply: Vec<u8>,
     sent: Vec<u8>,
@@ -577,6 +589,91 @@ fn fresh_fullsync_catchup_prefixes_selected_db_before_first_active_write() {
         expected_catchup
     );
     repl.remove_replica(client_id);
+}
+
+#[test]
+fn in_flight_fullsync_waiter_reuses_existing_snapshot_offset() {
+    let _g = psync_guard();
+    let repl = global_replication_state();
+    let _reset = GlobalReplReset::new(&repl);
+    let server = Arc::new(RedisServer::default());
+
+    let first_client_id = 1_100_021;
+    let (first_tx, _first_rx) = mpsc::channel();
+    let first_pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
+    first_pubsub
+        .lock()
+        .unwrap()
+        .register_sender(first_client_id, first_tx);
+    let mut first = Client::new(first_client_id);
+    first.set_args(vec![
+        RedisString::from_static(b"PSYNC"),
+        RedisString::from_static(b"?"),
+        RedisString::from_static(b"-1"),
+    ]);
+    let mut db = RedisDb::new(0);
+    {
+        let mut ctx = redis_core::CommandContext::with_server(
+            &mut first,
+            &mut db,
+            Arc::clone(&server),
+            first_pubsub,
+        );
+        redis_commands::replication::psync_command(&mut ctx).expect("first psync command");
+    }
+    let first_reply = first.drain_reply();
+    let first_offset = fullresync_offset(&first_reply);
+
+    let catchup = resp(&[b"SET", b"while-bgsave", b"1"]);
+    repl.append_to_backlog(&catchup);
+    assert!(
+        repl.master_offset() > first_offset,
+        "test setup should advance the master stream after the first full sync"
+    );
+
+    let second_client_id = 1_100_022;
+    let (second_tx, _second_rx) = mpsc::channel();
+    let second_pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
+    second_pubsub
+        .lock()
+        .unwrap()
+        .register_sender(second_client_id, second_tx);
+    let mut second = Client::new(second_client_id);
+    second.set_args(vec![
+        RedisString::from_static(b"PSYNC"),
+        RedisString::from_static(b"?"),
+        RedisString::from_static(b"-1"),
+    ]);
+    {
+        let mut ctx = redis_core::CommandContext::with_server(
+            &mut second,
+            &mut db,
+            Arc::clone(&server),
+            second_pubsub,
+        );
+        redis_commands::replication::psync_command(&mut ctx).expect("second psync command");
+    }
+    let second_reply = second.drain_reply();
+    assert_eq!(
+        fullresync_offset(&second_reply),
+        first_offset,
+        "a waiter joining an in-flight full sync must be told the snapshot offset of the shared RDB"
+    );
+
+    let job = repl
+        .take_repl_bgsave_job()
+        .expect("in-flight full sync job should remain installed");
+    assert_eq!(job.snapshot_offset, first_offset);
+    assert_eq!(
+        job.waiting_replicas,
+        vec![first_client_id, second_client_id]
+    );
+    let temp_path = job.temp_path.clone();
+    reap_repl_child_pid(job.child_pid);
+    let _ = std::fs::remove_file(&temp_path);
+    let _ = std::fs::remove_file(Path::new(&temp_path).with_extension("rdb.tmp"));
+    repl.remove_replica(first_client_id);
+    repl.remove_replica(second_client_id);
 }
 
 #[test]

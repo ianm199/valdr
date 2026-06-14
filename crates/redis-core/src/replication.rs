@@ -2080,23 +2080,62 @@ impl ReplicationState {
     }
 
     /// Append `client_id` to the current job's waiting-replica list when a
-    /// fresh PSYNC arrives while a BGSAVE is already running. Returns `true`
-    /// if a job exists (so the caller can skip starting a new one); `false`
-    /// when no job is in flight.
-    pub fn enqueue_repl_waiter(&self, client_id: ClientId) -> bool {
+    /// fresh PSYNC arrives while a BGSAVE is already running. Returns the
+    /// existing job's snapshot offset when a job exists, so the caller can send
+    /// a FULLRESYNC line that matches the RDB/catch-up stream this waiter will
+    /// receive. Returns `None` when no job is in flight.
+    pub fn enqueue_repl_waiter(&self, client_id: ClientId) -> Option<i64> {
         let mut guard = match self.repl_bgsave_job.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
         match guard.as_mut() {
             Some(job) => {
-                job.waiting_replicas.push(client_id);
+                if !job.waiting_replicas.contains(&client_id) {
+                    job.waiting_replicas.push(client_id);
+                }
                 job.needs_getack_on_completion |=
                     crate::blocked_keys::blocked_replication_wait_any();
-                true
+                Some(job.snapshot_offset)
             }
-            None => false,
+            None => None,
         }
+    }
+
+    /// Atomically join an in-flight BGSAVE and register the waiter's outbound
+    /// channel while the job lock is still held. This prevents the reaper from
+    /// consuming the job between "add waiter" and "install sender".
+    pub fn enqueue_repl_waiter_and_register(
+        &self,
+        client_id: ClientId,
+        sender: Sender<Vec<u8>>,
+    ) -> Option<i64> {
+        let mut guard = match self.repl_bgsave_job.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let Some(job) = guard.as_mut() else {
+            return None;
+        };
+        if !job.waiting_replicas.contains(&client_id) {
+            job.waiting_replicas.push(client_id);
+        }
+        job.needs_getack_on_completion |= crate::blocked_keys::blocked_replication_wait_any();
+        let snapshot_offset = job.snapshot_offset;
+
+        let conn = ReplicaConn::new(
+            client_id,
+            ReplicaState::WaitingBgsave,
+            snapshot_offset,
+            sender,
+        );
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        conn.last_ack_time_ms.store(now_ms, Ordering::Relaxed);
+        self.add_replica(conn);
+        Some(snapshot_offset)
     }
 
     /// Snapshot of waiting-replica `client_id`s without taking the job.

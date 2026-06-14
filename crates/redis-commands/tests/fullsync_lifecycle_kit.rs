@@ -244,9 +244,10 @@ fn failed_fullsync_job_cleans_waiters_temp_files_and_child_state() {
     attach_waiting_replica(&st, 71, 0);
     attach_waiting_replica(&st, 72, 0);
     install_job(&st, temp_path.clone(), vec![71]);
-    assert!(
+    assert_eq!(
         st.enqueue_repl_waiter(72),
-        "second full-sync waiter should join the in-flight job"
+        Some(0),
+        "second full-sync waiter should join the in-flight job at its snapshot offset"
     );
     assert_eq!(st.connected_replicas(), 2);
 
@@ -387,8 +388,8 @@ fn multiple_fullsync_waiters_receive_same_rdb_and_catchup_then_ack_online() {
     let rx3 = attach_waiting_replica(&st, 93, 0);
 
     install_job(&st, PathBuf::from("multi-waiter.rdb"), vec![91]);
-    assert!(st.enqueue_repl_waiter(92));
-    assert!(st.enqueue_repl_waiter(93));
+    assert_eq!(st.enqueue_repl_waiter(92), Some(0));
+    assert_eq!(st.enqueue_repl_waiter(93), Some(0));
     st.append_to_backlog(b"abc");
 
     let job = st
