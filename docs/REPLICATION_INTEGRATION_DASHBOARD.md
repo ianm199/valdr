@@ -77,7 +77,7 @@ Artifact:
 | `integration/replication` | 40/27 | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, the first async-loading CONFIG exception, successful swapdb function-context mismatch, parent-killed child discovery, `repl-diskless-load on-empty-db`, no-longer-useful RDB child cancellation, all four replica-link reply-violation assertions, malformed-PSYNC-offset logging, chained replica `FLUSHDB` / `FLUSHALL` stream relay, `GETSET` rewrite, nonblocking `BRPOPLPUSH` / `BLMOVE` rewrite stats, and empty-blocking `BRPOPLPUSH` / `BLMOVE` commandstats via real digest waits. Remaining failures are counted full-sync, diskless pipe/drop, blocked-list role-change, cache-master, lazy-expire, and old-data rollback cases. |
 | `integration/replication-psync` | timeout | Red | Historical focused gate was 90/0 after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support. Current full-file reruns still time out, but the full-sync detached-tail kit removed the first broad no-reconnect inconsistency. The latest oracle dump narrowed the visible data divergence to a single `0` vs `-0` string value; a fast kit then found and fixed an RDB raw numeric-string fidelity bug in that family. Full Tcl has not been rerun after that fix. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
-| `integration/replica-redirect` | timeout | Red | `CLIENT CAPA REDIRECT` top-level and MULTI/EXEC replica redirect semantics now pass the early file assertions. Manual `FAILOVER` now reaches timeout-driven handoff in Rust kits and a live two-process probe, including blocked `BRPOP` and paused `GET` REDIRECT after promotion. The official Tcl file still no-summary times out in the first failover test; side observation showed old primary `blocked_clients:2`, `paused_actions:all`, and `role:slave` while the target remained SIGSTOP'd. |
+| `integration/replica-redirect` | timeout; focused failover-pause slice 2/0 | Red | `CLIENT CAPA REDIRECT` top-level and MULTI/EXEC replica redirect semantics now pass the early file assertions. Manual `FAILOVER` reaches timeout-driven handoff in Rust kits and a live two-process probe, including blocked `BRPOP` and paused `GET` REDIRECT after promotion. A 2026-06-14 kit-first pass found the Tcl helper was blocked on its implicit `SELECT 9` while all-client failover pause was active; `SELECT` is now failover-pause exempt and the first paused-client Tcl case passes in a 3s focused run. The full file still needs a sequential scoreboard before this row can move out of red. |
 | `unit/wait` | 39/0 | Green | WAIT command suite passed after the R4 role-change unblock packet; WAITAOF/FACK edge cases still need separate coverage. |
 
 ## Temp RDB Cleanup
@@ -3046,6 +3046,63 @@ Takeaway:
   narrower client-lifecycle edge: explain why the official script does not
   execute `resume_process` despite externally visible `blocked_clients:2`, then
   turn that no-summary timeout into a parsed assertion or pass.
+
+### 2026-06-14 R5 follow-up: failover pause setup SELECT
+
+Scope:
+
+- Converted the remaining first `replica-redirect.tcl` no-summary hang into a
+  kit-sized runtime invariant: failover all-client pause must park
+  redirect-capable data commands, but still allow connection/setup commands.
+- Added `SELECT` to the owner-loop failover pause exemption set. The Tcl
+  `valkey_deferring_client` helper sends an implicit `SELECT 9` before the test
+  can issue `CLIENT CAPA REDIRECT`; parking that `SELECT` made the script hang
+  before it could create the second paused client.
+- Extended the runtime-owner kit so `CLIENT CAPA`, `SELECT`, and `INFO clients`
+  stay available while a data `GET` remains pause-postponed and counted.
+- Updated the redirect kit's PSYNC failover setup to seed real backlog history
+  with `append_to_backlog` instead of writing `master_repl_offset` directly.
+  The newer PSYNC decision code requires a readable history window, not just an
+  offset number.
+
+Evidence:
+
+```bash
+cargo test -p redis-server failover_pause_exempts_client_capa_but_pauses_data_reads -- --nocapture
+cargo test -p redis-server failover_all_pause_counts_postponed_data_but_allows_info -- --nocapture
+cargo test -p redis-commands --test failover_redirect_kit -- --nocapture --test-threads=1
+cargo build -p redis-server --bin redis-server
+VALKEY_BIN_DIR=/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/target/debug \
+  timeout 80 tclsh tests/test_helper.tcl \
+  --single integration/replica-redirect \
+  --clients 1 \
+  --skip-leaks \
+  --baseport 45400 \
+  --portcount 4000 \
+  --tags '-needs:debug -cluster -needs:cluster' \
+  --verbose \
+  --only 'write command inside MULTI is QUEUED, EXEC should be REDIRECT' \
+  --only 'client paused before and during failover-in-progress'
+```
+
+Results:
+
+- Runtime-owner failover pause predicate kit: passed after first failing on the
+  new `SELECT` assertion.
+- Runtime-owner dispatch/counting kit: 1 passed, 0 failed.
+- `failover_redirect_kit` serialized: 11 passed, 0 failed.
+- `cargo build -p redis-server --bin redis-server`: passed.
+- Focused direct Tcl `integration/replica-redirect` slice: 2 passed, 0 failed
+  in 3 seconds. The previously hanging `client paused before and during
+  failover-in-progress` case now passes.
+
+Takeaway:
+
+- This is the preferred shape for the remaining red replication work: narrow
+  the Tcl timeout with observation, encode the blocking invariant as a fast
+  Rust kit, then run only the smallest Tcl selector that proves the script
+  advanced. A full `replica-redirect` scoreboard is still needed before the
+  whole file's dashboard row can change status.
 
 ### 2026-06-13 R3 follow-up: replica-side CLIENT KILL reconnect
 

@@ -10,9 +10,7 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
-use redis_core::blocked_keys::{
-    blocked_keys_index, BlockedAction, BlockedSide, BlockedWaiter,
-};
+use redis_core::blocked_keys::{blocked_keys_index, BlockedAction, BlockedSide, BlockedWaiter};
 use redis_core::replication::{
     global_replication_state, ManualFailoverAdvance, ReplicaConn, ReplicaState,
 };
@@ -214,10 +212,7 @@ fn pending_replconf_metadata_is_applied_when_replica_registers() {
         repl.master_offset(),
         tx,
     ));
-    assert!(repl.manual_failover_target_online(&(
-        RedisString::from_bytes(b"127.0.0.1"),
-        6386,
-    )));
+    assert!(repl.manual_failover_target_online(&(RedisString::from_bytes(b"127.0.0.1"), 6386,)));
     let guard = repl.replicas.lock().unwrap_or_else(|p| p.into_inner());
     let conn = guard.get(&client_id).expect("registered replica");
     assert_eq!(conn.listening_port(), 6386);
@@ -238,7 +233,9 @@ fn failover_completion_redirects_blocked_data_clients_but_keeps_readonly_stream_
     let stream_client_id = 1_010_014;
 
     {
-        let mut idx = blocked_keys_index().lock().unwrap_or_else(|p| p.into_inner());
+        let mut idx = blocked_keys_index()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let _ = idx.remove_client(pop_client_id);
         let _ = idx.remove_client(stream_client_id);
         idx.add(BlockedWaiter {
@@ -278,7 +275,9 @@ fn failover_completion_redirects_blocked_data_clients_but_keeps_readonly_stream_
         stream_rx.try_recv().is_err(),
         "readonly stream waiter should remain blocked"
     );
-    let mut idx = blocked_keys_index().lock().unwrap_or_else(|p| p.into_inner());
+    let mut idx = blocked_keys_index()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     assert!(!idx.has_waiters_for(&pop_key));
     assert!(idx.has_waiters_for(&stream_key));
     let _ = idx.remove_client(stream_client_id);
@@ -456,7 +455,7 @@ fn psync_failover_promotes_replica_with_matching_cached_replid() {
     repl.become_replica_of(RedisString::from_bytes(b"127.0.0.1"), 6379);
     let old_primary_replid = [b'a'; 40];
     repl.set_cached_primary_replid(old_primary_replid);
-    repl.master_repl_offset.store(7, Ordering::Relaxed);
+    repl.append_to_backlog(b"abcdefg");
 
     let mut client = Client::new(1_010_011);
     let mut db = RedisDb::new(0);

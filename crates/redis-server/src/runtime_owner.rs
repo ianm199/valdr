@@ -2697,6 +2697,7 @@ fn pause_exempt_current_command(argv: &[RedisString]) -> bool {
     }
     name.eq_ignore_ascii_case(b"INFO")
         || name.eq_ignore_ascii_case(b"PING")
+        || name.eq_ignore_ascii_case(b"SELECT")
         || name.eq_ignore_ascii_case(b"HELLO")
         || name.eq_ignore_ascii_case(b"AUTH")
         || name.eq_ignore_ascii_case(b"QUIT")
@@ -3003,6 +3004,17 @@ mod tests {
              declare capability during failover"
         );
 
+        let mut select = ClientSlot::new(SlotId::new(14), Client::new(122));
+        select.stage_argv(vec![
+            RedisString::from_static(b"SELECT"),
+            RedisString::from_static(b"9"),
+        ]);
+        assert!(
+            !slot_command_is_paused(&select, PAUSE_ACTION_CLIENT_ALL),
+            "SELECT must remain available so newly accepted deferring clients \
+             can finish connection setup during failover"
+        );
+
         let mut get = ClientSlot::new(SlotId::new(13), Client::new(121));
         get.stage_argv(vec![
             RedisString::from_static(b"GET"),
@@ -3012,6 +3024,119 @@ mod tests {
             slot_command_is_paused(&get, PAUSE_ACTION_CLIENT_ALL),
             "data reads should still be paused during failover"
         );
+    }
+
+    #[test]
+    fn failover_all_pause_counts_postponed_data_but_allows_info() {
+        static PAUSE_TEST_GUARD: Mutex<()> = Mutex::new(());
+        let _guard = PAUSE_TEST_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+
+        fn resp(parts: &[&[u8]]) -> Vec<u8> {
+            let mut out = Vec::new();
+            out.extend_from_slice(format!("*{}\r\n", parts.len()).as_bytes());
+            for part in parts {
+                out.extend_from_slice(format!("${}\r\n", part.len()).as_bytes());
+                out.extend_from_slice(part);
+                out.extend_from_slice(b"\r\n");
+            }
+            out
+        }
+
+        struct PauseCleanup {
+            server: Arc<redis_core::RedisServer>,
+        }
+
+        impl Drop for PauseCleanup {
+            fn drop(&mut self) {
+                redis_core::networking::clear_failover_pause(&self.server);
+                while redis_core::networking::pause_postponed_client_count() > 0 {
+                    redis_core::networking::note_pause_resumed_client();
+                }
+            }
+        }
+
+        let server = Arc::new(redis_core::RedisServer::default());
+        let _cleanup = PauseCleanup {
+            server: Arc::clone(&server),
+        };
+        let registry = Arc::new(Mutex::new(PubSubRegistry::new()));
+        let mut owner = RuntimeOwner::new(
+            RuntimeOwnerConfig::disabled()
+                .with_database_count(1)
+                .with_max_pending_events(4),
+        );
+        redis_core::networking::apply_failover_pause(&server, i64::MAX);
+
+        let data_slot = owner.insert_client(Client::new(130)).unwrap();
+        {
+            let slot = owner.slot_mut(data_slot).expect("data slot");
+            slot.client_mut().capa_redirect = true;
+            slot.ingest(&resp(&[b"GET", b"foo"]));
+        }
+        let data_outcome = owner.dispatch_slot_commands(data_slot.as_index(), &registry, &server);
+        assert!(data_outcome.progressed);
+        assert!(!data_outcome.queued_write);
+        assert!(
+            owner.slot(data_slot).expect("data slot").pause_postponed,
+            "failover all-client pause should park data commands before dispatch"
+        );
+        assert_eq!(
+            pause_postponed_client_count(),
+            1,
+            "INFO blocked_clients relies on pause-postponed clients being counted"
+        );
+
+        let select_slot = owner.insert_client(Client::new(132)).unwrap();
+        owner
+            .slot_mut(select_slot)
+            .expect("select slot")
+            .ingest(&resp(&[b"SELECT", b"0"]));
+        let select_outcome =
+            owner.dispatch_slot_commands(select_slot.as_index(), &registry, &server);
+        assert!(select_outcome.progressed);
+        assert!(select_outcome.queued_write);
+        assert_eq!(
+            owner.take_pending_write(select_slot),
+            Some(b"+OK\r\n".to_vec()),
+            "deferring client setup SELECT should not be parked by failover pause"
+        );
+        assert_eq!(
+            pause_postponed_client_count(),
+            1,
+            "pause-postponed count should still only include the data command"
+        );
+
+        let info_slot = owner.insert_client(Client::new(131)).unwrap();
+        owner
+            .slot_mut(info_slot)
+            .expect("info slot")
+            .ingest(&resp(&[b"INFO", b"clients"]));
+        let info_outcome = owner.dispatch_slot_commands(info_slot.as_index(), &registry, &server);
+        assert!(info_outcome.progressed);
+        assert!(info_outcome.queued_write);
+        let reply = owner
+            .take_pending_write(info_slot)
+            .expect("INFO clients should reply during failover pause");
+        assert!(
+            reply
+                .windows(b"blocked_clients:1".len())
+                .any(|w| w == b"blocked_clients:1"),
+            "INFO clients should remain pause-exempt and expose postponed clients, got {:?}",
+            String::from_utf8_lossy(&reply)
+        );
+        assert!(
+            reply
+                .windows(b"paused_actions:all".len())
+                .any(|w| w == b"paused_actions:all"),
+            "INFO clients should report failover all-client pause, got {:?}",
+            String::from_utf8_lossy(&reply)
+        );
+
+        owner
+            .slot_mut(data_slot)
+            .expect("data slot")
+            .clear_pause_postponed();
+        redis_core::networking::clear_failover_pause(&server);
     }
 }
 
