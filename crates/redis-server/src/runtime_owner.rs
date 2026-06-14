@@ -1695,6 +1695,8 @@ impl RuntimeOwner {
         let keys_loaded = plan.outcome.keys_loaded;
         let msg = plan.outcome.message;
         self.dbs = plan.dbs;
+        self.replica_apply_db_index = 0;
+        redis_core::replication::global_replication_state().remember_primary_stream_db(0);
         redis_commands::eval::install_rdb_function_replacement(functions);
         redis_core::replication::global_replication_state()
             .set_zero_offset_partial_resync_allowed(keys_loaded == 0);
@@ -2932,6 +2934,87 @@ mod tests {
         let reused = owner.insert_client(Client::new(3)).unwrap();
         assert_eq!(reused, first);
         assert!(owner.slot(second).is_some());
+    }
+
+    #[test]
+    fn replica_fullsync_load_resets_apply_db_before_db0_catchup() {
+        fn argv(parts: &[&[u8]]) -> Vec<RedisString> {
+            parts
+                .iter()
+                .map(|part| RedisString::from_bytes(part))
+                .collect()
+        }
+
+        let mut owner = RuntimeOwner::new(
+            RuntimeOwnerConfig::disabled()
+                .with_database_count(16)
+                .with_max_pending_events(4),
+        );
+        let registry = Arc::new(Mutex::new(PubSubRegistry::new()));
+        let server = Arc::new(redis_core::RedisServer::default());
+
+        assert!(
+            owner.apply_replica_command_batch(vec![argv(&[b"SELECT", b"11"])], &registry, &server),
+            "stale pre-fullsync upstream stream DB should be observable"
+        );
+        assert_eq!(owner.replica_apply_db_index, 11);
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "valdr-runtime-owner-fullsync-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp RDB dir");
+        let rdb_path = dir.join("dump.rdb");
+
+        let mut source_dbs: Vec<RedisDb> = (0..16).map(RedisDb::new).collect();
+        let mut db11_set = redis_core::object::RedisObject::new_set();
+        db11_set
+            .set_mut()
+            .expect("new_set constructs a set")
+            .insert(RedisString::from_static(b"-912526146933"));
+        source_dbs[11].add(RedisString::from_static(b"929"), db11_set);
+        redis_core::rdb::save_rdb_databases(&source_dbs, &rdb_path).expect("save fullsync RDB");
+        let rdb_bytes = std::fs::read(&rdb_path).expect("read fullsync RDB");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(
+            owner.load_replica_rdb(&rdb_bytes, &server),
+            "fullsync RDB should load"
+        );
+        assert_eq!(
+            owner.replica_apply_db_index, 0,
+            "fullsync RDB load must reset the replica apply selected DB"
+        );
+
+        assert!(
+            owner.apply_replica_command_batch(
+                vec![argv(&[b"SADD", b"929", b"-1822692859"])],
+                &registry,
+                &server,
+            ),
+            "DB 0 catch-up SADD without SELECT should apply after fullsync"
+        );
+
+        let db0_set = owner.dbs[0]
+            .lookup_key_read(b"929")
+            .and_then(|obj| obj.set())
+            .expect("DB 0 should receive the post-RDB catch-up set member");
+        assert!(db0_set.contains(&RedisString::from_static(b"-1822692859")));
+        assert!(!db0_set.contains(&RedisString::from_static(b"-912526146933")));
+
+        let db11_set = owner.dbs[11]
+            .lookup_key_read(b"929")
+            .and_then(|obj| obj.set())
+            .expect("DB 11 should retain the RDB set member");
+        assert!(db11_set.contains(&RedisString::from_static(b"-912526146933")));
+        assert!(
+            !db11_set.contains(&RedisString::from_static(b"-1822692859")),
+            "DB 0 catch-up member must not merge into DB 11 after fullsync"
+        );
     }
 
     #[test]
