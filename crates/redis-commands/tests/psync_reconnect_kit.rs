@@ -191,6 +191,36 @@ fn same_primary_reconnect_gets_continue_and_replays_catchup() {
 }
 
 #[test]
+fn same_primary_zero_offset_reconnect_gets_continue_and_replays_catchup() {
+    let _g = psync_guard();
+    let repl = global_replication_state();
+    let _reset = GlobalReplReset::new(&repl);
+
+    assert_eq!(repl.master_offset(), 0);
+    let catchup = resp(&[b"SET", b"zero-offset", b"v"]);
+    repl.append_to_backlog(&catchup);
+    let runid = runid_string(&repl);
+    let drive = drive_psync(1_100_011, vec![b"PSYNC".to_vec(), runid, b"0".to_vec()]);
+
+    assert!(
+        drive.reply.starts_with(b"+CONTINUE"),
+        "same-primary zero-offset reconnect should continue, got {:?}",
+        String::from_utf8_lossy(&drive.reply)
+    );
+    assert!(
+        drive
+            .sent
+            .windows(catchup.len())
+            .any(|w| w == catchup.as_slice()),
+        "+CONTINUE from offset zero must replay retained backlog bytes, sent {:?}",
+        String::from_utf8_lossy(&drive.sent)
+    );
+    assert_eq!(drive.counters_after.1, drive.counters_before.1 + 1);
+    assert_eq!(drive.counters_after.0, drive.counters_before.0);
+    assert_eq!(drive.counters_after.2, drive.counters_before.2);
+}
+
+#[test]
 fn config_set_backlog_size_expands_live_psync_window() {
     let _g = psync_guard();
     let repl = global_replication_state();

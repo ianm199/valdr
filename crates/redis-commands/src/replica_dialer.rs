@@ -476,7 +476,9 @@ fn select_psync_args(repl: &ReplicationState) -> Vec<Vec<u8>> {
     let our_offset = repl.master_repl_offset.load(Ordering::SeqCst);
     let cached_replid = repl.cached_primary_replid();
     let failover = repl.manual_failover_state(0) == failover_state_code::FAILOVER_IN_PROGRESS;
-    if let Some(replid) = cached_replid.filter(|_| failover || our_offset > 0) {
+    if let Some(replid) = cached_replid
+        .filter(|_| failover || our_offset > 0 || repl.zero_offset_partial_resync_allowed())
+    {
         let mut args = vec![
             b"PSYNC".to_vec(),
             replid.to_vec(),
@@ -925,6 +927,31 @@ mod tests {
         assert_eq!(
             select_psync_args(&repl),
             vec![b"PSYNC".to_vec(), b"?".to_vec(), b"-1".to_vec()]
+        );
+    }
+
+    #[test]
+    fn psync_args_do_not_use_cached_replid_at_zero_offset_by_default() {
+        let repl = local_state();
+        let cached = [b'b'; 40];
+        repl.set_cached_primary_replid(cached);
+
+        assert_eq!(
+            select_psync_args(&repl),
+            vec![b"PSYNC".to_vec(), b"?".to_vec(), b"-1".to_vec()]
+        );
+    }
+
+    #[test]
+    fn psync_args_use_cached_replid_at_zero_offset_after_empty_fullsync() {
+        let repl = local_state();
+        let cached = [b'b'; 40];
+        repl.set_cached_primary_replid(cached);
+        repl.set_zero_offset_partial_resync_allowed(true);
+
+        assert_eq!(
+            select_psync_args(&repl),
+            vec![b"PSYNC".to_vec(), cached.to_vec(), b"0".to_vec()]
         );
     }
 

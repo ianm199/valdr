@@ -73,9 +73,9 @@ Artifact:
 | `integration/block-repl` | 2/0 | Green | Real `DEBUG DIGEST` plus single blocked-pop wake propagation now validates the list/zset blocking workload. |
 | `integration/replication-3` | 3/4 | Red | Expiry consistency, writable-replica expired-key behavior, and PFCOUNT expired-key/cache semantics. |
 | `integration/replication-4` | 15/2 | Red | SPOP rewrite cases now pass; remaining failures are divergence/default writable-replica cases. |
-| `integration/replication-buffer` | 6/9 | Red | Shared/private output ownership, writer-side drain, and active full-sync catch-up release moved the backlog-histlen outgrowth assertions and the non-dual-channel shrink assertion green. Remaining failures are dual-channel global-buffer behavior, broader partial resync / backlog-memory shrink cases, and output-buffer / PSYNC counter edge cases. |
+| `integration/replication-buffer` | 7/8 | Red | Shared/private output ownership, writer-side drain, active full-sync catch-up release, and the empty-RDB zero-offset reconnect guard moved the backlog-histlen outgrowth assertions, the non-dual-channel shrink assertion, and the dual-channel low-output-buffer partial-resync assertion green. Remaining failures are dual-channel global-buffer behavior, broader partial resync / backlog-memory shrink cases, output-buffer trimming, and the non-dual-channel low-output-buffer PSYNC counter edge case. |
 | `integration/replication` | 40/27 | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, the first async-loading CONFIG exception, successful swapdb function-context mismatch, parent-killed child discovery, `repl-diskless-load on-empty-db`, no-longer-useful RDB child cancellation, all four replica-link reply-violation assertions, malformed-PSYNC-offset logging, chained replica `FLUSHDB` / `FLUSHALL` stream relay, `GETSET` rewrite, nonblocking `BRPOPLPUSH` / `BLMOVE` rewrite stats, and empty-blocking `BRPOPLPUSH` / `BLMOVE` commandstats via real digest waits. Remaining failures are counted full-sync, diskless pipe/drop, blocked-list role-change, cache-master, lazy-expire, and old-data rollback cases. |
-| `integration/replication-psync` | 90/0 | Green | Focused gate is green after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support for the replica dialer. |
+| `integration/replication-psync` | timeout | Red | Historical focused gate was 90/0 after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support. Current full-file reruns time out with master/replica inconsistency lines even when the zero-offset selector is restored to the old conservative condition, so this is now a reopened R3 frontier rather than evidence against the buffer packet. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
 | `integration/replica-redirect` | timeout | Red | `CLIENT CAPA REDIRECT` top-level and MULTI/EXEC replica redirect semantics now pass the early file assertions. Manual `FAILOVER` now reaches timeout-driven handoff in Rust kits and a live two-process probe, including blocked `BRPOP` and paused `GET` REDIRECT after promotion. The official Tcl file still no-summary times out in the first failover test; side observation showed old primary `blocked_clients:2`, `paused_actions:all`, and `role:slave` while the target remained SIGSTOP'd. |
 | `unit/wait` | 39/0 | Green | WAIT command suite passed after the R4 role-change unblock packet; WAITAOF/FACK edge cases still need separate coverage. |
@@ -133,6 +133,9 @@ visible integration frontiers are now:
   while dependent replicas still pin them.
 - `R3-RECONNECT-MATRIX`: extend the new master-side PSYNC decision matrix into
   live replica-dialer reconnect coverage before grinding `replication-psync`.
+  Current full-file PSYNC reruns time out again with master/replica
+  inconsistency lines, including a conservative-selector comparison, so reopen
+  this lane before treating PSYNC as a green tripwire.
 - `R2-BUFFER-LIMITS`: accounting aliases, fan-out accounting, and retained
   full-sync history are covered; implement broader shared-buffer memory
   accounting, backlog outgrowth under slow online replicas, and replica
@@ -797,6 +800,121 @@ Takeaway:
   can consume it. The remaining shrink failures are in the dual-channel setup
   and in the later slow-replica/output-buffer disconnect path, not this
   active-job no-waiter case.
+
+### R2-BUFFER-ZERO-OFFSET-PSYNC
+
+Status: empty-RDB zero-offset reconnect slice completed on 2026-06-13;
+`integration/replication-buffer` moved from 6/9 to 7/8.
+
+Implementation:
+
+- `RdbLoadOutcome` now exposes `keys_loaded` / `keys_expired` to callers that
+  need to make post-load replication decisions without parsing the log string.
+- Successful replica full-sync RDB replacement marks `PSYNC <cached-replid> 0`
+  safe only when the incoming snapshot loaded zero keys.
+- The replica dialer keeps the old conservative behavior for normal offset-zero
+  cached replids: it sends `PSYNC ? -1` unless the reconnect is manual
+  failover, the processed offset is greater than zero, or the last full-sync
+  snapshot was empty.
+- Target changes and promotion back to primary clear the zero-offset permission
+  bit with the rest of the cached partial-resync state.
+- `psync_reconnect_kit` adds a master-side regression case proving
+  `PSYNC <runid> 0` can return `+CONTINUE` and replay retained backlog bytes
+  when the primary really has history after offset zero.
+
+Evidence:
+
+```bash
+rustfmt \
+  crates/redis-core/src/rdb/load.rs \
+  crates/redis-core/src/replication.rs \
+  crates/redis-commands/src/replica_dialer.rs \
+  crates/redis-commands/tests/psync_reconnect_kit.rs \
+  crates/redis-server/src/runtime_owner.rs
+cargo test -p redis-commands replica_dialer -- --nocapture
+cargo test -p redis-commands --test psync_reconnect_kit -- --nocapture
+cargo test -p redis-commands --test repl_buffer_kit -- --nocapture
+cargo test -p redis-commands --test repl_correctness_kit -- --nocapture
+cargo check -p redis-core -p redis-commands -p redis-server
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-buffer-zero-offset-psync-narrow2 \
+  --profile integration-repl \
+  --timeout-s 300 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replication-buffer \
+  --isolated-tests-copy \
+  --skip-build
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-buffer-zero-offset-psync-psync360-narrow2 \
+  --profile integration-repl \
+  --timeout-s 360 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replication-psync \
+  --isolated-tests-copy \
+  --skip-build
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-buffer-zero-offset-psync-psync360-conservative-compare \
+  --profile integration-repl \
+  --timeout-s 360 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replication-psync \
+  --isolated-tests-copy \
+  --skip-build
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-buffer-zero-offset-psync-tripwire2 \
+  --profile integration-repl \
+  --timeout-s 240 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replication-2,integration/block-repl \
+  --isolated-tests-copy \
+  --skip-build
+```
+
+Results:
+
+- `replica_dialer` tests: 9 passed, 0 failed.
+- `psync_reconnect_kit`: 9 passed, 0 failed.
+- `repl_buffer_kit`: 6 passed, 0 failed.
+- `repl_correctness_kit`: 29 passed, 0 failed.
+- `cargo check -p redis-core -p redis-commands -p redis-server`: passed.
+- `cargo build --bin redis-server`: passed.
+- Focused `integration/replication-buffer`:
+  `harness/oracle/results/tcl-survey/20260613T224648237767Z/result.json`
+  reported 7 passed, 8 failed, 0 timed out, 0 without summary. The
+  `Partial resynchronization is successful even client-output-buffer-limit is
+  less than repl-backlog-size. dualchannel yes` assertion is now absent from
+  the failure list; the `dualchannel no` variant remains red.
+- Focused `integration/replication-psync` with the scoped zero-offset selector:
+  `harness/oracle/results/tcl-survey/20260613T224913822348Z/result.json`
+  timed out at 360 seconds with master/replica inconsistency lines before a
+  summary.
+- Conservative-selector comparison for `integration/replication-psync`:
+  `harness/oracle/results/tcl-survey/20260613T225613931557Z/result.json`
+  also timed out at 360 seconds with the same class of inconsistency lines.
+  That makes PSYNC a reopened current R3 frontier, but it does not implicate
+  this packet's offset-zero selector.
+- Focused no-regression tripwire:
+  `harness/oracle/results/tcl-survey/20260613T230647306243Z/result.json`
+  reported `integration/replication-2` 7/0 and `integration/block-repl` 2/0.
+
+Takeaway:
+
+- Offset zero is not one state. A cached replid at offset zero is unsafe after a
+  non-empty full-sync snapshot because snapshot state is not represented in the
+  replication stream. It is safe after an empty full-sync snapshot because the
+  primary can replay retained bytes after offset zero without duplicating
+  preexisting keyspace. The remaining non-dual-channel buffer failure likely
+  needs a separate output-buffer/disconnect or counter slice, not a broader
+  PSYNC selector.
 
 ### R2-BGSAVE-CATCHUP
 

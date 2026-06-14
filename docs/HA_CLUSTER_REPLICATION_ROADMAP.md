@@ -70,7 +70,9 @@ Current red/unfinished areas from the 2026-06-13 R0 dashboard in
 
 - Dual-server `integration/replication.tcl` and `replication-buffer.tcl` are
   still blocked by full-sync / diskless behavior and replication-buffer
-  accounting semantics.
+  accounting semantics. The focused `replication-buffer` gate is now 7/8 after
+  shared output ownership, active catch-up release, and empty-RDB zero-offset
+  reconnect handling.
 - A rebuilt R1 gate now shows `replication-3` at 3/4 and `replication-4` at
   15/2. The command-propagation rewrite cases are cleared, but
   expiration/PFCOUNT semantics and divergence/writable-replica cases still need
@@ -79,17 +81,21 @@ Current red/unfinished areas from the 2026-06-13 R0 dashboard in
   single-pop wakes began propagating their canonical nonblocking forms.
 - `replication-2` is green at 7/0 with real `DEBUG DIGEST` after the replica
   dialer began batching already-read command frames through RuntimeOwner.
-- `replication-psync` is green in the focused gate at 90/0 after live backlog
-  resize, backlog TTL expiry, and delayed reconnect semantics landed.
+- `replication-psync` had a historical focused 90/0 gate after live backlog
+  resize, backlog TTL expiry, and delayed reconnect semantics landed. Current
+  full-file reruns time out with master/replica inconsistency lines even under
+  the old conservative offset-zero selector, so PSYNC is a reopened R3
+  frontier.
 - `replication-aof-sync` is green as of 2026-06-13 after full-sync RDB loads
   refresh appendonly manifests correctly.
 - `replica-redirect.tcl` needs real `FAILOVER` plus client redirect semantics.
 
 ## Execution Rules
 
-1. **Preserve current green gates.** `replication-2`, `block-repl`,
-   `replication-psync`, and `replication-aof-sync` are no-regression tripwires
-   for replication work.
+1. **Preserve current green gates.** `replication-2`, `block-repl`, and
+   `replication-aof-sync` are no-regression tripwires for replication work.
+   Treat `replication-psync` as a reopened red gate until the current timeout
+   is explained or fixed.
 2. **Use the fast kit first.** Build deterministic tests in
    `crates/redis-commands/tests/repl_correctness_kit.rs` before grinding slow
    TCL files.
@@ -363,10 +369,14 @@ Work packets:
   backlog-histlen outgrowth assertions are now green. The next reclaim slice
   drops active BGSAVE catch-up bytes as soon as the last waiting replica
   disconnects while leaving the job installed for child/temp-file cleanup,
-  moving focused `integration/replication-buffer` to 6/9. Remaining buffer
-  work is dual-channel global-buffer behavior, later slow-replica
-  output-buffer disconnect trimming, and broader partial-resync history
-  ownership.
+  moving focused `integration/replication-buffer` to 6/9. The empty-RDB
+  zero-offset reconnect slice then made `PSYNC <cached-replid> 0` legal only
+  after a full-sync snapshot loaded no keys, moving focused
+  `integration/replication-buffer` to 7/8 by clearing the dual-channel
+  low-output-buffer partial-resync assertion. Remaining buffer work is
+  dual-channel global-buffer behavior, the non-dual-channel low-output-buffer
+  PSYNC counter edge, later slow-replica output-buffer disconnect trimming, and
+  broader partial-resync history ownership.
 
 Gate:
 
@@ -412,6 +422,11 @@ Work packets:
   the background dialer; the focused `integration/replication-psync` gate now
   passes 90/90 at
   `harness/oracle/results/tcl-survey/20260613T162716653643Z/result.json`.
+  Current reruns later on 2026-06-13 timed out with master/replica
+  inconsistency lines both with the scoped empty-RDB zero-offset selector and
+  with the old conservative selector. Treat this as reopened R3 work:
+  reproduce one of those inconsistency cases in `psync_reconnect_kit` before
+  relying on the full Tcl file again.
 - **R3-METRICS:** keep `sync_full`, `sync_partial_ok`, `sync_partial_err`,
   master/replica offsets, lag, and backlog histlen faithful in `INFO`.
 

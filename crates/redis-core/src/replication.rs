@@ -569,6 +569,13 @@ pub struct ReplicationState {
     /// dialer echoes this in `PSYNC <replid> <offset>` so the primary's
     /// run-id check can grant a `+CONTINUE` partial resync.
     pub cached_primary_replid: Mutex<Option<[u8; 40]>>,
+    /// Replica-side guard for the narrow offset-zero reconnect case. A
+    /// completed full sync at offset 0 normally cannot prove whether `PSYNC
+    /// <replid> 0` is safe because the replica may already hold snapshot data
+    /// not represented in the command stream. Empty RDB full syncs are the
+    /// exception: there is no snapshot state to preserve, so retained backlog
+    /// bytes after offset 0 can be replayed by partial resync.
+    zero_offset_partial_resync_allowed: AtomicBool,
     /// Primary-side manual FAILOVER state. `NO_FAILOVER` means no operator
     /// failover is active; the other states are visible in INFO and drive the
     /// failover client-pause gate.
@@ -606,6 +613,7 @@ impl ReplicationState {
             stat_sync_partial_ok: AtomicU64::new(0),
             stat_sync_partial_err: AtomicU64::new(0),
             cached_primary_replid: Mutex::new(None),
+            zero_offset_partial_resync_allowed: AtomicBool::new(false),
             failover_state: AtomicU8::new(failover_state_code::NO_FAILOVER),
             manual_failover: Mutex::new(None),
         }
@@ -651,6 +659,18 @@ impl ReplicationState {
             Ok(g) => *g,
             Err(p) => *p.into_inner(),
         }
+    }
+
+    /// Allow or deny `PSYNC <cached-replid> 0` on the replica side.
+    pub fn set_zero_offset_partial_resync_allowed(&self, allowed: bool) {
+        self.zero_offset_partial_resync_allowed
+            .store(allowed, Ordering::Relaxed);
+    }
+
+    /// Whether an offset-zero cached partial resync is known to be safe.
+    pub fn zero_offset_partial_resync_allowed(&self) -> bool {
+        self.zero_offset_partial_resync_allowed
+            .load(Ordering::Relaxed)
     }
 
     /// Return the run id as a `&[u8; 40]` for callers that want to embed it
@@ -762,6 +782,7 @@ impl ReplicationState {
         self.master_repl_offset.store(0, Ordering::Relaxed);
         self.selected_db.store(-1, Ordering::Relaxed);
         self.primary_stream_db.store(0, Ordering::Relaxed);
+        self.set_zero_offset_partial_resync_allowed(false);
     }
 
     fn append_to_repl_bgsave_catchup(&self, bytes: &[u8]) {
@@ -1388,6 +1409,7 @@ impl ReplicationState {
             .store(repl_state_code::MASTER, Ordering::Relaxed);
         self.replica_link
             .store(replica_link_code::CONNECT, Ordering::Relaxed);
+        self.set_zero_offset_partial_resync_allowed(false);
     }
 
     /// Publish the fine-grained replica link phase (see [`replica_link_code`]).
@@ -2358,15 +2380,18 @@ mod tests {
 
         let cached = [b'a'; 40];
         st.set_cached_primary_replid(cached);
+        st.set_zero_offset_partial_resync_allowed(true);
         st.master_repl_offset.store(1234, Ordering::Relaxed);
 
         let same_epoch = st.become_replica_of(RedisString::from_bytes(b"127.0.0.1"), 6379);
         assert_eq!(st.cached_primary_replid(), Some(cached));
+        assert!(st.zero_offset_partial_resync_allowed());
         assert_eq!(st.master_offset(), 1234);
         assert!(st.dialer_epoch_is_current(same_epoch));
 
         let changed_epoch = st.become_replica_of(RedisString::from_bytes(b"127.0.0.2"), 6379);
         assert_eq!(st.cached_primary_replid(), None);
+        assert!(!st.zero_offset_partial_resync_allowed());
         assert_eq!(st.master_offset(), 0);
         assert!(!st.dialer_epoch_is_current(same_epoch));
         assert!(st.dialer_epoch_is_current(changed_epoch));

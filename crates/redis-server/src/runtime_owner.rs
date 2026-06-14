@@ -1663,9 +1663,12 @@ impl RuntimeOwner {
                 return false;
             }
         };
+        let keys_loaded = plan.outcome.keys_loaded;
         let msg = plan.outcome.message;
         self.dbs = plan.dbs;
         redis_commands::eval::install_rdb_function_replacement(functions);
+        redis_core::replication::global_replication_state()
+            .set_zero_offset_partial_resync_allowed(keys_loaded == 0);
         eprintln!("redis-server: replica: full-resync RDB loaded: {}", msg);
         self.refresh_replica_aof_after_fullsync(bytes, server)
     }

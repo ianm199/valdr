@@ -31,6 +31,8 @@ pub struct RdbLoadStats {
 pub struct RdbLoadOutcome {
     pub message: String,
     pub function_payloads: Vec<Vec<u8>>,
+    pub keys_loaded: i64,
+    pub keys_expired: i64,
 }
 
 #[derive(Debug)]
@@ -500,6 +502,8 @@ pub fn load_into_dbs_collecting_functions(
             version, keys_loaded
         ),
         function_payloads,
+        keys_loaded,
+        keys_expired,
     })
 }
 
