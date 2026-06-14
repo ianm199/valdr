@@ -1583,19 +1583,26 @@ impl RuntimeOwner {
                     }
                 }
             };
-            let ok = match request.kind {
+            let (ok, commit_offset) = match request.kind {
                 redis_commands::replica_dialer::ReplicaApplyKind::Command(argv) => {
-                    self.apply_replica_command(argv, registry, server)
+                    (self.apply_replica_command(argv, registry, server), true)
                 }
-                redis_commands::replica_dialer::ReplicaApplyKind::CommandBatch(commands) => {
-                    self.apply_replica_command_batch(commands, registry, server)
+                redis_commands::replica_dialer::ReplicaApplyKind::CommandBatch(commands) => (
+                    self.apply_replica_command_batch(commands, registry, server),
+                    true,
+                ),
+                redis_commands::replica_dialer::ReplicaApplyKind::BeginFullsync {
+                    flush_before_load,
+                } => {
+                    self.begin_replica_fullsync_loading(flush_before_load, server);
+                    (true, false)
                 }
                 redis_commands::replica_dialer::ReplicaApplyKind::LoadRdb(bytes) => {
-                    self.load_replica_rdb(&bytes, server)
+                    (self.load_replica_rdb(&bytes, server), true)
                 }
             };
             let _ = request.done.send(ok);
-            if ok {
+            if ok && commit_offset {
                 redis_commands::aof::note_current_writer_repl_offset(request.offset_after);
                 redis_core::replication::global_replication_state()
                     .master_repl_offset
@@ -1603,6 +1610,29 @@ impl RuntimeOwner {
                 redis_commands::replication::maybe_wake_wait_clients();
             }
             progressed = true;
+        }
+    }
+
+    fn begin_replica_fullsync_loading(
+        &mut self,
+        flush_before_load: bool,
+        server: &Arc<redis_core::RedisServer>,
+    ) {
+        if !flush_before_load {
+            return;
+        }
+        redis_core::stream_hooks::fire_stream_db_flushed_hook();
+        let mut removed = 0i64;
+        for db in &mut self.dbs {
+            removed = removed.saturating_add(db.size() as i64);
+            db.clear();
+        }
+        self.replica_apply_db_index = 0;
+        redis_core::replication::global_replication_state().remember_primary_stream_db(0);
+        if server.live_config.save_enabled() {
+            server.set_dirty(0);
+        } else {
+            server.add_dirty(removed);
         }
     }
 

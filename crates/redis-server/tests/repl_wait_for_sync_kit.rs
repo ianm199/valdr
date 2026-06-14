@@ -1633,6 +1633,97 @@ fn diskless_swapdb_aborted_fullsync_clears_loading_and_keeps_old_db() {
 }
 
 #[test]
+fn diskless_flush_before_load_fullsync_clears_old_db_while_loading() {
+    let replica = TestServer::start("repl-flush-before-load-replica").expect("start replica");
+    let master = TestServer::start("repl-flush-before-load-master").expect("start master");
+
+    let mut master_conn = RespConn::connect(master.port).expect("connect master");
+    for command in [
+        [b"CONFIG".as_slice(), b"SET", b"repl-diskless-sync", b"yes"].as_slice(),
+        [
+            b"CONFIG".as_slice(),
+            b"SET",
+            b"repl-diskless-sync-delay",
+            b"0",
+        ]
+        .as_slice(),
+        [b"CONFIG".as_slice(), b"SET", b"save", b""].as_slice(),
+        [b"CONFIG".as_slice(), b"SET", b"rdbcompression", b"no"].as_slice(),
+        [b"CONFIG".as_slice(), b"SET", b"rdb-key-save-delay", b"5000"].as_slice(),
+    ] {
+        expect_simple(
+            master_conn.command(command).expect("master CONFIG SET"),
+            b"OK",
+        );
+    }
+
+    let mut replica_conn = RespConn::connect(replica.port).expect("connect replica");
+    for command in [
+        [
+            b"CONFIG".as_slice(),
+            b"SET",
+            b"repl-diskless-load",
+            b"flush-before-load",
+        ]
+        .as_slice(),
+        [b"CONFIG".as_slice(), b"SET", b"save", b""].as_slice(),
+    ] {
+        expect_simple(
+            replica_conn.command(command).expect("replica CONFIG SET"),
+            b"OK",
+        );
+    }
+
+    seed_string_keys(replica.port, "old", 200, 1).expect("seed old replica DB");
+    expect_success(
+        replica_conn
+            .command(&[b"SET", b"mykey", b"myvalue"])
+            .expect("seed old replica sentinel"),
+    );
+    assert_eq!(
+        replica_conn
+            .command(&[b"DBSIZE"])
+            .expect("old replica DBSIZE"),
+        Frame::Integer(201),
+        "replica should expose its old dataset before full sync"
+    );
+
+    seed_string_keys(master.port, "master", 160, 65_536).expect("seed large master RDB");
+    expect_simple(
+        replica_conn
+            .command(&[b"SLAVEOF", b"127.0.0.1", master.port.to_string().as_bytes()])
+            .expect("SLAVEOF should reply"),
+        b"OK",
+    );
+    wait_for_info_field(&replica, b"persistence", "loading", "1")
+        .expect("replica should enter ordinary loading");
+
+    expect_simple(
+        master_conn
+            .command(&[b"CONFIG", b"SET", b"repl-diskless-sync-delay", b"5"])
+            .expect("CONFIG SET repl-diskless-sync-delay"),
+        b"OK",
+    );
+    match master_conn
+        .command(&[b"CLIENT", b"KILL", b"TYPE", b"replica"])
+        .expect("CLIENT KILL TYPE replica should reply")
+    {
+        Frame::Integer(killed) if killed >= 1 => {}
+        frame => panic!("expected to kill at least one loading replica, got {frame:?}"),
+    }
+    wait_for_info_field(&replica, b"persistence", "loading", "0")
+        .expect("aborted fullsync should clear replica loading");
+
+    assert_eq!(
+        replica_conn
+            .command(&[b"DBSIZE"])
+            .expect("DBSIZE after aborted flush-before-load fullsync"),
+        Frame::Integer(0),
+        "flush-before-load must clear the old DB before the replacement RDB is loaded"
+    );
+}
+
+#[test]
 fn multi_replica_fullsync_under_write_load_converges_offsets_and_digests() {
     let master = TestServer::start("repl-multi-master").expect("start master");
     let replica_a = TestServer::start("repl-multi-a").expect("start replica a");

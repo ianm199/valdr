@@ -49,6 +49,7 @@ const HANDSHAKE_READ_POLL_INTERVAL: Duration = Duration::from_millis(100);
 pub enum ReplicaApplyKind {
     Command(Vec<RedisString>),
     CommandBatch(Vec<Vec<RedisString>>),
+    BeginFullsync { flush_before_load: bool },
     LoadRdb(Vec<u8>),
 }
 
@@ -157,6 +158,14 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
                 PsyncOutcome::FullResync { offset, replid } => {
                     let async_loading = repl.cached_primary_replid().is_some_and(|id| id == replid);
                     repl.set_replica_link(replica_link_code::TRANSFER);
+                    if !begin_fullsync_loading(async_loading) {
+                        eprintln!("redis-server: replica: fullsync loading preparation failed");
+                        repl.repl_state
+                            .store(repl_state_code::REPLICA_CONNECTING, Ordering::SeqCst);
+                        repl.set_replica_link(replica_link_code::CONNECT);
+                        thread::sleep(Duration::from_millis(200));
+                        continue;
+                    }
                     publish_fullsync_loading_state(async_loading);
                     let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
                     let rdb_bytes = match read_fullresync_rdb(&stream, &repl, dialer_epoch) {
@@ -244,6 +253,20 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
         repl.set_replica_link(replica_link_code::CONNECT);
         thread::sleep(Duration::from_millis(200));
     }
+}
+
+fn begin_fullsync_loading(async_loading: bool) -> bool {
+    let Some(server) = GLOBAL_SERVER.get() else {
+        return true;
+    };
+    let flush_before_load = matches!(
+        server.live_config.repl_diskless_load(),
+        ReplDisklessLoadMode::FlushBeforeLoad
+    ) && !async_loading;
+    if !flush_before_load {
+        return true;
+    }
+    send_to_runtime_owner(ReplicaApplyKind::BeginFullsync { flush_before_load }, 0)
 }
 
 fn publish_fullsync_loading_state(async_loading: bool) {
