@@ -77,7 +77,7 @@ Artifact:
 | `integration/replication` | 40/27 | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, the first async-loading CONFIG exception, successful swapdb function-context mismatch, parent-killed child discovery, `repl-diskless-load on-empty-db`, no-longer-useful RDB child cancellation, all four replica-link reply-violation assertions, malformed-PSYNC-offset logging, chained replica `FLUSHDB` / `FLUSHALL` stream relay, `GETSET` rewrite, nonblocking `BRPOPLPUSH` / `BLMOVE` rewrite stats, and empty-blocking `BRPOPLPUSH` / `BLMOVE` commandstats via real digest waits. Remaining failures are counted full-sync, diskless pipe/drop, blocked-list role-change, cache-master, lazy-expire, and old-data rollback cases. |
 | `integration/replication-psync` | timeout | Red | Historical focused gate was 90/0 after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support. Current full-file reruns still time out, but the full-sync detached-tail kit removed the first broad no-reconnect inconsistency. The latest oracle dump narrowed the visible data divergence to a single `0` vs `-0` string value; a fast kit then found and fixed an RDB raw numeric-string fidelity bug in that family. Full Tcl has not been rerun after that fix. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
-| `integration/replica-redirect` | timeout; focused failover-pause slice 2/0 | Red | `CLIENT CAPA REDIRECT` top-level and MULTI/EXEC replica redirect semantics now pass the early file assertions. Manual `FAILOVER` reaches timeout-driven handoff in Rust kits and a live two-process probe, including blocked `BRPOP` and paused `GET` REDIRECT after promotion. A 2026-06-14 kit-first pass found the Tcl helper was blocked on its implicit `SELECT 9` while all-client failover pause was active; `SELECT` is now failover-pause exempt and the first paused-client Tcl case passes in a 3s focused run. The full file still needs a sequential scoreboard before this row can move out of red. |
+| `integration/replica-redirect` | 11/0 | Green | `CLIENT CAPA REDIRECT`, MULTI/EXEC replica redirects, failover pause, waiting-for-sync responses, and blocked-client behavior during failover now pass in the direct Tcl file. The final 2026-06-14 kit-first pass moved the file from timeout/no-summary to parsed 10/1, reduced the stale DB 9 stream return to partial-resync/role-change invariants, then cleared the full file at 11/0 in 6 seconds. |
 | `unit/wait` | 39/0 | Green | WAIT command suite passed after the R4 role-change unblock packet; WAITAOF/FACK edge cases still need separate coverage. |
 
 ## Temp RDB Cleanup
@@ -3103,6 +3103,75 @@ Takeaway:
   Rust kit, then run only the smallest Tcl selector that proves the script
   advanced. A full `replica-redirect` scoreboard is still needed before the
   whole file's dashboard row can change status.
+
+### 2026-06-14 R5 follow-up: replica-redirect scoreboard green
+
+Scope:
+
+- Converted the next `replica-redirect.tcl` failure from a broad Tcl symptom
+  into three kit-sized invariants:
+  partial resync must not publish `master_link_status:up` before inline catch-up
+  has gone idle, a promoted master reconfigured with `REPLICAOF` must drop
+  cached upstream PSYNC state, and primary-side replica rows must be cleared
+  when a master demotes.
+- The concrete Tcl failure was `blocked clients behavior during failover` after
+  `responses in waiting-for-sync state`: the replica-side readonly `XREAD`
+  returned stale DB 9 stream data instead of blocking. The root cause was a
+  premature `wait_replica_online` on the old primary's stale `slave0` row.
+- Added fast coverage in `replica_dialer::tests`, `psync_reconnect_kit`, and
+  `failover_redirect_kit` before rerunning Tcl.
+- Kept ordinary `REPLICAOF` chained-replica rows intact; stale primary-side
+  row cleanup is limited to failover demotion, where those rows would otherwise
+  make `wait_replica_online` observe an old downstream.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands --test failover_redirect_kit -- --nocapture --test-threads=1
+cargo test -p redis-commands --test psync_reconnect_kit -- --nocapture --test-threads=1
+cargo test -p redis-commands replica_dialer::tests -- --nocapture --test-threads=1
+cargo test -p redis-commands --test repl_correctness_kit -- --nocapture --test-threads=1
+cargo test -p redis-core replication::tests -- --nocapture
+cargo build -p redis-server --bin redis-server
+VALKEY_BIN_DIR=/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/target/debug \
+  timeout 90 tclsh tests/test_helper.tcl \
+  --single integration/replica-redirect \
+  --clients 1 \
+  --skip-leaks \
+  --baseport 47500 \
+  --portcount 4000 \
+  --tags '-needs:debug -cluster -needs:cluster' \
+  --verbose \
+  --only 'responses in waiting-for-sync state' \
+  --only 'blocked clients behavior during failover'
+VALKEY_BIN_DIR=/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/target/debug \
+  timeout 120 tclsh tests/test_helper.tcl \
+  --single integration/replica-redirect \
+  --clients 1 \
+  --skip-leaks \
+  --baseport 47700 \
+  --portcount 4000 \
+  --tags '-needs:debug -cluster -needs:cluster' \
+  --verbose
+```
+
+Results:
+
+- `failover_redirect_kit`: 11 passed, 0 failed.
+- `psync_reconnect_kit`: 17 passed, 0 failed.
+- `replica_dialer::tests`: 14 passed, 0 failed.
+- `repl_correctness_kit`: 32 passed, 0 failed.
+- Core replication tests: 15 passed, 0 failed.
+- `cargo build -p redis-server --bin redis-server`: passed.
+- Focused direct Tcl selector: 2 passed, 0 failed in 3 seconds.
+- Full direct `integration/replica-redirect`: 11 passed, 0 failed in 6 seconds.
+
+Takeaway:
+
+- We do not need the long Tcl command as the development loop. The productive
+  loop is: observe enough Tcl to name the failure, encode the invariant as a
+  fast Rust kit, then use the smallest Tcl selector as a scoreboard. Full Tcl
+  runs are still valuable, but only after the kits are green.
 
 ### 2026-06-13 R3 follow-up: replica-side CLIENT KILL reconnect
 

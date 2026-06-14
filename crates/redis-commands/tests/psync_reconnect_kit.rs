@@ -775,6 +775,35 @@ fn target_detour_preserves_cached_reconnect_state_until_fullsync_adopts_new_prim
 }
 
 #[test]
+fn promoted_master_reconfigured_as_replica_drops_cached_reconnect_state() {
+    let st = ReplicationState::new([b'c'; 40], 64);
+    st.become_replica_of(arg(b"127.0.0.1"), 6379);
+
+    let cached = [b'd'; 40];
+    st.set_cached_primary_replid(cached);
+    st.set_zero_offset_partial_resync_allowed(true);
+    st.append_to_backlog(&resp(&[b"XADD", b"k", b"*", b"foo", b"bar"]));
+
+    st.become_master();
+    assert_eq!(
+        st.cached_primary_replid(),
+        Some(cached),
+        "promotion preserves history until the operator chooses a new replica relationship"
+    );
+
+    st.become_replica_of(arg(b"127.0.0.1"), 6379);
+
+    assert!(
+        st.cached_primary_replid().is_none(),
+        "a promoted/standalone master reconfigured with REPLICAOF must start with PSYNC ? -1"
+    );
+    assert!(
+        !st.zero_offset_partial_resync_allowed(),
+        "empty-RDB zero-offset permission belongs to the old upstream relationship"
+    );
+}
+
+#[test]
 fn client_kill_primary_addr_requests_replica_dialer_reconnect() {
     let _g = psync_guard();
     let repl = global_replication_state();

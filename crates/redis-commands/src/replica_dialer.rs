@@ -148,67 +148,71 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
             return;
         }
 
-        let (online_offset, defer_fullsync_ack_until_idle) = match outcome {
-            PsyncOutcome::FullResync { offset, replid } => {
-                let async_loading = repl.cached_primary_replid().is_some_and(|id| id == replid);
-                repl.set_replica_link(replica_link_code::TRANSFER);
-                publish_fullsync_loading_state(async_loading);
-                let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
-                let rdb_bytes = match read_fullresync_rdb(&stream, &repl, dialer_epoch) {
-                    Ok(bytes) => bytes,
-                    Err(e) => {
-                        eprintln!("redis-server: replica: RDB sink failed: {}", e);
-                        clear_fullsync_loading_state();
-                        if !repl.dialer_epoch_is_current(dialer_epoch) {
-                            return;
+        let (online_offset, defer_fullsync_ack_until_idle, defer_partial_online_until_idle) =
+            match outcome {
+                PsyncOutcome::FullResync { offset, replid } => {
+                    let async_loading = repl.cached_primary_replid().is_some_and(|id| id == replid);
+                    repl.set_replica_link(replica_link_code::TRANSFER);
+                    publish_fullsync_loading_state(async_loading);
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+                    let rdb_bytes = match read_fullresync_rdb(&stream, &repl, dialer_epoch) {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            eprintln!("redis-server: replica: RDB sink failed: {}", e);
+                            clear_fullsync_loading_state();
+                            if !repl.dialer_epoch_is_current(dialer_epoch) {
+                                return;
+                            }
+                            repl.repl_state
+                                .store(repl_state_code::REPLICA_CONNECTING, Ordering::SeqCst);
+                            repl.set_replica_link(replica_link_code::CONNECT);
+                            thread::sleep(Duration::from_millis(200));
+                            continue;
                         }
+                    };
+
+                    if !repl.dialer_epoch_is_current(dialer_epoch) {
+                        clear_fullsync_loading_state();
+                        return;
+                    }
+                    if !load_rdb_via_runtime_owner(rdb_bytes, offset) {
+                        eprintln!("redis-server: replica: RDB load failed");
+                        clear_fullsync_loading_state();
                         repl.repl_state
                             .store(repl_state_code::REPLICA_CONNECTING, Ordering::SeqCst);
                         repl.set_replica_link(replica_link_code::CONNECT);
                         thread::sleep(Duration::from_millis(200));
                         continue;
                     }
-                };
-
-                if !repl.dialer_epoch_is_current(dialer_epoch) {
                     clear_fullsync_loading_state();
-                    return;
+                    repl.adopt_fullresync_primary(replid, offset);
+                    (offset, true, false)
                 }
-                if !load_rdb_via_runtime_owner(rdb_bytes, offset) {
-                    eprintln!("redis-server: replica: RDB load failed");
-                    clear_fullsync_loading_state();
-                    repl.repl_state
-                        .store(repl_state_code::REPLICA_CONNECTING, Ordering::SeqCst);
-                    repl.set_replica_link(replica_link_code::CONNECT);
-                    thread::sleep(Duration::from_millis(200));
-                    continue;
+                PsyncOutcome::Continue { offset } => {
+                    // Partial resync: no RDB. The backlog catch-up bytes arrive inline
+                    // on the same stream and are consumed by the sink loop below.
+                    // Do not publish `master_link_status:up` until that stream has
+                    // gone idle once; otherwise clients can observe stale keyspace
+                    // before catch-up commands such as FLUSHALL have applied.
+                    eprintln!(
+                        "redis-server: replica: +CONTINUE partial resync from offset {}",
+                        offset
+                    );
+                    (offset, false, true)
                 }
-                clear_fullsync_loading_state();
-                repl.adopt_fullresync_primary(replid, offset);
-                (offset, true)
-            }
-            PsyncOutcome::Continue { offset } => {
-                // Partial resync: no RDB. The backlog catch-up bytes arrive inline
-                // on the same stream and are consumed by the sink loop below, which
-                // advances the offset as it applies them. The keyspace is preserved.
-                eprintln!(
-                    "redis-server: replica: +CONTINUE partial resync from offset {}",
-                    offset
-                );
-                (offset, false)
-            }
-        };
+            };
 
         let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
         crate::aof::force_current_writer_fsynced_repl_offset(online_offset);
         let mut stream_offset = online_offset;
-        repl.repl_state
-            .store(repl_state_code::REPLICA_ONLINE, Ordering::SeqCst);
-        repl.set_replica_link(replica_link_code::CONNECTED);
-        complete_manual_failover_after_psync(&repl);
+        if !defer_partial_online_until_idle {
+            publish_replica_online_after_psync(&repl);
+        }
 
         let defer_fullsync_ack_until_idle =
             Arc::new(AtomicBool::new(defer_fullsync_ack_until_idle));
+        let defer_partial_online_until_idle =
+            Arc::new(AtomicBool::new(defer_partial_online_until_idle));
         let periodic_ack_stream = stream.try_clone().ok();
         if let Some(ack_stream) = periodic_ack_stream {
             let repl_for_ack = Arc::clone(&repl);
@@ -225,6 +229,7 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
             dialer_epoch,
             &mut stream_offset,
             &defer_fullsync_ack_until_idle,
+            &defer_partial_online_until_idle,
         );
         if !repl.dialer_epoch_is_current(dialer_epoch) {
             return;
@@ -283,6 +288,7 @@ fn run_replica_sink_loop(
     dialer_epoch: u64,
     stream_offset: &mut i64,
     defer_fullsync_ack_until_idle: &AtomicBool,
+    defer_partial_online_until_idle: &AtomicBool,
 ) {
     let mut read_buf = Vec::new();
     let mut tmp = vec![0u8; REPLICA_STREAM_READ_BUFFER_SIZE];
@@ -304,6 +310,7 @@ fn run_replica_sink_loop(
                     io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                 ) =>
             {
+                release_partial_online_after_idle(repl, defer_partial_online_until_idle);
                 release_fullsync_ack_after_idle(repl, defer_fullsync_ack_until_idle);
                 continue;
             }
@@ -369,6 +376,23 @@ fn release_fullsync_ack_after_idle(repl: &ReplicationState, pending: &AtomicBool
         return;
     }
     repl.set_replica_link(replica_link_code::CONNECTED);
+}
+
+fn publish_replica_online_after_psync(repl: &ReplicationState) {
+    repl.repl_state
+        .store(repl_state_code::REPLICA_ONLINE, Ordering::SeqCst);
+    repl.set_replica_link(replica_link_code::CONNECTED);
+    complete_manual_failover_after_psync(repl);
+}
+
+fn release_partial_online_after_idle(repl: &ReplicationState, pending: &AtomicBool) {
+    if !pending.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    repl.repl_state
+        .store(repl_state_code::REPLICA_ONLINE, Ordering::SeqCst);
+    repl.set_replica_link(replica_link_code::CONNECTED);
+    complete_manual_failover_after_psync(repl);
 }
 
 enum ReplicaStreamFrame {
@@ -566,7 +590,7 @@ fn select_psync_args(repl: &ReplicationState) -> Vec<Vec<u8>> {
     vec![b"PSYNC".to_vec(), b"?".to_vec(), b"-1".to_vec()]
 }
 
-fn complete_manual_failover_after_psync(repl: &Arc<ReplicationState>) {
+fn complete_manual_failover_after_psync(repl: &ReplicationState) {
     if !repl.complete_manual_failover() {
         return;
     }
@@ -1034,6 +1058,43 @@ mod tests {
     }
 
     #[test]
+    fn partial_resync_link_waits_for_catchup_idle_before_online() {
+        let repl = local_state();
+        repl.repl_state
+            .store(repl_state_code::REPLICA_CONNECTING, Ordering::SeqCst);
+        repl.set_replica_link(replica_link_code::HANDSHAKE);
+        let pending_online = AtomicBool::new(true);
+        let ack_ready = AtomicBool::new(false);
+
+        assert_eq!(repl.replica_link_str(), "handshake");
+        assert!(
+            build_replconf_ack_if_ready(&repl, &ack_ready, 10).is_none(),
+            "a partial-resync replica must not ACK or report online before catch-up idle"
+        );
+
+        release_partial_online_after_idle(&repl, &pending_online);
+
+        assert!(!pending_online.load(Ordering::SeqCst));
+        assert_eq!(repl.replica_link_str(), "connected");
+        assert_eq!(
+            repl.repl_state.load(Ordering::SeqCst),
+            repl_state_code::REPLICA_ONLINE
+        );
+        assert!(
+            build_replconf_ack_if_ready(&repl, &ack_ready, 10).is_some(),
+            "after catch-up stream idle, the replica can publish online and ACK"
+        );
+
+        repl.set_replica_link(replica_link_code::HANDSHAKE);
+        release_partial_online_after_idle(&repl, &pending_online);
+        assert_eq!(
+            repl.replica_link_str(),
+            "handshake",
+            "once the partial-online flag is consumed, later idle checks are no-ops"
+        );
+    }
+
+    #[test]
     fn fullsync_link_suppresses_ack_until_connected() {
         let repl = local_state();
         let ready = AtomicBool::new(false);
@@ -1068,10 +1129,7 @@ mod tests {
         let frames = parse_replica_frames(&mut buf, &mut stream_offset).unwrap();
 
         assert!(buf.is_empty());
-        assert_eq!(
-            stream_offset,
-            (set_frame.len() + incr_frame.len()) as i64
-        );
+        assert_eq!(stream_offset, (set_frame.len() + incr_frame.len()) as i64);
         assert_eq!(frames.len(), 2);
         match &frames[0] {
             ReplicaStreamFrame::Command { argv, offset_after } => {

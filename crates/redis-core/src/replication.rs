@@ -1490,6 +1490,7 @@ impl ReplicationState {
     /// a freshly-spawned dialer thread is not immediately told to quit.
     pub fn become_replica_of(&self, host: RedisString, port: u16) -> u64 {
         self.abort_manual_failover();
+        let was_master = self.repl_state.load(Ordering::Relaxed) == repl_state_code::MASTER;
         let epoch = self
             .dialer_epoch
             .fetch_add(1, Ordering::SeqCst)
@@ -1510,6 +1511,13 @@ impl ReplicationState {
             .store(repl_state_code::REPLICA_CONNECTING, Ordering::Relaxed);
         self.replica_link
             .store(replica_link_code::CONNECT, Ordering::Relaxed);
+        if was_master {
+            match self.cached_primary_replid.lock() {
+                Ok(mut g) => *g = None,
+                Err(p) => *p.into_inner() = None,
+            }
+            self.set_zero_offset_partial_resync_allowed(false);
+        }
         epoch
     }
 
@@ -1552,6 +1560,7 @@ impl ReplicationState {
     }
 
     fn become_replica_of_for_failover(&self, host: RedisString, port: u16) -> u64 {
+        self.clear_replicas_for_role_change();
         let epoch = self
             .dialer_epoch
             .fetch_add(1, Ordering::SeqCst)
@@ -1785,6 +1794,23 @@ impl ReplicationState {
     /// snapshot, so this path avoids re-entering that mutex.
     pub fn remove_replica_for_client_kill(&self, client_id: ClientId) -> ReplicaRemovalOutcome {
         self.remove_replica_inner(client_id, false)
+    }
+
+    /// Clear master-side replica rows when this node leaves the master role.
+    ///
+    /// Existing replica rows are only meaningful while the node is serving as a
+    /// master. Keeping them across failover demotion can make INFO replication
+    /// report an online downstream before the new upstream sync has caught up.
+    pub fn clear_replicas_for_role_change(&self) -> usize {
+        let replica_ids: Vec<ClientId> = match self.replicas.lock() {
+            Ok(g) => g.keys().copied().collect(),
+            Err(p) => p.into_inner().keys().copied().collect(),
+        };
+        let count = replica_ids.len();
+        for client_id in replica_ids {
+            self.remove_replica(client_id);
+        }
+        count
     }
 
     fn remove_replica_inner(

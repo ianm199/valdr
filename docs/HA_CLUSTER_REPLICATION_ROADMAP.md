@@ -127,11 +127,12 @@ Current red/unfinished areas from the 2026-06-13 R0 dashboard in
   failure to a complex-data kit before another broad grind.
 - `replication-aof-sync` is green as of 2026-06-13 after full-sync RDB loads
   refresh appendonly manifests correctly.
-- `replica-redirect.tcl` now has real `FAILOVER` plus client redirect semantics
-  covered by Rust kits and focused live/Tcl probes. The first paused-client
-  failover case passes after a 2026-06-14 kit-first fix that exempts setup
-  `SELECT` from failover all-client pause. The full file still needs a
-  sequential scoreboard before it can be claimed green.
+- `replica-redirect.tcl` is green at 11/0 as of 2026-06-14. Real `FAILOVER`,
+  client redirect semantics, failover pause, waiting-for-sync responses, and
+  blocked-client behavior are covered by Rust kits plus focused live/Tcl probes.
+  The final kit-first slice delayed partial-resync online publication until
+  stream idle and cleared stale master-side replica rows on failover demotion so Tcl
+  `wait_replica_online` cannot observe an old `slave0` row.
 
 ## Execution Rules
 
@@ -670,7 +671,10 @@ Work packets:
   A 2026-06-14 follow-up found the Tcl helper was hanging on its implicit
   `SELECT 9` during failover all-client pause; owner-loop failover pause now
   exempts `SELECT`, and the focused paused-client Tcl selector passes 2/0 in
-  about 3 seconds.
+  about 3 seconds. A later same-day slice cleared the remaining blocked-client
+  sequence by delaying partial-resync online publication until catch-up stream
+  idle and dropping stale primary-side replica rows during failover demotion. The
+  full direct `integration/replica-redirect` scoreboard is now green at 11/0.
 - **R5-REPLICA-PROMOTION:** `REPLICAOF NO ONE` promotion preserves data,
   replid/offset history, client-visible role, and write policy.
 - **R5-CLIENT-REDIRECT:** implement the client capability and redirect behavior
@@ -678,11 +682,9 @@ Work packets:
   on 2026-06-13: redirect-capable clients now get primary-target `REDIRECT`
   replies for replica data commands, `READONLY` clients can keep local reads,
   queue-time redirects dirty MULTI for `EXECABORT`, and queued writes redirect
-  at `EXEC` if the node became a replica after queueing. Remaining work is
-  a full-file sequential Tcl scoreboard, not basic redirect formatting. Evidence
-  from the 2026-06-14 focused selector shows the previous first paused-client
-  no-summary timeout now passes after allowing setup `SELECT` during failover
-  pause.
+  at `EXEC` if the node became a replica after queueing. Evidence from the
+  2026-06-14 direct Tcl scoreboard shows the whole `integration/replica-redirect`
+  file passing at 11/0.
 - **R5-ABORT-ROLLBACK:** timeout and abort paths leave the topology in a
   coherent state.
 
@@ -1002,7 +1004,7 @@ end with a short evidence note in this document or a linked packet doc.
 | `R1-TTL-REWRITE` | Propagate relative TTL writes as absolute expiry | string/db/expire propagation | repl kit + replication-3/4 |
 | `R1-DB-SELECT` | Fix multi-DB replica apply and stream `SELECT` coverage | replication apply/runtime owner | repl kit |
 | `R3-RECONNECT-MATRIX` | Add deterministic PSYNC edge-case tests | repl kit only first | repl kit |
-| `R5-REPLICA-REDIRECT-HARNESS` | Convert the rest of `replica-redirect.tcl` from timeout/no-summary into focused parsed failures or passes | harness observation + failover kit | failover_redirect_kit + focused Tcl |
+| `R5-REPLICA-REDIRECT-HARNESS` | Completed 2026-06-14: direct `replica-redirect.tcl` is green at 11/0; keep it as a regression scoreboard for future failover work | failover kit + Tcl scoreboard | failover_redirect_kit + direct Tcl |
 | `C0-HASHSLOT` | Implement hash slot calculation and vectors | new cluster module | cargo tests |
 | `C0-KEYSPECS` | Audit key extraction / CROSSSLOT requirements | command metadata docs/tests | cargo tests |
 | `H1-SENTINEL-INVENTORY` | Bucket Sentinel TCL and command surface | docs/harness only | no code gate |

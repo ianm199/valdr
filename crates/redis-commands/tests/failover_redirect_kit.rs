@@ -442,6 +442,10 @@ fn force_failover_with_target_waits_then_demotes_on_timeout() {
             .map(|(host, port)| (host.as_bytes().to_vec(), port)),
         Some((b"127.0.0.1".to_vec(), 6385))
     );
+    assert!(
+        repl.replicas_snapshot().is_empty(),
+        "after old-primary demotion, stale primary-side replica rows must not satisfy later wait_replica_online checks"
+    );
 
     let _ = repl.abort_manual_failover();
     repl.become_master();
