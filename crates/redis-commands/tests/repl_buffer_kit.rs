@@ -167,6 +167,39 @@ fn active_fullsync_catchup_releases_when_last_waiter_disconnects() {
 }
 
 #[test]
+fn active_fullsync_catchup_extends_readable_history_beyond_backlog() {
+    let st = ReplicationState::new(generate_runid(), 4);
+    let _rx = attach_replica(&st, 93, 0);
+    install_job(&st, vec![93], 0);
+
+    st.append_to_backlog(b"abcdefghijkl");
+    assert_eq!(
+        st.backlog_snapshot(),
+        (0, 12, 12, 4),
+        "active full-sync catch-up should make INFO-style history outgrow the circular backlog"
+    );
+    assert_eq!(
+        st.read_history_at(0, 12).as_deref(),
+        Some(b"abcdefghijkl".as_slice())
+    );
+    assert!(
+        st.can_read_history_range(0, 12),
+        "PSYNC should be allowed across active catch-up bytes beyond repl-backlog-size"
+    );
+
+    let removed = st.remove_replica(93);
+    assert!(removed.was_repl_bgsave_waiter);
+    assert_eq!(removed.remaining_repl_bgsave_waiters, 0);
+    assert_eq!(
+        st.backlog_snapshot(),
+        (8, 12, 4, 4),
+        "disconnecting the last full-sync waiter should shrink history back to the circular backlog"
+    );
+    assert!(st.read_history_at(0, 1).is_none());
+    assert!(!st.can_read_history_range(0, 12));
+}
+
+#[test]
 fn dual_channel_memory_accounting_excludes_active_fullsync_catchup() {
     let st = ReplicationState::new(generate_runid(), 4);
     let _rx = attach_replica(&st, 101, 0);

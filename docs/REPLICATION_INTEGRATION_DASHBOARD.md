@@ -73,7 +73,7 @@ Artifact:
 | `integration/block-repl` | 2/0 | Green | Real `DEBUG DIGEST` plus single blocked-pop wake propagation now validates the list/zset blocking workload. |
 | `integration/replication-3` | 3/4 | Red | Expiry consistency, writable-replica expired-key behavior, and PFCOUNT expired-key/cache semantics. |
 | `integration/replication-4` | 15/2 | Red | SPOP rewrite cases now pass; remaining failures are divergence/default writable-replica cases. |
-| `integration/replication-buffer` | 7/8 | Red | Shared/private output ownership, writer-side drain, active full-sync catch-up release, and the empty-RDB zero-offset reconnect guard moved the backlog-histlen outgrowth assertions, the non-dual-channel shrink assertion, and the dual-channel low-output-buffer partial-resync assertion green. A fast kit now wires live `dual-channel-replication-enabled` and excludes active full-sync catch-up from normal INFO memory accounting; the slow Tcl file has not been rerun after that packet. Remaining failures are broader partial resync / backlog-memory shrink cases, output-buffer trimming, and the non-dual-channel low-output-buffer PSYNC counter edge case. |
+| `integration/replication-buffer` | 8/7 | Red | Shared/private output ownership, writer-side drain, active full-sync catch-up release, and the empty-RDB zero-offset reconnect guard moved the backlog-histlen outgrowth assertions, the non-dual-channel shrink assertion, and the dual-channel low-output-buffer partial-resync assertion green. INFO now splits ordinary replica client output from Valkey-style replication-buffer fields, moving the focused gate to 8/7. Remaining failures are dual-channel `rdb-channel` topology/counting, broader partial resync / backlog-memory shrink cases, output-buffer trimming, and the non-dual-channel low-output-buffer PSYNC counter edge case. |
 | `integration/replication` | 40/27 | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, the first async-loading CONFIG exception, successful swapdb function-context mismatch, parent-killed child discovery, `repl-diskless-load on-empty-db`, no-longer-useful RDB child cancellation, all four replica-link reply-violation assertions, malformed-PSYNC-offset logging, chained replica `FLUSHDB` / `FLUSHALL` stream relay, `GETSET` rewrite, nonblocking `BRPOPLPUSH` / `BLMOVE` rewrite stats, and empty-blocking `BRPOPLPUSH` / `BLMOVE` commandstats via real digest waits. Remaining failures are counted full-sync, diskless pipe/drop, blocked-list role-change, cache-master, lazy-expire, and old-data rollback cases. |
 | `integration/replication-psync` | timeout | Red | Historical focused gate was 90/0 after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support. Current full-file reruns still time out, but the full-sync detached-tail kit removed the first broad no-reconnect inconsistency. The latest oracle dump narrowed the visible data divergence to a single `0` vs `-0` string value; a fast kit then found and fixed an RDB raw numeric-string fidelity bug in that family. Full Tcl has not been rerun after that fix. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
@@ -1068,6 +1068,59 @@ Takeaway:
   as the debugger. The next scoreboard run should use the focused
   `integration/replication-buffer` gate only after the next buffer slice is
   also kit-green.
+
+### R2-BUFFER-INFO-OUTPUT-SPLIT
+
+Status: focused `integration/replication-buffer` moved from 7/8 to 8/7 on
+2026-06-14.
+
+Implementation:
+
+- `INFO memory` now keeps ordinary replica client output out of
+  `mem_total_replication_buffers`.
+- `mem_replicas_repl_buffer` is currently `0` because the Rust port does not
+  yet model Valkey's dual-channel replica-side `pending_repl_data` buffer as a
+  separate structure.
+- Replica output remains visible under `mem_clients_slaves` / client memory;
+  it no longer inflates Valkey-style replication-buffer fields.
+- `repl_buffer_kit` now explicitly covers active full-sync catch-up making
+  readable history outgrow the circular backlog, then shrinking back to the
+  circular backlog after the last waiting replica disconnects.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands info:: -- --nocapture
+cargo test -p redis-commands --test repl_buffer_kit -- --nocapture
+cargo check -p redis-core -p redis-commands -p redis-server
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-buffer-info-field-split \
+  --profile integration-repl \
+  --timeout-s 300 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --skip-build \
+  --files integration/replication-buffer
+```
+
+Results:
+
+- `redis-commands info::`: 3 passed, 0 failed.
+- `repl_buffer_kit`: 9 passed, 0 failed.
+- `cargo check -p redis-core -p redis-commands -p redis-server`: passed.
+- Focused Tcl artifact:
+  `harness/oracle/results/tcl-survey/20260614T033242068928Z/result.json`.
+- `integration/replication-buffer`: 8 passed, 7 failed, no timeout.
+
+Takeaway:
+
+- The prior `All replicas share one global replication buffer dualchannel yes`
+  memory assertion is gone, and the following shrink test is now green. The
+  remaining failure in that first test is topology/counting: dual-channel
+  expects the syncing replica to expose an extra `type=rdb-channel` connection
+  in `connected_slaves`.
 
 ### R2-BGSAVE-CATCHUP
 

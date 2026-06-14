@@ -286,16 +286,17 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
             .replication_history_extra_len_for_memory(
                 ctx.live_config().dual_channel_replication_enabled(),
             );
-        let repl_output =
-            redis_core::replication::global_replication_state().replica_output_memory_snapshot();
         let mem_replication_backlog = if backlog_histlen > 0 || repl_history_extra > 0 {
             backlog_size.saturating_add(repl_history_extra)
         } else {
             0
         };
-        let mem_replicas_repl_buffer = repl_output.replication_buffer_bytes();
-        let mem_total_replication_buffers =
-            mem_replication_backlog.saturating_add(mem_replicas_repl_buffer);
+        // Valkey reports ordinary replica client output under
+        // mem_clients_slaves. mem_replicas_repl_buffer is reserved for the
+        // dual-channel replica-side pending replication-data buffer, which the
+        // Rust port does not yet model separately.
+        let mem_replicas_repl_buffer = 0usize;
+        let mem_total_replication_buffers = mem_replication_backlog;
         let used_memory = ESTIMATED_SERVER_MEMORY_BASELINE
             .saturating_add(key_memory)
             .saturating_add(mem_clients_normal as u64)
@@ -885,16 +886,18 @@ mod tests {
 
         let reply = client.drain_reply();
         let text = bulk_text(&reply);
-        field_value(text, "mem_replicas_repl_buffer")
-            .parse::<usize>()
-            .expect("numeric replica replication-buffer memory");
+        assert_eq!(field_value(text, "mem_replicas_repl_buffer"), "0");
         assert_eq!(field_value(text, "mem_clients_slaves"), "4096");
-        field_value(text, "mem_total_replication_buffers")
+        let total = field_value(text, "mem_total_replication_buffers")
             .parse::<usize>()
             .expect("numeric total replication-buffer memory");
-        field_value(text, "mem_replication_backlog")
+        let backlog = field_value(text, "mem_replication_backlog")
             .parse::<usize>()
             .expect("numeric replication backlog memory");
+        assert_eq!(
+            total, backlog,
+            "ordinary replica output memory is client memory, not replication-buffer memory"
+        );
     }
 }
 
