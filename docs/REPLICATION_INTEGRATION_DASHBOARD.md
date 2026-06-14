@@ -3669,6 +3669,30 @@ python3 harness/oracle/tcl-survey.py \
   --files integration/replication-psync \
   --isolated-tests-copy \
   --skip-build
+
+# Evidence-only: these used temporary extracted probe files for individual
+# reconnect variants from the first PSYNC family. The probes were deleted after
+# the runs.
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-psync-ok-reconnect-probe \
+  --profile integration-repl \
+  --timeout-s 180 \
+  --baseport 43000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/valdr_psync_ok_reconnect_probe \
+  --isolated-tests-copy \
+  --skip-build
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-psync-no-backlog-probe \
+  --profile integration-repl \
+  --timeout-s 180 \
+  --baseport 43000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/valdr_psync_no_backlog_probe \
+  --isolated-tests-copy \
+  --skip-build
 ```
 
 Results:
@@ -3681,14 +3705,21 @@ Results:
   `harness/oracle/results/tcl-survey/20260614T110355871614Z/result.json`:
   timeout, 1 file without summary, 5 parsed failure lines, 0
   abort/exception points.
+- Disposable extracted `ok psync` reconnect probe
+  `harness/oracle/results/tcl-survey/20260614T111433617729Z/result.json`:
+  3 passed, 0 failed, 0 timed out, 0 parsed failure lines.
+- Disposable extracted `no backlog` reconnect probe
+  `harness/oracle/results/tcl-survey/20260614T111514831947Z/result.json`:
+  3 passed, 0 failed, 0 timed out, 0 parsed failure lines.
 
 Takeaway:
 
 - The missing DB 9 set is not explained by ordinary active full-sync `SADD`
   capture; that path is now covered and green. The next kit should model one
-  of the reconnect variants directly, especially delayed reconnect or backlog
-  expiry, and prove no post-reconnect stream bytes are dropped after the load
-  handlers are killed.
+  of the full-file stress interactions directly. Basic isolated `ok psync` and
+  `no backlog` reconnect probes pass, so the remaining issue likely needs the
+  longer sequence, stronger load, delayed reconnect, backlog expiry, or cleanup
+  interaction between variants to reproduce.
 
 ### 2026-06-14 R2 follow-up: chained fullsync stream DB baseline
 
