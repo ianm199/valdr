@@ -983,6 +983,7 @@ impl RuntimeOwner {
             progressed |= owner.schedule_unpaused_postponed_commands(&server);
             progressed |= owner.apply_pending_listener_replacement(&mut listeners, poll.registry());
             progressed |= owner.install_pending_dynamic_listeners(&mut listeners, poll.registry());
+            progressed |= owner.close_pending_killed_clients();
 
             let timeout = if owner.has_scheduled_commands() {
                 Some(Duration::from_millis(0))
@@ -1017,6 +1018,7 @@ impl RuntimeOwner {
             progressed |= owner.install_pending_dynamic_listeners(&mut listeners, poll.registry());
             owner.sweep_output_buffer_limits();
             progressed |= owner.enforce_client_memory_limits(&server);
+            progressed |= owner.close_pending_killed_clients();
             progressed |= owner.cleanup_closed_clients(poll.registry(), &registry, &server);
 
             let _ = progressed;
@@ -2264,6 +2266,25 @@ impl RuntimeOwner {
         for slot in self.slots.iter_mut().flatten() {
             slot.refresh_output_buffer_state_at(now);
         }
+    }
+
+    fn close_pending_killed_clients(&mut self) -> bool {
+        let killed_ids = match client_info_registry().lock() {
+            Ok(guard) => guard.killed_ids(),
+            Err(poison) => poison.into_inner().killed_ids(),
+        };
+        if killed_ids.is_empty() {
+            return false;
+        }
+        let killed_ids: HashSet<u64> = killed_ids.into_iter().collect();
+        let mut progressed = false;
+        for slot in self.slots.iter_mut().flatten() {
+            if killed_ids.contains(&slot.client.id) && !slot.closed {
+                slot.mark_closed();
+                progressed = true;
+            }
+        }
+        progressed
     }
 
     fn enforce_client_memory_limits(&mut self, server: &redis_core::RedisServer) -> bool {

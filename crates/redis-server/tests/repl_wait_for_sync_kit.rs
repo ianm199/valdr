@@ -323,6 +323,16 @@ fn expect_non_error(frame: Frame) {
     }
 }
 
+fn seed_string_keys(port: u16, prefix: &str, count: usize, value_len: usize) -> io::Result<()> {
+    let mut conn = RespConn::connect(port)?;
+    let value = vec![b'x'; value_len];
+    for i in 0..count {
+        let key = format!("{prefix}:{i:04}");
+        expect_success(conn.command(&[b"SET", key.as_bytes(), value.as_slice()])?);
+    }
+    Ok(())
+}
+
 fn info_field(frame: &Frame, field: &str) -> Option<String> {
     let Frame::Bulk(Some(bytes)) = frame else {
         return None;
@@ -1501,6 +1511,124 @@ fn psync_replica_delayed_reconnect_after_client_kill_gets_continue() {
     assert!(
         !digest.is_empty(),
         "DEBUG DIGEST should return a non-empty digest after delayed partial reconnect"
+    );
+}
+
+#[test]
+fn diskless_swapdb_aborted_fullsync_clears_loading_and_keeps_old_db() {
+    let replica = TestServer::start("repl-swapdb-abort-replica").expect("start replica");
+    let master = TestServer::start("repl-swapdb-abort-master").expect("start master");
+
+    let mut master_conn = RespConn::connect(master.port).expect("connect master");
+    for command in [
+        [b"CONFIG".as_slice(), b"SET", b"repl-diskless-sync", b"yes"].as_slice(),
+        [
+            b"CONFIG".as_slice(),
+            b"SET",
+            b"repl-diskless-sync-delay",
+            b"0",
+        ]
+        .as_slice(),
+        [b"CONFIG".as_slice(), b"SET", b"save", b""].as_slice(),
+        [
+            b"CONFIG".as_slice(),
+            b"SET",
+            b"dual-channel-replication-enabled",
+            b"no",
+        ]
+        .as_slice(),
+        [b"CONFIG".as_slice(), b"SET", b"rdbcompression", b"no"].as_slice(),
+        [b"CONFIG".as_slice(), b"SET", b"rdb-key-save-delay", b"5000"].as_slice(),
+    ] {
+        expect_simple(
+            master_conn.command(command).expect("master CONFIG SET"),
+            b"OK",
+        );
+    }
+
+    let mut replica_conn = RespConn::connect(replica.port).expect("connect replica");
+    for command in [
+        [
+            b"CONFIG".as_slice(),
+            b"SET",
+            b"repl-diskless-load",
+            b"swapdb",
+        ]
+        .as_slice(),
+        [b"CONFIG".as_slice(), b"SET", b"save", b""].as_slice(),
+        [
+            b"CONFIG".as_slice(),
+            b"SET",
+            b"dual-channel-replication-enabled",
+            b"no",
+        ]
+        .as_slice(),
+    ] {
+        expect_simple(
+            replica_conn.command(command).expect("replica CONFIG SET"),
+            b"OK",
+        );
+    }
+
+    seed_string_keys(replica.port, "old", 200, 1).expect("seed old replica DB");
+    expect_success(
+        replica_conn
+            .command(&[b"SET", b"mykey", b"myvalue"])
+            .expect("seed old replica sentinel"),
+    );
+    assert_eq!(
+        replica_conn
+            .command(&[b"DBSIZE"])
+            .expect("old replica DBSIZE"),
+        Frame::Integer(201),
+        "replica should expose its old dataset before full sync"
+    );
+
+    seed_string_keys(master.port, "master", 160, 65_536).expect("seed large master RDB");
+    expect_simple(
+        replica_conn
+            .command(&[b"SLAVEOF", b"127.0.0.1", master.port.to_string().as_bytes()])
+            .expect("SLAVEOF should reply"),
+        b"OK",
+    );
+
+    let loading_info = wait_for_info_field(&replica, b"persistence", "loading", "1")
+        .expect("replica should enter swapdb loading");
+    assert_eq!(
+        info_field(&loading_info, "async_loading").as_deref(),
+        Some("0"),
+        "swapdb without async loading should use ordinary loading: {loading_info:?}"
+    );
+
+    expect_simple(
+        master_conn
+            .command(&[b"CONFIG", b"SET", b"repl-diskless-sync-delay", b"5"])
+            .expect("CONFIG SET repl-diskless-sync-delay"),
+        b"OK",
+    );
+    match master_conn
+        .command(&[b"CLIENT", b"KILL", b"TYPE", b"replica"])
+        .expect("CLIENT KILL TYPE replica should reply")
+    {
+        Frame::Integer(killed) if killed >= 1 => {}
+        frame => panic!("expected to kill at least one loading replica, got {frame:?}"),
+    }
+
+    wait_for_info_field(&replica, b"persistence", "loading", "0")
+        .expect("aborted fullsync should clear replica loading");
+    assert_eq!(
+        replica_conn
+            .command(&[b"GET", b"mykey"])
+            .expect("old sentinel GET after aborted fullsync"),
+        Frame::Bulk(Some(b"myvalue".to_vec())),
+        "aborted swapdb fullsync should keep the old DB exposed"
+    );
+    assert_eq!(
+        replica_conn
+            .command(&[b"DBSIZE"])
+            .expect("old replica DBSIZE after abort"),
+        Frame::Integer(201),
+        "aborted swapdb fullsync must not replace the old DB"
     );
 }
 
