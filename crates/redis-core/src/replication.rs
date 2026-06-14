@@ -874,6 +874,17 @@ impl ReplicationState {
         self.selected_db.store(selected, Ordering::Release);
     }
 
+    /// DB represented by the RDB snapshot delivered during full sync. A
+    /// primary's RDB leaves the command stream at DB 0; a chained replica's RDB
+    /// carries the upstream stream DB it last applied.
+    pub fn fullsync_rdb_stream_db(&self) -> i32 {
+        if self.replica_of_target().is_some() {
+            self.primary_stream_db.load(Ordering::Acquire)
+        } else {
+            0
+        }
+    }
+
     fn has_replication_stream_consumers(&self) -> bool {
         let has_replicas = match self.replicas.lock() {
             Ok(g) => !g.is_empty(),
@@ -2012,11 +2023,11 @@ impl ReplicationState {
             None => 0,
         };
         if !delivered_replicas.is_empty() {
-            // Newly loaded replicas apply post-RDB live bytes from DB 0 unless
-            // the stream explicitly selects a DB. Force the next live write to
-            // carry a SELECT even if older stream consumers already had that DB
-            // selected.
-            self.selected_db.store(-1, Ordering::Release);
+            // Newly loaded primary replicas apply post-RDB live bytes from DB 0
+            // unless the stream explicitly selects a DB. Chained replicas carry
+            // the upstream stream DB in the RDB handoff, so keep that DB as the
+            // baseline instead of emitting a redundant SELECT.
+            self.reset_selected_db_for_full_resync();
         }
         self.set_repl_child_pid(0);
 

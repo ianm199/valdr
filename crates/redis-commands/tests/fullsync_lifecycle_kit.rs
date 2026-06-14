@@ -16,7 +16,7 @@ use redis_core::live_config::ReplDisklessLoadMode;
 use redis_core::object::RedisObject;
 use redis_core::replication::global_replication_state;
 use redis_core::replication::{
-    generate_runid, ReplBgsaveJob, ReplicaConn, ReplicaState, ReplicationState,
+    generate_runid, replica_link_code, ReplBgsaveJob, ReplicaConn, ReplicaState, ReplicationState,
 };
 use redis_core::{Client, ClientId, PubSubRegistry, RedisServer};
 use redis_protocol::frame::{encode_resp2, RespFrame};
@@ -112,6 +112,39 @@ fn run_dispatch_with_server(
         client.reply_buf.extend_from_slice(b"\r\n");
     }
     client.drain_reply()
+}
+
+fn run_replica_apply_on_dbs(
+    client_id: ClientId,
+    dbs: &mut [RedisDb],
+    selected_db: &mut u32,
+    parts: &[&[u8]],
+) -> Vec<u8> {
+    let mut client = Client::new(client_id);
+    client.replication_apply = true;
+    client.db_index = *selected_db;
+    client.authenticated_user = Some(RedisString::from_static(b"default"));
+    client.set_args(parts.iter().map(|p| RedisString::from_bytes(p)).collect());
+    let server = Arc::new(RedisServer::default());
+    let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
+    {
+        let mut ctx =
+            redis_core::CommandContext::with_server_and_db_list(&mut client, dbs, server, pubsub);
+        dispatch(&mut ctx).expect("replica-applied command should dispatch");
+    }
+    *selected_db = client.db_index;
+    client.drain_reply()
+}
+
+fn resp(parts: &[&[u8]]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(format!("*{}\r\n", parts.len()).as_bytes());
+    for part in parts {
+        out.extend_from_slice(format!("${}\r\n", part.len()).as_bytes());
+        out.extend_from_slice(part);
+        out.extend_from_slice(b"\r\n");
+    }
+    out
 }
 
 fn load_library(
@@ -366,6 +399,85 @@ fn waiting_fullsync_job_stays_in_progress_without_visible_child_pid() {
         "after the last waiter disconnects, a zero-pid placeholder job no longer represents active full sync"
     );
     let _ = st.abort_repl_bgsave_job();
+}
+
+#[test]
+fn chained_fullsync_does_not_reselect_upstream_stream_db_after_rdb() {
+    let _guard = global_repl_guard();
+    let repl = global_replication_state();
+    let was_replica = repl.is_replica();
+    repl.become_master();
+    repl.become_replica_of(RedisString::from_static(b"127.0.0.1"), 6379);
+    repl.set_replica_link(replica_link_code::CONNECTED);
+    repl.remember_primary_stream_db(9);
+    repl.selected_db.store(9, std::sync::atomic::Ordering::Release);
+    let _ = repl.take_repl_bgsave_job();
+    repl.set_repl_child_pid(0);
+
+    let client_id = 9_950;
+    let (tx, rx) = mpsc::channel();
+    let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
+    pubsub.lock().unwrap().register_sender(client_id, tx);
+    let mut sync_client = Client::new(client_id);
+    sync_client.set_args(vec![RedisString::from_static(b"SYNC")]);
+    let server = Arc::new(RedisServer::default());
+    let mut db = RedisDb::new(0);
+    {
+        let mut ctx =
+            redis_core::CommandContext::with_server(&mut sync_client, &mut db, server, pubsub);
+        redis_commands::replication::sync_command(&mut ctx).expect("legacy SYNC should start");
+    }
+    assert_eq!(
+        sync_client.drain_reply(),
+        b"",
+        "legacy SYNC should wait for the raw RDB bulk"
+    );
+
+    let job = repl
+        .take_repl_bgsave_job()
+        .expect("SYNC should install a full-sync job");
+    let outcome = repl.complete_repl_bgsave_transfer(job, b"RDB".to_vec());
+    assert_eq!(outcome.delivered_replicas, vec![client_id]);
+    assert_eq!(rx.try_recv().unwrap(), b"$3\r\nRDB".to_vec());
+    let select9 = resp(&[b"SELECT", b"9"]);
+    let mut catch_up = Vec::new();
+    while let Ok(chunk) = rx.try_recv() {
+        catch_up.extend_from_slice(&chunk);
+    }
+    assert!(
+        !catch_up
+            .windows(select9.len())
+            .any(|w| w == select9.as_slice()),
+        "a chained full-sync RDB already represents upstream DB 9; catch-up must not start with redundant SELECT 9, got {:?}",
+        String::from_utf8_lossy(&catch_up)
+    );
+
+    let mut dbs: Vec<RedisDb> = (0..16).map(RedisDb::new).collect();
+    let mut upstream_selected_db = 9;
+    assert_eq!(
+        run_replica_apply_on_dbs(
+            9_951,
+            &mut dbs,
+            &mut upstream_selected_db,
+            &[b"SET", b"key", b"value"]
+        ),
+        b"+OK\r\n"
+    );
+    let mut live = Vec::new();
+    while let Ok(chunk) = rx.try_recv() {
+        live.extend_from_slice(&chunk);
+    }
+    assert_eq!(
+        live,
+        resp(&[b"SET", b"key", b"value"]),
+        "first live DB 9 frame after chained RDB should not be preceded by redundant SELECT 9"
+    );
+
+    repl.remove_replica(client_id);
+    repl.become_master();
+    if was_replica {
+        repl.become_replica_of(RedisString::from_static(b"127.0.0.1"), 6379);
+    }
 }
 
 #[test]

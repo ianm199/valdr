@@ -1072,7 +1072,7 @@ fn arm_full_sync_bgsave(
 
 fn prefix_fullsync_catchup_selected_db(repl: &Arc<ReplicationState>) {
     let selected = repl.selected_db.load(Ordering::Acquire);
-    if selected <= 0 {
+    if selected < 0 || selected == repl.fullsync_rdb_stream_db() {
         return;
     }
     let argv = [

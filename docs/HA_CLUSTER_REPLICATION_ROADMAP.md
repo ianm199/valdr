@@ -404,10 +404,20 @@ Work packets:
   28/39, and all four `replica do not write the reply to the replication link`
   assertions are gone. A follow-up PSYNC parser slice also added the
   compatibility log for malformed PSYNC offsets while keeping
-  `integration/replication-psync` green at 90/0. Remaining R2 work is still
-  full-sync/diskless correctness: old-data rollback, async-load exposure,
-  DB-size drift, diskless pipe/drop logs, cache-master replacement, and offset
-  convergence.
+  `integration/replication-psync` green at 90/0. A refreshed 2026-06-14
+  `integration/replication` scoreboard later timed out with 8 parsed lines,
+  including a chained `FLUSHDB` / `FLUSHALL` stream mismatch where a
+  sub-replica saw an extra leading `SELECT 9`. The chained full-sync stream DB
+  baseline kit now covers that exact shape: a replica accepting legacy `SYNC`
+  treats the upstream stream DB as already represented by the RDB, skips the
+  redundant catch-up `SELECT`, and avoids reselecting DB 9 before the first
+  live write. The follow-up scoreboard
+  `harness/oracle/results/tcl-survey/20260614T095418514204Z/result.json` still
+  timed out, but dropped the FLUSH line and now shows 7 parsed lines.
+  Remaining R2 work is still full-sync/diskless correctness: handshake timeout,
+  BLPOP role-change digest divergence, replica output-byte metrics,
+  multi-replica full-sync offset convergence, cache-master replacement, async
+  rollback/exposure, and diskless pipe/drop logs.
 - **R2-BUFFER-LIMITS:** implement replica output-buffer accounting and
   disconnection policy well enough for `replication-buffer` to count tests
   instead of dying in setup. Partial accounting surface landed on 2026-06-13:
