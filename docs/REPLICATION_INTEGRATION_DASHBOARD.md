@@ -73,9 +73,9 @@ Artifact:
 | `integration/block-repl` | 2/0 | Green | Real `DEBUG DIGEST` plus single blocked-pop wake propagation now validates the list/zset blocking workload. |
 | `integration/replication-3` | 3/4 | Red | Expiry consistency, writable-replica expired-key behavior, and PFCOUNT expired-key/cache semantics. |
 | `integration/replication-4` | 15/2 | Red | SPOP rewrite cases now pass; remaining failures are divergence/default writable-replica cases. |
-| `integration/replication-buffer` | 12/4 | Red | Shared/private output ownership, writer-side drain, active full-sync catch-up release, and the empty-RDB zero-offset reconnect guard moved the backlog-histlen outgrowth assertions, the non-dual-channel shrink assertion, and the dual-channel low-output-buffer partial-resync assertion green. INFO now splits ordinary replica client output from Valkey-style replication-buffer fields and exposes provisional dual-channel `rdb-channel` entries for waiting and sending full-sync replicas. RuntimeOwner applies split transaction catch-up with one pseudo-client, dual-capable replicas advertise `dual-channel`, and owner-loop writes now drain replica pending-output so full-sync `send_bulk` state ends when queued bytes leave the writer. Latest kit-first slices keep retained full-sync history open while a `send_bulk` owner pins it, include `send_bulk` replicas in command-stream fan-out, and make replica output-limit disconnects use the live close sentinel. Focused Tcl artifact `20260614T060739867825Z` stayed at 12/4; remaining failures are offset convergence and backlog-memory shrink in the broad slow-replica shared-history case for both dual and non-dual modes. |
+| `integration/replication-buffer` | 16/0 | Green | The replication-buffer kit line now covers active full-sync catch-up beyond the circular backlog, partial resync from retained shared history, retained-history release after the last dependent replica disconnects, shared output memory charged once, and hard-limit disconnect isolation. Follow-up Tcl scoreboards moved the file through 13/3, 15/1, and finally 16/0 at artifact `20260614T071942726290Z`; keep `repl_buffer_kit` as the inner loop and rerun this Tcl file only as a regression scoreboard. |
 | `integration/replication` | 40/27 | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, the first async-loading CONFIG exception, successful swapdb function-context mismatch, parent-killed child discovery, `repl-diskless-load on-empty-db`, no-longer-useful RDB child cancellation, all four replica-link reply-violation assertions, malformed-PSYNC-offset logging, chained replica `FLUSHDB` / `FLUSHALL` stream relay, `GETSET` rewrite, nonblocking `BRPOPLPUSH` / `BLMOVE` rewrite stats, and empty-blocking `BRPOPLPUSH` / `BLMOVE` commandstats via real digest waits. Remaining failures are counted full-sync, diskless pipe/drop, blocked-list role-change, cache-master, lazy-expire, and old-data rollback cases. |
-| `integration/replication-psync` | timeout | Red | Historical focused gate was 90/0 after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support. Current full-file reruns still time out, but the full-sync detached-tail kit removed the first broad no-reconnect inconsistency. The latest oracle dump narrowed the visible data divergence to a single `0` vs `-0` string value; a fast kit then found and fixed an RDB raw numeric-string fidelity bug in that family. Full Tcl has not been rerun after that fix. |
+| `integration/replication-psync` | timeout | Red | Historical focused gate was 90/0 after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support. Current full-file reruns remain red, but the kit-first loop has moved the visible frontier: raw `-0` RDB fidelity was fixed, set-store commands now rewrite to deterministic `DEL` plus `SADD`, and fresh full-sync catch-up now injects and retains a selected-DB prefix before active writes. The latest single Tcl scoreboard `20260614T091542767472Z` still timed out in the no-reconnect case, now with one replica-only DB 0 set row; reduce that DB0 residue to the next deterministic complex-data kit before another broad Tcl run. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
 | `integration/replica-redirect` | 11/0 | Green | `CLIENT CAPA REDIRECT`, MULTI/EXEC replica redirects, failover pause, waiting-for-sync responses, and blocked-client behavior during failover now pass in the direct Tcl file. The final 2026-06-14 kit-first pass moved the file from timeout/no-summary to parsed 10/1, reduced the stale DB 9 stream return to partial-resync/role-change invariants, then cleared the full file at 11/0 in 6 seconds. |
 | `unit/wait` | 39/0 | Green | WAIT command suite passed after the R4 role-change unblock packet; WAITAOF/FACK edge cases still need separate coverage. |
@@ -3463,3 +3463,76 @@ Takeaway:
   gate remains green. The remaining red `integration/replication` work is not
   PSYNC parser behavior; it is the full-sync, diskless, blocked-list, and
   rollback surface already tracked above.
+
+### 2026-06-14 R3 follow-up: PSYNC set-store and fullsync DB prefix kits
+
+Scope:
+
+- The PSYNC no-reconnect Tcl dump first exposed source-dependent set-store
+  replay: a replica could replay `SUNIONSTORE` / `SINTERSTORE` /
+  `SDIFFSTORE` against later source-set state and produce a different
+  destination. The set commands now suppress verbatim propagation and emit
+  deterministic destination updates: `DEL dst`, followed by sorted `SADD dst`
+  batches when the result is non-empty.
+- The next Tcl dump exposed full-sync catch-up DB drift: catch-up bytes after
+  an RDB load can begin while the master stream is logically on DB 9, but the
+  new replica starts applying post-RDB commands from DB 0. Fresh full sync now
+  appends a real `SELECT <db>` frame after the advertised snapshot offset when
+  the replication stream already has a nonzero selected DB.
+- The BGSAVE-for-replication job now seeds its active catch-up buffer from
+  backlog bytes already appended between the advertised snapshot offset and
+  job installation. That keeps the catch-up window ordered as
+  `SELECT <db>` followed by writes that arrive while the child is active.
+- New fast coverage:
+  `psync_reconnect_kit::fresh_fullsync_catchup_prefixes_selected_db_before_first_active_write`,
+  `repl_correctness_kit::r1_set_store_commands_rewrite_to_deterministic_destination_updates`,
+  and
+  `repl_correctness_kit::r1_set_store_first_fullsync_catchup_rewrite_selects_db9`.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands --test repl_correctness_kit -- --nocapture --test-threads=1
+cargo test -p redis-commands --test psync_reconnect_kit -- --nocapture --test-threads=1
+cargo test -p redis-commands --test fullsync_lifecycle_kit -- --nocapture --test-threads=1
+cargo test -p redis-commands --test repl_buffer_kit -- --nocapture --test-threads=1
+cargo test -p redis-commands --test aof_correctness_kit -- --nocapture --test-threads=1
+cargo test -p redis-commands replication::tests -- --nocapture --test-threads=1
+cargo build -p redis-server --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-psync-selected-db-kit-fix \
+  --profile integration-repl \
+  --timeout-s 360 \
+  --baseport 32000 \
+  --portcount 4000 \
+  --clients 1 \
+  --isolated-tests-copy \
+  --skip-build \
+  --files integration/replication-psync
+```
+
+Results:
+
+- `repl_correctness_kit`: 34 passed, 0 failed.
+- `psync_reconnect_kit`: 18 passed, 0 failed.
+- `fullsync_lifecycle_kit`: 12 passed, 0 failed.
+- `repl_buffer_kit`: 15 passed, 0 failed.
+- `aof_correctness_kit`: 18 passed, 0 failed.
+- `redis-commands` replication unit filter: 13 passed, 0 failed.
+- `cargo build -p redis-server --bin redis-server`: passed.
+- Focused `integration/replication-psync`
+  `harness/oracle/results/tcl-survey/20260614T091542767472Z/result.json`:
+  timed out in
+  `Test replication partial resync: no reconnection, just sync (diskless: no, disabled, dual-channel: no, reconnect: 0)`.
+  The visible dump changed again: the earlier DB 0/DB 9 duplicated zset is
+  gone, and the remaining diff is one replica-only DB 0 set row with member
+  `597971278521`.
+
+Takeaway:
+
+- The long Tcl command was useful as a scoreboard only. The productive loop was
+  to turn each dump signature into a Rust kit, fix that invariant, and rerun
+  the broad Tcl file once. The next PSYNC slice should target the remaining
+  complex-data DB 0 residue directly, likely by replaying active full-sync
+  catch-up for the set/list/zset/hash command mix rather than rerunning the
+  six-minute Tcl file as the debugger.

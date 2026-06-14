@@ -13,6 +13,7 @@ use redis_core::blocked_keys::{
     blocked_keys_index, deadline_from_timeout_secs, BlockedAction, BlockedWaiter,
 };
 use redis_core::client::ClientId;
+use redis_core::client_info::client_info_registry;
 use redis_core::pubsub_registry::PubSubRegistry;
 use redis_core::replication::{
     continue_reply, fullresync_reply, global_replication_state, replica_link_code,
@@ -910,7 +911,7 @@ fn handle_psync(
     }
 
     let snapshot_offset = master_offset;
-    repl.reset_selected_db_for_full_resync();
+    prefix_fullsync_catchup_selected_db(&repl);
     if let Some(sender) = outbound {
         register_replica(
             &repl,
@@ -1046,7 +1047,7 @@ fn arm_full_sync_bgsave(
         );
         return;
     }
-    match crate::persist::bgsave_for_replication(ctx, client_id) {
+    match crate::persist::bgsave_for_replication(ctx, client_id, snapshot_offset) {
         crate::persist::BgsaveForReplResult::Started => {
             eprintln!(
                 "redis-server: PSYNC client_id={} → FULLRESYNC at offset {} (BGSAVE started)",
@@ -1067,6 +1068,61 @@ fn arm_full_sync_bgsave(
             );
         }
     }
+}
+
+fn prefix_fullsync_catchup_selected_db(repl: &Arc<ReplicationState>) {
+    let selected = repl.selected_db.load(Ordering::Acquire);
+    if selected <= 0 {
+        return;
+    }
+    let argv = [
+        RedisString::from_bytes(b"SELECT"),
+        RedisString::from_vec(selected.to_string().into_bytes()),
+    ];
+    append_fullsync_catchup_prefix(repl, &argv);
+}
+
+fn append_fullsync_catchup_prefix(repl: &Arc<ReplicationState>, argv: &[RedisString]) {
+    let bytes = crate::aof::encode_resp_command(argv);
+    repl.append_to_backlog(&bytes);
+    for client_id in streaming_replica_client_ids(repl) {
+        if !repl.send_to_replica(client_id, bytes.clone()) {
+            eprintln!(
+                "redis-server: full-sync catch-up SELECT fan-out failed for client {}",
+                client_id
+            );
+        }
+    }
+}
+
+fn streaming_replica_client_ids(repl: &ReplicationState) -> Vec<ClientId> {
+    let mut ids: Vec<_> = {
+        let guard = match repl.replicas.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard
+            .values()
+            .filter(|conn| {
+                matches!(
+                    ReplicaState::from_u8(conn.state.load(Ordering::Acquire)),
+                    ReplicaState::Online | ReplicaState::SendingRdb
+                )
+            })
+            .map(|conn| conn.client_id)
+            .collect()
+    };
+    if ids.is_empty() {
+        return ids;
+    }
+    let killed_ids = match client_info_registry().lock() {
+        Ok(g) => g.killed_ids(),
+        Err(p) => p.into_inner().killed_ids(),
+    };
+    if !killed_ids.is_empty() {
+        ids.retain(|id| !killed_ids.contains(id));
+    }
+    ids
 }
 
 /// True when the replica's requested offset lies inside the live backlog
@@ -1283,6 +1339,42 @@ mod tests {
             .lookup_key_read(b"local")
             .expect("local key should survive until RDB apply replaces keyspace");
         assert_eq!(local.string_bytes().as_ref(), b"value");
+    }
+
+    #[test]
+    fn fullsync_catchup_prefixes_current_selected_db_frame() {
+        let repl = global_replication_state();
+        repl.become_master();
+        let client_id = 1_220_001;
+        let (tx, rx) = mpsc::channel();
+        repl.add_replica(ReplicaConn::new(
+            client_id,
+            ReplicaState::Online,
+            repl.master_offset(),
+            tx,
+        ));
+        repl.selected_db.store(9, Ordering::Release);
+
+        let before = repl.master_offset();
+        prefix_fullsync_catchup_selected_db(&repl);
+        let after = repl.master_offset();
+
+        let expected = crate::aof::encode_resp_command(&[
+            RedisString::from_bytes(b"SELECT"),
+            RedisString::from_bytes(b"9"),
+        ]);
+        let sent = rx
+            .recv_timeout(StdDuration::from_secs(1))
+            .expect("SELECT should be fanned out to existing stream consumers");
+        repl.remove_replica(client_id);
+        repl.selected_db.store(-1, Ordering::Release);
+
+        assert_eq!(sent, expected);
+        assert_eq!(
+            after - before,
+            expected.len() as i64,
+            "the SELECT prefix must be real backlog bytes so replica ACK offsets stay aligned"
+        );
     }
 
     #[test]

@@ -887,6 +887,21 @@ pub enum BgsaveForReplResult {
     Failed,
 }
 
+fn initial_repl_bgsave_catch_up(
+    repl: &Arc<redis_core::replication::ReplicationState>,
+    snapshot_offset: i64,
+) -> Vec<u8> {
+    let current_offset = repl.master_offset();
+    if current_offset <= snapshot_offset {
+        return Vec::new();
+    }
+    repl.read_history_at(
+        snapshot_offset,
+        current_offset.saturating_sub(snapshot_offset) as usize,
+    )
+    .unwrap_or_default()
+}
+
 /// Start a background RDB save destined for a freshly-attached replica.
 /// Differs from [`bgsave_command`] in three ways:
 /// * Writes to a per-PID temp file `<dir>/temp-repl-<child-pid>.rdb` so
@@ -904,13 +919,13 @@ pub enum BgsaveForReplResult {
 pub fn bgsave_for_replication(
     ctx: &mut CommandContext<'_>,
     requesting_client_id: ClientId,
+    snapshot_offset: i64,
 ) -> BgsaveForReplResult {
     let repl = global_replication_state();
     if repl.repl_child_pid() != 0 {
         return BgsaveForReplResult::Skipped;
     }
     let cfg = Arc::clone(&ctx.server().live_config);
-    let snapshot_offset = repl.master_offset();
     let dir = cfg.rdb_dir();
     let parent_pid = std::process::id() as i32;
     let temp_path: PathBuf =
@@ -960,7 +975,7 @@ pub fn bgsave_for_replication(
                 temp_path,
                 waiting_replicas: vec![requesting_client_id],
                 snapshot_offset,
-                catch_up_bytes: Vec::new(),
+                catch_up_bytes: initial_repl_bgsave_catch_up(&repl, snapshot_offset),
                 needs_getack_on_completion: redis_core::blocked_keys::blocked_replication_wait_any(
                 ),
             });
@@ -979,7 +994,7 @@ pub fn bgsave_for_replication(
         temp_path,
         waiting_replicas: vec![requesting_client_id],
         snapshot_offset,
-        catch_up_bytes: Vec::new(),
+        catch_up_bytes: initial_repl_bgsave_catch_up(&repl, snapshot_offset),
         needs_getack_on_completion: redis_core::blocked_keys::blocked_replication_wait_any(),
     });
     let spawn = thread::Builder::new()

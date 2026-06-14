@@ -33,7 +33,7 @@ use std::time::Duration;
 use redis_core::blocked_keys::{blocked_keys_index, BlockedAction, BlockedSide, BlockedWaiter};
 use redis_core::metrics::{command_stats_snapshot, reset_command_stats};
 use redis_core::replication::{
-    global_replication_state, ReplicaConn, ReplicaState, ReplicationState,
+    global_replication_state, ReplBgsaveJob, ReplicaConn, ReplicaState, ReplicationState,
 };
 use redis_core::{Client, PubSubRegistry, RedisDb, RedisServer};
 use redis_types::RedisString;
@@ -914,6 +914,157 @@ fn r1_spop_rewrites_replication_to_deterministic_commands() {
             .any(|w| w == resp(&[b"SPOP", b"batch", b"1025"]).as_slice()),
         "large SPOP count itself must not be propagated"
     );
+}
+
+#[test]
+fn r1_set_store_commands_rewrite_to_deterministic_destination_updates() {
+    let _g = repl_guard();
+    let cap = ReplCapture::attach(900_016, 0);
+    let mut db = RedisDb::new(0);
+
+    assert_eq!(
+        dispatch_as_primary(30, &mut db, &[b"SADD", b"src", b"a"]),
+        b":1\r\n"
+    );
+    assert_eq!(
+        dispatch_as_primary(31, &mut db, &[b"SADD", b"other", b"b"]),
+        b":1\r\n"
+    );
+    let _ = cap.drain();
+
+    let reply = dispatch_as_primary(32, &mut db, &[b"SUNIONSTORE", b"dst", b"src", b"other"]);
+    assert_eq!(reply, b":2\r\n");
+    let stream = cap.drain();
+
+    assert!(
+        !stream
+            .windows(b"SUNIONSTORE".len())
+            .any(|w| w == b"SUNIONSTORE"),
+        "source-dependent SUNIONSTORE must not be propagated verbatim: {:?}",
+        String::from_utf8_lossy(&stream)
+    );
+    assert!(
+        stream
+            .windows(resp(&[b"DEL", b"dst"]).len())
+            .any(|w| w == resp(&[b"DEL", b"dst"]).as_slice()),
+        "store rewrite must clear the destination before replaying members: {:?}",
+        String::from_utf8_lossy(&stream)
+    );
+    assert!(
+        stream.windows(b"SADD".len()).any(|w| w == b"SADD")
+            && stream.windows(b"dst".len()).any(|w| w == b"dst")
+            && stream.windows(b"a".len()).any(|w| w == b"a")
+            && stream.windows(b"b".len()).any(|w| w == b"b"),
+        "store rewrite must replay the concrete destination members: {:?}",
+        String::from_utf8_lossy(&stream)
+    );
+
+    let reply = dispatch_as_primary(33, &mut db, &[b"SINTERSTORE", b"empty", b"src", b"missing"]);
+    assert_eq!(reply, b":0\r\n");
+    let stream = cap.drain();
+    assert!(
+        !stream
+            .windows(b"SINTERSTORE".len())
+            .any(|w| w == b"SINTERSTORE"),
+        "empty SINTERSTORE must not be propagated verbatim: {:?}",
+        String::from_utf8_lossy(&stream)
+    );
+    assert!(
+        stream
+            .windows(resp(&[b"DEL", b"empty"]).len())
+            .any(|w| w == resp(&[b"DEL", b"empty"]).as_slice()),
+        "empty store rewrite must delete the destination: {:?}",
+        String::from_utf8_lossy(&stream)
+    );
+}
+
+#[test]
+fn r1_set_store_first_fullsync_catchup_rewrite_selects_db9() {
+    let _g = repl_guard();
+    let repl = global_replication_state();
+    repl.become_master();
+    let _ = repl.take_repl_bgsave_job();
+    repl.set_repl_child_pid(0);
+
+    let mut primary_dbs: Vec<RedisDb> = (0..16).map(RedisDb::new).collect();
+    let mut primary_selected_db = 9;
+    assert_eq!(
+        dispatch_as_primary_on_dbs(
+            34,
+            &mut primary_dbs,
+            &mut primary_selected_db,
+            &[b"SADD", b"src", b"a"]
+        ),
+        b":1\r\n"
+    );
+    assert_eq!(
+        dispatch_as_primary_on_dbs(
+            35,
+            &mut primary_dbs,
+            &mut primary_selected_db,
+            &[b"SADD", b"other", b"b"]
+        ),
+        b":1\r\n"
+    );
+
+    repl.selected_db.store(-1, Ordering::Release);
+    let snapshot_offset = repl.master_offset();
+    let dir = unique_temp_dir("repl-kit-set-store-catchup");
+    let temp_path = dir.join("temp-repl-set-store.rdb");
+    repl.install_repl_bgsave_job(ReplBgsaveJob {
+        child_pid: 0,
+        temp_path: temp_path.clone(),
+        waiting_replicas: vec![900_017],
+        snapshot_offset,
+        catch_up_bytes: Vec::new(),
+        needs_getack_on_completion: false,
+    });
+
+    assert_eq!(
+        dispatch_as_primary_on_dbs(
+            36,
+            &mut primary_dbs,
+            &mut primary_selected_db,
+            &[b"SUNIONSTORE", b"dst", b"src", b"other"]
+        ),
+        b":2\r\n"
+    );
+    let job = repl
+        .take_repl_bgsave_job()
+        .expect("active full-sync job should capture rewritten set-store bytes");
+    let _ = std::fs::remove_file(&temp_path);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let catchup = job.catch_up_bytes;
+    assert!(
+        catchup.starts_with(&resp(&[b"SELECT", b"9"])),
+        "first active full-sync set-store rewrite must select DB 9, got {:?}",
+        String::from_utf8_lossy(&catchup)
+    );
+    assert!(
+        !catchup
+            .windows(b"SUNIONSTORE".len())
+            .any(|w| w == b"SUNIONSTORE"),
+        "set-store catch-up must be concrete destination writes, got {:?}",
+        String::from_utf8_lossy(&catchup)
+    );
+
+    let mut replica_dbs: Vec<RedisDb> = (0..16).map(RedisDb::new).collect();
+    let mut replica_selected_db = 0;
+    apply_resp_stream_as_replica_on_dbs(39, &mut replica_dbs, &mut replica_selected_db, &catchup);
+    assert_eq!(replica_selected_db, 9);
+    assert!(
+        replica_dbs[0].lookup_key_read(b"dst").is_none(),
+        "DB 0 must not receive the DB 9 set-store destination"
+    );
+    let dst = replica_dbs[9]
+        .lookup_key_read(b"dst")
+        .and_then(|obj| obj.set().cloned())
+        .expect("DB 9 should receive the concrete set-store destination");
+    assert!(dst.contains(&RedisString::from_static(b"a")));
+    assert!(dst.contains(&RedisString::from_static(b"b")));
+
+    repl.selected_db.store(-1, Ordering::Release);
 }
 
 #[test]

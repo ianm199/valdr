@@ -8,6 +8,7 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::time::Duration;
 
 use redis_core::client_info::client_info_registry;
 use redis_core::replication::{
@@ -175,20 +176,29 @@ fn run_dispatch(client: &mut Client, db: &mut RedisDb, cmd: &[&[u8]]) -> Vec<u8>
     reply
 }
 
+fn reap_repl_child_pid(pid: i32) {
+    if pid <= 0 {
+        return;
+    }
+    #[cfg(unix)]
+    unsafe {
+        let _ = libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        let mut status: libc::c_int = 0;
+        let _ = libc::waitpid(pid as libc::pid_t, &mut status, 0);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+    }
+}
+
 fn cleanup_repl_bgsave(repl: &Arc<ReplicationState>) {
     if let Some(job) = repl.take_repl_bgsave_job() {
         let _ = std::fs::remove_file(&job.temp_path);
         let _ = std::fs::remove_file(Path::new(&job.temp_path).with_extension("rdb.tmp"));
     }
     let pid = repl.repl_child_pid();
-    if pid > 0 {
-        #[cfg(unix)]
-        unsafe {
-            let _ = libc::kill(pid as libc::pid_t, libc::SIGTERM);
-            let mut status: libc::c_int = 0;
-            let _ = libc::waitpid(pid as libc::pid_t, &mut status, 0);
-        }
-    }
+    reap_repl_child_pid(pid);
     repl.set_repl_child_pid(0);
 }
 
@@ -197,6 +207,7 @@ fn reset_global_primary(repl: &Arc<ReplicationState>, backlog_size: usize) {
     repl.resize_backlog_preserving_history(backlog_size);
     let runid = *repl.runid();
     repl.adopt_fullresync_primary(runid, 0);
+    repl.selected_db.store(-1, Ordering::Release);
     repl.set_zero_offset_partial_resync_allowed(false);
     repl.become_master();
 }
@@ -492,6 +503,80 @@ fn same_primary_reconnect_after_db9_minus_zero_replays_later_zero_only() {
     assert_eq!(drive.counters_after.1, drive.counters_before.1 + 1);
     assert_eq!(drive.counters_after.0, drive.counters_before.0);
     assert_eq!(drive.counters_after.2, drive.counters_before.2);
+}
+
+#[test]
+fn fresh_fullsync_catchup_prefixes_selected_db_before_first_active_write() {
+    let _g = psync_guard();
+    let repl = global_replication_state();
+    let _reset = GlobalReplReset::new(&repl);
+    let server = Arc::new(RedisServer::default());
+    let client_id = 1_100_020;
+    let snapshot_offset = repl.master_offset();
+
+    repl.selected_db.store(9, Ordering::Release);
+
+    let (tx, rx) = mpsc::channel();
+    let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
+    pubsub.lock().unwrap().register_sender(client_id, tx);
+
+    let mut client = Client::new(client_id);
+    client.set_args(vec![
+        RedisString::from_static(b"PSYNC"),
+        RedisString::from_static(b"?"),
+        RedisString::from_static(b"-1"),
+    ]);
+    let mut db = RedisDb::new(0);
+    {
+        let mut ctx = redis_core::CommandContext::with_server(&mut client, &mut db, server, pubsub);
+        redis_commands::replication::psync_command(&mut ctx).expect("psync command");
+    }
+    let reply = client.drain_reply();
+    assert!(
+        reply.starts_with(b"+FULLRESYNC"),
+        "fresh PSYNC should start a full sync, got {:?}",
+        String::from_utf8_lossy(&reply)
+    );
+
+    let select9 = resp(&[b"SELECT", b"9"]);
+    let zadd = resp(&[
+        b"ZADD",
+        b"200185508560",
+        b"0.3282887667083595",
+        b"-785098819",
+    ]);
+    repl.append_to_backlog(&zadd);
+
+    let job = repl
+        .take_repl_bgsave_job()
+        .expect("fresh full sync should install a replication BGSAVE job");
+    assert_eq!(job.snapshot_offset, snapshot_offset);
+    let mut expected_catchup = select9;
+    expected_catchup.extend_from_slice(&zadd);
+    assert_eq!(
+        job.catch_up_bytes, expected_catchup,
+        "active full-sync catch-up must include the selected-DB prefix before later writes"
+    );
+
+    let temp_path = job.temp_path.clone();
+    let child_pid = job.child_pid;
+    reap_repl_child_pid(child_pid);
+    let outcome = repl.complete_repl_bgsave_transfer(job, b"RDB".to_vec());
+    let _ = std::fs::remove_file(&temp_path);
+    let _ = std::fs::remove_file(Path::new(&temp_path).with_extension("rdb.tmp"));
+
+    assert_eq!(outcome.delivered_replicas, vec![client_id]);
+    assert!(outcome.failed_replicas.is_empty());
+    assert_eq!(outcome.retained_catchup_len, expected_catchup.len());
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        b"$3\r\nRDB".to_vec()
+    );
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        expected_catchup
+    );
+    repl.remove_replica(client_id);
 }
 
 #[test]

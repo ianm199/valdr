@@ -713,7 +713,7 @@ fn reply_member_array(ctx: &mut CommandContext, members: HashSet<RedisString>) -
 }
 
 /// Store `members` at `dst`, deleting `dst` when `members` is empty.
-fn store_set(ctx: &mut CommandContext, dst: RedisString, members: HashSet<RedisString>) -> i64 {
+fn store_set(ctx: &mut CommandContext, dst: RedisString, members: &HashSet<RedisString>) -> i64 {
     if members.is_empty() {
         ctx.db_mut().sync_delete(&dst);
         return 0;
@@ -723,11 +723,39 @@ fn store_set(ctx: &mut CommandContext, dst: RedisString, members: HashSet<RedisS
     {
         let h = obj.set_mut().expect("new_set constructs an Inline set");
         for m in members {
-            h.insert(m);
+            h.insert(m.clone());
         }
     }
     ctx.db_mut().set_key(dst, obj, 0);
     len
+}
+
+fn propagate_set_store_rewrite(
+    ctx: &mut CommandContext,
+    dst: &RedisString,
+    members: &HashSet<RedisString>,
+) {
+    const BATCH_SIZE: usize = 1024;
+    let db_id = ctx.selected_db_id();
+    let del = [RedisString::from_bytes(b"DEL"), dst.clone()];
+    let mut last_offset = crate::dispatch::propagate_command_from_wake(db_id, &del);
+
+    if !members.is_empty() {
+        let mut sorted: Vec<RedisString> = members.iter().cloned().collect();
+        sorted.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        for chunk in sorted.chunks(BATCH_SIZE) {
+            let mut sadd = Vec::with_capacity(chunk.len() + 2);
+            sadd.push(RedisString::from_bytes(b"SADD"));
+            sadd.push(dst.clone());
+            sadd.extend(chunk.iter().cloned());
+            last_offset = crate::dispatch::propagate_command_from_wake(db_id, &sadd);
+        }
+    }
+
+    if last_offset > 0 {
+        ctx.client_mut().last_write_repl_offset = last_offset;
+    }
+    ctx.client_mut().set_prevent_propagation();
 }
 
 /// SINTER key [key...]
@@ -750,7 +778,8 @@ pub fn sinterstore_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let dst = ctx.arg_owned(1usize)?;
     let snapshots = collect_set_snapshots(ctx, 2, argc)?;
     let result = intersect_sets(snapshots);
-    let stored = store_set(ctx, dst.clone(), result);
+    let stored = store_set(ctx, dst.clone(), &result);
+    propagate_set_store_rewrite(ctx, &dst, &result);
     ctx.notify_keyspace_event(NOTIFY_SET, b"sinterstore", &dst);
     ctx.reply_integer(stored)
 }
@@ -822,7 +851,8 @@ pub fn sunionstore_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let dst = ctx.arg_owned(1usize)?;
     let snapshots = collect_set_snapshots(ctx, 2, argc)?;
     let result = union_sets(snapshots);
-    let stored = store_set(ctx, dst.clone(), result);
+    let stored = store_set(ctx, dst.clone(), &result);
+    propagate_set_store_rewrite(ctx, &dst, &result);
     ctx.notify_keyspace_event(NOTIFY_SET, b"sunionstore", &dst);
     ctx.reply_integer(stored)
 }
@@ -847,7 +877,8 @@ pub fn sdiffstore_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let dst = ctx.arg_owned(1usize)?;
     let snapshots = collect_set_snapshots(ctx, 2, argc)?;
     let result = diff_sets(snapshots);
-    let stored = store_set(ctx, dst.clone(), result);
+    let stored = store_set(ctx, dst.clone(), &result);
+    propagate_set_store_rewrite(ctx, &dst, &result);
     ctx.notify_keyspace_event(NOTIFY_SET, b"sdiffstore", &dst);
     ctx.reply_integer(stored)
 }
