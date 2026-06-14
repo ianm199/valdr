@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use redis_core::client_info::client_info_registry;
 use redis_core::replication::{
-    global_replication_state, ReplicaConn, ReplicaState, ReplicationState,
+    global_replication_state, replica_link_code, ReplicaConn, ReplicaState, ReplicationState,
     DEFAULT_REPL_BACKLOG_SIZE, REPLICA_CAPA_DUAL_CHANNEL,
 };
 use redis_core::{Client, PubSubRegistry, RedisDb, RedisServer};
@@ -685,6 +685,56 @@ fn malformed_psync_offset_errors_without_fullsync_side_effects() {
     assert!(!client.is_replica);
     assert_eq!(repl.sync_counters(), counters_before);
     assert_eq!(repl.connected_replicas(), replicas_before);
+}
+
+#[test]
+fn syncing_replica_refuses_downstream_psync_until_upstream_connected() {
+    let _g = psync_guard();
+    let repl = global_replication_state();
+    let _reset = GlobalReplReset::new(&repl);
+    repl.become_replica_of(arg(b"127.0.0.1"), 6379);
+    repl.set_replica_link(replica_link_code::TRANSFER);
+    let counters_before = repl.sync_counters();
+    let replicas_before = repl.connected_replicas();
+
+    let mut client = Client::new(1_100_011);
+    let mut db = RedisDb::new(0);
+    let reply = run_dispatch(&mut client, &mut db, &[b"PSYNC", b"?", b"-1"]);
+
+    assert!(
+        reply.starts_with(b"-NOMASTERLINK Can't SYNC while not connected with my master"),
+        "syncing replica should refuse chained PSYNC, got {:?}",
+        String::from_utf8_lossy(&reply)
+    );
+    assert!(!client.is_replica);
+    assert_eq!(repl.sync_counters(), counters_before);
+    assert_eq!(repl.connected_replicas(), replicas_before);
+}
+
+#[test]
+fn connected_replica_can_serve_chained_psync() {
+    let _g = psync_guard();
+    let repl = global_replication_state();
+    let _reset = GlobalReplReset::new(&repl);
+    repl.become_replica_of(arg(b"127.0.0.1"), 6379);
+    repl.set_replica_link(replica_link_code::CONNECTED);
+    repl.append_to_backlog(&resp(&[b"SET", b"from-upstream", b"1"]));
+
+    let reply = drive_psync(
+        1_100_012,
+        vec![
+            b"PSYNC".to_vec(),
+            runid_string(&repl),
+            repl.master_offset().to_string().into_bytes(),
+        ],
+    );
+
+    assert!(
+        reply.reply.starts_with(b"+CONTINUE"),
+        "connected chained replica should serve PSYNC, got {:?}",
+        String::from_utf8_lossy(&reply.reply)
+    );
+    assert_eq!(reply.counters_after.1, reply.counters_before.1 + 1);
 }
 
 #[test]

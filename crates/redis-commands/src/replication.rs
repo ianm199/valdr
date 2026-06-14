@@ -15,9 +15,9 @@ use redis_core::blocked_keys::{
 use redis_core::client::ClientId;
 use redis_core::pubsub_registry::PubSubRegistry;
 use redis_core::replication::{
-    continue_reply, fullresync_reply, global_replication_state, ManualFailoverAdvance, ReplicaConn,
-    ReplicaState, ReplicationState, REPLICA_CAPA_DUAL_CHANNEL, REPLICA_CAPA_EOF,
-    REPLICA_CAPA_PSYNC2,
+    continue_reply, fullresync_reply, global_replication_state, replica_link_code,
+    ManualFailoverAdvance, ReplicaConn, ReplicaState, ReplicationState, REPLICA_CAPA_DUAL_CHANNEL,
+    REPLICA_CAPA_EOF, REPLICA_CAPA_PSYNC2,
 };
 use redis_core::util::mstime;
 use redis_core::CommandContext;
@@ -853,6 +853,13 @@ fn handle_psync(
     send_fullresync_line: bool,
 ) -> RedisResult<()> {
     let repl = global_replication_state();
+    if repl.replica_of_target().is_some()
+        && repl.replica_link.load(Ordering::Relaxed) != replica_link_code::CONNECTED
+    {
+        return Err(RedisError::runtime(
+            b"NOMASTERLINK Can't SYNC while not connected with my master",
+        ));
+    }
     repl.expire_backlog_if_idle(mstime(), ctx.live_config().repl_backlog_ttl());
     let our_runid = repl.runid();
     let master_offset = repl.master_offset();
@@ -1516,5 +1523,7 @@ mod tests {
 //   unsafe_blocks: 0
 //   notes:         Deleted dead helper block_replica_waiter (no callers).
 //                  PSYNC/SYNC handshake accept; REPLICAOF toggle. Replica
-//                  dialer + RDB transfer are Wave B/C TODOs.
+//                  dialer + RDB transfer are Wave B/C TODOs. Refuses chained
+//                  SYNC/PSYNC while this server's own upstream link is not
+//                  connected, matching Valkey's NOMASTERLINK guard.
 // ──────────────────────────────────────────────────────────────────────────

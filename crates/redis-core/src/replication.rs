@@ -2195,13 +2195,28 @@ impl ReplicationState {
         if self.repl_child_pid() != 0 {
             return true;
         }
+        let job_has_waiters = match self.repl_bgsave_job.lock() {
+            Ok(g) => g
+                .as_ref()
+                .is_some_and(|job| !job.waiting_replicas.is_empty()),
+            Err(p) => p
+                .into_inner()
+                .as_ref()
+                .is_some_and(|job| !job.waiting_replicas.is_empty()),
+        };
+        if job_has_waiters {
+            return true;
+        }
         let guard = match self.replicas.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
-        guard
-            .values()
-            .any(|replica| replica.state() == ReplicaState::SendingRdb)
+        guard.values().any(|replica| {
+            matches!(
+                replica.state(),
+                ReplicaState::WaitingBgsave | ReplicaState::SendingRdb
+            )
+        })
     }
 }
 

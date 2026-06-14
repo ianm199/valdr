@@ -339,6 +339,28 @@ fn fullsync_completion_includes_backlog_tail_after_job_detaches() {
 }
 
 #[test]
+fn waiting_fullsync_job_stays_in_progress_without_visible_child_pid() {
+    let st = ReplicationState::new(generate_runid(), 64);
+    let _rx = attach_waiting_replica(&st, 86, 0);
+
+    install_job_with_pid(&st, 0, PathBuf::from("waiting-no-pid.rdb"), vec![86]);
+
+    assert!(
+        st.fullsync_transfer_in_progress(),
+        "INFO persistence must still report replication BGSAVE in progress while a full-sync waiter is waiting"
+    );
+
+    let removed = st.remove_replica(86);
+    assert!(removed.was_repl_bgsave_waiter);
+    assert_eq!(removed.remaining_repl_bgsave_waiters, 0);
+    assert!(
+        !st.fullsync_transfer_in_progress(),
+        "after the last waiter disconnects, a zero-pid placeholder job no longer represents active full sync"
+    );
+    let _ = st.abort_repl_bgsave_job();
+}
+
+#[test]
 fn last_fullsync_waiter_disconnect_marks_repl_child_useless() {
     let st = ReplicationState::new(generate_runid(), 4);
     let dir = unique_temp_dir("fullsync-useless-child");

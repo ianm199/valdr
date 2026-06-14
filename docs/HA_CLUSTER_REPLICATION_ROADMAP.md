@@ -472,6 +472,30 @@ Work packets:
   replica1 catch-up and fails the follow-on histlen assertion, while
   dual-channel `no` reaches the later assertion that replica2 must still be in
   `sync` while BGSAVE remains in progress.
+  A small full-sync visibility kit also made
+  `ReplicationState::fullsync_transfer_in_progress()` treat a zero-pid
+  replication BGSAVE job with waiting replicas, plus `wait_bgsave` replicas,
+  as an active transfer for `INFO persistence`; this was correctness-tightening
+  and did not move the Tcl scoreboard by itself.
+  The chained-replica PSYNC guard slice then mirrored Valkey's
+  `NOMASTERLINK` refusal for `SYNC`/`PSYNC` while a replica's own upstream
+  link is not `connected`. `psync_reconnect_kit` now covers both sides:
+  a replica in `sync` refuses downstream PSYNC without mutating counters or
+  client state, while a `connected` chained replica can still serve PSYNC.
+  The Tcl survey wrapper also gained `--only` pass-through so dependent Tcl
+  slices can be used as a faster scoreboard. Focused dependent slices passed:
+  `harness/oracle/results/tcl-survey/20260614T070730539584Z/result.json`
+  (`dualchannel yes` backlog-growth + partial-resync pair) and
+  `harness/oracle/results/tcl-survey/20260614T070747013346Z/result.json`
+  (`dualchannel no` pair). The six-test dependent trio artifact
+  `harness/oracle/results/tcl-survey/20260614T070809444708Z/result.json`
+  is 5/1, and the authoritative full focused gate
+  `python3 harness/oracle/tcl-survey.py --runner-id repl-buffer-chained-sync-nomasterlink-full --profile integration-repl --timeout-s 300 --baseport 52000 --portcount 4000 --clients 1 --skip-build --files integration/replication-buffer`
+  moved `integration/replication-buffer` to 15/1 in
+  `harness/oracle/results/tcl-survey/20260614T070850344193Z/result.json`.
+  The remaining failure is now the dual-channel `yes` backlog-memory shrink
+  assertion that expects `connected_slaves` to include the extra RDB channel
+  connection (`3` observed as `2`).
 
 Gate:
 

@@ -245,6 +245,8 @@ def tcl_command(test_file: str, args: argparse.Namespace) -> list[str]:
         cmd.extend(["--portcount", str(args.portcount)])
     if args.deny_tags:
         cmd.extend(["--tags", " ".join(f"-{tag}" for tag in args.deny_tags)])
+    for only in args.only_tests:
+        cmd.extend(["--only", only])
     if getattr(args, "tls", False):
         # test_helper --tls generates certs (tests/tls/gen-test-certs.sh) and
         # starts each server with tls-port/tls-cert-file/etc.; our build_tls_startup
@@ -287,6 +289,16 @@ def main() -> int:
     parser.add_argument("--baseport", type=int, help="Initial port number for spawned Valkey servers.")
     parser.add_argument("--portcount", type=int, help="Port range for spawned Valkey servers.")
     parser.add_argument("--skip-build", action="store_true")
+    parser.add_argument(
+        "--only",
+        action="append",
+        dest="only_tests",
+        default=[],
+        help=(
+            "Only run Tcl tests whose names match this exact name or regexp "
+            "(passed through to test_helper.tcl --only). Repeatable."
+        ),
+    )
     parser.add_argument(
         "--isolated-tests-copy",
         action="store_true",
@@ -399,6 +411,7 @@ def main() -> int:
                 "kind": "tcl_survey",
                 "run_id": run_id,
                 "profile": args.profile,
+                "only_tests": args.only_tests,
                 "repl_temp_cleanup": repl_temp_cleanup,
                 "setup": {key: setup[key] for key in ("cmd", "returncode", "timed_out", "elapsed_s")},
             },
@@ -472,6 +485,7 @@ def main() -> int:
                 "failures": failures,
                 "exception": exception,
                 "abort_test": abort_test,
+                "only_tests": args.only_tests,
                 "log": str(log_path.relative_to(ROOT)),
             }
             file_results.append(file_result)
@@ -580,6 +594,7 @@ def main() -> int:
             "files": file_results,
             "repl_temp_cleanup": repl_temp_cleanup,
             "deny_tags": args.deny_tags,
+            "only_tests": args.only_tests,
             "clients": args.clients,
             "timeout_s": args.timeout_s,
             "setup": {key: setup[key] for key in ("cmd", "returncode", "timed_out", "elapsed_s")},
