@@ -85,7 +85,7 @@ Artifact:
 | `integration/replication-3` | 3/4 | Red | Expiry consistency, writable-replica expired-key behavior, and PFCOUNT expired-key/cache semantics. |
 | `integration/replication-4` | 15/2 | Red | SPOP rewrite cases now pass; remaining failures are divergence/default writable-replica cases. |
 | `integration/replication-buffer` | 16/0 | Green | The replication-buffer kit line now covers active full-sync catch-up beyond the circular backlog, partial resync from retained shared history, retained-history release after the last dependent replica disconnects, shared output memory charged once, and hard-limit disconnect isolation. Follow-up Tcl scoreboards moved the file through 13/3, 15/1, and finally 16/0 at artifact `20260614T071942726290Z`; keep `repl_buffer_kit` as the inner loop and rerun this Tcl file only as a regression scoreboard. |
-| `integration/replication` | timeout / 2 parsed lines | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, async-loading CONFIG exceptions, successful swapdb function payloads, parent-killed child discovery, `repl-diskless-load on-empty-db`, no-longer-useful RDB child cancellation, replica-link reply violations, malformed-PSYNC-offset logging, chained replica `FLUSHDB` / `FLUSHALL` stream relay, `GETSET` rewrite, nonblocking `BRPOPLPUSH` / `BLMOVE` rewrite stats, empty-blocking commandstats, replica output-byte stats, BLPOP role-change divergence, and `replicas_waiting_psync` visibility. The latest full 2026-06-14 scoreboard `20260614T103948500193Z` still times out, but the parsed frontier moved from six lines to two: handshake timeout logging and one multi-replica `swapdb` offset-convergence variant. The handshake line is likely live stdout buffering after the focused selector had already cleared it; the follow-up replica dialer flush covers that surface. The multi-replica offset line now has an immediate idle-ACK kit and production change; validate it with a focused selector or the next batch scoreboard, not another debugger run. |
+| `integration/replication` | timeout / 2 parsed lines | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, async-loading CONFIG exceptions, successful swapdb function payloads, parent-killed child discovery, `repl-diskless-load on-empty-db`, no-longer-useful RDB child cancellation, replica-link reply violations, malformed-PSYNC-offset logging, chained replica `FLUSHDB` / `FLUSHALL` stream relay, `GETSET` rewrite, nonblocking `BRPOPLPUSH` / `BLMOVE` rewrite stats, empty-blocking commandstats, replica output-byte stats, BLPOP role-change divergence, and `replicas_waiting_psync` visibility. The latest full 2026-06-14 scoreboard `20260614T103948500193Z` still times out, but the parsed frontier moved from six lines to two: handshake timeout logging and one multi-replica `swapdb` offset-convergence variant. The handshake line is likely live stdout buffering after the focused selector had already cleared it; the follow-up replica dialer flush covers that surface. The multi-replica offset line now has an immediate idle-ACK kit and a 15-second extracted Tcl probe proving the exact upstream block passes; use a planned full-file scoreboard to update the official row rather than using the long file as the debugger. |
 | `integration/replication-psync` | timeout | Red | Historical focused gate was 90/0 after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support. Current full-file reruns remain red, but the kit-first loop has moved the visible frontier: raw `-0` RDB fidelity was fixed, set-store commands now rewrite to deterministic `DEL` plus `SADD`, fresh full-sync catch-up now injects and retains a selected-DB prefix before active writes, and the latest replica-only DB 0 set residue is covered by a post-fullsync live-stream SELECT kit. The latest single Tcl scoreboard remains `20260614T091542767472Z`; do not use the six-minute file as the debugger. Rerun it as a scoreboard after the next kit batch or nightly pass. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
 | `integration/replica-redirect` | 11/0 | Green | `CLIENT CAPA REDIRECT`, MULTI/EXEC replica redirects, failover pause, waiting-for-sync responses, and blocked-client behavior during failover now pass in the direct Tcl file. The final 2026-06-14 kit-first pass moved the file from timeout/no-summary to parsed 10/1, reduced the stale DB 9 stream return to partial-resync/role-change invariants, then cleared the full file at 11/0 in 6 seconds. |
@@ -4003,6 +4003,30 @@ cargo test -p redis-commands --test fullsync_lifecycle_kit \
   multiple_fullsync_waiters_receive_same_rdb_and_catchup_then_ack_online -- --nocapture
 rustfmt --edition 2021 --check crates/redis-commands/src/replica_dialer.rs
 cargo build -p redis-server --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-multi-replica-swapdb-idle-ack-only-rerun \
+  --profile integration-repl \
+  --timeout-s 240 \
+  --baseport 43000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replication \
+  --only 'Connect multiple replicas at the same time.*master diskless=no, replica diskless=swapdb dual-channel-replication-enabled=no' \
+  --isolated-tests-copy \
+  --skip-build
+
+# Evidence-only: this used a temporary extracted probe file containing just the
+# upstream multi-replica swapdb block. The probe was deleted after the run.
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-multi-replica-swapdb-idle-ack-probe \
+  --profile integration-repl \
+  --timeout-s 240 \
+  --baseport 43000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/valdr_multi_replica_swapdb_probe \
+  --isolated-tests-copy \
+  --skip-build
 ```
 
 Results:
@@ -4013,9 +4037,23 @@ Results:
 - Focused full-sync lifecycle kit: 1 passed, 0 failed.
 - File-scoped `rustfmt --check`: passed.
 - `cargo build -p redis-server --bin redis-server`: passed.
+- Official `--only` selector
+  `harness/oracle/results/tcl-survey/20260614T105734800711Z/result.json`
+  ran for 16.9 seconds with zero parsed failure lines, but is not strong
+  validation for this block because the upstream Tcl file still executes
+  earlier top-level setup and aborts before the selected block with the known
+  unrelated `assertion:replica didn't sync in time`.
+- A disposable extracted Tcl probe containing only the exact upstream
+  `master diskless=no, replica diskless=swapdb, dual-channel=no` block passed
+  at `harness/oracle/results/tcl-survey/20260614T105920616005Z/result.json`:
+  1 passed, 0 failed, 0 timed out, 0 without summary, 0 parsed failure lines,
+  0 abort/exception points, elapsed 15.3 seconds. The temporary probe file was
+  deleted after the run and is not part of the repo.
 
 Takeaway:
 
 - This is the kit-sized attack on the remaining multi-replica `swapdb` offset
-  line. The next Tcl validation should be a focused selector or a planned
-  scoreboard batch, not the default inner loop.
+  line, and the extracted Tcl probe confirms the exact upstream body passes
+  without paying for the whole `integration/replication` file. The official
+  row still needs a planned full-file scoreboard before changing from
+  `timeout / 2 parsed lines`.
