@@ -111,8 +111,15 @@ Current red/unfinished areas from the 2026-06-13 R0 dashboard in
   frontier. A detached full-sync catch-up tail kit removed the earliest broad
   no-reconnect mismatch; the next visible data divergence is a single string
   value `0` on the master vs `-0` on the replica. A follow-up Rust kit found
-  and fixed an RDB raw numeric-string fidelity bug in that family; full Tcl has
-  not yet been rerun after that fix.
+  and fixed an RDB raw numeric-string fidelity bug in that family. The next
+  2026-06-14 full-file Tcl attempt
+  `harness/oracle/results/tcl-survey/20260614T072301072427Z/result.json`
+  still timed out, now showing setup `Replication not started` failures plus a
+  digest dump with one master-only hash row. The setup leg is now covered by a
+  fast dialer kit/probe that lets the replica report `ROLE connected` after RDB
+  load while a separate full-sync ACK latch keeps the primary-side replica in
+  `send_bulk` until the post-RDB stream goes idle. The remaining PSYNC debugger
+  target is the one-row complex-data divergence, not another broad Tcl grind.
 - `replication-aof-sync` is green as of 2026-06-13 after full-sync RDB loads
   refresh appendonly manifests correctly.
 - `replica-redirect.tcl` needs real `FAILOVER` plus client redirect semantics.
@@ -124,8 +131,10 @@ Current red/unfinished areas from the 2026-06-13 R0 dashboard in
    Treat `replication-psync` as a reopened red gate until the current timeout
    is explained or fixed.
 2. **Use the fast kit first.** Build deterministic tests in
-   `crates/redis-commands/tests/repl_correctness_kit.rs` before grinding slow
-   TCL files.
+   `crates/redis-commands/tests/repl_correctness_kit.rs`,
+   `crates/redis-commands/tests/psync_reconnect_kit.rs`,
+   `crates/redis-commands/tests/repl_buffer_kit.rs`, or
+   `replica_dialer::tests` before grinding slow TCL files.
 3. **Run dual-server TCL sequentially.** Never run replication TCL with `-j4` or
    two integration-repl runs at once; suite contention creates false failures.
 4. **Do not claim HA because a command exists.** A `FAILOVER` parser is not a
@@ -560,8 +569,19 @@ Work packets:
   covered DB 9 partial catch-up, primary stream replay, PSYNC replay from the
   offset after the `-0` frame, and full-sync RDB reconstruction. That kit found
   the RDB raw loader promoting `-0` to integer `0`; the loader now shares the
-  runtime string encoder and canonical integer round-trip rule. Keep using
-  these kits as the debugger and rerun full Tcl only as a scoreboard.
+  runtime string encoder and canonical integer round-trip rule. A 2026-06-14
+  rerun after that fix timed out in
+  `harness/oracle/results/tcl-survey/20260614T072301072427Z/result.json`: the
+  visible setup failure was `Replication not started`, and the digest dump
+  showed one master-only hash row. The setup failure was reduced to
+  `replica_dialer::tests::fullsync_role_connects_before_ack_is_released_after_stream_idle`:
+  after a fullsync RDB load, local `ROLE` may report `connected`, but ACKs stay
+  suppressed until the post-RDB stream goes idle so the primary still reports
+  the replica as `send_bulk`. An ad hoc two-server probe with continuous writes
+  proved that split: replica `ROLE connected` while master `INFO replication`
+  still had `state=send_bulk`, then `state=online` after writes stopped. Keep
+  using these kits as the debugger; the next kit should isolate the remaining
+  one-row complex-data divergence before rerunning full Tcl as a scoreboard.
 - **R3-METRICS:** keep `sync_full`, `sync_partial_ok`, `sync_partial_err`,
   master/replica offsets, lag, and backlog histlen faithful in `INFO`.
 

@@ -15,7 +15,7 @@
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, OnceLock};
 use std::thread;
@@ -148,7 +148,7 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
             return;
         }
 
-        let (online_offset, mut mark_connected_after_fullsync_idle) = match outcome {
+        let (online_offset, defer_fullsync_ack_until_idle) = match outcome {
             PsyncOutcome::FullResync { offset, replid } => {
                 let async_loading = repl.cached_primary_replid().is_some_and(|id| id == replid);
                 repl.set_replica_link(replica_link_code::TRANSFER);
@@ -203,23 +203,26 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
         crate::aof::force_current_writer_fsynced_repl_offset(online_offset);
         repl.repl_state
             .store(repl_state_code::REPLICA_ONLINE, Ordering::SeqCst);
-        if !mark_connected_after_fullsync_idle {
-            repl.set_replica_link(replica_link_code::CONNECTED);
-        }
+        repl.set_replica_link(replica_link_code::CONNECTED);
         complete_manual_failover_after_psync(&repl);
 
+        let defer_fullsync_ack_until_idle =
+            Arc::new(AtomicBool::new(defer_fullsync_ack_until_idle));
         let periodic_ack_stream = stream.try_clone().ok();
         if let Some(ack_stream) = periodic_ack_stream {
             let repl_for_ack = Arc::clone(&repl);
+            let ack_deferred = Arc::clone(&defer_fullsync_ack_until_idle);
             let _ = thread::Builder::new()
                 .name("replica-ack".to_string())
-                .spawn(move || periodic_ack_loop(ack_stream, repl_for_ack, dialer_epoch));
+                .spawn(move || {
+                    periodic_ack_loop(ack_stream, repl_for_ack, dialer_epoch, ack_deferred)
+                });
         }
         run_replica_sink_loop(
             &stream,
             &repl,
             dialer_epoch,
-            &mut mark_connected_after_fullsync_idle,
+            &defer_fullsync_ack_until_idle,
         );
         if !repl.dialer_epoch_is_current(dialer_epoch) {
             return;
@@ -276,7 +279,7 @@ fn run_replica_sink_loop(
     stream: &TcpStream,
     repl: &ReplicationState,
     dialer_epoch: u64,
-    mark_connected_after_fullsync_idle: &mut bool,
+    defer_fullsync_ack_until_idle: &AtomicBool,
 ) {
     let mut read_buf = Vec::new();
     let mut tmp = vec![0u8; REPLICA_STREAM_READ_BUFFER_SIZE];
@@ -298,7 +301,7 @@ fn run_replica_sink_loop(
                     io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                 ) =>
             {
-                mark_fullsync_link_connected_after_idle(repl, mark_connected_after_fullsync_idle);
+                release_fullsync_ack_after_idle(repl, defer_fullsync_ack_until_idle);
                 continue;
             }
             Err(_) => return,
@@ -323,11 +326,20 @@ fn run_replica_sink_loop(
                     if replica_command_batch_has_open_transaction(&command_batch) {
                         continue;
                     }
-                    if !flush_replica_command_batch(stream, repl, dialer_epoch, &mut command_batch)
-                    {
+                    if !flush_replica_command_batch(
+                        stream,
+                        repl,
+                        dialer_epoch,
+                        defer_fullsync_ack_until_idle,
+                        &mut command_batch,
+                    ) {
                         return;
                     }
-                    if let Some(ack) = build_replconf_ack_if_connected(repl, offset_after) {
+                    if let Some(ack) = build_replconf_ack_if_ready(
+                        repl,
+                        defer_fullsync_ack_until_idle,
+                        offset_after,
+                    ) {
                         if stream_write(stream, &ack).is_err() {
                             return;
                         }
@@ -336,19 +348,24 @@ fn run_replica_sink_loop(
             }
         }
         if !replica_command_batch_has_open_transaction(&command_batch)
-            && !flush_replica_command_batch(stream, repl, dialer_epoch, &mut command_batch)
+            && !flush_replica_command_batch(
+                stream,
+                repl,
+                dialer_epoch,
+                defer_fullsync_ack_until_idle,
+                &mut command_batch,
+            )
         {
             return;
         }
     }
 }
 
-fn mark_fullsync_link_connected_after_idle(repl: &ReplicationState, pending: &mut bool) {
-    if !*pending {
+fn release_fullsync_ack_after_idle(repl: &ReplicationState, pending: &AtomicBool) {
+    if !pending.swap(false, Ordering::SeqCst) {
         return;
     }
     repl.set_replica_link(replica_link_code::CONNECTED);
-    *pending = false;
 }
 
 enum ReplicaStreamFrame {
@@ -395,6 +412,7 @@ fn flush_replica_command_batch(
     stream: &TcpStream,
     repl: &ReplicationState,
     dialer_epoch: u64,
+    defer_fullsync_ack_until_idle: &AtomicBool,
     command_batch: &mut Vec<(Vec<RedisString>, i64)>,
 ) -> bool {
     let Some((_, offset_after)) = command_batch.last() else {
@@ -415,7 +433,7 @@ fn flush_replica_command_batch(
     // primary did not send GETACK. This eager ACK keeps script WAIT's
     // non-blocking path accurate without adding a second timer thread to the
     // RuntimeOwner-compatible dialer.
-    match build_replconf_ack_if_connected(repl, offset_after) {
+    match build_replconf_ack_if_ready(repl, defer_fullsync_ack_until_idle, offset_after) {
         Some(ack) => stream_write(stream, &ack).is_ok(),
         None => true,
     }
@@ -750,7 +768,12 @@ fn is_getack(argv: &[RedisString]) -> bool {
 
 /// Periodically send `REPLCONF ACK <offset>` to the master every second.
 /// Exits when the stop flag is set or the write fails (master disconnected).
-fn periodic_ack_loop(mut stream: TcpStream, repl: Arc<ReplicationState>, dialer_epoch: u64) {
+fn periodic_ack_loop(
+    mut stream: TcpStream,
+    repl: Arc<ReplicationState>,
+    dialer_epoch: u64,
+    defer_fullsync_ack_until_idle: Arc<AtomicBool>,
+) {
     loop {
         thread::sleep(Duration::from_secs(1));
 
@@ -761,9 +784,11 @@ fn periodic_ack_loop(mut stream: TcpStream, repl: Arc<ReplicationState>, dialer_
             return;
         }
 
-        let Some(msg) =
-            build_replconf_ack_if_connected(&repl, repl.master_repl_offset.load(Ordering::SeqCst))
-        else {
+        let Some(msg) = build_replconf_ack_if_ready(
+            &repl,
+            &defer_fullsync_ack_until_idle,
+            repl.master_repl_offset.load(Ordering::SeqCst),
+        ) else {
             continue;
         };
         if stream.write_all(&msg).is_err() {
@@ -790,8 +815,14 @@ fn build_replconf_ack(offset: i64) -> Vec<u8> {
     }
 }
 
-fn build_replconf_ack_if_connected(repl: &ReplicationState, offset: i64) -> Option<Vec<u8>> {
-    if repl.replica_link.load(Ordering::SeqCst) == replica_link_code::CONNECTED {
+fn build_replconf_ack_if_ready(
+    repl: &ReplicationState,
+    defer_fullsync_ack_until_idle: &AtomicBool,
+    offset: i64,
+) -> Option<Vec<u8>> {
+    if repl.replica_link.load(Ordering::SeqCst) == replica_link_code::CONNECTED
+        && !defer_fullsync_ack_until_idle.load(Ordering::SeqCst)
+    {
         Some(build_replconf_ack(offset))
     } else {
         None
@@ -971,38 +1002,49 @@ mod tests {
     }
 
     #[test]
-    fn fullsync_link_stays_sync_until_stream_idle() {
+    fn fullsync_role_connects_before_ack_is_released_after_stream_idle() {
         let repl = local_state();
         repl.set_replica_link(replica_link_code::TRANSFER);
-        let mut pending = true;
+        let pending = AtomicBool::new(true);
 
         assert_eq!(repl.replica_link_str(), "sync");
-        mark_fullsync_link_connected_after_idle(&repl, &mut pending);
+        repl.set_replica_link(replica_link_code::CONNECTED);
+        assert_eq!(
+            repl.replica_link_str(),
+            "connected",
+            "after the fullsync RDB is loaded, ROLE can report connected even while ACK is deferred"
+        );
+        assert!(
+            build_replconf_ack_if_ready(&repl, &pending, 10).is_none(),
+            "loaded fullsync links must not ACK until the post-RDB stream goes idle"
+        );
 
-        assert_eq!(repl.replica_link_str(), "connected");
-        assert!(!pending);
+        release_fullsync_ack_after_idle(&repl, &pending);
+        assert!(!pending.load(Ordering::SeqCst));
+        assert!(build_replconf_ack_if_ready(&repl, &pending, 10).is_some());
 
         repl.set_replica_link(replica_link_code::TRANSFER);
-        mark_fullsync_link_connected_after_idle(&repl, &mut pending);
+        release_fullsync_ack_after_idle(&repl, &pending);
         assert_eq!(
             repl.replica_link_str(),
             "sync",
-            "once the pending flag is consumed, later idle checks are no-ops"
+            "once the deferred ACK flag is consumed, later idle checks are no-ops"
         );
     }
 
     #[test]
     fn fullsync_link_suppresses_ack_until_connected() {
         let repl = local_state();
+        let ready = AtomicBool::new(false);
         repl.set_replica_link(replica_link_code::TRANSFER);
 
         assert!(
-            build_replconf_ack_if_connected(&repl, 10).is_none(),
+            build_replconf_ack_if_ready(&repl, &ready, 10).is_none(),
             "a replica still reporting ROLE sync must not ACK and make the master mark it online"
         );
 
         repl.set_replica_link(replica_link_code::CONNECTED);
-        let ack = build_replconf_ack_if_connected(&repl, 10).expect("connected link can ACK");
+        let ack = build_replconf_ack_if_ready(&repl, &ready, 10).expect("connected link can ACK");
         assert!(
             ack.windows(b"REPLCONF".len()).any(|w| w == b"REPLCONF")
                 && ack.windows(b"ACK".len()).any(|w| w == b"ACK")
