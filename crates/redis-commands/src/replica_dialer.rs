@@ -632,6 +632,7 @@ fn log_handshake_failure(err: &io::Error) {
         let msg = HANDSHAKE_TIMEOUT_LOG;
         eprintln!("{}", msg);
         println!("{}", msg);
+        let _ = io::stdout().flush();
     } else {
         eprintln!("redis-server: replica: handshake failed: {}", err);
     }
