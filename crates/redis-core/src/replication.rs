@@ -856,6 +856,14 @@ impl ReplicationState {
             return true;
         }
 
+        if self
+            .backlog_last_replica_disconnect_ms
+            .load(Ordering::Relaxed)
+            >= 0
+        {
+            return true;
+        }
+
         match self.repl_bgsave_job.lock() {
             Ok(g) => g.is_some(),
             Err(p) => p.into_inner().is_some(),
@@ -1725,6 +1733,21 @@ impl ReplicationState {
     /// Drop the replica record for `client_id`, if present. Called from
     /// per-connection cleanup path when a replica disconnects.
     pub fn remove_replica(&self, client_id: ClientId) -> ReplicaRemovalOutcome {
+        self.remove_replica_inner(client_id, true)
+    }
+
+    /// Drop a replica record while the client-info registry lock is already
+    /// held by CLIENT KILL. The caller has already removed the visible client
+    /// snapshot, so this path avoids re-entering that mutex.
+    pub fn remove_replica_for_client_kill(&self, client_id: ClientId) -> ReplicaRemovalOutcome {
+        self.remove_replica_inner(client_id, false)
+    }
+
+    fn remove_replica_inner(
+        &self,
+        client_id: ClientId,
+        update_client_info: bool,
+    ) -> ReplicaRemovalOutcome {
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
@@ -1768,8 +1791,10 @@ impl ReplicationState {
                 p.into_inner().remove(&client_id);
             }
         }
-        if let Ok(mut guard) = crate::client_info::client_info_registry().lock() {
-            guard.set_output_buffer_memory(client_id, 0);
+        if update_client_info {
+            if let Ok(mut guard) = crate::client_info::client_info_registry().lock() {
+                guard.set_output_buffer_memory(client_id, 0);
+            }
         }
         let (was_repl_bgsave_waiter, remaining_repl_bgsave_waiters, child_pid) =
             self.remove_repl_bgsave_waiter(client_id);

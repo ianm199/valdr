@@ -344,7 +344,9 @@ fn propagate_transaction_commands(
     // replicas — matching Valkey, which discards pending propagation when it
     // becomes a replica. The queued writes still executed locally; they are
     // simply not forwarded.
-    if redis_core::replication::global_replication_state().is_replica() {
+    if ctx.client_ref().replication_apply
+        || redis_core::replication::global_replication_state().is_replica()
+    {
         return 0;
     }
     let offset = match commands {

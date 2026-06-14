@@ -34,6 +34,7 @@ static GLOBAL_SERVER: OnceLock<Arc<RedisServer>> = OnceLock::new();
 static GLOBAL_OUR_PORT: OnceLock<u16> = OnceLock::new();
 static GLOBAL_RDB_DIR: OnceLock<String> = OnceLock::new();
 static RUNTIME_APPLY_TX: OnceLock<Sender<ReplicaApplyRequest>> = OnceLock::new();
+const RUNTIME_APPLY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Work the dialer thread hands to the runtime owner loop because the owner —
 /// not the dialer — owns the live DB slice.
@@ -308,6 +309,9 @@ fn run_replica_sink_loop(stream: &TcpStream, repl: &ReplicationState, dialer_epo
                     command_batch.push((argv, offset_after));
                 }
                 ReplicaStreamFrame::GetAck { offset_after } => {
+                    if replica_command_batch_has_open_transaction(&command_batch) {
+                        continue;
+                    }
                     if !flush_replica_command_batch(stream, repl, dialer_epoch, &mut command_batch)
                     {
                         return;
@@ -318,7 +322,9 @@ fn run_replica_sink_loop(stream: &TcpStream, repl: &ReplicationState, dialer_epo
                 }
             }
         }
-        if !flush_replica_command_batch(stream, repl, dialer_epoch, &mut command_batch) {
+        if !replica_command_batch_has_open_transaction(&command_batch)
+            && !flush_replica_command_batch(stream, repl, dialer_epoch, &mut command_batch)
+        {
             return;
         }
     }
@@ -389,6 +395,23 @@ fn flush_replica_command_batch(
     // non-blocking path accurate without adding a second timer thread to the
     // RuntimeOwner-compatible dialer.
     stream_write(stream, &build_replconf_ack(offset_after)).is_ok()
+}
+
+fn replica_command_batch_has_open_transaction(batch: &[(Vec<RedisString>, i64)]) -> bool {
+    let mut open = false;
+    for (argv, _) in batch {
+        let Some(name) = argv.first() else {
+            continue;
+        };
+        if name.as_bytes().eq_ignore_ascii_case(b"MULTI") {
+            open = true;
+        } else if name.as_bytes().eq_ignore_ascii_case(b"EXEC")
+            || name.as_bytes().eq_ignore_ascii_case(b"DISCARD")
+        {
+            open = false;
+        }
+    }
+    open
 }
 
 /// Execute the PING / REPLCONF / PSYNC handshake over `stream`.
@@ -683,9 +706,7 @@ fn send_to_runtime_owner(kind: ReplicaApplyKind, offset_after: i64) -> bool {
     {
         return false;
     }
-    done_rx
-        .recv_timeout(Duration::from_secs(2))
-        .unwrap_or(false)
+    done_rx.recv_timeout(RUNTIME_APPLY_TIMEOUT).unwrap_or(false)
 }
 
 /// Returns true when the argv represents `REPLCONF GETACK *`.
@@ -820,6 +841,31 @@ mod tests {
 
     fn argv_bytes(argv: &[RedisString]) -> Vec<Vec<u8>> {
         argv.iter().map(|arg| arg.as_bytes().to_vec()).collect()
+    }
+
+    fn command(parts: &[&[u8]]) -> (Vec<RedisString>, i64) {
+        (
+            parts
+                .iter()
+                .map(|part| RedisString::from_bytes(part))
+                .collect(),
+            0,
+        )
+    }
+
+    #[test]
+    fn replica_command_batch_waits_for_transaction_exec() {
+        let mut batch = vec![command(&[b"MULTI"]), command(&[b"SET", b"k", b"v"])];
+        assert!(
+            replica_command_batch_has_open_transaction(&batch),
+            "a split catch-up stream must not flush after MULTI before EXEC arrives"
+        );
+
+        batch.push(command(&[b"EXEC"]));
+        assert!(
+            !replica_command_batch_has_open_transaction(&batch),
+            "the transaction envelope is complete once EXEC has been parsed"
+        );
     }
 
     #[test]

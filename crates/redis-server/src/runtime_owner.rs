@@ -1603,11 +1603,7 @@ impl RuntimeOwner {
             return true;
         }
 
-        let mut client = Client::new(0);
-        client.replication_apply = true;
-        client.suppress_monitor = true;
-        client.authenticated_user = Some(RedisString::from_bytes(b"default"));
-        client.db_index = self.replica_apply_db_index;
+        let mut client = self.new_replica_apply_client();
         client.set_args(argv);
 
         super::process_current_command_with_db_list(&mut client, &mut self.dbs, registry, server);
@@ -1622,12 +1618,34 @@ impl RuntimeOwner {
         registry: &Arc<Mutex<PubSubRegistry>>,
         server: &Arc<redis_core::RedisServer>,
     ) -> bool {
+        let mut client = self.new_replica_apply_client();
         for argv in commands {
-            if !self.apply_replica_command(argv, registry, server) {
+            let reply_start = client.reply_buf.len();
+            client.set_args(argv);
+            super::process_current_command_with_db_list(
+                &mut client,
+                &mut self.dbs,
+                registry,
+                server,
+            );
+            let failed = client.reply_buf[reply_start..].starts_with(b"-");
+            client.reply_buf.truncate(reply_start);
+            if failed {
+                self.replica_apply_db_index = client.db_index;
                 return false;
             }
         }
+        self.replica_apply_db_index = client.db_index;
         true
+    }
+
+    fn new_replica_apply_client(&self) -> Client {
+        let mut client = Client::new(0);
+        client.replication_apply = true;
+        client.suppress_monitor = true;
+        client.authenticated_user = Some(RedisString::from_bytes(b"default"));
+        client.db_index = self.replica_apply_db_index;
+        client
     }
 
     /// Load a full-resync RDB snapshot into the owned databases, replacing their
@@ -2840,6 +2858,50 @@ mod tests {
         let reused = owner.insert_client(Client::new(3)).unwrap();
         assert_eq!(reused, first);
         assert!(owner.slot(second).is_some());
+    }
+
+    #[test]
+    fn replica_apply_batch_preserves_multi_state_until_exec() {
+        fn argv(parts: &[&[u8]]) -> Vec<RedisString> {
+            parts
+                .iter()
+                .map(|part| RedisString::from_bytes(part))
+                .collect()
+        }
+
+        let mut owner = RuntimeOwner::new(
+            RuntimeOwnerConfig::disabled()
+                .with_database_count(1)
+                .with_max_pending_events(4),
+        );
+        let registry = Arc::new(Mutex::new(PubSubRegistry::new()));
+        let server = Arc::new(redis_core::RedisServer::default());
+
+        assert!(
+            owner.apply_replica_command_batch(
+                vec![
+                    argv(&[b"MULTI"]),
+                    argv(&[b"SET", b"tx-key", b"v"]),
+                    argv(&[b"EXEC"]),
+                ],
+                &registry,
+                &server,
+            ),
+            "replicated MULTI/EXEC catch-up must be applied with one pseudo-client"
+        );
+        assert_eq!(
+            owner.dbs[0]
+                .lookup_key_read(b"tx-key")
+                .expect("transaction key")
+                .string_bytes()
+                .as_ref(),
+            b"v"
+        );
+
+        assert!(
+            !owner.apply_replica_command_batch(vec![argv(&[b"EXEC"])], &registry, &server),
+            "a malformed replicated transaction envelope should still fail"
+        );
     }
 
     #[test]

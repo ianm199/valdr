@@ -78,8 +78,14 @@ Current red/unfinished areas from the 2026-06-13 R0 dashboard in
   replica client output out of `mem_total_replication_buffers`, moving the
   focused Tcl gate from 7/8 to 8/7. A dual-channel INFO topology shim then
   exposed provisional `type=rdb-channel` entries for waiting full-sync
-  replicas, moving the focused gate to 9/6. The next visible buffer slice is
-  partial-resync beyond backlog and low-output-buffer PSYNC counter behavior.
+  replicas, moving the focused gate to 9/6. The transaction catch-up slice then
+  made RuntimeOwner apply split replicated MULTI/EXEC catch-up with one
+  pseudo-client and taught the replica dialer not to flush partial transactions
+  mid-stream. The focused gate stayed at 9/6, but the low-output-buffer PSYNC
+  counter failure moved from non-dual-channel duplicate reconnects to the
+  narrower dual-channel fake/main PSYNC accounting edge. The next visible
+  buffer slice is dual-channel PSYNC accounting, partial-resync beyond backlog,
+  and output-buffer trimming.
 - A rebuilt R1 gate now shows `replication-3` at 3/4 and `replication-4` at
   15/2. The command-propagation rewrite cases are cleared, but
   expiration/PFCOUNT semantics and divergence/writable-replica cases still need
@@ -394,7 +400,15 @@ Work packets:
   `repl_buffer_kit`, and moved focused `integration/replication-buffer` to
   8/7. The dual-channel INFO topology slice then added provisional
   `type=rdb-channel` lines for waiting full-sync replicas and moved the gate to
-  9/6. Remaining buffer work is the non-dual-channel low-output-buffer PSYNC
+  9/6. The transaction catch-up slice then kept one replication-apply
+  pseudo-client alive for a parsed RuntimeOwner batch, held socket-read batches
+  open while a replicated MULTI is pending, suppressed downstream transaction
+  fanout during replica apply, and extended the runtime apply timeout for
+  upstream `DEBUG SLEEP` catch-up. Rust units and kits stayed green, and the
+  focused `integration/replication-buffer` artifact
+  `harness/oracle/results/tcl-survey/20260614T043523717635Z/result.json`
+  stayed at 9/6 while proving the non-dual low-output-buffer duplicate-PSYNC
+  loop is gone. Remaining buffer work is the dual-channel fake/main PSYNC
   counter edge, later slow-replica output-buffer disconnect trimming, and
   broader partial-resync history ownership.
 

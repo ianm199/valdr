@@ -9,8 +9,10 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
+use redis_core::client_info::client_info_registry;
 use redis_core::replication::{
-    global_replication_state, ReplicationState, DEFAULT_REPL_BACKLOG_SIZE,
+    global_replication_state, ReplicaConn, ReplicaState, ReplicationState,
+    DEFAULT_REPL_BACKLOG_SIZE,
 };
 use redis_core::{Client, PubSubRegistry, RedisDb, RedisServer};
 use redis_protocol::frame::{encode_resp2, RespFrame};
@@ -218,6 +220,61 @@ fn same_primary_zero_offset_reconnect_gets_continue_and_replays_catchup() {
     assert_eq!(drive.counters_after.1, drive.counters_before.1 + 1);
     assert_eq!(drive.counters_after.0, drive.counters_before.0);
     assert_eq!(drive.counters_after.2, drive.counters_before.2);
+}
+
+#[test]
+fn killed_last_replica_at_zero_offset_keeps_backlog_window_for_partial_reconnect() {
+    let _g = psync_guard();
+    let repl = global_replication_state();
+    let _reset = GlobalReplReset::new(&repl);
+
+    let old_client_id = 1_100_013;
+    let (tx, _rx) = mpsc::channel();
+    repl.add_replica(ReplicaConn::new(old_client_id, ReplicaState::Online, 0, tx));
+    {
+        let mut guard = client_info_registry().lock().unwrap();
+        guard.deregister(old_client_id);
+        guard.register(old_client_id, "127.0.0.1:0".to_string());
+        guard.mark_killed(old_client_id);
+    }
+    assert_eq!(repl.connected_replicas(), 0);
+    assert!(
+        repl.should_propagate_writes(),
+        "the backlog TTL window should stay active after the last replica disconnects even when histlen is still zero"
+    );
+
+    let mut writer = Client::new(1_100_014);
+    let mut db = RedisDb::new(0);
+    let reply = run_dispatch(&mut writer, &mut db, &[b"SET", b"after-kill", b"v"]);
+    assert_eq!(reply, b"+OK\r\n");
+    let (first, master, histlen, _) = repl.backlog_snapshot();
+    assert_eq!(first, 0);
+    assert!(master > 0);
+    assert!(histlen > 0);
+
+    let runid = runid_string(&repl);
+    let drive = drive_psync(1_100_015, vec![b"PSYNC".to_vec(), runid, b"0".to_vec()]);
+    assert!(
+        drive.reply.starts_with(b"+CONTINUE"),
+        "writes after a killed zero-offset replica must remain available for partial reconnect, got {:?}",
+        String::from_utf8_lossy(&drive.reply)
+    );
+    let expected_catchup = resp(&[b"SET", b"after-kill", b"v"]);
+    assert!(
+        drive
+            .sent
+            .windows(expected_catchup.len())
+            .any(|w| w == expected_catchup.as_slice()),
+        "+CONTINUE should replay the write that happened while no replica was connected"
+    );
+    assert_eq!(drive.counters_after.1, drive.counters_before.1 + 1);
+    assert_eq!(drive.counters_after.0, drive.counters_before.0);
+    assert_eq!(drive.counters_after.2, drive.counters_before.2);
+
+    client_info_registry()
+        .lock()
+        .unwrap()
+        .deregister(old_client_id);
 }
 
 #[test]

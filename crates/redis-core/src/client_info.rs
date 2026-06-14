@@ -62,11 +62,15 @@ pub struct ClientSnapshot {
 pub struct ClientInfoRegistry {
     entries: HashMap<ClientId, ClientSnapshot>,
     kill_marks: HashSet<ClientId>,
+    cleanup_replica_on_kill: bool,
 }
 
 impl ClientInfoRegistry {
     fn new() -> Self {
-        Self::default()
+        Self {
+            cleanup_replica_on_kill: true,
+            ..Self::default()
+        }
     }
 
     /// Register a freshly accepted connection.
@@ -213,6 +217,9 @@ impl ClientInfoRegistry {
     pub fn mark_killed(&mut self, id: ClientId) {
         if self.entries.remove(&id).is_some() {
             self.kill_marks.insert(id);
+            if self.cleanup_replica_on_kill {
+                crate::replication::global_replication_state().remove_replica_for_client_kill(id);
+            }
         }
     }
 
