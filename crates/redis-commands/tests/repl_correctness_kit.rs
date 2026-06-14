@@ -1155,6 +1155,86 @@ fn r1_set_store_first_fullsync_catchup_rewrite_selects_db9() {
 }
 
 #[test]
+fn r1_active_fullsync_catchup_replays_db9_sadd_set_creation() {
+    let _g = repl_guard();
+    let repl = global_replication_state();
+    repl.become_master();
+    let _ = repl.take_repl_bgsave_job();
+    repl.set_repl_child_pid(0);
+    repl.selected_db.store(-1, Ordering::Release);
+
+    let mut primary_dbs: Vec<RedisDb> = (0..16).map(RedisDb::new).collect();
+    let mut primary_selected_db = 9;
+    let snapshot_offset = repl.master_offset();
+    let dir = unique_temp_dir("repl-kit-active-fullsync-sadd");
+    let temp_path = dir.join("temp-repl-active-fullsync-sadd.rdb");
+    repl.install_repl_bgsave_job(ReplBgsaveJob {
+        child_pid: 0,
+        temp_path: temp_path.clone(),
+        waiting_replicas: vec![900_019],
+        snapshot_offset,
+        catch_up_bytes: Vec::new(),
+        needs_getack_on_completion: false,
+    });
+
+    assert_eq!(
+        dispatch_as_primary_on_dbs(
+            42,
+            &mut primary_dbs,
+            &mut primary_selected_db,
+            &[
+                b"SADD",
+                b"238641124329",
+                b"-438323278649",
+                b"2172725227",
+                b"397",
+                b"817822073"
+            ]
+        ),
+        b":4\r\n"
+    );
+    let job = repl
+        .take_repl_bgsave_job()
+        .expect("active full-sync job should capture ordinary SADD bytes");
+    let _ = std::fs::remove_file(&temp_path);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let catchup = job.catch_up_bytes;
+    assert!(
+        catchup.starts_with(&resp(&[b"SELECT", b"9"])),
+        "first active full-sync SADD must select DB 9, got {:?}",
+        String::from_utf8_lossy(&catchup)
+    );
+    assert!(
+        catchup.windows(b"SADD".len()).any(|w| w == b"SADD")
+            && catchup
+                .windows(b"238641124329".len())
+                .any(|w| w == b"238641124329"),
+        "active full-sync catch-up must include the ordinary SADD frame, got {:?}",
+        String::from_utf8_lossy(&catchup)
+    );
+
+    let mut replica_dbs: Vec<RedisDb> = (0..16).map(RedisDb::new).collect();
+    let mut replica_selected_db = 0;
+    apply_resp_stream_as_replica_on_dbs(43, &mut replica_dbs, &mut replica_selected_db, &catchup);
+    assert_eq!(replica_selected_db, 9);
+    assert!(
+        replica_dbs[0].lookup_key_read(b"238641124329").is_none(),
+        "DB 0 must not receive the active full-sync DB 9 set"
+    );
+    let db9_set = replica_dbs[9]
+        .lookup_key_read(b"238641124329")
+        .and_then(|obj| obj.set().cloned())
+        .expect("DB 9 should receive the active full-sync set");
+    assert!(db9_set.contains(&RedisString::from_static(b"-438323278649")));
+    assert!(db9_set.contains(&RedisString::from_static(b"2172725227")));
+    assert!(db9_set.contains(&RedisString::from_static(b"397")));
+    assert!(db9_set.contains(&RedisString::from_static(b"817822073")));
+
+    repl.selected_db.store(-1, Ordering::Release);
+}
+
+#[test]
 fn r1_live_write_after_fullsync_forces_select_for_new_send_bulk_replica() {
     let _g = repl_guard();
     let repl = global_replication_state();
