@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::time::Duration;
 
 use redis_commands::config_cmd::{
     apply_config_set, config_value_for_key, validate_config_set_pair,
@@ -100,6 +101,40 @@ fn killed_replica_is_not_a_live_fanout_target_during_async_teardown() {
 }
 
 #[test]
+fn send_bulk_replica_receives_new_stream_writes_after_rdb_is_queued() {
+    let _guard = global_repl_guard();
+    let repl = global_replication_state();
+    repl.become_master();
+
+    let client_id = 1_990_002;
+    repl.remove_replica(client_id);
+    client_info_registry().lock().unwrap().deregister(client_id);
+
+    let (tx, rx) = mpsc::channel();
+    repl.add_replica(ReplicaConn::new(
+        client_id,
+        ReplicaState::SendingRdb,
+        repl.master_offset(),
+        tx,
+    ));
+
+    let cmd = argv(&[b"SET", b"send-bulk-replica", b"v"]);
+    let expected = redis_commands::aof::encode_resp_command(&cmd);
+    let before = repl.master_offset();
+    let offset = propagate_command_raw(&cmd);
+
+    assert_eq!(offset, before + expected.len() as i64);
+    assert_eq!(
+        rx.recv_timeout(Duration::from_millis(250))
+            .expect("send_bulk replica should receive command stream bytes"),
+        expected
+    );
+
+    repl.remove_replica(client_id);
+    client_info_registry().lock().unwrap().deregister(client_id);
+}
+
+#[test]
 fn retained_fullsync_history_extends_partial_resync_after_job_completion() {
     let st = ReplicationState::new(generate_runid(), 4);
     let _rx = attach_replica(&st, 41, 0);
@@ -133,6 +168,37 @@ fn retained_fullsync_history_extends_partial_resync_after_job_completion() {
         st.can_read_history_range(0, 10),
         "PSYNC should be allowed when retained history and backlog are contiguous"
     );
+}
+
+#[test]
+fn retained_fullsync_history_keeps_growing_for_send_bulk_owner() {
+    let st = ReplicationState::new(generate_runid(), 4);
+    let _rx = attach_replica(&st, 42, 0);
+
+    st.append_to_backlog(b"abcdef");
+    st.retain_fullsync_history(0, b"abcdef".to_vec(), &[42]);
+    assert_eq!(st.backlog_snapshot(), (0, 6, 6, 4));
+
+    st.append_to_backlog(b"ghij");
+    st.append_to_backlog(b"klmn");
+
+    assert_eq!(
+        st.backlog_snapshot(),
+        (0, 14, 14, 4),
+        "a send_bulk owner should keep the shared full-sync stream readable beyond the circular backlog"
+    );
+    assert_eq!(
+        st.read_history_at(0, 14).as_deref(),
+        Some(b"abcdefghijklmn".as_slice())
+    );
+
+    st.remove_replica(42);
+    assert_eq!(
+        st.backlog_snapshot(),
+        (10, 14, 4, 4),
+        "disconnecting the last owner releases the grown shared history"
+    );
+    assert!(!st.can_read_history_range(0, 14));
 }
 
 #[test]
@@ -364,6 +430,10 @@ fn retained_history_does_not_overclaim_after_backlog_wrap_creates_gap() {
 
     st.append_to_backlog(b"abcdef");
     st.retain_fullsync_history(0, b"abcdef".to_vec(), &[61]);
+    {
+        let mut guard = st.retained_history.lock().unwrap();
+        guard[0].open = false;
+    }
 
     st.append_to_backlog(b"ghij");
     assert_eq!(

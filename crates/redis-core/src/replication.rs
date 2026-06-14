@@ -477,6 +477,11 @@ pub struct RetainedReplHistory {
     pub bytes: Vec<u8>,
     /// Replica client ids that still pin this segment.
     pub owners: Vec<ClientId>,
+    /// Whether future replication stream bytes should extend this segment while
+    /// any owner still depends on it. Full-sync `send_bulk` replicas consume the
+    /// shared stream after the RDB payload, so their retained history must grow
+    /// beyond the circular backlog until they ACK or disconnect.
+    pub open: bool,
 }
 
 impl RetainedReplHistory {
@@ -698,6 +703,7 @@ impl ReplicationState {
             Err(p) => p.into_inner().append(bytes),
         };
         self.append_to_repl_bgsave_catchup(bytes);
+        self.append_to_open_retained_history(new_offset.saturating_sub(bytes.len() as i64), bytes);
         self.master_repl_offset.store(new_offset, Ordering::Relaxed);
         new_offset
     }
@@ -802,6 +808,21 @@ impl ReplicationState {
         };
         if let Some(job) = guard.as_mut() {
             job.catch_up_bytes.extend_from_slice(bytes);
+        }
+    }
+
+    fn append_to_open_retained_history(&self, start_offset: i64, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        let mut guard = match self.retained_history.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        for segment in guard.iter_mut() {
+            if segment.open && segment.end_offset() == start_offset {
+                segment.bytes.extend_from_slice(bytes);
+            }
         }
     }
 
@@ -1128,6 +1149,7 @@ impl ReplicationState {
             start_offset,
             bytes,
             owners,
+            open: true,
         });
     }
 

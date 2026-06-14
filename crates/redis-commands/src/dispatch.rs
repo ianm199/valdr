@@ -2499,7 +2499,8 @@ pub(crate) fn execabort_from_error_reply(reply: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Append `argv` to the replication backlog and fan out to all online replicas.
+/// Append `argv` to the replication backlog and fan out to all replicas that
+/// are consuming the command stream.
 /// Called from `dispatch_command_name` after every successful write command
 /// executed by a non-replica client. Failures to deliver to a specific
 /// replica are logged and skipped; they are non-fatal because the replica
@@ -2515,7 +2516,7 @@ fn propagate_write_to_replicas(
         repl.append_to_backlog(select_bytes);
     }
     let offset = repl.append_to_backlog(&argv_bytes);
-    for client_id in online_replica_client_ids(repl) {
+    for client_id in streaming_replica_client_ids(repl) {
         if let Some(select_bytes) = select_bytes.as_ref() {
             if !repl.send_to_replica(client_id, select_bytes.clone()) {
                 eprintln!(
@@ -2535,7 +2536,7 @@ fn propagate_write_to_replicas(
     offset
 }
 
-fn online_replica_client_ids(
+fn streaming_replica_client_ids(
     repl: &redis_core::replication::ReplicationState,
 ) -> Vec<redis_core::client::ClientId> {
     let mut ids: Vec<_> = {
@@ -2546,9 +2547,13 @@ fn online_replica_client_ids(
         guard
             .values()
             .filter(|conn| {
-                redis_core::replication::ReplicaState::from_u8(
-                    conn.state.load(std::sync::atomic::Ordering::Acquire),
-                ) == redis_core::replication::ReplicaState::Online
+                matches!(
+                    redis_core::replication::ReplicaState::from_u8(
+                        conn.state.load(std::sync::atomic::Ordering::Acquire),
+                    ),
+                    redis_core::replication::ReplicaState::Online
+                        | redis_core::replication::ReplicaState::SendingRdb
+                )
             })
             .map(|conn| conn.client_id)
             .collect()
@@ -2618,7 +2623,7 @@ pub fn propagate_command_raw(argv: &[RedisString]) -> i64 {
 
     let argv_bytes = crate::aof::encode_resp_command(argv);
     let offset = repl.append_to_backlog(&argv_bytes);
-    for client_id in online_replica_client_ids(&repl) {
+    for client_id in streaming_replica_client_ids(&repl) {
         if !repl.send_to_replica(client_id, argv_bytes.clone()) {
             eprintln!(
                 "redis-server: raw replication fan-out failed for client {}",
