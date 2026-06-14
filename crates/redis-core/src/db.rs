@@ -18,6 +18,7 @@
 //! `glob_match` wrapper so call sites stay source-shaped while sharing
 //! the faithful implementation.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -81,6 +82,35 @@ pub struct GlobalNotifyHandle {
 }
 
 static GLOBAL_NOTIFY_HANDLE: OnceLock<Arc<GlobalNotifyHandle>> = OnceLock::new();
+
+/// Implicit key deletion produced by lazy expiry during command execution.
+/// `redis-commands` drains this thread-local after dispatch and propagates the
+/// synthesized DEL/UNLINK before the user command that observed the expiry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingExpiredDeletion {
+    pub db_id: u32,
+    pub key: RedisString,
+    pub lazy: bool,
+}
+
+thread_local! {
+    static PENDING_EXPIRED_DELETIONS: RefCell<Vec<PendingExpiredDeletion>> =
+        RefCell::new(Vec::new());
+}
+
+fn record_pending_expired_deletion(db_id: u32, key: &RedisString, lazy: bool) {
+    PENDING_EXPIRED_DELETIONS.with(|pending| {
+        pending.borrow_mut().push(PendingExpiredDeletion {
+            db_id,
+            key: key.clone(),
+            lazy,
+        });
+    });
+}
+
+pub fn take_pending_expired_deletions() -> Vec<PendingExpiredDeletion> {
+    PENDING_EXPIRED_DELETIONS.with(|pending| std::mem::take(&mut *pending.borrow_mut()))
+}
 
 /// Install the global notification handle used by lazy/active expiry paths.
 /// Should be called once during server initialisation, before any connection
@@ -410,16 +440,16 @@ pub enum KeyStatus {
 #[derive(Debug, Clone)]
 pub struct ScanOptions {
     pub count: i64,
- /// Pattern bytes, or `None` for '*' (match all).
+    /// Pattern bytes, or `None` for '*' (match all).
     pub pat: Option<Vec<u8>>,
     pub use_pattern: bool,
- /// Slot derived from pattern hashtag in cluster mode; -1 if none.
+    /// Slot derived from pattern hashtag in cluster mode; -1 if none.
     pub match_slot: i32,
- /// Object type filter; `i64::MAX` means no filter.
+    /// Object type filter; `i64::MAX` means no filter.
     pub type_filter: i64,
- /// Explicit slot from SLOT option (CLUSTERSCAN only); -1 if none.
+    /// Explicit slot from SLOT option (CLUSTERSCAN only); -1 if none.
     pub input_slot: i32,
- /// Return only keys, not field+value pairs (NOVALUES / NOSCORES).
+    /// Return only keys, not field+value pairs (NOVALUES / NOSCORES).
     pub only_keys: bool,
 }
 
@@ -473,10 +503,10 @@ impl GetKeysResult {
 /// integration — deferred to Phase 4.
 #[derive(Debug, Default)]
 pub struct ScanData {
- /// Collected (key, optional_value) byte pairs.
+    /// Collected (key, optional_value) byte pairs.
     pub result: Vec<(Vec<u8>, Option<Vec<u8>>)>,
     pub db_id: u32,
- /// `i64::MAX` = no filter.
+    /// `i64::MAX` = no filter.
     pub type_filter: i64,
     pub pattern: Option<Vec<u8>>,
     pub sampled: i64,
@@ -492,61 +522,61 @@ pub struct ScanData {
 /// and secondary expires dict land in Phase 4.
 #[derive(Debug, Default)]
 pub struct RedisDb {
- /// Database index.
+    /// Database index.
     pub id: u32,
 
- /// Main keyspace. C: serverDb.keys (kvstore).
+    /// Main keyspace. C: serverDb.keys (kvstore).
     dict: KeyspaceMap,
 
- /// Keys with blocking clients (BLPOP / BRPOP / XREADGROUP).
+    /// Keys with blocking clients (BLPOP / BRPOP / XREADGROUP).
     /// C: serverDb.blocking_keys — TODO(port): deferred to Phase 3.
     #[allow(dead_code)] // C serverDb field; wired in Phase 3 when blocked-key unblock logic is ported
     blocking_keys: HashMap<RedisString, ()>,
 
- /// Keys signalled as ready to unblock a waiting client.
+    /// Keys signalled as ready to unblock a waiting client.
     /// C: serverDb.ready_keys — TODO(port): deferred to Phase 3.
     #[allow(dead_code)] // C serverDb field; wired in Phase 3 when blocked-key unblock logic is ported
     ready_keys: HashSet<RedisString>,
 
- /// Keys being WATCHed by MULTI/EXEC clients.
+    /// Keys being WATCHed by MULTI/EXEC clients.
     /// C: serverDb.watched_keys — TODO(port): deferred to Phase 5.
     watched_keys: HashMap<RedisString, ()>,
 
- /// Average TTL for INFO keyspace stats.
+    /// Average TTL for INFO keyspace stats.
     /// C: serverDb.avg_ttl — TODO(port): active-expiry cycle (Phase 3).
     pub avg_ttl: i64,
 
- /// When true, lazy expiration is suppressed and expired keys stay visible
- /// to lookups and key iteration. Set per-command by the dispatcher when a
- /// primary is in `import-mode` and the calling client is in import-source
- /// state. C: `server.current_client->flag.import_source` consulted by
- /// `keyIsExpired` / `objectIsExpired`.
+    /// When true, lazy expiration is suppressed and expired keys stay visible
+    /// to lookups and key iteration. Set per-command by the dispatcher when a
+    /// primary is in `import-mode` and the calling client is in import-source
+    /// state. C: `server.current_client->flag.import_source` consulted by
+    /// `keyIsExpired` / `objectIsExpired`.
     import_source_active: bool,
 
- /// When true (a primary in `import-mode`), an expired key is still reported
- /// as expired to non-import clients but is NOT lazily deleted — the server
- /// waits for an explicit DEL from the import source. C: the `KEEP_EXPIRED`
- /// branch of `getExpirationPolicyWithFlags`.
+    /// When true (a primary in `import-mode`), an expired key is still reported
+    /// as expired to non-import clients but is NOT lazily deleted — the server
+    /// waits for an explicit DEL from the import source. C: the `KEEP_EXPIRED`
+    /// branch of `getExpirationPolicyWithFlags`.
     import_mode_keep: bool,
 
- /// When true, CLIENT PAUSE is suppressing physical expiry. Expired keys
- /// remain logically expired for normal lookups but are not deleted and can
- /// still be sampled by RANDOMKEY, matching Valkey's PAUSE_ACTION_EXPIRE.
+    /// When true, CLIENT PAUSE is suppressing physical expiry. Expired keys
+    /// remain logically expired for normal lookups but are not deleted and can
+    /// still be sampled by RANDOMKEY, matching Valkey's PAUSE_ACTION_EXPIRE.
     pause_expire_keep: bool,
 
- /// When true (this server is a replica of a primary), an expired key is
- /// reported as logically expired to lookups but is NOT lazily deleted — the
- /// replica waits for the primary to propagate the DEL. C: the `masterhost
- /// != NULL` branch of `getExpirationPolicyWithFlags` returning KEEP.
+    /// When true (this server is a replica of a primary), an expired key is
+    /// reported as logically expired to lookups but is NOT lazily deleted — the
+    /// replica waits for the primary to propagate the DEL. C: the `masterhost
+    /// != NULL` branch of `getExpirationPolicyWithFlags` returning KEEP.
     replica_keep_expired: bool,
 
- /// When true, the command currently executing arrived on the primary link
- /// (the replica applying the replication stream). Such commands must IGNORE
- /// expiry entirely — keys are treated as present regardless of TTL — so a
- /// replicated INCR/APPEND on a logically-expired key mutates the existing
- /// value instead of recreating it TTL-less and diverging the keyspace. C:
- /// `getExpirationPolicyWithFlags` returns POLICY_IGNORE_EXPIRE when
- /// `current_client->flag.primary`.
+    /// When true, the command currently executing arrived on the primary link
+    /// (the replica applying the replication stream). Such commands must IGNORE
+    /// expiry entirely — keys are treated as present regardless of TTL — so a
+    /// replicated INCR/APPEND on a logically-expired key mutates the existing
+    /// value instead of recreating it TTL-less and diverging the keyspace. C:
+    /// `getExpirationPolicyWithFlags` returns POLICY_IGNORE_EXPIRE when
+    /// `current_client->flag.primary`.
     replica_link_apply: bool,
 }
 
@@ -562,9 +592,9 @@ impl RedisDb {
         }
     }
 
- /// Construct a `RedisDb` from a snapshot of (key, object) pairs.
- /// Used by BGSAVE to build a throwaway DB containing only the entries
- /// captured at snapshot time. The id is set to 0.
+    /// Construct a `RedisDb` from a snapshot of (key, object) pairs.
+    /// Used by BGSAVE to build a throwaway DB containing only the entries
+    /// captured at snapshot time. The id is set to 0.
     pub fn from_snapshot(entries: Vec<(RedisString, crate::object::RedisObject)>) -> Self {
         let mut db = Self::new(0);
         for (k, v) in entries {
@@ -577,9 +607,9 @@ impl RedisDb {
         self.dict.snapshot()
     }
 
- // ── Internal helpers ─────────────────────────────────────────────────────
+    // ── Internal helpers ─────────────────────────────────────────────────────
 
- /// Wall-clock time in milliseconds since the Unix epoch.
+    /// Wall-clock time in milliseconds since the Unix epoch.
     fn now_ms() -> i64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -587,11 +617,11 @@ impl RedisDb {
             .unwrap_or(0)
     }
 
- /// True if the key exists and its TTL has elapsed.
+    /// True if the key exists and its TTL has elapsed.
     pub fn is_expired(&self, key: &RedisString) -> bool {
         // TODO(port): return false when server.loading is true
- // a primary in import-mode keeps expired keys
- // visible to an import-source client.
+        // a primary in import-mode keeps expired keys
+        // visible to an import-source client.
         if self.import_source_active || self.replica_link_apply {
             return false;
         }
@@ -601,11 +631,11 @@ impl RedisDb {
         }
     }
 
- /// Sets the per-command import-expiry state. `import_source_active` keeps
- /// expired keys fully visible to the current client; `import_mode_keep`
- /// stops lazy expiration from deleting expired keys (they stay, reported as
- /// expired). The dispatcher refreshes these before every command so they
- /// reflect the current client and server state.
+    /// Sets the per-command import-expiry state. `import_source_active` keeps
+    /// expired keys fully visible to the current client; `import_mode_keep`
+    /// stops lazy expiration from deleting expired keys (they stay, reported as
+    /// expired). The dispatcher refreshes these before every command so they
+    /// reflect the current client and server state.
     pub fn set_import_expire_state(&mut self, import_source_active: bool, import_mode_keep: bool) {
         self.import_source_active = import_source_active;
         self.import_mode_keep = import_mode_keep;
@@ -615,21 +645,21 @@ impl RedisDb {
         self.pause_expire_keep = pause_expire_keep;
     }
 
- /// Set whether this server is currently a replica, so the lazy-expiry path
- /// keeps (does not delete) logically-expired keys while reporting them
- /// expired. Refreshed per-command by the dispatcher.
+    /// Set whether this server is currently a replica, so the lazy-expiry path
+    /// keeps (does not delete) logically-expired keys while reporting them
+    /// expired. Refreshed per-command by the dispatcher.
     pub fn set_replica_keep_expired(&mut self, replica_keep_expired: bool) {
         self.replica_keep_expired = replica_keep_expired;
     }
 
- /// Mark whether the current command arrived on the primary link (replica
- /// applying the replication stream), enabling IGNORE_EXPIRE. Refreshed
- /// per-command by the dispatcher.
+    /// Mark whether the current command arrived on the primary link (replica
+    /// applying the replication stream), enabling IGNORE_EXPIRE. Refreshed
+    /// per-command by the dispatcher.
     pub fn set_replica_link_apply(&mut self, replica_link_apply: bool) {
         self.replica_link_apply = replica_link_apply;
     }
 
- /// Check and optionally delete an expired key. Returns the new `KeyStatus`.
+    /// Check and optionally delete an expired key. Returns the new `KeyStatus`.
     pub fn expire_if_needed(&mut self, key: &RedisString, flags: u32) -> KeyStatus {
         if !self.is_expired(key) {
             return KeyStatus::Valid;
@@ -637,18 +667,18 @@ impl RedisDb {
         if flags & EXPIRE_AVOID_DELETE_EXPIRED != 0 {
             return KeyStatus::Expired;
         }
- // a primary in import-mode
- // reports the key as expired but waits for the import source to delete
- // it, so non-force lookups must not lazily remove it.
+        // a primary in import-mode
+        // reports the key as expired but waits for the import source to delete
+        // it, so non-force lookups must not lazily remove it.
         if (self.import_mode_keep || self.pause_expire_keep || self.replica_keep_expired)
             && flags & EXPIRE_FORCE_DELETE_EXPIRED == 0
         {
             return KeyStatus::Expired;
         }
-        // TODO(port): EXPIRE_FORCE_DELETE_EXPIRED — check replica mode before deleting
         // TODO(port): signalModifiedKey(NULL, db, keyobj)
-        // TODO(port): propagateDeletion to AOF + replicas
-        self.dict.remove(key);
+        if self.dict.remove(key).is_some() {
+            record_pending_expired_deletion(self.id, key, false);
+        }
         notify_keyspace_event_global(NOTIFY_EXPIRED, b"expired", key, self.id);
         server_metrics()
             .expired_keys
@@ -656,9 +686,9 @@ impl RedisDb {
         KeyStatus::Deleted
     }
 
- // ── Lookup API ──────────────────────────────────────────────────────────
+    // ── Lookup API ──────────────────────────────────────────────────────────
 
- /// General-purpose key lookup with flags.
+    /// General-purpose key lookup with flags.
     pub fn lookup_key(&mut self, key: &RedisString, flags: u32) -> Option<&RedisObject> {
         if self.expire_if_needed(key, 0) != KeyStatus::Valid {
             if flags & (LOOKUP_NOSTATS | LOOKUP_WRITE) == 0 {
@@ -690,7 +720,7 @@ impl RedisDb {
         result
     }
 
- /// Read-oriented lookup. Asserts no LOOKUP_WRITE flag.
+    /// Read-oriented lookup. Asserts no LOOKUP_WRITE flag.
     pub fn lookup_key_read_with_flags(
         &mut self,
         key: &RedisString,
@@ -700,20 +730,20 @@ impl RedisDb {
         self.lookup_key(key, flags)
     }
 
- /// Convenience read lookup with no flags.
- /// MIGRATION SHIM: the original C function (and the full-port version)
- /// takes `&mut self` because reads touch LRU and may lazy-delete expired
- /// keys. The architect-stub variant accepted `impl AsRef<[u8]>` and was
- /// `&self`. To keep all 30+ call sites compiling, the back-compat layer
- /// makes this `&self` over `impl AsRef<[u8]>` and skips both the LRU
- /// touch and the expire-if-needed cycle. Callers who want either should
- /// use `lookup_key_read_with_flags` (mutable, LRU-touching).
+    /// Convenience read lookup with no flags.
+    /// MIGRATION SHIM: the original C function (and the full-port version)
+    /// takes `&mut self` because reads touch LRU and may lazy-delete expired
+    /// keys. The architect-stub variant accepted `impl AsRef<[u8]>` and was
+    /// `&self`. To keep all 30+ call sites compiling, the back-compat layer
+    /// makes this `&self` over `impl AsRef<[u8]>` and skips both the LRU
+    /// touch and the expire-if-needed cycle. Callers who want either should
+    /// use `lookup_key_read_with_flags` (mutable, LRU-touching).
     pub fn lookup_key_read(&self, key: impl AsRef<[u8]>) -> Option<&RedisObject> {
         let k = RedisString::from_bytes(key.as_ref());
         self.find(&k)
     }
 
- /// Write-oriented lookup — may force-delete an expired key.
+    /// Write-oriented lookup — may force-delete an expired key.
     pub fn lookup_key_write_with_flags(
         &mut self,
         key: &RedisString,
@@ -731,14 +761,14 @@ impl RedisDb {
         Some(obj)
     }
 
- /// Write-oriented lookup with no extra flags.
+    /// Write-oriented lookup with no extra flags.
     pub fn lookup_key_write(&mut self, key: &RedisString) -> Option<&mut RedisObject> {
         self.lookup_key_write_with_flags(key, LOOKUP_NONE)
     }
 
- // ── Key add / set / replace ─────────────────────────────────────────────
+    // ── Key add / set / replace ─────────────────────────────────────────────
 
- /// Insert a key that must not already exist (debug-asserts in dev builds).
+    /// Insert a key that must not already exist (debug-asserts in dev builds).
     pub fn add(&mut self, key: RedisString, value: RedisObject) {
         debug_assert!(!self.dict.contains_key(&key), "dbAdd: key already exists");
         // TODO(port): signalKeyAsReady(db, key, val->type)
@@ -746,16 +776,16 @@ impl RedisDb {
         self.dict.insert(key, value);
     }
 
- /// Insert-or-overwrite with no preconditions. Returns the previous value if any.
- /// PORT NOTE: covers both insert (dbAdd path) and overwrite (dbSetValue path)
- /// depending on caller intent. Use `set_key` for the high-level interface.
+    /// Insert-or-overwrite with no preconditions. Returns the previous value if any.
+    /// PORT NOTE: covers both insert (dbAdd path) and overwrite (dbSetValue path)
+    /// depending on caller intent. Use `set_key` for the high-level interface.
     pub fn insert(&mut self, key: RedisString, value: RedisObject) -> Option<RedisObject> {
         // TODO(port): moduleNotifyKeyUnlink / signalDeletedKeyAsReady on overwrite
         // TODO(port): initObjectLRUOrLFU on insert
         self.dict.insert(key, value)
     }
 
- /// High-level key setter: insert or overwrite, handle TTL + signals.
+    /// High-level key setter: insert or overwrite, handle TTL + signals.
     pub fn set_key(&mut self, key: RedisString, mut value: RedisObject, flags: u32) {
         let preserved_expire = if flags & SETKEY_KEEPTTL != 0 {
             self.dict.get(&key).map(|o| o.expire).unwrap_or(EXPIRY_NONE)
@@ -766,8 +796,8 @@ impl RedisDb {
         self.set_key_prepared(key, value, flags);
     }
 
- /// High-level setter when the caller already observed the previous
- /// expiry during its command-specific lookup.
+    /// High-level setter when the caller already observed the previous
+    /// expiry during its command-specific lookup.
     pub fn set_key_with_known_expire(
         &mut self,
         key: RedisString,
@@ -801,7 +831,7 @@ impl RedisDb {
         }
     }
 
- /// Replace a key's value without touching its expiry or LRU.
+    /// Replace a key's value without touching its expiry or LRU.
     pub fn replace_value(&mut self, key: &RedisString, mut value: RedisObject) {
         // TODO(port): lazy-free of old object via tryOffloadFreeObjToIOThreads
         if let Some(old) = self.dict.get(key) {
@@ -811,16 +841,16 @@ impl RedisDb {
         self.dict.insert(key.clone(), value);
     }
 
- /// Ensure the string at `key` is mutable (raw encoding, not shared).
+    /// Ensure the string at `key` is mutable (raw encoding, not shared).
     pub fn unshare_string_value(&mut self, key: &RedisString) -> Option<&mut RedisObject> {
         // TODO(port): getDecodedObject / createRawStringObject / dbReplaceValue
- // if encoding == EMBSTR or refcount > 1 (Phase 4 encoding work)
+        // if encoding == EMBSTR or refcount > 1 (Phase 4 encoding work)
         self.dict.get_mut(key)
     }
 
- // ── Delete ──────────────────────────────────────────────────────────────
+    // ── Delete ──────────────────────────────────────────────────────────────
 
- /// Synchronous delete; returns true if the key existed.
+    /// Synchronous delete; returns true if the key existed.
     pub fn sync_delete(&mut self, key: &RedisString) -> bool {
         // TODO(port): moduleNotifyKeyUnlink(key, val, db->id, flags)
         // TODO(port): signalDeletedKeyAsReady(db, key, val->type)
@@ -832,8 +862,8 @@ impl RedisDb {
         existed
     }
 
- /// Async delete (lazy-free). Phase A falls through to synchronous delete.
- /// PERF(port): freeObjAsync — background deallocation deferred to Phase 3.
+    /// Async delete (lazy-free). Phase A falls through to synchronous delete.
+    /// PERF(port): freeObjAsync — background deallocation deferred to Phase 3.
     pub fn async_delete(&mut self, key: &RedisString) -> bool {
         let Some(obj) = self.dict.remove(key) else {
             return false;
@@ -844,15 +874,15 @@ impl RedisDb {
         true
     }
 
- /// Delete using the server's lazyfree setting.
+    /// Delete using the server's lazyfree setting.
     pub fn delete(&mut self, key: &RedisString) -> bool {
         // TODO(port): choose sync vs async via server.lazyfree_lazy_server_del
         self.sync_delete(key)
     }
 
- // ── Expiry ──────────────────────────────────────────────────────────────
+    // ── Expiry ──────────────────────────────────────────────────────────────
 
- /// Remove the TTL from an existing key (make it persistent).
+    /// Remove the TTL from an existing key (make it persistent).
     pub fn remove_expire(&mut self, key: &RedisString) -> bool {
         if let Some(obj) = self.dict.get_mut(key) {
             if obj.expire != EXPIRY_NONE {
@@ -863,7 +893,7 @@ impl RedisDb {
         false
     }
 
- /// Set the absolute expiry timestamp (ms since epoch) for an existing key.
+    /// Set the absolute expiry timestamp (ms since epoch) for an existing key.
     pub fn set_expire(&mut self, key: &RedisString, when: i64) {
         // TODO(port): rememberReplicaKeyWithExpire on writable replica
         if let Some(obj) = self.dict.get_mut(key) {
@@ -871,19 +901,19 @@ impl RedisDb {
         }
     }
 
- /// Return the expiry timestamp (ms) or `EXPIRY_NONE` (-1) if no TTL.
+    /// Return the expiry timestamp (ms) or `EXPIRY_NONE` (-1) if no TTL.
     pub fn get_expire(&self, key: &RedisString) -> i64 {
         self.dict.get(key).map(|o| o.expire).unwrap_or(EXPIRY_NONE)
     }
 
- /// True if the key has an elapsed TTL.
+    /// True if the key has an elapsed TTL.
     pub fn key_is_expired(&self, key: &RedisString) -> bool {
         self.is_expired(key)
     }
 
- // ── Misc DB operations ──────────────────────────────────────────────────
+    // ── Misc DB operations ──────────────────────────────────────────────────
 
- /// Remove all keys.
+    /// Remove all keys.
     pub fn clear(&mut self) {
         // TODO(port): emptyDbAsync, kvstoreEmpty callback, resetDbExpiryState
         let watched_keys: Vec<RedisString> = if watched_keys_any() {
@@ -898,22 +928,22 @@ impl RedisDb {
         }
     }
 
- /// Raw (no expiry check) key lookup. Used by internal scans.
+    /// Raw (no expiry check) key lookup. Used by internal scans.
     pub fn find(&self, key: &RedisString) -> Option<&RedisObject> {
         self.dict.get(key)
     }
 
- /// Borrow the main dict for eviction sampling.
- /// Exposed here rather than going through `keys_snapshot_with_types` so
- /// the eviction loop in `eviction.rs` can peek at `RedisObject.lru` for
- /// each sample without allocating a snapshot of the entire keyspace.
+    /// Borrow the main dict for eviction sampling.
+    /// Exposed here rather than going through `keys_snapshot_with_types` so
+    /// the eviction loop in `eviction.rs` can peek at `RedisObject.lru` for
+    /// each sample without allocating a snapshot of the entire keyspace.
     pub fn iter_for_eviction(&self) -> impl Iterator<Item = (&RedisString, &RedisObject)> {
         self.dict.iter()
     }
 
- /// Borrow live key/value pairs for coarse memory accounting.
- /// This preserves the same visibility filter as `keys_snapshot_with_types`
- /// without cloning every key or doing a second lookup per entry.
+    /// Borrow live key/value pairs for coarse memory accounting.
+    /// This preserves the same visibility filter as `keys_snapshot_with_types`
+    /// without cloning every key or doing a second lookup per entry.
     pub fn iter_for_memory_accounting(&self) -> impl Iterator<Item = (&RedisString, &RedisObject)> {
         let now = Self::now_ms();
         self.dict.iter().filter(move |(_, obj)| {
@@ -921,24 +951,24 @@ impl RedisDb {
         })
     }
 
- /// True if the key is in the dict regardless of TTL.
+    /// True if the key is in the dict regardless of TTL.
     pub fn exists_raw(&self, key: &RedisString) -> bool {
         self.dict.contains_key(key)
     }
 
- /// True if the key is present and not expired.
+    /// True if the key is present and not expired.
     pub fn exists(&mut self, key: &RedisString) -> bool {
         self.lookup_key_read_with_flags(key, LOOKUP_NOTOUCH)
             .is_some()
     }
 
- /// Number of keys including logically-expired ones not yet lazily removed.
+    /// Number of keys including logically-expired ones not yet lazily removed.
     pub fn size(&self) -> u64 {
         self.dict.len() as u64
     }
 
- /// Number of keys that carry an active TTL (expire != EXPIRY_NONE).
- /// Used by `INFO keyspace` to populate the `expires=N` field.
+    /// Number of keys that carry an active TTL (expire != EXPIRY_NONE).
+    /// Used by `INFO keyspace` to populate the `expires=N` field.
     pub fn expires_count(&self) -> u64 {
         self.dict
             .values()
@@ -950,7 +980,7 @@ impl RedisDb {
         self.dict.is_empty()
     }
 
- /// Return keys matching `pattern` that are not expired (immutable, no TTL removal).
+    /// Return keys matching `pattern` that are not expired (immutable, no TTL removal).
     /// TODO(port): cluster slot filtering (patternHashSlot); active-expiry during scan.
     pub fn matching_keys(&self, pattern: &[u8]) -> Vec<RedisString> {
         let all = pattern == b"*";
@@ -965,14 +995,14 @@ impl RedisDb {
             .collect()
     }
 
- /// Return a stable snapshot of every live (non-expired) key paired with
- /// its `TYPE` byte-string name (`string`, `list`, `hash`, `set`, `zset`,
- /// `stream`, `none`).
- /// Used by the linear-cursor SCAN implementation in `scan_command`;
- /// iteration order is whatever the underlying `HashMap` yields and is
- /// only stable within a single mutation-free window. Real Redis hashes
+    /// Return a stable snapshot of every live (non-expired) key paired with
+    /// its `TYPE` byte-string name (`string`, `list`, `hash`, `set`, `zset`,
+    /// `stream`, `none`).
+    /// Used by the linear-cursor SCAN implementation in `scan_command`;
+    /// iteration order is whatever the underlying `HashMap` yields and is
+    /// only stable within a single mutation-free window. Real Redis hashes
     /// the cursor for resize safety — see the TODO in `scan_command` for
- /// the deferred parity work.
+    /// the deferred parity work.
     pub fn keys_snapshot_with_types(&self) -> Vec<(RedisString, &'static [u8])> {
         let now = Self::now_ms();
         self.dict
@@ -984,8 +1014,8 @@ impl RedisDb {
             .collect()
     }
 
- /// Return a random key that is not expired.
- /// PERF(port): O(n) HashMap walk — replace with fair random kvstore entry in Phase 4.
+    /// Return a random key that is not expired.
+    /// PERF(port): O(n) HashMap walk — replace with fair random kvstore entry in Phase 4.
     pub fn random_key(&self) -> Option<RedisString> {
         // TODO(port): kvstoreGetFairRandomHashtableIndex / kvstoreHashtableFairRandomEntry
         let now = Self::now_ms();
@@ -1008,14 +1038,14 @@ impl RedisDb {
             .map(|(k, _)| k.clone())
     }
 
- /// Sample up to `max` (key, expire_ms) pairs from this db's keyspace for
- /// active-expiration cycle. Only keys that carry a TTL are returned;
- /// untagged (persistent) keys are skipped. The starting offset is pseudo-
- /// randomised from `offset_seed` to avoid biased deletion from HashMap
- /// iteration order.
- /// PERF(port): O(n) walk over the main dict because Phase B has no
- /// secondary `expires` index yet. Phase 4 kvstore work replaces this with
- /// a direct sample over `db->expires`.
+    /// Sample up to `max` (key, expire_ms) pairs from this db's keyspace for
+    /// active-expiration cycle. Only keys that carry a TTL are returned;
+    /// untagged (persistent) keys are skipped. The starting offset is pseudo-
+    /// randomised from `offset_seed` to avoid biased deletion from HashMap
+    /// iteration order.
+    /// PERF(port): O(n) walk over the main dict because Phase B has no
+    /// secondary `expires` index yet. Phase 4 kvstore work replaces this with
+    /// a direct sample over `db->expires`.
     pub fn sample_expiring_keys(&self, max: usize, offset_seed: u64) -> Vec<(RedisString, i64)> {
         if max == 0 || self.dict.is_empty() {
             return Vec::new();
@@ -1034,8 +1064,8 @@ impl RedisDb {
         out
     }
 
- /// Number of keys that currently carry a TTL.
- /// PERF(port): O(n) walk — phase-4 kvstore exposes `db->expires` size in O(1).
+    /// Number of keys that currently carry a TTL.
+    /// PERF(port): O(n) walk — phase-4 kvstore exposes `db->expires` size in O(1).
     pub fn expiring_key_count(&self) -> usize {
         self.dict
             .iter()
@@ -1043,7 +1073,7 @@ impl RedisDb {
             .count()
     }
 
- /// Swap keyspace contents with `other`. blocking/ready/watched stay in place.
+    /// Swap keyspace contents with `other`. blocking/ready/watched stay in place.
     pub fn swap_contents_with(&mut self, other: &mut RedisDb) {
         watched_keys_touch_all_in_db(self, Some(other));
         watched_keys_touch_all_in_db(other, Some(self));
@@ -1053,13 +1083,13 @@ impl RedisDb {
         std::mem::swap(&mut self.avg_ttl, &mut other.avg_ttl);
     }
 
- // ── Signal hooks (Phase A stubs) ────────────────────────────────────────
+    // ── Signal hooks (Phase A stubs) ────────────────────────────────────────
 
- /// Invalidate WATCH state and client-tracking for a modified key.
- /// MIGRATION SHIM: accepts anything that views as bytes (the architect
- /// stub took `impl AsRef<[u8]>`) so callers passing `&RedisString`,
- /// `&Vec<u8>`, or `&[u8]` all compile. Notifies every WATCH watcher
- /// `key` via the global watched-keys index (see [`watched_keys_index`]).
+    /// Invalidate WATCH state and client-tracking for a modified key.
+    /// MIGRATION SHIM: accepts anything that views as bytes (the architect
+    /// stub took `impl AsRef<[u8]>`) so callers passing `&RedisString`,
+    /// `&Vec<u8>`, or `&[u8]` all compile. Notifies every WATCH watcher
+    /// `key` via the global watched-keys index (see [`watched_keys_index`]).
     pub fn signal_modified(&self, key: impl AsRef<[u8]>) {
         // TODO(port): trackingInvalidateKey(c, key, 1)
         if !watched_keys_any() {
@@ -1069,35 +1099,35 @@ impl RedisDb {
         watched_keys_touch(self.id, &k);
     }
 
- // ── Migration shims for the architect stub ──────────────────────────────
+    // ── Migration shims for the architect stub ──────────────────────────────
 
- /// Database id as `i32` (matches the C `redisDb.id` type used by callers).
+    /// Database id as `i32` (matches the C `redisDb.id` type used by callers).
     pub fn id(&self) -> i32 {
         self.id as i32
     }
 
- /// Number of keys (alias of [`size`] as `usize`).
- /// MIGRATION SHIM: the architect-stub `len` returned `usize`; we keep it
- /// here for callers that haven't switched to `size` yet.
+    /// Number of keys (alias of [`size`] as `usize`).
+    /// MIGRATION SHIM: the architect-stub `len` returned `usize`; we keep it
+    /// here for callers that haven't switched to `size` yet.
     pub fn len(&self) -> usize {
         self.size() as usize
     }
 
- /// Byte-keyed delete shim that accepts `impl AsRef<[u8]>`.
- /// MIGRATION SHIM: the architect stub had `delete(impl AsRef<[u8]>)`;
- /// some callers still pass `&Vec<u8>`. The full-port `delete(&RedisString)`
- /// already covers `&RedisString`. This sibling method handles the byte
- /// path via a temporary `RedisString::from_bytes`.
+    /// Byte-keyed delete shim that accepts `impl AsRef<[u8]>`.
+    /// MIGRATION SHIM: the architect stub had `delete(impl AsRef<[u8]>)`;
+    /// some callers still pass `&Vec<u8>`. The full-port `delete(&RedisString)`
+    /// already covers `&RedisString`. This sibling method handles the byte
+    /// path via a temporary `RedisString::from_bytes`.
     pub fn delete_by_bytes(&mut self, key: impl AsRef<[u8]>) -> bool {
         let k = RedisString::from_bytes(key.as_ref());
         self.delete(&k)
     }
 
- /// Whether `key` has an active expiry that is already in the past.
- /// MIGRATION SHIM: the architect-stub variant took `&RedisObject` (
- /// caller hadn't extracted a key string yet). The new helper extracts
- /// string-payload bytes (if any) and reuses [`key_is_expired`]; returns
- /// `false` for non-string `key` arguments.
+    /// Whether `key` has an active expiry that is already in the past.
+    /// MIGRATION SHIM: the architect-stub variant took `&RedisObject` (
+    /// caller hadn't extracted a key string yet). The new helper extracts
+    /// string-payload bytes (if any) and reuses [`key_is_expired`]; returns
+    /// `false` for non-string `key` arguments.
     pub fn key_is_expired_obj(&self, key: &RedisObject) -> bool {
         match key.as_string_bytes() {
             Some(bytes) => self.key_is_expired(&RedisString::from_bytes(bytes)),
@@ -1105,18 +1135,18 @@ impl RedisDb {
         }
     }
 
- /// True if no key in this db is currently WATCHed by any client.
- /// MIGRATION SHIM: the architect stub kept the watched-keys map on
- /// `RedisDb`. Phase 3 will route this through MULTI/EXEC state; until
- /// then this returns `self.watched_keys.is_empty`.
+    /// True if no key in this db is currently WATCHed by any client.
+    /// MIGRATION SHIM: the architect stub kept the watched-keys map on
+    /// `RedisDb`. Phase 3 will route this through MULTI/EXEC state; until
+    /// then this returns `self.watched_keys.is_empty`.
     pub fn watched_keys_is_empty(&self) -> bool {
         self.watched_keys.is_empty()
     }
 
- /// Register `client_id` as a watcher of `key` in this db.
- /// MIGRATION SHIM: the architect stub stored watcher lists on the db
- /// itself. The full port defers this to Phase 3; we record presence
- /// only so [`watched_keys_is_empty`] returns the expected answer.
+    /// Register `client_id` as a watcher of `key` in this db.
+    /// MIGRATION SHIM: the architect stub stored watcher lists on the db
+    /// itself. The full port defers this to Phase 3; we record presence
+    /// only so [`watched_keys_is_empty`] returns the expected answer.
     pub fn watched_keys_add_client(
         &mut self,
         key: &RedisObject,
@@ -1167,7 +1197,7 @@ pub fn db_swap_databases(
 /// Propagate a key deletion to replicas and AOF.
 pub fn propagate_deletion(_db_id: u32, _key: &RedisString, _lazy: bool, _slot: i32) {
     // TODO(port): alsoPropagate(db->id, argv[DEL/UNLINK + key], PROPAGATE_AOF|PROPAGATE_REPL, slot)
- // Replication + AOF: Phase 4
+    // Replication + AOF: Phase 4
 }
 
 /// Delete an expired key and propagate the implicit deletion.
@@ -1917,13 +1947,13 @@ mod tests {
         obj.expire = 1; // 1 ms since epoch — always in the past
         db.add(key.clone(), obj);
 
- // Normal client: the expired key is invisible to lookup and iteration.
+        // Normal client: the expired key is invisible to lookup and iteration.
         assert!(db.is_expired(&key));
         assert!(db.random_key().is_none());
         assert!(db.matching_keys(b"*").is_empty());
 
- // import-source state: the expired key stays visible everywhere,
- // is NOT lazily deleted on lookup.
+        // import-source state: the expired key stays visible everywhere,
+        // is NOT lazily deleted on lookup.
         db.set_import_expire_state(true, true);
         assert!(!db.is_expired(&key));
         assert!(db.lookup_key_read_with_flags(&key, LOOKUP_NONE).is_some());
@@ -1934,14 +1964,14 @@ mod tests {
         assert_eq!(db.random_key(), Some(key.clone()));
         assert_eq!(db.matching_keys(b"*"), vec![key.clone()]);
 
- // import-mode, normal client: the key is reported expired (invisible)
- // but a non-force read must NOT lazily delete it.
+        // import-mode, normal client: the key is reported expired (invisible)
+        // but a non-force read must NOT lazily delete it.
         db.set_import_expire_state(false, true);
         assert!(db.is_expired(&key));
         assert!(db.lookup_key_read_with_flags(&key, LOOKUP_NONE).is_none());
         assert!(db.exists_raw(&key), "import-mode must keep the expired key");
 
- // No import mode: normal lazy expiration deletes on read.
+        // No import mode: normal lazy expiration deletes on read.
         db.set_import_expire_state(false, false);
         assert!(db.is_expired(&key));
         assert!(db.lookup_key_read_with_flags(&key, LOOKUP_NONE).is_none());
@@ -1953,12 +1983,12 @@ mod tests {
 
     #[test]
     fn replica_keep_expired_reports_expired_without_deleting() {
- // On a replica, a logically-expired key reads as absent (EXISTS/GET see
- // it gone) but is NOT lazily deleted — the replica waits for the primary
- // to propagate the DEL. C: `getExpirationPolicyWithFlags` returns
- // POLICY_KEEP_EXPIRED when `server.primary_host != NULL`. This is the
- // semantics replication-3/-4's "writable/readonly replica doesn't return
- // expired keys" assertions depend on.
+        // On a replica, a logically-expired key reads as absent (EXISTS/GET see
+        // it gone) but is NOT lazily deleted — the replica waits for the primary
+        // to propagate the DEL. C: `getExpirationPolicyWithFlags` returns
+        // POLICY_KEEP_EXPIRED when `server.primary_host != NULL`. This is the
+        // semantics replication-3/-4's "writable/readonly replica doesn't return
+        // expired keys" assertions depend on.
         let mut db = RedisDb::new(0);
         let key = k(b"k");
         let mut obj = make_str_obj(b"1");
@@ -1977,15 +2007,15 @@ mod tests {
             "replica must NOT lazily delete the expired key (waits for primary DEL)"
         );
 
- // A forced delete (the synthesized DEL applied from the primary) still
- // removes it even in replica mode.
+        // A forced delete (the synthesized DEL applied from the primary) still
+        // removes it even in replica mode.
         assert_eq!(
             db.expire_if_needed(&key, EXPIRE_FORCE_DELETE_EXPIRED),
             KeyStatus::Deleted,
         );
         assert!(!db.exists_raw(&key));
 
- // As a primary (flag cleared), a normal lookup lazily deletes on access.
+        // As a primary (flag cleared), a normal lookup lazily deletes on access.
         let key2 = k(b"k2");
         let mut obj2 = make_str_obj(b"2");
         obj2.expire = 1;
@@ -1997,10 +2027,10 @@ mod tests {
 
     #[test]
     fn replica_link_apply_ignores_expiry() {
- // A command applied from the primary link must treat an expired key as
- // present (IGNORE_EXPIRE), so a replicated INCR mutates the existing value
- // rather than recreating it. C: POLICY_IGNORE_EXPIRE for
- // current_client->flag.primary.
+        // A command applied from the primary link must treat an expired key as
+        // present (IGNORE_EXPIRE), so a replicated INCR mutates the existing value
+        // rather than recreating it. C: POLICY_IGNORE_EXPIRE for
+        // current_client->flag.primary.
         let mut db = RedisDb::new(0);
         let key = k(b"k");
         let mut obj = make_str_obj(b"1");

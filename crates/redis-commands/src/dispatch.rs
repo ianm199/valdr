@@ -734,7 +734,9 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
     let _fullsync_snapshot_read = fullsync_snapshot_repl
         .as_ref()
         .map(|repl| repl.fullsync_snapshot_read_guard());
+    let _ = redis_core::db::take_pending_expired_deletions();
     let result = (entry.handler)(ctx);
+    let pending_expired_deletions = redis_core::db::take_pending_expired_deletions();
     let command_blocked = result.is_ok() && ctx.client_ref().blocked_on_keys;
     let reply_is_error = result.is_ok()
         && ctx
@@ -865,6 +867,12 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
                 ctx.client_ref().name.clone(),
             );
         }
+    }
+
+    if !pending_expired_deletions.is_empty()
+        && should_propagate_pending_expired_deletions(ctx, command_blocked)
+    {
+        propagate_pending_expired_deletions(pending_expired_deletions);
     }
 
     let mut propagated_offset = None;
@@ -1068,6 +1076,36 @@ fn should_propagate_write_command(ctx: &CommandContext<'_>, original_name: &[u8]
             .is_some_and(|current| !current.as_bytes().eq_ignore_ascii_case(b"GETEX"));
     }
     true
+}
+
+fn should_propagate_pending_expired_deletions(
+    ctx: &CommandContext<'_>,
+    command_blocked: bool,
+) -> bool {
+    !command_blocked
+        && !ctx.client_ref().flag_deny_blocking()
+        && !ctx.client_ref().flag_lua()
+        && !ctx.client_ref().replication_apply
+        && !ctx.client_ref().is_replica
+}
+
+fn propagate_pending_expired_deletions(
+    deletions: Vec<redis_core::db::PendingExpiredDeletion>,
+) -> i64 {
+    let mut last_offset = -1;
+    for deletion in deletions {
+        let verb: &[u8] = if deletion.lazy {
+            b"UNLINK".as_slice()
+        } else {
+            b"DEL".as_slice()
+        };
+        let argv = [RedisString::from_bytes(verb), deletion.key];
+        let offset = propagate_command_from_wake(deletion.db_id, &argv);
+        if offset > 0 {
+            last_offset = offset;
+        }
+    }
+    last_offset
 }
 
 /// Return the combined hot-path metadata for a named command.

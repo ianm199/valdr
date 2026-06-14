@@ -31,6 +31,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use redis_core::blocked_keys::{blocked_keys_index, BlockedAction, BlockedSide, BlockedWaiter};
+use redis_core::db::LOOKUP_NOTOUCH;
 use redis_core::metrics::{command_stats_snapshot, reset_command_stats};
 use redis_core::replication::{
     global_replication_state, ReplBgsaveJob, ReplicaConn, ReplicaState, ReplicationState,
@@ -1667,6 +1668,67 @@ fn r1_ttl_relative_writes_rewrite_to_absolute_propagation() {
             .windows(resp(&[b"GETEX", b"getex-rel", b"EX", b"60"]).len())
             .any(|w| w == resp(&[b"GETEX", b"getex-rel", b"EX", b"60"]).as_slice()),
         "relative GETEX EX form must not be propagated"
+    );
+}
+
+#[test]
+fn r1_lazy_expire_recreate_propagates_delete_before_write() {
+    let _g = repl_guard();
+    let repl = global_replication_state();
+    repl.become_master();
+    repl.reset_selected_db_for_full_resync();
+    let cap = ReplCapture::attach(900_034, repl.master_offset());
+    let mut primary_db = RedisDb::new(0);
+    let mut replica_dbs: Vec<RedisDb> = (0..16).map(RedisDb::new).collect();
+    let mut replica_selected_db = 0;
+
+    assert_eq!(
+        dispatch_as_primary(34, &mut primary_db, &[b"SADD", b"s", b"foo"]),
+        b":1\r\n"
+    );
+    assert_eq!(
+        dispatch_as_primary(35, &mut primary_db, &[b"PEXPIRE", b"s", b"1"]),
+        b":1\r\n"
+    );
+    let initial_stream = cap.drain();
+    apply_resp_stream_as_replica_on_dbs(
+        36,
+        &mut replica_dbs,
+        &mut replica_selected_db,
+        &initial_stream,
+    );
+    let _ = cap.drain();
+    std::thread::sleep(Duration::from_millis(20));
+
+    assert_eq!(
+        dispatch_as_primary(37, &mut primary_db, &[b"SADD", b"s", b"foo"]),
+        b":1\r\n"
+    );
+    let stream = cap.drain();
+    let del_frame = resp(&[b"DEL", b"s"]);
+    let sadd_frame = resp(&[b"SADD", b"s", b"foo"]);
+    let del_pos = stream
+        .windows(del_frame.len())
+        .position(|w| w == del_frame.as_slice())
+        .expect("lazy expiry before recreate must propagate DEL");
+    let sadd_pos = stream
+        .windows(sadd_frame.len())
+        .position(|w| w == sadd_frame.as_slice())
+        .expect("recreating SADD must still propagate");
+    assert!(
+        del_pos < sadd_pos,
+        "replica must delete the expired value before applying the recreating write, got {:?}",
+        String::from_utf8_lossy(&stream)
+    );
+
+    apply_resp_stream_as_replica_on_dbs(38, &mut replica_dbs, &mut replica_selected_db, &stream);
+    let key = RedisString::from_static(b"s");
+    replica_dbs[0].set_replica_keep_expired(true);
+    assert!(
+        replica_dbs[0]
+            .lookup_key_read_with_flags(&key, LOOKUP_NOTOUCH)
+            .is_some(),
+        "without the propagated DEL, replica apply mutates the expired set and normal replica reads still report it missing"
     );
 }
 
