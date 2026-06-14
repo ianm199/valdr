@@ -797,6 +797,135 @@ fn psync_no_reconnect_swapdb_fullsync_converges_under_mutating_write_load() {
 }
 
 #[test]
+fn psync_no_reconnect_fullsync_replays_db0_final_list_pop() {
+    let master = TestServer::start("repl-psync-list-pop-master").expect("start master");
+    let replica = TestServer::start("repl-psync-list-pop-replica").expect("start replica");
+    configure_psync_surface(&master, &replica);
+
+    let mut master_conn = RespConn::connect(master.port).expect("connect master");
+    expect_simple(
+        master_conn
+            .command(&[b"CONFIG", b"SET", b"rdb-key-save-delay", b"500000"])
+            .expect("CONFIG SET rdb-key-save-delay"),
+        b"OK",
+    );
+    expect_success(
+        master_conn
+            .command(&[b"LPUSH", b"733", b"982874811618"])
+            .expect("seed one-element DB 0 list"),
+    );
+
+    let mut replica_conn = RespConn::connect(replica.port).expect("connect replica");
+    expect_simple(
+        replica_conn
+            .command(&[b"SLAVEOF", b"127.0.0.1", master.port.to_string().as_bytes()])
+            .expect("SLAVEOF should reply"),
+        b"OK",
+    );
+    wait_for_info_field(&master, b"persistence", "rdb_bgsave_in_progress", "1")
+        .expect("master should keep replication BGSAVE open long enough for catch-up write");
+
+    let popped = master_conn
+        .command(&[b"LPOP", b"733"])
+        .expect("final LPOP should reply");
+    assert_eq!(
+        popped,
+        Frame::Bulk(Some(b"982874811618".to_vec())),
+        "master should remove the exact one-element list value"
+    );
+    assert_eq!(
+        master_conn
+            .command(&[b"EXISTS", b"733"])
+            .expect("EXISTS after final LPOP"),
+        Frame::Integer(0),
+        "master should delete the list key after final pop"
+    );
+
+    wait_for_replica_up(&replica, &master).expect("replica should reach online state");
+    wait_for_digest_match(&master, &replica)
+        .expect("replica should replay the catch-up final LPOP and converge");
+
+    let mut replica_check = RespConn::connect(replica.port).expect("connect replica for EXISTS");
+    assert_eq!(
+        replica_check
+            .command(&[b"EXISTS", b"733"])
+            .expect("replica EXISTS after full sync"),
+        Frame::Integer(0),
+        "replica must not retain the DB 0 list after full-sync catch-up"
+    );
+}
+
+#[test]
+fn psync_no_reconnect_fullsync_replays_db11_final_hdel() {
+    let master = TestServer::start("repl-psync-hdel-master").expect("start master");
+    let replica = TestServer::start("repl-psync-hdel-replica").expect("start replica");
+    configure_psync_surface(&master, &replica);
+
+    let mut master_conn = RespConn::connect(master.port).expect("connect master");
+    expect_simple(
+        master_conn
+            .command(&[b"CONFIG", b"SET", b"rdb-key-save-delay", b"500000"])
+            .expect("CONFIG SET rdb-key-save-delay"),
+        b"OK",
+    );
+    expect_simple(
+        master_conn
+            .command(&[b"SELECT", b"11"])
+            .expect("SELECT DB 11"),
+        b"OK",
+    );
+    expect_success(
+        master_conn
+            .command(&[b"HSET", b"700", b"980330930547", b"-784434765942"])
+            .expect("seed one-field DB 11 hash"),
+    );
+
+    let mut replica_conn = RespConn::connect(replica.port).expect("connect replica");
+    expect_simple(
+        replica_conn
+            .command(&[b"SLAVEOF", b"127.0.0.1", master.port.to_string().as_bytes()])
+            .expect("SLAVEOF should reply"),
+        b"OK",
+    );
+    wait_for_info_field(&master, b"persistence", "rdb_bgsave_in_progress", "1")
+        .expect("master should keep replication BGSAVE open long enough for catch-up write");
+
+    assert_eq!(
+        master_conn
+            .command(&[b"HDEL", b"700", b"980330930547"])
+            .expect("final HDEL should reply"),
+        Frame::Integer(1),
+        "master should remove the exact one-field hash entry"
+    );
+    assert_eq!(
+        master_conn
+            .command(&[b"EXISTS", b"700"])
+            .expect("EXISTS after final HDEL"),
+        Frame::Integer(0),
+        "master should delete the hash key after final HDEL"
+    );
+
+    wait_for_replica_up(&replica, &master).expect("replica should reach online state");
+    wait_for_digest_match(&master, &replica)
+        .expect("replica should replay the catch-up final HDEL and converge");
+
+    let mut replica_check = RespConn::connect(replica.port).expect("connect replica for EXISTS");
+    expect_simple(
+        replica_check
+            .command(&[b"SELECT", b"11"])
+            .expect("replica SELECT DB 11"),
+        b"OK",
+    );
+    assert_eq!(
+        replica_check
+            .command(&[b"EXISTS", b"700"])
+            .expect("replica EXISTS after full sync"),
+        Frame::Integer(0),
+        "replica must not retain the DB 11 hash after full-sync catch-up"
+    );
+}
+
+#[test]
 fn psync_same_primary_socket_drop_reconnects_with_continue() {
     let master = TestServer::start("repl-reconnect-master").expect("start master");
     let replica = TestServer::start("repl-reconnect-replica").expect("start replica");
@@ -849,6 +978,88 @@ fn psync_same_primary_socket_drop_reconnects_with_continue() {
     assert!(
         !digest.is_empty(),
         "DEBUG DIGEST should return a non-empty digest after partial reconnect"
+    );
+}
+
+#[test]
+fn psync_same_primary_reconnect_replays_db0_final_list_pop() {
+    let master = TestServer::start("repl-reconnect-list-pop-master").expect("start master");
+    let replica = TestServer::start("repl-reconnect-list-pop-replica").expect("start replica");
+    configure_psync_surface(&master, &replica);
+
+    let mut master_conn = RespConn::connect(master.port).expect("connect master");
+    expect_success(
+        master_conn
+            .command(&[b"LPUSH", b"733", b"982874811618"])
+            .expect("seed one-element DB 0 list"),
+    );
+
+    let mut replica_conn = RespConn::connect(replica.port).expect("connect replica");
+    expect_simple(
+        replica_conn
+            .command(&[b"SLAVEOF", b"127.0.0.1", master.port.to_string().as_bytes()])
+            .expect("SLAVEOF should reply"),
+        b"OK",
+    );
+    wait_for_replica_up(&replica, &master).expect("initial full sync should finish");
+    wait_for_digest_match(&master, &replica).expect("initial list should converge");
+    expect_success(
+        master_conn
+            .command(&[b"SET", b"offset-anchor", b"1"])
+            .expect("online anchor write should advance PSYNC offset"),
+    );
+    wait_for_digest_match(&master, &replica)
+        .expect("replica should apply the online anchor before reconnect");
+
+    let stats_before = wait_for_info_counter_at_least(&master, b"stats", "sync_full", 1)
+        .expect("master should count initial full sync");
+    let sync_full_before = info_u64(&stats_before, "sync_full").expect("sync_full field");
+    let partial_ok_before = info_u64(&stats_before, "sync_partial_ok").unwrap_or(0);
+
+    match master_conn
+        .command(&[b"CLIENT", b"KILL", b"TYPE", b"replica"])
+        .expect("CLIENT KILL TYPE replica should reply")
+    {
+        Frame::Integer(killed) if killed >= 1 => {}
+        frame => panic!("expected to kill at least one replica client, got {frame:?}"),
+    }
+    wait_for_info_field(&master, b"replication", "connected_slaves", "0")
+        .expect("master should observe the dropped replica connection");
+
+    assert_eq!(
+        master_conn
+            .command(&[b"LPOP", b"733"])
+            .expect("final LPOP while replica is reconnecting"),
+        Frame::Bulk(Some(b"982874811618".to_vec())),
+        "master should remove the exact one-element list value"
+    );
+    assert_eq!(
+        master_conn
+            .command(&[b"EXISTS", b"733"])
+            .expect("EXISTS after final LPOP"),
+        Frame::Integer(0),
+        "master should delete the list key after final pop"
+    );
+
+    let stats_after =
+        wait_for_info_counter_at_least(&master, b"stats", "sync_partial_ok", partial_ok_before + 1)
+            .expect("same-primary reconnect should be accepted as partial resync");
+    assert_eq!(
+        info_u64(&stats_after, "sync_full"),
+        Some(sync_full_before),
+        "same-primary reconnect with retained final LPOP must not require another full sync"
+    );
+
+    wait_for_replica_up(&replica, &master).expect("replica should return online");
+    wait_for_digest_match(&master, &replica)
+        .expect("replica should replay final LPOP made during reconnect");
+    let mut replica_check = RespConn::connect(replica.port).expect("connect replica for EXISTS");
+    assert_eq!(
+        replica_check
+            .command(&[b"EXISTS", b"733"])
+            .expect("replica EXISTS after reconnect"),
+        Frame::Integer(0),
+        "replica must not retain the DB 0 list after partial reconnect"
     );
 }
 
