@@ -221,6 +221,40 @@ fn same_primary_zero_offset_reconnect_gets_continue_and_replays_catchup() {
 }
 
 #[test]
+fn same_primary_reconnect_after_db9_minus_zero_replays_later_zero_only() {
+    let _g = psync_guard();
+    let repl = global_replication_state();
+    let _reset = GlobalReplReset::new(&repl);
+
+    let key = b"316637927";
+    let mut already_applied = Vec::new();
+    already_applied.extend(resp(&[b"SELECT", b"9"]));
+    already_applied.extend(resp(&[b"SET", key, b"-0"]));
+    let provided = repl.append_to_backlog(&already_applied);
+    let catchup = resp(&[b"SET", key, b"0"]);
+    repl.append_to_backlog(&catchup);
+
+    let runid = runid_string(&repl);
+    let drive = drive_psync(
+        1_100_012,
+        vec![b"PSYNC".to_vec(), runid, provided.to_string().into_bytes()],
+    );
+
+    assert!(
+        drive.reply.starts_with(b"+CONTINUE"),
+        "same-primary reconnect after DB 9 -0 frame should continue, got {:?}",
+        String::from_utf8_lossy(&drive.reply)
+    );
+    assert_eq!(
+        drive.sent, catchup,
+        "+CONTINUE should replay only the later DB 9 overwrite"
+    );
+    assert_eq!(drive.counters_after.1, drive.counters_before.1 + 1);
+    assert_eq!(drive.counters_after.0, drive.counters_before.0);
+    assert_eq!(drive.counters_after.2, drive.counters_before.2);
+}
+
+#[test]
 fn config_set_backlog_size_expands_live_psync_window() {
     let _g = psync_guard();
     let repl = global_replication_state();

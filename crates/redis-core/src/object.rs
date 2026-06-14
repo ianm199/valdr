@@ -1758,27 +1758,13 @@ pub fn is_canonical_i64_ascii(bytes: &[u8]) -> bool {
     if bytes.is_empty() || bytes.len() > 20 {
         return false;
     }
-    let (sign_skip, digits) = if bytes[0] == b'-' {
-        (1usize, &bytes[1..])
-    } else {
-        (0usize, bytes)
+    let Ok(s) = std::str::from_utf8(bytes) else {
+        return false;
     };
-    if digits.is_empty() {
+    let Ok(value) = s.parse::<i64>() else {
         return false;
-    }
-    if digits.len() > 1 && digits[0] == b'0' {
-        return false;
-    }
-    for &b in digits {
-        if !b.is_ascii_digit() {
-            return false;
-        }
-    }
-    let _ = sign_skip;
-    match std::str::from_utf8(bytes) {
-        Ok(s) => s.parse::<i64>().is_ok(),
-        Err(_) => false,
-    }
+    };
+    value.to_string().as_bytes() == bytes
 }
 
 /// Return `true` if a string of `len` bytes should use EMBSTR encoding.

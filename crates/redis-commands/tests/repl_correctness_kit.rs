@@ -278,6 +278,61 @@ fn debug_digest(client_id: u64, dbs: &mut [RedisDb], selected_db: &mut u32) -> V
     reply[5..45].to_vec()
 }
 
+fn apply_resp_stream_as_replica_on_dbs(
+    client_id: u64,
+    dbs: &mut [RedisDb],
+    selected_db: &mut u32,
+    stream: &[u8],
+) -> Vec<Vec<u8>> {
+    let mut c = Client::new(client_id);
+    c.replication_apply = true;
+    c.suppress_monitor = true;
+    c.db_index = *selected_db;
+    c.set_authenticated_user(Some(RedisString::from_static(b"default")));
+    c.query_buf.extend_from_slice(stream);
+
+    let server = Arc::new(RedisServer::default());
+    let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
+    let mut consumed_total = 0usize;
+    let mut replies = Vec::new();
+
+    loop {
+        match c.parse_query_buffer_into_argv(consumed_total) {
+            Ok(Some(consumed)) => {
+                consumed_total += consumed;
+                if c.argv.is_empty() {
+                    continue;
+                }
+                let result = {
+                    let mut ctx = redis_core::CommandContext::with_server_and_db_list(
+                        &mut c,
+                        dbs,
+                        Arc::clone(&server),
+                        Arc::clone(&pubsub),
+                    );
+                    dispatch(&mut ctx)
+                };
+                assert!(
+                    result.is_ok(),
+                    "replica stream command failed for argv {:?}: {:?}",
+                    c.argv
+                        .iter()
+                        .map(|arg| String::from_utf8_lossy(arg.as_bytes()).to_string())
+                        .collect::<Vec<_>>(),
+                    result.err()
+                );
+                replies.push(c.drain_reply());
+                c.reset_args();
+            }
+            Ok(None) => break,
+            Err(err) => panic!("replica stream parse failed: {:?}", err),
+        }
+    }
+
+    *selected_db = c.db_index;
+    replies
+}
+
 // ─── GREEN ANCHOR ────────────────────────────────────────────────────────────
 
 /// GREEN ANCHOR — proves the capture mechanism is faithful before any red test
@@ -438,6 +493,163 @@ fn replica_fullsync_stream_starts_at_upstream_selected_db() {
     );
 
     repl.become_master();
+}
+
+#[test]
+fn replica_apply_partial_catchup_preserves_db9_for_minus_zero_overwrite() {
+    let _g = repl_guard();
+    let mut dbs: Vec<RedisDb> = (0..16).map(RedisDb::new).collect();
+    let mut selected_db = 0;
+    let key = b"316637927";
+
+    let mut first_stream = Vec::new();
+    first_stream.extend(resp(&[b"SELECT", b"9"]));
+    first_stream.extend(resp(&[b"SET", key, b"-0"]));
+    let replies =
+        apply_resp_stream_as_replica_on_dbs(37, &mut dbs, &mut selected_db, &first_stream);
+    assert_eq!(selected_db, 9);
+    assert_eq!(replies, vec![b"+OK\r\n".to_vec(), b"+OK\r\n".to_vec()]);
+
+    let catchup = resp(&[b"SET", key, b"0"]);
+    let replies = apply_resp_stream_as_replica_on_dbs(38, &mut dbs, &mut selected_db, &catchup);
+    assert_eq!(selected_db, 9);
+    assert_eq!(replies, vec![b"+OK\r\n".to_vec()]);
+
+    let db9 = dbs[9]
+        .lookup_key_read(key)
+        .map(|obj| obj.string_bytes().to_vec());
+    let db0 = dbs[0]
+        .lookup_key_read(key)
+        .map(|obj| obj.string_bytes().to_vec());
+    assert_eq!(db9.as_deref(), Some(b"0".as_slice()));
+    assert_eq!(db0, None, "partial catch-up must not fall back to DB 0");
+}
+
+#[test]
+fn primary_db9_overwrite_stream_replays_to_replica_db9() {
+    let _g = repl_guard();
+    let repl = global_replication_state();
+    repl.become_master();
+    repl.reset_selected_db_for_full_resync();
+    let cap = ReplCapture::attach(900_033, repl.master_offset());
+
+    let key = b"316637927";
+    let mut master_dbs: Vec<RedisDb> = (0..16).map(RedisDb::new).collect();
+    let mut master_selected_db = 0;
+    assert_eq!(
+        dispatch_as_primary_on_dbs(
+            39,
+            &mut master_dbs,
+            &mut master_selected_db,
+            &[b"SELECT", b"9"]
+        ),
+        b"+OK\r\n"
+    );
+    assert_eq!(
+        dispatch_as_primary_on_dbs(
+            40,
+            &mut master_dbs,
+            &mut master_selected_db,
+            &[b"SET", key, b"-0"]
+        ),
+        b"+OK\r\n"
+    );
+    assert_eq!(
+        dispatch_as_primary_on_dbs(
+            41,
+            &mut master_dbs,
+            &mut master_selected_db,
+            &[b"SET", key, b"0"]
+        ),
+        b"+OK\r\n"
+    );
+
+    let stream = cap.drain();
+    let select9 = resp(&[b"SELECT", b"9"]);
+    assert!(
+        stream
+            .windows(select9.len())
+            .any(|window| window == select9.as_slice()),
+        "DB 9 primary stream must include SELECT before writes, got {:?}",
+        String::from_utf8_lossy(&stream)
+    );
+
+    let mut replica_dbs: Vec<RedisDb> = (0..16).map(RedisDb::new).collect();
+    let mut replica_selected_db = 0;
+    apply_resp_stream_as_replica_on_dbs(42, &mut replica_dbs, &mut replica_selected_db, &stream);
+
+    let value = replica_dbs[9]
+        .lookup_key_read(key)
+        .map(|obj| obj.string_bytes().to_vec());
+    assert_eq!(replica_selected_db, 9);
+    assert_eq!(value.as_deref(), Some(b"0".as_slice()));
+    assert!(
+        replica_dbs[0].lookup_key_read(key).is_none(),
+        "DB 0 must not receive the DB 9 overwrite"
+    );
+
+    repl.become_master();
+}
+
+#[test]
+fn fullsync_rdb_minus_zero_then_db9_catchup_zero_reconstructs_latest_value() {
+    let _g = repl_guard();
+    let key = b"316637927";
+    let dir = unique_temp_dir("repl-kit-fullsync-db9");
+    std::fs::create_dir_all(&dir).unwrap();
+    let rdb_path = dir.join("dump.rdb");
+
+    let mut master_dbs: Vec<RedisDb> = (0..16).map(RedisDb::new).collect();
+    let mut master_selected_db = 0;
+    assert_eq!(
+        dispatch_as_primary_on_dbs(
+            43,
+            &mut master_dbs,
+            &mut master_selected_db,
+            &[b"SELECT", b"9"]
+        ),
+        b"+OK\r\n"
+    );
+    assert_eq!(
+        dispatch_as_primary_on_dbs(
+            44,
+            &mut master_dbs,
+            &mut master_selected_db,
+            &[b"SET", key, b"-0"]
+        ),
+        b"+OK\r\n"
+    );
+
+    redis_core::rdb::save_rdb_databases(&master_dbs, &rdb_path).expect("save full-sync RDB");
+
+    let mut replica_dbs: Vec<RedisDb> = (0..16).map(RedisDb::new).collect();
+    redis_core::rdb::load_into_dbs_replacing(&mut replica_dbs, &rdb_path)
+        .expect("load full-sync RDB");
+    assert_eq!(
+        replica_dbs[9]
+            .lookup_key_read(key)
+            .map(|obj| obj.string_bytes().to_vec())
+            .as_deref(),
+        Some(b"-0".as_slice()),
+        "RDB load should preserve the pre-catch-up DB 9 value exactly"
+    );
+
+    let mut catchup = Vec::new();
+    catchup.extend(resp(&[b"SELECT", b"9"]));
+    catchup.extend(resp(&[b"SET", key, b"0"]));
+    let mut replica_selected_db = 0;
+    apply_resp_stream_as_replica_on_dbs(45, &mut replica_dbs, &mut replica_selected_db, &catchup);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(replica_selected_db, 9);
+    assert_eq!(
+        replica_dbs[9]
+            .lookup_key_read(key)
+            .map(|obj| obj.string_bytes().to_vec())
+            .as_deref(),
+        Some(b"0".as_slice())
+    );
+    assert!(replica_dbs[0].lookup_key_read(key).is_none());
 }
 
 // ─── R1-NOOP-DIRTY: no-op write propagation guards ─────────────────────────

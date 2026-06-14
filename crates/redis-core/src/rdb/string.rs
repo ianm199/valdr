@@ -10,19 +10,18 @@
 //! Load encoding rules (mirroring `rdbLoadEncodedStringObject` + `tryObjectEncoding`):
 //! - `is_encoded` flag from `load_len`: dispatch on `RDB_ENC_INT8/16/32` →
 //! `StringEncoding::Int(n as i64)`. `RDB_ENC_LZF` → error (Round 27).
-//! - Raw byte payload: `len <= 44` → `StringEncoding::Embstr`, else `StringEncoding::Raw`.
+//! - Raw byte payload: reuse the runtime string encoder, so canonical integer
+//! strings become `StringEncoding::Int` and non-canonical byte strings keep
+//! their exact bytes as `Embstr`/`Raw`.
 
 use std::io::{self, Read, Write};
 
-use crate::object::{is_canonical_i64_ascii, ObjectKind, RedisObject, StringEncoding};
+use crate::object::{ObjectKind, RedisObject, StringEncoding};
 
 use super::lzf::lzf_decompress;
 use super::varint::{
     load_len, write_len, RDB_ENCVAL, RDB_ENC_INT16, RDB_ENC_INT32, RDB_ENC_INT8, RDB_ENC_LZF,
 };
-
-/// Threshold in bytes below which a loaded raw string gets `Embstr` encoding.
-const EMBSTR_LIMIT: usize = 44;
 
 /// Serialize a `RDB_TYPE_STRING` value payload for `obj`.
 /// The type byte itself is written by the caller; this function writes only
@@ -104,18 +103,7 @@ fn load_encoded_string(r: &mut impl Read, enc: u8) -> io::Result<RedisObject> {
 fn load_raw_bytes(r: &mut impl Read, len: usize) -> io::Result<RedisObject> {
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf)?;
-    if is_canonical_i64_ascii(&buf) {
-        if let Ok(s) = std::str::from_utf8(&buf) {
-            if let Ok(n) = s.parse::<i64>() {
-                return Ok(RedisObject::new_int_string(n));
-            }
-        }
-    }
-    if len <= EMBSTR_LIMIT {
-        Ok(RedisObject::new_embstr(&buf))
-    } else {
-        Ok(RedisObject::new_raw_string(&buf))
-    }
+    Ok(RedisObject::new_string_try_encoded(&buf))
 }
 
 #[cfg(test)]
@@ -190,6 +178,28 @@ mod tests {
                 assert_eq!(s.as_bytes(), b"hello")
             }
             other => panic!("expected Embstr, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn raw_minus_zero_roundtrip_stays_raw_bytes() {
+        let obj = RedisObject::new_embstr(b"-0");
+        let loaded = roundtrip(obj);
+        match loaded.kind {
+            ObjectKind::String(StringEncoding::Embstr(s)) => {
+                assert_eq!(s.as_bytes(), b"-0")
+            }
+            other => panic!("expected raw -0 to stay Embstr, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn raw_zero_roundtrip_promotes_to_int() {
+        let obj = RedisObject::new_embstr(b"0");
+        let loaded = roundtrip(obj);
+        match loaded.kind {
+            ObjectKind::String(StringEncoding::Int(n)) => assert_eq!(n, 0),
+            other => panic!("expected canonical 0 to promote to Int, got {:?}", other),
         }
     }
 

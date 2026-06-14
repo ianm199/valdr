@@ -75,7 +75,7 @@ Artifact:
 | `integration/replication-4` | 15/2 | Red | SPOP rewrite cases now pass; remaining failures are divergence/default writable-replica cases. |
 | `integration/replication-buffer` | 7/8 | Red | Shared/private output ownership, writer-side drain, active full-sync catch-up release, and the empty-RDB zero-offset reconnect guard moved the backlog-histlen outgrowth assertions, the non-dual-channel shrink assertion, and the dual-channel low-output-buffer partial-resync assertion green. Remaining failures are dual-channel global-buffer behavior, broader partial resync / backlog-memory shrink cases, output-buffer trimming, and the non-dual-channel low-output-buffer PSYNC counter edge case. |
 | `integration/replication` | 40/27 | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, the first async-loading CONFIG exception, successful swapdb function-context mismatch, parent-killed child discovery, `repl-diskless-load on-empty-db`, no-longer-useful RDB child cancellation, all four replica-link reply-violation assertions, malformed-PSYNC-offset logging, chained replica `FLUSHDB` / `FLUSHALL` stream relay, `GETSET` rewrite, nonblocking `BRPOPLPUSH` / `BLMOVE` rewrite stats, and empty-blocking `BRPOPLPUSH` / `BLMOVE` commandstats via real digest waits. Remaining failures are counted full-sync, diskless pipe/drop, blocked-list role-change, cache-master, lazy-expire, and old-data rollback cases. |
-| `integration/replication-psync` | timeout | Red | Historical focused gate was 90/0 after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support. Current full-file reruns still time out, but the full-sync detached-tail kit removed the first broad no-reconnect inconsistency; the latest oracle dump narrowed the visible data divergence to a single `0` vs `-0` string value. |
+| `integration/replication-psync` | timeout | Red | Historical focused gate was 90/0 after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support. Current full-file reruns still time out, but the full-sync detached-tail kit removed the first broad no-reconnect inconsistency. The latest oracle dump narrowed the visible data divergence to a single `0` vs `-0` string value; a fast kit then found and fixed an RDB raw numeric-string fidelity bug in that family. Full Tcl has not been rerun after that fix. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
 | `integration/replica-redirect` | timeout | Red | `CLIENT CAPA REDIRECT` top-level and MULTI/EXEC replica redirect semantics now pass the early file assertions. Manual `FAILOVER` now reaches timeout-driven handoff in Rust kits and a live two-process probe, including blocked `BRPOP` and paused `GET` REDIRECT after promotion. The official Tcl file still no-summary times out in the first failover test; side observation showed old primary `blocked_clients:2`, `paused_actions:all`, and `role:slave` while the target remained SIGSTOP'd. |
 | `unit/wait` | 39/0 | Green | WAIT command suite passed after the R4 role-change unblock packet; WAITAOF/FACK edge cases still need separate coverage. |
@@ -136,8 +136,10 @@ visible integration frontiers are now:
   Current full-file PSYNC reruns time out again with master/replica
   inconsistency lines, including a conservative-selector comparison. The
   detached full-sync catch-up tail slice removes the earliest broad
-  no-reconnect mismatch; next reproduce the narrowed `0` vs `-0` string
-  divergence in a Rust kit before rerunning the full Tcl matrix.
+  no-reconnect mismatch. The narrowed `0` vs `-0` family now has Rust kit
+  coverage, including an RDB raw-string load bug where `-0` was promoted to
+  integer `0`; keep using these kits as the debugger and reserve the full Tcl
+  matrix for a scoreboard rerun.
 - `R2-BUFFER-LIMITS`: accounting aliases, fan-out accounting, and retained
   full-sync history are covered; implement broader shared-buffer memory
   accounting, backlog outgrowth under slow online replicas, and replica
@@ -965,9 +967,63 @@ Results:
 Takeaway:
 
 - This packet fixes a real full-sync lifecycle race and narrows the PSYNC
-  frontier, but the next work should not rerun the full Tcl matrix. Build a
-  small kit for the `0` vs `-0` divergence, likely in replica apply or command
-  rewrite semantics for complex data generation.
+  frontier. The next packet did build the small `0` vs `-0` family kit and
+  found an RDB raw numeric-string fidelity bug, reinforcing that the slow Tcl
+  matrix should stay a scoreboard rather than the debugger loop.
+
+### R3-RDB-NUMERIC-STRING-FIDELITY
+
+Status: deterministic `0` / `-0` family kit fixed on 2026-06-14; no slow Tcl
+rerun in this packet.
+
+Implementation:
+
+- `repl_correctness_kit` now has a RESP stream apply helper that feeds raw
+  replication bytes through the same parser and replica-apply dispatch shape as
+  the runtime owner.
+- New DB 9 probes cover:
+  - partial catch-up after `SELECT 9; SET key -0`, proving a bare later
+    `SET key 0` applies to the preserved selected DB;
+  - primary propagation capture for `SELECT 9; SET key -0; SET key 0`,
+    proving the emitted stream replays to DB 9;
+  - full-sync RDB reconstruction where the RDB contains `-0` and catch-up
+    later sets `0`.
+- `psync_reconnect_kit` now covers reconnecting from the offset after the DB 9
+  `-0` frame and replaying only the later `SET key 0` frame.
+- RDB raw string loading now uses the runtime string encoder, and
+  `is_canonical_i64_ascii` now requires byte-for-byte integer round-trip
+  formatting. This keeps raw `-0` as bytes while still promoting canonical `0`
+  to integer encoding.
+
+Evidence:
+
+```bash
+cargo test -p redis-core rdb::string -- --nocapture
+cargo test -p redis-commands --test repl_correctness_kit -- --nocapture
+cargo test -p redis-commands --test psync_reconnect_kit -- --nocapture
+cargo test -p redis-commands --test fullsync_lifecycle_kit -- --nocapture
+cargo test -p redis-commands --test repl_buffer_kit -- --nocapture
+cargo check -p redis-core -p redis-commands -p redis-server
+```
+
+Results:
+
+- `rdb::string`: 10 passed, 0 failed. The new `raw_minus_zero_roundtrip_stays_raw_bytes`
+  case guards against `-0` becoming integer `0`.
+- `repl_correctness_kit`: 32 passed, 0 failed. The new full-sync reconstruction
+  case failed before the fix because the loaded RDB value was `0` instead of
+  `-0`.
+- `psync_reconnect_kit`: 10 passed, 0 failed.
+- `fullsync_lifecycle_kit`: 11 passed, 0 failed.
+- `repl_buffer_kit`: 6 passed, 0 failed.
+- `cargo check -p redis-core -p redis-commands -p redis-server`: passed.
+
+Takeaway:
+
+- The random complex-data generator can produce both `0` and `-0`; persistence,
+  full sync, and catch-up must preserve those bytes exactly until a later
+  command overwrites them. The kit found a real RDB loader mismatch without
+  another long Tcl run.
 
 ### R2-BGSAVE-CATCHUP
 

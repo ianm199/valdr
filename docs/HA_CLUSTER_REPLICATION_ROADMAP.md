@@ -87,7 +87,9 @@ Current red/unfinished areas from the 2026-06-13 R0 dashboard in
   the old conservative offset-zero selector, so PSYNC is a reopened R3
   frontier. A detached full-sync catch-up tail kit removed the earliest broad
   no-reconnect mismatch; the next visible data divergence is a single string
-  value `0` on the master vs `-0` on the replica.
+  value `0` on the master vs `-0` on the replica. A follow-up Rust kit found
+  and fixed an RDB raw numeric-string fidelity bug in that family; full Tcl has
+  not yet been rerun after that fix.
 - `replication-aof-sync` is green as of 2026-06-13 after full-sync RDB loads
   refresh appendonly manifests correctly.
 - `replica-redirect.tcl` needs real `FAILOVER` plus client redirect semantics.
@@ -430,8 +432,12 @@ Work packets:
   a follow-up kit on 2026-06-14 fixed the detached full-sync catch-up tail
   window where writes appended after the reaper took the BGSAVE job were not
   included in the RDB catch-up stream. The full Tcl matrix still timed out, but
-  its visible data diff narrowed to `0` vs `-0`; reproduce that in a small Rust
-  kit before relying on the full Tcl file again.
+  its visible data diff narrowed to `0` vs `-0`. A follow-up small Rust kit
+  covered DB 9 partial catch-up, primary stream replay, PSYNC replay from the
+  offset after the `-0` frame, and full-sync RDB reconstruction. That kit found
+  the RDB raw loader promoting `-0` to integer `0`; the loader now shares the
+  runtime string encoder and canonical integer round-trip rule. Keep using
+  these kits as the debugger and rerun full Tcl only as a scoreboard.
 - **R3-METRICS:** keep `sync_full`, `sync_partial_ok`, `sync_partial_err`,
   master/replica offsets, lag, and backlog histlen faithful in `INFO`.
 
