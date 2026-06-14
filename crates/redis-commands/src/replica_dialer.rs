@@ -317,8 +317,14 @@ fn run_replica_sink_loop(
                     io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                 ) =>
             {
-                release_partial_online_after_idle(repl, defer_partial_online_until_idle);
-                release_fullsync_ack_after_idle(repl, defer_fullsync_ack_until_idle);
+                if !release_idle_state_and_ack(
+                    stream,
+                    repl,
+                    defer_fullsync_ack_until_idle,
+                    defer_partial_online_until_idle,
+                ) {
+                    return;
+                }
                 continue;
             }
             Err(_) => return,
@@ -378,11 +384,31 @@ fn run_replica_sink_loop(
     }
 }
 
-fn release_fullsync_ack_after_idle(repl: &ReplicationState, pending: &AtomicBool) {
+fn release_idle_state_and_ack(
+    stream: &TcpStream,
+    repl: &ReplicationState,
+    defer_fullsync_ack_until_idle: &AtomicBool,
+    defer_partial_online_until_idle: &AtomicBool,
+) -> bool {
+    let released_partial = release_partial_online_after_idle(repl, defer_partial_online_until_idle);
+    let released_fullsync = release_fullsync_ack_after_idle(repl, defer_fullsync_ack_until_idle);
+    if !released_partial && !released_fullsync {
+        return true;
+    }
+
+    let offset = repl.master_repl_offset.load(Ordering::SeqCst);
+    match build_replconf_ack_if_ready(repl, defer_fullsync_ack_until_idle, offset) {
+        Some(ack) => stream_write(stream, &ack).is_ok(),
+        None => true,
+    }
+}
+
+fn release_fullsync_ack_after_idle(repl: &ReplicationState, pending: &AtomicBool) -> bool {
     if !pending.swap(false, Ordering::SeqCst) {
-        return;
+        return false;
     }
     repl.set_replica_link(replica_link_code::CONNECTED);
+    true
 }
 
 fn publish_replica_online_after_psync(repl: &ReplicationState) {
@@ -392,14 +418,15 @@ fn publish_replica_online_after_psync(repl: &ReplicationState) {
     complete_manual_failover_after_psync(repl);
 }
 
-fn release_partial_online_after_idle(repl: &ReplicationState, pending: &AtomicBool) {
+fn release_partial_online_after_idle(repl: &ReplicationState, pending: &AtomicBool) -> bool {
     if !pending.swap(false, Ordering::SeqCst) {
-        return;
+        return false;
     }
     repl.repl_state
         .store(repl_state_code::REPLICA_ONLINE, Ordering::SeqCst);
     repl.set_replica_link(replica_link_code::CONNECTED);
     complete_manual_failover_after_psync(repl);
+    true
 }
 
 enum ReplicaStreamFrame {
@@ -1048,6 +1075,27 @@ mod tests {
         batch_sizes
     }
 
+    fn connected_stream_pair() -> (TcpStream, TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let replica = TcpStream::connect(addr).expect("connect peer");
+        let (primary, _) = listener.accept().expect("accept peer");
+        (replica, primary)
+    }
+
+    fn assert_ack_frame_contains_offset(frame: &[u8], offset: i64) {
+        let offset = offset.to_string();
+        assert!(
+            frame.windows(b"REPLCONF".len()).any(|w| w == b"REPLCONF")
+                && frame.windows(b"ACK".len()).any(|w| w == b"ACK")
+                && frame
+                    .windows(offset.as_bytes().len())
+                    .any(|w| w == offset.as_bytes()),
+            "ACK frame should encode the processed offset {offset}: {:?}",
+            String::from_utf8_lossy(frame)
+        );
+    }
+
     #[test]
     fn replica_command_batch_waits_for_transaction_exec() {
         let mut batch = vec![command(&[b"MULTI"]), command(&[b"SET", b"k", b"v"])];
@@ -1179,6 +1227,32 @@ mod tests {
     }
 
     #[test]
+    fn fullsync_idle_release_immediately_acks_applied_catchup_offset() {
+        let (replica_stream, mut primary_stream) = connected_stream_pair();
+        primary_stream
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .expect("set read timeout");
+
+        let repl = local_state();
+        repl.repl_state
+            .store(repl_state_code::REPLICA_ONLINE, Ordering::SeqCst);
+        repl.set_replica_link(replica_link_code::CONNECTED);
+        repl.master_repl_offset.store(147, Ordering::SeqCst);
+        let fullsync_pending = AtomicBool::new(true);
+        let partial_pending = AtomicBool::new(false);
+
+        assert!(
+            release_idle_state_and_ack(&replica_stream, &repl, &fullsync_pending, &partial_pending,),
+            "idle full-sync release should write the ACK synchronously"
+        );
+        assert!(!fullsync_pending.load(Ordering::SeqCst));
+
+        let mut buf = [0u8; 128];
+        let n = primary_stream.read(&mut buf).expect("read ACK");
+        assert_ack_frame_contains_offset(&buf[..n], 147);
+    }
+
+    #[test]
     fn partial_resync_link_waits_for_catchup_idle_before_online() {
         let repl = local_state();
         repl.repl_state
@@ -1213,6 +1287,37 @@ mod tests {
             "handshake",
             "once the partial-online flag is consumed, later idle checks are no-ops"
         );
+    }
+
+    #[test]
+    fn partial_resync_idle_release_immediately_acks_applied_catchup_offset() {
+        let (replica_stream, mut primary_stream) = connected_stream_pair();
+        primary_stream
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .expect("set read timeout");
+
+        let repl = local_state();
+        repl.repl_state
+            .store(repl_state_code::REPLICA_CONNECTING, Ordering::SeqCst);
+        repl.set_replica_link(replica_link_code::HANDSHAKE);
+        repl.master_repl_offset.store(211, Ordering::SeqCst);
+        let fullsync_pending = AtomicBool::new(false);
+        let partial_pending = AtomicBool::new(true);
+
+        assert!(
+            release_idle_state_and_ack(&replica_stream, &repl, &fullsync_pending, &partial_pending,),
+            "idle partial-resync release should publish online and write the ACK synchronously"
+        );
+        assert!(!partial_pending.load(Ordering::SeqCst));
+        assert_eq!(repl.replica_link_str(), "connected");
+        assert_eq!(
+            repl.repl_state.load(Ordering::SeqCst),
+            repl_state_code::REPLICA_ONLINE
+        );
+
+        let mut buf = [0u8; 128];
+        let n = primary_stream.read(&mut buf).expect("read ACK");
+        assert_ack_frame_contains_offset(&buf[..n], 211);
     }
 
     #[test]
