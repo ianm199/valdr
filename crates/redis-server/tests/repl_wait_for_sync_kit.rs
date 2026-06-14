@@ -396,6 +396,50 @@ fn wait_for_info_counter_at_least(
     ))
 }
 
+fn wait_for_replicas_offset_match(
+    master: &TestServer,
+    replicas: &[&TestServer],
+) -> io::Result<u64> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut last = String::new();
+    while Instant::now() < deadline {
+        let master_info = info(master, b"replication")?;
+        let Some(master_offset) = info_u64(&master_info, "master_repl_offset") else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("master INFO has no master_repl_offset: {master_info:?}"),
+            ));
+        };
+        let mut offsets = Vec::with_capacity(replicas.len());
+        let mut all_match = true;
+        for replica in replicas {
+            let replica_info = info(replica, b"replication")?;
+            let link_up = info_field(&replica_info, "master_link_status").as_deref() == Some("up");
+            let offset = info_u64(&replica_info, "master_repl_offset");
+            offsets.push((replica.port, link_up, offset));
+            if !link_up || offset != Some(master_offset) {
+                all_match = false;
+            }
+        }
+        if all_match {
+            return Ok(master_offset);
+        }
+        last = format!("master_offset={master_offset}, replica_offsets={offsets:?}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!(
+            "replica offsets did not converge; last={last}; master stderr={}; replica stderrs={:?}",
+            master.stderr_tail(),
+            replicas
+                .iter()
+                .map(|replica| replica.stderr_tail())
+                .collect::<Vec<_>>()
+        ),
+    ))
+}
+
 fn configure_psync_surface(master: &TestServer, replica: &TestServer) {
     let mut master_conn = RespConn::connect(master.port).expect("connect master for config");
     for command in [
@@ -672,4 +716,58 @@ fn psync_same_primary_socket_drop_reconnects_with_continue() {
         !digest.is_empty(),
         "DEBUG DIGEST should return a non-empty digest after partial reconnect"
     );
+}
+
+#[test]
+fn multi_replica_fullsync_under_write_load_converges_offsets_and_digests() {
+    let master = TestServer::start("repl-multi-master").expect("start master");
+    let replica_a = TestServer::start("repl-multi-a").expect("start replica a");
+    let replica_b = TestServer::start("repl-multi-b").expect("start replica b");
+    let replica_c = TestServer::start("repl-multi-c").expect("start replica c");
+    let replicas: [&TestServer; 3] = [&replica_a, &replica_b, &replica_c];
+
+    for replica in replicas {
+        configure_psync_surface(&master, replica);
+    }
+
+    write_complex_data(master.port, 700, 80).expect("seed master data");
+    let master_port = master.port;
+    let writer = thread::spawn(move || write_complex_data(master_port, 780, 160));
+
+    for replica in replicas {
+        let mut conn = RespConn::connect(replica.port).expect("connect replica");
+        expect_simple(
+            conn.command(&[b"SLAVEOF", b"127.0.0.1", master.port.to_string().as_bytes()])
+                .expect("SLAVEOF should reply"),
+            b"OK",
+        );
+    }
+
+    for replica in replicas {
+        wait_for_replica_up(replica, &master).expect("replica should reach online state");
+    }
+    writer
+        .join()
+        .expect("writer thread should not panic")
+        .expect("writer commands should succeed");
+
+    wait_for_info_field(&master, b"replication", "replicas_waiting_psync", "0")
+        .expect("master should not retain full-sync waiters after replicas are online");
+    let offset = wait_for_replicas_offset_match(&master, &replicas)
+        .expect("all replicas should acknowledge the final master offset");
+    assert!(
+        offset > 0,
+        "write load should advance the replication offset"
+    );
+
+    let master_digest = debug_digest(&master).expect("master DEBUG DIGEST");
+    assert!(
+        !master_digest.is_empty(),
+        "DEBUG DIGEST should return a non-empty digest after multi-replica load"
+    );
+    for replica in replicas {
+        let replica_digest = wait_for_digest_match(&master, replica)
+            .expect("replica digest should converge with master");
+        assert_eq!(replica_digest, master_digest);
+    }
 }
