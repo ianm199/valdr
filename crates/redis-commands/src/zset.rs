@@ -1453,6 +1453,33 @@ fn store_zset(ctx: &mut CommandContext, dst: RedisString, entries: Vec<(RedisStr
     len
 }
 
+fn propagate_zset_store_rewrite(
+    ctx: &mut CommandContext,
+    dst: &RedisString,
+    entries: &[(RedisString, f64)],
+) {
+    const BATCH_SIZE: usize = 512;
+    let db_id = ctx.selected_db_id();
+    let del = [RedisString::from_bytes(b"DEL"), dst.clone()];
+    let mut last_offset = crate::dispatch::propagate_command_from_wake(db_id, &del);
+
+    for chunk in entries.chunks(BATCH_SIZE) {
+        let mut zadd = Vec::with_capacity(chunk.len() * 2 + 2);
+        zadd.push(RedisString::from_bytes(b"ZADD"));
+        zadd.push(dst.clone());
+        for (member, score) in chunk {
+            zadd.push(RedisString::from_vec(format_score(*score)));
+            zadd.push(member.clone());
+        }
+        last_offset = crate::dispatch::propagate_command_from_wake(db_id, &zadd);
+    }
+
+    if last_offset > 0 {
+        ctx.client_mut().last_write_repl_offset = last_offset;
+    }
+    ctx.client_mut().set_prevent_propagation();
+}
+
 /// Emit a zset-algebra result as a wire array, with or without scores.
 /// In RESP3 with WITHSCORES, emits a nested `*N [ *2 [member, double]... ]`
 /// structure matching real Redis/Valkey's RESP3 shape. In RESP2 (or without
@@ -1519,8 +1546,9 @@ fn algebra_store_inner(ctx: &mut CommandContext, cmd: &[u8], op: AlgebraOp) -> R
         AlgebraOp::Union => b"zunionstore" as &[u8],
         AlgebraOp::Inter => b"zinterstore" as &[u8],
     };
-    let stored = store_zset(ctx, dst.clone(), result);
+    let stored = store_zset(ctx, dst.clone(), result.clone());
     ctx.notify_keyspace_event(NOTIFY_ZSET, event, &dst);
+    propagate_zset_store_rewrite(ctx, &dst, &result);
     ctx.reply_integer(stored)
 }
 
@@ -1590,8 +1618,9 @@ pub fn zdiffstore_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
     let sources = collect_zalgebra_sources(ctx, 3, numkeys)?;
     let result = zdiff_inner(sources);
-    let stored = store_zset(ctx, dst.clone(), result);
+    let stored = store_zset(ctx, dst.clone(), result.clone());
     ctx.notify_keyspace_event(NOTIFY_ZSET, b"zdiffstore", &dst);
+    propagate_zset_store_rewrite(ctx, &dst, &result);
     ctx.reply_integer(stored)
 }
 

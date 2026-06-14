@@ -1066,6 +1066,71 @@ fn r1_set_store_commands_rewrite_to_deterministic_destination_updates() {
 }
 
 #[test]
+fn r1_zset_store_commands_rewrite_to_deterministic_destination_updates() {
+    let _g = repl_guard();
+    let cap = ReplCapture::attach(900_017, 0);
+    let mut db = RedisDb::new(0);
+
+    assert_eq!(
+        dispatch_as_primary(34, &mut db, &[b"ZADD", b"za", b"1", b"a"]),
+        b":1\r\n"
+    );
+    assert_eq!(
+        dispatch_as_primary(35, &mut db, &[b"ZADD", b"zb", b"2", b"b"]),
+        b":1\r\n"
+    );
+    let _ = cap.drain();
+
+    let reply = dispatch_as_primary(36, &mut db, &[b"ZUNIONSTORE", b"zdst", b"2", b"za", b"zb"]);
+    assert_eq!(reply, b":2\r\n");
+    let stream = cap.drain();
+
+    assert!(
+        !stream
+            .windows(b"ZUNIONSTORE".len())
+            .any(|w| w == b"ZUNIONSTORE"),
+        "source-dependent ZUNIONSTORE must not be propagated verbatim: {:?}",
+        String::from_utf8_lossy(&stream)
+    );
+    assert!(
+        stream
+            .windows(resp(&[b"DEL", b"zdst"]).len())
+            .any(|w| w == resp(&[b"DEL", b"zdst"]).as_slice()),
+        "zset store rewrite must clear the destination first: {:?}",
+        String::from_utf8_lossy(&stream)
+    );
+    assert!(
+        stream
+            .windows(resp(&[b"ZADD", b"zdst", b"1", b"a", b"2", b"b"]).len())
+            .any(|w| w == resp(&[b"ZADD", b"zdst", b"1", b"a", b"2", b"b"]).as_slice()),
+        "zset store rewrite must replay concrete score/member pairs: {:?}",
+        String::from_utf8_lossy(&stream)
+    );
+
+    let reply = dispatch_as_primary(
+        37,
+        &mut db,
+        &[b"ZINTERSTORE", b"empty-zdst", b"2", b"za", b"missing"],
+    );
+    assert_eq!(reply, b":0\r\n");
+    let stream = cap.drain();
+    assert!(
+        !stream
+            .windows(b"ZINTERSTORE".len())
+            .any(|w| w == b"ZINTERSTORE"),
+        "empty ZINTERSTORE must not be propagated verbatim: {:?}",
+        String::from_utf8_lossy(&stream)
+    );
+    assert!(
+        stream
+            .windows(resp(&[b"DEL", b"empty-zdst"]).len())
+            .any(|w| w == resp(&[b"DEL", b"empty-zdst"]).as_slice()),
+        "empty zset store rewrite must delete the destination: {:?}",
+        String::from_utf8_lossy(&stream)
+    );
+}
+
+#[test]
 fn r1_set_store_first_fullsync_catchup_rewrite_selects_db9() {
     let _g = repl_guard();
     let repl = global_replication_state();
@@ -1150,6 +1215,233 @@ fn r1_set_store_first_fullsync_catchup_rewrite_selects_db9() {
         .expect("DB 9 should receive the concrete set-store destination");
     assert!(dst.contains(&RedisString::from_static(b"a")));
     assert!(dst.contains(&RedisString::from_static(b"b")));
+
+    repl.selected_db.store(-1, Ordering::Release);
+}
+
+#[test]
+fn r1_zset_store_first_fullsync_catchup_rewrite_selects_db12() {
+    let _g = repl_guard();
+    let repl = global_replication_state();
+    repl.become_master();
+    let _ = repl.take_repl_bgsave_job();
+    repl.set_repl_child_pid(0);
+
+    let mut primary_dbs: Vec<RedisDb> = (0..16).map(RedisDb::new).collect();
+    let mut primary_selected_db = 12;
+    assert_eq!(
+        dispatch_as_primary_on_dbs(
+            40,
+            &mut primary_dbs,
+            &mut primary_selected_db,
+            &[b"ZADD", b"za", b"1", b"a"]
+        ),
+        b":1\r\n"
+    );
+    assert_eq!(
+        dispatch_as_primary_on_dbs(
+            41,
+            &mut primary_dbs,
+            &mut primary_selected_db,
+            &[b"ZADD", b"zdst", b"7", b"stale"]
+        ),
+        b":1\r\n"
+    );
+
+    repl.selected_db.store(-1, Ordering::Release);
+    let snapshot_offset = repl.master_offset();
+    let dir = unique_temp_dir("repl-kit-zset-store-catchup");
+    let temp_path = dir.join("temp-repl-zset-store.rdb");
+    repl.install_repl_bgsave_job(ReplBgsaveJob {
+        child_pid: 0,
+        temp_path: temp_path.clone(),
+        waiting_replicas: vec![900_018],
+        snapshot_offset,
+        catch_up_bytes: Vec::new(),
+        needs_getack_on_completion: false,
+    });
+
+    assert_eq!(
+        dispatch_as_primary_on_dbs(
+            42,
+            &mut primary_dbs,
+            &mut primary_selected_db,
+            &[b"ZINTERSTORE", b"zdst", b"2", b"za", b"missing"]
+        ),
+        b":0\r\n"
+    );
+    let job = repl
+        .take_repl_bgsave_job()
+        .expect("active full-sync job should capture rewritten zset-store bytes");
+    let _ = std::fs::remove_file(&temp_path);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let catchup = job.catch_up_bytes;
+    assert!(
+        catchup.starts_with(&resp(&[b"SELECT", b"12"])),
+        "first active full-sync zset-store rewrite must select DB 12, got {:?}",
+        String::from_utf8_lossy(&catchup)
+    );
+    assert!(
+        !catchup
+            .windows(b"ZINTERSTORE".len())
+            .any(|w| w == b"ZINTERSTORE"),
+        "zset-store catch-up must be concrete destination writes, got {:?}",
+        String::from_utf8_lossy(&catchup)
+    );
+    assert!(
+        catchup
+            .windows(resp(&[b"DEL", b"zdst"]).len())
+            .any(|w| w == resp(&[b"DEL", b"zdst"]).as_slice()),
+        "empty zset-store catch-up must delete the destination, got {:?}",
+        String::from_utf8_lossy(&catchup)
+    );
+
+    let mut replica_dbs: Vec<RedisDb> = (0..16).map(RedisDb::new).collect();
+    let mut replica_selected_db = 12;
+    dispatch_as_primary_on_dbs(
+        43,
+        &mut replica_dbs,
+        &mut replica_selected_db,
+        &[b"ZADD", b"za", b"1", b"a"],
+    );
+    dispatch_as_primary_on_dbs(
+        44,
+        &mut replica_dbs,
+        &mut replica_selected_db,
+        &[b"ZADD", b"missing", b"1", b"a"],
+    );
+    dispatch_as_primary_on_dbs(
+        45,
+        &mut replica_dbs,
+        &mut replica_selected_db,
+        &[b"ZADD", b"zdst", b"7", b"stale"],
+    );
+    apply_resp_stream_as_replica_on_dbs(46, &mut replica_dbs, &mut replica_selected_db, &catchup);
+    assert_eq!(replica_selected_db, 12);
+    assert!(
+        replica_dbs[12].lookup_key_read(b"zdst").is_none(),
+        "concrete zset-store catch-up must delete the destination even when stale replica sources would make verbatim ZINTERSTORE non-empty"
+    );
+
+    repl.selected_db.store(-1, Ordering::Release);
+}
+
+#[test]
+fn r1_zset_store_rewrite_then_hset_fullsync_catchup_switches_db() {
+    let _g = repl_guard();
+    let repl = global_replication_state();
+    repl.become_master();
+    let _ = repl.take_repl_bgsave_job();
+    repl.set_repl_child_pid(0);
+
+    let mut primary_dbs: Vec<RedisDb> = (0..16).map(RedisDb::new).collect();
+    let mut primary_selected_db = 12;
+    assert_eq!(
+        dispatch_as_primary_on_dbs(
+            47,
+            &mut primary_dbs,
+            &mut primary_selected_db,
+            &[b"ZADD", b"za", b"1", b"a"]
+        ),
+        b":1\r\n"
+    );
+    assert_eq!(
+        dispatch_as_primary_on_dbs(
+            48,
+            &mut primary_dbs,
+            &mut primary_selected_db,
+            &[b"ZADD", b"zdst", b"7", b"stale"]
+        ),
+        b":1\r\n"
+    );
+
+    repl.selected_db.store(-1, Ordering::Release);
+    let snapshot_offset = repl.master_offset();
+    let dir = unique_temp_dir("repl-kit-zset-store-hset-catchup");
+    let temp_path = dir.join("temp-repl-zset-store-hset.rdb");
+    repl.install_repl_bgsave_job(ReplBgsaveJob {
+        child_pid: 0,
+        temp_path: temp_path.clone(),
+        waiting_replicas: vec![900_020],
+        snapshot_offset,
+        catch_up_bytes: Vec::new(),
+        needs_getack_on_completion: false,
+    });
+
+    assert_eq!(
+        dispatch_as_primary_on_dbs(
+            49,
+            &mut primary_dbs,
+            &mut primary_selected_db,
+            &[b"ZINTERSTORE", b"zdst", b"2", b"za", b"missing"]
+        ),
+        b":0\r\n"
+    );
+    assert_eq!(
+        dispatch_as_primary_on_dbs(
+            50,
+            &mut primary_dbs,
+            &mut primary_selected_db,
+            &[b"SELECT", b"11"]
+        ),
+        b"+OK\r\n"
+    );
+    assert_eq!(
+        dispatch_as_primary_on_dbs(
+            51,
+            &mut primary_dbs,
+            &mut primary_selected_db,
+            &[b"HSET", b"967", b"512775170389", b"20010100220140"]
+        ),
+        b":1\r\n"
+    );
+
+    let job = repl
+        .take_repl_bgsave_job()
+        .expect("active full-sync job should capture zset rewrite and following HSET");
+    let _ = std::fs::remove_file(&temp_path);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let catchup = job.catch_up_bytes;
+    assert!(
+        catchup.starts_with(&resp(&[b"SELECT", b"12"])),
+        "zset rewrite must first select DB 12, got {:?}",
+        String::from_utf8_lossy(&catchup)
+    );
+    assert!(
+        catchup
+            .windows(resp(&[b"SELECT", b"11"]).len())
+            .any(|w| w == resp(&[b"SELECT", b"11"]).as_slice()),
+        "ordinary HSET after zset rewrite must switch catch-up to DB 11, got {:?}",
+        String::from_utf8_lossy(&catchup)
+    );
+    assert!(
+        catchup
+            .windows(resp(&[b"HSET", b"967", b"512775170389", b"20010100220140"]).len())
+            .any(|w| {
+                w == resp(&[b"HSET", b"967", b"512775170389", b"20010100220140"]).as_slice()
+            }),
+        "catch-up must include the ordinary HSET frame, got {:?}",
+        String::from_utf8_lossy(&catchup)
+    );
+
+    let mut replica_dbs: Vec<RedisDb> = (0..16).map(RedisDb::new).collect();
+    let mut replica_selected_db = 0;
+    apply_resp_stream_as_replica_on_dbs(52, &mut replica_dbs, &mut replica_selected_db, &catchup);
+    assert_eq!(replica_selected_db, 11);
+    assert!(
+        replica_dbs[12].lookup_key_read(b"967").is_none(),
+        "DB 12 must not receive the DB 11 hash key"
+    );
+    let hash = replica_dbs[11]
+        .lookup_key_read(b"967")
+        .and_then(|obj| obj.hash().cloned())
+        .expect("DB 11 should receive the ordinary HSET after zset-store rewrite");
+    assert_eq!(
+        hash.get(&RedisString::from_static(b"512775170389")),
+        Some(&RedisString::from_static(b"20010100220140"))
+    );
 
     repl.selected_db.store(-1, Ordering::Release);
 }

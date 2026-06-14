@@ -327,14 +327,48 @@ fn active_fullsync_catchup_extends_readable_history_beyond_backlog() {
 }
 
 #[test]
+fn fullsync_prefix_appended_after_job_install_survives_backlog_wrap() {
+    let st = ReplicationState::new(generate_runid(), 4);
+    let rx = attach_replica_with_state(&st, 94, ReplicaState::WaitingBgsave, 0);
+
+    install_job(&st, vec![94], 0);
+    st.append_to_backlog(b"S");
+    st.append_to_backlog(b"abcdef");
+    assert_eq!(
+        st.backlog_snapshot(),
+        (0, 7, 7, 4),
+        "active catch-up should report the full prefix-plus-job range"
+    );
+    assert_eq!(
+        st.read_history_at(0, 7).as_deref(),
+        Some(b"Sabcdef".as_slice()),
+        "a SELECT prefix appended into the active job must remain readable from the full-sync snapshot offset"
+    );
+
+    let job = st
+        .take_repl_bgsave_job()
+        .expect("active full-sync job should be ready for completion");
+    let outcome = st.complete_repl_bgsave_transfer(job, b"RDB".to_vec());
+
+    assert_eq!(outcome.delivered_replicas, vec![94]);
+    assert!(outcome.failed_replicas.is_empty());
+    assert_eq!(
+        outcome.retained_catchup_len, 7,
+        "full-sync completion must deliver the prefix byte plus all job catch-up bytes"
+    );
+    assert_eq!(rx.recv().unwrap(), b"$3\r\nRDB".to_vec());
+    assert_eq!(rx.recv().unwrap(), b"Sabcdef".to_vec());
+}
+
+#[test]
 fn online_replica_reconnect_can_consume_active_history_pinned_by_other_waiter() {
     let st = ReplicationState::new(generate_runid(), 4);
-    let online_rx = attach_replica(&st, 94, 0);
-    let _waiter_rx = attach_replica(&st, 95, 0);
-    install_job(&st, vec![95], 0);
+    let online_rx = attach_replica(&st, 95, 0);
+    let _waiter_rx = attach_replica(&st, 96, 0);
+    install_job(&st, vec![96], 0);
 
     st.append_to_backlog(b"abcdef");
-    st.remove_replica(94);
+    st.remove_replica(95);
     st.append_to_backlog(b"ghijkl");
 
     assert_eq!(
@@ -349,11 +383,11 @@ fn online_replica_reconnect_can_consume_active_history_pinned_by_other_waiter() 
         Some(b"abcdefghijkl".as_slice())
     );
 
-    let reconnected_rx = attach_replica(&st, 96, 0);
+    let reconnected_rx = attach_replica(&st, 97, 0);
     let catch_up = st
         .read_history_at(0, st.master_offset() as usize)
         .expect("active catch-up should satisfy the reconnect");
-    assert!(st.send_to_replica(96, catch_up));
+    assert!(st.send_to_replica(97, catch_up));
     assert_eq!(reconnected_rx.recv().unwrap(), b"abcdefghijkl".to_vec());
     assert!(
         online_rx.try_recv().is_err(),

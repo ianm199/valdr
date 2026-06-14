@@ -958,7 +958,6 @@ fn handle_psync(
     }
 
     let snapshot_offset = repl.master_offset();
-    prefix_fullsync_catchup_selected_db(&repl);
     if let Some(sender) = outbound {
         register_replica(
             &repl,
@@ -974,7 +973,9 @@ fn handle_psync(
     }
     ctx.client_mut().is_replica = true;
 
-    arm_full_sync_bgsave(ctx, &repl, client_id, snapshot_offset);
+    if arm_full_sync_bgsave(ctx, &repl, client_id, snapshot_offset) {
+        prefix_fullsync_catchup_selected_db(&repl);
+    }
     Ok(())
 }
 
@@ -1086,13 +1087,13 @@ fn arm_full_sync_bgsave(
     repl: &Arc<ReplicationState>,
     client_id: ClientId,
     snapshot_offset: i64,
-) {
+) -> bool {
     if let Some(existing_snapshot_offset) = repl.enqueue_repl_waiter(client_id) {
         eprintln!(
             "redis-server: PSYNC client_id={} → FULLRESYNC at offset {} (joining in-flight BGSAVE)",
             client_id, existing_snapshot_offset
         );
-        return;
+        return false;
     }
     match crate::persist::bgsave_for_replication(ctx, client_id, snapshot_offset) {
         crate::persist::BgsaveForReplResult::Started => {
@@ -1100,6 +1101,7 @@ fn arm_full_sync_bgsave(
                 "redis-server: PSYNC client_id={} → FULLRESYNC at offset {} (BGSAVE started)",
                 client_id, snapshot_offset
             );
+            true
         }
         crate::persist::BgsaveForReplResult::Skipped => {
             let _ = repl.enqueue_repl_waiter(client_id);
@@ -1107,12 +1109,14 @@ fn arm_full_sync_bgsave(
                 "redis-server: PSYNC client_id={} → FULLRESYNC at offset {} (joined late)",
                 client_id, snapshot_offset
             );
+            false
         }
         crate::persist::BgsaveForReplResult::Failed => {
             eprintln!(
                 "redis-server: PSYNC client_id={} → FULLRESYNC at offset {} but BGSAVE fork failed",
                 client_id, snapshot_offset
             );
+            false
         }
     }
 }
