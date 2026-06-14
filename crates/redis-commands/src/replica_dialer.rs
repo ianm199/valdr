@@ -470,7 +470,15 @@ fn run_handshake(
         ));
     }
 
-    send_multibulk(stream, &[b"REPLCONF", b"capa", b"psync2"])?;
+    let mut capa_args: Vec<&[u8]> = vec![b"REPLCONF", b"capa", b"psync2"];
+    if GLOBAL_SERVER
+        .get()
+        .map(|server| server.live_config.dual_channel_replication_enabled())
+        .unwrap_or(false)
+    {
+        capa_args.push(b"dual-channel");
+    }
+    send_multibulk(stream, &capa_args)?;
     let ok2 = read_line(stream)?;
     if !ok2.starts_with(b"+OK") {
         return Err(io::Error::new(

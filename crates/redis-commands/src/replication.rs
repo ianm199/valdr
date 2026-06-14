@@ -16,7 +16,8 @@ use redis_core::client::ClientId;
 use redis_core::pubsub_registry::PubSubRegistry;
 use redis_core::replication::{
     continue_reply, fullresync_reply, global_replication_state, ManualFailoverAdvance, ReplicaConn,
-    ReplicaState, ReplicationState,
+    ReplicaState, ReplicationState, REPLICA_CAPA_DUAL_CHANNEL, REPLICA_CAPA_EOF,
+    REPLICA_CAPA_PSYNC2,
 };
 use redis_core::util::mstime;
 use redis_core::CommandContext;
@@ -820,13 +821,16 @@ fn request_ack_from_replicas(repl: &ReplicationState) {
 /// Known flags:
 /// * `eof` — replica can receive the RDB blob without inline `$<len>` framing.
 /// * `psync2` — replica supports PSYNC2 (run-id propagation after partial resync).
+/// * `dual-channel` — replica supports Valkey's dual-channel full-sync flow.
 /// Unknown flag names map to bit 31 as a catch-all so they are stored but do
 /// not collide with the defined bits.
 fn capa_flag_bit(name: &[u8]) -> u32 {
     if name.eq_ignore_ascii_case(b"eof") {
-        1u32 << 0
+        REPLICA_CAPA_EOF
     } else if name.eq_ignore_ascii_case(b"psync2") {
-        1u32 << 1
+        REPLICA_CAPA_PSYNC2
+    } else if name.eq_ignore_ascii_case(b"dual-channel") {
+        REPLICA_CAPA_DUAL_CHANNEL
     } else {
         1u32 << 31
     }
@@ -902,6 +906,9 @@ fn handle_psync(
         repl.incr_sync_partial_err();
     }
     repl.incr_sync_full();
+    if should_count_dual_channel_main_psync(ctx, &repl, client_id, send_fullresync_line) {
+        repl.incr_sync_partial_ok();
+    }
 
     let snapshot_offset = master_offset;
     repl.reset_selected_db_for_full_resync();
@@ -922,6 +929,18 @@ fn handle_psync(
 
     arm_full_sync_bgsave(ctx, &repl, client_id, snapshot_offset);
     Ok(())
+}
+
+fn should_count_dual_channel_main_psync(
+    ctx: &CommandContext<'_>,
+    repl: &ReplicationState,
+    client_id: ClientId,
+    send_fullresync_line: bool,
+) -> bool {
+    if !send_fullresync_line || !ctx.live_config().dual_channel_replication_enabled() {
+        return false;
+    }
+    repl.replica_capa_flags_for_client(client_id) & REPLICA_CAPA_DUAL_CHANNEL != 0
 }
 
 fn handle_psync_failover(

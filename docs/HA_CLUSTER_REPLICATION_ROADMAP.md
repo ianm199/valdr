@@ -83,9 +83,12 @@ Current red/unfinished areas from the 2026-06-13 R0 dashboard in
   pseudo-client and taught the replica dialer not to flush partial transactions
   mid-stream. The focused gate stayed at 9/6, but the low-output-buffer PSYNC
   counter failure moved from non-dual-channel duplicate reconnects to the
-  narrower dual-channel fake/main PSYNC accounting edge. The next visible
-  buffer slice is dual-channel PSYNC accounting, partial-resync beyond backlog,
-  and output-buffer trimming.
+  narrower dual-channel fake/main PSYNC accounting edge. The dual-channel
+  accounting slice then taught the dialer to advertise `dual-channel` and
+  counted the logical main-channel PSYNC for dual-capable full syncs, moving the
+  focused gate to 12/4. The next visible buffer slice is shared-history
+  partial resync beyond configured backlog, backlog-memory shrink after
+  slow-replica disconnect, and the later true dual-channel RDB transport.
 - A rebuilt R1 gate now shows `replication-3` at 3/4 and `replication-4` at
   15/2. The command-propagation rewrite cases are cleared, but
   expiration/PFCOUNT semantics and divergence/writable-replica cases still need
@@ -408,9 +411,15 @@ Work packets:
   focused `integration/replication-buffer` artifact
   `harness/oracle/results/tcl-survey/20260614T043523717635Z/result.json`
   stayed at 9/6 while proving the non-dual low-output-buffer duplicate-PSYNC
-  loop is gone. Remaining buffer work is the dual-channel fake/main PSYNC
-  counter edge, later slow-replica output-buffer disconnect trimming, and
-  broader partial-resync history ownership.
+  loop is gone. The dual-channel PSYNC accounting slice then mapped
+  `REPLCONF capa dual-channel`, advertised it from dual-enabled replicas, and
+  counted the logical main-channel successful PSYNC for dual-capable full
+  syncs while still using the ordinary RDB transport. Focused
+  `integration/replication-buffer` artifact
+  `harness/oracle/results/tcl-survey/20260614T044906327151Z/result.json`
+  moved the gate to 12/4. Remaining buffer work is later slow-replica
+  output-buffer disconnect trimming, broader partial-resync history ownership,
+  and real dual-channel RDB transport beyond the compatibility accounting shim.
 
 Gate:
 

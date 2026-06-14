@@ -25,6 +25,13 @@ use crate::client::ClientId;
 /// Default size of the replication backlog in bytes (1 MiB).
 pub const DEFAULT_REPL_BACKLOG_SIZE: usize = 1024 * 1024;
 
+/// Replica advertised support for EOF-framed socket RDB transfer.
+pub const REPLICA_CAPA_EOF: u32 = 1 << 0;
+/// Replica advertised PSYNC2 support.
+pub const REPLICA_CAPA_PSYNC2: u32 = 1 << 1;
+/// Replica advertised Valkey dual-channel full-sync support.
+pub const REPLICA_CAPA_DUAL_CHANNEL: u32 = 1 << 2;
+
 /// Replication role / connection state codes stored
 /// [`ReplicationState::repl_state`].
 pub mod repl_state_code {
@@ -1711,6 +1718,29 @@ impl ReplicationState {
             Err(p) => p.into_inner(),
         };
         guard.entry(client_id).or_default().capa_flags |= flags;
+    }
+
+    pub fn replica_capa_flags_for_client(&self, client_id: ClientId) -> u32 {
+        let live_flags = {
+            let guard = match self.replicas.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            guard
+                .get(&client_id)
+                .map(|conn| conn.capa_flags.load(Ordering::Relaxed))
+        };
+        if let Some(flags) = live_flags {
+            return flags;
+        }
+        let guard = match self.pending_replica_metadata.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard
+            .get(&client_id)
+            .map(|metadata| metadata.capa_flags)
+            .unwrap_or(0)
     }
 
     fn apply_pending_replica_metadata(&self, replica: &ReplicaConn) {

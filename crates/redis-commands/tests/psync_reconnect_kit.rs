@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use redis_core::client_info::client_info_registry;
 use redis_core::replication::{
     global_replication_state, ReplicaConn, ReplicaState, ReplicationState,
-    DEFAULT_REPL_BACKLOG_SIZE,
+    DEFAULT_REPL_BACKLOG_SIZE, REPLICA_CAPA_DUAL_CHANNEL,
 };
 use redis_core::{Client, PubSubRegistry, RedisDb, RedisServer};
 use redis_protocol::frame::{encode_resp2, RespFrame};
@@ -68,6 +68,70 @@ fn drive_psync_with_server(
     let mut c = Client::new(client_id);
     c.set_args(args.into_iter().map(RedisString::from_vec).collect());
     let mut db = RedisDb::new(0);
+    {
+        let mut ctx =
+            redis_core::CommandContext::with_server(&mut c, &mut db, server, pubsub.clone());
+        redis_commands::replication::psync_command(&mut ctx).expect("psync command");
+    }
+
+    let mut sent = Vec::new();
+    while let Ok(chunk) = rx.try_recv() {
+        sent.extend_from_slice(&chunk);
+    }
+    let reply = c.drain_reply();
+    let counters_after = repl.sync_counters();
+    repl.remove_replica(client_id);
+    cleanup_repl_bgsave(&repl);
+    PsyncDrive {
+        reply,
+        sent,
+        counters_before,
+        counters_after,
+    }
+}
+
+fn drive_psync_after_replconf_with_server(
+    client_id: u64,
+    replconf_args: Vec<Vec<u8>>,
+    psync_args: Vec<Vec<u8>>,
+    server: Arc<RedisServer>,
+) -> PsyncDrive {
+    let repl = global_replication_state();
+    let counters_before = repl.sync_counters();
+    let (tx, rx) = mpsc::channel();
+    let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
+    pubsub.lock().unwrap().register_sender(client_id, tx);
+
+    let mut c = Client::new(client_id);
+    let mut db = RedisDb::new(0);
+    let advertises_dual_channel = replconf_args
+        .iter()
+        .any(|arg| arg.eq_ignore_ascii_case(b"dual-channel"));
+    c.set_args(
+        replconf_args
+            .into_iter()
+            .map(RedisString::from_vec)
+            .collect(),
+    );
+    {
+        let mut ctx = redis_core::CommandContext::with_server(
+            &mut c,
+            &mut db,
+            server.clone(),
+            pubsub.clone(),
+        );
+        redis_commands::replication::replconf_command(&mut ctx).expect("replconf command");
+    }
+    assert_eq!(c.drain_reply(), b"+OK\r\n");
+    if advertises_dual_channel {
+        assert_ne!(
+            repl.replica_capa_flags_for_client(client_id) & REPLICA_CAPA_DUAL_CHANNEL,
+            0,
+            "REPLCONF capa dual-channel should be available to the following PSYNC"
+        );
+    }
+
+    c.set_args(psync_args.into_iter().map(RedisString::from_vec).collect());
     {
         let mut ctx =
             redis_core::CommandContext::with_server(&mut c, &mut db, server, pubsub.clone());
@@ -275,6 +339,74 @@ fn killed_last_replica_at_zero_offset_keeps_backlog_window_for_partial_reconnect
         .lock()
         .unwrap()
         .deregister(old_client_id);
+}
+
+#[test]
+fn dual_channel_capable_fullsync_counts_logical_main_channel_psync() {
+    let _g = psync_guard();
+    let repl = global_replication_state();
+    let _reset = GlobalReplReset::new(&repl);
+    let server = Arc::new(RedisServer::default());
+    server
+        .live_config
+        .set_dual_channel_replication_enabled(true);
+
+    let client_id = 1_100_016;
+    let drive = drive_psync_after_replconf_with_server(
+        client_id,
+        vec![
+            b"REPLCONF".to_vec(),
+            b"capa".to_vec(),
+            b"psync2".to_vec(),
+            b"dual-channel".to_vec(),
+        ],
+        vec![b"PSYNC".to_vec(), b"?".to_vec(), b"-1".to_vec()],
+        server,
+    );
+
+    assert!(
+        drive.reply.starts_with(b"+FULLRESYNC"),
+        "the port still uses the ordinary full-sync transport for now, got {:?}",
+        String::from_utf8_lossy(&drive.reply)
+    );
+    assert_eq!(drive.counters_after.0, drive.counters_before.0 + 1);
+    assert_eq!(
+        drive.counters_after.1,
+        drive.counters_before.1 + 1,
+        "dual-channel full sync should account the logical main-channel +CONTINUE"
+    );
+    assert_eq!(drive.counters_after.2, drive.counters_before.2);
+}
+
+#[test]
+fn dual_channel_capability_is_ignored_when_master_config_disables_it() {
+    let _g = psync_guard();
+    let repl = global_replication_state();
+    let _reset = GlobalReplReset::new(&repl);
+    let server = Arc::new(RedisServer::default());
+    server
+        .live_config
+        .set_dual_channel_replication_enabled(false);
+
+    let drive = drive_psync_after_replconf_with_server(
+        1_100_017,
+        vec![
+            b"REPLCONF".to_vec(),
+            b"capa".to_vec(),
+            b"psync2".to_vec(),
+            b"dual-channel".to_vec(),
+        ],
+        vec![b"PSYNC".to_vec(), b"?".to_vec(), b"-1".to_vec()],
+        server,
+    );
+
+    assert!(drive.reply.starts_with(b"+FULLRESYNC"));
+    assert_eq!(drive.counters_after.0, drive.counters_before.0 + 1);
+    assert_eq!(
+        drive.counters_after.1, drive.counters_before.1,
+        "master-side dual-channel config must gate the provisional accounting"
+    );
+    assert_eq!(drive.counters_after.2, drive.counters_before.2);
 }
 
 #[test]
