@@ -18,14 +18,24 @@ red replication surface is:
 
 ## Commands
 
-Fast deterministic gate:
+Fast deterministic replication/HA gate:
 
 ```bash
-cargo test -p redis-commands --test repl_correctness_kit
+make repl-kits
 ```
 
-Latest result on 2026-06-14 after the BLPOP role-change unblock packet:
-37 passed, 0 failed.
+For a single focused kit:
+
+```bash
+make repl-kits REPL_KITS=psync_reconnect_kit
+```
+
+Use this kit lane as the normal debugger before reaching for a full Tcl
+scoreboard. It runs the replication correctness, backlog/buffer,
+full-sync-lifecycle, PSYNC reconnect, failover redirect, and replica dialer
+Rust tests without starting the upstream Tcl matrix.
+
+Latest result on 2026-06-14: `make repl-kits` passed 114/114 tests.
 
 R0 full integration dashboard:
 

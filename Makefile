@@ -25,10 +25,11 @@ CRATE      ?=            # test: narrow to one crate, e.g. redis-core
 KIT        ?=            # test-kit: one kit, e.g. conn_transport_kit
 FILES      ?=            # oracle: specific files, e.g. unit/type/string (overrides TIER)
 FORMAT     ?= table      # bench/oracle output: table (human-readable) | json
+REPL_KITS  ?= repl_correctness_kit repl_buffer_kit fullsync_lifecycle_kit psync_reconnect_kit failover_redirect_kit
 
 MATRIX_TSV = $$(ls -t harness/bench/results/*profile-matrix.tsv | head -1)
 
-.PHONY: help build test test-kit bench bench-quick bench-p1 bench-show bench-release oracle oracle-full
+.PHONY: help build test test-kit repl-kits bench bench-quick bench-p1 bench-show bench-release oracle oracle-full
 
 help: ## Show this help
 	@echo "Valdr targets:"
@@ -36,7 +37,7 @@ help: ## Show this help
 	  | sort \
 	  | awk -F':.*## ' '{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 	@echo ""
-	@echo "Flags (override inline): SKIP_BUILD TRIALS COMMANDS REQUESTS CLIENTS PAYLOAD TIER CRATE KIT FILES"
+	@echo "Flags (override inline): SKIP_BUILD TRIALS COMMANDS REQUESTS CLIENTS PAYLOAD TIER CRATE KIT FILES REPL_KITS"
 	@echo "  e.g.  make bench-p1 TRIALS=40 COMMANDS=get,set"
 	@echo "        make test CRATE=redis-core         # one crate, not the workspace"
 	@echo "        make oracle                        # fast tier, ~14s (TIER=all for full)"
@@ -58,6 +59,15 @@ test-kit: ## Custom subsystem testers only (fastest tier). KIT=conn_transport_ki
 	    && cargo test -p redis-commands --test aof_correctness_kit \
 	    && cargo test -p redis-commands --test repl_correctness_kit; \
 	fi
+
+repl-kits: ## Replication/HA Rust kits only; fast debugger before long Tcl scoreboards
+	@set -e; \
+	for kit in $(REPL_KITS); do \
+	  echo "==> redis-commands $$kit"; \
+	  cargo test -p redis-commands --test $$kit; \
+	done; \
+	echo "==> redis-commands replica_dialer::tests"; \
+	cargo test -p redis-commands --lib replica_dialer::tests
 
 bench: ## Full profile matrix (p1/p16/p100 + range-heavy) vs upstream. FORMAT=json for raw JSON
 	@echo "running profile matrix (SKIP_BUILD=$(SKIP_BUILD), clients=$(CLIENTS), payload=$(PAYLOAD))…" >&2
