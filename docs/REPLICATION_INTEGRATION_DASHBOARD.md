@@ -75,7 +75,7 @@ Artifact:
 | `integration/replication-4` | 15/2 | Red | SPOP rewrite cases now pass; remaining failures are divergence/default writable-replica cases. |
 | `integration/replication-buffer` | 7/8 | Red | Shared/private output ownership, writer-side drain, active full-sync catch-up release, and the empty-RDB zero-offset reconnect guard moved the backlog-histlen outgrowth assertions, the non-dual-channel shrink assertion, and the dual-channel low-output-buffer partial-resync assertion green. Remaining failures are dual-channel global-buffer behavior, broader partial resync / backlog-memory shrink cases, output-buffer trimming, and the non-dual-channel low-output-buffer PSYNC counter edge case. |
 | `integration/replication` | 40/27 | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, the first async-loading CONFIG exception, successful swapdb function-context mismatch, parent-killed child discovery, `repl-diskless-load on-empty-db`, no-longer-useful RDB child cancellation, all four replica-link reply-violation assertions, malformed-PSYNC-offset logging, chained replica `FLUSHDB` / `FLUSHALL` stream relay, `GETSET` rewrite, nonblocking `BRPOPLPUSH` / `BLMOVE` rewrite stats, and empty-blocking `BRPOPLPUSH` / `BLMOVE` commandstats via real digest waits. Remaining failures are counted full-sync, diskless pipe/drop, blocked-list role-change, cache-master, lazy-expire, and old-data rollback cases. |
-| `integration/replication-psync` | timeout | Red | Historical focused gate was 90/0 after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support. Current full-file reruns time out with master/replica inconsistency lines even when the zero-offset selector is restored to the old conservative condition, so this is now a reopened R3 frontier rather than evidence against the buffer packet. |
+| `integration/replication-psync` | timeout | Red | Historical focused gate was 90/0 after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support. Current full-file reruns still time out, but the full-sync detached-tail kit removed the first broad no-reconnect inconsistency; the latest oracle dump narrowed the visible data divergence to a single `0` vs `-0` string value. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
 | `integration/replica-redirect` | timeout | Red | `CLIENT CAPA REDIRECT` top-level and MULTI/EXEC replica redirect semantics now pass the early file assertions. Manual `FAILOVER` now reaches timeout-driven handoff in Rust kits and a live two-process probe, including blocked `BRPOP` and paused `GET` REDIRECT after promotion. The official Tcl file still no-summary times out in the first failover test; side observation showed old primary `blocked_clients:2`, `paused_actions:all`, and `role:slave` while the target remained SIGSTOP'd. |
 | `unit/wait` | 39/0 | Green | WAIT command suite passed after the R4 role-change unblock packet; WAITAOF/FACK edge cases still need separate coverage. |
@@ -134,8 +134,10 @@ visible integration frontiers are now:
 - `R3-RECONNECT-MATRIX`: extend the new master-side PSYNC decision matrix into
   live replica-dialer reconnect coverage before grinding `replication-psync`.
   Current full-file PSYNC reruns time out again with master/replica
-  inconsistency lines, including a conservative-selector comparison, so reopen
-  this lane before treating PSYNC as a green tripwire.
+  inconsistency lines, including a conservative-selector comparison. The
+  detached full-sync catch-up tail slice removes the earliest broad
+  no-reconnect mismatch; next reproduce the narrowed `0` vs `-0` string
+  divergence in a Rust kit before rerunning the full Tcl matrix.
 - `R2-BUFFER-LIMITS`: accounting aliases, fan-out accounting, and retained
   full-sync history are covered; implement broader shared-buffer memory
   accounting, backlog outgrowth under slow online replicas, and replica
@@ -915,6 +917,57 @@ Takeaway:
   preexisting keyspace. The remaining non-dual-channel buffer failure likely
   needs a separate output-buffer/disconnect or counter slice, not a broader
   PSYNC selector.
+
+### R3-FULLSYNC-DETACHED-CATCHUP-TAIL
+
+Status: deterministic full-sync tail gap fixed on 2026-06-14; use kits as the
+inner loop before rerunning the slow PSYNC Tcl matrix.
+
+Implementation:
+
+- `fullsync_lifecycle_kit` now covers the reaper detach window: the server
+  takes the active replication BGSAVE job before reading and shipping the temp
+  RDB, but client writes can still append to the backlog before transfer
+  completion.
+- `complete_repl_bgsave_transfer` now builds catch-up from both sources: the
+  detached job's `catch_up_bytes` plus the live backlog tail from the point
+  where the detached buffer ends through the current master offset.
+- The completion path requires the whole catch-up range to be readable before
+  delivering it, instead of silently preferring a stale detached buffer.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands --test fullsync_lifecycle_kit -- --nocapture
+cargo test -p redis-commands --test psync_reconnect_kit -- --nocapture
+cargo test -p redis-commands --test repl_buffer_kit -- --nocapture
+cargo test -p redis-commands --test repl_correctness_kit -- --nocapture
+cargo check -p redis-core -p redis-commands -p redis-server
+```
+
+Results:
+
+- `fullsync_lifecycle_kit`: 11 passed, 0 failed. The new
+  `fullsync_completion_includes_backlog_tail_after_job_detaches` case failed
+  before the fix with `retained_catchup_len == 1` instead of `2`.
+- `psync_reconnect_kit`: 9 passed, 0 failed.
+- `repl_buffer_kit`: 6 passed, 0 failed.
+- `repl_correctness_kit`: 29 passed, 0 failed.
+- `cargo check -p redis-core -p redis-commands -p redis-server`: passed.
+- Prior oracle rerun, not part of the normal inner loop:
+  `harness/oracle/results/tcl-survey/20260614T025006301487Z/result.json`
+  still timed out at 540 seconds, but the first earlier failure
+  `no reconnection, just sync (diskless: no, disabled, dual-channel: no,
+  reconnect: 0)` disappeared. The latest `/tmp/repldump*.txt` diff from that
+  run showed one remaining data difference: DB 9 key `316637927` was string
+  `0` on the master and `-0` on the replica.
+
+Takeaway:
+
+- This packet fixes a real full-sync lifecycle race and narrows the PSYNC
+  frontier, but the next work should not rerun the full Tcl matrix. Build a
+  small kit for the `0` vs `-0` divergence, likely in replica apply or command
+  rewrite semantics for complex data generation.
 
 ### R2-BGSAVE-CATCHUP
 

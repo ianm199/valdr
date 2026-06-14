@@ -85,7 +85,9 @@ Current red/unfinished areas from the 2026-06-13 R0 dashboard in
   resize, backlog TTL expiry, and delayed reconnect semantics landed. Current
   full-file reruns time out with master/replica inconsistency lines even under
   the old conservative offset-zero selector, so PSYNC is a reopened R3
-  frontier.
+  frontier. A detached full-sync catch-up tail kit removed the earliest broad
+  no-reconnect mismatch; the next visible data divergence is a single string
+  value `0` on the master vs `-0` on the replica.
 - `replication-aof-sync` is green as of 2026-06-13 after full-sync RDB loads
   refresh appendonly manifests correctly.
 - `replica-redirect.tcl` needs real `FAILOVER` plus client redirect semantics.
@@ -425,8 +427,11 @@ Work packets:
   Current reruns later on 2026-06-13 timed out with master/replica
   inconsistency lines both with the scoped empty-RDB zero-offset selector and
   with the old conservative selector. Treat this as reopened R3 work:
-  reproduce one of those inconsistency cases in `psync_reconnect_kit` before
-  relying on the full Tcl file again.
+  a follow-up kit on 2026-06-14 fixed the detached full-sync catch-up tail
+  window where writes appended after the reaper took the BGSAVE job were not
+  included in the RDB catch-up stream. The full Tcl matrix still timed out, but
+  its visible data diff narrowed to `0` vs `-0`; reproduce that in a small Rust
+  kit before relying on the full Tcl file again.
 - **R3-METRICS:** keep `sync_full`, `sync_partial_ok`, `sync_partial_err`,
   master/replica offsets, lag, and backlog histlen faithful in `INFO`.
 

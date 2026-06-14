@@ -1865,19 +1865,8 @@ impl ReplicationState {
 
         let snapshot_offset = job.snapshot_offset;
         let current_offset = self.master_offset();
-        let catch_up = if current_offset > snapshot_offset {
-            if job.catch_up_bytes.is_empty() {
-                let guard = match self.backlog.lock() {
-                    Ok(g) => g,
-                    Err(p) => p.into_inner(),
-                };
-                guard.read_at(snapshot_offset, (current_offset - snapshot_offset) as usize)
-            } else {
-                Some(job.catch_up_bytes.clone())
-            }
-        } else {
-            None
-        };
+        let catch_up =
+            self.fullsync_catch_up_bytes(snapshot_offset, current_offset, &job.catch_up_bytes);
 
         let mut delivered_replicas = Vec::new();
         let mut failed_replicas = Vec::new();
@@ -1920,6 +1909,44 @@ impl ReplicationState {
             retained_catchup_len,
             needs_getack_on_completion: job.needs_getack_on_completion,
         }
+    }
+
+    fn fullsync_catch_up_bytes(
+        &self,
+        snapshot_offset: i64,
+        current_offset: i64,
+        job_catch_up: &[u8],
+    ) -> Option<Vec<u8>> {
+        if current_offset <= snapshot_offset {
+            return None;
+        }
+
+        let expected_len = current_offset.saturating_sub(snapshot_offset) as usize;
+        let mut bytes = Vec::with_capacity(expected_len);
+        let mut cursor = snapshot_offset;
+
+        if !job_catch_up.is_empty() {
+            let take = job_catch_up.len().min(expected_len);
+            bytes.extend_from_slice(&job_catch_up[..take]);
+            cursor = cursor.saturating_add(take as i64);
+        }
+
+        if cursor < current_offset {
+            let tail_len = current_offset.saturating_sub(cursor) as usize;
+            let tail = {
+                let guard = match self.backlog.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                guard.read_at(cursor, tail_len)
+            }?;
+            if tail.len() != tail_len {
+                return None;
+            }
+            bytes.extend_from_slice(&tail);
+        }
+
+        (bytes.len() == expected_len).then_some(bytes)
     }
 
     /// Append `client_id` to the current job's waiting-replica list when a

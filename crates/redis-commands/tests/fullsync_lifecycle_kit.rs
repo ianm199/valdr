@@ -304,6 +304,31 @@ fn killed_repl_child_is_collected_and_later_fullsync_can_deliver() {
 }
 
 #[test]
+fn fullsync_completion_includes_backlog_tail_after_job_detaches() {
+    let st = ReplicationState::new(generate_runid(), 64);
+    let rx = attach_waiting_replica(&st, 85, 0);
+
+    install_job(&st, PathBuf::from("detached-tail.rdb"), vec![85]);
+    st.append_to_backlog(b"a");
+    let job = st
+        .take_repl_bgsave_job()
+        .expect("reaper should detach the job before transfer");
+    st.append_to_backlog(b"b");
+
+    let outcome = st.complete_repl_bgsave_transfer(job, b"RDB".to_vec());
+
+    assert_eq!(outcome.delivered_replicas, vec![85]);
+    assert!(outcome.failed_replicas.is_empty());
+    assert_eq!(
+        outcome.retained_catchup_len, 2,
+        "catch-up must include bytes appended after the job left active state"
+    );
+    assert_eq!(rx.recv().unwrap(), b"$3\r\nRDB".to_vec());
+    assert_eq!(rx.recv().unwrap(), b"ab".to_vec());
+    assert_eq!(st.read_history_at(0, 2).as_deref(), Some(b"ab".as_slice()));
+}
+
+#[test]
 fn last_fullsync_waiter_disconnect_marks_repl_child_useless() {
     let st = ReplicationState::new(generate_runid(), 4);
     let dir = unique_temp_dir("fullsync-useless-child");
