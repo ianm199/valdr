@@ -69,8 +69,9 @@ impl ClientInfoRegistry {
         Self::default()
     }
 
- /// Register a freshly accepted connection.
+    /// Register a freshly accepted connection.
     pub fn register(&mut self, id: ClientId, addr: String) {
+        self.kill_marks.remove(&id);
         self.entries.insert(
             id,
             ClientSnapshot {
@@ -111,11 +112,11 @@ impl ClientInfoRegistry {
         );
     }
 
- /// Update the externally visible command/db/blocking snapshot for `id`.
- /// This is intentionally batch-oriented rather than called for every
- /// command in a pipeline. `CLIENT LIST` observes the last command completed
- /// by the connection, which is the useful stable state for diagnostics
- /// avoids pushing a global mutex into every GET/SET hot path.
+    /// Update the externally visible command/db/blocking snapshot for `id`.
+    /// This is intentionally batch-oriented rather than called for every
+    /// command in a pipeline. `CLIENT LIST` observes the last command completed
+    /// by the connection, which is the useful stable state for diagnostics
+    /// avoids pushing a global mutex into every GET/SET hot path.
     pub fn update_snapshot(&mut self, id: ClientId, cmd: &[u8], db_index: u32, blocked: bool) {
         if let Some(e) = self.entries.get_mut(&id) {
             e.cmd = cmd.iter().map(|b| b.to_ascii_lowercase() as char).collect();
@@ -124,8 +125,8 @@ impl ClientInfoRegistry {
         }
     }
 
- /// Refresh the metadata fields that are not passed through the hot-path
- /// `update_snapshot` call.
+    /// Refresh the metadata fields that are not passed through the hot-path
+    /// `update_snapshot` call.
     pub fn update_client_metadata(&mut self, client: &Client) {
         if let Some(e) = self.entries.get_mut(&client.id) {
             e.db_index = client.db_index;
@@ -183,44 +184,52 @@ impl ClientInfoRegistry {
         }
     }
 
- /// Mark `id` as blocked (waiting on a blocking command).
+    /// Mark `id` as blocked (waiting on a blocking command).
     pub fn set_blocked(&mut self, id: ClientId, blocked: bool) {
         if let Some(e) = self.entries.get_mut(&id) {
             e.blocked = blocked;
         }
     }
 
- /// Update `id`'s selected database index.
+    /// Update `id`'s selected database index.
     pub fn set_db(&mut self, id: ClientId, db_index: u32) {
         if let Some(e) = self.entries.get_mut(&id) {
             e.db_index = db_index;
         }
     }
 
- /// Remove a connection that has disconnected.
+    /// Remove a connection that has disconnected.
     pub fn deregister(&mut self, id: ClientId) {
         self.entries.remove(&id);
         self.kill_marks.remove(&id);
     }
 
- /// Mark a connection for asynchronous teardown.
- /// The command handler cannot directly own another connection's socket
- /// the thread-per-client runtime. Removing the snapshot makes CLIENT LIST
- /// observe Valkey-like immediate disappearance; the kill mark is consumed
- /// by the target connection loop before it processes the next read.
+    /// Mark a connection for asynchronous teardown.
+    /// The command handler cannot directly own another connection's socket
+    /// the thread-per-client runtime. Removing the snapshot makes CLIENT LIST
+    /// observe Valkey-like immediate disappearance; the kill mark remains until
+    /// deregistration so other global registries can stop treating the client as
+    /// writable during the async teardown gap.
     pub fn mark_killed(&mut self, id: ClientId) {
         if self.entries.remove(&id).is_some() {
             self.kill_marks.insert(id);
         }
     }
 
- /// Return and clear the pending kill bit for `id`.
+    /// Return the pending kill bit for `id`. Cleanup clears it via `deregister`.
     pub fn take_killed(&mut self, id: ClientId) -> bool {
-        self.kill_marks.remove(&id)
+        self.kill_marks.contains(&id)
     }
 
- /// Remove pub/sub clients authenticated as `username` whose active
- /// subscriptions are no longer allowed by `updated_user`.
+    /// Snapshot ids currently marked for asynchronous teardown.
+    pub fn killed_ids(&self) -> Vec<ClientId> {
+        let mut out: Vec<ClientId> = self.kill_marks.iter().copied().collect();
+        out.sort_unstable();
+        out
+    }
+
+    /// Remove pub/sub clients authenticated as `username` whose active
+    /// subscriptions are no longer allowed by `updated_user`.
     pub fn deregister_revoked_pubsub_clients(
         &mut self,
         username: &RedisString,
@@ -239,7 +248,7 @@ impl ClientInfoRegistry {
         revoked
     }
 
- /// Snapshot of all currently registered clients.
+    /// Snapshot of all currently registered clients.
     pub fn all(&self) -> Vec<ClientSnapshot> {
         let mut out: Vec<ClientSnapshot> = self.entries.values().cloned().collect();
         out.sort_by_key(|snap| snap.id);
@@ -266,6 +275,37 @@ static CLIENT_INFO_REGISTRY: OnceLock<Arc<Mutex<ClientInfoRegistry>>> = OnceLock
 /// Return the process-wide client info registry singleton.
 pub fn client_info_registry() -> &'static Arc<Mutex<ClientInfoRegistry>> {
     CLIENT_INFO_REGISTRY.get_or_init(|| Arc::new(Mutex::new(ClientInfoRegistry::new())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kill_mark_survives_probe_until_deregister() {
+        let mut registry = ClientInfoRegistry::default();
+        registry.register(42, "127.0.0.1:6379".to_string());
+        registry.mark_killed(42);
+
+        assert!(registry.take_killed(42));
+        assert_eq!(registry.killed_ids(), vec![42]);
+
+        registry.deregister(42);
+        assert!(!registry.take_killed(42));
+        assert!(registry.killed_ids().is_empty());
+    }
+
+    #[test]
+    fn register_clears_stale_kill_mark_for_reused_id() {
+        let mut registry = ClientInfoRegistry::default();
+        registry.register(7, "127.0.0.1:6379".to_string());
+        registry.mark_killed(7);
+
+        registry.register(7, "127.0.0.1:6380".to_string());
+
+        assert!(!registry.take_killed(7));
+        assert!(registry.killed_ids().is_empty());
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────

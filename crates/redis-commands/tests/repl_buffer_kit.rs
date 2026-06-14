@@ -8,17 +8,36 @@
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use redis_commands::config_cmd::{
     apply_config_set, config_value_for_key, validate_config_set_pair,
 };
+use redis_commands::dispatch::propagate_command_raw;
+use redis_core::client_info::client_info_registry;
 use redis_core::live_config::LiveConfig;
 use redis_core::metrics::server_metrics;
 use redis_core::replication::{
-    generate_runid, ReplBgsaveJob, ReplicaConn, ReplicaState, ReplicationState,
+    generate_runid, global_replication_state, ReplBgsaveJob, ReplicaConn, ReplicaState,
+    ReplicationState,
 };
 use redis_core::ClientId;
+use redis_types::RedisString;
+
+fn global_repl_guard() -> MutexGuard<'static, ()> {
+    static REPL_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+    match REPL_GUARD.get_or_init(|| Mutex::new(())).lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    }
+}
+
+fn argv(parts: &[&[u8]]) -> Vec<RedisString> {
+    parts
+        .iter()
+        .map(|part| RedisString::from_bytes(part))
+        .collect()
+}
 
 fn attach_replica(st: &ReplicationState, client_id: ClientId, offset: i64) -> Receiver<Vec<u8>> {
     let (tx, rx) = mpsc::channel();
@@ -40,6 +59,44 @@ fn install_job(st: &ReplicationState, waiters: Vec<ClientId>, snapshot_offset: i
         catch_up_bytes: Vec::new(),
         needs_getack_on_completion: false,
     });
+}
+
+#[test]
+fn killed_replica_is_not_a_live_fanout_target_during_async_teardown() {
+    let _guard = global_repl_guard();
+    let repl = global_replication_state();
+    repl.become_master();
+
+    let client_id = 1_990_001;
+    repl.remove_replica(client_id);
+    {
+        let mut guard = client_info_registry().lock().unwrap();
+        guard.deregister(client_id);
+        guard.register(client_id, "127.0.0.1:0".to_string());
+        guard.mark_killed(client_id);
+    }
+
+    let (tx, rx) = mpsc::channel();
+    repl.add_replica(ReplicaConn::new(
+        client_id,
+        ReplicaState::Online,
+        repl.master_offset(),
+        tx,
+    ));
+
+    let before = repl.master_offset();
+    let offset = propagate_command_raw(&argv(&[b"SET", b"killed-replica", b"v"]));
+    assert!(
+        offset > before,
+        "the write still belongs in replication history for future PSYNC"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "CLIENT KILL removes the client snapshot immediately, so same-transaction fan-out must not keep writing to that replica id"
+    );
+
+    repl.remove_replica(client_id);
+    client_info_registry().lock().unwrap().deregister(client_id);
 }
 
 #[test]

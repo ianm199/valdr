@@ -18,6 +18,7 @@ use redis_core::acl::{
     record_acl_log_entry, AclUser, ACL_KEY_ANY, ACL_KEY_READ, ACL_KEY_READ_WRITE, ACL_KEY_WRITE,
 };
 use redis_core::client::Client;
+use redis_core::client_info::client_info_registry;
 use redis_core::eviction::{oom_error_reply, try_evict_to_fit, EvictionOutcome};
 use redis_core::memory::approximate_memory_used;
 use redis_core::metrics::{
@@ -2537,19 +2538,32 @@ fn propagate_write_to_replicas(
 fn online_replica_client_ids(
     repl: &redis_core::replication::ReplicationState,
 ) -> Vec<redis_core::client::ClientId> {
-    let guard = match repl.replicas.lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
+    let mut ids: Vec<_> = {
+        let guard = match repl.replicas.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard
+            .values()
+            .filter(|conn| {
+                redis_core::replication::ReplicaState::from_u8(
+                    conn.state.load(std::sync::atomic::Ordering::Acquire),
+                ) == redis_core::replication::ReplicaState::Online
+            })
+            .map(|conn| conn.client_id)
+            .collect()
     };
-    guard
-        .values()
-        .filter(|conn| {
-            redis_core::replication::ReplicaState::from_u8(
-                conn.state.load(std::sync::atomic::Ordering::Acquire),
-            ) == redis_core::replication::ReplicaState::Online
-        })
-        .map(|conn| conn.client_id)
-        .collect()
+    if ids.is_empty() {
+        return ids;
+    }
+    let killed_ids = match client_info_registry().lock() {
+        Ok(g) => g.killed_ids(),
+        Err(p) => p.into_inner().killed_ids(),
+    };
+    if !killed_ids.is_empty() {
+        ids.retain(|id| !killed_ids.contains(id));
+    }
+    ids
 }
 
 /// Feed a synthesized write command to propagation surfaces from outside a
