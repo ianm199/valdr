@@ -614,7 +614,15 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
             std::str::from_utf8(repl.runid()).unwrap_or("0000000000000000000000000000000000000000");
         let (backlog_first, master_offset, backlog_histlen, backlog_size) = repl.backlog_snapshot();
         let replicas = repl.replicas_snapshot();
-        let connected = replicas.len();
+        let dual_channel_waiters = if ctx.live_config().dual_channel_replication_enabled() {
+            replicas
+                .iter()
+                .filter(|(_, state, _, _, _)| *state == "wait_bgsave")
+                .count()
+        } else {
+            0
+        };
+        let connected = replicas.len().saturating_add(dual_channel_waiters);
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
@@ -647,7 +655,8 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
             );
         }
         let _ = writeln!(buf, "connected_slaves:{}\r", connected);
-        for (idx, (_cid, state, port, offset, last_ack_ms)) in replicas.iter().enumerate() {
+        let mut replica_idx = 0usize;
+        for (_cid, state, port, offset, last_ack_ms) in replicas.iter() {
             let lag = if *last_ack_ms == 0 {
                 0
             } else {
@@ -655,9 +664,21 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
             };
             let _ = writeln!(
                 buf,
-                "slave{}:ip=?,port={},state={},offset={},lag={}\r",
-                idx, port, state, offset, lag
+                "slave{}:ip=?,port={},state={},offset={},lag={},type=replica\r",
+                replica_idx, port, state, offset, lag
             );
+            replica_idx += 1;
+            if ctx.live_config().dual_channel_replication_enabled() && *state == "wait_bgsave" {
+                // Surface the provisional RDB channel expected by Valkey's
+                // dual-channel observability tests. The Rust data path still
+                // transfers the RDB through the ordinary full-sync owner.
+                let _ = writeln!(
+                    buf,
+                    "slave{}:ip=?,port={},state={},offset={},lag={},type=rdb-channel\r",
+                    replica_idx, port, state, offset, lag
+                );
+                replica_idx += 1;
+            }
         }
         let _ = writeln!(buf, "master_replid:{}\r", runid_str);
         let _ = writeln!(buf, "master_repl_offset:{}\r", master_offset);
@@ -780,7 +801,36 @@ fn ascii_lower(b: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use redis_core::{client_info::client_info_registry, Client, RedisDb, RedisObject};
+    use std::sync::{mpsc, Mutex, MutexGuard};
+
+    use redis_core::{
+        client_info::client_info_registry,
+        replication::{global_replication_state, ReplicaConn, ReplicaState},
+        Client, RedisDb, RedisObject,
+    };
+
+    fn repl_info_guard() -> MutexGuard<'static, ()> {
+        static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+        match GUARD.get_or_init(|| Mutex::new(())).lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        }
+    }
+
+    fn clear_repl_info_state() {
+        let repl = global_replication_state();
+        let ids: Vec<_> = repl
+            .replicas_snapshot()
+            .into_iter()
+            .map(|(id, _, _, _, _)| id)
+            .collect();
+        for id in ids {
+            repl.remove_replica(id);
+        }
+        let _ = repl.abort_repl_bgsave_job();
+        repl.set_repl_child_pid(0);
+        repl.become_master();
+    }
 
     fn arg(bytes: &[u8]) -> RedisString {
         RedisString::from_bytes(bytes)
@@ -846,6 +896,8 @@ mod tests {
 
     #[test]
     fn info_persistence_counts_replication_bgsave_child() {
+        let _guard = repl_info_guard();
+        clear_repl_info_state();
         let repl = redis_core::replication::global_replication_state();
         repl.set_repl_child_pid(4242);
 
@@ -897,6 +949,42 @@ mod tests {
         assert_eq!(
             total, backlog,
             "ordinary replica output memory is client memory, not replication-buffer memory"
+        );
+    }
+
+    #[test]
+    fn info_replication_counts_dual_channel_rdb_channel_for_waiting_fullsync() {
+        let _guard = repl_info_guard();
+        clear_repl_info_state();
+        let repl = global_replication_state();
+        let (online_tx, _online_rx) = mpsc::channel();
+        let (sync_tx, _sync_rx) = mpsc::channel();
+        repl.add_replica(ReplicaConn::new(
+            980_780,
+            ReplicaState::Online,
+            42,
+            online_tx,
+        ));
+        repl.add_replica(ReplicaConn::new(
+            980_781,
+            ReplicaState::WaitingBgsave,
+            42,
+            sync_tx,
+        ));
+
+        let mut db = RedisDb::new(0);
+        let mut client = Client::new(980_782);
+        client.set_args(vec![arg(b"INFO"), arg(b"replication")]);
+        let mut ctx = CommandContext::with_db(&mut client, &mut db);
+        info_command(&mut ctx).unwrap();
+
+        clear_repl_info_state();
+        let reply = client.drain_reply();
+        let text = bulk_text(&reply);
+        assert_eq!(field_value(text, "connected_slaves"), "3");
+        assert!(
+            text.contains("state=wait_bgsave,offset=42,lag=0,type=rdb-channel"),
+            "INFO replication should expose a provisional rdb-channel line: {text}"
         );
     }
 }

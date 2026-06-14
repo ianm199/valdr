@@ -76,8 +76,10 @@ Current red/unfinished areas from the 2026-06-13 R0 dashboard in
   `dual-channel-replication-enabled` flag and fixed dual-channel INFO-memory
   accounting for active full-sync catch-up. A later INFO split kept ordinary
   replica client output out of `mem_total_replication_buffers`, moving the
-  focused Tcl gate from 7/8 to 8/7. The next visible buffer slice is
-  dual-channel `rdb-channel` topology/counting for `connected_slaves`.
+  focused Tcl gate from 7/8 to 8/7. A dual-channel INFO topology shim then
+  exposed provisional `type=rdb-channel` entries for waiting full-sync
+  replicas, moving the focused gate to 9/6. The next visible buffer slice is
+  partial-resync beyond backlog and low-output-buffer PSYNC counter behavior.
 - A rebuilt R1 gate now shows `replication-3` at 3/4 and `replication-4` at
   15/2. The command-propagation rewrite cases are cleared, but
   expiration/PFCOUNT semantics and divergence/writable-replica cases still need
@@ -390,10 +392,11 @@ Work packets:
   output split then stopped counting ordinary replica client output as
   `mem_total_replication_buffers`, added active-catch-up outgrowth coverage to
   `repl_buffer_kit`, and moved focused `integration/replication-buffer` to
-  8/7. Remaining buffer work is dual-channel `rdb-channel`
-  topology/counting, the non-dual-channel low-output-buffer PSYNC counter
-  edge, later slow-replica output-buffer disconnect trimming, and broader
-  partial-resync history ownership.
+  8/7. The dual-channel INFO topology slice then added provisional
+  `type=rdb-channel` lines for waiting full-sync replicas and moved the gate to
+  9/6. Remaining buffer work is the non-dual-channel low-output-buffer PSYNC
+  counter edge, later slow-replica output-buffer disconnect trimming, and
+  broader partial-resync history ownership.
 
 Gate:
 
