@@ -40,16 +40,22 @@ impl fmt::Display for Frame {
 struct RespConn {
     stream: TcpStream,
     buf: Vec<u8>,
+    read_deadline: Duration,
 }
 
 impl RespConn {
     fn connect(port: u16) -> io::Result<Self> {
+        Self::connect_with_deadline(port, Duration::from_secs(2))
+    }
+
+    fn connect_with_deadline(port: u16, read_deadline: Duration) -> io::Result<Self> {
         let stream = TcpStream::connect(("127.0.0.1", port))?;
-        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+        stream.set_read_timeout(Some(Duration::from_millis(100)))?;
         stream.set_write_timeout(Some(Duration::from_secs(2)))?;
         Ok(Self {
             stream,
             buf: Vec::new(),
+            read_deadline,
         })
     }
 
@@ -66,7 +72,7 @@ impl RespConn {
     }
 
     fn read_frame(&mut self) -> io::Result<Frame> {
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + self.read_deadline;
         loop {
             if let Some((frame, consumed)) = parse_frame(&self.buf)? {
                 self.buf.drain(..consumed);
@@ -541,6 +547,89 @@ fn write_complex_data(port: u16, start: usize, count: usize) -> io::Result<()> {
     Ok(())
 }
 
+fn write_mutating_complex_data(port: u16, start: usize, count: usize) -> io::Result<()> {
+    let mut conn = RespConn::connect(port)?;
+    let mut selected_db = None;
+    for i in start..start + count {
+        let db = match i % 3 {
+            0 => 9,
+            1 => 11,
+            _ => 12,
+        };
+        if selected_db != Some(db) {
+            expect_simple(
+                conn.command(&[b"SELECT", db.to_string().as_bytes()])?,
+                b"OK",
+            );
+            selected_db = Some(db);
+        }
+
+        let suffix = i.to_string();
+        let str_key = format!("mut:str:{}", i % 37);
+        let hash = format!("mut:hash:{}", i % 11);
+        let set_a = format!("mut:set:a:{}", i % 13);
+        let set_b = format!("mut:set:b:{}", i % 13);
+        let set_dst = format!("mut:set:dst:{}", i % 7);
+        let zset_a = format!("mut:zset:a:{}", i % 17);
+        let zset_b = format!("mut:zset:b:{}", i % 17);
+        let zset_dst = format!("mut:zset:dst:{}", i % 9);
+        let list = format!("mut:list:{}", i % 5);
+        let field = format!("field:{}", i % 23);
+        let member = format!("member:{suffix}");
+        let value = format!("value:{suffix}");
+        let score = (i % 101).to_string();
+
+        expect_success(conn.command(&[b"SET", str_key.as_bytes(), value.as_bytes()])?);
+        expect_success(conn.command(&[
+            b"HSET",
+            hash.as_bytes(),
+            field.as_bytes(),
+            value.as_bytes(),
+        ])?);
+        if i % 4 == 0 {
+            expect_success(conn.command(&[b"HDEL", hash.as_bytes(), field.as_bytes()])?);
+        }
+        expect_success(conn.command(&[b"SADD", set_a.as_bytes(), member.as_bytes()])?);
+        expect_success(conn.command(&[b"SADD", set_b.as_bytes(), value.as_bytes()])?);
+        if i % 5 == 0 {
+            expect_success(conn.command(&[b"SREM", set_a.as_bytes(), member.as_bytes()])?);
+        }
+        expect_success(conn.command(&[
+            b"SUNIONSTORE",
+            set_dst.as_bytes(),
+            set_a.as_bytes(),
+            set_b.as_bytes(),
+        ])?);
+        expect_success(conn.command(&[
+            b"ZADD",
+            zset_a.as_bytes(),
+            score.as_bytes(),
+            member.as_bytes(),
+        ])?);
+        expect_success(conn.command(&[
+            b"ZADD",
+            zset_b.as_bytes(),
+            score.as_bytes(),
+            value.as_bytes(),
+        ])?);
+        if i % 6 == 0 {
+            expect_success(conn.command(&[b"ZREM", zset_a.as_bytes(), member.as_bytes()])?);
+        }
+        expect_success(conn.command(&[
+            b"ZUNIONSTORE",
+            zset_dst.as_bytes(),
+            b"2",
+            zset_a.as_bytes(),
+            zset_b.as_bytes(),
+        ])?);
+        expect_success(conn.command(&[b"LPUSH", list.as_bytes(), value.as_bytes()])?);
+        if i % 7 == 0 {
+            expect_success(conn.command(&[b"LREM", list.as_bytes(), b"0", value.as_bytes()])?);
+        }
+    }
+    Ok(())
+}
+
 fn debug_digest(server: &TestServer) -> io::Result<String> {
     let mut conn = RespConn::connect(server.port)?;
     match conn.command(&[b"DEBUG", b"DIGEST"])? {
@@ -715,6 +804,92 @@ fn psync_same_primary_socket_drop_reconnects_with_continue() {
     assert!(
         !digest.is_empty(),
         "DEBUG DIGEST should return a non-empty digest after partial reconnect"
+    );
+}
+
+#[test]
+fn psync_replica_delayed_reconnect_after_client_kill_gets_continue() {
+    let master = TestServer::start("repl-delay-master").expect("start master");
+    let replica = TestServer::start("repl-delay-replica").expect("start replica");
+    configure_psync_surface(&master, &replica);
+
+    write_complex_data(master.port, 900, 25).expect("seed master data");
+    let mut replica_conn = RespConn::connect(replica.port).expect("connect replica");
+    expect_simple(
+        replica_conn
+            .command(&[b"SLAVEOF", b"127.0.0.1", master.port.to_string().as_bytes()])
+            .expect("SLAVEOF should reply"),
+        b"OK",
+    );
+    wait_for_replica_up(&replica, &master).expect("initial full sync should finish");
+    write_complex_data(master.port, 930, 10)
+        .expect("online writes before delayed reconnect should advance PSYNC offset");
+    wait_for_digest_match(&master, &replica)
+        .expect("replica should apply online writes before delayed reconnect");
+
+    let stats_before = wait_for_info_counter_at_least(&master, b"stats", "sync_full", 1)
+        .expect("master should count initial full sync");
+    let sync_full_before = info_u64(&stats_before, "sync_full").expect("sync_full field");
+    let partial_ok_before = info_u64(&stats_before, "sync_partial_ok").unwrap_or(0);
+
+    let primary_addr = format!("127.0.0.1:{}", master.port);
+    for cycle in 0..2 {
+        let master_port = master.port;
+        let writer =
+            thread::spawn(move || write_mutating_complex_data(master_port, 950 + cycle * 150, 80));
+        let mut delayed = RespConn::connect_with_deadline(replica.port, Duration::from_secs(8))
+            .expect("connect replica for delayed reconnect transaction");
+        expect_simple(
+            delayed.command(&[b"MULTI"]).expect("MULTI should reply"),
+            b"OK",
+        );
+        expect_simple(
+            delayed
+                .command(&[b"CLIENT", b"KILL", primary_addr.as_bytes()])
+                .expect("CLIENT KILL should queue"),
+            b"QUEUED",
+        );
+        expect_simple(
+            delayed
+                .command(&[b"DEBUG", b"SLEEP", b"3"])
+                .expect("DEBUG SLEEP should queue"),
+            b"QUEUED",
+        );
+        let exec = delayed
+            .command(&[b"EXEC"])
+            .expect("EXEC should finish after DEBUG SLEEP");
+        assert!(
+            exec.text_lossy().contains("OK"),
+            "delayed reconnect transaction should succeed, got {exec:?}"
+        );
+        writer
+            .join()
+            .expect("writer thread should not panic")
+            .expect("writer commands should succeed");
+        wait_for_info_counter_at_least(
+            &master,
+            b"stats",
+            "sync_partial_ok",
+            partial_ok_before + cycle as u64 + 1,
+        )
+        .expect("each delayed reconnect should be accepted as partial resync");
+    }
+
+    let stats_after =
+        wait_for_info_counter_at_least(&master, b"stats", "sync_partial_ok", partial_ok_before + 2)
+            .expect("delayed same-primary reconnect should be accepted as partial resync");
+    assert_eq!(
+        info_u64(&stats_after, "sync_full"),
+        Some(sync_full_before),
+        "delayed same-primary reconnect with retained backlog must not require another full sync"
+    );
+
+    wait_for_replica_up(&replica, &master).expect("replica should return online after delay");
+    let digest = wait_for_digest_match(&master, &replica)
+        .expect("replica should receive writes made during delayed reconnect");
+    assert!(
+        !digest.is_empty(),
+        "DEBUG DIGEST should return a non-empty digest after delayed partial reconnect"
     );
 }
 
