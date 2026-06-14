@@ -73,7 +73,7 @@ Artifact:
 | `integration/block-repl` | 2/0 | Green | Real `DEBUG DIGEST` plus single blocked-pop wake propagation now validates the list/zset blocking workload. |
 | `integration/replication-3` | 3/4 | Red | Expiry consistency, writable-replica expired-key behavior, and PFCOUNT expired-key/cache semantics. |
 | `integration/replication-4` | 15/2 | Red | SPOP rewrite cases now pass; remaining failures are divergence/default writable-replica cases. |
-| `integration/replication-buffer` | 7/8 | Red | Shared/private output ownership, writer-side drain, active full-sync catch-up release, and the empty-RDB zero-offset reconnect guard moved the backlog-histlen outgrowth assertions, the non-dual-channel shrink assertion, and the dual-channel low-output-buffer partial-resync assertion green. Remaining failures are dual-channel global-buffer behavior, broader partial resync / backlog-memory shrink cases, output-buffer trimming, and the non-dual-channel low-output-buffer PSYNC counter edge case. |
+| `integration/replication-buffer` | 7/8 | Red | Shared/private output ownership, writer-side drain, active full-sync catch-up release, and the empty-RDB zero-offset reconnect guard moved the backlog-histlen outgrowth assertions, the non-dual-channel shrink assertion, and the dual-channel low-output-buffer partial-resync assertion green. A fast kit now wires live `dual-channel-replication-enabled` and excludes active full-sync catch-up from normal INFO memory accounting; the slow Tcl file has not been rerun after that packet. Remaining failures are broader partial resync / backlog-memory shrink cases, output-buffer trimming, and the non-dual-channel low-output-buffer PSYNC counter edge case. |
 | `integration/replication` | 40/27 | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, the first async-loading CONFIG exception, successful swapdb function-context mismatch, parent-killed child discovery, `repl-diskless-load on-empty-db`, no-longer-useful RDB child cancellation, all four replica-link reply-violation assertions, malformed-PSYNC-offset logging, chained replica `FLUSHDB` / `FLUSHALL` stream relay, `GETSET` rewrite, nonblocking `BRPOPLPUSH` / `BLMOVE` rewrite stats, and empty-blocking `BRPOPLPUSH` / `BLMOVE` commandstats via real digest waits. Remaining failures are counted full-sync, diskless pipe/drop, blocked-list role-change, cache-master, lazy-expire, and old-data rollback cases. |
 | `integration/replication-psync` | timeout | Red | Historical focused gate was 90/0 after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support. Current full-file reruns still time out, but the full-sync detached-tail kit removed the first broad no-reconnect inconsistency. The latest oracle dump narrowed the visible data divergence to a single `0` vs `-0` string value; a fast kit then found and fixed an RDB raw numeric-string fidelity bug in that family. Full Tcl has not been rerun after that fix. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
@@ -1024,6 +1024,50 @@ Takeaway:
   full sync, and catch-up must preserve those bytes exactly until a later
   command overwrites them. The kit found a real RDB loader mismatch without
   another long Tcl run.
+
+### R2-BUFFER-DUAL-CHANNEL-ACCOUNTING-KIT
+
+Status: deterministic dual-channel INFO-memory kit completed on 2026-06-14;
+the long `integration/replication-buffer` Tcl file was intentionally deferred
+as a scoreboard.
+
+Implementation:
+
+- `LiveConfig` now stores `dual-channel-replication-enabled`, defaulting to
+  `yes` to match the existing config default.
+- `CONFIG SET` / `CONFIG GET` now mutate and expose the live dual-channel
+  value, and invalid non yes/no values are rejected.
+- `ReplicationState` now distinguishes raw full-sync history retained in
+  memory from the bytes that INFO should charge to normal replication buffers.
+- With dual-channel enabled, active RDB full-sync catch-up bytes are no longer
+  charged to `mem_replication_backlog`; retained post-transfer history still
+  counts because it can satisfy PSYNC. With dual-channel disabled, the previous
+  conservative accounting remains.
+- `repl_buffer_kit` now covers the exact distinction that caused the first
+  focused `replication-buffer` failure: active full-sync catch-up exists, but
+  dual-channel INFO accounting must not inflate the normal replication-buffer
+  total.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands --test repl_buffer_kit -- --nocapture
+cargo test -p redis-commands info:: -- --nocapture
+cargo check -p redis-core -p redis-commands -p redis-server
+```
+
+Results:
+
+- `repl_buffer_kit`: 8 passed, 0 failed.
+- `redis-commands info::`: 3 passed, 0 failed.
+- `cargo check -p redis-core -p redis-commands -p redis-server`: passed.
+
+Takeaway:
+
+- This is the desired kit-first replacement for using the 100+ second Tcl file
+  as the debugger. The next scoreboard run should use the focused
+  `integration/replication-buffer` gate only after the next buffer slice is
+  also kit-green.
 
 ### R2-BGSAVE-CATCHUP
 

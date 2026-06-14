@@ -1162,6 +1162,24 @@ impl ReplicationState {
             .saturating_add(self.retained_repl_history_len())
     }
 
+    /// Bytes held outside the circular backlog that should be charged to INFO
+    /// memory's normal replication-buffer accounting.
+    ///
+    /// With dual-channel full sync, active RDB catch-up bytes are owned by the
+    /// full-sync path rather than the ordinary replication stream. Retained
+    /// post-transfer history still counts because it can satisfy later PSYNC.
+    pub fn replication_history_extra_len_for_memory(
+        &self,
+        dual_channel_replication_enabled: bool,
+    ) -> usize {
+        let retained = self.retained_repl_history_len();
+        if dual_channel_replication_enabled {
+            retained
+        } else {
+            self.repl_bgsave_catchup_len().saturating_add(retained)
+        }
+    }
+
     /// Snapshot pending replica output memory. Shared replication-stream bytes
     /// are represented by the largest per-replica shared queue because all
     /// attached replicas read from one logical stream buffer; explicitly

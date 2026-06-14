@@ -72,7 +72,10 @@ Current red/unfinished areas from the 2026-06-13 R0 dashboard in
   still blocked by full-sync / diskless behavior and replication-buffer
   accounting semantics. The focused `replication-buffer` gate is now 7/8 after
   shared output ownership, active catch-up release, and empty-RDB zero-offset
-  reconnect handling.
+  reconnect handling. A fast follow-up kit wired the live
+  `dual-channel-replication-enabled` flag and fixed dual-channel INFO-memory
+  accounting for active full-sync catch-up; the slow Tcl scoreboard has not
+  been rerun after that packet.
 - A rebuilt R1 gate now shows `replication-3` at 3/4 and `replication-4` at
   15/2. The command-propagation rewrite cases are cleared, but
   expiration/PFCOUNT semantics and divergence/writable-replica cases still need
@@ -377,10 +380,14 @@ Work packets:
   zero-offset reconnect slice then made `PSYNC <cached-replid> 0` legal only
   after a full-sync snapshot loaded no keys, moving focused
   `integration/replication-buffer` to 7/8 by clearing the dual-channel
-  low-output-buffer partial-resync assertion. Remaining buffer work is
-  dual-channel global-buffer behavior, the non-dual-channel low-output-buffer
-  PSYNC counter edge, later slow-replica output-buffer disconnect trimming, and
-  broader partial-resync history ownership.
+  low-output-buffer partial-resync assertion. The next kit-first pass then
+  made `dual-channel-replication-enabled` a real live config value and changed
+  INFO memory to exclude active RDB full-sync catch-up from normal
+  replication-buffer accounting while still charging retained post-transfer
+  PSYNC history; Tcl was intentionally deferred as a scoreboard. Remaining
+  buffer work is the non-dual-channel low-output-buffer PSYNC counter edge,
+  later slow-replica output-buffer disconnect trimming, and broader
+  partial-resync history ownership.
 
 Gate:
 

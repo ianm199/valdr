@@ -8,7 +8,12 @@
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver};
+use std::sync::Arc;
 
+use redis_commands::config_cmd::{
+    apply_config_set, config_value_for_key, validate_config_set_pair,
+};
+use redis_core::live_config::LiveConfig;
 use redis_core::metrics::server_metrics;
 use redis_core::replication::{
     generate_runid, ReplBgsaveJob, ReplicaConn, ReplicaState, ReplicationState,
@@ -159,6 +164,67 @@ fn active_fullsync_catchup_releases_when_last_waiter_disconnects() {
         .expect("job remains for reaper cleanup");
     assert!(job.waiting_replicas.is_empty());
     assert!(job.catch_up_bytes.is_empty());
+}
+
+#[test]
+fn dual_channel_memory_accounting_excludes_active_fullsync_catchup() {
+    let st = ReplicationState::new(generate_runid(), 4);
+    let _rx = attach_replica(&st, 101, 0);
+    install_job(&st, vec![101], 0);
+
+    st.append_to_backlog(b"abcdef");
+    assert_eq!(st.repl_bgsave_catchup_len(), 6);
+    assert_eq!(st.replication_history_extra_len(), 6);
+    assert_eq!(
+        st.replication_history_extra_len_for_memory(false),
+        6,
+        "single-channel accounting charges active catch-up to replication memory"
+    );
+    assert_eq!(
+        st.replication_history_extra_len_for_memory(true),
+        0,
+        "dual-channel accounting must not inflate the normal replication buffer while RDB sync is active"
+    );
+
+    let job = st.take_repl_bgsave_job().expect("active full-sync job");
+    st.retain_fullsync_history(
+        job.snapshot_offset,
+        job.catch_up_bytes,
+        &job.waiting_replicas,
+    );
+    assert_eq!(st.retained_repl_history_len(), 6);
+    assert_eq!(
+        st.replication_history_extra_len_for_memory(true),
+        6,
+        "post-transfer retained history still counts because it can satisfy PSYNC"
+    );
+}
+
+#[test]
+fn dual_channel_replication_config_is_live() {
+    let cfg = Arc::new(LiveConfig::new());
+
+    assert!(cfg.dual_channel_replication_enabled());
+    assert_eq!(
+        config_value_for_key(&cfg, b"dual-channel-replication-enabled").as_deref(),
+        Some("yes")
+    );
+
+    validate_config_set_pair(b"dual-channel-replication-enabled", b"no")
+        .expect("valid yes/no value");
+    apply_config_set(&cfg, b"dual-channel-replication-enabled", b"no");
+    assert!(!cfg.dual_channel_replication_enabled());
+    assert_eq!(
+        config_value_for_key(&cfg, b"dual-channel-replication-enabled").as_deref(),
+        Some("no")
+    );
+
+    apply_config_set(&cfg, b"dual-channel-replication-enabled", b"YeS");
+    assert!(cfg.dual_channel_replication_enabled());
+    assert!(
+        validate_config_set_pair(b"dual-channel-replication-enabled", b"maybe").is_err(),
+        "CONFIG SET should reject non yes/no dual-channel values"
+    );
 }
 
 #[test]

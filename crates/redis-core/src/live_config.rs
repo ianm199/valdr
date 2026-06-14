@@ -254,6 +254,9 @@ pub struct LiveConfig {
     /// (`repl-diskless-sync`). Default `true`. No-op until Wave B wires
     /// actual snapshot transfer.
     pub repl_diskless_sync: AtomicBool,
+    /// Use the dual-channel full-sync accounting model
+    /// (`dual-channel-replication-enabled`). Default `true`.
+    pub dual_channel_replication_enabled: AtomicBool,
     /// Replica load behavior for diskless full sync (`repl-diskless-load`).
     /// Default `disabled` matches Valkey and avoids ordinary full-sync LOADING
     /// state unless the user explicitly selects a diskless-load mode.
@@ -420,6 +423,7 @@ impl Default for LiveConfig {
             import_mode: AtomicBool::new(false),
             availability_zone: Mutex::new(String::new()),
             repl_diskless_sync: AtomicBool::new(true),
+            dual_channel_replication_enabled: AtomicBool::new(true),
             repl_diskless_load: AtomicU8::new(ReplDisklessLoadMode::Disabled as u8),
             rdb_version_check_relaxed: AtomicBool::new(false),
         }
@@ -1015,6 +1019,19 @@ impl LiveConfig {
     /// Update the repl-diskless-sync flag.
     pub fn set_repl_diskless_sync(&self, v: bool) {
         self.repl_diskless_sync.store(v, Ordering::Relaxed);
+    }
+
+    /// Whether primary full-sync catch-up is accounted as dual-channel
+    /// replication state (`dual-channel-replication-enabled`).
+    pub fn dual_channel_replication_enabled(&self) -> bool {
+        self.dual_channel_replication_enabled
+            .load(Ordering::Relaxed)
+    }
+
+    /// Update the dual-channel replication flag.
+    pub fn set_dual_channel_replication_enabled(&self, v: bool) {
+        self.dual_channel_replication_enabled
+            .store(v, Ordering::Relaxed);
     }
 
     /// Diskless full-sync load behavior (`repl-diskless-load`).

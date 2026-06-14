@@ -282,8 +282,10 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let (mem_clients_normal, mem_clients_slaves) = client_memory_info_totals();
         let (_, _, backlog_histlen, backlog_size) =
             redis_core::replication::global_replication_state().backlog_snapshot();
-        let repl_history_extra =
-            redis_core::replication::global_replication_state().replication_history_extra_len();
+        let repl_history_extra = redis_core::replication::global_replication_state()
+            .replication_history_extra_len_for_memory(
+                ctx.live_config().dual_channel_replication_enabled(),
+            );
         let repl_output =
             redis_core::replication::global_replication_state().replica_output_memory_snapshot();
         let mem_replication_backlog = if backlog_histlen > 0 || repl_history_extra > 0 {

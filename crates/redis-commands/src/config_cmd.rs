@@ -279,6 +279,11 @@ pub fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)>
     } else {
         "no".to_string()
     };
+    let live_dual_channel_replication = if cfg.dual_channel_replication_enabled() {
+        "yes".to_string()
+    } else {
+        "no".to_string()
+    };
     let live_repl_diskless_load = cfg.repl_diskless_load().as_config_str().to_string();
     let live_rdb_version_check = if cfg.rdb_version_check_relaxed() {
         "relaxed".to_string()
@@ -360,6 +365,7 @@ pub fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)>
             "lua-enable-insecure-api" => Some(live_lua_enable_insecure_api.clone()),
             "lua-time-limit" | "busy-reply-threshold" => Some(live_lua_time_limit.clone()),
             "repl-diskless-sync" => Some(live_repl_diskless.clone()),
+            "dual-channel-replication-enabled" => Some(live_dual_channel_replication.clone()),
             "repl-diskless-load" => Some(live_repl_diskless_load.clone()),
             "rdb-version-check" => Some(live_rdb_version_check.clone()),
             "client-output-buffer-limit" => Some(live_client_obuf_limit.clone()),
@@ -680,6 +686,13 @@ pub fn validate_config_set_pair(key: &[u8], value: &[u8]) -> RedisResult<()> {
     {
         return Err(RedisError::runtime(
             b"ERR CONFIG SET failed (possibly related to argument 'repl-diskless-load')",
+        ));
+    }
+    if ascii_eq_ignore_case(key, b"dual-channel-replication-enabled")
+        && parse_yes_no(value).is_none()
+    {
+        return Err(RedisError::runtime(
+            b"ERR CONFIG SET failed (possibly related to argument 'dual-channel-replication-enabled')",
         ));
     }
     if ascii_eq_ignore_case(key, b"bind") && !valid_bind_config_value(value) {
@@ -1110,6 +1123,11 @@ pub fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
         }
         b"repl-diskless-sync" => {
             cfg.set_repl_diskless_sync(value == b"yes");
+        }
+        b"dual-channel-replication-enabled" => {
+            if let Some(enabled) = parse_yes_no(value) {
+                cfg.set_dual_channel_replication_enabled(enabled);
+            }
         }
         b"repl-diskless-load" => {
             if let Some(mode) = ReplDisklessLoadMode::parse(value) {
