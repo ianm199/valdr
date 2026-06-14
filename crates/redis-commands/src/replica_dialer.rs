@@ -201,6 +201,7 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
 
         let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
         crate::aof::force_current_writer_fsynced_repl_offset(online_offset);
+        let mut stream_offset = online_offset;
         repl.repl_state
             .store(repl_state_code::REPLICA_ONLINE, Ordering::SeqCst);
         repl.set_replica_link(replica_link_code::CONNECTED);
@@ -222,6 +223,7 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
             &stream,
             &repl,
             dialer_epoch,
+            &mut stream_offset,
             &defer_fullsync_ack_until_idle,
         );
         if !repl.dialer_epoch_is_current(dialer_epoch) {
@@ -279,6 +281,7 @@ fn run_replica_sink_loop(
     stream: &TcpStream,
     repl: &ReplicationState,
     dialer_epoch: u64,
+    stream_offset: &mut i64,
     defer_fullsync_ack_until_idle: &AtomicBool,
 ) {
     let mut read_buf = Vec::new();
@@ -310,7 +313,7 @@ fn run_replica_sink_loop(
             return;
         }
         read_buf.extend_from_slice(&tmp[..n]);
-        let frames = match parse_replica_frames(&mut read_buf, repl) {
+        let frames = match parse_replica_frames(&mut read_buf, stream_offset) {
             Ok(frames) => frames,
             Err(_) => return,
         };
@@ -380,16 +383,14 @@ enum ReplicaStreamFrame {
 
 fn parse_replica_frames(
     read_buf: &mut Vec<u8>,
-    repl: &ReplicationState,
+    stream_offset: &mut i64,
 ) -> io::Result<Vec<ReplicaStreamFrame>> {
     let mut frames = Vec::new();
     loop {
         match redis_protocol::parse_inline_or_multibulk(read_buf) {
             Ok(Some((argv, consumed))) => {
-                let offset_after = repl
-                    .master_repl_offset
-                    .fetch_add(consumed as i64, Ordering::SeqCst)
-                    .saturating_add(consumed as i64);
+                *stream_offset = stream_offset.saturating_add(consumed as i64);
+                let offset_after = *stream_offset;
                 read_buf.drain(..consumed);
                 if is_getack(&argv) {
                     frames.push(ReplicaStreamFrame::GetAck { offset_after });
@@ -928,13 +929,13 @@ mod tests {
     }
 
     fn batch_sizes_for_chunked_replica_stream(stream: &[u8], chunk_size: usize) -> Vec<usize> {
-        let repl = local_state();
         let mut read_buf = Vec::new();
+        let mut stream_offset = 0;
         let mut command_batch: Vec<(Vec<RedisString>, i64)> = Vec::new();
         let mut batch_sizes = Vec::new();
         for chunk in stream.chunks(chunk_size) {
             read_buf.extend_from_slice(chunk);
-            let frames = parse_replica_frames(&mut read_buf, &repl).unwrap();
+            let frames = parse_replica_frames(&mut read_buf, &mut stream_offset).unwrap();
             for frame in frames {
                 match frame {
                     ReplicaStreamFrame::Command { argv, offset_after } => {
@@ -1063,9 +1064,14 @@ mod tests {
         buf.extend_from_slice(&set_frame);
         buf.extend_from_slice(&incr_frame);
 
-        let frames = parse_replica_frames(&mut buf, &repl).unwrap();
+        let mut stream_offset = 0;
+        let frames = parse_replica_frames(&mut buf, &mut stream_offset).unwrap();
 
         assert!(buf.is_empty());
+        assert_eq!(
+            stream_offset,
+            (set_frame.len() + incr_frame.len()) as i64
+        );
         assert_eq!(frames.len(), 2);
         match &frames[0] {
             ReplicaStreamFrame::Command { argv, offset_after } => {
@@ -1086,13 +1092,13 @@ mod tests {
         }
         assert_eq!(
             repl.master_repl_offset.load(Ordering::SeqCst),
-            (set_frame.len() + incr_frame.len()) as i64
+            0,
+            "parsing may compute stream offsets, but applied/ACK offset must only advance after RuntimeOwner apply succeeds"
         );
     }
 
     #[test]
     fn replica_stream_parser_keeps_partial_tail_for_next_read() {
-        let repl = local_state();
         let set_frame = build_multibulk(&[b"SET", b"k", b"v"]);
         let incr_frame = build_multibulk(&[b"INCR", b"n"]);
         let partial_len = incr_frame.len() - 2;
@@ -1100,19 +1106,16 @@ mod tests {
         buf.extend_from_slice(&set_frame);
         buf.extend_from_slice(&incr_frame[..partial_len]);
 
-        let frames = parse_replica_frames(&mut buf, &repl).unwrap();
+        let mut stream_offset = 0;
+        let frames = parse_replica_frames(&mut buf, &mut stream_offset).unwrap();
 
         assert_eq!(frames.len(), 1);
         assert_eq!(buf, incr_frame[..partial_len]);
-        assert_eq!(
-            repl.master_repl_offset.load(Ordering::SeqCst),
-            set_frame.len() as i64
-        );
+        assert_eq!(stream_offset, set_frame.len() as i64);
     }
 
     #[test]
     fn replica_stream_parser_marks_getack_without_dropping_surrounding_commands() {
-        let repl = local_state();
         let set_frame = build_multibulk(&[b"SET", b"k", b"v"]);
         let getack_frame = build_multibulk(&[b"REPLCONF", b"GETACK", b"*"]);
         let incr_frame = build_multibulk(&[b"INCR", b"n"]);
@@ -1121,7 +1124,8 @@ mod tests {
         buf.extend_from_slice(&getack_frame);
         buf.extend_from_slice(&incr_frame);
 
-        let frames = parse_replica_frames(&mut buf, &repl).unwrap();
+        let mut stream_offset = 0;
+        let frames = parse_replica_frames(&mut buf, &mut stream_offset).unwrap();
 
         assert!(buf.is_empty());
         assert_eq!(frames.len(), 3);

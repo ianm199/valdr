@@ -118,8 +118,13 @@ Current red/unfinished areas from the 2026-06-13 R0 dashboard in
   digest dump with one master-only hash row. The setup leg is now covered by a
   fast dialer kit/probe that lets the replica report `ROLE connected` after RDB
   load while a separate full-sync ACK latch keeps the primary-side replica in
-  `send_bulk` until the post-RDB stream goes idle. The remaining PSYNC debugger
-  target is the one-row complex-data divergence, not another broad Tcl grind.
+  `send_bulk` until the post-RDB stream goes idle. A follow-up dialer offset kit
+  stopped the parser from publishing parsed-but-unapplied bytes as the replica's
+  ACK-able offset; the RuntimeOwner now remains the only publisher of applied
+  offsets. A short two-server HSET digest probe covered the one-missing-hash-row
+  shape with 113k continuous writes. The official PSYNC status still needs a
+  sequential full-file Tcl scoreboard; if it remains red, reduce the next
+  failure to a complex-data kit before another broad grind.
 - `replication-aof-sync` is green as of 2026-06-13 after full-sync RDB loads
   refresh appendonly manifests correctly.
 - `replica-redirect.tcl` needs real `FAILOVER` plus client redirect semantics.
@@ -579,9 +584,14 @@ Work packets:
   suppressed until the post-RDB stream goes idle so the primary still reports
   the replica as `send_bulk`. An ad hoc two-server probe with continuous writes
   proved that split: replica `ROLE connected` while master `INFO replication`
-  still had `state=send_bulk`, then `state=online` after writes stopped. Keep
-  using these kits as the debugger; the next kit should isolate the remaining
-  one-row complex-data divergence before rerunning full Tcl as a scoreboard.
+  still had `state=send_bulk`, then `state=online` after writes stopped. The
+  next fast slice split parsed stream offset from applied/ACK-able offset:
+  `parse_replica_frames` computes per-frame offsets from a local cursor, but
+  `master_repl_offset` is only published after RuntimeOwner applies the batch.
+  A two-server HSET digest probe then passed with 113k continuous DB 11 writes,
+  covering the visible one-row hash divergence shape. Keep using these kits as
+  the debugger; rerun full Tcl only as a sequential scoreboard, and reduce any
+  new PSYNC failure to a deterministic kit first.
 - **R3-METRICS:** keep `sync_full`, `sync_partial_ok`, `sync_partial_err`,
   master/replica offsets, lag, and backlog histlen faithful in `INFO`.
 
