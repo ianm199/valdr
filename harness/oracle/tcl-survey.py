@@ -307,7 +307,18 @@ def main() -> int:
             "concurrent TCL probes do not race over tests/tmp."
         ),
     )
-    parser.add_argument("--quiet", action="store_true", default=True)
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        default=True,
+        help="Pass --quiet to test_helper.tcl. This is the default to keep survey artifacts small.",
+    )
+    parser.add_argument(
+        "--no-quiet",
+        dest="quiet",
+        action="store_false",
+        help="Do not pass --quiet to test_helper.tcl; preserve Tcl progress output in per-file logs.",
+    )
     parser.add_argument(
         "--profile",
         choices=sorted(DENY_TAG_PROFILES),

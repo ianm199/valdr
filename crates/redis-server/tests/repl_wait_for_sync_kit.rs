@@ -447,6 +447,14 @@ fn wait_for_replicas_offset_match(
 }
 
 fn configure_psync_surface(master: &TestServer, replica: &TestServer) {
+    configure_psync_surface_with_diskless_load(master, replica, b"disabled");
+}
+
+fn configure_psync_surface_with_diskless_load(
+    master: &TestServer,
+    replica: &TestServer,
+    repl_diskless_load: &[u8],
+) {
     let mut master_conn = RespConn::connect(master.port).expect("connect master for config");
     for command in [
         [
@@ -485,7 +493,7 @@ fn configure_psync_surface(master: &TestServer, replica: &TestServer) {
             b"CONFIG".as_slice(),
             b"SET",
             b"repl-diskless-load",
-            b"disabled",
+            repl_diskless_load,
         ]
         .as_slice(),
         [
@@ -748,6 +756,43 @@ fn psync_no_reconnect_fullsync_converges_under_cross_db_write_load() {
     assert!(
         !digest.is_empty(),
         "DEBUG DIGEST should return a non-empty digest after write load"
+    );
+}
+
+#[test]
+fn psync_no_reconnect_swapdb_fullsync_converges_under_mutating_write_load() {
+    let master = TestServer::start("repl-psync-swapdb-master").expect("start master");
+    let replica = TestServer::start("repl-psync-swapdb-replica").expect("start replica");
+    configure_psync_surface_with_diskless_load(&master, &replica, b"swapdb");
+
+    write_mutating_complex_data(master.port, 2000, 60).expect("seed master data");
+    let mut writers = Vec::new();
+    for worker in 0..3 {
+        let master_port = master.port;
+        writers.push(thread::spawn(move || {
+            write_mutating_complex_data(master_port, 2100 + worker * 200, 80)
+        }));
+    }
+
+    let mut replica_conn = RespConn::connect(replica.port).expect("connect replica");
+    expect_simple(
+        replica_conn
+            .command(&[b"SLAVEOF", b"127.0.0.1", master.port.to_string().as_bytes()])
+            .expect("SLAVEOF should reply"),
+        b"OK",
+    );
+
+    wait_for_replica_up(&replica, &master).expect("replica should reach online state");
+    for writer in writers {
+        writer
+            .join()
+            .expect("writer thread should not panic")
+            .expect("writer commands should succeed");
+    }
+    let digest = wait_for_digest_match(&master, &replica).expect("digests should converge");
+    assert!(
+        !digest.is_empty(),
+        "DEBUG DIGEST should return a non-empty digest after swapdb full sync"
     );
 }
 
