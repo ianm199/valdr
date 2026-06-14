@@ -1109,10 +1109,11 @@ fn psync_no_reconnect_fullsync_replays_db0_final_list_pop() {
     );
 }
 
-#[test]
-fn psync_no_reconnect_fullsync_replays_db11_final_hdel() {
-    let master = TestServer::start("repl-psync-hdel-master").expect("start master");
-    let replica = TestServer::start("repl-psync-hdel-replica").expect("start replica");
+fn assert_db11_final_hdel_catchup(prefix: &str, key: &[u8], field: &[u8], value: &[u8]) {
+    let master_name = format!("repl-psync-{prefix}-master");
+    let replica_name = format!("repl-psync-{prefix}-replica");
+    let master = TestServer::start(&master_name).expect("start master");
+    let replica = TestServer::start(&replica_name).expect("start replica");
     configure_psync_surface(&master, &replica);
 
     let mut master_conn = RespConn::connect(master.port).expect("connect master");
@@ -1130,7 +1131,7 @@ fn psync_no_reconnect_fullsync_replays_db11_final_hdel() {
     );
     expect_success(
         master_conn
-            .command(&[b"HSET", b"700", b"980330930547", b"-784434765942"])
+            .command(&[b"HSET", key, field, value])
             .expect("seed one-field DB 11 hash"),
     );
 
@@ -1146,14 +1147,14 @@ fn psync_no_reconnect_fullsync_replays_db11_final_hdel() {
 
     assert_eq!(
         master_conn
-            .command(&[b"HDEL", b"700", b"980330930547"])
+            .command(&[b"HDEL", key, field])
             .expect("final HDEL should reply"),
         Frame::Integer(1),
         "master should remove the exact one-field hash entry"
     );
     assert_eq!(
         master_conn
-            .command(&[b"EXISTS", b"700"])
+            .command(&[b"EXISTS", key])
             .expect("EXISTS after final HDEL"),
         Frame::Integer(0),
         "master should delete the hash key after final HDEL"
@@ -1172,10 +1173,25 @@ fn psync_no_reconnect_fullsync_replays_db11_final_hdel() {
     );
     assert_eq!(
         replica_check
-            .command(&[b"EXISTS", b"700"])
+            .command(&[b"EXISTS", key])
             .expect("replica EXISTS after full sync"),
         Frame::Integer(0),
         "replica must not retain the DB 11 hash after full-sync catch-up"
+    );
+}
+
+#[test]
+fn psync_no_reconnect_fullsync_replays_db11_final_hdel() {
+    assert_db11_final_hdel_catchup("numeric-hdel", b"700", b"980330930547", b"-784434765942");
+}
+
+#[test]
+fn psync_no_reconnect_fullsync_replays_db11_binary_final_hdel() {
+    assert_db11_final_hdel_catchup(
+        "binary-hdel",
+        b"bin-hash",
+        b"\0field\r\n\"\\:980330930547",
+        b"\0value\r\n-784434765942",
     );
 }
 
