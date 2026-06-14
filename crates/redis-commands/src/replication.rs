@@ -1077,6 +1077,9 @@ fn partial_in_window(repl: &Arc<ReplicationState>, provided: i64, master_offset:
     if provided > master_offset {
         return false;
     }
+    if provided == 0 && master_offset == 0 {
+        return repl.zero_offset_partial_resync_allowed();
+    }
     repl.can_read_history_range(provided, master_offset)
 }
 
@@ -1297,8 +1300,16 @@ mod tests {
         );
         assert_eq!(
             decide_psync(&st, &runid, &runid, 0, st.master_offset()),
+            PsyncDecision::FullResync {
+                count_partial_err: true
+            },
+            "offset-0 reconnect is unsafe until an empty full sync proves there is no snapshot data"
+        );
+        st.set_zero_offset_partial_resync_allowed(true);
+        assert_eq!(
+            decide_psync(&st, &runid, &runid, 0, st.master_offset()),
             PsyncDecision::Continue,
-            "a caught-up reconnect at offset 0 should not need an RDB"
+            "a safe caught-up offset-0 reconnect should not need an RDB"
         );
 
         st.append_to_backlog(b"abcdefgh");

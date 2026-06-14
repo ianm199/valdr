@@ -828,6 +828,10 @@ Implementation:
 - `psync_reconnect_kit` adds a master-side regression case proving
   `PSYNC <runid> 0` can return `+CONTINUE` and replay retained backlog bytes
   when the primary really has history after offset zero.
+- A 2026-06-14 follow-up made the command-level PSYNC decision matrix explicit:
+  `PSYNC <runid> 0` with no readable history and no empty-RDB permission must
+  fall back to full resync, while the empty-history permission allows the
+  caught-up offset-zero case.
 
 Evidence:
 
@@ -1300,8 +1304,8 @@ Takeaway:
 
 ### R2-BUFFER-FULLSYNC-DRAIN-VISIBILITY
 
-Status: kit-first slice completed on 2026-06-14; focused Tcl scoreboard not
-rerun after this packet.
+Status: kit-first slice completed on 2026-06-14; focused Tcl scoreboard stayed
+at 12/4 after this packet.
 
 Implementation:
 
@@ -1332,6 +1336,15 @@ cargo test -p redis-commands --test repl_buffer_kit -- --nocapture
 cargo test -p redis-commands info::tests -- --nocapture
 cargo check -p redis-commands -p redis-server
 cargo build -p redis-server --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-buffer-fullsync-drain-visibility \
+  --profile integration-repl \
+  --timeout-s 300 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --skip-build \
+  --files integration/replication-buffer
 ```
 
 Results:
@@ -1347,12 +1360,22 @@ Results:
   large post-BGSAVE catch-up tail: 179 samples, saw replica ROLE `sync`, and
   settled at master `rdb_bgsave_in_progress:0`, `connected_slaves:1`, replica
   ROLE `connected`, and no lingering `state=send_bulk` line.
+- Focused Tcl artifact:
+  `harness/oracle/results/tcl-survey/20260614T052444531017Z/result.json`.
+- `integration/replication-buffer`: 12 passed, 4 failed, no timeout.
 
 Takeaway:
 
-- The useful debugger here is the kit ladder, not the full Tcl file. The next
-  long command to run is the focused `integration/replication-buffer`
-  scoreboard when we need to measure whether the remaining 12/4 frontier moved.
+- The useful debugger here is the kit ladder, not the full Tcl file. The
+  remaining frontier is the shared-history / backlog-shrink pair in the slow
+  replica scenario.
+- A follow-up experiment that kept the debug-delayed BGSAVE job installed until
+  active catch-up went idle was rejected and reverted. Focused artifact
+  `harness/oracle/results/tcl-survey/20260614T053600956113Z/result.json`
+  regressed to no-summary after 196s with `Replica offset didn't catch up with
+  the master after too long time.` The next attempt needs a kit that proves
+  online replica catch-up throughput while the full-sync waiter pins large
+  history; a state-lifetime hold alone is not acceptable.
 
 ### R2-BGSAVE-CATCHUP
 

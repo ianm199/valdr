@@ -427,7 +427,11 @@ Work packets:
   this surface; the focused Tcl file remains the scoreboard gate. Remaining
   buffer work is later slow-replica output-buffer disconnect trimming, broader
   partial-resync history ownership, and real dual-channel RDB transport beyond
-  the compatibility accounting shim.
+  the compatibility accounting shim. A later debug-delayed BGSAVE hold
+  experiment was rejected after it regressed the focused gate to a no-summary
+  replica-offset catch-up abort; the next BGSAVE-window attempt must prove
+  online replica catch-up throughput while a full-sync waiter pins large shared
+  history, not just keep the job state alive longer.
 
 Gate:
 
