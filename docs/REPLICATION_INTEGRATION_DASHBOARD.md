@@ -35,7 +35,7 @@ scoreboard. It runs the replication correctness, backlog/buffer,
 full-sync-lifecycle, PSYNC reconnect, failover redirect, and replica dialer
 Rust tests without starting the upstream Tcl matrix.
 
-Latest result on 2026-06-14: `make repl-kits` passed 140/140 tests.
+Latest result on 2026-06-14: `make repl-kits` passed 142/142 tests.
 The adjacent runtime-owner unit lane also passed 13/13 tests after reducing a
 `repl-diskless-load swapdb` PSYNC DB-selection mismatch:
 
@@ -101,7 +101,7 @@ Artifact:
 | `integration/replication-3` | 3/4 | Red | Expiry consistency, writable-replica expired-key behavior, and PFCOUNT expired-key/cache semantics. |
 | `integration/replication-4` | 15/2 | Red | SPOP rewrite cases now pass; remaining failures are divergence/default writable-replica cases. |
 | `integration/replication-buffer` | 16/0 | Green | The replication-buffer kit line now covers active full-sync catch-up beyond the circular backlog, selected-DB full-sync prefixes appended into the active job before backlog wrap, partial resync from retained shared history, retained-history release after the last dependent replica disconnects, shared output memory charged once, and hard-limit disconnect isolation. Follow-up Tcl scoreboards moved the file through 13/3, 15/1, and finally 16/0 at artifact `20260614T071942726290Z`; keep `repl_buffer_kit` as the inner loop and rerun this Tcl file only as a regression scoreboard. |
-| `integration/replication` | 54/13 | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, async-loading CONFIG exceptions, successful swapdb function payloads, parent-killed child discovery, `repl-diskless-load on-empty-db`, no-longer-useful RDB child cancellation, replica-link reply violations, malformed-PSYNC-offset logging, chained replica `FLUSHDB` / `FLUSHALL` stream relay, `GETSET` rewrite, nonblocking `BRPOPLPUSH` / `BLMOVE` rewrite stats, empty-blocking commandstats, replica output-byte stats, BLPOP role-change divergence, `replicas_waiting_psync` visibility, diskless full-sync short-read recovery state/logging, handshake-timeout detection, line-224 `MULTI`/`SLAVEOF`/`INFO`/`EXEC`, three-replica full-sync/write-load offset convergence, killed swapdb full-sync sockets, `repl-diskless-load flush-before-load` owner-DB clearing, lazy-expire recreate propagation, and disk-based RDB rename-failure rollback. The current full 2026-06-14 scoreboard `20260614T152330925016Z` completes with 54 passed, 13 failed, 0 timed out, 0 without summary, and 26 parsed failure lines. Remaining scoreboard failures cluster around diskless pipe/log observability, `replicaof` immediately after disconnection, cache-master/fullsync load behavior, and EINTR watchdog. Focused Tcl `--only` remains unreliable for this file because earlier top-level setup can still abort; use process kits as reducers and full-file Tcl as the scoreboard. |
+| `integration/replication` | 54/13 | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, async-loading CONFIG exceptions, successful swapdb function payloads, parent-killed child discovery, `repl-diskless-load on-empty-db`, no-longer-useful RDB child cancellation, replica-link reply violations, malformed-PSYNC-offset logging, chained replica `FLUSHDB` / `FLUSHALL` stream relay, `GETSET` rewrite, nonblocking `BRPOPLPUSH` / `BLMOVE` rewrite stats, empty-blocking commandstats, replica output-byte stats, BLPOP role-change divergence, `replicas_waiting_psync` visibility, handshake-timeout detection, line-224 `MULTI`/`SLAVEOF`/`INFO`/`EXEC`, three-replica full-sync/write-load offset convergence, killed swapdb full-sync sockets, `repl-diskless-load flush-before-load` owner-DB clearing, lazy-expire recreate propagation, and disk-based RDB rename-failure rollback. The current clean-port full 2026-06-14 scoreboard `20260614T154218963678Z` completes with 54 passed, 13 failed, 0 timed out, 0 without summary, and 26 parsed failure lines. Remaining scoreboard failures cluster around diskless pipe/log observability, `replicaof` immediately after disconnection, cache-master/fullsync load behavior, and EINTR watchdog. The latest checkpoint adds replica stdout markers for short-read/error, fullsync success, and partial-resync success paths; `make repl-kits` is green, but the long Tcl re-score after the completion-marker addition is intentionally deferred. Focused Tcl `--only` remains unreliable for this file because earlier top-level setup can still abort; use process kits as reducers and full-file Tcl as the scoreboard. |
 | `integration/replication-psync` | 90/0 | Green | Historical focused gate was 90/0 after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support. Later full-file reruns regressed to timeouts and digest mismatches, but the kit-first loop moved the visible frontier through raw `-0` RDB fidelity, deterministic set/zset store rewrites, selected-DB full-sync catch-up, post-fullsync live-stream DB selection, in-flight BGSAVE waiter offset reuse, fresh full-sync snapshot barriers, no-reconnect `repl-diskless-load swapdb`, same-primary socket-drop partial reconnect, delayed replica-side `CLIENT KILL`/`DEBUG SLEEP` reconnect, DB 0 final-list-pop catch-up, DB 11 final-`HDEL` catch-up, DB 11 binary-field final-`HDEL` catch-up, DB 0 final-list-pop partial reconnect, and Tcl-style stop-after-online bg_complex writers. The no-quiet artifact `20260614T133752958562Z` captured a swapdb digest mismatch, and `20260614T135259082789Z` later timed out with four parsed PSYNC failures. The final stop-timed reducer exposed the real transfer-window bug: the reaper took the active BGSAVE job before reading/queuing the RDB, so writes during that window could miss both job catch-up and live fan-out or interleave ahead of catch-up. Production now keeps the job installed while reading the temp RDB and uses the full-sync snapshot barrier while taking the job, computing catch-up, queuing RDB/catch-up, and only then exposing replicas to live fan-out. Full `integration/replication-psync` is green at artifact `20260614T143228939871Z`: 90 passed, 0 failed, 0 timed out, 0 parsed failure lines. Keep the new process kit as the inner loop and rerun this Tcl file only as a regression scoreboard. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
 | `integration/replica-redirect` | 11/0 | Green | `CLIENT CAPA REDIRECT`, MULTI/EXEC replica redirects, failover pause, waiting-for-sync responses, and blocked-client behavior during failover now pass in the direct Tcl file. The final 2026-06-14 kit-first pass moved the file from timeout/no-summary to parsed 10/1, reduced the stale DB 9 stream return to partial-resync/role-change invariants, then cleared the full file at 11/0 in 6 seconds. |
@@ -197,6 +197,78 @@ visible integration frontiers are now:
   REDIRECT unblocking, and promotion/demotion remain open.
 
 ## Packet Evidence
+
+### 2026-06-14 R3 checkpoint: fullsync stdout markers for diskless short-read waiter
+
+Status: checkpoint completed on 2026-06-14; deterministic kits are green, but
+full `integration/replication` remains 54/13 until the next long scoreboard.
+
+Scope:
+
+- The `diskless loading short read` Tcl body waits on the replica stdout log
+  after `Loading DB in memory` for any of:
+  `Internal error in RDB`, `Finished with success`, or
+  `Successful partial resynchronization`.
+- The first reducer showed that short RDB reads must print the
+  `Internal error in RDB` marker to stdout, not only stderr.
+- The clean full-file scoreboard still failed the same Tcl waiter after the
+  failure-marker-only patch, which showed the missing surface was broader: the
+  upstream waiter also accepts races where RDB delivery finishes successfully
+  or reconnect recovers through partial resync.
+
+Implementation:
+
+- Replica full-sync RDB read failures now classify stdout-visible failures with
+  `fullsync_rdb_failure_should_log_to_stdout`; `UnexpectedEof` prints the
+  `Internal error in RDB` marker to stdout, while dialer-epoch/role-change
+  interruption remains non-stdout noise.
+- Successful full-sync RDB load now prints the Valkey-compatible
+  `PRIMARY <-> REPLICA sync: Finished with success` marker.
+- Partial resync `+CONTINUE` now keeps the detailed stderr offset log and also
+  prints `Successful partial resynchronization with primary.` to stdout.
+- `replica_dialer::tests` covers all three Tcl waiter patterns.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands replica_dialer::tests -- --nocapture
+make repl-kits
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-integration-after-rdb-short-read-log-fix-clean-ports \
+  --profile integration-repl \
+  --timeout-s 620 \
+  --baseport 30000 \
+  --portcount 8000 \
+  --clients 1 \
+  --files integration/replication \
+  --isolated-tests-copy \
+  --skip-build \
+  --no-quiet
+```
+
+Results:
+
+- `replica_dialer::tests`: 23 passed, 0 failed.
+- `make repl-kits`: 142 passed, 0 failed.
+- A prior full-file attempt
+  `harness/oracle/results/tcl-survey/20260614T153105095295Z/result.json` was
+  not a valid scoreboard: local debugpy already held port `53003`, so one
+  server failed to bind and the file timed out with 0 counted tests.
+- Focused Tcl `--only` artifact
+  `harness/oracle/results/tcl-survey/20260614T154052231393Z/result.json` is not
+  counted as validation because earlier top-level setup still ran and aborted
+  before the selected body.
+- Clean full `integration/replication` scoreboard
+  `harness/oracle/results/tcl-survey/20260614T154218963678Z/result.json`:
+  54 passed, 13 failed, 0 timed out, 0 without summary, 26 parsed failure
+  lines. This run happened before the success/partial-resync stdout markers and
+  proved the failure-marker-only patch did not move the Tcl scoreboard.
+
+Takeaway:
+
+- This leaves a useful checkpoint without overclaiming movement: the replica
+  now exposes the three stdout markers the upstream short-read waiter accepts,
+  and the next long Tcl run can re-score the diskless short-read failure.
 
 ### 2026-06-14 R3 follow-up: disk-based full-sync RDB rename failure
 
@@ -1388,8 +1460,9 @@ Results:
 - Conservative-selector comparison for `integration/replication-psync`:
   `harness/oracle/results/tcl-survey/20260613T225613931557Z/result.json`
   also timed out at 360 seconds with the same class of inconsistency lines.
-  That makes PSYNC a reopened current R3 frontier, but it does not implicate
-  this packet's offset-zero selector.
+  At that point PSYNC had reopened as an R3 frontier, but the later
+  `20260614T143228939871Z` full-file scoreboard made it green again. The
+  timeout did not implicate this packet's offset-zero selector.
 - Focused no-regression tripwire:
   `harness/oracle/results/tcl-survey/20260613T230647306243Z/result.json`
   reported `integration/replication-2` 7/0 and `integration/block-repl` 2/0.

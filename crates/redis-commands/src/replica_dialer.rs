@@ -200,6 +200,7 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
                     }
                     clear_fullsync_loading_state();
                     repl.adopt_fullresync_primary(replid, offset);
+                    log_fullsync_rdb_success();
                     (offset, true, false)
                 }
                 PsyncOutcome::Continue { offset } => {
@@ -208,10 +209,7 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
                     // Do not publish `master_link_status:up` until that stream has
                     // gone idle once; otherwise clients can observe stale keyspace
                     // before catch-up commands such as FLUSHALL have applied.
-                    eprintln!(
-                        "redis-server: replica: +CONTINUE partial resync from offset {}",
-                        offset
-                    );
+                    log_partial_resync_success(offset);
                     (offset, false, true)
                 }
             };
@@ -305,13 +303,41 @@ pub fn fullsync_rdb_failure_log_line(err: &io::Error) -> String {
     }
 }
 
+pub fn fullsync_rdb_failure_should_log_to_stdout(err: &io::Error) -> bool {
+    err.kind() != io::ErrorKind::Interrupted
+}
+
 fn log_fullsync_rdb_read_failure(err: &io::Error) {
     let msg = fullsync_rdb_failure_log_line(err);
     eprintln!("{}", msg);
-    if is_handshake_timeout_error(err) {
+    if fullsync_rdb_failure_should_log_to_stdout(err) {
         println!("{}", msg);
         let _ = io::stdout().flush();
     }
+}
+
+pub fn fullsync_rdb_success_log_line() -> &'static str {
+    "redis-server: PRIMARY <-> REPLICA sync: Finished with success"
+}
+
+fn log_fullsync_rdb_success() {
+    let msg = fullsync_rdb_success_log_line();
+    eprintln!("{}", msg);
+    println!("{}", msg);
+    let _ = io::stdout().flush();
+}
+
+pub fn partial_resync_success_log_line() -> &'static str {
+    "redis-server: Successful partial resynchronization with primary."
+}
+
+fn log_partial_resync_success(offset: i64) {
+    eprintln!(
+        "redis-server: replica: +CONTINUE partial resync from offset {}",
+        offset
+    );
+    println!("{}", partial_resync_success_log_line());
+    let _ = io::stdout().flush();
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1340,6 +1366,32 @@ mod tests {
         );
 
         let _ = primary.join();
+    }
+
+    #[test]
+    fn fullsync_rdb_short_read_log_is_stdout_visible_for_tcl_waiter() {
+        let err = io::Error::new(io::ErrorKind::UnexpectedEof, "EOF reading RDB");
+        let line = fullsync_rdb_failure_log_line(&err);
+        assert!(
+            line.contains("Internal error in RDB"),
+            "short-read failures must use the Tcl-observed RDB error marker, got {line}"
+        );
+        assert!(
+            fullsync_rdb_failure_should_log_to_stdout(&err),
+            "diskless loading short-read Tcl waits on the server stdout log after the loading marker"
+        );
+    }
+
+    #[test]
+    fn fullsync_completion_logs_match_short_read_tcl_waiter_patterns() {
+        assert!(
+            fullsync_rdb_success_log_line().contains("Finished with success"),
+            "short-read Tcl accepts completed fullsyncs when the kill races with RDB delivery"
+        );
+        assert!(
+            partial_resync_success_log_line().contains("Successful partial resynchronization"),
+            "short-read Tcl accepts partial reconnect success when backlog recovery wins"
+        );
     }
 
     #[test]

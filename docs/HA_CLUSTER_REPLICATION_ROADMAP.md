@@ -106,39 +106,19 @@ Current red/unfinished areas from the 2026-06-13 R0 dashboard in
   single-pop wakes began propagating their canonical nonblocking forms.
 - `replication-2` is green at 7/0 with real `DEBUG DIGEST` after the replica
   dialer began batching already-read command frames through RuntimeOwner.
-- `replication-psync` had a historical focused 90/0 gate after live backlog
-  resize, backlog TTL expiry, and delayed reconnect semantics landed. Current
-  full-file reruns time out with master/replica inconsistency lines even under
-  the old conservative offset-zero selector, so PSYNC is a reopened R3
-  frontier. A detached full-sync catch-up tail kit removed the earliest broad
-  no-reconnect mismatch; the next visible data divergence is a single string
-  value `0` on the master vs `-0` on the replica. A follow-up Rust kit found
-  and fixed an RDB raw numeric-string fidelity bug in that family. The next
-  2026-06-14 full-file Tcl attempt
-  `harness/oracle/results/tcl-survey/20260614T072301072427Z/result.json`
-  still timed out, now showing setup `Replication not started` failures plus a
-  digest dump with one master-only hash row. The setup leg is now covered by a
-  fast dialer kit/probe that lets the replica report `ROLE connected` after RDB
-  load while a separate full-sync ACK latch keeps the primary-side replica in
-  `send_bulk` until the post-RDB stream goes idle. A follow-up dialer offset kit
-  stopped the parser from publishing parsed-but-unapplied bytes as the replica's
-  ACK-able offset; the RuntimeOwner now remains the only publisher of applied
-  offsets. A short two-server HSET digest probe covered the one-missing-hash-row
-  shape with 113k continuous writes. A follow-up packet fixed source-dependent
-  set-store replay by rewriting store commands to deterministic destination
-  updates, then fixed fresh full-sync catch-up DB drift by injecting a real
-  selected-DB prefix into the backlog and seeding the BGSAVE job catch-up from
-  bytes already appended after the advertised snapshot offset. The latest
-  sequential Tcl scoreboard
-  `harness/oracle/results/tcl-survey/20260614T091542767472Z/result.json` still
-  times out in the no-reconnect case, but the visible diff moved to one
-  replica-only DB 0 set row. That residue is now reduced to
-  `repl_correctness_kit::r1_live_write_after_fullsync_forces_select_for_new_send_bulk_replica`:
-  after an RDB is delivered to a send-bulk replica, the primary resets the
-  cached replication stream selected DB so the next live DB 9 write emits a
-  real `SELECT 9`. Do not run the six-minute PSYNC Tcl file as the debugger;
-  rerun it only as the next scoreboard or nightly confirmation after a kit
-  batch.
+- `replication-psync` is green at 90/0 as of artifact
+  `harness/oracle/results/tcl-survey/20260614T143228939871Z/result.json`.
+  It regressed through several 2026-06-14 reruns, but the kit-first loop closed
+  the visible failures: raw `-0` RDB fidelity, deterministic set/zset store
+  rewrites, selected-DB full-sync catch-up, post-fullsync live-stream DB
+  selection, in-flight BGSAVE waiter offset reuse, fresh full-sync snapshot
+  barriers, no-reconnect `repl-diskless-load swapdb`, same-primary socket-drop
+  partial reconnect, delayed replica-side reconnect after `CLIENT KILL` /
+  `DEBUG SLEEP`, DB 0 final-list-pop catch-up, DB 11 final-`HDEL` catch-up,
+  binary-field final-`HDEL`, and Tcl-style stop-after-online bg_complex
+  writers. Keep `psync_reconnect_kit`, `repl_correctness_kit`, and the process
+  PSYNC kit as the debugger; rerun the full Tcl file only as a regression
+  scoreboard.
 - `replication-aof-sync` is green as of 2026-06-13 after full-sync RDB loads
   refresh appendonly manifests correctly.
 - `replica-redirect.tcl` is green at 11/0 as of 2026-06-14. Real `FAILOVER`,
@@ -150,10 +130,9 @@ Current red/unfinished areas from the 2026-06-13 R0 dashboard in
 
 ## Execution Rules
 
-1. **Preserve current green gates.** `replication-2`, `block-repl`, and
-   `replication-aof-sync` are no-regression tripwires for replication work.
-   Treat `replication-psync` as a reopened red gate until the current timeout
-   is explained or fixed.
+1. **Preserve current green gates.** `replication-2`, `block-repl`,
+   `replication-buffer`, `replication-psync`, `replication-aof-sync`, and
+   `replica-redirect` are no-regression tripwires for replication work.
 2. **Use the fast kit first.** Build deterministic tests in
    `crates/redis-commands/tests/repl_correctness_kit.rs`,
    `crates/redis-commands/tests/psync_reconnect_kit.rs`,
@@ -598,40 +577,19 @@ Work packets:
   the background dialer; the focused `integration/replication-psync` gate now
   passes 90/90 at
   `harness/oracle/results/tcl-survey/20260613T162716653643Z/result.json`.
-  Current reruns later on 2026-06-13 timed out with master/replica
-  inconsistency lines both with the scoped empty-RDB zero-offset selector and
-  with the old conservative selector. Treat this as reopened R3 work:
-  a follow-up kit on 2026-06-14 fixed the detached full-sync catch-up tail
-  window where writes appended after the reaper took the BGSAVE job were not
-  included in the RDB catch-up stream. The full Tcl matrix still timed out, but
-  its visible data diff narrowed to `0` vs `-0`. A follow-up small Rust kit
-  covered DB 9 partial catch-up, primary stream replay, PSYNC replay from the
-  offset after the `-0` frame, and full-sync RDB reconstruction. That kit found
-  the RDB raw loader promoting `-0` to integer `0`; the loader now shares the
-  runtime string encoder and canonical integer round-trip rule. A 2026-06-14
-  rerun after that fix timed out in
-  `harness/oracle/results/tcl-survey/20260614T072301072427Z/result.json`: the
-  visible setup failure was `Replication not started`, and the digest dump
-  showed one master-only hash row. The setup failure was reduced to
-  `replica_dialer::tests::fullsync_role_connects_before_ack_is_released_after_stream_idle`:
-  after a fullsync RDB load, local `ROLE` may report `connected`, but ACKs stay
-  suppressed until the post-RDB stream goes idle so the primary still reports
-  the replica as `send_bulk`. An ad hoc two-server probe with continuous writes
-  proved that split: replica `ROLE connected` while master `INFO replication`
-  still had `state=send_bulk`, then `state=online` after writes stopped. The
-  next fast slice split parsed stream offset from applied/ACK-able offset:
-  `parse_replica_frames` computes per-frame offsets from a local cursor, but
-  `master_repl_offset` is only published after RuntimeOwner applies the batch.
-  A two-server HSET digest probe then passed with 113k continuous DB 11 writes,
-  covering the visible one-row hash divergence shape. The next kit-first packet
-  fixed source-dependent set-store replay and fresh full-sync selected-DB
-  catch-up ordering; `psync_reconnect_kit` now proves the catch-up stream starts
-  with `SELECT 9` before the first active write. The focused Tcl scoreboard
-  `harness/oracle/results/tcl-survey/20260614T091542767472Z/result.json` still
-  timed out, now with one replica-only DB 0 set row. A follow-up kit reproduced
-  that post-fullsync live-stream DB drift and fixed it by forcing the next live
-  write after RDB delivery to carry a fresh `SELECT`. Keep using kits as the
-  debugger; rerun the broad Tcl PSYNC file only when it is serving as a
+  Later 2026-06-14 reruns reopened the file with timeout and digest mismatch
+  shapes, then the kit-first loop closed the sequence: detached full-sync
+  catch-up tail loss, raw `-0` RDB fidelity, post-RDB ACK timing, parsed vs.
+  applied offset publication, source-dependent set/zset store replay, fresh
+  full-sync selected-DB catch-up ordering, live-stream DB drift after RDB
+  delivery, in-flight BGSAVE waiter offset reuse, fresh snapshot barriers,
+  swapdb no-reconnect convergence, same-primary socket-drop partial reconnect,
+  delayed reconnect after `CLIENT KILL` / `DEBUG SLEEP`, final DB 0 list-pop
+  catch-up, final DB 11 `HDEL` catch-up, and Tcl-style stop-after-online
+  bg_complex writers. Full `integration/replication-psync` is green again at
+  `harness/oracle/results/tcl-survey/20260614T143228939871Z/result.json`
+  with 90 passed, 0 failed, 0 timed out, and 0 parsed failure lines. Keep using
+  kits as the debugger; rerun the broad Tcl PSYNC file only as a regression
   scoreboard.
 - **R3-METRICS:** keep `sync_full`, `sync_partial_ok`, `sync_partial_err`,
   master/replica offsets, lag, and backlog histlen faithful in `INFO`.
