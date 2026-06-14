@@ -74,7 +74,7 @@ Artifact:
 | `integration/replication-3` | 3/4 | Red | Expiry consistency, writable-replica expired-key behavior, and PFCOUNT expired-key/cache semantics. |
 | `integration/replication-4` | 15/2 | Red | SPOP rewrite cases now pass; remaining failures are divergence/default writable-replica cases. |
 | `integration/replication-buffer` | 16/0 | Green | The replication-buffer kit line now covers active full-sync catch-up beyond the circular backlog, partial resync from retained shared history, retained-history release after the last dependent replica disconnects, shared output memory charged once, and hard-limit disconnect isolation. Follow-up Tcl scoreboards moved the file through 13/3, 15/1, and finally 16/0 at artifact `20260614T071942726290Z`; keep `repl_buffer_kit` as the inner loop and rerun this Tcl file only as a regression scoreboard. |
-| `integration/replication` | timeout / 6 parsed lines | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, async-loading CONFIG exceptions, successful swapdb function payloads, parent-killed child discovery, `repl-diskless-load on-empty-db`, no-longer-useful RDB child cancellation, replica-link reply violations, malformed-PSYNC-offset logging, chained replica `FLUSHDB` / `FLUSHALL` stream relay, `GETSET` rewrite, nonblocking `BRPOPLPUSH` / `BLMOVE` rewrite stats, empty-blocking commandstats, and replica output-byte stats. The latest 2026-06-14 scoreboard `20260614T100741793243Z` still times out, but dropped the replica output bytes metric line; remaining parsed lines are handshake timeout, BLPOP role-change digest, and four multi-replica full-sync cases. The BLPOP role-change line now has a kit-backed fix; rerun the full Tcl file as a scoreboard after the next kit batch rather than using it as the debugger. |
+| `integration/replication` | timeout / 6 parsed lines | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, async-loading CONFIG exceptions, successful swapdb function payloads, parent-killed child discovery, `repl-diskless-load on-empty-db`, no-longer-useful RDB child cancellation, replica-link reply violations, malformed-PSYNC-offset logging, chained replica `FLUSHDB` / `FLUSHALL` stream relay, `GETSET` rewrite, nonblocking `BRPOPLPUSH` / `BLMOVE` rewrite stats, empty-blocking commandstats, and replica output-byte stats. The latest full 2026-06-14 scoreboard `20260614T100741793243Z` still times out, but dropped the replica output bytes metric line; remaining parsed lines there are handshake timeout, BLPOP role-change digest, and four multi-replica full-sync cases. The BLPOP role-change and handshake-timeout lines now have kit-backed fixes; the focused handshake selector `20260614T103132690504Z` has zero parsed failures but still aborts later through an unrelated `--only` setup path. Rerun the full Tcl file as a scoreboard after the next kit batch rather than using it as the debugger. |
 | `integration/replication-psync` | timeout | Red | Historical focused gate was 90/0 after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support. Current full-file reruns remain red, but the kit-first loop has moved the visible frontier: raw `-0` RDB fidelity was fixed, set-store commands now rewrite to deterministic `DEL` plus `SADD`, fresh full-sync catch-up now injects and retains a selected-DB prefix before active writes, and the latest replica-only DB 0 set residue is covered by a post-fullsync live-stream SELECT kit. The latest single Tcl scoreboard remains `20260614T091542767472Z`; do not use the six-minute file as the debugger. Rerun it as a scoreboard after the next kit batch or nightly pass. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
 | `integration/replica-redirect` | 11/0 | Green | `CLIENT CAPA REDIRECT`, MULTI/EXEC replica redirects, failover pause, waiting-for-sync responses, and blocked-client behavior during failover now pass in the direct Tcl file. The final 2026-06-14 kit-first pass moved the file from timeout/no-summary to parsed 10/1, reduced the stale DB 9 stream return to partial-resync/role-change invariants, then cleared the full file at 11/0 in 6 seconds. |
@@ -127,8 +127,9 @@ visible integration frontiers are now:
   Lua-originated flushes, and initializes downstream stream DB state from the
   upstream selected DB. Chained full sync now also treats the upstream stream
   DB as already represented by the downstream RDB, avoiding redundant `SELECT`
-  frames before the first live write. Async failure rollback, handshake
-  timeout, multi-replica offset convergence, and diskless pipe cleanup remain
+  frames before the first live write. Replica-side handshake/full-sync reads
+  now honor `repl-timeout` while waiting on a stalled primary. Async failure
+  rollback, multi-replica offset convergence, and diskless pipe cleanup remain
   open.
 - `R2-BGSAVE-CATCHUP`: active replication BGSAVE jobs now retain appended
   replication bytes outside the circular backlog and use that buffer for
@@ -3777,3 +3778,76 @@ Takeaway:
   `integration/replication` Tcl file is still useful as a scoreboard, but it
   should be saved for the next batch or nightly pass so the debugger stays in
   fast Rust kits.
+
+### 2026-06-14 R2 follow-up: replica handshake timeout
+
+Status: deterministic dialer kit fixed on 2026-06-14; focused Tcl selector no
+longer reports the handshake-timeout failure, but still aborts later through an
+unrelated `--only` setup path.
+
+Scope:
+
+- The current `integration/replication` frontier included `Slave is able to
+  detect timeout during handshake`: after `CONFIG SET repl-timeout 5` and a
+  sleeping primary, Tcl waited for the replica log line
+  `Timeout connecting to the PRIMARY`.
+- The initial reduced unit covered a primary that accepts the replica TCP
+  connection but never replies to the PING/REPLCONF/PSYNC handshake.
+- The first focused Tcl selector still failed, which exposed the real runtime
+  path: Valdr's primary can send `+FULLRESYNC`, then stall before the RDB bulk
+  header. The replica had moved into transfer state, where the RDB reader was
+  treating every socket timeout as a retry forever.
+- `replica_dialer` now sets the handshake read timeout from live
+  `repl-timeout`, uses the same timeout as an idle deadline while reading the
+  full-sync RDB header/body, resets the replica link out of `handshake` after
+  failed handshakes, and emits the Valkey-compatible timeout log to stdout and
+  stderr for both handshake and transfer-phase stalls.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands replica_dialer::tests -- --nocapture
+cargo test -p redis-commands --test fullsync_lifecycle_kit
+cargo test -p redis-commands --test psync_reconnect_kit
+cargo test -p redis-commands --test repl_correctness_kit
+cargo test -p redis-commands --test repl_buffer_kit
+rustfmt --edition 2021 --check crates/redis-commands/src/replica_dialer.rs
+cargo build -p redis-server --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-handshake-timeout-only-transfer-timeout \
+  --profile integration-repl \
+  --timeout-s 90 \
+  --baseport 43000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replication \
+  --only 'Slave is able to detect timeout during handshake' \
+  --isolated-tests-copy \
+  --skip-build
+```
+
+Results:
+
+- `redis-commands replica_dialer::tests`: 16 passed, 0 failed.
+- `fullsync_lifecycle_kit`: 13 passed, 0 failed.
+- `psync_reconnect_kit`: 18 passed, 0 failed.
+- `repl_correctness_kit`: 37 passed, 0 failed.
+- `repl_buffer_kit`: 15 passed, 0 failed.
+- File-scoped `rustfmt --check`: passed.
+- `cargo build -p redis-server --bin redis-server`: passed.
+- First focused Tcl probe
+  `harness/oracle/results/tcl-survey/20260614T102813100318Z/result.json`
+  still had the handshake-timeout parsed failure and revealed the transfer
+  stall.
+- Second focused Tcl probe
+  `harness/oracle/results/tcl-survey/20260614T103132690504Z/result.json`
+  reported zero parsed failure lines for the selected handshake-timeout test,
+  but the `--only` run still had no summary because a later same-file setup
+  path aborted with `assertion:replica didn't sync in time`.
+
+Takeaway:
+
+- The handshake-timeout frontier now has a fast Rust regression surface and a
+  focused Tcl selector showing the parsed failure line is gone. Keep the full
+  `integration/replication` run for a later scoreboard batch with the remaining
+  multi-replica full-sync cases.

@@ -19,9 +19,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use redis_core::live_config::ReplDisklessLoadMode;
+use redis_core::live_config::{ReplDisklessLoadMode, DEFAULT_REPL_TIMEOUT};
 use redis_core::replication::{
     failover_state_code, global_replication_state, repl_state_code, replica_link_code,
     ReplicationState,
@@ -36,6 +36,7 @@ static GLOBAL_RDB_DIR: OnceLock<String> = OnceLock::new();
 static RUNTIME_APPLY_TX: OnceLock<Sender<ReplicaApplyRequest>> = OnceLock::new();
 const RUNTIME_APPLY_TIMEOUT: Duration = Duration::from_secs(30);
 const REPLICA_STREAM_READ_BUFFER_SIZE: usize = 4 * 1024 * 1024;
+const HANDSHAKE_TIMEOUT_LOG: &str = "redis-server: Timeout connecting to the PRIMARY";
 
 /// Work the dialer thread hands to the runtime owner loop because the owner —
 /// not the dialer — owns the live DB slice.
@@ -133,12 +134,14 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
             }
         };
         let _ = stream.set_nodelay(true);
+        let _ = set_handshake_read_timeout(&stream, configured_handshake_timeout());
 
         repl.set_replica_link(replica_link_code::HANDSHAKE);
         let outcome = match run_handshake(&stream, &repl, our_port) {
             Ok(o) => o,
             Err(e) => {
-                eprintln!("redis-server: replica: handshake failed: {}", e);
+                log_handshake_failure(&e);
+                repl.set_replica_link(replica_link_code::CONNECT);
                 thread::sleep(Duration::from_millis(200));
                 continue;
             }
@@ -158,7 +161,11 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
                     let rdb_bytes = match read_fullresync_rdb(&stream, &repl, dialer_epoch) {
                         Ok(bytes) => bytes,
                         Err(e) => {
-                            eprintln!("redis-server: replica: RDB sink failed: {}", e);
+                            if is_handshake_timeout_error(&e) {
+                                log_handshake_failure(&e);
+                            } else {
+                                eprintln!("redis-server: replica: RDB sink failed: {}", e);
+                            }
                             clear_fullsync_loading_state();
                             if !repl.dialer_epoch_is_current(dialer_epoch) {
                                 return;
@@ -600,6 +607,36 @@ fn complete_manual_failover_after_psync(repl: &ReplicationState) {
     }
 }
 
+fn configured_handshake_timeout() -> Duration {
+    let secs = GLOBAL_SERVER
+        .get()
+        .map(|server| server.live_config.repl_timeout())
+        .unwrap_or(DEFAULT_REPL_TIMEOUT)
+        .max(1);
+    Duration::from_secs(secs)
+}
+
+fn set_handshake_read_timeout(stream: &TcpStream, timeout: Duration) -> io::Result<()> {
+    stream.set_read_timeout(Some(timeout))
+}
+
+fn is_handshake_timeout_error(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+    )
+}
+
+fn log_handshake_failure(err: &io::Error) {
+    if is_handshake_timeout_error(err) {
+        let msg = HANDSHAKE_TIMEOUT_LOG;
+        eprintln!("{}", msg);
+        println!("{}", msg);
+    } else {
+        eprintln!("redis-server: replica: handshake failed: {}", err);
+    }
+}
+
 /// The two PSYNC outcomes the replica must handle differently: a `+FULLRESYNC`
 /// is followed by an RDB bulk payload (replace the keyspace); a `+CONTINUE`
 /// streams backlog catch-up bytes inline with no RDB (keep the keyspace).
@@ -665,7 +702,16 @@ fn read_fullresync_rdb(
     repl: &ReplicationState,
     dialer_epoch: u64,
 ) -> io::Result<Vec<u8>> {
-    let header = read_line_checked(stream, repl, dialer_epoch)?;
+    read_fullresync_rdb_with_timeout(stream, repl, dialer_epoch, configured_handshake_timeout())
+}
+
+fn read_fullresync_rdb_with_timeout(
+    stream: &TcpStream,
+    repl: &ReplicationState,
+    dialer_epoch: u64,
+    idle_timeout: Duration,
+) -> io::Result<Vec<u8>> {
+    let header = read_line_checked(stream, repl, dialer_epoch, idle_timeout)?;
     let header_str = std::str::from_utf8(&header)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "non-UTF8 RDB header"))?
         .trim();
@@ -681,7 +727,7 @@ fn read_fullresync_rdb(
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "cannot parse RDB size"))?;
 
     let mut buf = vec![0u8; size];
-    read_exact_from_stream_checked(stream, &mut buf, repl, dialer_epoch)?;
+    read_exact_from_stream_checked(stream, &mut buf, repl, dialer_epoch, idle_timeout)?;
     Ok(buf)
 }
 
@@ -689,12 +735,13 @@ fn read_line_checked(
     stream: &TcpStream,
     repl: &ReplicationState,
     dialer_epoch: u64,
+    idle_timeout: Duration,
 ) -> io::Result<Vec<u8>> {
     let mut byte = [0u8; 1];
     loop {
         let mut line = Vec::new();
         loop {
-            read_exact_from_stream_checked(stream, &mut byte, repl, dialer_epoch)?;
+            read_exact_from_stream_checked(stream, &mut byte, repl, dialer_epoch, idle_timeout)?;
             if byte[0] == b'\n' {
                 if line.last() == Some(&b'\r') {
                     line.pop();
@@ -714,8 +761,10 @@ fn read_exact_from_stream_checked(
     buf: &mut [u8],
     repl: &ReplicationState,
     dialer_epoch: u64,
+    idle_timeout: Duration,
 ) -> io::Result<()> {
     let mut filled = 0;
+    let mut last_progress = Instant::now();
     while filled < buf.len() {
         if !repl.dialer_epoch_is_current(dialer_epoch) || repl.take_replica_link_drop_request() {
             let _ = stream.shutdown(Shutdown::Both);
@@ -731,13 +780,22 @@ fn read_exact_from_stream_checked(
                     "EOF reading RDB",
                 ));
             }
-            Ok(n) => filled += n,
+            Ok(n) => {
+                filled += n;
+                last_progress = Instant::now();
+            }
             Err(e)
                 if matches!(
                     e.kind(),
                     io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                 ) =>
             {
+                if last_progress.elapsed() >= idle_timeout {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "Timeout connecting to the PRIMARY",
+                    ));
+                }
                 continue;
             }
             Err(e) => return Err(e),
@@ -1024,6 +1082,68 @@ mod tests {
             batches.iter().any(|count| *count >= 400),
             "the first full read window should amortize RuntimeOwner apply roundtrips: {batches:?}"
         );
+    }
+
+    #[test]
+    fn handshake_read_timeout_detects_primary_stall_before_pong() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let primary = thread::spawn(move || {
+            let (_stream, _) = listener.accept().expect("accept replica");
+            thread::sleep(Duration::from_millis(150));
+        });
+
+        let stream = TcpStream::connect(addr).expect("connect test primary");
+        set_handshake_read_timeout(&stream, Duration::from_millis(20))
+            .expect("set handshake read timeout");
+        let repl = local_state();
+        let err = match run_handshake(&stream, &repl, 0) {
+            Ok(_) => panic!("stalled primary should time out during handshake"),
+            Err(err) => err,
+        };
+
+        assert!(
+            is_handshake_timeout_error(&err),
+            "expected handshake timeout classification, got {err:?}"
+        );
+        assert_eq!(
+            HANDSHAKE_TIMEOUT_LOG,
+            "redis-server: Timeout connecting to the PRIMARY"
+        );
+
+        let _ = primary.join();
+    }
+
+    #[test]
+    fn fullsync_rdb_header_read_times_out_when_primary_stalls() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let primary = thread::spawn(move || {
+            let (_stream, _) = listener.accept().expect("accept replica");
+            thread::sleep(Duration::from_millis(150));
+        });
+
+        let stream = TcpStream::connect(addr).expect("connect test primary");
+        stream
+            .set_read_timeout(Some(Duration::from_millis(10)))
+            .expect("set read timeout");
+        let repl = local_state();
+        let err = match read_fullresync_rdb_with_timeout(
+            &stream,
+            &repl,
+            repl.dialer_epoch.load(Ordering::SeqCst),
+            Duration::from_millis(50),
+        ) {
+            Ok(_) => panic!("stalled primary should time out before RDB bulk header"),
+            Err(err) => err,
+        };
+
+        assert!(
+            is_handshake_timeout_error(&err),
+            "expected full-sync header timeout classification, got {err:?}"
+        );
+
+        let _ = primary.join();
     }
 
     #[test]
