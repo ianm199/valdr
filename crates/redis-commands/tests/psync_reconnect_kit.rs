@@ -8,6 +8,7 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::thread;
 use std::time::Duration;
 
 use redis_core::client_info::client_info_registry;
@@ -674,6 +675,73 @@ fn in_flight_fullsync_waiter_reuses_existing_snapshot_offset() {
     let _ = std::fs::remove_file(Path::new(&temp_path).with_extension("rdb.tmp"));
     repl.remove_replica(first_client_id);
     repl.remove_replica(second_client_id);
+}
+
+#[test]
+fn fresh_fullsync_waits_for_inflight_writer_before_snapshot_offset() {
+    let _g = psync_guard();
+    let repl = global_replication_state();
+    let _reset = GlobalReplReset::new(&repl);
+    let server = Arc::new(RedisServer::default());
+    let writer_guard = repl.fullsync_snapshot_read_guard();
+    let client_id = 1_100_023;
+    let before = repl.master_offset();
+
+    let server_for_thread = Arc::clone(&server);
+    let handle = thread::spawn(move || {
+        let (tx, _rx) = mpsc::channel();
+        let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
+        pubsub.lock().unwrap().register_sender(client_id, tx);
+        let mut client = Client::new(client_id);
+        client.set_args(vec![
+            RedisString::from_static(b"PSYNC"),
+            RedisString::from_static(b"?"),
+            RedisString::from_static(b"-1"),
+        ]);
+        let mut db = RedisDb::new(0);
+        {
+            let mut ctx = redis_core::CommandContext::with_server(
+                &mut client,
+                &mut db,
+                server_for_thread,
+                pubsub,
+            );
+            redis_commands::replication::psync_command(&mut ctx).expect("psync command");
+        }
+        client.drain_reply()
+    });
+
+    let inflight_write = resp(&[b"LPUSH", b"during-snapshot", b"1"]);
+    let after = repl.append_to_backlog(&inflight_write);
+    assert!(
+        after > before,
+        "test setup should advance the replication stream while a writer guard is held"
+    );
+    drop(writer_guard);
+
+    let reply = handle.join().expect("PSYNC thread should complete");
+    assert_eq!(
+        fullresync_offset(&reply),
+        after,
+        "fresh full sync must advertise the offset after already-running writes finish"
+    );
+
+    let job = repl
+        .take_repl_bgsave_job()
+        .expect("fresh full sync should install a replication BGSAVE job");
+    assert_eq!(job.snapshot_offset, after);
+    assert!(
+        !job.catch_up_bytes
+            .windows(inflight_write.len())
+            .any(|w| w == inflight_write.as_slice()),
+        "bytes already included before the snapshot boundary must not be replayed as catch-up"
+    );
+
+    let temp_path = job.temp_path.clone();
+    reap_repl_child_pid(job.child_pid);
+    let _ = std::fs::remove_file(&temp_path);
+    let _ = std::fs::remove_file(Path::new(&temp_path).with_extension("rdb.tmp"));
+    repl.remove_replica(client_id);
 }
 
 #[test]

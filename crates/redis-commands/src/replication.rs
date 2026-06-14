@@ -922,34 +922,51 @@ fn handle_psync(
         repl.incr_sync_partial_ok();
     }
 
-    let requested_snapshot_offset = master_offset;
     let existing_bgsave_offset = match outbound.as_ref() {
         Some(sender) => repl.enqueue_repl_waiter_and_register(client_id, sender.clone()),
         None => repl.enqueue_repl_waiter(client_id),
     };
-    let (snapshot_offset, joined_existing_bgsave) = match existing_bgsave_offset {
-        Some(existing_snapshot_offset) => {
-            eprintln!(
-                "redis-server: PSYNC client_id={} → FULLRESYNC at offset {} (joining in-flight BGSAVE)",
-                client_id, existing_snapshot_offset
-            );
-            (existing_snapshot_offset, true)
+    if let Some(existing_snapshot_offset) = existing_bgsave_offset {
+        eprintln!(
+            "redis-server: PSYNC client_id={} → FULLRESYNC at offset {} (joining in-flight BGSAVE)",
+            client_id, existing_snapshot_offset
+        );
+        if send_fullresync_line {
+            let line = fullresync_reply(our_runid, existing_snapshot_offset);
+            ctx.client_mut().reply_buf.extend_from_slice(&line);
         }
-        None => {
-            prefix_fullsync_catchup_selected_db(&repl);
-            (requested_snapshot_offset, false)
-        }
+        ctx.client_mut().is_replica = true;
+        return Ok(());
+    }
+
+    let _snapshot_guard = repl.fullsync_snapshot_write_guard();
+    let existing_bgsave_offset = match outbound.as_ref() {
+        Some(sender) => repl.enqueue_repl_waiter_and_register(client_id, sender.clone()),
+        None => repl.enqueue_repl_waiter(client_id),
     };
-    if !joined_existing_bgsave {
-        if let Some(sender) = outbound {
-            register_replica(
-                &repl,
-                client_id,
-                ReplicaState::WaitingBgsave,
-                snapshot_offset,
-                sender,
-            );
+    if let Some(existing_snapshot_offset) = existing_bgsave_offset {
+        eprintln!(
+            "redis-server: PSYNC client_id={} → FULLRESYNC at offset {} (joining in-flight BGSAVE)",
+            client_id, existing_snapshot_offset
+        );
+        if send_fullresync_line {
+            let line = fullresync_reply(our_runid, existing_snapshot_offset);
+            ctx.client_mut().reply_buf.extend_from_slice(&line);
         }
+        ctx.client_mut().is_replica = true;
+        return Ok(());
+    }
+
+    let snapshot_offset = repl.master_offset();
+    prefix_fullsync_catchup_selected_db(&repl);
+    if let Some(sender) = outbound {
+        register_replica(
+            &repl,
+            client_id,
+            ReplicaState::WaitingBgsave,
+            snapshot_offset,
+            sender,
+        );
     }
     if send_fullresync_line {
         let line = fullresync_reply(our_runid, snapshot_offset);
@@ -957,9 +974,7 @@ fn handle_psync(
     }
     ctx.client_mut().is_replica = true;
 
-    if !joined_existing_bgsave {
-        arm_full_sync_bgsave(ctx, &repl, client_id, snapshot_offset);
-    }
+    arm_full_sync_bgsave(ctx, &repl, client_id, snapshot_offset);
     Ok(())
 }
 

@@ -15,7 +15,7 @@ use std::sync::atomic::{
     Ordering,
 };
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use redis_types::RedisString;
@@ -533,6 +533,10 @@ pub struct ReplicationState {
     /// finished shipping the RDB and catch-up bytes to every waiter; then
     /// reset to `None`.
     pub repl_bgsave_job: Mutex<Option<ReplBgsaveJob>>,
+    /// Snapshot barrier for forkless full-sync snapshots. Mutating command
+    /// handlers take the read side while a full-sync snapshot takes the write
+    /// side, giving the advertised FULLRESYNC offset a real keyspace boundary.
+    fullsync_snapshot_barrier: RwLock<()>,
     /// Full-sync catch-up history retained after the BGSAVE job has been
     /// consumed. This models Valkey's shared replication buffer lifetime well
     /// enough for slow full-sync waiters and PSYNC decisions to keep seeing the
@@ -614,6 +618,7 @@ impl ReplicationState {
             replica_link: AtomicU8::new(replica_link_code::CONNECT),
             repl_child_pid: AtomicI32::new(0),
             repl_bgsave_job: Mutex::new(None),
+            fullsync_snapshot_barrier: RwLock::new(()),
             retained_history: Mutex::new(Vec::new()),
             selected_db: AtomicI32::new(-1),
             primary_stream_db: AtomicI32::new(0),
@@ -815,6 +820,20 @@ impl ReplicationState {
         };
         if let Some(job) = guard.as_mut() {
             job.catch_up_bytes.extend_from_slice(bytes);
+        }
+    }
+
+    pub fn fullsync_snapshot_read_guard(&self) -> RwLockReadGuard<'_, ()> {
+        match self.fullsync_snapshot_barrier.read() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        }
+    }
+
+    pub fn fullsync_snapshot_write_guard(&self) -> RwLockWriteGuard<'_, ()> {
+        match self.fullsync_snapshot_barrier.write() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
         }
     }
 

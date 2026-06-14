@@ -726,6 +726,14 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
     let should_time_slowlog = initial_slowlog_gate.should_time() && !metadata.skip_commandlog;
     let start = elapsed_start();
     let pre_reply_len = ctx.client_ref().reply_buf.len();
+    let fullsync_snapshot_repl = if needs_fullsync_snapshot_read_guard(ctx, name, metadata) {
+        Some(redis_core::replication::global_replication_state())
+    } else {
+        None
+    };
+    let _fullsync_snapshot_read = fullsync_snapshot_repl
+        .as_ref()
+        .map(|repl| repl.fullsync_snapshot_read_guard());
     let result = (entry.handler)(ctx);
     let command_blocked = result.is_ok() && ctx.client_ref().blocked_on_keys;
     let reply_is_error = result.is_ok()
@@ -883,6 +891,17 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
     drain_pending_wakes(ctx);
 
     result
+}
+
+fn needs_fullsync_snapshot_read_guard(
+    ctx: &CommandContext<'_>,
+    name: &[u8],
+    metadata: CommandMetadata,
+) -> bool {
+    if ctx.client_ref().flag_lua() || ctx.client_ref().flag_deny_blocking() {
+        return false;
+    }
+    metadata.write || metadata.may_replicate || name.eq_ignore_ascii_case(b"EXEC")
 }
 
 fn is_aof_lifecycle_barrier(name: &[u8]) -> bool {
