@@ -620,11 +620,12 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
             std::str::from_utf8(repl.runid()).unwrap_or("0000000000000000000000000000000000000000");
         let (backlog_first, master_offset, backlog_histlen, backlog_size) = repl.backlog_snapshot();
         let replicas = repl.replicas_snapshot();
+        let replicas_waiting_psync = replicas
+            .iter()
+            .filter(|(_, state, _, _, _)| *state == "wait_bgsave" || *state == "send_bulk")
+            .count();
         let dual_channel_waiters = if ctx.live_config().dual_channel_replication_enabled() {
-            replicas
-                .iter()
-                .filter(|(_, state, _, _, _)| *state == "wait_bgsave" || *state == "send_bulk")
-                .count()
+            replicas_waiting_psync
         } else {
             0
         };
@@ -661,6 +662,7 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
             );
         }
         let _ = writeln!(buf, "connected_slaves:{}\r", connected);
+        let _ = writeln!(buf, "replicas_waiting_psync:{}\r", replicas_waiting_psync);
         let mut replica_idx = 0usize;
         for (_cid, state, port, offset, last_ack_ms) in replicas.iter() {
             let lag = if *last_ack_ms == 0 {
@@ -961,6 +963,27 @@ mod tests {
     }
 
     #[test]
+    fn info_replication_reports_zero_replicas_waiting_psync_for_online_replicas() {
+        let _guard = repl_info_guard();
+        clear_repl_info_state();
+        let repl = global_replication_state();
+        let (tx, _rx) = mpsc::channel();
+        repl.add_replica(ReplicaConn::new(980_784, ReplicaState::Online, 42, tx));
+
+        let mut db = RedisDb::new(0);
+        let mut client = Client::new(980_785);
+        client.set_args(vec![arg(b"INFO"), arg(b"replication")]);
+        let mut ctx = CommandContext::with_db(&mut client, &mut db);
+        info_command(&mut ctx).unwrap();
+
+        clear_repl_info_state();
+        let reply = client.drain_reply();
+        let text = bulk_text(&reply);
+        assert_eq!(field_value(text, "connected_slaves"), "1");
+        assert_eq!(field_value(text, "replicas_waiting_psync"), "0");
+    }
+
+    #[test]
     fn info_replication_counts_dual_channel_rdb_channel_for_waiting_fullsync() {
         let _guard = repl_info_guard();
         clear_repl_info_state();
@@ -997,6 +1020,7 @@ mod tests {
         let reply = client.drain_reply();
         let text = bulk_text(&reply);
         assert_eq!(field_value(text, "connected_slaves"), "5");
+        assert_eq!(field_value(text, "replicas_waiting_psync"), "2");
         assert!(
             text.contains("state=wait_bgsave,offset=42,lag=0,type=rdb-channel"),
             "INFO replication should expose a provisional rdb-channel line: {text}"

@@ -380,6 +380,64 @@ fn fullsync_completion_includes_backlog_tail_after_job_detaches() {
 }
 
 #[test]
+fn multiple_fullsync_waiters_receive_same_rdb_and_catchup_then_ack_online() {
+    let st = ReplicationState::new(generate_runid(), 64);
+    let rx1 = attach_waiting_replica(&st, 91, 0);
+    let rx2 = attach_waiting_replica(&st, 92, 0);
+    let rx3 = attach_waiting_replica(&st, 93, 0);
+
+    install_job(&st, PathBuf::from("multi-waiter.rdb"), vec![91]);
+    assert!(st.enqueue_repl_waiter(92));
+    assert!(st.enqueue_repl_waiter(93));
+    st.append_to_backlog(b"abc");
+
+    let job = st
+        .take_repl_bgsave_job()
+        .expect("multi-waiter job should be installed");
+    assert_eq!(job.waiting_replicas, vec![91, 92, 93]);
+    let outcome = st.complete_repl_bgsave_transfer(job, b"RDB".to_vec());
+
+    assert_eq!(outcome.delivered_replicas, vec![91, 92, 93]);
+    assert!(outcome.failed_replicas.is_empty());
+    assert_eq!(outcome.retained_catchup_len, 3);
+    for (id, rx) in [(91, rx1), (92, rx2), (93, rx3)] {
+        assert_eq!(rx.recv().unwrap(), b"$3\r\nRDB".to_vec(), "RDB for {id}");
+        assert_eq!(rx.recv().unwrap(), b"abc".to_vec(), "catch-up for {id}");
+    }
+
+    let states: Vec<_> = st
+        .replicas_snapshot()
+        .into_iter()
+        .map(|(id, state, _, _, _)| (id, state))
+        .collect();
+    assert_eq!(
+        states,
+        vec![(91, "send_bulk"), (92, "send_bulk"), (93, "send_bulk")]
+    );
+    assert!(st.fullsync_transfer_in_progress());
+
+    let offset = st.master_offset();
+    assert!(st.acknowledge_replica(91, offset, None, 1_000));
+    assert!(st.acknowledge_replica(92, offset, None, 1_000));
+    assert!(st.acknowledge_replica(93, offset, None, 1_000));
+
+    let states: Vec<_> = st
+        .replicas_snapshot()
+        .into_iter()
+        .map(|(id, state, _, offset, _)| (id, state, offset))
+        .collect();
+    assert_eq!(
+        states,
+        vec![
+            (91, "online", offset),
+            (92, "online", offset),
+            (93, "online", offset)
+        ]
+    );
+    assert!(!st.fullsync_transfer_in_progress());
+}
+
+#[test]
 fn waiting_fullsync_job_stays_in_progress_without_visible_child_pid() {
     let st = ReplicationState::new(generate_runid(), 64);
     let _rx = attach_waiting_replica(&st, 86, 0);
@@ -410,7 +468,8 @@ fn chained_fullsync_does_not_reselect_upstream_stream_db_after_rdb() {
     repl.become_replica_of(RedisString::from_static(b"127.0.0.1"), 6379);
     repl.set_replica_link(replica_link_code::CONNECTED);
     repl.remember_primary_stream_db(9);
-    repl.selected_db.store(9, std::sync::atomic::Ordering::Release);
+    repl.selected_db
+        .store(9, std::sync::atomic::Ordering::Release);
     let _ = repl.take_repl_bgsave_job();
     repl.set_repl_child_pid(0);
 
