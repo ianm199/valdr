@@ -35,11 +35,53 @@ pub use save::{
     save_rdb_databases_with_functions,
 };
 
-use std::path::PathBuf;
+use std::fs::{self, File};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Construct the full RDB file path from `dir` and `filename` config values.
 pub fn rdb_path(dir: &str, filename: &str) -> PathBuf {
     PathBuf::from(dir).join(filename)
+}
+
+/// Stage a replica full-sync RDB through the configured on-disk RDB file.
+///
+/// Valkey's `repl-diskless-load disabled` path writes the incoming snapshot to
+/// a temp file, fsyncs it, and renames it over `dbfilename` before loading. A
+/// failed rename must abort the full sync before the in-memory keyspace is
+/// replaced, so callers can keep serving the old data and retry later.
+pub fn stage_replica_fullsync_rdb_to_disk(
+    dir: impl AsRef<Path>,
+    filename: &str,
+    bytes: &[u8],
+) -> io::Result<PathBuf> {
+    let dir = dir.as_ref();
+    fs::create_dir_all(dir)?;
+    let final_path = dir.join(filename);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let temp_path = dir.join(format!("temp-repl-{}-{}.rdb", std::process::id(), nanos));
+
+    let write_result = (|| -> io::Result<()> {
+        let mut file = File::create(&temp_path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    if let Err(err) = write_result {
+        let _ = fs::remove_file(&temp_path);
+        return Err(err);
+    }
+
+    if let Err(err) = fs::rename(&temp_path, &final_path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(err);
+    }
+
+    Ok(final_path)
 }
 
 /// Upper bound on how many elements an untrusted RDB/RESTORE length prefix may

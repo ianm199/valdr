@@ -35,7 +35,7 @@ scoreboard. It runs the replication correctness, backlog/buffer,
 full-sync-lifecycle, PSYNC reconnect, failover redirect, and replica dialer
 Rust tests without starting the upstream Tcl matrix.
 
-Latest result on 2026-06-14: `make repl-kits` passed 139/139 tests.
+Latest result on 2026-06-14: `make repl-kits` passed 140/140 tests.
 The adjacent runtime-owner unit lane also passed 13/13 tests after reducing a
 `repl-diskless-load swapdb` PSYNC DB-selection mismatch:
 
@@ -101,7 +101,7 @@ Artifact:
 | `integration/replication-3` | 3/4 | Red | Expiry consistency, writable-replica expired-key behavior, and PFCOUNT expired-key/cache semantics. |
 | `integration/replication-4` | 15/2 | Red | SPOP rewrite cases now pass; remaining failures are divergence/default writable-replica cases. |
 | `integration/replication-buffer` | 16/0 | Green | The replication-buffer kit line now covers active full-sync catch-up beyond the circular backlog, selected-DB full-sync prefixes appended into the active job before backlog wrap, partial resync from retained shared history, retained-history release after the last dependent replica disconnects, shared output memory charged once, and hard-limit disconnect isolation. Follow-up Tcl scoreboards moved the file through 13/3, 15/1, and finally 16/0 at artifact `20260614T071942726290Z`; keep `repl_buffer_kit` as the inner loop and rerun this Tcl file only as a regression scoreboard. |
-| `integration/replication` | 52/15 | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, async-loading CONFIG exceptions, successful swapdb function payloads, parent-killed child discovery, `repl-diskless-load on-empty-db`, no-longer-useful RDB child cancellation, replica-link reply violations, malformed-PSYNC-offset logging, chained replica `FLUSHDB` / `FLUSHALL` stream relay, `GETSET` rewrite, nonblocking `BRPOPLPUSH` / `BLMOVE` rewrite stats, empty-blocking commandstats, replica output-byte stats, BLPOP role-change divergence, `replicas_waiting_psync` visibility, diskless full-sync short-read recovery state/logging, handshake-timeout detection, line-224 `MULTI`/`SLAVEOF`/`INFO`/`EXEC`, three-replica full-sync/write-load offset convergence, killed swapdb full-sync sockets, `repl-diskless-load flush-before-load` owner-DB clearing, and lazy-expire recreate propagation in the Rust stream kit. The current full 2026-06-14 scoreboard `20260614T150148808125Z` completes with 52 passed, 15 failed, 0 timed out, 0 without summary, and 30 parsed failure lines; it has not yet been refreshed after the lazy-expire kit fix. Remaining scoreboard failures cluster around diskless pipe/log observability, `replicaof` immediately after disconnection, cache-master/fullsync load behavior, EINTR watchdog, and disk-based RDB rename-failure rollback. Focused Tcl `--only` remains unreliable for this file because earlier top-level setup can still abort; use process kits as reducers and full-file Tcl as the scoreboard. |
+| `integration/replication` | 54/13 | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, async-loading CONFIG exceptions, successful swapdb function payloads, parent-killed child discovery, `repl-diskless-load on-empty-db`, no-longer-useful RDB child cancellation, replica-link reply violations, malformed-PSYNC-offset logging, chained replica `FLUSHDB` / `FLUSHALL` stream relay, `GETSET` rewrite, nonblocking `BRPOPLPUSH` / `BLMOVE` rewrite stats, empty-blocking commandstats, replica output-byte stats, BLPOP role-change divergence, `replicas_waiting_psync` visibility, diskless full-sync short-read recovery state/logging, handshake-timeout detection, line-224 `MULTI`/`SLAVEOF`/`INFO`/`EXEC`, three-replica full-sync/write-load offset convergence, killed swapdb full-sync sockets, `repl-diskless-load flush-before-load` owner-DB clearing, lazy-expire recreate propagation, and disk-based RDB rename-failure rollback. The current full 2026-06-14 scoreboard `20260614T152330925016Z` completes with 54 passed, 13 failed, 0 timed out, 0 without summary, and 26 parsed failure lines. Remaining scoreboard failures cluster around diskless pipe/log observability, `replicaof` immediately after disconnection, cache-master/fullsync load behavior, and EINTR watchdog. Focused Tcl `--only` remains unreliable for this file because earlier top-level setup can still abort; use process kits as reducers and full-file Tcl as the scoreboard. |
 | `integration/replication-psync` | 90/0 | Green | Historical focused gate was 90/0 after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support. Later full-file reruns regressed to timeouts and digest mismatches, but the kit-first loop moved the visible frontier through raw `-0` RDB fidelity, deterministic set/zset store rewrites, selected-DB full-sync catch-up, post-fullsync live-stream DB selection, in-flight BGSAVE waiter offset reuse, fresh full-sync snapshot barriers, no-reconnect `repl-diskless-load swapdb`, same-primary socket-drop partial reconnect, delayed replica-side `CLIENT KILL`/`DEBUG SLEEP` reconnect, DB 0 final-list-pop catch-up, DB 11 final-`HDEL` catch-up, DB 11 binary-field final-`HDEL` catch-up, DB 0 final-list-pop partial reconnect, and Tcl-style stop-after-online bg_complex writers. The no-quiet artifact `20260614T133752958562Z` captured a swapdb digest mismatch, and `20260614T135259082789Z` later timed out with four parsed PSYNC failures. The final stop-timed reducer exposed the real transfer-window bug: the reaper took the active BGSAVE job before reading/queuing the RDB, so writes during that window could miss both job catch-up and live fan-out or interleave ahead of catch-up. Production now keeps the job installed while reading the temp RDB and uses the full-sync snapshot barrier while taking the job, computing catch-up, queuing RDB/catch-up, and only then exposing replicas to live fan-out. Full `integration/replication-psync` is green at artifact `20260614T143228939871Z`: 90 passed, 0 failed, 0 timed out, 0 parsed failure lines. Keep the new process kit as the inner loop and rerun this Tcl file only as a regression scoreboard. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
 | `integration/replica-redirect` | 11/0 | Green | `CLIENT CAPA REDIRECT`, MULTI/EXEC replica redirects, failover pause, waiting-for-sync responses, and blocked-client behavior during failover now pass in the direct Tcl file. The final 2026-06-14 kit-first pass moved the file from timeout/no-summary to parsed 10/1, reduced the stale DB 9 stream return to partial-resync/role-change invariants, then cleared the full file at 11/0 in 6 seconds. |
@@ -198,10 +198,83 @@ visible integration frontiers are now:
 
 ## Packet Evidence
 
-### 2026-06-14 R3 follow-up: lazy-expire recreate propagation
+### 2026-06-14 R3 follow-up: disk-based full-sync RDB rename failure
 
 Status: production fix completed on 2026-06-14; full
-`integration/replication` scoreboard intentionally deferred.
+`integration/replication` scoreboard advanced to 54/13.
+
+Scope:
+
+- The previous full `integration/replication` scoreboard
+  `harness/oracle/results/tcl-survey/20260614T150148808125Z/result.json`
+  failed `Replica keep the old data if RDB file save fails in disk-based
+  replication`: the expected `Failed trying to rename the temp DB into
+  dump.rdb` log never appeared.
+- The root gap was that replica full-sync loading skipped Valkey's disk-based
+  handoff. RuntimeOwner staged incoming RDB bytes in `/tmp`, loaded directly
+  from that temp path, and never tried to rename over configured `dbfilename`.
+
+Implementation:
+
+- `redis_core::rdb::stage_replica_fullsync_rdb_to_disk` now writes incoming
+  full-sync bytes to a temp RDB, fsyncs it, and renames it over the configured
+  `dbfilename`.
+- RuntimeOwner uses that disk handoff when `repl-diskless-load` is `disabled`.
+  Rename failure logs the Valkey-compatible message and returns failure before
+  replacing the old in-memory DB. Diskless load modes keep the existing
+  staged-load path.
+- `fullsync_lifecycle_kit` now covers the exact invariant: a `dump.rdb`
+  directory blocks the rename, the old replica DB remains, removing the
+  blocker lets retry stage/load, and the incoming DB replaces the old data.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands --test fullsync_lifecycle_kit \
+  disk_based_fullsync_rename_failure_keeps_old_data_until_retry -- --nocapture
+cargo test -p redis-server \
+  runtime_owner::tests::replica_fullsync_load_resets_apply_db_before_db0_catchup -- --nocapture
+cargo test -p redis-commands --test fullsync_lifecycle_kit -- --nocapture
+make repl-kits
+cargo build -p redis-server --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-integration-after-disk-rdb-rename-fix \
+  --profile integration-repl \
+  --timeout-s 520 \
+  --baseport 52000 \
+  --portcount 5000 \
+  --clients 1 \
+  --files integration/replication \
+  --isolated-tests-copy \
+  --skip-build \
+  --no-quiet
+```
+
+Results:
+
+- The focused Rust reducer passed.
+- `fullsync_lifecycle_kit`: 16 passed, 0 failed.
+- `make repl-kits`: 140 passed, 0 failed.
+- `redis-server` binary build passed.
+- Focused Tcl `--only` was not counted: artifact
+  `harness/oracle/results/tcl-survey/20260614T152301011185Z/result.json`
+  ran 0 counted tests and aborted in top-level setup with `replica didn't sync
+  in time`.
+- Full `integration/replication` scoreboard
+  `harness/oracle/results/tcl-survey/20260614T152330925016Z/result.json`:
+  54 passed, 13 failed, 0 timed out, 0 without summary, 26 parsed failure
+  lines. The lazy-expire and disk-based RDB rename failures are absent.
+
+Takeaway:
+
+- `repl-diskless-load disabled` needs the same disk rename boundary as Valkey:
+  valid incoming RDB bytes are not enough to replace memory until the temp DB
+  has been committed to configured `dbfilename`.
+
+### 2026-06-14 R3 follow-up: lazy-expire recreate propagation
+
+Status: production fix completed on 2026-06-14; later full
+`integration/replication` scoreboard advanced to 54/13.
 
 Scope:
 
@@ -243,6 +316,9 @@ Results:
 - After the fix, the focused reducer passed.
 - `redis-commands --test repl_correctness_kit`: 42 passed, 0 failed.
 - `make repl-kits`: 139 passed, 0 failed.
+- Later full scoreboard
+  `harness/oracle/results/tcl-survey/20260614T152330925016Z/result.json`
+  no longer includes `Test replication with lazy expire`.
 
 Takeaway:
 

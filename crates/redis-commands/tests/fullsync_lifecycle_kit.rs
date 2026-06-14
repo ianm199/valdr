@@ -641,6 +641,63 @@ fn replica_rdb_replacement_is_atomic_on_failed_incoming_fullsync() {
 }
 
 #[test]
+fn disk_based_fullsync_rename_failure_keeps_old_data_until_retry() {
+    let dir = unique_temp_dir("fullsync-disk-rename");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let source_path = dir.join("source.rdb");
+    let dump_path = dir.join("dump.rdb");
+
+    let mut incoming = vec![RedisDb::new(0)];
+    incoming[0].add(
+        RedisString::from_static(b"primary_key"),
+        RedisObject::new_string(b"primary_value"),
+    );
+    redis_core::rdb::save_rdb_databases(&incoming, &source_path).expect("save incoming RDB");
+    let bytes = std::fs::read(&source_path).expect("read incoming RDB");
+
+    let mut current = vec![RedisDb::new(0)];
+    current[0].add(
+        RedisString::from_static(b"replica_key"),
+        RedisObject::new_string(b"replica_value"),
+    );
+
+    std::fs::create_dir(&dump_path).expect("block final RDB rename with a directory");
+    let err = redis_core::rdb::stage_replica_fullsync_rdb_to_disk(&dir, "dump.rdb", &bytes)
+        .expect_err("renaming temp RDB over a directory must fail");
+    assert!(
+        err.kind() == io::ErrorKind::IsADirectory
+            || err.kind() == io::ErrorKind::AlreadyExists
+            || err.kind() == io::ErrorKind::PermissionDenied,
+        "unexpected rename failure: {err}"
+    );
+    assert_string_value(&current[0], b"replica_key", b"replica_value");
+    assert_key_missing(&current[0], b"primary_key");
+
+    std::fs::remove_dir(&dump_path).expect("remove rename blocker");
+    let staged = redis_core::rdb::stage_replica_fullsync_rdb_to_disk(&dir, "dump.rdb", &bytes)
+        .expect("retry should stage incoming RDB to disk");
+    assert_eq!(staged, dump_path);
+    let plan = redis_core::rdb::load_replacement_plan(current.len(), &staged)
+        .expect("staged RDB should load");
+    current = plan.dbs;
+    assert_string_value(&current[0], b"primary_key", b"primary_value");
+    assert_key_missing(&current[0], b"replica_key");
+
+    let leftover_temp: Vec<_> = std::fs::read_dir(&dir)
+        .expect("read temp dir")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("temp-repl-"))
+        .collect();
+    assert!(
+        leftover_temp.is_empty(),
+        "failed staging should clean temp files, left {leftover_temp:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn primary_link_script_write_applies_on_readonly_replica() {
     let _guard = global_repl_guard();
     let repl = global_replication_state();

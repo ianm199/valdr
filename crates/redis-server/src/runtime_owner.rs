@@ -1694,17 +1694,45 @@ impl RuntimeOwner {
     /// Load a full-resync RDB snapshot into the owned databases, replacing their
     /// contents. The dialer ships the bytes off the master stream; the owner is
     /// the only thread allowed to mutate `self.dbs`, so the load happens here.
-    /// The bytes are staged through a temp file because the RDB loader reads
-    /// from a path.
+    /// The bytes are staged through disk because the RDB loader reads from a
+    /// path. In `repl-diskless-load disabled`, this follows Valkey's disk-based
+    /// handoff and renames the temp RDB into the configured `dbfilename` before
+    /// loading; rename failure aborts before the old keyspace is replaced.
     fn load_replica_rdb(&mut self, bytes: &[u8], server: &Arc<redis_core::RedisServer>) -> bool {
-        let temp_path =
-            std::env::temp_dir().join(format!("valdr-replica-incoming-{}.rdb", std::process::id()));
-        if let Err(e) = std::fs::write(&temp_path, bytes) {
-            eprintln!("redis-server: replica: staging incoming RDB failed: {}", e);
-            return false;
+        let cfg = Arc::clone(&server.live_config);
+        let (load_path, remove_after_load) = if matches!(
+            cfg.repl_diskless_load(),
+            redis_core::live_config::ReplDisklessLoadMode::Disabled
+        ) {
+            let dir = PathBuf::from(cfg.rdb_dir());
+            let filename = cfg.rdb_filename();
+            match redis_core::rdb::stage_replica_fullsync_rdb_to_disk(&dir, &filename, bytes) {
+                Ok(path) => (path, false),
+                Err(e) => {
+                    let msg = format!(
+                        "redis-server: Failed trying to rename the temp DB into {} in PRIMARY <-> REPLICA synchronization: {}",
+                        filename, e
+                    );
+                    eprintln!("{}", msg);
+                    println!("{}", msg);
+                    let _ = io::stdout().flush();
+                    return false;
+                }
+            }
+        } else {
+            let temp_path = std::env::temp_dir()
+                .join(format!("valdr-replica-incoming-{}.rdb", std::process::id()));
+            if let Err(e) = std::fs::write(&temp_path, bytes) {
+                eprintln!("redis-server: replica: staging incoming RDB failed: {}", e);
+                return false;
+            }
+            (temp_path, true)
+        };
+
+        let result = redis_core::rdb::load_replacement_plan(self.dbs.len(), &load_path);
+        if remove_after_load {
+            let _ = std::fs::remove_file(&load_path);
         }
-        let result = redis_core::rdb::load_replacement_plan(self.dbs.len(), &temp_path);
-        let _ = std::fs::remove_file(&temp_path);
         let plan = match result {
             Ok(plan) => plan,
             Err(e) => {
@@ -3019,6 +3047,9 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).expect("create temp RDB dir");
+        server
+            .live_config
+            .set_rdb_dir(dir.to_string_lossy().into_owned());
         let rdb_path = dir.join("dump.rdb");
 
         let mut source_dbs: Vec<RedisDb> = (0..16).map(RedisDb::new).collect();
@@ -3030,12 +3061,12 @@ mod tests {
         source_dbs[11].add(RedisString::from_static(b"929"), db11_set);
         redis_core::rdb::save_rdb_databases(&source_dbs, &rdb_path).expect("save fullsync RDB");
         let rdb_bytes = std::fs::read(&rdb_path).expect("read fullsync RDB");
-        let _ = std::fs::remove_dir_all(&dir);
 
         assert!(
             owner.load_replica_rdb(&rdb_bytes, &server),
             "fullsync RDB should load"
         );
+        let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(
             owner.replica_apply_db_index, 0,
             "fullsync RDB load must reset the replica apply selected DB"
