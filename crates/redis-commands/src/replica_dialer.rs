@@ -327,8 +327,10 @@ fn run_replica_sink_loop(
                     {
                         return;
                     }
-                    if stream_write(stream, &build_replconf_ack(offset_after)).is_err() {
-                        return;
+                    if let Some(ack) = build_replconf_ack_if_connected(repl, offset_after) {
+                        if stream_write(stream, &ack).is_err() {
+                            return;
+                        }
                     }
                 }
             }
@@ -413,7 +415,10 @@ fn flush_replica_command_batch(
     // primary did not send GETACK. This eager ACK keeps script WAIT's
     // non-blocking path accurate without adding a second timer thread to the
     // RuntimeOwner-compatible dialer.
-    stream_write(stream, &build_replconf_ack(offset_after)).is_ok()
+    match build_replconf_ack_if_connected(repl, offset_after) {
+        Some(ack) => stream_write(stream, &ack).is_ok(),
+        None => true,
+    }
 }
 
 fn replica_command_batch_has_open_transaction(batch: &[(Vec<RedisString>, i64)]) -> bool {
@@ -756,8 +761,11 @@ fn periodic_ack_loop(mut stream: TcpStream, repl: Arc<ReplicationState>, dialer_
             return;
         }
 
-        let offset = repl.master_repl_offset.load(Ordering::SeqCst);
-        let msg = build_replconf_ack(offset);
+        let Some(msg) =
+            build_replconf_ack_if_connected(&repl, repl.master_repl_offset.load(Ordering::SeqCst))
+        else {
+            continue;
+        };
         if stream.write_all(&msg).is_err() {
             return;
         }
@@ -779,6 +787,14 @@ fn build_replconf_ack(offset: i64) -> Vec<u8> {
         ])
     } else {
         build_multibulk(&[b"REPLCONF", b"ACK", offset_str.as_bytes()])
+    }
+}
+
+fn build_replconf_ack_if_connected(repl: &ReplicationState, offset: i64) -> Option<Vec<u8>> {
+    if repl.replica_link.load(Ordering::SeqCst) == replica_link_code::CONNECTED {
+        Some(build_replconf_ack(offset))
+    } else {
+        None
     }
 }
 
@@ -972,6 +988,27 @@ mod tests {
             repl.replica_link_str(),
             "sync",
             "once the pending flag is consumed, later idle checks are no-ops"
+        );
+    }
+
+    #[test]
+    fn fullsync_link_suppresses_ack_until_connected() {
+        let repl = local_state();
+        repl.set_replica_link(replica_link_code::TRANSFER);
+
+        assert!(
+            build_replconf_ack_if_connected(&repl, 10).is_none(),
+            "a replica still reporting ROLE sync must not ACK and make the master mark it online"
+        );
+
+        repl.set_replica_link(replica_link_code::CONNECTED);
+        let ack = build_replconf_ack_if_connected(&repl, 10).expect("connected link can ACK");
+        assert!(
+            ack.windows(b"REPLCONF".len()).any(|w| w == b"REPLCONF")
+                && ack.windows(b"ACK".len()).any(|w| w == b"ACK")
+                && ack.windows(b"10".len()).any(|w| w == b"10"),
+            "ACK frame should encode the processed offset: {:?}",
+            String::from_utf8_lossy(&ack)
         );
     }
 
@@ -1209,5 +1246,7 @@ mod tests {
 //                  apply_command_locally/lock_db (alternate apply loop, no caller).
 //                  Replica dialer is explicitly blocked after the owner-owned
 //                  DB flip until replication apply can route through
-//                  RuntimeOwner instead of a divergent global DB.
+//                  RuntimeOwner instead of a divergent global DB. ACKs are
+//                  suppressed while a full-sync link is still ROLE sync so the
+//                  primary keeps the RDB-channel state visible until idle.
 // ──────────────────────────────────────────────────────────────────────────

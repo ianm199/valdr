@@ -496,6 +496,15 @@ Work packets:
   The remaining failure is now the dual-channel `yes` backlog-memory shrink
   assertion that expects `connected_slaves` to include the extra RDB channel
   connection (`3` observed as `2`).
+  The ACK-timing slice then kept full-sync replicas visible as `send_bulk`
+  after writer drain and suppressed replica ACKs while the local full-sync link
+  still reports `sync`; `REPLCONF ACK` now promotes the primary-side replica
+  record online. The focused dependent trio passed in
+  `harness/oracle/results/tcl-survey/20260614T071919885835Z/result.json`, and
+  the full focused gate
+  `python3 harness/oracle/tcl-survey.py --runner-id repl-buffer-ack-after-fullsync-idle-full --profile integration-repl --timeout-s 300 --baseport 52000 --portcount 4000 --clients 1 --skip-build --files integration/replication-buffer`
+  moved `integration/replication-buffer` to 16/0 in
+  `harness/oracle/results/tcl-survey/20260614T071942726290Z/result.json`.
 
 Gate:
 

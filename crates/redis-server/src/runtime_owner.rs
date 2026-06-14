@@ -2856,6 +2856,15 @@ mod tests {
                 .into_iter()
                 .find(|(id, _, _, _, _)| *id == replica_id)
                 .map(|(_, state, _, _, _)| state),
+            Some("send_bulk")
+        );
+
+        repl.acknowledge_replica(replica_id, 6, None, 1_000);
+        assert_eq!(
+            repl.replicas_snapshot()
+                .into_iter()
+                .find(|(id, _, _, _, _)| *id == replica_id)
+                .map(|(_, state, _, _, _)| state),
             Some("online")
         );
 
@@ -3019,4 +3028,6 @@ mod tests {
 //                  Dead-code pass: create_databases free fn deleted (inlined
 //                  into RuntimeOwner::new); owner-loop vocabulary items
 //                  annotated with #[allow(dead_code)] per object-vocabulary.tsv.
+//                  Replica writer drain now clears output memory only; ACK
+//                  timing owns send_bulk -> online promotion.
 // --------------------------------------------------------------------------

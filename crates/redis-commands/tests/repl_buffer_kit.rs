@@ -401,6 +401,24 @@ fn dual_channel_memory_accounting_excludes_active_fullsync_catchup() {
 }
 
 #[test]
+fn send_bulk_replica_stays_visible_until_ack_after_writer_drain() {
+    let st = ReplicationState::new(generate_runid(), 64);
+    let _rx = attach_replica_with_state(&st, 102, ReplicaState::SendingRdb, 0);
+
+    assert!(st.send_private_to_replica(102, b"$3\r\nRDB".to_vec()));
+    assert_eq!(st.replicas_snapshot()[0].1, "send_bulk");
+    assert_eq!(st.account_replica_output_drained(102, 7), 0);
+    assert_eq!(
+        st.replicas_snapshot()[0].1,
+        "send_bulk",
+        "writer drain only means the socket accepted bytes; the replica is not online until it ACKs"
+    );
+
+    assert!(st.acknowledge_replica(102, 64, None, 1_000));
+    assert_eq!(st.replicas_snapshot()[0].1, "online");
+}
+
+#[test]
 fn dual_channel_replication_config_is_live() {
     let cfg = Arc::new(LiveConfig::new());
 

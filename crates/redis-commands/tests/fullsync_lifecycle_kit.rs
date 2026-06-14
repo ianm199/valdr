@@ -300,6 +300,11 @@ fn killed_repl_child_is_collected_and_later_fullsync_can_deliver() {
     assert_eq!(st.account_replica_output_drained(82, 10), 0);
     {
         let guard = st.replicas.lock().unwrap();
+        assert_eq!(guard[&82].state(), ReplicaState::SendingRdb);
+    }
+    assert!(st.acknowledge_replica(82, st.master_offset(), None, 1_000));
+    {
+        let guard = st.replicas.lock().unwrap();
         assert_eq!(guard[&82].state(), ReplicaState::Online);
     }
     assert_eq!(st.read_history_at(0, 3).as_deref(), Some(b"abc".as_slice()));
@@ -333,6 +338,9 @@ fn fullsync_completion_includes_backlog_tail_after_job_detaches() {
     assert_eq!(rx.recv().unwrap(), b"$3\r\nRDB".to_vec());
     assert_eq!(rx.recv().unwrap(), b"ab".to_vec());
     assert_eq!(st.account_replica_output_drained(85, 9), 0);
+    assert_eq!(st.replicas_snapshot()[0].1, "send_bulk");
+    assert!(st.fullsync_transfer_in_progress());
+    assert!(st.acknowledge_replica(85, st.master_offset(), None, 1_000));
     assert_eq!(st.replicas_snapshot()[0].1, "online");
     assert!(!st.fullsync_transfer_in_progress());
     assert_eq!(st.read_history_at(0, 2).as_deref(), Some(b"ab".as_slice()));

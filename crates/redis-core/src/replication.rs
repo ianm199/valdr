@@ -2168,14 +2168,39 @@ impl ReplicationState {
                     if let Ok(mut guard) = crate::client_info::client_info_registry().lock() {
                         guard.set_output_buffer_memory(client_id, next);
                     }
-                    if next == 0 && replica.state() == ReplicaState::SendingRdb {
-                        replica.set_state(ReplicaState::Online);
-                    }
                     return next;
                 }
                 Err(actual) => current = actual,
             }
         }
+    }
+
+    /// Record a replica ACK and promote a completed full-sync stream online.
+    /// Valkey keeps diskless/dual-channel full-sync replicas out of the
+    /// online command stream until the replica ACKs after loading the RDB.
+    pub fn acknowledge_replica(
+        &self,
+        client_id: ClientId,
+        offset: i64,
+        aof_offset: Option<i64>,
+        now_ms: i64,
+    ) -> bool {
+        let guard = match self.replicas.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let Some(replica) = guard.get(&client_id) else {
+            return false;
+        };
+        replica.offset.store(offset, Ordering::Relaxed);
+        if let Some(aof_offset) = aof_offset {
+            replica.aof_offset.store(aof_offset, Ordering::Relaxed);
+        }
+        replica.last_ack_time_ms.store(now_ms, Ordering::Relaxed);
+        if replica.state() == ReplicaState::SendingRdb {
+            replica.set_state(ReplicaState::Online);
+        }
+        true
     }
 
     /// Mark a replica's state, no-op when the entry is gone. Used by
@@ -2573,5 +2598,6 @@ mod tests {
 //                  (a) write-command propagation into append_to_backlog
 //                  (Wave B), (b) RDB transfer to a replica after +FULLRESYNC
 //                  (Wave B), (c) replica-side handshake spawn (Wave C),
-//                  (d) REPLCONF subcommands + WAIT (Wave B).
+//                  (d) REPLCONF subcommands + WAIT (Wave B). Full-sync
+//                  send_bulk replicas remain visible until REPLCONF ACK.
 // ──────────────────────────────────────────────────────────────────────────

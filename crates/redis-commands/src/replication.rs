@@ -239,27 +239,19 @@ pub fn replconf_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or(0);
             let repl = global_replication_state();
-            {
-                let guard = match repl.replicas.lock() {
-                    Ok(g) => g,
-                    Err(p) => p.into_inner(),
-                };
-                if let Some(conn) = guard.get(&client_id) {
-                    conn.offset.store(offset, Ordering::Relaxed);
-                    let mut i = 3usize;
-                    while i + 1 < ctx.arg_count() {
-                        let option = ctx.arg_owned(i)?;
-                        if option.as_bytes().eq_ignore_ascii_case(b"FACK") {
-                            let aof_offset_arg = ctx.arg_owned(i + 1)?;
-                            if let Ok(aof_offset) = parse_i64(aof_offset_arg.as_bytes()) {
-                                conn.aof_offset.store(aof_offset, Ordering::Relaxed);
-                            }
-                        }
-                        i += 2;
+            let mut aof_offset = None;
+            let mut i = 3usize;
+            while i + 1 < ctx.arg_count() {
+                let option = ctx.arg_owned(i)?;
+                if option.as_bytes().eq_ignore_ascii_case(b"FACK") {
+                    let aof_offset_arg = ctx.arg_owned(i + 1)?;
+                    if let Ok(parsed) = parse_i64(aof_offset_arg.as_bytes()) {
+                        aof_offset = Some(parsed);
                     }
-                    conn.last_ack_time_ms.store(now_ms, Ordering::Relaxed);
                 }
+                i += 2;
             }
+            repl.acknowledge_replica(client_id, offset, aof_offset, now_ms);
             repl.release_retained_history_ack(client_id, offset);
             maybe_wake_wait_clients();
             Ok(())
@@ -1525,5 +1517,6 @@ mod tests {
 //                  PSYNC/SYNC handshake accept; REPLICAOF toggle. Replica
 //                  dialer + RDB transfer are Wave B/C TODOs. Refuses chained
 //                  SYNC/PSYNC while this server's own upstream link is not
-//                  connected, matching Valkey's NOMASTERLINK guard.
+//                  connected, matching Valkey's NOMASTERLINK guard. REPLCONF
+//                  ACK promotes completed send_bulk replicas online.
 // ──────────────────────────────────────────────────────────────────────────
