@@ -35,7 +35,7 @@ scoreboard. It runs the replication correctness, backlog/buffer,
 full-sync-lifecycle, PSYNC reconnect, failover redirect, and replica dialer
 Rust tests without starting the upstream Tcl matrix.
 
-Latest result on 2026-06-14: `make repl-kits` passed 126/126 tests.
+Latest result on 2026-06-14: `make repl-kits` passed 127/127 tests.
 
 R0 full integration dashboard:
 
@@ -96,7 +96,7 @@ Artifact:
 | `integration/replication-4` | 15/2 | Red | SPOP rewrite cases now pass; remaining failures are divergence/default writable-replica cases. |
 | `integration/replication-buffer` | 16/0 | Green | The replication-buffer kit line now covers active full-sync catch-up beyond the circular backlog, selected-DB full-sync prefixes appended into the active job before backlog wrap, partial resync from retained shared history, retained-history release after the last dependent replica disconnects, shared output memory charged once, and hard-limit disconnect isolation. Follow-up Tcl scoreboards moved the file through 13/3, 15/1, and finally 16/0 at artifact `20260614T071942726290Z`; keep `repl_buffer_kit` as the inner loop and rerun this Tcl file only as a regression scoreboard. |
 | `integration/replication` | timeout / 1 parsed line | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, async-loading CONFIG exceptions, successful swapdb function payloads, parent-killed child discovery, `repl-diskless-load on-empty-db`, no-longer-useful RDB child cancellation, replica-link reply violations, malformed-PSYNC-offset logging, chained replica `FLUSHDB` / `FLUSHALL` stream relay, `GETSET` rewrite, nonblocking `BRPOPLPUSH` / `BLMOVE` rewrite stats, empty-blocking commandstats, replica output-byte stats, BLPOP role-change divergence, `replicas_waiting_psync` visibility, and diskless full-sync short-read recovery state/logging. The latest full 2026-06-14 scoreboard `20260614T123310223132Z` still times out, but the parsed frontier is down to the handshake-timeout line; the earlier multi-replica `swapdb` offset-convergence line no longer appears. The live-timeout dialer kit moved the focused handshake selector to zero parsed failure lines at `20260614T125100851671Z`. The new `redis-server` process kit now covers the later line-224 `MULTI`/`SLAVEOF`/`INFO`/`EXEC` plus `wait_for_sync` and key-transfer sequence directly. Focused Tcl selectors still execute earlier top-level setup and can abort with no summary, so use the process kit as the debugger and reserve the full file for the next scoreboard. |
-| `integration/replication-psync` | timeout / 1 parsed line | Red | Historical focused gate was 90/0 after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support. Current full-file reruns remain red, but the kit-first loop has moved the visible frontier: raw `-0` RDB fidelity was fixed, set-store commands now rewrite to deterministic `DEL` plus `SADD`, zset-store commands now rewrite to deterministic `DEL` plus concrete `ZADD`, fresh full-sync catch-up appends the selected-DB prefix after the active BGSAVE job is installed, post-fullsync live-stream DB selection is covered, in-flight full-sync waiters now reuse the existing BGSAVE snapshot offset, fresh full-sync snapshot offsets now wait for already-running writers before advertising `+FULLRESYNC`, and the `redis-server` process kit now covers no-reconnect full sync under cross-DB write load through digest convergence. The latest full-file Tcl scoreboard `20260614T115859554308Z` timed out with one parsed digest-mismatch line in the first no-reconnect body. A temporary extracted reducer for that body passed 3/0 at artifact `20260614T122847570164Z` after the zset-store rewrite and full-sync prefix ordering change; use a planned full-file scoreboard to prove the row moved, not as the inner loop. |
+| `integration/replication-psync` | timeout / 1 parsed line | Red | Historical focused gate was 90/0 after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support. Current full-file reruns remain red, but the kit-first loop has moved the visible frontier: raw `-0` RDB fidelity was fixed, set-store commands now rewrite to deterministic `DEL` plus `SADD`, zset-store commands now rewrite to deterministic `DEL` plus concrete `ZADD`, fresh full-sync catch-up appends the selected-DB prefix after the active BGSAVE job is installed, post-fullsync live-stream DB selection is covered, in-flight full-sync waiters now reuse the existing BGSAVE snapshot offset, fresh full-sync snapshot offsets now wait for already-running writers before advertising `+FULLRESYNC`, and the `redis-server` process kit now covers no-reconnect full sync under cross-DB write load plus same-primary socket-drop partial reconnect through digest convergence and `sync_partial_ok`. The latest full-file Tcl scoreboard `20260614T115859554308Z` timed out with one parsed digest-mismatch line in the first no-reconnect body. A temporary extracted reducer for that body passed 3/0 at artifact `20260614T122847570164Z` after the zset-store rewrite and full-sync prefix ordering change; use a planned full-file scoreboard to prove the row moved, not as the inner loop. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
 | `integration/replica-redirect` | 11/0 | Green | `CLIENT CAPA REDIRECT`, MULTI/EXEC replica redirects, failover pause, waiting-for-sync responses, and blocked-client behavior during failover now pass in the direct Tcl file. The final 2026-06-14 kit-first pass moved the file from timeout/no-summary to parsed 10/1, reduced the stale DB 9 stream return to partial-resync/role-change invariants, then cleared the full file at 11/0 in 6 seconds. |
 | `unit/wait` | 39/0 | Green | WAIT command suite passed after the R4 role-change unblock packet; WAITAOF/FACK edge cases still need separate coverage. |
@@ -4076,6 +4076,12 @@ Scope:
   hash, set, zset, and list data across DB 9/11/12 while the replica performs a
   full sync, then wait for `master_link_status:up` and `DEBUG DIGEST`
   convergence.
+- It also covers a same-primary live reconnect slice for the `ok psync`
+  family: establish a full sync, apply online writes so the replica holds a
+  concrete positive PSYNC offset, drop the master-side replica client with
+  `CLIENT KILL TYPE replica`, write more data while `connected_slaves:0`, then
+  assert the reconnect increments `sync_partial_ok` without another
+  `sync_full` and the final master/replica digests converge.
 - `make repl-kits` now runs `redis-server` process kits after the existing
   `redis-commands` replication kits via `SERVER_REPL_KITS`.
 
@@ -4100,8 +4106,8 @@ python3 harness/oracle/tcl-survey.py \
 
 Results:
 
-- `redis-server --test repl_wait_for_sync_kit`: 2 passed, 0 failed.
-- `make repl-kits`: 126 passed, 0 failed.
+- `redis-server --test repl_wait_for_sync_kit`: 3 passed, 0 failed.
+- `make repl-kits`: 127 passed, 0 failed.
 - `cargo build -p redis-server --bin redis-server`: passed.
 - Focused Tcl selector
   `harness/oracle/results/tcl-survey/20260614T130329843015Z/result.json`
@@ -4113,6 +4119,10 @@ Results:
   background write clients before the selected test body, so `--only` can still
   execute expensive setup outside the selected assertion. The process kit is the
   cheaper deterministic debugger; the full Tcl file remains a later scoreboard.
+- The same Tcl limitation applies to the new socket-drop reconnect slice: the
+  process kit directly verifies the live `CLIENT KILL`/dialer/PSYNC path and
+  counters, while the full `integration/replication-psync` file remains the
+  scoreboard to rerun once enough slices have accumulated.
 
 Takeaway:
 

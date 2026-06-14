@@ -314,6 +314,10 @@ fn info_field(frame: &Frame, field: &str) -> Option<String> {
         .map(|value| value.trim_end_matches('\r').to_string())
 }
 
+fn info_u64(frame: &Frame, field: &str) -> Option<u64> {
+    info_field(frame, field)?.parse().ok()
+}
+
 fn wait_for_replica_up(replica: &TestServer, master: &TestServer) -> io::Result<Frame> {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut last = None;
@@ -333,6 +337,61 @@ fn wait_for_replica_up(replica: &TestServer, master: &TestServer) -> io::Result<
             last,
             replica.stderr_tail(),
             master.stderr_tail()
+        ),
+    ))
+}
+
+fn info(server: &TestServer, section: &[u8]) -> io::Result<Frame> {
+    let mut conn = RespConn::connect(server.port)?;
+    conn.command(&[b"INFO", section])
+}
+
+fn wait_for_info_field(
+    server: &TestServer,
+    section: &[u8],
+    field: &str,
+    expected: &str,
+) -> io::Result<Frame> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut last = None;
+    while Instant::now() < deadline {
+        let frame = info(server, section)?;
+        if info_field(&frame, field).as_deref() == Some(expected) {
+            return Ok(frame);
+        }
+        last = Some(frame);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!(
+            "INFO {section:?} field {field} did not reach {expected}; last={last:?}; stderr={}",
+            server.stderr_tail()
+        ),
+    ))
+}
+
+fn wait_for_info_counter_at_least(
+    server: &TestServer,
+    section: &[u8],
+    field: &str,
+    minimum: u64,
+) -> io::Result<Frame> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut last = None;
+    while Instant::now() < deadline {
+        let frame = info(server, section)?;
+        if info_u64(&frame, field).is_some_and(|value| value >= minimum) {
+            return Ok(frame);
+        }
+        last = Some(frame);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!(
+            "INFO {section:?} counter {field} did not reach {minimum}; last={last:?}; stderr={}",
+            server.stderr_tail()
         ),
     ))
 }
@@ -556,5 +615,61 @@ fn psync_no_reconnect_fullsync_converges_under_cross_db_write_load() {
     assert!(
         !digest.is_empty(),
         "DEBUG DIGEST should return a non-empty digest after write load"
+    );
+}
+
+#[test]
+fn psync_same_primary_socket_drop_reconnects_with_continue() {
+    let master = TestServer::start("repl-reconnect-master").expect("start master");
+    let replica = TestServer::start("repl-reconnect-replica").expect("start replica");
+    configure_psync_surface(&master, &replica);
+
+    write_complex_data(master.port, 400, 25).expect("seed master data");
+    let mut replica_conn = RespConn::connect(replica.port).expect("connect replica");
+    expect_simple(
+        replica_conn
+            .command(&[b"SLAVEOF", b"127.0.0.1", master.port.to_string().as_bytes()])
+            .expect("SLAVEOF should reply"),
+        b"OK",
+    );
+    wait_for_replica_up(&replica, &master).expect("initial full sync should finish");
+    write_complex_data(master.port, 450, 10)
+        .expect("online writes before reconnect should advance the PSYNC offset");
+    wait_for_digest_match(&master, &replica)
+        .expect("replica should apply online writes before the forced socket drop");
+
+    let stats_before = wait_for_info_counter_at_least(&master, b"stats", "sync_full", 1)
+        .expect("master should count initial full sync");
+    let sync_full_before = info_u64(&stats_before, "sync_full").expect("sync_full field");
+    let partial_ok_before = info_u64(&stats_before, "sync_partial_ok").unwrap_or(0);
+
+    let mut master_conn = RespConn::connect(master.port).expect("connect master");
+    match master_conn
+        .command(&[b"CLIENT", b"KILL", b"TYPE", b"replica"])
+        .expect("CLIENT KILL TYPE replica should reply")
+    {
+        Frame::Integer(killed) if killed >= 1 => {}
+        frame => panic!("expected to kill at least one replica client, got {frame:?}"),
+    }
+    wait_for_info_field(&master, b"replication", "connected_slaves", "0")
+        .expect("master should observe the dropped replica connection");
+
+    write_complex_data(master.port, 500, 40)
+        .expect("master writes while replica link is reconnecting should succeed");
+    let stats_after =
+        wait_for_info_counter_at_least(&master, b"stats", "sync_partial_ok", partial_ok_before + 1)
+            .expect("same-primary reconnect should be accepted as partial resync");
+    assert_eq!(
+        info_u64(&stats_after, "sync_full"),
+        Some(sync_full_before),
+        "same-primary socket drop with retained backlog must not require another full sync"
+    );
+
+    wait_for_replica_up(&replica, &master).expect("replica should return online");
+    let digest = wait_for_digest_match(&master, &replica)
+        .expect("replica should receive writes made during reconnect");
+    assert!(
+        !digest.is_empty(),
+        "DEBUG DIGEST should return a non-empty digest after partial reconnect"
     );
 }
