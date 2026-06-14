@@ -431,7 +431,11 @@ Work packets:
   experiment was rejected after it regressed the focused gate to a no-summary
   replica-offset catch-up abort; the next BGSAVE-window attempt must prove
   online replica catch-up throughput while a full-sync waiter pins large shared
-  history, not just keep the job state alive longer.
+  history, not just keep the job state alive longer. The follow-up dialer
+  throughput slice raised the primary-stream read window to 1 MiB and added a
+  10 KiB-command batching kit, keeping the focused `replication-buffer` gate
+  counted at 12/4 while removing the one-command-per-large-frame apply
+  bottleneck as a prerequisite for the next state-window fix.
 
 Gate:
 

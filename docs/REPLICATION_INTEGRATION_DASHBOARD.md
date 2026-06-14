@@ -1377,6 +1377,57 @@ Takeaway:
   online replica catch-up throughput while the full-sync waiter pins large
   history; a state-lifetime hold alone is not acceptable.
 
+### R2-BUFFER-LARGE-CATCHUP-BATCHING
+
+Status: throughput prerequisite completed on 2026-06-14; focused Tcl scoreboard
+stayed at 12/4.
+
+Implementation:
+
+- The replica dialer now reads primary stream catch-up with a 1 MiB buffer
+  instead of 8 KiB.
+- `replica_dialer::tests::large_partial_resync_commands_batch_by_read_window`
+  models the `replication-buffer` workload shape: many 10 KiB `SET` frames
+  should be applied in a small number of RuntimeOwner batches instead of one
+  apply roundtrip per command.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands replica_dialer::tests -- --nocapture
+cargo test -p redis-commands --test repl_buffer_kit -- --nocapture
+cargo test -p redis-commands --test psync_reconnect_kit -- --nocapture
+cargo check -p redis-commands -p redis-server
+cargo build -p redis-server --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-buffer-large-catchup-batch \
+  --profile integration-repl \
+  --timeout-s 300 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --skip-build \
+  --files integration/replication-buffer
+```
+
+Results:
+
+- `replica_dialer::tests`: 12 passed, 0 failed.
+- `repl_buffer_kit`: 11 passed, 0 failed.
+- `psync_reconnect_kit`: 13 passed, 0 failed.
+- `cargo check -p redis-commands -p redis-server`: passed.
+- `cargo build -p redis-server --bin redis-server`: passed.
+- Focused Tcl artifact:
+  `harness/oracle/results/tcl-survey/20260614T054522469720Z/result.json`.
+- `integration/replication-buffer`: 12 passed, 4 failed, no timeout.
+
+Takeaway:
+
+- This does not solve the remaining state-lifetime assertions by itself, but it
+  removes the one-command-per-large-frame apply bottleneck that made the rejected
+  BGSAVE-window hold regress to a replica catch-up abort. The next window fix
+  should use this batching kit as a prerequisite.
+
 ### R2-BGSAVE-CATCHUP
 
 Status: active-job catch-up foundation completed on 2026-06-13; slow Tcl

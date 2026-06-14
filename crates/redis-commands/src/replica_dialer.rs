@@ -35,6 +35,7 @@ static GLOBAL_OUR_PORT: OnceLock<u16> = OnceLock::new();
 static GLOBAL_RDB_DIR: OnceLock<String> = OnceLock::new();
 static RUNTIME_APPLY_TX: OnceLock<Sender<ReplicaApplyRequest>> = OnceLock::new();
 const RUNTIME_APPLY_TIMEOUT: Duration = Duration::from_secs(30);
+const REPLICA_STREAM_READ_BUFFER_SIZE: usize = 1024 * 1024;
 
 /// Work the dialer thread hands to the runtime owner loop because the owner —
 /// not the dialer — owns the live DB slice.
@@ -281,7 +282,7 @@ fn run_replica_sink_loop(
     mark_connected_after_fullsync_idle: &mut bool,
 ) {
     let mut read_buf = Vec::new();
-    let mut tmp = [0u8; 8192];
+    let mut tmp = vec![0u8; REPLICA_STREAM_READ_BUFFER_SIZE];
     let mut command_batch: Vec<(Vec<RedisString>, i64)> = Vec::new();
     loop {
         if !repl.dialer_epoch_is_current(dialer_epoch) {
@@ -882,6 +883,43 @@ mod tests {
         )
     }
 
+    fn batch_sizes_for_chunked_replica_stream(stream: &[u8], chunk_size: usize) -> Vec<usize> {
+        let repl = local_state();
+        let mut read_buf = Vec::new();
+        let mut command_batch: Vec<(Vec<RedisString>, i64)> = Vec::new();
+        let mut batch_sizes = Vec::new();
+        for chunk in stream.chunks(chunk_size) {
+            read_buf.extend_from_slice(chunk);
+            let frames = parse_replica_frames(&mut read_buf, &repl).unwrap();
+            for frame in frames {
+                match frame {
+                    ReplicaStreamFrame::Command { argv, offset_after } => {
+                        command_batch.push((argv, offset_after));
+                    }
+                    ReplicaStreamFrame::GetAck { .. } => {
+                        if !replica_command_batch_has_open_transaction(&command_batch)
+                            && !command_batch.is_empty()
+                        {
+                            batch_sizes.push(command_batch.len());
+                            command_batch.clear();
+                        }
+                    }
+                }
+            }
+            if !replica_command_batch_has_open_transaction(&command_batch)
+                && !command_batch.is_empty()
+            {
+                batch_sizes.push(command_batch.len());
+                command_batch.clear();
+            }
+        }
+        assert!(
+            read_buf.is_empty(),
+            "test stream should end on a complete RESP frame"
+        );
+        batch_sizes
+    }
+
     #[test]
     fn replica_command_batch_waits_for_transaction_exec() {
         let mut batch = vec![command(&[b"MULTI"]), command(&[b"SET", b"k", b"v"])];
@@ -894,6 +932,28 @@ mod tests {
         assert!(
             !replica_command_batch_has_open_transaction(&batch),
             "the transaction envelope is complete once EXEC has been parsed"
+        );
+    }
+
+    #[test]
+    fn large_partial_resync_commands_batch_by_read_window() {
+        let value = vec![b'x'; 10_000];
+        let mut stream = Vec::new();
+        for i in 0..128 {
+            let key = format!("k:{i}");
+            stream.extend_from_slice(&build_multibulk(&[b"SET", key.as_bytes(), &value]));
+        }
+
+        let batches =
+            batch_sizes_for_chunked_replica_stream(&stream, REPLICA_STREAM_READ_BUFFER_SIZE);
+
+        assert!(
+            batches.len() <= 2,
+            "10KB catch-up commands should not degrade into one RuntimeOwner apply request per command: {batches:?}"
+        );
+        assert!(
+            batches.iter().any(|count| *count >= 100),
+            "the first full read window should amortize RuntimeOwner apply roundtrips: {batches:?}"
         );
     }
 
