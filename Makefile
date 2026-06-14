@@ -26,6 +26,7 @@ KIT        ?=            # test-kit: one kit, e.g. conn_transport_kit
 FILES      ?=            # oracle: specific files, e.g. unit/type/string (overrides TIER)
 FORMAT     ?= table      # bench/oracle output: table (human-readable) | json
 REPL_KITS  ?= repl_correctness_kit repl_buffer_kit fullsync_lifecycle_kit psync_reconnect_kit failover_redirect_kit
+SERVER_REPL_KITS ?= repl_wait_for_sync_kit
 
 MATRIX_TSV = $$(ls -t harness/bench/results/*profile-matrix.tsv | head -1)
 
@@ -37,7 +38,7 @@ help: ## Show this help
 	  | sort \
 	  | awk -F':.*## ' '{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 	@echo ""
-	@echo "Flags (override inline): SKIP_BUILD TRIALS COMMANDS REQUESTS CLIENTS PAYLOAD TIER CRATE KIT FILES REPL_KITS"
+	@echo "Flags (override inline): SKIP_BUILD TRIALS COMMANDS REQUESTS CLIENTS PAYLOAD TIER CRATE KIT FILES REPL_KITS SERVER_REPL_KITS"
 	@echo "  e.g.  make bench-p1 TRIALS=40 COMMANDS=get,set"
 	@echo "        make test CRATE=redis-core         # one crate, not the workspace"
 	@echo "        make oracle                        # fast tier, ~14s (TIER=all for full)"
@@ -67,7 +68,11 @@ repl-kits: ## Replication/HA Rust kits only; fast debugger before long Tcl score
 	  cargo test -p redis-commands --test $$kit; \
 	done; \
 	echo "==> redis-commands replica_dialer::tests"; \
-	cargo test -p redis-commands --lib replica_dialer::tests
+	cargo test -p redis-commands --lib replica_dialer::tests; \
+	for kit in $(SERVER_REPL_KITS); do \
+	  echo "==> redis-server $$kit"; \
+	  cargo test -p redis-server --test $$kit; \
+	done
 
 bench: ## Full profile matrix (p1/p16/p100 + range-heavy) vs upstream. FORMAT=json for raw JSON
 	@echo "running profile matrix (SKIP_BUILD=$(SKIP_BUILD), clients=$(CLIENTS), payload=$(PAYLOAD))…" >&2
