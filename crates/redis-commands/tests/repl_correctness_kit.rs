@@ -1068,6 +1068,82 @@ fn r1_set_store_first_fullsync_catchup_rewrite_selects_db9() {
 }
 
 #[test]
+fn r1_live_write_after_fullsync_forces_select_for_new_send_bulk_replica() {
+    let _g = repl_guard();
+    let repl = global_replication_state();
+    repl.become_master();
+    let _ = repl.take_repl_bgsave_job();
+    repl.set_repl_child_pid(0);
+    repl.selected_db.store(9, Ordering::Release);
+
+    let client_id = 900_018;
+    let snapshot_offset = repl.master_offset();
+    let (tx, rx) = mpsc::channel();
+    repl.add_replica(ReplicaConn::new(
+        client_id,
+        ReplicaState::WaitingBgsave,
+        snapshot_offset,
+        tx,
+    ));
+    let dir = unique_temp_dir("repl-kit-post-fullsync-select");
+    let temp_path = dir.join("temp-repl-post-fullsync-select.rdb");
+    let outcome = repl.complete_repl_bgsave_transfer(
+        ReplBgsaveJob {
+            child_pid: 0,
+            temp_path: temp_path.clone(),
+            waiting_replicas: vec![client_id],
+            snapshot_offset,
+            catch_up_bytes: Vec::new(),
+            needs_getack_on_completion: false,
+        },
+        b"RDB".to_vec(),
+    );
+    let _ = std::fs::remove_file(&temp_path);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(outcome.delivered_replicas, vec![client_id]);
+    assert_eq!(rx.try_recv().unwrap(), b"$3\r\nRDB".to_vec());
+
+    let mut primary_dbs: Vec<RedisDb> = (0..16).map(RedisDb::new).collect();
+    let mut primary_selected_db = 9;
+    assert_eq!(
+        dispatch_as_primary_on_dbs(
+            40,
+            &mut primary_dbs,
+            &mut primary_selected_db,
+            &[b"SADD", b"db9-set", b"597971278521"]
+        ),
+        b":1\r\n"
+    );
+
+    let mut stream = Vec::new();
+    while let Ok(chunk) = rx.try_recv() {
+        stream.extend_from_slice(&chunk);
+    }
+    assert!(
+        stream.starts_with(&resp(&[b"SELECT", b"9"])),
+        "a send_bulk replica after fullsync may be at DB 0, so the first live DB 9 set write must force SELECT; got {:?}",
+        String::from_utf8_lossy(&stream)
+    );
+
+    let mut replica_dbs: Vec<RedisDb> = (0..16).map(RedisDb::new).collect();
+    let mut replica_selected_db = 0;
+    apply_resp_stream_as_replica_on_dbs(41, &mut replica_dbs, &mut replica_selected_db, &stream);
+    assert_eq!(replica_selected_db, 9);
+    assert!(
+        replica_dbs[0].lookup_key_read(b"db9-set").is_none(),
+        "DB 0 must not receive the post-fullsync DB 9 set write"
+    );
+    let db9_set = replica_dbs[9]
+        .lookup_key_read(b"db9-set")
+        .and_then(|obj| obj.set().cloned())
+        .expect("DB 9 should receive the post-fullsync set write");
+    assert!(db9_set.contains(&RedisString::from_static(b"597971278521")));
+
+    repl.remove_replica(client_id);
+    repl.selected_db.store(-1, Ordering::Release);
+}
+
+#[test]
 fn r1_ttl_relative_writes_rewrite_to_absolute_propagation() {
     let _g = repl_guard();
     let cap = ReplCapture::attach(900_015, 0);

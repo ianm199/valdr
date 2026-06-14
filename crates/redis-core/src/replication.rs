@@ -2011,6 +2011,13 @@ impl ReplicationState {
             }
             None => 0,
         };
+        if !delivered_replicas.is_empty() {
+            // Newly loaded replicas apply post-RDB live bytes from DB 0 unless
+            // the stream explicitly selects a DB. Force the next live write to
+            // carry a SELECT even if older stream consumers already had that DB
+            // selected.
+            self.selected_db.store(-1, Ordering::Release);
+        }
         self.set_repl_child_pid(0);
 
         ReplFullsyncTransferOutcome {

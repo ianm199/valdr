@@ -75,7 +75,7 @@ Artifact:
 | `integration/replication-4` | 15/2 | Red | SPOP rewrite cases now pass; remaining failures are divergence/default writable-replica cases. |
 | `integration/replication-buffer` | 16/0 | Green | The replication-buffer kit line now covers active full-sync catch-up beyond the circular backlog, partial resync from retained shared history, retained-history release after the last dependent replica disconnects, shared output memory charged once, and hard-limit disconnect isolation. Follow-up Tcl scoreboards moved the file through 13/3, 15/1, and finally 16/0 at artifact `20260614T071942726290Z`; keep `repl_buffer_kit` as the inner loop and rerun this Tcl file only as a regression scoreboard. |
 | `integration/replication` | 40/27 | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, the first async-loading CONFIG exception, successful swapdb function-context mismatch, parent-killed child discovery, `repl-diskless-load on-empty-db`, no-longer-useful RDB child cancellation, all four replica-link reply-violation assertions, malformed-PSYNC-offset logging, chained replica `FLUSHDB` / `FLUSHALL` stream relay, `GETSET` rewrite, nonblocking `BRPOPLPUSH` / `BLMOVE` rewrite stats, and empty-blocking `BRPOPLPUSH` / `BLMOVE` commandstats via real digest waits. Remaining failures are counted full-sync, diskless pipe/drop, blocked-list role-change, cache-master, lazy-expire, and old-data rollback cases. |
-| `integration/replication-psync` | timeout | Red | Historical focused gate was 90/0 after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support. Current full-file reruns remain red, but the kit-first loop has moved the visible frontier: raw `-0` RDB fidelity was fixed, set-store commands now rewrite to deterministic `DEL` plus `SADD`, and fresh full-sync catch-up now injects and retains a selected-DB prefix before active writes. The latest single Tcl scoreboard `20260614T091542767472Z` still timed out in the no-reconnect case, now with one replica-only DB 0 set row; reduce that DB0 residue to the next deterministic complex-data kit before another broad Tcl run. |
+| `integration/replication-psync` | timeout | Red | Historical focused gate was 90/0 after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support. Current full-file reruns remain red, but the kit-first loop has moved the visible frontier: raw `-0` RDB fidelity was fixed, set-store commands now rewrite to deterministic `DEL` plus `SADD`, fresh full-sync catch-up now injects and retains a selected-DB prefix before active writes, and the latest replica-only DB 0 set residue is covered by a post-fullsync live-stream SELECT kit. The latest single Tcl scoreboard remains `20260614T091542767472Z`; do not use the six-minute file as the debugger. Rerun it as a scoreboard after the next kit batch or nightly pass. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
 | `integration/replica-redirect` | 11/0 | Green | `CLIENT CAPA REDIRECT`, MULTI/EXEC replica redirects, failover pause, waiting-for-sync responses, and blocked-client behavior during failover now pass in the direct Tcl file. The final 2026-06-14 kit-first pass moved the file from timeout/no-summary to parsed 10/1, reduced the stale DB 9 stream return to partial-resync/role-change invariants, then cleared the full file at 11/0 in 6 seconds. |
 | `unit/wait` | 39/0 | Green | WAIT command suite passed after the R4 role-change unblock packet; WAITAOF/FACK edge cases still need separate coverage. |
@@ -140,8 +140,10 @@ visible integration frontiers are now:
   detached full-sync catch-up tail slice removes the earliest broad
   no-reconnect mismatch. The narrowed `0` vs `-0` family now has Rust kit
   coverage, including an RDB raw-string load bug where `-0` was promoted to
-  integer `0`; keep using these kits as the debugger and reserve the full Tcl
-  matrix for a scoreboard rerun.
+  integer `0`. The later DB 0 set residue is also covered by a kit that drives
+  RDB delivery through `complete_repl_bgsave_transfer` and proves the first
+  post-fullsync DB 9 live write forces `SELECT 9`. Keep using these kits as
+  the debugger and reserve the full Tcl matrix for a scoreboard rerun.
 - `R2-BUFFER-LIMITS`: accounting aliases, fan-out accounting, retained
   full-sync history, owner-loop replica drain, and full-sync `send_bulk`
   visibility are covered; implement broader shared-buffer memory accounting,
@@ -3536,3 +3538,57 @@ Takeaway:
   complex-data DB 0 residue directly, likely by replaying active full-sync
   catch-up for the set/list/zset/hash command mix rather than rerunning the
   six-minute Tcl file as the debugger.
+
+### 2026-06-14 R3 follow-up: post-fullsync live-stream SELECT reset
+
+Scope:
+
+- The latest `integration/replication-psync` scoreboard showed one
+  replica-only DB 0 set row after earlier DB 9 catch-up fixes. That shape can
+  happen when a replica has just received an RDB and starts applying later live
+  stream bytes from DB 0, while the primary's replication stream cache still
+  believes DB 9 is already selected for older stream consumers.
+- `complete_repl_bgsave_transfer` now invalidates the primary replication
+  stream selected-DB cache after delivering an RDB to at least one replica. The
+  next live write emits a real `SELECT <db>` even if older online consumers had
+  already selected that DB.
+- New fast coverage
+  `repl_correctness_kit::r1_live_write_after_fullsync_forces_select_for_new_send_bulk_replica`
+  drives the real full-sync transfer completion path, drains the private RDB
+  bulk, dispatches a DB 9 `SADD`, replays the captured live stream on a fresh
+  replica starting at DB 0, and proves the write lands only in DB 9.
+- This packet intentionally did not rerun the six-minute
+  `integration/replication-psync` file. The reduced kit is the debugger; the
+  broad Tcl file should be the next scoreboard or nightly confirmation, not the
+  inner loop.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands --test repl_correctness_kit -- --nocapture --test-threads=1
+cargo test -p redis-commands --test psync_reconnect_kit -- --nocapture --test-threads=1
+cargo test -p redis-commands --test fullsync_lifecycle_kit -- --nocapture --test-threads=1
+cargo test -p redis-commands --test repl_buffer_kit -- --nocapture --test-threads=1
+cargo test -p redis-commands --test aof_correctness_kit -- --nocapture --test-threads=1
+cargo test -p redis-commands replication::tests -- --nocapture --test-threads=1
+cargo test -p redis-core replication::tests -- --nocapture --test-threads=1
+cargo build -p redis-server --bin redis-server
+```
+
+Results:
+
+- `repl_correctness_kit`: 35 passed, 0 failed.
+- `psync_reconnect_kit`: 18 passed, 0 failed.
+- `fullsync_lifecycle_kit`: 12 passed, 0 failed.
+- `repl_buffer_kit`: 15 passed, 0 failed.
+- `aof_correctness_kit`: 18 passed, 0 failed.
+- `redis-commands` replication unit filter: 13 passed, 0 failed.
+- `redis-core` replication unit filter: 15 passed, 0 failed.
+- `cargo build -p redis-server --bin redis-server`: passed.
+
+Takeaway:
+
+- This is the faster path we want for lagging HA/replication fronts: use Tcl
+  artifacts to name a failure signature, reduce the signature to a kit, and
+  keep coding against the kit until the invariant is fixed. Only rerun the
+  long Tcl file when it can answer, "did the visible frontier move?"

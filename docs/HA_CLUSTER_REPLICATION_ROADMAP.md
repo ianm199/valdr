@@ -132,8 +132,13 @@ Current red/unfinished areas from the 2026-06-13 R0 dashboard in
   sequential Tcl scoreboard
   `harness/oracle/results/tcl-survey/20260614T091542767472Z/result.json` still
   times out in the no-reconnect case, but the visible diff moved to one
-  replica-only DB 0 set row. Reduce that remaining complex-data residue to a
-  deterministic kit before another broad PSYNC Tcl run.
+  replica-only DB 0 set row. That residue is now reduced to
+  `repl_correctness_kit::r1_live_write_after_fullsync_forces_select_for_new_send_bulk_replica`:
+  after an RDB is delivered to a send-bulk replica, the primary resets the
+  cached replication stream selected DB so the next live DB 9 write emits a
+  real `SELECT 9`. Do not run the six-minute PSYNC Tcl file as the debugger;
+  rerun it only as the next scoreboard or nightly confirmation after a kit
+  batch.
 - `replication-aof-sync` is green as of 2026-06-13 after full-sync RDB loads
   refresh appendonly manifests correctly.
 - `replica-redirect.tcl` is green at 11/0 as of 2026-06-14. Real `FAILOVER`,
@@ -608,9 +613,11 @@ Work packets:
   catch-up ordering; `psync_reconnect_kit` now proves the catch-up stream starts
   with `SELECT 9` before the first active write. The focused Tcl scoreboard
   `harness/oracle/results/tcl-survey/20260614T091542767472Z/result.json` still
-  timed out, now with one replica-only DB 0 set row. Keep using kits as the
-  debugger; the next R3 slice should reproduce that complex-data DB0 residue
-  without another broad Tcl run.
+  timed out, now with one replica-only DB 0 set row. A follow-up kit reproduced
+  that post-fullsync live-stream DB drift and fixed it by forcing the next live
+  write after RDB delivery to carry a fresh `SELECT`. Keep using kits as the
+  debugger; rerun the broad Tcl PSYNC file only when it is serving as a
+  scoreboard.
 - **R3-METRICS:** keep `sync_full`, `sync_partial_ok`, `sync_partial_err`,
   master/replica offsets, lag, and backlog histlen faithful in `INFO`.
 
