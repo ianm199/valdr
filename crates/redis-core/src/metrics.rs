@@ -501,6 +501,8 @@ pub struct ServerMetrics {
     pub active_time_main_thread_us: AtomicU64,
  /// Total error replies emitted since the last `CONFIG RESETSTAT`.
     pub total_error_replies: AtomicU64,
+ /// Bytes queued to replica links since the last `CONFIG RESETSTAT`.
+    pub total_net_repl_output_bytes: AtomicU64,
  /// Number of logical fork/background-persistence starts.
     pub total_forks: AtomicU64,
  /// Number of BGSAVE child processes that exited with status 0.
@@ -533,6 +535,7 @@ impl ServerMetrics {
             client_output_buffer_limit_disconnections: AtomicU64::new(0),
             active_time_main_thread_us: AtomicU64::new(0),
             total_error_replies: AtomicU64::new(0),
+            total_net_repl_output_bytes: AtomicU64::new(0),
             total_forks: AtomicU64::new(0),
             rdb_saves_succeeded: AtomicU64::new(0),
             rdb_saves_failed: AtomicU64::new(0),
@@ -593,6 +596,8 @@ impl ServerMetrics {
             .store(0, Ordering::Relaxed);
         self.active_time_main_thread_us.store(0, Ordering::Relaxed);
         self.total_error_replies.store(0, Ordering::Relaxed);
+        self.total_net_repl_output_bytes
+            .store(0, Ordering::Relaxed);
         self.total_forks.store(0, Ordering::Relaxed);
         self.rdb_saves_succeeded.store(0, Ordering::Relaxed);
         self.rdb_saves_failed.store(0, Ordering::Relaxed);

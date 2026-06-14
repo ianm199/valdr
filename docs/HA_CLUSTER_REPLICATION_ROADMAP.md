@@ -413,10 +413,15 @@ Work packets:
   redundant catch-up `SELECT`, and avoids reselecting DB 9 before the first
   live write. The follow-up scoreboard
   `harness/oracle/results/tcl-survey/20260614T095418514204Z/result.json` still
-  timed out, but dropped the FLUSH line and now shows 7 parsed lines.
-  Remaining R2 work is still full-sync/diskless correctness: handshake timeout,
-  BLPOP role-change digest divergence, replica output-byte metrics,
-  multi-replica full-sync offset convergence, cache-master replacement, async
+  timed out, but dropped the FLUSH line and now shows 7 parsed lines. A
+  follow-up stats packet added `total_net_repl_output_bytes` to `INFO stats`,
+  resets it on `CONFIG RESETSTAT`, and increments it when replica output is
+  successfully queued; the full scoreboard
+  `harness/oracle/results/tcl-survey/20260614T100741793243Z/result.json` still
+  timed out, but dropped the replica output-byte metric line and now shows 6
+  parsed lines. Remaining R2 work is still full-sync/diskless correctness:
+  handshake timeout, BLPOP role-change digest divergence, multi-replica
+  full-sync offset convergence, cache-master replacement, async
   rollback/exposure, and diskless pipe/drop logs.
 - **R2-BUFFER-LIMITS:** implement replica output-buffer accounting and
   disconnection policy well enough for `replication-buffer` to count tests

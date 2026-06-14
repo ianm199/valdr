@@ -168,6 +168,15 @@ fn assert_reply_contains(reply: &[u8], needle: &[u8]) {
     );
 }
 
+fn info_field_value(reply: &[u8], name: &str) -> Option<String> {
+    let first_line = reply.windows(2).position(|w| w == b"\r\n")?;
+    let payload = &reply[first_line + 2..reply.len().saturating_sub(2)];
+    let text = String::from_utf8_lossy(payload);
+    text.lines()
+        .find_map(|line| line.strip_prefix(name)?.strip_prefix(':'))
+        .map(|value| value.trim_end_matches('\r').to_string())
+}
+
 fn command_stat_calls(name: &[u8]) -> u64 {
     command_stats_snapshot()
         .into_iter()
@@ -386,6 +395,46 @@ fn r2_replica_fanout_updates_pending_output_accounting() {
         pending,
         stream.len(),
         "fan-out accounting should track queued replica bytes"
+    );
+}
+
+#[test]
+fn r2_info_stats_counts_replication_output_bytes() {
+    let _g = repl_guard();
+    let repl = global_replication_state();
+    repl.become_master();
+    let cap = ReplCapture::attach(900_019, repl.master_offset());
+    let mut db = RedisDb::new(0);
+
+    assert_eq!(
+        dispatch_as_primary(19, &mut db, &[b"CONFIG", b"RESETSTAT"]),
+        b"+OK\r\n"
+    );
+    let before = dispatch_as_primary(20, &mut db, &[b"INFO", b"stats"]);
+    assert_eq!(
+        info_field_value(&before, "total_net_repl_output_bytes").as_deref(),
+        Some("0"),
+        "INFO stats should expose the replication output byte counter after RESETSTAT"
+    );
+
+    assert_eq!(
+        dispatch_as_primary(21, &mut db, &[b"SET", b"metric-key", b"value"]),
+        b"+OK\r\n"
+    );
+    let stream = cap.drain();
+    assert!(
+        !stream.is_empty(),
+        "SET should fan out bytes to the capture replica"
+    );
+    let after = dispatch_as_primary(22, &mut db, &[b"INFO", b"stats"]);
+    let count = info_field_value(&after, "total_net_repl_output_bytes")
+        .expect("INFO stats should include total_net_repl_output_bytes")
+        .parse::<u64>()
+        .expect("replication output byte counter should be numeric");
+    assert!(
+        count >= stream.len() as u64,
+        "replication output byte counter should include queued stream bytes; count={count}, stream_len={}",
+        stream.len()
     );
 }
 

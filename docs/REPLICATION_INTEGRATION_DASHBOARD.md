@@ -74,7 +74,7 @@ Artifact:
 | `integration/replication-3` | 3/4 | Red | Expiry consistency, writable-replica expired-key behavior, and PFCOUNT expired-key/cache semantics. |
 | `integration/replication-4` | 15/2 | Red | SPOP rewrite cases now pass; remaining failures are divergence/default writable-replica cases. |
 | `integration/replication-buffer` | 16/0 | Green | The replication-buffer kit line now covers active full-sync catch-up beyond the circular backlog, partial resync from retained shared history, retained-history release after the last dependent replica disconnects, shared output memory charged once, and hard-limit disconnect isolation. Follow-up Tcl scoreboards moved the file through 13/3, 15/1, and finally 16/0 at artifact `20260614T071942726290Z`; keep `repl_buffer_kit` as the inner loop and rerun this Tcl file only as a regression scoreboard. |
-| `integration/replication` | timeout / 7 parsed lines | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, async-loading CONFIG exceptions, successful swapdb function payloads, parent-killed child discovery, `repl-diskless-load on-empty-db`, no-longer-useful RDB child cancellation, replica-link reply violations, malformed-PSYNC-offset logging, chained replica `FLUSHDB` / `FLUSHALL` stream relay, `GETSET` rewrite, nonblocking `BRPOPLPUSH` / `BLMOVE` rewrite stats, and empty-blocking commandstats. The latest 2026-06-14 scoreboard `20260614T095418514204Z` still times out, but dropped the FLUSH stream line; remaining parsed lines are handshake timeout, BLPOP role-change digest, replica output bytes metric, and four multi-replica full-sync cases. |
+| `integration/replication` | timeout / 6 parsed lines | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, async-loading CONFIG exceptions, successful swapdb function payloads, parent-killed child discovery, `repl-diskless-load on-empty-db`, no-longer-useful RDB child cancellation, replica-link reply violations, malformed-PSYNC-offset logging, chained replica `FLUSHDB` / `FLUSHALL` stream relay, `GETSET` rewrite, nonblocking `BRPOPLPUSH` / `BLMOVE` rewrite stats, empty-blocking commandstats, and replica output-byte stats. The latest 2026-06-14 scoreboard `20260614T100741793243Z` still times out, but dropped the replica output bytes metric line; remaining parsed lines are handshake timeout, BLPOP role-change digest, and four multi-replica full-sync cases. |
 | `integration/replication-psync` | timeout | Red | Historical focused gate was 90/0 after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support. Current full-file reruns remain red, but the kit-first loop has moved the visible frontier: raw `-0` RDB fidelity was fixed, set-store commands now rewrite to deterministic `DEL` plus `SADD`, fresh full-sync catch-up now injects and retains a selected-DB prefix before active writes, and the latest replica-only DB 0 set residue is covered by a post-fullsync live-stream SELECT kit. The latest single Tcl scoreboard remains `20260614T091542767472Z`; do not use the six-minute file as the debugger. Rerun it as a scoreboard after the next kit batch or nightly pass. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
 | `integration/replica-redirect` | 11/0 | Green | `CLIENT CAPA REDIRECT`, MULTI/EXEC replica redirects, failover pause, waiting-for-sync responses, and blocked-client behavior during failover now pass in the direct Tcl file. The final 2026-06-14 kit-first pass moved the file from timeout/no-summary to parsed 10/1, reduced the stale DB 9 stream return to partial-resync/role-change invariants, then cleared the full file at 11/0 in 6 seconds. |
@@ -128,8 +128,8 @@ visible integration frontiers are now:
   upstream selected DB. Chained full sync now also treats the upstream stream
   DB as already represented by the downstream RDB, avoiding redundant `SELECT`
   frames before the first live write. Async failure rollback, handshake
-  timeout, output-byte metrics, multi-replica offset convergence, and diskless
-  pipe cleanup remain open.
+  timeout, multi-replica offset convergence, and diskless pipe cleanup remain
+  open.
 - `R2-BGSAVE-CATCHUP`: active replication BGSAVE jobs now retain appended
   replication bytes outside the circular backlog and use that buffer for
   post-RDB catch-up. Completed full-sync catch-up bytes are now also retained
@@ -3664,4 +3664,59 @@ Takeaway:
 - The next `integration/replication` slice should not revisit FLUSH stream
   relay. The current parsed frontier is handshake timeout, BLPOP role-change
   digest divergence, replica output bytes metric, and the four multi-replica
+  full-sync cases.
+
+### 2026-06-14 R2 follow-up: replica output bytes metric
+
+Scope:
+
+- The current `integration/replication` frontier included
+  `Replica output bytes metric`: after `CONFIG RESETSTAT`, Tcl read
+  `total_net_repl_output_bytes` from `INFO stats` and got an empty string
+  instead of `0`.
+- New fast coverage
+  `repl_correctness_kit::r2_info_stats_counts_replication_output_bytes` resets
+  stats, attaches a capture replica, verifies `INFO stats` exposes
+  `total_net_repl_output_bytes:0`, then dispatches a primary `SET` and proves
+  the counter includes the queued replication stream bytes.
+- `ServerMetrics` now owns `total_net_repl_output_bytes`, `CONFIG RESETSTAT`
+  clears it, `ReplicationState::queue_replica_output` increments it after a
+  successful replica send, and `INFO stats` renders the field.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands --test repl_correctness_kit -- --nocapture --test-threads=1
+cargo test -p redis-commands --test repl_buffer_kit -- --nocapture --test-threads=1
+cargo test -p redis-commands info::tests -- --nocapture --test-threads=1
+cargo test -p redis-core replication::tests -- --nocapture --test-threads=1
+cargo build -p redis-server --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-output-bytes-metric-full \
+  --profile integration-repl \
+  --timeout-s 420 \
+  --baseport 36000 \
+  --portcount 4000 \
+  --clients 1 \
+  --files integration/replication \
+  --isolated-tests-copy \
+  --skip-build
+```
+
+Results:
+
+- `repl_correctness_kit`: 36 passed, 0 failed.
+- `repl_buffer_kit`: 15 passed, 0 failed.
+- `redis-commands info::tests`: 4 passed, 0 failed.
+- `redis-core` replication unit filter: 15 passed, 0 failed.
+- `cargo build -p redis-server --bin redis-server`: passed.
+- Full `integration/replication`
+  `harness/oracle/results/tcl-survey/20260614T100741793243Z/result.json`:
+  still timed out at 420 seconds, but the parsed frontier moved from 7 lines
+  to 6 and the `Replica output bytes metric` line is gone.
+
+Takeaway:
+
+- The current parsed `integration/replication` frontier is now handshake
+  timeout, BLPOP role-change digest divergence, and the four multi-replica
   full-sync cases.

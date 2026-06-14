@@ -2125,6 +2125,9 @@ impl ReplicationState {
         let send_result = match guard.get(&client_id) {
             Some(r) => {
                 if r.outbound_sender.send(bytes).is_ok() {
+                    crate::metrics::server_metrics()
+                        .total_net_repl_output_bytes
+                        .fetch_add(len as u64, Ordering::Relaxed);
                     let pending = r
                         .pending_output_bytes
                         .fetch_add(len, Ordering::Relaxed)

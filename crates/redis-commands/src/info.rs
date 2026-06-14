@@ -164,6 +164,7 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         active_time_us
     };
     let total_error_replies = metrics.total_error_replies.load(Ordering::Relaxed);
+    let total_net_repl_output_bytes = metrics.total_net_repl_output_bytes.load(Ordering::Relaxed);
     let client_query_buffer_limit_disconnections = metrics
         .client_query_buffer_limit_disconnections
         .load(Ordering::Relaxed);
@@ -519,6 +520,11 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let _ = writeln!(buf, "instantaneous_ops_per_sec:0\r");
         let _ = writeln!(buf, "total_net_input_bytes:0\r");
         let _ = writeln!(buf, "total_net_output_bytes:0\r");
+        let _ = writeln!(
+            buf,
+            "total_net_repl_output_bytes:{}\r",
+            total_net_repl_output_bytes
+        );
         let _ = writeln!(buf, "rejected_connections:{}\r", rejected);
         let (sync_full, sync_partial_ok, sync_partial_err) =
             redis_core::replication::global_replication_state().sync_counters();
