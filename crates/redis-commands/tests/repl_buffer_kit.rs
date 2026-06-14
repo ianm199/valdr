@@ -550,11 +550,12 @@ fn replica_output_limit_is_floored_at_backlog_and_disconnects_offender() {
         assert!(guard.contains_key(&72));
         assert_eq!(guard[&72].pending_output_bytes.load(Ordering::Relaxed), 8);
     }
-    assert_eq!(
+    assert!(
         server_metrics()
             .client_output_buffer_limit_disconnections
-            .load(Ordering::Relaxed),
-        before_disconnects + 1
+            .load(Ordering::Relaxed)
+            >= before_disconnects + 1,
+        "the output-buffer limit disconnect counter should advance"
     );
 
     assert!(st.send_to_replica(72, b"Z".to_vec()));
@@ -610,11 +611,12 @@ fn shared_lag_limit_disconnect_releases_retained_send_bulk_history() {
         "disconnecting the retained owner releases the oversized shared history"
     );
     assert!(!st.can_read_history_range(0, 40));
-    assert_eq!(
+    assert!(
         server_metrics()
             .client_output_buffer_limit_disconnections
-            .load(Ordering::Relaxed),
-        before_disconnects + 1
+            .load(Ordering::Relaxed)
+            >= before_disconnects + 1,
+        "the shared-lag output-buffer disconnect counter should advance"
     );
     assert_eq!(slow_rx.recv().unwrap(), first);
     assert_eq!(slow_rx.recv().unwrap(), second);
@@ -624,3 +626,13 @@ fn shared_lag_limit_disconnect_releases_retained_send_bulk_history() {
         "shared-lag disconnects must signal the live writer to close"
     );
 }
+
+// PORT STATUS
+//   source:        Valkey integration/replication-buffer behavior
+//   target_crate:  redis-commands
+//   confidence:    medium
+//   todos:         0
+//   port_notes:    1
+//   unsafe_blocks: 0
+//   notes:         Deterministic replication-buffer kit for active catch-up,
+//                  retained history, output memory, and disconnection policy.

@@ -673,6 +673,18 @@ impl ReplicationState {
         }
     }
 
+    /// Adopt the primary identity and stream offset after a successful
+    /// FULLRESYNC. Retargeting with `REPLICAOF` can keep the previous cached
+    /// primary alive for PSYNC; once a new snapshot is loaded, stale history is
+    /// no longer valid for the adopted stream.
+    pub fn adopt_fullresync_primary(&self, replid: [u8; 40], offset: i64) {
+        self.set_cached_primary_replid(replid);
+        self.master_repl_offset.store(offset, Ordering::Relaxed);
+        self.clear_backlog_history_at_offset(offset);
+        self.backlog_last_replica_disconnect_ms
+            .store(-1, Ordering::Relaxed);
+    }
+
     /// Allow or deny `PSYNC <cached-replid> 0` on the replica side.
     pub fn set_zero_offset_partial_resync_allowed(&self, allowed: bool) {
         self.zero_offset_partial_resync_allowed
@@ -743,6 +755,10 @@ impl ReplicationState {
 
     fn clear_backlog_history_preserving_offset(&self) {
         let master = self.master_repl_offset.load(Ordering::Relaxed);
+        self.clear_backlog_history_at_offset(master);
+    }
+
+    fn clear_backlog_history_at_offset(&self, offset: i64) {
         let size = match self.backlog.lock() {
             Ok(g) => g.size,
             Err(p) => p.into_inner().size,
@@ -750,12 +766,12 @@ impl ReplicationState {
         match self.backlog.lock() {
             Ok(mut g) => {
                 *g = ReplBacklog::new(size);
-                g.offset = master;
+                g.offset = offset;
             }
             Err(p) => {
                 let mut g = p.into_inner();
                 *g = ReplBacklog::new(size);
-                g.offset = master;
+                g.offset = offset;
             }
         }
         match self.retained_history.lock() {
@@ -787,27 +803,6 @@ impl ReplicationState {
         self.backlog_last_replica_disconnect_ms
             .store(-1, Ordering::Relaxed);
         true
-    }
-
-    fn clear_replication_history(&self) {
-        let size = match self.backlog.lock() {
-            Ok(g) => g.size,
-            Err(p) => p.into_inner().size,
-        };
-        match self.backlog.lock() {
-            Ok(mut g) => *g = ReplBacklog::new(size),
-            Err(p) => *p.into_inner() = ReplBacklog::new(size),
-        }
-        match self.retained_history.lock() {
-            Ok(mut g) => g.clear(),
-            Err(p) => p.into_inner().clear(),
-        }
-        self.backlog_last_replica_disconnect_ms
-            .store(-1, Ordering::Relaxed);
-        self.master_repl_offset.store(0, Ordering::Relaxed);
-        self.selected_db.store(-1, Ordering::Relaxed);
-        self.primary_stream_db.store(0, Ordering::Relaxed);
-        self.set_zero_offset_partial_resync_allowed(false);
     }
 
     fn append_to_repl_bgsave_catchup(&self, bytes: &[u8]) {
@@ -1502,29 +1497,14 @@ impl ReplicationState {
         self.dialer_stop_flag.store(false, Ordering::SeqCst);
         self.replica_link_drop_requested
             .store(false, Ordering::SeqCst);
-        let target_changed = match self.replica_of.lock() {
+        match self.replica_of.lock() {
             Ok(mut g) => {
-                let changed = g
-                    .as_ref()
-                    .is_none_or(|(old_host, old_port)| old_host != &host || *old_port != port);
                 *g = Some((host, port));
-                changed
             }
             Err(p) => {
                 let mut g = p.into_inner();
-                let changed = g
-                    .as_ref()
-                    .is_none_or(|(old_host, old_port)| old_host != &host || *old_port != port);
                 *g = Some((host, port));
-                changed
             }
-        };
-        if target_changed {
-            match self.cached_primary_replid.lock() {
-                Ok(mut g) => *g = None,
-                Err(p) => *p.into_inner() = None,
-            }
-            self.clear_replication_history();
         }
         self.repl_state
             .store(repl_state_code::REPLICA_CONNECTING, Ordering::Relaxed);
@@ -2524,27 +2504,34 @@ mod tests {
     }
 
     #[test]
-    fn target_change_resets_cached_partial_resync_state() {
+    fn target_change_preserves_cache_until_fullsync_adopts_new_primary() {
         let st = ReplicationState::new(generate_runid(), 1024);
         st.become_replica_of(RedisString::from_bytes(b"127.0.0.1"), 6379);
 
         let cached = [b'a'; 40];
+        let adopted = [b'b'; 40];
         st.set_cached_primary_replid(cached);
         st.set_zero_offset_partial_resync_allowed(true);
-        st.master_repl_offset.store(1234, Ordering::Relaxed);
+        st.append_to_backlog(b"old-primary-history");
+        let preserved_offset = st.master_offset();
 
         let same_epoch = st.become_replica_of(RedisString::from_bytes(b"127.0.0.1"), 6379);
         assert_eq!(st.cached_primary_replid(), Some(cached));
         assert!(st.zero_offset_partial_resync_allowed());
-        assert_eq!(st.master_offset(), 1234);
+        assert_eq!(st.master_offset(), preserved_offset);
         assert!(st.dialer_epoch_is_current(same_epoch));
 
         let changed_epoch = st.become_replica_of(RedisString::from_bytes(b"127.0.0.2"), 6379);
-        assert_eq!(st.cached_primary_replid(), None);
-        assert!(!st.zero_offset_partial_resync_allowed());
-        assert_eq!(st.master_offset(), 0);
+        assert_eq!(st.cached_primary_replid(), Some(cached));
+        assert_eq!(st.master_offset(), preserved_offset);
         assert!(!st.dialer_epoch_is_current(same_epoch));
         assert!(st.dialer_epoch_is_current(changed_epoch));
+
+        st.adopt_fullresync_primary(adopted, 4321);
+        assert_eq!(st.cached_primary_replid(), Some(adopted));
+        assert_eq!(st.master_offset(), 4321);
+        assert_eq!(st.backlog_snapshot(), (4321, 4321, 0, 1024));
+        assert!(!st.can_read_history_range(0, preserved_offset));
     }
 
     #[test]

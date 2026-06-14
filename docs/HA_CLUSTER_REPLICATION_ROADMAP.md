@@ -452,7 +452,26 @@ Work packets:
   for retained full-sync history beyond the circular backlog; focused
   `integration/replication-buffer` stayed at 12/4, narrowing the next real
   attack to live large-catch-up offset advancement while another full-sync
-  owner still pins the shared history.
+  owner still pins the shared history. A 4 MiB replica stream read-window probe
+  kept the dispatcher path intact and all Rust kits green, but the first focused
+  scoreboard artifact
+  `harness/oracle/results/tcl-survey/20260614T063602219108Z/result.json` stayed
+  at 12/4, proving raw read-window size was not the missing invariant by
+  itself. The upstream-shaped cache lifecycle slice then preserved the cached
+  primary across a temporary `REPLICAOF` detour and only cleared stale history
+  after a successful FULLRESYNC was adopted; `psync_reconnect_kit` now covers
+  the detour and explicit fullsync-adoption reset. With `replica_dialer::tests`,
+  `repl_buffer_kit`, `psync_reconnect_kit`, `fullsync_lifecycle_kit`,
+  `cargo check -p redis-core -p redis-commands -p redis-server`, and
+  `cargo build -p redis-server --bin redis-server` green, the sequential focused
+  scoreboard
+  `python3 harness/oracle/tcl-survey.py --runner-id repl-buffer-cache-detour --profile integration-repl --timeout-s 300 --baseport 52000 --portcount 4000 --clients 1 --skip-build --files integration/replication-buffer`
+  moved `integration/replication-buffer` to 13/3 in artifact
+  `harness/oracle/results/tcl-survey/20260614T064742027998Z/result.json`.
+  Remaining failures are now narrower: dual-channel `yes` still times out on
+  replica1 catch-up and fails the follow-on histlen assertion, while
+  dual-channel `no` reaches the later assertion that replica2 must still be in
+  `sync` while BGSAVE remains in progress.
 
 Gate:
 

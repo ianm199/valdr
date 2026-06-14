@@ -35,7 +35,7 @@ static GLOBAL_OUR_PORT: OnceLock<u16> = OnceLock::new();
 static GLOBAL_RDB_DIR: OnceLock<String> = OnceLock::new();
 static RUNTIME_APPLY_TX: OnceLock<Sender<ReplicaApplyRequest>> = OnceLock::new();
 const RUNTIME_APPLY_TIMEOUT: Duration = Duration::from_secs(30);
-const REPLICA_STREAM_READ_BUFFER_SIZE: usize = 1024 * 1024;
+const REPLICA_STREAM_READ_BUFFER_SIZE: usize = 4 * 1024 * 1024;
 
 /// Work the dialer thread hands to the runtime owner loop because the owner —
 /// not the dialer — owns the live DB slice.
@@ -150,10 +150,7 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
 
         let (online_offset, mut mark_connected_after_fullsync_idle) = match outcome {
             PsyncOutcome::FullResync { offset, replid } => {
-                // Adopt the primary's replid so the next reconnect can request a
-                // partial resync against it.
                 let async_loading = repl.cached_primary_replid().is_some_and(|id| id == replid);
-                repl.set_cached_primary_replid(replid);
                 repl.set_replica_link(replica_link_code::TRANSFER);
                 publish_fullsync_loading_state(async_loading);
                 let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
@@ -187,7 +184,7 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
                     continue;
                 }
                 clear_fullsync_loading_state();
-                repl.master_repl_offset.store(offset, Ordering::SeqCst);
+                repl.adopt_fullresync_primary(replid, offset);
                 (offset, true)
             }
             PsyncOutcome::Continue { offset } => {
@@ -939,7 +936,7 @@ mod tests {
     fn large_partial_resync_commands_batch_by_read_window() {
         let value = vec![b'x'; 10_000];
         let mut stream = Vec::new();
-        for i in 0..128 {
+        for i in 0..512 {
             let key = format!("k:{i}");
             stream.extend_from_slice(&build_multibulk(&[b"SET", key.as_bytes(), &value]));
         }
@@ -952,7 +949,7 @@ mod tests {
             "10KB catch-up commands should not degrade into one RuntimeOwner apply request per command: {batches:?}"
         );
         assert!(
-            batches.iter().any(|count| *count >= 100),
+            batches.iter().any(|count| *count >= 400),
             "the first full read window should amortize RuntimeOwner apply roundtrips: {batches:?}"
         );
     }

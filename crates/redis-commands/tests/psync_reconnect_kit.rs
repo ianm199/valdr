@@ -195,7 +195,9 @@ fn cleanup_repl_bgsave(repl: &Arc<ReplicationState>) {
 fn reset_global_primary(repl: &Arc<ReplicationState>, backlog_size: usize) {
     cleanup_repl_bgsave(repl);
     repl.resize_backlog_preserving_history(backlog_size);
-    repl.become_replica_of(arg(b"psync-kit-reset"), 1);
+    let runid = *repl.runid();
+    repl.adopt_fullresync_primary(runid, 0);
+    repl.set_zero_offset_partial_resync_allowed(false);
     repl.become_master();
 }
 
@@ -686,11 +688,12 @@ fn malformed_psync_offset_errors_without_fullsync_side_effects() {
 }
 
 #[test]
-fn target_change_clears_cached_reconnect_state_but_same_target_preserves_it() {
+fn target_detour_preserves_cached_reconnect_state_until_fullsync_adopts_new_primary() {
     let st = ReplicationState::new([b'c'; 40], 64);
     st.become_replica_of(arg(b"127.0.0.1"), 6379);
 
     let cached = [b'd'; 40];
+    let adopted = [b'e'; 40];
     st.set_cached_primary_replid(cached);
     st.append_to_backlog(&resp(&[b"SET", b"old-primary", b"1"]));
     let preserved_offset = st.master_offset();
@@ -700,12 +703,24 @@ fn target_change_clears_cached_reconnect_state_but_same_target_preserves_it() {
     assert_eq!(st.master_offset(), preserved_offset);
 
     st.become_replica_of(arg(b"127.0.0.2"), 6379);
-    assert_eq!(st.cached_primary_replid(), None);
-    assert_eq!(st.master_offset(), 0);
+    assert_eq!(st.cached_primary_replid(), Some(cached));
+    assert_eq!(st.master_offset(), preserved_offset);
+
+    st.become_replica_of(arg(b"127.0.0.1"), 6379);
+    assert_eq!(st.cached_primary_replid(), Some(cached));
+    assert_eq!(
+        st.master_offset(),
+        preserved_offset,
+        "a temporary REPLICAOF detour must not destroy the original master's PSYNC cache"
+    );
+
+    st.adopt_fullresync_primary(adopted, 9000);
+    assert_eq!(st.cached_primary_replid(), Some(adopted));
+    assert_eq!(st.master_offset(), 9000);
     assert_eq!(
         st.backlog_snapshot().2,
         0,
-        "retargeting to a different primary must discard old backlog bytes"
+        "adopting a new FULLRESYNC stream must discard old backlog bytes"
     );
 }
 
@@ -745,3 +760,13 @@ fn client_kill_primary_addr_requests_replica_dialer_reconnect() {
     assert!(!repl.take_replica_link_drop_request());
     repl.become_master();
 }
+
+// PORT STATUS
+//   source:        Valkey integration/replication-psync behavior
+//   target_crate:  redis-commands
+//   confidence:    medium
+//   todos:         0
+//   port_notes:    1
+//   unsafe_blocks: 0
+//   notes:         Deterministic PSYNC reconnect kit for cached primary,
+//                  backlog, retained history, target detours, and counters.
