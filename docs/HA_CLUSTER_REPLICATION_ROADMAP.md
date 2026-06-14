@@ -417,9 +417,17 @@ Work packets:
   syncs while still using the ordinary RDB transport. Focused
   `integration/replication-buffer` artifact
   `harness/oracle/results/tcl-survey/20260614T044906327151Z/result.json`
-  moved the gate to 12/4. Remaining buffer work is later slow-replica
-  output-buffer disconnect trimming, broader partial-resync history ownership,
-  and real dual-channel RDB transport beyond the compatibility accounting shim.
+  moved the gate to 12/4. The next kit-first drain-visibility slice keeps
+  primary-side full-sync replicas in `send_bulk` until their queued RDB/catch-up
+  bytes leave the RuntimeOwner write buffer, moves replica-side ROLE to
+  `connected` only after full-sync stream idle, accounts owner-loop replica
+  writes through the same pending-output drain path, and proves the active
+  full-sync history can satisfy an online replica reconnect while another waiter
+  pins it. Short Rust kits plus a two-server live probe are now the debugger for
+  this surface; the focused Tcl file remains the scoreboard gate. Remaining
+  buffer work is later slow-replica output-buffer disconnect trimming, broader
+  partial-resync history ownership, and real dual-channel RDB transport beyond
+  the compatibility accounting shim.
 
 Gate:
 

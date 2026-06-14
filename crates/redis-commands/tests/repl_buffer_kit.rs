@@ -257,6 +257,46 @@ fn active_fullsync_catchup_extends_readable_history_beyond_backlog() {
 }
 
 #[test]
+fn online_replica_reconnect_can_consume_active_history_pinned_by_other_waiter() {
+    let st = ReplicationState::new(generate_runid(), 4);
+    let online_rx = attach_replica(&st, 94, 0);
+    let _waiter_rx = attach_replica(&st, 95, 0);
+    install_job(&st, vec![95], 0);
+
+    st.append_to_backlog(b"abcdef");
+    st.remove_replica(94);
+    st.append_to_backlog(b"ghijkl");
+
+    assert_eq!(
+        st.backlog_snapshot(),
+        (0, 12, 12, 4),
+        "the waiting full-sync replica should pin all catch-up bytes for PSYNC"
+    );
+    assert!(st.can_read_history_range(0, st.master_offset()));
+    assert_eq!(
+        st.read_history_at(0, st.master_offset() as usize)
+            .as_deref(),
+        Some(b"abcdefghijkl".as_slice())
+    );
+
+    let reconnected_rx = attach_replica(&st, 96, 0);
+    let catch_up = st
+        .read_history_at(0, st.master_offset() as usize)
+        .expect("active catch-up should satisfy the reconnect");
+    assert!(st.send_to_replica(96, catch_up));
+    assert_eq!(reconnected_rx.recv().unwrap(), b"abcdefghijkl".to_vec());
+    assert!(
+        online_rx.try_recv().is_err(),
+        "the old disconnected replica channel must not receive reconnect catch-up"
+    );
+    assert_eq!(
+        st.repl_bgsave_catchup_len(),
+        12,
+        "the full-sync waiter still pins active history after the online reconnect"
+    );
+}
+
+#[test]
 fn dual_channel_memory_accounting_excludes_active_fullsync_catchup() {
     let st = ReplicationState::new(generate_runid(), 4);
     let _rx = attach_replica(&st, 101, 0);

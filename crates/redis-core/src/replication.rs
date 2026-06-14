@@ -1961,7 +1961,6 @@ impl ReplicationState {
             if catch_up_queued {
                 delivered_replicas.push(*client_id);
             }
-            self.set_replica_state(*client_id, ReplicaState::Online);
         }
 
         let retained_catchup_len = match catch_up.filter(|bytes| !bytes.is_empty()) {
@@ -2154,6 +2153,9 @@ impl ReplicationState {
                     if let Ok(mut guard) = crate::client_info::client_info_registry().lock() {
                         guard.set_output_buffer_memory(client_id, next);
                     }
+                    if next == 0 && replica.state() == ReplicaState::SendingRdb {
+                        replica.set_state(ReplicaState::Online);
+                    }
                     return next;
                 }
                 Err(actual) => current = actual,
@@ -2172,6 +2174,19 @@ impl ReplicationState {
         if let Some(r) = guard.get(&client_id) {
             r.set_state(state);
         }
+    }
+
+    pub fn fullsync_transfer_in_progress(&self) -> bool {
+        if self.repl_child_pid() != 0 {
+            return true;
+        }
+        let guard = match self.replicas.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard
+            .values()
+            .any(|replica| replica.state() == ReplicaState::SendingRdb)
     }
 }
 

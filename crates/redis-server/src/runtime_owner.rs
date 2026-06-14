@@ -478,6 +478,17 @@ impl ClientSlot {
         }
     }
 
+    fn note_written_bytes(&mut self, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
+        self.client.net_output_bytes = self.client.net_output_bytes.saturating_add(bytes as u64);
+        if self.client.is_replica {
+            redis_core::replication::global_replication_state()
+                .account_replica_output_drained(self.client.id, bytes);
+        }
+    }
+
     fn publish_client_metadata(&self) {
         if let Ok(mut guard) = client_info_registry().lock() {
             guard.update_client_metadata(&self.client);
@@ -1934,8 +1945,7 @@ impl RuntimeOwner {
 
         if consumed > 0 {
             slot.write_buffer.consume_front(consumed);
-            slot.client.net_output_bytes =
-                slot.client.net_output_bytes.saturating_add(consumed as u64);
+            slot.note_written_bytes(consumed);
             slot.reconcile_output_buffer_after_write();
             slot.publish_client_metadata();
             progressed = true;
@@ -2401,6 +2411,7 @@ impl RuntimeOwner {
                 return false;
             }
         };
+        let mut written_total = 0usize;
         while !buffer.is_empty() {
             match stream.write(buffer.as_bytes()) {
                 Ok(0) => {
@@ -2409,8 +2420,7 @@ impl RuntimeOwner {
                 }
                 Ok(n) => {
                     buffer.consume_front(n);
-                    slot.client.net_output_bytes =
-                        slot.client.net_output_bytes.saturating_add(n as u64);
+                    written_total = written_total.saturating_add(n);
                     progressed = true;
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
@@ -2421,6 +2431,7 @@ impl RuntimeOwner {
                 }
             }
         }
+        slot.note_written_bytes(written_total);
         slot.reconcile_output_buffer_after_write();
         if progressed {
             slot.publish_client_metadata();
@@ -2796,6 +2807,59 @@ mod tests {
         slot.mark_closed();
         assert!(slot.query_buffer().is_empty());
         assert!(slot.is_closed());
+    }
+
+    #[test]
+    fn replica_slot_write_drain_updates_replication_pending_output() {
+        let repl = redis_core::replication::global_replication_state();
+        let replica_id = 9_900_123;
+        repl.remove_replica(replica_id);
+
+        let (tx, _rx) = mpsc::channel();
+        repl.add_replica(redis_core::replication::ReplicaConn::new(
+            replica_id,
+            redis_core::replication::ReplicaState::SendingRdb,
+            0,
+            tx,
+        ));
+        assert!(repl.send_to_replica(replica_id, b"abcdef".to_vec()));
+
+        let mut client = Client::new(replica_id);
+        client.is_replica = true;
+        let mut slot = ClientSlot::new(SlotId::new(4), client);
+        let pending_for_replica = || {
+            let guard = match repl.replicas.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            guard
+                .get(&replica_id)
+                .expect("replica record")
+                .pending_output_bytes
+                .load(Ordering::Relaxed)
+        };
+
+        slot.note_written_bytes(2);
+        assert_eq!(pending_for_replica(), 4);
+        assert_eq!(
+            repl.replicas_snapshot()
+                .into_iter()
+                .find(|(id, _, _, _, _)| *id == replica_id)
+                .map(|(_, state, _, _, _)| state),
+            Some("send_bulk")
+        );
+
+        slot.note_written_bytes(4);
+        assert_eq!(pending_for_replica(), 0);
+        assert_eq!(
+            repl.replicas_snapshot()
+                .into_iter()
+                .find(|(id, _, _, _, _)| *id == replica_id)
+                .map(|(_, state, _, _, _)| state),
+            Some("online")
+        );
+
+        repl.remove_replica(replica_id);
     }
 
     #[test]

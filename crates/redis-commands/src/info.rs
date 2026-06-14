@@ -409,7 +409,7 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
             ctx.server().dirty()
         );
         let repl_bgsave_in_progress =
-            redis_core::replication::global_replication_state().repl_child_pid() != 0;
+            redis_core::replication::global_replication_state().fullsync_transfer_in_progress();
         let _ = writeln!(
             buf,
             "rdb_bgsave_in_progress:{}\r",
@@ -617,7 +617,7 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let dual_channel_waiters = if ctx.live_config().dual_channel_replication_enabled() {
             replicas
                 .iter()
-                .filter(|(_, state, _, _, _)| *state == "wait_bgsave")
+                .filter(|(_, state, _, _, _)| *state == "wait_bgsave" || *state == "send_bulk")
                 .count()
         } else {
             0
@@ -668,7 +668,9 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
                 replica_idx, port, state, offset, lag
             );
             replica_idx += 1;
-            if ctx.live_config().dual_channel_replication_enabled() && *state == "wait_bgsave" {
+            if ctx.live_config().dual_channel_replication_enabled()
+                && (*state == "wait_bgsave" || *state == "send_bulk")
+            {
                 // Surface the provisional RDB channel expected by Valkey's
                 // dual-channel observability tests. The Rust data path still
                 // transfers the RDB through the ordinary full-sync owner.
@@ -959,6 +961,7 @@ mod tests {
         let repl = global_replication_state();
         let (online_tx, _online_rx) = mpsc::channel();
         let (sync_tx, _sync_rx) = mpsc::channel();
+        let (send_tx, _send_rx) = mpsc::channel();
         repl.add_replica(ReplicaConn::new(
             980_780,
             ReplicaState::Online,
@@ -971,6 +974,12 @@ mod tests {
             42,
             sync_tx,
         ));
+        repl.add_replica(ReplicaConn::new(
+            980_783,
+            ReplicaState::SendingRdb,
+            43,
+            send_tx,
+        ));
 
         let mut db = RedisDb::new(0);
         let mut client = Client::new(980_782);
@@ -981,10 +990,14 @@ mod tests {
         clear_repl_info_state();
         let reply = client.drain_reply();
         let text = bulk_text(&reply);
-        assert_eq!(field_value(text, "connected_slaves"), "3");
+        assert_eq!(field_value(text, "connected_slaves"), "5");
         assert!(
             text.contains("state=wait_bgsave,offset=42,lag=0,type=rdb-channel"),
             "INFO replication should expose a provisional rdb-channel line: {text}"
+        );
+        assert!(
+            text.contains("state=send_bulk,offset=43,lag=0,type=rdb-channel"),
+            "INFO replication should expose an RDB-channel line while full-sync output is pending: {text}"
         );
     }
 }

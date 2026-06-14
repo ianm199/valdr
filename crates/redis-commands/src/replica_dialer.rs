@@ -147,7 +147,7 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
             return;
         }
 
-        let online_offset = match outcome {
+        let (online_offset, mut mark_connected_after_fullsync_idle) = match outcome {
             PsyncOutcome::FullResync { offset, replid } => {
                 // Adopt the primary's replid so the next reconnect can request a
                 // partial resync against it.
@@ -187,7 +187,7 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
                 }
                 clear_fullsync_loading_state();
                 repl.master_repl_offset.store(offset, Ordering::SeqCst);
-                offset
+                (offset, true)
             }
             PsyncOutcome::Continue { offset } => {
                 // Partial resync: no RDB. The backlog catch-up bytes arrive inline
@@ -197,7 +197,7 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
                     "redis-server: replica: +CONTINUE partial resync from offset {}",
                     offset
                 );
-                offset
+                (offset, false)
             }
         };
 
@@ -205,7 +205,9 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
         crate::aof::force_current_writer_fsynced_repl_offset(online_offset);
         repl.repl_state
             .store(repl_state_code::REPLICA_ONLINE, Ordering::SeqCst);
-        repl.set_replica_link(replica_link_code::CONNECTED);
+        if !mark_connected_after_fullsync_idle {
+            repl.set_replica_link(replica_link_code::CONNECTED);
+        }
         complete_manual_failover_after_psync(&repl);
 
         let periodic_ack_stream = stream.try_clone().ok();
@@ -215,7 +217,12 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
                 .name("replica-ack".to_string())
                 .spawn(move || periodic_ack_loop(ack_stream, repl_for_ack, dialer_epoch));
         }
-        run_replica_sink_loop(&stream, &repl, dialer_epoch);
+        run_replica_sink_loop(
+            &stream,
+            &repl,
+            dialer_epoch,
+            &mut mark_connected_after_fullsync_idle,
+        );
         if !repl.dialer_epoch_is_current(dialer_epoch) {
             return;
         }
@@ -267,7 +274,12 @@ fn wait_for_replica_dialer_pause(repl: &Arc<ReplicationState>, dialer_epoch: u64
     }
 }
 
-fn run_replica_sink_loop(stream: &TcpStream, repl: &ReplicationState, dialer_epoch: u64) {
+fn run_replica_sink_loop(
+    stream: &TcpStream,
+    repl: &ReplicationState,
+    dialer_epoch: u64,
+    mark_connected_after_fullsync_idle: &mut bool,
+) {
     let mut read_buf = Vec::new();
     let mut tmp = [0u8; 8192];
     let mut command_batch: Vec<(Vec<RedisString>, i64)> = Vec::new();
@@ -288,6 +300,7 @@ fn run_replica_sink_loop(stream: &TcpStream, repl: &ReplicationState, dialer_epo
                     io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                 ) =>
             {
+                mark_fullsync_link_connected_after_idle(repl, mark_connected_after_fullsync_idle);
                 continue;
             }
             Err(_) => return,
@@ -328,6 +341,14 @@ fn run_replica_sink_loop(stream: &TcpStream, repl: &ReplicationState, dialer_epo
             return;
         }
     }
+}
+
+fn mark_fullsync_link_connected_after_idle(repl: &ReplicationState, pending: &mut bool) {
+    if !*pending {
+        return;
+    }
+    repl.set_replica_link(replica_link_code::CONNECTED);
+    *pending = false;
 }
 
 enum ReplicaStreamFrame {
@@ -873,6 +894,27 @@ mod tests {
         assert!(
             !replica_command_batch_has_open_transaction(&batch),
             "the transaction envelope is complete once EXEC has been parsed"
+        );
+    }
+
+    #[test]
+    fn fullsync_link_stays_sync_until_stream_idle() {
+        let repl = local_state();
+        repl.set_replica_link(replica_link_code::TRANSFER);
+        let mut pending = true;
+
+        assert_eq!(repl.replica_link_str(), "sync");
+        mark_fullsync_link_connected_after_idle(&repl, &mut pending);
+
+        assert_eq!(repl.replica_link_str(), "connected");
+        assert!(!pending);
+
+        repl.set_replica_link(replica_link_code::TRANSFER);
+        mark_fullsync_link_connected_after_idle(&repl, &mut pending);
+        assert_eq!(
+            repl.replica_link_str(),
+            "sync",
+            "once the pending flag is consumed, later idle checks are no-ops"
         );
     }
 

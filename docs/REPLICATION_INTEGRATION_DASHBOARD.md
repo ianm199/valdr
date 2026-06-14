@@ -73,7 +73,7 @@ Artifact:
 | `integration/block-repl` | 2/0 | Green | Real `DEBUG DIGEST` plus single blocked-pop wake propagation now validates the list/zset blocking workload. |
 | `integration/replication-3` | 3/4 | Red | Expiry consistency, writable-replica expired-key behavior, and PFCOUNT expired-key/cache semantics. |
 | `integration/replication-4` | 15/2 | Red | SPOP rewrite cases now pass; remaining failures are divergence/default writable-replica cases. |
-| `integration/replication-buffer` | 12/4 | Red | Shared/private output ownership, writer-side drain, active full-sync catch-up release, and the empty-RDB zero-offset reconnect guard moved the backlog-histlen outgrowth assertions, the non-dual-channel shrink assertion, and the dual-channel low-output-buffer partial-resync assertion green. INFO now splits ordinary replica client output from Valkey-style replication-buffer fields and exposes provisional dual-channel `rdb-channel` entries for waiting full-sync replicas. RuntimeOwner applies split transaction catch-up with one pseudo-client, and dual-capable replicas now advertise `dual-channel` so the master accounts the logical main-channel PSYNC for full syncs while still using the ordinary RDB transport. Remaining failures are the broader partial-resync beyond backlog and backlog-memory shrink cases for both dual and non-dual modes. |
+| `integration/replication-buffer` | 12/4 | Red | Shared/private output ownership, writer-side drain, active full-sync catch-up release, and the empty-RDB zero-offset reconnect guard moved the backlog-histlen outgrowth assertions, the non-dual-channel shrink assertion, and the dual-channel low-output-buffer partial-resync assertion green. INFO now splits ordinary replica client output from Valkey-style replication-buffer fields and exposes provisional dual-channel `rdb-channel` entries for waiting and sending full-sync replicas. RuntimeOwner applies split transaction catch-up with one pseudo-client, dual-capable replicas advertise `dual-channel`, and owner-loop writes now drain replica pending-output so full-sync `send_bulk` state ends when queued bytes leave the writer. Remaining failures are the broader partial-resync beyond backlog and backlog-memory shrink cases for both dual and non-dual modes. |
 | `integration/replication` | 40/27 | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, the first async-loading CONFIG exception, successful swapdb function-context mismatch, parent-killed child discovery, `repl-diskless-load on-empty-db`, no-longer-useful RDB child cancellation, all four replica-link reply-violation assertions, malformed-PSYNC-offset logging, chained replica `FLUSHDB` / `FLUSHALL` stream relay, `GETSET` rewrite, nonblocking `BRPOPLPUSH` / `BLMOVE` rewrite stats, and empty-blocking `BRPOPLPUSH` / `BLMOVE` commandstats via real digest waits. Remaining failures are counted full-sync, diskless pipe/drop, blocked-list role-change, cache-master, lazy-expire, and old-data rollback cases. |
 | `integration/replication-psync` | timeout | Red | Historical focused gate was 90/0 after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support. Current full-file reruns still time out, but the full-sync detached-tail kit removed the first broad no-reconnect inconsistency. The latest oracle dump narrowed the visible data divergence to a single `0` vs `-0` string value; a fast kit then found and fixed an RDB raw numeric-string fidelity bug in that family. Full Tcl has not been rerun after that fix. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
@@ -130,7 +130,9 @@ visible integration frontiers are now:
 - `R2-BGSAVE-CATCHUP`: active replication BGSAVE jobs now retain appended
   replication bytes outside the circular backlog and use that buffer for
   post-RDB catch-up. Completed full-sync catch-up bytes are now also retained
-  while dependent replicas still pin them.
+  while dependent replicas still pin them. The kit surface now also proves an
+  online replica reconnect can consume active full-sync history while another
+  waiter keeps that history pinned.
 - `R3-RECONNECT-MATRIX`: extend the new master-side PSYNC decision matrix into
   live replica-dialer reconnect coverage before grinding `replication-psync`.
   Current full-file PSYNC reruns time out again with master/replica
@@ -140,10 +142,11 @@ visible integration frontiers are now:
   coverage, including an RDB raw-string load bug where `-0` was promoted to
   integer `0`; keep using these kits as the debugger and reserve the full Tcl
   matrix for a scoreboard rerun.
-- `R2-BUFFER-LIMITS`: accounting aliases, fan-out accounting, and retained
-  full-sync history are covered; implement broader shared-buffer memory
-  accounting, backlog outgrowth under slow online replicas, and replica
-  output-buffer disconnection semantics behind `replication-buffer`.
+- `R2-BUFFER-LIMITS`: accounting aliases, fan-out accounting, retained
+  full-sync history, owner-loop replica drain, and full-sync `send_bulk`
+  visibility are covered; implement broader shared-buffer memory accounting,
+  backlog outgrowth under slow online replicas, and replica output-buffer
+  disconnection semantics behind `replication-buffer`.
 - `R4-WAIT/WAITAOF`: role-change unblock now covers both WAIT and WAITAOF for
   `REPLICAOF` topology changes; replica FACK/disconnect semantics remain open.
 - `R4-AOF-FULLSYNC`: `replication-aof-sync` is now green after full-sync RDB
@@ -1294,6 +1297,62 @@ Takeaway:
   remaining four failures are the dual/non-dual pair for partial resync beyond
   configured backlog and the dual/non-dual pair for backlog-memory shrink after
   slow-replica disconnect.
+
+### R2-BUFFER-FULLSYNC-DRAIN-VISIBILITY
+
+Status: kit-first slice completed on 2026-06-14; focused Tcl scoreboard not
+rerun after this packet.
+
+Implementation:
+
+- Master-side full-sync waiters remain in `send_bulk` after the RDB/catch-up
+  payload is queued and move to `online` only when pending replica output drains
+  to zero.
+- RuntimeOwner plain-TCP and TLS write paths now report replica bytes consumed
+  from the slot write buffer to `ReplicationState::account_replica_output_drained`.
+- Replica-side ROLE stays `sync` after a full resync until the primary stream
+  reaches an idle read, avoiding an early `connected` state while catch-up bytes
+  are still being applied.
+- INFO persistence treats queued full-sync output as an in-progress full-sync
+  transfer, and INFO replication exposes provisional dual-channel `rdb-channel`
+  lines for both `wait_bgsave` and `send_bulk`.
+- `repl_buffer_kit` now proves active full-sync catch-up history can satisfy an
+  online replica reconnect while another full-sync waiter still pins that
+  history.
+
+Evidence:
+
+```bash
+cargo test -p redis-server \
+  runtime_owner::tests::replica_slot_write_drain_updates_replication_pending_output \
+  -- --nocapture
+cargo test -p redis-commands replica_dialer::tests -- --nocapture
+cargo test -p redis-commands --test fullsync_lifecycle_kit -- --nocapture
+cargo test -p redis-commands --test repl_buffer_kit -- --nocapture
+cargo test -p redis-commands info::tests -- --nocapture
+cargo check -p redis-commands -p redis-server
+cargo build -p redis-server --bin redis-server
+```
+
+Results:
+
+- RuntimeOwner replica drain kit: 1 passed, 0 failed.
+- `replica_dialer::tests`: 11 passed, 0 failed.
+- `fullsync_lifecycle_kit`: 11 passed, 0 failed.
+- `repl_buffer_kit`: 11 passed, 0 failed.
+- `info::tests`: 4 passed, 0 failed.
+- `cargo check -p redis-commands -p redis-server`: passed.
+- `cargo build -p redis-server --bin redis-server`: passed.
+- Two-server live probe with `CONFIG SET rdb-key-save-delay 1000000` and a
+  large post-BGSAVE catch-up tail: 179 samples, saw replica ROLE `sync`, and
+  settled at master `rdb_bgsave_in_progress:0`, `connected_slaves:1`, replica
+  ROLE `connected`, and no lingering `state=send_bulk` line.
+
+Takeaway:
+
+- The useful debugger here is the kit ladder, not the full Tcl file. The next
+  long command to run is the focused `integration/replication-buffer`
+  scoreboard when we need to measure whether the remaining 12/4 frontier moved.
 
 ### R2-BGSAVE-CATCHUP
 
