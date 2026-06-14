@@ -37,6 +37,7 @@ static RUNTIME_APPLY_TX: OnceLock<Sender<ReplicaApplyRequest>> = OnceLock::new()
 const RUNTIME_APPLY_TIMEOUT: Duration = Duration::from_secs(30);
 const REPLICA_STREAM_READ_BUFFER_SIZE: usize = 4 * 1024 * 1024;
 const HANDSHAKE_TIMEOUT_LOG: &str = "redis-server: Timeout connecting to the PRIMARY";
+const HANDSHAKE_READ_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Work the dialer thread hands to the runtime owner loop because the owner —
 /// not the dialer — owns the live DB slice.
@@ -134,10 +135,10 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
             }
         };
         let _ = stream.set_nodelay(true);
-        let _ = set_handshake_read_timeout(&stream, configured_handshake_timeout());
+        let _ = set_handshake_read_timeout(&stream, HANDSHAKE_READ_POLL_INTERVAL);
 
         repl.set_replica_link(replica_link_code::HANDSHAKE);
-        let outcome = match run_handshake(&stream, &repl, our_port) {
+        let outcome = match run_handshake(&stream, &repl, our_port, dialer_epoch) {
             Ok(o) => o,
             Err(e) => {
                 log_handshake_failure(&e);
@@ -282,7 +283,12 @@ pub fn fullsync_rdb_failure_log_line(err: &io::Error) -> String {
 }
 
 fn log_fullsync_rdb_read_failure(err: &io::Error) {
-    eprintln!("{}", fullsync_rdb_failure_log_line(err));
+    let msg = fullsync_rdb_failure_log_line(err);
+    eprintln!("{}", msg);
+    if is_handshake_timeout_error(err) {
+        println!("{}", msg);
+        let _ = io::stdout().flush();
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -558,13 +564,26 @@ fn run_handshake(
     stream: &TcpStream,
     repl: &ReplicationState,
     our_port: u16,
+    dialer_epoch: u64,
+) -> io::Result<PsyncOutcome> {
+    run_handshake_with_timeout(stream, repl, our_port, dialer_epoch, || {
+        configured_handshake_timeout()
+    })
+}
+
+fn run_handshake_with_timeout(
+    stream: &TcpStream,
+    repl: &ReplicationState,
+    our_port: u16,
+    dialer_epoch: u64,
+    mut timeout: impl FnMut() -> Duration,
 ) -> io::Result<PsyncOutcome> {
     if let Some(primaryauth) = GLOBAL_SERVER
         .get()
         .and_then(|server| server.live_config.primaryauth())
     {
         send_multibulk(stream, &[b"AUTH", primaryauth.as_bytes()])?;
-        let auth_reply = read_line(stream)?;
+        let auth_reply = read_handshake_line(stream, repl, dialer_epoch, &mut timeout)?;
         if !auth_reply.starts_with(b"+OK") {
             let msg = format!(
                 "redis-server: Unable to AUTH to PRIMARY: {}",
@@ -583,7 +602,7 @@ fn run_handshake(
     }
 
     send_multibulk(stream, &[b"PING"])?;
-    let pong = read_line(stream)?;
+    let pong = read_handshake_line(stream, repl, dialer_epoch, &mut timeout)?;
     if !pong.starts_with(b"+PONG") && !pong.starts_with(b"+pong") {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -596,7 +615,7 @@ fn run_handshake(
         stream,
         &[b"REPLCONF", b"listening-port", port_str.as_bytes()],
     )?;
-    let ok1 = read_line(stream)?;
+    let ok1 = read_handshake_line(stream, repl, dialer_epoch, &mut timeout)?;
     if !ok1.starts_with(b"+OK") {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -616,7 +635,7 @@ fn run_handshake(
         capa_args.push(b"dual-channel");
     }
     send_multibulk(stream, &capa_args)?;
-    let ok2 = read_line(stream)?;
+    let ok2 = read_handshake_line(stream, repl, dialer_epoch, &mut timeout)?;
     if !ok2.starts_with(b"+OK") {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -636,7 +655,7 @@ fn run_handshake(
     let psync_args = select_psync_args(repl);
     send_multibulk_vec(stream, &psync_args)?;
 
-    let reply = read_line(stream)?;
+    let reply = read_handshake_line(stream, repl, dialer_epoch, &mut timeout)?;
     parse_psync_reply(&reply)
 }
 
@@ -681,6 +700,86 @@ fn configured_handshake_timeout() -> Duration {
 
 fn set_handshake_read_timeout(stream: &TcpStream, timeout: Duration) -> io::Result<()> {
     stream.set_read_timeout(Some(timeout))
+}
+
+fn read_handshake_line(
+    stream: &TcpStream,
+    repl: &ReplicationState,
+    dialer_epoch: u64,
+    timeout: &mut impl FnMut() -> Duration,
+) -> io::Result<Vec<u8>> {
+    let mut byte = [0u8; 1];
+    loop {
+        let mut line = Vec::new();
+        loop {
+            read_exact_from_stream_with_live_timeout(
+                stream,
+                &mut byte,
+                repl,
+                dialer_epoch,
+                timeout,
+                "replica handshake interrupted by role change",
+                "EOF reading replica handshake",
+            )?;
+            if byte[0] == b'\n' {
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+                break;
+            }
+            line.push(byte[0]);
+        }
+        if !line.is_empty() {
+            return Ok(line);
+        }
+    }
+}
+
+fn read_exact_from_stream_with_live_timeout(
+    stream: &TcpStream,
+    buf: &mut [u8],
+    repl: &ReplicationState,
+    dialer_epoch: u64,
+    timeout: &mut impl FnMut() -> Duration,
+    interrupted_message: &'static str,
+    eof_message: &'static str,
+) -> io::Result<()> {
+    let mut filled = 0;
+    let mut last_progress = Instant::now();
+    while filled < buf.len() {
+        if !repl.dialer_epoch_is_current(dialer_epoch) || repl.take_replica_link_drop_request() {
+            let _ = stream.shutdown(Shutdown::Both);
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                interrupted_message,
+            ));
+        }
+        match stream_read_slice(stream, &mut buf[filled..]) {
+            Ok(0) => {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, eof_message));
+            }
+            Ok(n) => {
+                filled += n;
+                last_progress = Instant::now();
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                if last_progress.elapsed() >= timeout().max(HANDSHAKE_READ_POLL_INTERVAL) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "Timeout connecting to the PRIMARY",
+                    ));
+                }
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 fn is_handshake_timeout_error(err: &io::Error) -> bool {
@@ -766,16 +865,18 @@ fn read_fullresync_rdb(
     repl: &ReplicationState,
     dialer_epoch: u64,
 ) -> io::Result<Vec<u8>> {
-    read_fullresync_rdb_with_timeout(stream, repl, dialer_epoch, configured_handshake_timeout())
+    read_fullresync_rdb_with_timeout(stream, repl, dialer_epoch, || {
+        configured_handshake_timeout()
+    })
 }
 
 fn read_fullresync_rdb_with_timeout(
     stream: &TcpStream,
     repl: &ReplicationState,
     dialer_epoch: u64,
-    idle_timeout: Duration,
+    mut timeout: impl FnMut() -> Duration,
 ) -> io::Result<Vec<u8>> {
-    let header = read_line_checked(stream, repl, dialer_epoch, idle_timeout)?;
+    let header = read_line_checked(stream, repl, dialer_epoch, &mut timeout)?;
     let header_str = std::str::from_utf8(&header)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "non-UTF8 RDB header"))?
         .trim();
@@ -791,7 +892,15 @@ fn read_fullresync_rdb_with_timeout(
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "cannot parse RDB size"))?;
 
     let mut buf = vec![0u8; size];
-    read_exact_from_stream_checked(stream, &mut buf, repl, dialer_epoch, idle_timeout)?;
+    read_exact_from_stream_with_live_timeout(
+        stream,
+        &mut buf,
+        repl,
+        dialer_epoch,
+        &mut timeout,
+        "replica full-sync read interrupted by role change",
+        "EOF reading RDB",
+    )?;
     Ok(buf)
 }
 
@@ -799,13 +908,21 @@ fn read_line_checked(
     stream: &TcpStream,
     repl: &ReplicationState,
     dialer_epoch: u64,
-    idle_timeout: Duration,
+    timeout: &mut impl FnMut() -> Duration,
 ) -> io::Result<Vec<u8>> {
     let mut byte = [0u8; 1];
     loop {
         let mut line = Vec::new();
         loop {
-            read_exact_from_stream_checked(stream, &mut byte, repl, dialer_epoch, idle_timeout)?;
+            read_exact_from_stream_with_live_timeout(
+                stream,
+                &mut byte,
+                repl,
+                dialer_epoch,
+                timeout,
+                "replica full-sync read interrupted by role change",
+                "EOF reading RDB",
+            )?;
             if byte[0] == b'\n' {
                 if line.last() == Some(&b'\r') {
                     line.pop();
@@ -818,54 +935,6 @@ fn read_line_checked(
             return Ok(line);
         }
     }
-}
-
-fn read_exact_from_stream_checked(
-    stream: &TcpStream,
-    buf: &mut [u8],
-    repl: &ReplicationState,
-    dialer_epoch: u64,
-    idle_timeout: Duration,
-) -> io::Result<()> {
-    let mut filled = 0;
-    let mut last_progress = Instant::now();
-    while filled < buf.len() {
-        if !repl.dialer_epoch_is_current(dialer_epoch) || repl.take_replica_link_drop_request() {
-            let _ = stream.shutdown(Shutdown::Both);
-            return Err(io::Error::new(
-                io::ErrorKind::Interrupted,
-                "replica full-sync read interrupted by role change",
-            ));
-        }
-        match stream_read_slice(stream, &mut buf[filled..]) {
-            Ok(0) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "EOF reading RDB",
-                ));
-            }
-            Ok(n) => {
-                filled += n;
-                last_progress = Instant::now();
-            }
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                ) =>
-            {
-                if last_progress.elapsed() >= idle_timeout {
-                    return Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "Timeout connecting to the PRIMARY",
-                    ));
-                }
-                continue;
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(())
 }
 
 fn apply_command_batch_via_runtime_owner(
@@ -999,30 +1068,6 @@ fn build_multibulk(parts: &[&[u8]]) -> Vec<u8> {
     buf
 }
 
-/// Read a `\r\n`-terminated line from the stream.
-/// Accumulates bytes until a CRLF is found. Returns the line bytes without
-/// the trailing `\r\n`. Standalone `\n` bytes (keepalive pings that Valkey
-/// masters send periodically) are skipped until a non-empty line arrives.
-fn read_line(stream: &TcpStream) -> io::Result<Vec<u8>> {
-    let mut byte = [0u8; 1];
-    loop {
-        let mut line = Vec::new();
-        loop {
-            stream_read_exact(stream, &mut byte)?;
-            if byte[0] == b'\n' {
-                if line.last() == Some(&b'\r') {
-                    line.pop();
-                }
-                break;
-            }
-            line.push(byte[0]);
-        }
-        if !line.is_empty() {
-            return Ok(line);
-        }
-    }
-}
-
 fn stream_write(stream: &TcpStream, data: &[u8]) -> io::Result<()> {
     let mut s = stream
         .try_clone()
@@ -1037,13 +1082,6 @@ fn stream_read(stream: &TcpStream, buf: &mut [u8]) -> io::Result<usize> {
     s.read(buf)
 }
 
-fn stream_read_exact(stream: &TcpStream, buf: &mut [u8]) -> io::Result<()> {
-    let mut s = stream
-        .try_clone()
-        .map_err(|e| io::Error::new(e.kind(), format!("stream clone: {}", e)))?;
-    s.read_exact(buf)
-}
-
 fn stream_read_slice(stream: &TcpStream, buf: &mut [u8]) -> io::Result<usize> {
     let mut s = stream
         .try_clone()
@@ -1054,7 +1092,7 @@ fn stream_read_slice(stream: &TcpStream, buf: &mut [u8]) -> io::Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     fn local_state() -> ReplicationState {
         ReplicationState::new([b'1'; 40], 1024)
@@ -1182,7 +1220,13 @@ mod tests {
         set_handshake_read_timeout(&stream, Duration::from_millis(20))
             .expect("set handshake read timeout");
         let repl = local_state();
-        let err = match run_handshake(&stream, &repl, 0) {
+        let err = match run_handshake_with_timeout(
+            &stream,
+            &repl,
+            0,
+            repl.dialer_epoch.load(Ordering::SeqCst),
+            || Duration::from_millis(20),
+        ) {
             Ok(_) => panic!("stalled primary should time out during handshake"),
             Err(err) => err,
         };
@@ -1196,6 +1240,50 @@ mod tests {
             "redis-server: Timeout connecting to the PRIMARY"
         );
 
+        let _ = primary.join();
+    }
+
+    #[test]
+    fn handshake_timeout_uses_live_repl_timeout_after_read_blocks() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let primary = thread::spawn(move || {
+            let (_stream, _) = listener.accept().expect("accept replica");
+            thread::sleep(Duration::from_millis(350));
+        });
+
+        let stream = TcpStream::connect(addr).expect("connect test primary");
+        set_handshake_read_timeout(&stream, Duration::from_millis(10))
+            .expect("set handshake read poll timeout");
+        let repl = local_state();
+        let live_timeout_ms = Arc::new(AtomicU64::new(1_000));
+        let updater = Arc::clone(&live_timeout_ms);
+        let shrink = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            updater.store(50, Ordering::SeqCst);
+        });
+        let started = Instant::now();
+        let err = match run_handshake_with_timeout(
+            &stream,
+            &repl,
+            0,
+            repl.dialer_epoch.load(Ordering::SeqCst),
+            || Duration::from_millis(live_timeout_ms.load(Ordering::SeqCst)),
+        ) {
+            Ok(_) => panic!("stalled primary should time out during handshake"),
+            Err(err) => err,
+        };
+
+        assert!(
+            is_handshake_timeout_error(&err),
+            "expected handshake timeout classification, got {err:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "handshake should honor the shorter live timeout after the read is already blocked"
+        );
+
+        let _ = shrink.join();
         let _ = primary.join();
     }
 
@@ -1217,7 +1305,7 @@ mod tests {
             &stream,
             &repl,
             repl.dialer_epoch.load(Ordering::SeqCst),
-            Duration::from_millis(50),
+            || Duration::from_millis(50),
         ) {
             Ok(_) => panic!("stalled primary should time out before RDB bulk header"),
             Err(err) => err,
@@ -1228,6 +1316,95 @@ mod tests {
             "expected full-sync header timeout classification, got {err:?}"
         );
 
+        let _ = primary.join();
+    }
+
+    #[test]
+    fn fullsync_rdb_header_timeout_uses_live_repl_timeout_after_read_blocks() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let primary = thread::spawn(move || {
+            let (_stream, _) = listener.accept().expect("accept replica");
+            thread::sleep(Duration::from_millis(350));
+        });
+
+        let stream = TcpStream::connect(addr).expect("connect test primary");
+        stream
+            .set_read_timeout(Some(Duration::from_millis(10)))
+            .expect("set read timeout");
+        let repl = local_state();
+        let live_timeout_ms = Arc::new(AtomicU64::new(1_000));
+        let updater = Arc::clone(&live_timeout_ms);
+        let shrink = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            updater.store(50, Ordering::SeqCst);
+        });
+        let started = Instant::now();
+        let err = match read_fullresync_rdb_with_timeout(
+            &stream,
+            &repl,
+            repl.dialer_epoch.load(Ordering::SeqCst),
+            || Duration::from_millis(live_timeout_ms.load(Ordering::SeqCst)),
+        ) {
+            Ok(_) => panic!("stalled primary should time out before RDB bulk header"),
+            Err(err) => err,
+        };
+
+        assert!(
+            is_handshake_timeout_error(&err),
+            "expected full-sync header timeout classification, got {err:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "full-sync header read should honor the shorter live timeout after the read is already blocked"
+        );
+
+        let _ = shrink.join();
+        let _ = primary.join();
+    }
+
+    #[test]
+    fn fullsync_rdb_body_timeout_uses_live_repl_timeout_after_partial_payload() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let primary = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept replica");
+            stream_write(&stream, b"$5\r\nabc").expect("write partial RDB payload");
+            thread::sleep(Duration::from_millis(350));
+        });
+
+        let stream = TcpStream::connect(addr).expect("connect test primary");
+        stream
+            .set_read_timeout(Some(Duration::from_millis(10)))
+            .expect("set read timeout");
+        let repl = local_state();
+        let live_timeout_ms = Arc::new(AtomicU64::new(1_000));
+        let updater = Arc::clone(&live_timeout_ms);
+        let shrink = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            updater.store(50, Ordering::SeqCst);
+        });
+        let started = Instant::now();
+        let err = match read_fullresync_rdb_with_timeout(
+            &stream,
+            &repl,
+            repl.dialer_epoch.load(Ordering::SeqCst),
+            || Duration::from_millis(live_timeout_ms.load(Ordering::SeqCst)),
+        ) {
+            Ok(_) => panic!("stalled primary should time out before complete RDB payload"),
+            Err(err) => err,
+        };
+
+        assert!(
+            is_handshake_timeout_error(&err),
+            "expected full-sync body timeout classification, got {err:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "full-sync body read should honor the shorter live timeout after partial payload"
+        );
+
+        let _ = shrink.join();
         let _ = primary.join();
     }
 
