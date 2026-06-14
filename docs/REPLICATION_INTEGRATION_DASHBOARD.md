@@ -73,7 +73,7 @@ Artifact:
 | `integration/block-repl` | 2/0 | Green | Real `DEBUG DIGEST` plus single blocked-pop wake propagation now validates the list/zset blocking workload. |
 | `integration/replication-3` | 3/4 | Red | Expiry consistency, writable-replica expired-key behavior, and PFCOUNT expired-key/cache semantics. |
 | `integration/replication-4` | 15/2 | Red | SPOP rewrite cases now pass; remaining failures are divergence/default writable-replica cases. |
-| `integration/replication-buffer` | 12/4 | Red | Shared/private output ownership, writer-side drain, active full-sync catch-up release, and the empty-RDB zero-offset reconnect guard moved the backlog-histlen outgrowth assertions, the non-dual-channel shrink assertion, and the dual-channel low-output-buffer partial-resync assertion green. INFO now splits ordinary replica client output from Valkey-style replication-buffer fields and exposes provisional dual-channel `rdb-channel` entries for waiting and sending full-sync replicas. RuntimeOwner applies split transaction catch-up with one pseudo-client, dual-capable replicas advertise `dual-channel`, and owner-loop writes now drain replica pending-output so full-sync `send_bulk` state ends when queued bytes leave the writer. The latest kit-first slice keeps retained full-sync history open while a `send_bulk` owner pins it and includes `send_bulk` replicas in command-stream fan-out; Tcl has not been rerun after that fast proof. Remaining failures are the broader partial-resync beyond backlog and backlog-memory shrink cases for both dual and non-dual modes. |
+| `integration/replication-buffer` | 12/4 | Red | Shared/private output ownership, writer-side drain, active full-sync catch-up release, and the empty-RDB zero-offset reconnect guard moved the backlog-histlen outgrowth assertions, the non-dual-channel shrink assertion, and the dual-channel low-output-buffer partial-resync assertion green. INFO now splits ordinary replica client output from Valkey-style replication-buffer fields and exposes provisional dual-channel `rdb-channel` entries for waiting and sending full-sync replicas. RuntimeOwner applies split transaction catch-up with one pseudo-client, dual-capable replicas advertise `dual-channel`, and owner-loop writes now drain replica pending-output so full-sync `send_bulk` state ends when queued bytes leave the writer. Latest kit-first slices keep retained full-sync history open while a `send_bulk` owner pins it, include `send_bulk` replicas in command-stream fan-out, and make replica output-limit disconnects use the live close sentinel. Focused Tcl artifact `20260614T060739867825Z` stayed at 12/4; remaining failures are offset convergence and backlog-memory shrink in the broad slow-replica shared-history case for both dual and non-dual modes. |
 | `integration/replication` | 40/27 | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, the first async-loading CONFIG exception, successful swapdb function-context mismatch, parent-killed child discovery, `repl-diskless-load on-empty-db`, no-longer-useful RDB child cancellation, all four replica-link reply-violation assertions, malformed-PSYNC-offset logging, chained replica `FLUSHDB` / `FLUSHALL` stream relay, `GETSET` rewrite, nonblocking `BRPOPLPUSH` / `BLMOVE` rewrite stats, and empty-blocking `BRPOPLPUSH` / `BLMOVE` commandstats via real digest waits. Remaining failures are counted full-sync, diskless pipe/drop, blocked-list role-change, cache-master, lazy-expire, and old-data rollback cases. |
 | `integration/replication-psync` | timeout | Red | Historical focused gate was 90/0 after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support. Current full-file reruns still time out, but the full-sync detached-tail kit removed the first broad no-reconnect inconsistency. The latest oracle dump narrowed the visible data divergence to a single `0` vs `-0` string value; a fast kit then found and fixed an RDB raw numeric-string fidelity bug in that family. Full Tcl has not been rerun after that fix. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
@@ -1468,6 +1468,73 @@ Takeaway:
   inner loop. These kits are the fast proof for the remaining shared-history
   semantics; the Tcl file should be rerun only as an outer scoreboard after a
   coherent slice changes the expected count.
+
+### R2-BUFFER-SHARED-LAG-LIMIT-CLOSE
+
+Status: prerequisite correctness slice completed on 2026-06-14; focused Tcl
+scoreboard stayed at 12/4.
+
+Implementation:
+
+- Replica output-buffer hard-limit checks now use Valkey's effective replica
+  limit: a nonzero configured hard limit below `repl-backlog-size` is floored
+  at the backlog size.
+- Shared replication-stream bytes now participate in that effective limit. A
+  slow replica whose shared lag grows beyond the effective limit is removed
+  and releases any retained full-sync history it pinned.
+- Output-limit disconnects send the empty outbound payload used by both live
+  server paths as the writer close sentinel before removing replica metadata.
+  A no-sentinel variant was rejected because it only removed bookkeeping and
+  left live replica reconnect behavior broken.
+- `psync_reconnect_kit` now proves that `PSYNC +CONTINUE` can replay catch-up
+  bytes from retained full-sync history beyond the circular backlog, separating
+  range/decision coverage from live 100 MB apply timing.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands --test repl_buffer_kit -- --nocapture
+cargo test -p redis-commands --test psync_reconnect_kit -- --nocapture
+cargo test -p redis-commands replica_dialer::tests -- --nocapture
+cargo test -p redis-commands --test fullsync_lifecycle_kit -- --nocapture
+cargo check -p redis-core -p redis-commands -p redis-server
+cargo build -p redis-server --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id repl-buffer-shared-lag-limit-close \
+  --profile integration-repl \
+  --timeout-s 300 \
+  --baseport 47000 \
+  --portcount 4000 \
+  --clients 1 \
+  --skip-build \
+  --files integration/replication-buffer
+```
+
+Results:
+
+- `repl_buffer_kit`: 14 passed, 0 failed.
+- `psync_reconnect_kit`: 14 passed, 0 failed.
+- `replica_dialer::tests`: 12 passed, 0 failed.
+- `fullsync_lifecycle_kit`: 11 passed, 0 failed.
+- `cargo check -p redis-core -p redis-commands -p redis-server`: passed.
+- `cargo build -p redis-server --bin redis-server`: passed.
+- Focused Tcl artifact:
+  `harness/oracle/results/tcl-survey/20260614T060739867825Z/result.json`.
+- `integration/replication-buffer`: 12 passed, 4 failed, no timeout.
+
+Rejected experiment:
+
+- `harness/oracle/results/tcl-survey/20260614T060303623049Z/result.json`
+  regressed the same focused file to 8/6 because output-limit disconnects did
+  not signal the live writer to close. The accepted implementation keeps the
+  close sentinel in the kit.
+
+Takeaway:
+
+- The remaining four failures are no longer explained by PSYNC retained-range
+  availability or by the output-limit close hook. The next useful kit should
+  model live replica catch-up/offset advancement for the 100 MB reconnect while
+  another `send_bulk` owner pins the shared retained history.
 
 ### R2-BGSAVE-CATCHUP
 

@@ -41,13 +41,17 @@ fn argv(parts: &[&[u8]]) -> Vec<RedisString> {
 }
 
 fn attach_replica(st: &ReplicationState, client_id: ClientId, offset: i64) -> Receiver<Vec<u8>> {
+    attach_replica_with_state(st, client_id, ReplicaState::Online, offset)
+}
+
+fn attach_replica_with_state(
+    st: &ReplicationState,
+    client_id: ClientId,
+    state: ReplicaState,
+    offset: i64,
+) -> Receiver<Vec<u8>> {
     let (tx, rx) = mpsc::channel();
-    st.add_replica(ReplicaConn::new(
-        client_id,
-        ReplicaState::Online,
-        offset,
-        tx,
-    ));
+    st.add_replica(ReplicaConn::new(client_id, state, offset, tx));
     rx
 }
 
@@ -507,7 +511,7 @@ fn shared_replica_output_memory_is_counted_once_and_drains_by_slowest_replica() 
 }
 
 #[test]
-fn shared_stream_can_exceed_hard_limit_but_private_output_disconnects_offender() {
+fn replica_output_limit_is_floored_at_backlog_and_disconnects_offender() {
     let st = ReplicationState::new(generate_runid(), 64);
     st.set_replica_output_buffer_hard_limit(10);
     let slow_rx = attach_replica(&st, 71, 0);
@@ -518,7 +522,7 @@ fn shared_stream_can_exceed_hard_limit_but_private_output_disconnects_offender()
 
     assert!(
         st.send_to_replica(71, b"abcdefghijkl".to_vec()),
-        "shared replication history may exceed the private hard limit"
+        "a nonzero replica hard limit lower than repl-backlog-size is floored at the backlog size"
     );
     assert!(st.send_to_replica(72, b"ABCDEFGH".to_vec()));
     assert_eq!(st.connected_replicas(), 2);
@@ -533,10 +537,11 @@ fn shared_stream_can_exceed_hard_limit_but_private_output_disconnects_offender()
         "writer-side drain should clear reported replica output memory"
     );
 
-    assert!(st.send_private_to_replica(71, b"abcdefgh".to_vec()));
+    let almost_effective_limit = vec![b'p'; 63];
+    assert!(st.send_private_to_replica(71, almost_effective_limit.clone()));
     assert!(
-        !st.send_private_to_replica(71, b"ijkl".to_vec()),
-        "private queued output crossing the hard limit should disconnect the offender"
+        !st.send_private_to_replica(71, b"q".to_vec()),
+        "queued output crossing the effective replica hard limit should disconnect the offender"
     );
     assert_eq!(st.connected_replicas(), 1);
     {
@@ -556,6 +561,66 @@ fn shared_stream_can_exceed_hard_limit_but_private_output_disconnects_offender()
     assert_eq!(healthy_rx.recv().unwrap(), b"ABCDEFGH".to_vec());
     assert_eq!(healthy_rx.recv().unwrap(), b"Z".to_vec());
     assert_eq!(slow_rx.recv().unwrap(), b"abcdefghijkl".to_vec());
-    assert_eq!(slow_rx.recv().unwrap(), b"abcdefgh".to_vec());
-    assert_eq!(slow_rx.recv().unwrap(), b"ijkl".to_vec());
+    assert_eq!(slow_rx.recv().unwrap(), almost_effective_limit);
+    assert_eq!(slow_rx.recv().unwrap(), b"q".to_vec());
+    assert_eq!(
+        slow_rx.recv().unwrap(),
+        Vec::<u8>::new(),
+        "output-limit disconnects must signal the live writer to close"
+    );
+}
+
+#[test]
+fn shared_lag_limit_disconnect_releases_retained_send_bulk_history() {
+    let st = ReplicationState::new(generate_runid(), 16);
+    st.set_replica_output_buffer_hard_limit(32);
+    let slow_rx = attach_replica_with_state(&st, 91, ReplicaState::SendingRdb, 0);
+    let _healthy_rx = attach_replica(&st, 92, 0);
+    let before_disconnects = server_metrics()
+        .client_output_buffer_limit_disconnections
+        .load(Ordering::Relaxed);
+
+    let first = vec![b'a'; 20];
+    st.append_to_backlog(&first);
+    st.retain_fullsync_history(0, first.clone(), &[91]);
+    assert_eq!(st.backlog_snapshot(), (0, 20, 20, 16));
+    assert!(st.send_to_replica(91, first.clone()));
+
+    let second = vec![b'b'; 20];
+    st.append_to_backlog(&second);
+    assert_eq!(
+        st.backlog_snapshot(),
+        (0, 40, 40, 16),
+        "the send_bulk owner pins open retained history beyond the circular backlog"
+    );
+
+    assert!(
+        !st.send_to_replica(91, second.clone()),
+        "shared stream lag beyond the effective replica hard limit should disconnect the slow owner"
+    );
+    assert_eq!(st.connected_replicas(), 1);
+    {
+        let guard = st.replicas.lock().unwrap();
+        assert!(!guard.contains_key(&91));
+        assert!(guard.contains_key(&92));
+    }
+    assert_eq!(
+        st.backlog_snapshot(),
+        (24, 40, 16, 16),
+        "disconnecting the retained owner releases the oversized shared history"
+    );
+    assert!(!st.can_read_history_range(0, 40));
+    assert_eq!(
+        server_metrics()
+            .client_output_buffer_limit_disconnections
+            .load(Ordering::Relaxed),
+        before_disconnects + 1
+    );
+    assert_eq!(slow_rx.recv().unwrap(), first);
+    assert_eq!(slow_rx.recv().unwrap(), second);
+    assert_eq!(
+        slow_rx.recv().unwrap(),
+        Vec::<u8>::new(),
+        "shared-lag disconnects must signal the live writer to close"
+    );
 }

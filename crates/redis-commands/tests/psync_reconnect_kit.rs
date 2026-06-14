@@ -257,6 +257,55 @@ fn same_primary_reconnect_gets_continue_and_replays_catchup() {
 }
 
 #[test]
+fn same_primary_reconnect_replays_retained_fullsync_history_beyond_backlog() {
+    let _g = psync_guard();
+    let repl = global_replication_state();
+    let _reset = GlobalReplReset::new(&repl);
+    repl.resize_backlog_preserving_history(16);
+
+    let fullsync_owner = 1_100_018;
+    let (owner_tx, _owner_rx) = mpsc::channel();
+    repl.add_replica(ReplicaConn::new(
+        fullsync_owner,
+        ReplicaState::SendingRdb,
+        0,
+        owner_tx,
+    ));
+
+    let already_applied = resp(&[b"SET", b"retained-a", b"1"]);
+    repl.append_to_backlog(&already_applied);
+    repl.retain_fullsync_history(0, already_applied, &[fullsync_owner]);
+    let provided = repl.master_offset();
+    let catchup = resp(&[b"SET", b"retained-b", b"2"]);
+    repl.append_to_backlog(&catchup);
+    assert!(
+        repl.backlog_snapshot().0 < provided,
+        "retained full-sync history should keep the reconnect offset readable beyond the circular backlog"
+    );
+
+    let runid = runid_string(&repl);
+    let drive = drive_psync(
+        1_100_019,
+        vec![b"PSYNC".to_vec(), runid, provided.to_string().into_bytes()],
+    );
+
+    assert!(
+        drive.reply.starts_with(b"+CONTINUE"),
+        "same-primary reconnect should continue from retained full-sync history, got {:?}",
+        String::from_utf8_lossy(&drive.reply)
+    );
+    assert_eq!(
+        drive.sent, catchup,
+        "+CONTINUE should replay exactly the missing retained-history tail"
+    );
+    assert_eq!(drive.counters_after.1, drive.counters_before.1 + 1);
+    assert_eq!(drive.counters_after.0, drive.counters_before.0);
+    assert_eq!(drive.counters_after.2, drive.counters_before.2);
+
+    repl.remove_replica(fullsync_owner);
+}
+
+#[test]
 fn same_primary_zero_offset_reconnect_gets_continue_and_replays_catchup() {
     let _g = psync_guard();
     let repl = global_replication_state();

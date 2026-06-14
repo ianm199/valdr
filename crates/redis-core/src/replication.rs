@@ -729,6 +729,18 @@ impl ReplicationState {
             .load(Ordering::Relaxed)
     }
 
+    fn effective_replica_output_buffer_hard_limit(&self) -> usize {
+        let hard_limit = self.replica_output_buffer_hard_limit();
+        if hard_limit == 0 {
+            return 0;
+        }
+        let backlog_size = match self.backlog.lock() {
+            Ok(g) => g.size,
+            Err(p) => p.into_inner().size,
+        };
+        hard_limit.max(backlog_size)
+    }
+
     fn clear_backlog_history_preserving_offset(&self) {
         let master = self.master_repl_offset.load(Ordering::Relaxed);
         let size = match self.backlog.lock() {
@@ -2101,8 +2113,9 @@ impl ReplicationState {
                     if let Ok(mut guard) = crate::client_info::client_info_registry().lock() {
                         guard.set_output_buffer_memory(client_id, pending);
                     }
-                    let hard_limit = self.replica_output_buffer_hard_limit();
-                    if private && hard_limit > 0 && pending > hard_limit {
+                    let hard_limit = self.effective_replica_output_buffer_hard_limit();
+                    if hard_limit > 0 && pending >= hard_limit {
+                        let _ = r.outbound_sender.send(Vec::new());
                         Some((true, true))
                     } else {
                         Some((true, false))
@@ -2131,8 +2144,8 @@ impl ReplicationState {
 
     /// Send shared replication-stream bytes through the outbound sender of the
     /// replica identified by `client_id`. These bytes are accounted as pending
-    /// output for visibility, but are not themselves a hard-limit disconnect
-    /// trigger because upstream keeps them backed by shared replication history.
+    /// output for visibility and use Valkey's effective replica output limit,
+    /// which floors nonzero hard limits at the configured backlog size.
     pub fn send_to_replica(&self, client_id: ClientId, bytes: Vec<u8>) -> bool {
         self.queue_replica_output(client_id, bytes, false)
     }

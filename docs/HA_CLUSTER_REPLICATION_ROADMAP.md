@@ -88,10 +88,14 @@ Current red/unfinished areas from the 2026-06-13 R0 dashboard in
   counted the logical main-channel PSYNC for dual-capable full syncs, moving the
   focused gate to 12/4. Follow-up kits then kept retained full-sync history
   open while a `send_bulk` owner pins it and included `send_bulk` replicas in
-  command-stream fan-out; Tcl is intentionally deferred until the next
-  scoreboard run. The next visible buffer slice is backlog-memory shrink after
-  slow-replica disconnect, broader shared-history ownership, and the later true
-  dual-channel RDB transport.
+  command-stream fan-out. The shared-lag limit slice then made nonzero replica
+  output hard limits floor at `repl-backlog-size`, made limit disconnects signal
+  the live writer close sentinel, and proved PSYNC can replay retained
+  full-sync history beyond the circular backlog; the focused Tcl scoreboard
+  stayed at 12/4. The next visible buffer slice is live catch-up/offset
+  advancement for the 100 MB reconnect while another full-sync owner pins
+  shared history, followed by backlog-memory shrink after slow-replica
+  disconnect and the later true dual-channel RDB transport.
 - A rebuilt R1 gate now shows `replication-3` at 3/4 and `replication-4` at
   15/2. The command-propagation rewrite cases are cleared, but
   expiration/PFCOUNT semantics and divergence/writable-replica cases still need
@@ -443,7 +447,12 @@ Work packets:
   `send_bulk` owner pins it and treats `send_bulk` replicas as command-stream
   fan-out targets; `repl_buffer_kit`, `psync_reconnect_kit`,
   `replica_dialer::tests`, and `cargo check` are green, with the long Tcl gate
-  deferred as an outer scoreboard.
+  deferred as an outer scoreboard. The next shared-lag limit slice made
+  output-limit disconnects use the live close sentinel and added PSYNC coverage
+  for retained full-sync history beyond the circular backlog; focused
+  `integration/replication-buffer` stayed at 12/4, narrowing the next real
+  attack to live large-catch-up offset advancement while another full-sync
+  owner still pins the shared history.
 
 Gate:
 
