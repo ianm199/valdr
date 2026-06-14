@@ -3,6 +3,10 @@ use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -721,6 +725,118 @@ fn find_bg_key_with_type(
     Ok(None)
 }
 
+fn write_bg_complex_style_op(conn: &mut RespConn, rng: &mut Lcg) -> io::Result<()> {
+    let key_id = rng.range(64);
+    let key = format!("bg:{key_id}");
+    let dst_key = format!("bg:dst:{}", rng.range(16));
+    let field = bg_value(rng);
+    let value = bg_value(rng);
+    let score = match rng.range(16) {
+        0 => "+inf".to_string(),
+        1 => "-inf".to_string(),
+        n => format!("{}.{}", n, rng.range(1_000_000)),
+    };
+
+    let mut kind = conn.command(&[b"TYPE", key.as_bytes()])?.text_lossy();
+    if kind == "none" {
+        match rng.range(6) {
+            0 => expect_success(conn.command(&[b"SET", key.as_bytes(), value.as_slice()])?),
+            1 => expect_success(conn.command(&[b"LPUSH", key.as_bytes(), value.as_slice()])?),
+            2 => expect_success(conn.command(&[b"SADD", key.as_bytes(), value.as_slice()])?),
+            3 => expect_success(conn.command(&[
+                b"ZADD",
+                key.as_bytes(),
+                score.as_bytes(),
+                value.as_slice(),
+            ])?),
+            4 => expect_success(conn.command(&[
+                b"HSET",
+                key.as_bytes(),
+                field.as_slice(),
+                value.as_slice(),
+            ])?),
+            _ => expect_success(conn.command(&[b"DEL", key.as_bytes()])?),
+        }
+        kind = conn.command(&[b"TYPE", key.as_bytes()])?.text_lossy();
+    }
+
+    match kind.as_str() {
+        "string" | "none" => {}
+        "list" => match rng.range(5) {
+            0 => expect_success(conn.command(&[b"LPUSH", key.as_bytes(), value.as_slice()])?),
+            1 => expect_success(conn.command(&[b"RPUSH", key.as_bytes(), value.as_slice()])?),
+            2 => {
+                expect_success(conn.command(&[b"LREM", key.as_bytes(), b"0", value.as_slice()])?)
+            }
+            3 => expect_non_error(conn.command(&[b"RPOP", key.as_bytes()])?),
+            _ => expect_non_error(conn.command(&[b"LPOP", key.as_bytes()])?),
+        },
+        "set" => match rng.range(4) {
+            0 => expect_success(conn.command(&[b"SADD", key.as_bytes(), value.as_slice()])?),
+            1 => expect_success(conn.command(&[b"SREM", key.as_bytes(), value.as_slice()])?),
+            n => {
+                if let Some(other_key) = find_bg_key_with_type(conn, rng, "set")? {
+                    let op: &[u8] = match n {
+                        2 => b"SUNIONSTORE",
+                        3 => b"SINTERSTORE",
+                        _ => b"SDIFFSTORE",
+                    };
+                    expect_success(conn.command(&[
+                        op,
+                        dst_key.as_bytes(),
+                        key.as_bytes(),
+                        other_key.as_bytes(),
+                    ])?);
+                }
+            }
+        },
+        "zset" => match rng.range(4) {
+            0 => expect_success(conn.command(&[
+                b"ZADD",
+                key.as_bytes(),
+                score.as_bytes(),
+                value.as_slice(),
+            ])?),
+            1 => expect_success(conn.command(&[b"ZREM", key.as_bytes(), value.as_slice()])?),
+            n => {
+                if let Some(other_key) = find_bg_key_with_type(conn, rng, "zset")? {
+                    let op = if n == 2 {
+                        b"ZUNIONSTORE"
+                    } else {
+                        b"ZINTERSTORE"
+                    };
+                    expect_success(conn.command(&[
+                        op,
+                        dst_key.as_bytes(),
+                        b"2",
+                        key.as_bytes(),
+                        other_key.as_bytes(),
+                    ])?);
+                }
+            }
+        },
+        "hash" => {
+            if rng.range(2) == 0 {
+                expect_success(conn.command(&[
+                    b"HSET",
+                    key.as_bytes(),
+                    field.as_slice(),
+                    value.as_slice(),
+                ])?);
+            } else {
+                expect_success(conn.command(&[b"HDEL", key.as_bytes(), field.as_slice()])?);
+            }
+        }
+        other => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unexpected TYPE reply in bg complex writer: {other}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn write_bg_complex_style_data(port: u16, db: u32, seed: u64, count: usize) -> io::Result<()> {
     let mut conn = RespConn::connect(port)?;
     expect_simple(
@@ -730,120 +846,33 @@ fn write_bg_complex_style_data(port: u16, db: u32, seed: u64, count: usize) -> i
     let mut rng = Lcg::new(seed);
 
     for _ in 0..count {
-        let key_id = rng.range(64);
-        let key = format!("bg:{key_id}");
-        let dst_key = format!("bg:dst:{}", rng.range(16));
-        let field = bg_value(&mut rng);
-        let value = bg_value(&mut rng);
-        let score = match rng.range(16) {
-            0 => "+inf".to_string(),
-            1 => "-inf".to_string(),
-            n => format!("{}.{}", n, rng.range(1_000_000)),
-        };
-
-        let mut kind = conn.command(&[b"TYPE", key.as_bytes()])?.text_lossy();
-        if kind == "none" {
-            match rng.range(6) {
-                0 => expect_success(conn.command(&[b"SET", key.as_bytes(), value.as_slice()])?),
-                1 => expect_success(conn.command(&[b"LPUSH", key.as_bytes(), value.as_slice()])?),
-                2 => expect_success(conn.command(&[b"SADD", key.as_bytes(), value.as_slice()])?),
-                3 => expect_success(conn.command(&[
-                    b"ZADD",
-                    key.as_bytes(),
-                    score.as_bytes(),
-                    value.as_slice(),
-                ])?),
-                4 => expect_success(conn.command(&[
-                    b"HSET",
-                    key.as_bytes(),
-                    field.as_slice(),
-                    value.as_slice(),
-                ])?),
-                _ => expect_success(conn.command(&[b"DEL", key.as_bytes()])?),
-            }
-            kind = conn.command(&[b"TYPE", key.as_bytes()])?.text_lossy();
-        }
-
-        match kind.as_str() {
-            "string" | "none" => {}
-            "list" => match rng.range(5) {
-                0 => expect_success(conn.command(&[b"LPUSH", key.as_bytes(), value.as_slice()])?),
-                1 => expect_success(conn.command(&[b"RPUSH", key.as_bytes(), value.as_slice()])?),
-                2 => expect_success(conn.command(&[
-                    b"LREM",
-                    key.as_bytes(),
-                    b"0",
-                    value.as_slice(),
-                ])?),
-                3 => expect_non_error(conn.command(&[b"RPOP", key.as_bytes()])?),
-                _ => expect_non_error(conn.command(&[b"LPOP", key.as_bytes()])?),
-            },
-            "set" => match rng.range(4) {
-                0 => expect_success(conn.command(&[b"SADD", key.as_bytes(), value.as_slice()])?),
-                1 => expect_success(conn.command(&[b"SREM", key.as_bytes(), value.as_slice()])?),
-                n => {
-                    if let Some(other_key) = find_bg_key_with_type(&mut conn, &mut rng, "set")? {
-                        let op: &[u8] = match n {
-                            2 => b"SUNIONSTORE",
-                            3 => b"SINTERSTORE",
-                            _ => b"SDIFFSTORE",
-                        };
-                        expect_success(conn.command(&[
-                            op,
-                            dst_key.as_bytes(),
-                            key.as_bytes(),
-                            other_key.as_bytes(),
-                        ])?);
-                    }
-                }
-            },
-            "zset" => match rng.range(4) {
-                0 => expect_success(conn.command(&[
-                    b"ZADD",
-                    key.as_bytes(),
-                    score.as_bytes(),
-                    value.as_slice(),
-                ])?),
-                1 => expect_success(conn.command(&[b"ZREM", key.as_bytes(), value.as_slice()])?),
-                n => {
-                    if let Some(other_key) = find_bg_key_with_type(&mut conn, &mut rng, "zset")? {
-                        let op = if n == 2 {
-                            b"ZUNIONSTORE"
-                        } else {
-                            b"ZINTERSTORE"
-                        };
-                        expect_success(conn.command(&[
-                            op,
-                            dst_key.as_bytes(),
-                            b"2",
-                            key.as_bytes(),
-                            other_key.as_bytes(),
-                        ])?);
-                    }
-                }
-            },
-            "hash" => {
-                if rng.range(2) == 0 {
-                    expect_success(conn.command(&[
-                        b"HSET",
-                        key.as_bytes(),
-                        field.as_slice(),
-                        value.as_slice(),
-                    ])?);
-                } else {
-                    expect_success(conn.command(&[b"HDEL", key.as_bytes(), field.as_slice()])?);
-                }
-            }
-            other => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("unexpected TYPE reply in bg complex writer: {other}"),
-                ));
-            }
-        }
+        write_bg_complex_style_op(&mut conn, &mut rng)?;
     }
 
     Ok(())
+}
+
+fn write_bg_complex_style_data_until(
+    port: u16,
+    db: u32,
+    seed: u64,
+    stop: Arc<AtomicBool>,
+    max_ops: usize,
+) -> io::Result<usize> {
+    let mut conn = RespConn::connect(port)?;
+    expect_simple(
+        conn.command(&[b"SELECT", db.to_string().as_bytes()])?,
+        b"OK",
+    );
+    let mut rng = Lcg::new(seed);
+    let mut ops = 0;
+
+    while ops < max_ops && !stop.load(Ordering::Relaxed) {
+        write_bg_complex_style_op(&mut conn, &mut rng)?;
+        ops += 1;
+    }
+
+    Ok(ops)
 }
 
 fn debug_digest(server: &TestServer) -> io::Result<String> {
@@ -1047,6 +1076,62 @@ fn psync_no_reconnect_fullsync_converges_under_bg_complex_style_load() {
     assert!(
         !digest.is_empty(),
         "DEBUG DIGEST should return a non-empty digest after bg complex-style load"
+    );
+}
+
+#[test]
+fn psync_no_reconnect_fullsync_converges_when_bg_complex_writers_stop_after_online() {
+    let master = TestServer::start("repl-psync-bg-stop-master").expect("start master");
+    let replica = TestServer::start("repl-psync-bg-stop-replica").expect("start replica");
+    configure_psync_surface(&master, &replica);
+
+    let mut master_conn = RespConn::connect(master.port).expect("connect master");
+    expect_simple(
+        master_conn
+            .command(&[b"CONFIG", b"SET", b"rdb-key-save-delay", b"2000"])
+            .expect("CONFIG SET rdb-key-save-delay"),
+        b"OK",
+    );
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut writers = Vec::new();
+    for (db, seed) in [(9, 0x90_u64), (11, 0x110_u64), (12, 0x120_u64)] {
+        let master_port = master.port;
+        let stop = Arc::clone(&stop);
+        writers.push(thread::spawn(move || {
+            write_bg_complex_style_data_until(master_port, db, seed, stop, 100_000)
+        }));
+    }
+    thread::sleep(Duration::from_millis(50));
+
+    let mut replica_conn = RespConn::connect(replica.port).expect("connect replica");
+    expect_simple(
+        replica_conn
+            .command(&[b"SLAVEOF", b"127.0.0.1", master.port.to_string().as_bytes()])
+            .expect("SLAVEOF should reply"),
+        b"OK",
+    );
+
+    wait_for_replica_up(&replica, &master).expect("replica should reach online state");
+    stop.store(true, Ordering::Relaxed);
+
+    let mut total_ops = 0;
+    for writer in writers {
+        total_ops += writer
+            .join()
+            .expect("writer thread should not panic")
+            .expect("stop-timed bg complex-style writer commands should succeed");
+    }
+    assert!(
+        total_ops > 1_000,
+        "stop-timed bg_complex workload should run long enough to stress full-sync catch-up; ops={total_ops}"
+    );
+
+    let digest = wait_for_digest_match(&master, &replica)
+        .expect("stop-timed bg complex-style digests should converge");
+    assert!(
+        !digest.is_empty(),
+        "DEBUG DIGEST should return a non-empty digest after stop-timed bg_complex load"
     );
 }
 

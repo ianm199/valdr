@@ -580,25 +580,25 @@ pub(crate) fn spawn_repl_bgsave_reaper() {}
 /// child exited cleanly.
 pub(crate) fn dispatch_full_sync_transfer() {
     let repl = redis_core::replication::global_replication_state();
-    let job = match repl.take_repl_bgsave_job() {
-        Some(j) => j,
+    let temp_path = match repl.repl_bgsave_job_snapshot() {
+        Some((path, _, _)) => path,
         None => return,
     };
-    let temp_path = job.temp_path.clone();
-    let rdb_bytes = match fs::read(&job.temp_path) {
+    let rdb_bytes = match fs::read(&temp_path) {
         Ok(b) => b,
         Err(e) => {
             eprintln!(
                 "redis-server: failed to read RDB temp file {}: {}",
-                job.temp_path.display(),
+                temp_path.display(),
                 e
             );
-            repl.cleanup_failed_repl_bgsave_job(&job);
-            repl.set_repl_child_pid(0);
+            let _ = repl.abort_repl_bgsave_job();
             return;
         }
     };
-    let outcome = repl.complete_repl_bgsave_transfer(job, rdb_bytes);
+    let Some(outcome) = repl.complete_current_repl_bgsave_transfer(rdb_bytes) else {
+        return;
+    };
     for client_id in &outcome.failed_replicas {
         eprintln!(
             "redis-server: full-sync transfer send failed for replica client_id={}",

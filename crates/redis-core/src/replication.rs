@@ -1950,9 +1950,7 @@ impl ReplicationState {
         }
     }
 
-    /// Remove and return the current `ReplBgsaveJob`. Called by the reaper
-    /// after the child exits so the temp file path and waiting-replica list
-    /// can be consumed without holding the mutex through the I/O.
+    /// Remove and return the current `ReplBgsaveJob`.
     pub fn take_repl_bgsave_job(&self) -> Option<ReplBgsaveJob> {
         match self.repl_bgsave_job.lock() {
             Ok(mut g) => g.take(),
@@ -2014,7 +2012,6 @@ impl ReplicationState {
         let mut delivered_replicas = Vec::new();
         let mut failed_replicas = Vec::new();
         for client_id in &job.waiting_replicas {
-            self.set_replica_state(*client_id, ReplicaState::SendingRdb);
             if !self.send_private_to_replica(*client_id, header.clone()) {
                 failed_replicas.push(*client_id);
                 continue;
@@ -2029,6 +2026,7 @@ impl ReplicationState {
             }
 
             if catch_up_queued {
+                self.set_replica_state(*client_id, ReplicaState::SendingRdb);
                 delivered_replicas.push(*client_id);
             }
         }
@@ -2058,6 +2056,21 @@ impl ReplicationState {
             retained_catchup_len,
             needs_getack_on_completion: job.needs_getack_on_completion,
         }
+    }
+
+    /// Complete the currently-installed BGSAVE job after the reaper has read
+    /// the temp RDB file. The job intentionally remains installed while the
+    /// file is read so concurrent writes keep extending its catch-up buffer.
+    /// The final transfer holds the full-sync snapshot write barrier, blocking
+    /// new top-level writes until RDB plus catch-up bytes are queued and the
+    /// replicas become eligible for live fan-out.
+    pub fn complete_current_repl_bgsave_transfer(
+        &self,
+        rdb_bytes: Vec<u8>,
+    ) -> Option<ReplFullsyncTransferOutcome> {
+        let _guard = self.fullsync_snapshot_write_guard();
+        let job = self.take_repl_bgsave_job()?;
+        Some(self.complete_repl_bgsave_transfer(job, rdb_bytes))
     }
 
     fn fullsync_catch_up_bytes(
