@@ -13,8 +13,8 @@ Fast deterministic gate:
 cargo test -p redis-commands --test repl_correctness_kit
 ```
 
-Latest result on 2026-06-13 after the real digest / blocked-pop wake packet:
-29 passed, 0 failed.
+Latest result on 2026-06-14 after the BLPOP role-change unblock packet:
+37 passed, 0 failed.
 
 R0 full integration dashboard:
 
@@ -74,7 +74,7 @@ Artifact:
 | `integration/replication-3` | 3/4 | Red | Expiry consistency, writable-replica expired-key behavior, and PFCOUNT expired-key/cache semantics. |
 | `integration/replication-4` | 15/2 | Red | SPOP rewrite cases now pass; remaining failures are divergence/default writable-replica cases. |
 | `integration/replication-buffer` | 16/0 | Green | The replication-buffer kit line now covers active full-sync catch-up beyond the circular backlog, partial resync from retained shared history, retained-history release after the last dependent replica disconnects, shared output memory charged once, and hard-limit disconnect isolation. Follow-up Tcl scoreboards moved the file through 13/3, 15/1, and finally 16/0 at artifact `20260614T071942726290Z`; keep `repl_buffer_kit` as the inner loop and rerun this Tcl file only as a regression scoreboard. |
-| `integration/replication` | timeout / 6 parsed lines | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, async-loading CONFIG exceptions, successful swapdb function payloads, parent-killed child discovery, `repl-diskless-load on-empty-db`, no-longer-useful RDB child cancellation, replica-link reply violations, malformed-PSYNC-offset logging, chained replica `FLUSHDB` / `FLUSHALL` stream relay, `GETSET` rewrite, nonblocking `BRPOPLPUSH` / `BLMOVE` rewrite stats, empty-blocking commandstats, and replica output-byte stats. The latest 2026-06-14 scoreboard `20260614T100741793243Z` still times out, but dropped the replica output bytes metric line; remaining parsed lines are handshake timeout, BLPOP role-change digest, and four multi-replica full-sync cases. |
+| `integration/replication` | timeout / 6 parsed lines | Red | Full-sync lifecycle work moved past killed-child cleanup, script-busy READONLY, FCALL READONLY, async-loading CONFIG exceptions, successful swapdb function payloads, parent-killed child discovery, `repl-diskless-load on-empty-db`, no-longer-useful RDB child cancellation, replica-link reply violations, malformed-PSYNC-offset logging, chained replica `FLUSHDB` / `FLUSHALL` stream relay, `GETSET` rewrite, nonblocking `BRPOPLPUSH` / `BLMOVE` rewrite stats, empty-blocking commandstats, and replica output-byte stats. The latest 2026-06-14 scoreboard `20260614T100741793243Z` still times out, but dropped the replica output bytes metric line; remaining parsed lines are handshake timeout, BLPOP role-change digest, and four multi-replica full-sync cases. The BLPOP role-change line now has a kit-backed fix; rerun the full Tcl file as a scoreboard after the next kit batch rather than using it as the debugger. |
 | `integration/replication-psync` | timeout | Red | Historical focused gate was 90/0 after live backlog resize, `repl-backlog-ttl` expiry, stale replica entry cleanup, and `DEBUG SLEEP` pause support. Current full-file reruns remain red, but the kit-first loop has moved the visible frontier: raw `-0` RDB fidelity was fixed, set-store commands now rewrite to deterministic `DEL` plus `SADD`, fresh full-sync catch-up now injects and retains a selected-DB prefix before active writes, and the latest replica-only DB 0 set residue is covered by a post-fullsync live-stream SELECT kit. The latest single Tcl scoreboard remains `20260614T091542767472Z`; do not use the six-minute file as the debugger. Rerun it as a scoreboard after the next kit batch or nightly pass. |
 | `integration/replication-aof-sync` | 6/0 | Green | Full-sync AOF base refresh, disk-based RDB reuse, diskless BGREWRITEAOF fallback, and stale local RDB restart coverage now pass. |
 | `integration/replica-redirect` | 11/0 | Green | `CLIENT CAPA REDIRECT`, MULTI/EXEC replica redirects, failover pause, waiting-for-sync responses, and blocked-client behavior during failover now pass in the direct Tcl file. The final 2026-06-14 kit-first pass moved the file from timeout/no-summary to parsed 10/1, reduced the stale DB 9 stream return to partial-resync/role-change invariants, then cleared the full file at 11/0 in 6 seconds. |
@@ -152,8 +152,9 @@ visible integration frontiers are now:
   visibility are covered; implement broader shared-buffer memory accounting,
   backlog outgrowth under slow online replicas, and replica output-buffer
   disconnection semantics behind `replication-buffer`.
-- `R4-WAIT/WAITAOF`: role-change unblock now covers both WAIT and WAITAOF for
-  `REPLICAOF` topology changes; replica FACK/disconnect semantics remain open.
+- `R4-WAIT/WAITAOF`: role-change unblock now covers WAIT, WAITAOF, and
+  write-sensitive list/zset blocking waiters for `REPLICAOF` topology changes;
+  replica FACK/disconnect semantics remain open.
 - `R4-AOF-FULLSYNC`: `replication-aof-sync` is now green after full-sync RDB
   loads refresh appendonly manifests correctly.
 - `R5-MANUAL-FAILOVER`: server `FAILOVER` now has parser coverage and visible
@@ -3720,3 +3721,59 @@ Takeaway:
 - The current parsed `integration/replication` frontier is now handshake
   timeout, BLPOP role-change digest divergence, and the four multi-replica
   full-sync cases.
+
+### 2026-06-14 R2 follow-up: BLPOP role-change unblock kit
+
+Status: deterministic kit-backed fix completed on 2026-06-14; no slow Tcl
+scoreboard was run for this packet.
+
+Scope:
+
+- The current `integration/replication` frontier included `BLPOP followed by
+  role change, issue #2473`: a client blocked on a node while it was primary
+  could survive `REPLICAOF`, then consume the next replicated `RPUSH` and
+  diverge from the upstream keyspace.
+- `BlockedKeysIndex` now has a role-change drain for write-sensitive data
+  waiters: list pops, list moves, and sorted-set pops. READONLY stream waiters
+  remain on their existing failover/replicated-write path.
+- `unblock_replication_role_change` now drains both replication-progress
+  waiters and those data waiters, sends the upstream-compatible `UNBLOCKED`
+  error, and records the blocked command as rejected when delivery succeeds.
+- `repl_correctness_kit::p4_blocked_blpop_unblocks_before_replica_apply_after_role_change`
+  parks a real `BLPOP` through dispatch, force-unblocks it through the role
+  change helper, applies `RPUSH foo a b c` as replica traffic, and proves the
+  local blocked client does not consume `a`. The same kit asserts
+  `cmdstat_blpop` remains `calls=1,rejected_calls=1,failed_calls=0`.
+
+Evidence:
+
+```bash
+cargo test -p redis-commands --test repl_correctness_kit \
+  p4_blocked_blpop_unblocks_before_replica_apply_after_role_change
+cargo test -p redis-commands --test repl_correctness_kit
+cargo test -p redis-commands --test failover_redirect_kit
+cargo test -p redis-core blocked_keys
+cargo test -p redis-commands replication::tests
+rustfmt --edition 2021 --check \
+  crates/redis-core/src/blocked_keys.rs \
+  crates/redis-commands/src/replication.rs \
+  crates/redis-commands/tests/repl_correctness_kit.rs
+cargo build -p redis-server --bin redis-server
+```
+
+Results:
+
+- Focused BLPOP role-change kit: 1 passed, 0 failed.
+- `repl_correctness_kit`: 37 passed, 0 failed.
+- `failover_redirect_kit`: 11 passed, 0 failed.
+- `redis-core blocked_keys` filter: 3 passed, 0 failed.
+- `redis-commands` replication unit filter: 13 passed, 0 failed.
+- File-scoped `rustfmt --check`: passed.
+- `cargo build -p redis-server --bin redis-server`: passed.
+
+Takeaway:
+
+- This is the right loop for the BLPOP role-change digest line. The full
+  `integration/replication` Tcl file is still useful as a scoreboard, but it
+  should be saved for the next batch or nightly pass so the debugger stays in
+  fast Rust kits.

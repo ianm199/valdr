@@ -25,6 +25,8 @@ use redis_core::CommandContext;
 use redis_protocol::frame::RespFrame;
 use redis_types::{RedisError, RedisResult, RedisString};
 
+use crate::connection::blocked_action_command_name;
+
 /// `REPLICAOF host port` / `REPLICAOF NO ONE` (alias: `SLAVEOF`).
 /// `REPLICAOF NO ONE` cancels replica mode and becomes a standalone primary.
 /// `REPLICAOF <host> <port>` configures this server as a replica of the named
@@ -739,13 +741,23 @@ pub fn unblock_replication_role_change() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
-        idx.take_all_replication_waiters()
+        let mut waiters = idx.take_all_replication_waiters();
+        waiters.extend(idx.take_role_change_unblock_waiters());
+        waiters
     };
     for waiter in waiters {
-        let _ = waiter.sender.send(
-            b"-UNBLOCKED force unblock from blocking operation, instance state changed\r\n"
-                .to_vec(),
-        );
+        if waiter
+            .sender
+            .send(
+                b"-UNBLOCKED force unblock from blocking operation, instance state changed\r\n"
+                    .to_vec(),
+            )
+            .is_ok()
+        {
+            redis_core::metrics::record_blocked_command_rejected(blocked_action_command_name(
+                &waiter.action,
+            ));
+        }
     }
 }
 

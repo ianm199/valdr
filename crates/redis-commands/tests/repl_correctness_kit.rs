@@ -152,6 +152,36 @@ fn dispatch_result_as_primary(client_id: u64, db: &mut RedisDb, cmd: &[&[u8]]) -
     }
 }
 
+fn block_blpop(client_id: u64, db: &mut RedisDb, key: &[u8]) -> Receiver<Vec<u8>> {
+    {
+        let mut idx = blocked_keys_index()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _ = idx.remove_client(client_id);
+    }
+
+    let (tx, rx) = mpsc::channel();
+    let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
+    {
+        let mut guard = pubsub.lock().unwrap();
+        guard.register_sender(client_id, tx);
+    }
+    let mut c = Client::new(client_id);
+    c.set_args(argv(&[b"BLPOP".as_slice(), key, b"0".as_slice()]));
+    let server = Arc::new(RedisServer::default());
+    {
+        let mut ctx = redis_core::CommandContext::with_server(&mut c, db, server, pubsub);
+        dispatch(&mut ctx).expect("BLPOP dispatch should park");
+    }
+    assert!(c.blocked_on_keys, "BLPOP should park on an empty key");
+    assert_eq!(
+        c.drain_reply(),
+        b"",
+        "blocked BLPOP must not synchronously reply"
+    );
+    rx
+}
+
 fn count_subsequence(haystack: &[u8], needle: &[u8]) -> usize {
     haystack
         .windows(needle.len())
@@ -183,6 +213,14 @@ fn command_stat_calls(name: &[u8]) -> u64 {
         .find(|stat| stat.name.eq_ignore_ascii_case(name))
         .map(|stat| stat.calls)
         .unwrap_or(0)
+}
+
+fn command_stat_counts(name: &[u8]) -> (u64, u64, u64) {
+    command_stats_snapshot()
+        .into_iter()
+        .find(|stat| stat.name.eq_ignore_ascii_case(name))
+        .map(|stat| (stat.calls, stat.rejected_calls, stat.failed_calls))
+        .unwrap_or((0, 0, 0))
 }
 
 fn dispatch_as_primary_on_db(
@@ -2300,6 +2338,45 @@ fn p4_wait_and_waitaof_waiters_unblock_on_role_change() {
             String::from_utf8_lossy(&reply),
         );
     }
+}
+
+#[test]
+fn p4_blocked_blpop_unblocks_before_replica_apply_after_role_change() {
+    let _g = repl_guard();
+    global_replication_state().become_master();
+    reset_command_stats();
+
+    let mut db = RedisDb::new(0);
+    let rx = block_blpop(980_007, &mut db, b"foo");
+    assert_eq!(command_stat_counts(b"blpop"), (1, 0, 0));
+
+    redis_commands::replication::unblock_replication_role_change();
+    let reply = rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("BLPOP waiter should be force-unblocked on role change");
+    assert!(
+        reply.starts_with(
+            b"-UNBLOCKED force unblock from blocking operation, instance state changed"
+        ),
+        "unexpected BLPOP role-change reply: {:?}",
+        String::from_utf8_lossy(&reply),
+    );
+    assert_eq!(command_stat_counts(b"blpop"), (1, 1, 0));
+
+    assert_eq!(
+        dispatch_as_replica_apply(980_008, &mut db, &[b"RPUSH", b"foo", b"a", b"b", b"c"]),
+        b":3\r\n"
+    );
+    assert_eq!(
+        dispatch_as_primary(980_009, &mut db, &[b"LRANGE", b"foo", b"0", b"-1"]),
+        b"*3\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "replica-applied RPUSH must not wake the stale BLPOP waiter"
+    );
+
+    reset_command_stats();
 }
 
 // ─── R5 FAILOVER parser-only groundwork ─────────────────────────────────────

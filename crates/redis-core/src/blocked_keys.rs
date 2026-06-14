@@ -582,6 +582,31 @@ impl BlockedKeysIndex {
         out
     }
 
+    /// Drain data waiters that must not survive a replication role change.
+    /// Blocking pop commands are write-sensitive: if a primary becomes a
+    /// replica and a queued replicated write later wakes the waiter, the local
+    /// client would consume data that should only have been applied from the
+    /// upstream stream.
+    pub fn take_role_change_unblock_waiters(&mut self) -> Vec<BlockedWaiter> {
+        let cids: Vec<ClientId> = self
+            .waiters
+            .iter()
+            .filter_map(|(cid, w)| match &w.action {
+                BlockedAction::Pop { .. }
+                | BlockedAction::Move { .. }
+                | BlockedAction::ZSetPop { .. } => Some(*cid),
+                _ => None,
+            })
+            .collect();
+        let mut out = Vec::with_capacity(cids.len());
+        for cid in cids {
+            if let Some(w) = self.remove_client(cid) {
+                out.push(w);
+            }
+        }
+        out
+    }
+
     /// Drain every data-command waiter that should receive a REDIRECT after a
     /// replication role change. READONLY stream waiters deliberately remain in the
     /// blocking index so they can be satisfied by later replicated writes.
