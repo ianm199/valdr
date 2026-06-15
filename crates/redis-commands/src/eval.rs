@@ -20,7 +20,6 @@ use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
@@ -49,6 +48,7 @@ use redis_types::{RedisError, RedisResult, RedisString};
 use crate::dispatch::{command_acl_categories, command_is_denyoom, dispatch_command_name};
 
 mod active_function;
+mod busy_script;
 #[cfg(feature = "lua-rs-engine")]
 mod lua_rs_backend;
 mod resp_bridge;
@@ -59,6 +59,11 @@ use active_function::{
     active_function_call, active_function_dirty, active_function_error_recorded,
     enter_active_function_call, function_call_active, with_active_function_context,
 };
+use busy_script::{
+    busy_script_error, busy_script_snapshot, clear_busy_script, set_busy_script, BusyScriptKind,
+    BusyScriptState,
+};
+pub(crate) use busy_script::{busy_script_error_reply, busy_script_owner_is, is_script_busy};
 use resp_bridge::{
     lua_to_resp, parse_reply_value, reply_to_lua, script_resp_view, ReplyValue,
     LUA_ERROR_ALREADY_RECORDED_FIELD,
@@ -101,21 +106,6 @@ struct FunctionScriptChecks {
     synthetic_loop_dirty: bool,
     massive_unpack_lpush: bool,
     unpack_range_overflow: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BusyScriptKind {
-    Eval,
-    Function,
-}
-
-#[derive(Clone, Debug)]
-struct BusyScriptState {
-    kind: BusyScriptKind,
-    owner_id: u64,
-    name: Vec<u8>,
-    command: Vec<Vec<u8>>,
-    dirty: bool,
 }
 
 struct RuntimeFunctionRegistration {
@@ -1847,74 +1837,6 @@ fn record_script_rejected_command(args: &[Vec<u8>], payload: &[u8]) {
         record_command_stat(name, 0, true, false);
     }
     record_error_reply(payload);
-}
-
-fn busy_script_state() -> &'static Mutex<Option<BusyScriptState>> {
-    static STATE: OnceLock<Mutex<Option<BusyScriptState>>> = OnceLock::new();
-    STATE.get_or_init(|| Mutex::new(None))
-}
-
-static BUSY_SCRIPT_ACTIVE: AtomicBool = AtomicBool::new(false);
-
-pub(crate) fn is_script_busy() -> bool {
-    if !BUSY_SCRIPT_ACTIVE.load(AtomicOrdering::Acquire) {
-        return false;
-    }
-    let guard = match busy_script_state().lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    guard.is_some()
-}
-
-pub(crate) fn busy_script_owner_is(client_id: u64) -> bool {
-    if !BUSY_SCRIPT_ACTIVE.load(AtomicOrdering::Acquire) {
-        return false;
-    }
-    let guard = match busy_script_state().lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    guard
-        .as_ref()
-        .is_some_and(|state| state.owner_id == client_id)
-}
-
-pub(crate) fn busy_script_error_reply() -> Vec<u8> {
-    b"-BUSY Redis is busy running a script. You can only call SCRIPT KILL or SHUTDOWN NOSAVE.\r\n"
-        .to_vec()
-}
-
-fn busy_script_error() -> RedisError {
-    RedisError::runtime(
-        b"BUSY Redis is busy running a script. You can only call SCRIPT KILL or SHUTDOWN NOSAVE.",
-    )
-}
-
-fn busy_script_snapshot() -> Option<BusyScriptState> {
-    let guard = match busy_script_state().lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    guard.clone()
-}
-
-fn set_busy_script(state: BusyScriptState) {
-    let mut guard = match busy_script_state().lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    *guard = Some(state);
-    BUSY_SCRIPT_ACTIVE.store(true, AtomicOrdering::Release);
-}
-
-fn clear_busy_script() {
-    let mut guard = match busy_script_state().lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    *guard = None;
-    BUSY_SCRIPT_ACTIVE.store(false, AtomicOrdering::Release);
 }
 
 fn current_command_argv(ctx: &CommandContext<'_>) -> Vec<Vec<u8>> {
