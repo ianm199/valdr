@@ -1,4 +1,8 @@
-//! AUTO-EXTRACTED from connection.rs by refactor/file-structure-splits phase 1.5.
+//! COMMAND introspection metadata and key-spec helpers.
+//!
+//! The generated command registry owns source-shaped command metadata. This
+//! module turns that metadata into RESP replies for `COMMAND` subcommands and
+//! derives key positions for `COMMAND GETKEYS` / `GETKEYSANDFLAGS`.
 #![allow(unused_imports, dead_code, unused_variables, unused_mut)]
 
 use std::collections::{HashMap, HashSet};
@@ -48,8 +52,9 @@ use crate::shutdown_signals::*;
 
 /// `COMMAND` / `COMMAND COUNT` / `COMMAND GETKEYS` / `COMMAND GETKEYSANDFLAGS`.
 /// `COMMAND` (no args) replies with an array of bulk-string command names
-/// drawn from the dispatch table. This stub omits the per-command metadata
-/// (arity/flags/key-positions/etc.); `redis-cli` accepts a names-only reply.
+/// drawn from the dispatch table. This compatibility shortcut omits the
+/// full per-command metadata array; `COMMAND INFO` is the metadata path used
+/// by tests and clients that need flags/key positions.
 /// `COMMAND COUNT` replies with the integer length of the dispatch table.
 /// `COMMAND LIST` returns the generated command and subcommand names, including
 /// `parent|subcommand` full names for source-shaped upstream introspection

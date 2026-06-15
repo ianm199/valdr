@@ -7,7 +7,7 @@
 //! 1. The generated registry in `generated::COMMANDS` is the source of truth
 //! for command metadata (arity, flags, ACL category).
 //! 2. A small static `HANDLERS` table maps an uppercase ASCII command name
-//! a Rust function. Commands with no handler yet are intentionally absent;
+//! to a Rust function. Commands with no handler yet are intentionally absent;
 //! callers receive an `unknown command` error.
 
 use std::borrow::Cow;
@@ -2761,10 +2761,11 @@ fn ascii_lower_vec(bytes: &[u8]) -> Vec<u8> {
     bytes.iter().map(|b| ascii_lower(*b)).collect()
 }
 
-/// Wave A placeholder handler that returns `Err(RedisError::runtime(b"ERR …"))`.
-/// Handler bodies in Waves B/C/D will replace these one by one. Routing
-/// the stub proves the table is wired correctly. Retained for new commands
-/// scaffolded but not yet implemented.
+/// Development-only fallback for newly scaffolded commands.
+///
+/// Current runtime entries should route directly to implemented or intentionally
+/// partial handlers. Commands with no handler should stay absent from
+/// [`HANDLERS`] so callers receive the normal unknown-command error.
 #[allow(dead_code)]
 fn unimplemented_handler(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     let name = ctx
@@ -2779,14 +2780,10 @@ fn unimplemented_handler(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 }
 
 /// Static dispatch table.
-/// Only includes commands whose handlers exist in this crate (even if
-/// handler body is `todo!`). Wave B fills in PING + ECHO bodies; Wave C
-/// fills in SET/GET/DEL/EXISTS/INCR.
-/// PORT NOTE: For Wave A we route every entry to `unimplemented_handler`
-/// rather than the real handler. The Wave B agent flips PING/ECHO over
-/// `crate::connection::ping_command` / `echo_command` once those exist;
-/// Wave C does the same for string commands. This avoids `todo!` panics
-/// crashing the server during Wave A smoke testing.
+///
+/// Includes commands with a runtime handler in this crate or `redis-core`.
+/// Generated metadata stays in `generated::COMMANDS`; this table is only the
+/// executable routing layer used after dispatch gates pass.
 pub static HANDLERS: &[DispatchEntry] = &[
     DispatchEntry {
         name: b"PING",
@@ -3518,7 +3515,7 @@ pub static HANDLERS: &[DispatchEntry] = &[
         name: b"UNWATCH",
         handler: crate::multi::unwatch_command,
     },
-    // ── TCL HARNESS STUBS (Round 9) ────────────────────────────────────────
+    // ── SCRIPTING / CONFIG / INTROSPECTION COMPATIBILITY ───────────────────
     DispatchEntry {
         name: b"FUNCTION",
         handler: crate::connection::function_command,
@@ -4024,13 +4021,16 @@ mod tests {
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        architect packet (Wave A — dispatch lookup fn)
+//   source:        runtime dispatch table + generated metadata registry
 //   target_crate:  redis-commands
 //   confidence:    high
 //   todos:         0
 //   port_notes:    1
 //   unsafe_blocks: 0
-//   notes:         Lookup + routing wired. Handler bodies are stubbed via
-//                  unimplemented_handler so the binary returns a clean error
-//                  reply for any command; Waves B/C wire the real bodies.
+//   notes:         Lookup, command renaming, hot-path metadata, ACL/auth/OOM/
+//                  loading/pause/script/MULTI gates, propagation hooks, and
+//                  runtime routing are active. Missing runtime handlers stay
+//                  absent from HANDLERS and return the normal unknown-command
+//                  error. unimplemented_handler is retained only as a local
+//                  development scaffold.
 // ──────────────────────────────────────────────────────────────────────────
