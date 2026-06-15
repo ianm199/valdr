@@ -2,7 +2,7 @@
 
 use mlua::{Error as LuaError, Lua, Table as LuaTable, Variadic};
 
-use super::readonly_table_proxy;
+use super::lua_sandbox::readonly_table_proxy;
 
 /// LuaBitOp `barg`: reduce a Lua number to its low 32 bits using the same
 /// magic-number conversion LuaBitOp performs for the double `lua_Number`

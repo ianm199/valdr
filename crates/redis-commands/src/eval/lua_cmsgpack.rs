@@ -2,7 +2,7 @@
 
 use mlua::{Error as LuaError, Lua, MultiValue, Table as LuaTable, Value as LuaValue};
 
-use super::readonly_table_proxy;
+use super::lua_sandbox::readonly_table_proxy;
 
 const CMSGPACK_MAX_NESTING: usize = 16;
 
