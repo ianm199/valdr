@@ -1,9 +1,10 @@
 //! `CommandContext` — the contract every command implementation works against.
-//! Per PORTING.md §2 #5: bundles `&mut Client`, parsed args, and reply
-//! writer helpers. Returns `Result<, RedisError>`. NOT the C `client *c`
-//! parameter — commands never touch the raw connection or buffer-list.
-//! `RedisServer` reference comes via the orchestrator (Phase 3 architect
-//! packet adds it).
+//! Bundles the mutable client, selected database access, live server state,
+//! optional pub/sub registry, parsed argv, and reply-writer helpers. It is not
+//! the C `client *c` parameter: command handlers stay behind this Rust API
+//! instead of reaching into raw connection state or buffer-list internals.
+//! Production dispatch uses the server-backed constructors; unit tests can
+//! still build isolated contexts with owned or borrowed scratch DBs.
 
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
@@ -137,13 +138,13 @@ impl DbListRoute {
 pub struct CommandContext<'a> {
     pub client: &'a mut Client,
     db: DbStorage<'a>,
- /// Shared handle to the live server state. Wrapped in `Arc` so the same
- /// instance is reachable from every command-dispatch thread without giving
- /// out a `&mut` borrow.
+    /// Shared handle to the live server state. Wrapped in `Arc` so the same
+    /// instance is reachable from every command-dispatch thread without giving
+    /// out a `&mut` borrow.
     server: Arc<RedisServer>,
- /// Optional shared pub/sub registry handle.
- /// `None` in unit tests; `Some` for the live server, where every
- /// connection's accept-loop wraps the same registry in `Arc<Mutex<>>`.
+    /// Optional shared pub/sub registry handle.
+    /// `None` in unit tests; `Some` for the live server, where every
+    /// connection's accept-loop wraps the same registry in `Arc<Mutex<>>`.
     pub pubsub: Option<Arc<Mutex<PubSubRegistry>>>,
 }
 
@@ -153,10 +154,10 @@ pub struct CommandContext<'a> {
 /// bytes inline). Once all translated code switches to `RedisError`,
 /// `&[u8]` impl can be removed.
 impl<'a> CommandContext<'a> {
- /// Construct a context with an isolated owned scratch database.
- /// Intended for unit tests; production code paths should use
- /// [`Self::with_server`] so the live server's config and pubsub registry
- /// thread through every dispatch.
+    /// Construct a context with an isolated owned scratch database.
+    /// Intended for unit tests; production code paths should use
+    /// [`Self::with_server`] so the live server's config and pubsub registry
+    /// thread through every dispatch.
     pub fn new(client: &'a mut Client) -> Self {
         Self {
             client,
@@ -166,8 +167,8 @@ impl<'a> CommandContext<'a> {
         }
     }
 
- /// Construct a context sharing the caller-supplied database.
- /// Test-only helper; production callers go through [`Self::with_server`].
+    /// Construct a context sharing the caller-supplied database.
+    /// Test-only helper; production callers go through [`Self::with_server`].
     pub fn with_db(client: &'a mut Client, db: &'a mut RedisDb) -> Self {
         Self {
             client,
@@ -177,8 +178,8 @@ impl<'a> CommandContext<'a> {
         }
     }
 
- /// Construct a context with both a shared database and a shared pub/sub
- /// registry. Used by the live server accept loop.
+    /// Construct a context with both a shared database and a shared pub/sub
+    /// registry. Used by the live server accept loop.
     pub fn with_db_and_pubsub(
         client: &'a mut Client,
         db: &'a mut RedisDb,
@@ -192,9 +193,9 @@ impl<'a> CommandContext<'a> {
         }
     }
 
- /// Construct a fully-wired context: live database, shared pub/sub
- /// registry, and the actual `Arc<RedisServer>` carrying the live config.
- /// This is the production accept-loop constructor.
+    /// Construct a fully-wired context: live database, shared pub/sub
+    /// registry, and the actual `Arc<RedisServer>` carrying the live config.
+    /// This is the production accept-loop constructor.
     pub fn with_server(
         client: &'a mut Client,
         db: &'a mut RedisDb,
@@ -204,12 +205,12 @@ impl<'a> CommandContext<'a> {
         Self::with_server_and_db_route(client, db, DbListRoute::global(), server, pubsub)
     }
 
- /// Construct a fully-wired context with an explicit DB-list route.
- /// `db` is the already-selected database for this dispatch. `route` names
- /// the full live DB list that cross-DB commands can consult without
- /// reaching back to `global_databases` directly. For this packet
- /// route points at the existing global handles; it does not move storage
- /// ownership or create a second live keyspace.
+    /// Construct a fully-wired context with an explicit DB-list route.
+    /// `db` is the already-selected database for this dispatch. `route` names
+    /// the full live DB list that cross-DB commands can consult without
+    /// reaching back to `global_databases` directly. For this packet
+    /// route points at the existing global handles; it does not move storage
+    /// ownership or create a second live keyspace.
     pub fn with_server_and_db_route(
         client: &'a mut Client,
         db: &'a mut RedisDb,
@@ -228,11 +229,11 @@ impl<'a> CommandContext<'a> {
         }
     }
 
- /// Construct a production context backed by the RuntimeOwner-owned DB
- /// slice.
- /// The selected DB is derived from `client.db_index`, matching Valkey's
- /// per-client selected database semantics. Cross-DB commands route through
- /// closure helpers on this context instead of taking global DB mutexes.
+    /// Construct a production context backed by the RuntimeOwner-owned DB
+    /// slice.
+    /// The selected DB is derived from `client.db_index`, matching Valkey's
+    /// per-client selected database semantics. Cross-DB commands route through
+    /// closure helpers on this context instead of taking global DB mutexes.
     pub fn with_server_and_db_list(
         client: &'a mut Client,
         dbs: &'a mut [RedisDb],
@@ -251,7 +252,7 @@ impl<'a> CommandContext<'a> {
         }
     }
 
- // ── Args ──────────────────────────────────────────────────────
+    // ── Args ──────────────────────────────────────────────────────
 
     pub fn arg(&self, i: usize) -> RedisResult<&RedisString> {
         self.client
@@ -263,7 +264,7 @@ impl<'a> CommandContext<'a> {
         self.client.arg_count()
     }
 
- /// Arg 0 is the command name (uppercase by Redis convention).
+    /// Arg 0 is the command name (uppercase by Redis convention).
     pub fn command_name(&self) -> &[u8] {
         self.client
             .arg(0)
@@ -271,11 +272,11 @@ impl<'a> CommandContext<'a> {
             .unwrap_or(b"<unknown>")
     }
 
- /// Apply the packet-level CLIENT TRACKING hooks after a command succeeds.
- /// This is intentionally narrow: it records the common read-command key
- /// shapes used by the official tracking TCL and sends invalidations for
- /// the matching write-command shapes through the existing outbound
- /// pub/sub channels.
+    /// Apply the packet-level CLIENT TRACKING hooks after a command succeeds.
+    /// This is intentionally narrow: it records the common read-command key
+    /// shapes used by the official tracking TCL and sends invalidations for
+    /// the matching write-command shapes through the existing outbound
+    /// pub/sub channels.
     pub fn apply_client_tracking_after_command(&mut self, name: &[u8], is_write: bool) {
         let runtime_tracking_active = crate::tracking::runtime_has_tracking_clients();
         let runtime_bcast_pending = crate::tracking::runtime_has_pending_bcast();
@@ -329,7 +330,7 @@ impl<'a> CommandContext<'a> {
         }
     }
 
- // ── Reply writers ─────────────────────────────────────────────
+    // ── Reply writers ─────────────────────────────────────────────
 
     pub fn reply_simple_string(&mut self, bytes: &[u8]) -> RedisResult<()> {
         self.client.write_simple_string(bytes);
@@ -384,32 +385,32 @@ impl<'a> CommandContext<'a> {
         Ok(())
     }
 
- /// Reply with a push frame that bypasses CLIENT REPLY OFF/SKIP.
+    /// Reply with a push frame that bypasses CLIENT REPLY OFF/SKIP.
     pub fn reply_push_frame(&mut self, frame: &RespFrame) -> RedisResult<()> {
         self.client.write_push_frame(frame);
         Ok(())
     }
 
- /// Reply with an error. Equivalent of C's addReplyError* family.
- /// Accepts either a `&RedisError` (preferred) or raw `&[u8]` bytes; both
- /// are dispatched through [`ReplyErrorArg`]. The error becomes a `-...`
- /// RESP error line; this does not return `Err`.
+    /// Reply with an error. Equivalent of C's addReplyError* family.
+    /// Accepts either a `&RedisError` (preferred) or raw `&[u8]` bytes; both
+    /// are dispatched through [`ReplyErrorArg`]. The error becomes a `-...`
+    /// RESP error line; this does not return `Err`.
     pub fn reply_error<E: ReplyErrorArg>(&mut self, err: E) -> RedisResult<()> {
         let payload = err.into_reply_error_payload();
         self.client.write_error(payload.as_bytes());
         Ok(())
     }
 
- // ── Phase-B stubs needed by translated command code ────────────
+    // ── Phase-B stubs needed by translated command code ────────────
 
- /// Argument count, C-style (alias of `arg_count`).
+    /// Argument count, C-style (alias of `arg_count`).
     pub fn argc(&self) -> usize {
         self.client.arg_count()
     }
 
- /// Owned-copy argv accessor.
- /// Returns a cloned `RedisString` for the given index. Translated code
- /// uses this where it wants to retain a copy across borrows of `ctx`.
+    /// Owned-copy argv accessor.
+    /// Returns a cloned `RedisString` for the given index. Translated code
+    /// uses this where it wants to retain a copy across borrows of `ctx`.
     pub fn arg_owned<I: ArgIndex>(&self, i: I) -> RedisResult<RedisString> {
         let idx = i.into_arg_index()?;
         self.client
@@ -418,7 +419,7 @@ impl<'a> CommandContext<'a> {
             .ok_or_else(|| RedisError::wrong_number_of_args(self.command_name()))
     }
 
- /// Borrow argv bytes for translated command code.
+    /// Borrow argv bytes for translated command code.
     pub fn arg_bytes<I: ArgIndex>(&self, i: I) -> RedisResult<&[u8]> {
         let idx = i.into_arg_index()?;
         self.client
@@ -427,29 +428,29 @@ impl<'a> CommandContext<'a> {
             .ok_or_else(|| RedisError::wrong_number_of_args(self.command_name()))
     }
 
- /// Parse a signed decimal argv as `i64` without converting Redis data to UTF-8.
+    /// Parse a signed decimal argv as `i64` without converting Redis data to UTF-8.
     pub fn arg_parse_i64<I: ArgIndex>(&self, i: I) -> RedisResult<i64> {
         let bytes = self.arg_bytes(i)?;
         parse_i64_from_bytes(bytes)
             .ok_or_else(|| RedisError::runtime(b"ERR value is not an integer or out of range"))
     }
 
- /// Argv accessor returning a `RedisObject::String` wrapper.
- /// STUB — Phase B placeholder mapping a raw argv `RedisString` into
- /// `RedisObject::String` variant. Eventually arguments will already be
- /// `RedisObject`-typed once shared-object interning lands.
+    /// Argv accessor returning a `RedisObject::String` wrapper.
+    /// STUB — Phase B placeholder mapping a raw argv `RedisString` into
+    /// `RedisObject::String` variant. Eventually arguments will already be
+    /// `RedisObject`-typed once shared-object interning lands.
     pub fn arg_as_object<I: ArgIndex>(&self, i: I) -> RedisResult<RedisObject> {
         let s = self.arg_owned(i)?;
         Ok(RedisObject::from_string(s))
     }
 
- /// Null bulk reply (alias of `reply_null_bulk`).
+    /// Null bulk reply (alias of `reply_null_bulk`).
     pub fn reply_null(&mut self) -> RedisResult<()> {
         self.reply_null_bulk()
     }
 
- /// Push or array header — RESP3 push frame in client RESP3 mode,
- /// fall back to RESP2 array header otherwise.
+    /// Push or array header — RESP3 push frame in client RESP3 mode,
+    /// fall back to RESP2 array header otherwise.
     pub fn reply_push_or_array_header<L: ReplyArrayLen>(&mut self, len: L) -> RedisResult<()> {
         let n = len.into_reply_len();
         self.client.write_push_or_array_header(n);
@@ -461,57 +462,57 @@ impl<'a> CommandContext<'a> {
         Ok(())
     }
 
- /// Reply with a map header for `n_pairs` key/value pairs.
- /// RESP3 clients receive `%N\r\n`; RESP2 clients receive an equivalent
- /// flat alternating array header (`*2N\r\n`). Caller must then emit
- /// exactly `2 * n_pairs` frames in alternating key/value order; both
- /// wire shapes are well-formed RESP under either protocol.
+    /// Reply with a map header for `n_pairs` key/value pairs.
+    /// RESP3 clients receive `%N\r\n`; RESP2 clients receive an equivalent
+    /// flat alternating array header (`*2N\r\n`). Caller must then emit
+    /// exactly `2 * n_pairs` frames in alternating key/value order; both
+    /// wire shapes are well-formed RESP under either protocol.
     pub fn reply_map_header<L: ReplyArrayLen>(&mut self, n_pairs: L) -> RedisResult<()> {
         let n = n_pairs.into_reply_len();
         self.client.write_map_header(n);
         Ok(())
     }
 
- /// Reply with a set header for `n` items.
- /// RESP3 clients receive `~N\r\n`; RESP2 clients receive `*N\r\n` (
- /// semantic distinction between array and set is RESP3-only).
+    /// Reply with a set header for `n` items.
+    /// RESP3 clients receive `~N\r\n`; RESP2 clients receive `*N\r\n` (
+    /// semantic distinction between array and set is RESP3-only).
     pub fn reply_set_header<L: ReplyArrayLen>(&mut self, n: L) -> RedisResult<()> {
         let n = n.into_reply_len();
         self.client.write_set_header(n);
         Ok(())
     }
 
- /// Reply with a RESP3 double. RESP2 clients receive a bulk string of
- /// canonical textual representation (matches `format_score` in the zset
- /// command surface).
+    /// Reply with a RESP3 double. RESP2 clients receive a bulk string of
+    /// canonical textual representation (matches `format_score` in the zset
+    /// command surface).
     pub fn reply_double(&mut self, d: f64) -> RedisResult<()> {
         self.client.write_frame(&RespFrame::Double(d));
         Ok(())
     }
 
- /// Reply with a RESP3 boolean. RESP2 clients receive an integer reply
- /// `:1\r\n` (true) or `:0\r\n` (false).
+    /// Reply with a RESP3 boolean. RESP2 clients receive an integer reply
+    /// `:1\r\n` (true) or `:0\r\n` (false).
     pub fn reply_boolean(&mut self, b: bool) -> RedisResult<()> {
         self.client.write_frame(&RespFrame::Boolean(b));
         Ok(())
     }
 
- /// Reply with a RESP3 null. RESP2 clients receive `$-1\r\n`.
+    /// Reply with a RESP3 null. RESP2 clients receive `$-1\r\n`.
     pub fn reply_resp3_null(&mut self) -> RedisResult<()> {
         self.client.write_frame(&RespFrame::Null);
         Ok(())
     }
 
- /// Reply with a RESP3 big number. RESP2 clients receive a bulk string
- /// the same digits.
+    /// Reply with a RESP3 big number. RESP2 clients receive a bulk string
+    /// the same digits.
     pub fn reply_big_number(&mut self, digits: &[u8]) -> RedisResult<()> {
         self.client
             .write_frame(&RespFrame::BigNumber(RedisString::from_bytes(digits)));
         Ok(())
     }
 
- /// Reply with a RESP3 verbatim string. RESP2 clients receive a bulk
- /// string of the payload bytes (no format tag).
+    /// Reply with a RESP3 verbatim string. RESP2 clients receive a bulk
+    /// string of the payload bytes (no format tag).
     pub fn reply_verbatim_string(&mut self, format: &[u8; 3], bytes: &[u8]) -> RedisResult<()> {
         self.client.write_frame(&RespFrame::VerbatimString {
             format: *format,
@@ -520,18 +521,18 @@ impl<'a> CommandContext<'a> {
         Ok(())
     }
 
- /// Per-context database. STUB — Phase 3 routes through the server.
+    /// Per-context database. STUB — Phase 3 routes through the server.
     pub fn db(&self) -> &RedisDb {
         self.db.as_ref()
     }
 
- /// Mutable view of the per-context database. STUB — Phase 3 routes through
- /// the server keyed by `client.db_index`.
+    /// Mutable view of the per-context database. STUB — Phase 3 routes through
+    /// the server keyed by `client.db_index`.
     pub fn db_mut(&mut self) -> &mut RedisDb {
         self.db.as_mut()
     }
 
- /// Clone a live object by raw key bytes using the normal read lookup path.
+    /// Clone a live object by raw key bytes using the normal read lookup path.
     pub fn lookup_key_read_by_bytes(&mut self, key: &[u8]) -> RedisResult<Option<RedisObject>> {
         let key = RedisString::from_bytes(key);
         Ok(self
@@ -540,7 +541,7 @@ impl<'a> CommandContext<'a> {
             .cloned())
     }
 
- /// Return a hash field value as a string object for translated pattern lookups.
+    /// Return a hash field value as a string object for translated pattern lookups.
     pub fn hash_get_field_as_object(
         &self,
         obj: &RedisObject,
@@ -553,14 +554,14 @@ impl<'a> CommandContext<'a> {
         Ok(hash.get(&field).cloned().map(RedisObject::from_string))
     }
 
- /// Reply with a string object's byte representation.
+    /// Reply with a string object's byte representation.
     pub fn reply_bulk_object(&mut self, obj: &RedisObject) -> RedisResult<()> {
         let bytes = obj.string_bytes();
         self.reply_bulk(bytes.as_ref())
     }
 
- /// Look up a string key named by an argv slot and write the bulk reply
- /// directly from the stored object where possible.
+    /// Look up a string key named by an argv slot and write the bulk reply
+    /// directly from the stored object where possible.
     pub fn reply_string_key_arg<I: ArgIndex>(
         &mut self,
         i: I,
@@ -587,9 +588,9 @@ impl<'a> CommandContext<'a> {
         Ok(())
     }
 
- /// Look up a string key named by an argv slot and write either the string
- /// value or a null bulk. Used by multi-key read commands where wrong-type
- /// elements are represented as nulls instead of command errors.
+    /// Look up a string key named by an argv slot and write either the string
+    /// value or a null bulk. Used by multi-key read commands where wrong-type
+    /// elements are represented as nulls instead of command errors.
     pub fn reply_string_key_arg_or_null<I: ArgIndex>(
         &mut self,
         i: I,
@@ -617,18 +618,18 @@ impl<'a> CommandContext<'a> {
         Ok(())
     }
 
- /// Whether this command is executing inside Lua/script context.
- /// The Lua bridge sets `ClientFlags::lua` while dispatching inner
- /// `redis.call`/`redis.pcall` commands, matching C's `CLIENT_SCRIPT` flag.
+    /// Whether this command is executing inside Lua/script context.
+    /// The Lua bridge sets `ClientFlags::lua` while dispatching inner
+    /// `redis.call`/`redis.pcall` commands, matching C's `CLIENT_SCRIPT` flag.
     pub fn is_script_context(&self) -> bool {
         self.client.flag_lua()
     }
 
- /// Number of logical databases visible to this command context.
- /// Production contexts carry a `DbListRoute` and report the configured
- /// route length. Legacy test contexts fall back to the current global DB
- /// count so SELECT validation keeps matching the product envelope until
- /// tests opt into an explicit route.
+    /// Number of logical databases visible to this command context.
+    /// Production contexts carry a `DbListRoute` and report the configured
+    /// route length. Legacy test contexts fall back to the current global DB
+    /// count so SELECT validation keeps matching the product envelope until
+    /// tests opt into an explicit route.
     pub fn database_count(&self) -> usize {
         match &self.db {
             DbStorage::OwnerList { dbs, .. } => dbs.len(),
@@ -640,15 +641,15 @@ impl<'a> CommandContext<'a> {
         }
     }
 
- /// Route to the logical DB list visible from this context.
- /// Production contexts receive an explicit route from the dispatch owner.
- /// Legacy borrowed/owned contexts fall back to the current global route so
- /// tests and the TLS startup path preserve today's storage model.
+    /// Route to the logical DB list visible from this context.
+    /// Production contexts receive an explicit route from the dispatch owner.
+    /// Legacy borrowed/owned contexts fall back to the current global route so
+    /// tests and the TLS startup path preserve today's storage model.
     pub fn db_list_route(&self) -> DbListRoute {
         self.db.route().unwrap_or_else(DbListRoute::global)
     }
 
- /// Validate a database index parsed from argv.
+    /// Validate a database index parsed from argv.
     pub fn validate_db_index(&self, index: i64) -> RedisResult<u32> {
         if index < 0 || index >= self.database_count() as i64 {
             return Err(RedisError::runtime(b"ERR DB index is out of range"));
@@ -656,21 +657,21 @@ impl<'a> CommandContext<'a> {
         Ok(index as u32)
     }
 
- /// Currently selected database index as carried by the client.
+    /// Currently selected database index as carried by the client.
     pub fn selected_db_index(&self) -> u32 {
         self.client.db_index
     }
 
- /// Return the selected DB id for the borrowed DB currently installed
- /// this context.
+    /// Return the selected DB id for the borrowed DB currently installed
+    /// this context.
     pub fn selected_db_id(&self) -> u32 {
         self.db.as_ref().id
     }
 
- /// Update the visible selected DB index for this context.
- /// This keeps both `client.db_index` and the internal OwnerList routing
- /// cursor in sync when the selected DB is changed while reusing a shared
- /// DB slice.
+    /// Update the visible selected DB index for this context.
+    /// This keeps both `client.db_index` and the internal OwnerList routing
+    /// cursor in sync when the selected DB is changed while reusing a shared
+    /// DB slice.
     pub fn set_selected_db_index(&mut self, index: u32) {
         if let DbStorage::OwnerList { selected_index, .. } = &mut self.db {
             *selected_index = index;
@@ -678,12 +679,12 @@ impl<'a> CommandContext<'a> {
         self.client.db_index = index;
     }
 
- /// Return a handle to a non-selected DB from the live DB list.
- /// `Ok(None)` means the requested index is the currently borrowed DB
- /// callers should use `ctx.db` / `ctx.db_mut` instead. This avoids
- /// taking the same `Arc<Mutex<RedisDb>>` twice on the transitional storage
- /// model. Future owner-owned DB packets can keep this contract while
- /// changing the route internals.
+    /// Return a handle to a non-selected DB from the live DB list.
+    /// `Ok(None)` means the requested index is the currently borrowed DB
+    /// callers should use `ctx.db` / `ctx.db_mut` instead. This avoids
+    /// taking the same `Arc<Mutex<RedisDb>>` twice on the transitional storage
+    /// model. Future owner-owned DB packets can keep this contract while
+    /// changing the route internals.
     pub fn other_db_handle(&self, index: u32) -> RedisResult<Option<Arc<Mutex<RedisDb>>>> {
         self.validate_db_index(index as i64)?;
         if self.db.is_owner_list() {
@@ -697,11 +698,11 @@ impl<'a> CommandContext<'a> {
         Ok(Some(self.db_list_route().get(index)))
     }
 
- /// Run `f` with mutable access to a logical database selected by index.
- /// For the selected DB this reuses the already-borrowed `&mut RedisDb`.
- /// For any other DB it locks the current DB-list route. This is
- /// transitional API that lets commands stop naming `global_databases`
- /// directly before the owner-owned DB flip.
+    /// Run `f` with mutable access to a logical database selected by index.
+    /// For the selected DB this reuses the already-borrowed `&mut RedisDb`.
+    /// For any other DB it locks the current DB-list route. This is
+    /// transitional API that lets commands stop naming `global_databases`
+    /// directly before the owner-owned DB flip.
     pub fn with_db_index<R>(
         &mut self,
         index: u32,
@@ -720,12 +721,12 @@ impl<'a> CommandContext<'a> {
         Ok(f(&mut guard))
     }
 
- /// Run `f` with this context temporarily routed to `index` as its selected
- /// DB.
- /// Queued EXEC dispatch uses this to preserve commands that changed DB via
- /// an earlier queued SELECT. On owner-owned storage this simply changes
- /// selected index inside the DB slice route; on the transitional global
- /// route it builds a short-lived context around the requested DB handle.
+    /// Run `f` with this context temporarily routed to `index` as its selected
+    /// DB.
+    /// Queued EXEC dispatch uses this to preserve commands that changed DB via
+    /// an earlier queued SELECT. On owner-owned storage this simply changes
+    /// selected index inside the DB slice route; on the transitional global
+    /// route it builds a short-lived context around the requested DB handle.
     pub fn with_selected_db_index<R>(
         &mut self,
         index: u32,
@@ -768,7 +769,7 @@ impl<'a> CommandContext<'a> {
         }
     }
 
- /// Run `f` once for every logical DB in the context route.
+    /// Run `f` once for every logical DB in the context route.
     pub fn for_each_db_mut(&mut self, mut f: impl FnMut(&mut RedisDb)) -> RedisResult<()> {
         if let DbStorage::OwnerList { dbs, .. } = &mut self.db {
             for db in dbs.iter_mut() {
@@ -792,7 +793,7 @@ impl<'a> CommandContext<'a> {
         Ok(())
     }
 
- /// Run `f` with mutable access to two distinct logical DBs.
+    /// Run `f` with mutable access to two distinct logical DBs.
     pub fn with_two_db_indices<R>(
         &mut self,
         first: u32,
@@ -851,51 +852,54 @@ impl<'a> CommandContext<'a> {
         let started = Instant::now();
         let mut dbs = Vec::new();
         self.for_each_db_mut(|db| {
-            dbs.push(KeyspaceSnapshotDb::from_keyspace(db.id, db.snapshot_keyspace()));
+            dbs.push(KeyspaceSnapshotDb::from_keyspace(
+                db.id,
+                db.snapshot_keyspace(),
+            ));
         })?;
         Ok(KeyspaceSnapshot::new(dbs, started.elapsed()))
     }
 
- /// Mutable borrow of the underlying `Client`.
+    /// Mutable borrow of the underlying `Client`.
     pub fn client_mut(&mut self) -> &mut Client {
         self.client
     }
 
- /// Shared borrow of the underlying `Client`.
+    /// Shared borrow of the underlying `Client`.
     pub fn client_ref(&self) -> &Client {
         self.client
     }
 
- /// Shared borrow of the live `RedisServer`. Returns the actual server
- /// that the accept loop built at startup — not a per-context scratch
- /// copy — so CONFIG SET writes and other live mutations are visible.
+    /// Shared borrow of the live `RedisServer`. Returns the actual server
+    /// that the accept loop built at startup — not a per-context scratch
+    /// copy — so CONFIG SET writes and other live mutations are visible.
     pub fn server(&self) -> &RedisServer {
         &self.server
     }
 
- /// Clone the `Arc<RedisServer>` for handlers that need to outlive
- /// current command (background threads, deferred callbacks).
+    /// Clone the `Arc<RedisServer>` for handlers that need to outlive
+    /// current command (background threads, deferred callbacks).
     pub fn server_arc(&self) -> Arc<RedisServer> {
         Arc::clone(&self.server)
     }
 
- /// Shared borrow of the live config. Convenience for
- /// `ctx.server.live_config.as_ref`.
+    /// Shared borrow of the live config. Convenience for
+    /// `ctx.server.live_config.as_ref`.
     pub fn live_config(&self) -> &LiveConfig {
         &self.server.live_config
     }
 
- /// Fire a keyspace-notification for one database operation.
- /// `event_type` is one or more `NOTIFY_*` flags OR'd together (the class
- /// of the triggering command, e.g. `NOTIFY_STRING` for `SET`). `event` is
- /// the raw event-name bytes (e.g. `b"set"`). `key` is the key
- /// operation touched. The current database id comes from `client.db_index`.
- /// The helper consults `live_config.notify_keyspace_events_flags`
- /// returns early when the configured mask does not intersect `event_type`
- /// (matches the C semantics in `notifyKeyspaceEvent`).
- /// Publishes to `__keyspace@<db>__:<key>` and/or `__keyevent@<db>__:<event>`
- /// channels via the shared pub/sub registry; ignores callers that have no
- /// pubsub handle attached (unit tests).
+    /// Fire a keyspace-notification for one database operation.
+    /// `event_type` is one or more `NOTIFY_*` flags OR'd together (the class
+    /// of the triggering command, e.g. `NOTIFY_STRING` for `SET`). `event` is
+    /// the raw event-name bytes (e.g. `b"set"`). `key` is the key
+    /// operation touched. The current database id comes from `client.db_index`.
+    /// The helper consults `live_config.notify_keyspace_events_flags`
+    /// returns early when the configured mask does not intersect `event_type`
+    /// (matches the C semantics in `notifyKeyspaceEvent`).
+    /// Publishes to `__keyspace@<db>__:<key>` and/or `__keyevent@<db>__:<event>`
+    /// channels via the shared pub/sub registry; ignores callers that have no
+    /// pubsub handle attached (unit tests).
     pub fn notify_keyspace_event(&self, event_type: i32, event: &[u8], key: &RedisString) {
         let flags = self.live_config().notify_keyspace_events_flags() as i32;
         if flags & event_type == 0 {
@@ -934,38 +938,38 @@ impl<'a> CommandContext<'a> {
         }
     }
 
- /// Fast preflight for command hot paths that otherwise have to keep an
- /// owned key alive only to call `notify_keyspace_event`, which is usually
- /// disabled by config.
+    /// Fast preflight for command hot paths that otherwise have to keep an
+    /// owned key alive only to call `notify_keyspace_event`, which is usually
+    /// disabled by config.
     pub fn keyspace_notifications_enabled(&self, event_type: i32) -> bool {
         let flags = self.live_config().notify_keyspace_events_flags() as i32;
         flags & event_type != 0 && self.pubsub.is_some()
     }
 
- /// Empty-array reply (RESP `*0\r\n`).
+    /// Empty-array reply (RESP `*0\r\n`).
     pub fn reply_empty_array(&mut self) -> RedisResult<()> {
         self.reply_array_header_i64(0)
     }
 
- /// Argv accessor returning a `RedisObject` (alias of `arg_as_object`).
+    /// Argv accessor returning a `RedisObject` (alias of `arg_as_object`).
     pub fn arg_object<I: ArgIndex>(&self, i: I) -> RedisResult<RedisObject> {
         self.arg_as_object(i)
     }
 
- /// Begin watching `key` for MULTI/EXEC CAS semantics.
- /// STUB — Phase B placeholder. The full implementation
- /// `redis-commands::multi::watch_for_key` needs both `&mut Client`
- /// `&mut RedisDb`; this thin wrapper bridges via the per-context db
- /// scratch until Phase 3 wires real db routing.
+    /// Begin watching `key` for MULTI/EXEC CAS semantics.
+    /// STUB — Phase B placeholder. The full implementation
+    /// `redis-commands::multi::watch_for_key` needs both `&mut Client`
+    /// `&mut RedisDb`; this thin wrapper bridges via the per-context db
+    /// scratch until Phase 3 wires real db routing.
     pub fn watch_for_key(&mut self, _key: &RedisObject) -> RedisResult<()> {
         // TODO(port): call multi::watch_for_key once cross-crate dispatch
- // resolves the borrow conflict between &mut Client and &mut RedisDb.
+        // resolves the borrow conflict between &mut Client and &mut RedisDb.
         Ok(())
     }
 
- /// Dispatch the currently-installed queued command with the given flags.
- /// STUB — Phase B placeholder; real implementation depends on the Phase 3
- /// command-dispatch table.
+    /// Dispatch the currently-installed queued command with the given flags.
+    /// STUB — Phase B placeholder; real implementation depends on the Phase 3
+    /// command-dispatch table.
     pub fn call_queued(&mut self, _flags: u32) -> RedisResult<()> {
         // TODO(port): wire when command dispatch lands.
         Ok(())

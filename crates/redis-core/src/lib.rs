@@ -1,11 +1,12 @@
-//! Core server state.
-//! Owners (per `harness/type-vocabulary.tsv`):
-//! - `Client` — `src/client.rs`
-//! - `CommandContext` — `src/command_context.rs`
-//! - `RedisServer` — `src/server.rs` (STUB; expand in Phase 3)
-//! - `RedisDb` — `src/db.rs` (STUB; HashMap-backed; kvstore in Phase 4)
-//! - `RedisObject` — `src/object.rs` (STUB; encoding sub-variants in Phase 4)
-//! Phases 2-3 of the pilot land here.
+//! Core Valdr server state and shared runtime primitives.
+//!
+//! This crate owns the types that command handlers and the server runtime
+//! share: clients, command contexts, server config/state, database storage,
+//! objects, persistence state, replication state, metrics, and networking
+//! helpers. Some internals still carry explicit TODO(port)/TODO(architect)
+//! markers, but the crate is no longer just scaffolding: the live command
+//! server, replication kits, AOF/RDB paths, and scripting code all execute
+//! through these APIs.
 
 pub mod acl;
 pub mod bio;
@@ -78,13 +79,6 @@ pub use pubsub_registry::PubSubRegistry;
 pub use server::{RedisServer, ServerConfig};
 pub use transport::Connection;
 
-// ──────────────────────────────────────────────────────────────────────────
-// PORT STATUS
-//   source:        (none — scaffolding placeholder)
-//   target_crate:  redis-core
-//   confidence:    skeleton
-//   todos:         5
-//   port_notes:    0
-//   unsafe_blocks: 0
-//   notes:         scaffolding; awaiting first translation packet
-// ──────────────────────────────────────────────────────────────────────────
+// PORT STATUS: active compatibility core. Keep unresolved work local to the
+// modules that own it with TODO(port)/TODO(architect) markers instead of
+// treating the whole crate as a skeleton.

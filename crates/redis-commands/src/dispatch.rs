@@ -1,7 +1,8 @@
 //! Command dispatch table — maps argv[0] (case-insensitive) to a handler fn.
-//! Wave A wires up the *lookup* side only. Most handler bodies are still
-//! `todo!`; this module just routes the call. Handler bodies land in Waves
-//! B/C/D.
+//! The generated command registry remains the metadata source of truth, while
+//! this module builds the hot runtime lookup table, applies command gates
+//! (auth, OOM, loading, pause, ACL, busy script, MULTI constraints), and
+//! invokes implemented command handlers.
 //! Two-layer lookup:
 //! 1. The generated registry in `generated::COMMANDS` is the source of truth
 //! for command metadata (arity, flags, ACL category).
