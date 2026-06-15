@@ -7,7 +7,7 @@ use mlua::{
 use redis_types::{RedisError, RedisResult};
 
 use super::bytes::ascii_eq_ci;
-use super::{FunctionDefinition, RuntimeFunctionRegistration};
+use super::{function_store::FunctionDefinition, RuntimeFunctionRegistration};
 
 pub(super) fn parse_function_library_header(code: &[u8]) -> RedisResult<(Vec<u8>, &[u8])> {
     if !code.starts_with(b"#!") {

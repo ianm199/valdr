@@ -17,9 +17,7 @@
 
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use mlua::{
@@ -51,6 +49,7 @@ mod busy_script;
 mod bytes;
 mod function_dump;
 mod function_metadata;
+mod function_store;
 mod lua_bit;
 mod lua_cjson;
 mod lua_cmsgpack;
@@ -86,6 +85,12 @@ use function_metadata::{
     parse_function_library_header, parse_register_function_args,
     parse_runtime_register_function_args,
 };
+pub use function_store::PreparedFunctionLibraries;
+use function_store::{
+    find_loaded_function, function_libraries, function_library_key, install_function_library,
+    loaded_library_code_is_identical, snapshot_function_libraries, FunctionDefinition,
+    LoadedFunctionLibrary,
+};
 use lua_bit::install_bit;
 use lua_cjson::install_cjson;
 use lua_cmsgpack::install_cmsgpack;
@@ -108,7 +113,7 @@ pub(crate) use script_cache::{
 use script_checks::{
     function_script_checks, script_is_massive_unpack_lpush, script_is_synthetic_infinite_loop,
     script_is_top_level_infinite_function_load, script_is_unpack_range_overflow,
-    script_synthetic_loop_is_dirty, unpack_range_overflow_error, FunctionScriptChecks,
+    script_synthetic_loop_is_dirty, unpack_range_overflow_error,
 };
 use script_errors::{
     lua_arg_to_bytes, lua_execution_error_payload, lua_script_call_error_payload,
@@ -122,27 +127,6 @@ use script_flags::{
 
 const LUA_REDIS_VERSION: &str = "7.0.0";
 const LUA_REDIS_VERSION_NUM: i64 = 7 << 16;
-#[derive(Debug, Clone)]
-struct FunctionDefinition {
-    name: Vec<u8>,
-    description: Option<Vec<u8>>,
-    no_writes: bool,
-    allow_oom: bool,
-    allow_stale: bool,
-}
-
-#[derive(Debug, Clone)]
-struct LoadedFunctionLibrary {
-    name: Vec<u8>,
-    code: Vec<u8>,
-    functions: Vec<FunctionDefinition>,
-    script_checks: FunctionScriptChecks,
-}
-
-pub struct PreparedFunctionLibraries {
-    libraries: Vec<LoadedFunctionLibrary>,
-}
-
 struct RuntimeFunctionRegistration {
     name: Vec<u8>,
     callback: RegistryKey,
@@ -323,19 +307,6 @@ fn maybe_enter_eval_timedout_mode(
         dirty: script_dirty.get(),
     });
     redis_core::networking::process_events_while_blocked();
-}
-
-fn function_libraries() -> &'static Mutex<HashMap<Vec<u8>, LoadedFunctionLibrary>> {
-    static LIBRARIES: OnceLock<Mutex<HashMap<Vec<u8>, LoadedFunctionLibrary>>> = OnceLock::new();
-    LIBRARIES.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn snapshot_function_libraries() -> Vec<LoadedFunctionLibrary> {
-    let guard = match function_libraries().lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    guard.values().cloned().collect()
 }
 
 #[derive(Clone, Copy)]
@@ -796,86 +767,6 @@ fn fcall_command_generic(ctx: &mut CommandContext<'_>, ro: bool) -> RedisResult<
     }
 
     run_loaded_function(ctx, &library, &definition, &keys, &argv, ro)
-}
-
-fn install_function_library(
-    libraries: &mut HashMap<Vec<u8>, LoadedFunctionLibrary>,
-    loaded: LoadedFunctionLibrary,
-    replace: bool,
-    quote_library_collision: bool,
-) -> RedisResult<()> {
-    let old_key = function_library_key(libraries, &loaded.name);
-    if old_key.is_some() && !replace {
-        let mut msg = if quote_library_collision {
-            b"ERR Library '".to_vec()
-        } else {
-            b"ERR Library ".to_vec()
-        };
-        msg.extend_from_slice(&loaded.name);
-        if quote_library_collision {
-            msg.extend_from_slice(b"' already exists");
-        } else {
-            msg.extend_from_slice(b" already exists");
-        }
-        return Err(RedisError::runtime(msg));
-    }
-    for (key, library) in libraries.iter() {
-        if old_key.as_ref().is_some_and(|old| old == key) {
-            continue;
-        }
-        for existing in &library.functions {
-            if let Some(new_fn) = loaded
-                .functions
-                .iter()
-                .find(|new_fn| ascii_eq_ci(&new_fn.name, &existing.name))
-            {
-                let mut msg = b"ERR Function ".to_vec();
-                msg.extend_from_slice(&new_fn.name);
-                msg.extend_from_slice(b" already exists");
-                return Err(RedisError::runtime(msg));
-            }
-        }
-    }
-    if let Some(key) = old_key {
-        libraries.remove(&key);
-    }
-    libraries.insert(loaded.name.clone(), loaded);
-    Ok(())
-}
-
-fn loaded_library_code_is_identical(
-    libraries: &HashMap<Vec<u8>, LoadedFunctionLibrary>,
-    name: &[u8],
-    code: &[u8],
-) -> bool {
-    libraries
-        .values()
-        .any(|library| ascii_eq_ci(&library.name, name) && library.code == code)
-}
-
-fn function_library_key(
-    libraries: &HashMap<Vec<u8>, LoadedFunctionLibrary>,
-    name: &[u8],
-) -> Option<Vec<u8>> {
-    libraries
-        .keys()
-        .find(|existing| ascii_eq_ci(existing, name))
-        .cloned()
-}
-
-fn find_loaded_function(name: &[u8]) -> Option<(LoadedFunctionLibrary, FunctionDefinition)> {
-    let guard = match function_libraries().lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    for library in guard.values() {
-        for function in &library.functions {
-            if ascii_eq_ci(&function.name, name) {
-                return Some((library.clone(), function.clone()));
-            }
-        }
-    }
-    None
 }
 
 fn compile_function_library(library_body: &[u8]) -> RedisResult<Vec<FunctionDefinition>> {
@@ -2815,10 +2706,12 @@ fn parse_i64(bytes: &[u8]) -> Result<i64, RedisError> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
     use redis_core::{pubsub_registry::PubSubRegistry, RedisDb, RedisServer};
 
+    use super::script_checks::FunctionScriptChecks;
     use super::*;
 
     #[test]
