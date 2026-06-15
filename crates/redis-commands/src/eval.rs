@@ -9,16 +9,16 @@
 //! argv, calling [`crate::dispatch::dispatch_command_name`], parsing
 //! newly-written reply bytes back into a Lua value, then restoring
 //! caller's argv and the original reply buffer prefix.
-//! Script cache is a process-wide `Mutex<HashMap<sha1_hex, bytes>>` keyed
-//! by the lower-case 40-byte SHA-1 hex of the source bytes. `SCRIPT LOAD`
-//! inserts into the cache; `EVALSHA` looks up; `SCRIPT FLUSH` clears.
+//! Script cache ownership lives in `eval::script_cache`; `SCRIPT LOAD`
+//! inserts into the process-wide cache, `EVALSHA` looks up by lower-case
+//! 40-byte SHA-1 hex, and `SCRIPT FLUSH` clears cached scripts.
 //! See `docs/ADR_001_LUA_RUNTIME.md` for the runtime-choice rationale
 //! the full sandbox patch list.
 
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Mutex, OnceLock};
@@ -52,6 +52,7 @@ mod active_function;
 #[cfg(feature = "lua-rs-engine")]
 mod lua_rs_backend;
 mod resp_bridge;
+mod script_cache;
 
 use active_function::{
     active_function_call, active_function_dirty, active_function_error_recorded,
@@ -61,11 +62,13 @@ use resp_bridge::{
     lua_to_resp, parse_reply_value, reply_to_lua, script_resp_view, ReplyValue,
     LUA_ERROR_ALREADY_RECORDED_FIELD,
 };
+use script_cache::{cache_script, normalise_sha, sha1_hex};
+pub(crate) use script_cache::{
+    evicted_scripts_count, reset_script_cache_stats, script_cache_len, script_cache_memory_estimate,
+};
 
 const LUA_REDIS_VERSION: &str = "7.0.0";
 const LUA_REDIS_VERSION_NUM: i64 = 7 << 16;
-const EVAL_SCRIPT_CACHE_LIMIT: usize = 500;
-
 #[derive(Debug, Clone)]
 struct FunctionDefinition {
     name: Vec<u8>,
@@ -1841,112 +1844,6 @@ fn record_script_rejected_command(args: &[Vec<u8>], payload: &[u8]) {
     record_error_reply(payload);
 }
 
-#[derive(Clone)]
-struct CachedScript {
-    body: Vec<u8>,
-    evictable: bool,
-}
-
-#[derive(Default)]
-struct ScriptCache {
-    entries: HashMap<[u8; 40], CachedScript>,
-    lru: VecDeque<[u8; 40]>,
-    evicted: u64,
-}
-
-impl ScriptCache {
-    fn touch_eval_script(&mut self, sha: [u8; 40]) {
-        self.lru.retain(|existing| existing != &sha);
-        self.lru.push_back(sha);
-    }
-
-    fn evict_eval_scripts_if_needed(&mut self) {
-        while self
-            .entries
-            .values()
-            .filter(|entry| entry.evictable)
-            .count()
-            > EVAL_SCRIPT_CACHE_LIMIT
-        {
-            let Some(candidate) = self.lru.pop_front() else {
-                break;
-            };
-            if self
-                .entries
-                .get(&candidate)
-                .is_some_and(|entry| entry.evictable)
-            {
-                self.entries.remove(&candidate);
-                self.evicted = self.evicted.saturating_add(1);
-            }
-        }
-    }
-}
-
-/// Process-wide script cache. Keys are the 40-byte lowercase SHA-1 hex
-/// the source bytes. `EVAL` scripts are capped by a small LRU; `SCRIPT LOAD`
-/// entries are persistent and do not participate in that LRU, matching Valkey.
-fn script_cache() -> &'static Mutex<ScriptCache> {
-    static CACHE: OnceLock<Mutex<ScriptCache>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(ScriptCache::default()))
-}
-
-fn cache_script(script_bytes: &[u8], evictable: bool) -> [u8; 40] {
-    let hex = sha1_hex(script_bytes);
-    let mut guard = match script_cache().lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    guard.entries.insert(
-        hex,
-        CachedScript {
-            body: script_bytes.to_vec(),
-            evictable,
-        },
-    );
-    if evictable {
-        guard.touch_eval_script(hex);
-        guard.evict_eval_scripts_if_needed();
-    }
-    hex
-}
-
-pub(crate) fn script_cache_memory_estimate() -> usize {
-    let guard = match script_cache().lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    guard
-        .entries
-        .values()
-        .map(|entry| entry.body.len() + 96)
-        .sum()
-}
-
-pub(crate) fn script_cache_len() -> usize {
-    let guard = match script_cache().lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    guard.entries.len()
-}
-
-pub(crate) fn evicted_scripts_count() -> u64 {
-    let guard = match script_cache().lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    guard.evicted
-}
-
-pub(crate) fn reset_script_cache_stats() {
-    let mut guard = match script_cache().lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    guard.evicted = 0;
-}
-
 fn busy_script_state() -> &'static Mutex<Option<BusyScriptState>> {
     static STATE: OnceLock<Mutex<Option<BusyScriptState>>> = OnceLock::new();
     STATE.get_or_init(|| Mutex::new(None))
@@ -3699,7 +3596,7 @@ pub(crate) fn queued_script_declares_write(argv: &[RedisString]) -> bool {
             return false;
         };
         let script = {
-            let guard = match script_cache().lock() {
+            let guard = match script_cache::script_cache().lock() {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
@@ -3730,7 +3627,7 @@ pub(crate) fn cached_evalsha_is_no_writes(raw_sha: &[u8]) -> bool {
         return false;
     };
     let script = {
-        let guard = match script_cache().lock() {
+        let guard = match script_cache::script_cache().lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
@@ -4601,7 +4498,7 @@ fn evalsha_command_impl(
         }
     };
     let script_bytes: Option<Vec<u8>> = {
-        let mut guard = match script_cache().lock() {
+        let mut guard = match script_cache::script_cache().lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
@@ -5234,7 +5131,7 @@ fn script_exists(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ctx.arg_count() < 3 {
         return Err(RedisError::wrong_number_of_args(b"script|exists"));
     }
-    let guard = match script_cache().lock() {
+    let guard = match script_cache::script_cache().lock() {
         Ok(g) => g,
         Err(p) => p.into_inner(),
     };
@@ -5260,7 +5157,7 @@ fn script_show(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             b"NOSCRIPT No matching script. Please use EVAL.",
         ));
     };
-    let guard = match script_cache().lock() {
+    let guard = match script_cache::script_cache().lock() {
         Ok(g) => g,
         Err(p) => p.into_inner(),
     };
@@ -5283,7 +5180,7 @@ fn script_flush(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             return Err(RedisError::syntax(b"syntax error"));
         }
     }
-    let mut guard = match script_cache().lock() {
+    let mut guard = match script_cache::script_cache().lock() {
         Ok(g) => g,
         Err(p) => p.into_inner(),
     };
@@ -5318,24 +5215,6 @@ fn parse_i64(bytes: &[u8]) -> Result<i64, RedisError> {
     s.parse::<i64>().map_err(|_| RedisError::not_integer())
 }
 
-/// Accept any case for the input sha; return `Some` with the lowercase
-/// canonical 40-byte buffer when the input is exactly 40 hex bytes.
-fn normalise_sha(bytes: &[u8]) -> Option<[u8; 40]> {
-    if bytes.len() != 40 {
-        return None;
-    }
-    let mut out = [0u8; 40];
-    for (i, b) in bytes.iter().enumerate() {
-        let c = match *b {
-            b'0'..=b'9' | b'a'..=b'f' => *b,
-            b'A'..=b'F' => *b + 32,
-            _ => return None,
-        };
-        out[i] = c;
-    }
-    Some(out)
-}
-
 fn ascii_eq_ci(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -5367,98 +5246,6 @@ fn ascii_lower(b: u8) -> u8 {
     } else {
         b
     }
-}
-
-/// Compute the lowercase 40-byte SHA-1 hex digest of `data` using a
-/// pure-Rust implementation. Stays inside this crate so we do not pull
-/// a hash-crate dependency for a single use site.
-fn sha1_hex(data: &[u8]) -> [u8; 40] {
-    let digest = sha1_digest(data);
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = [0u8; 40];
-    for (i, byte) in digest.iter().enumerate() {
-        out[i * 2] = HEX[(byte >> 4) as usize];
-        out[i * 2 + 1] = HEX[(byte & 0x0f) as usize];
-    }
-    out
-}
-
-/// Compute the raw 20-byte SHA-1 digest of `data`.
-/// Direct translation of FIPS 180-4 §6.1.2; zero unsafe, no dependency.
-fn sha1_digest(data: &[u8]) -> [u8; 20] {
-    let mut h0: u32 = 0x67452301;
-    let mut h1: u32 = 0xEFCDAB89;
-    let mut h2: u32 = 0x98BADCFE;
-    let mut h3: u32 = 0x10325476;
-    let mut h4: u32 = 0xC3D2E1F0;
-
-    let bit_len: u64 = (data.len() as u64) * 8;
-
-    let mut padded: Vec<u8> = Vec::with_capacity(data.len() + 72);
-    padded.extend_from_slice(data);
-    padded.push(0x80);
-    while padded.len() % 64 != 56 {
-        padded.push(0);
-    }
-    padded.extend_from_slice(&bit_len.to_be_bytes());
-
-    for chunk in padded.chunks(64) {
-        let mut w = [0u32; 80];
-        for i in 0..16 {
-            w[i] = u32::from_be_bytes([
-                chunk[i * 4],
-                chunk[i * 4 + 1],
-                chunk[i * 4 + 2],
-                chunk[i * 4 + 3],
-            ]);
-        }
-        for i in 16..80 {
-            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
-        }
-
-        let mut a = h0;
-        let mut b = h1;
-        let mut c = h2;
-        let mut d = h3;
-        let mut e = h4;
-
-        for i in 0..80 {
-            let (f, k) = if i < 20 {
-                ((b & c) | ((!b) & d), 0x5A827999u32)
-            } else if i < 40 {
-                (b ^ c ^ d, 0x6ED9EBA1u32)
-            } else if i < 60 {
-                ((b & c) | (b & d) | (c & d), 0x8F1BBCDCu32)
-            } else {
-                (b ^ c ^ d, 0xCA62C1D6u32)
-            };
-            let temp = a
-                .rotate_left(5)
-                .wrapping_add(f)
-                .wrapping_add(e)
-                .wrapping_add(k)
-                .wrapping_add(w[i]);
-            e = d;
-            d = c;
-            c = b.rotate_left(30);
-            b = a;
-            a = temp;
-        }
-
-        h0 = h0.wrapping_add(a);
-        h1 = h1.wrapping_add(b);
-        h2 = h2.wrapping_add(c);
-        h3 = h3.wrapping_add(d);
-        h4 = h4.wrapping_add(e);
-    }
-
-    let mut out = [0u8; 20];
-    out[0..4].copy_from_slice(&h0.to_be_bytes());
-    out[4..8].copy_from_slice(&h1.to_be_bytes());
-    out[8..12].copy_from_slice(&h2.to_be_bytes());
-    out[12..16].copy_from_slice(&h3.to_be_bytes());
-    out[16..20].copy_from_slice(&h4.to_be_bytes());
-    out
 }
 
 #[cfg(test)]
