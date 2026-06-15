@@ -12,7 +12,7 @@ use redis_types::{RedisError, RedisResult};
 use super::bytes::ascii_eq_ci;
 use super::function_metadata::parse_register_function_args;
 use super::function_store::FunctionDefinition;
-use super::install_redis_api_constants;
+use super::lua_api::install_redis_api_constants;
 use super::lua_bit::install_bit;
 use super::lua_cjson::install_cjson;
 use super::lua_cmsgpack::install_cmsgpack;

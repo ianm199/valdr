@@ -11,7 +11,11 @@ use redis_core::metrics::record_error_reply;
 use redis_core::CommandContext;
 use redis_types::{RedisError, RedisResult, RedisString};
 
+use super::lua_api::{LUA_REDIS_VERSION, LUA_REDIS_VERSION_NUM};
+use super::lua_sandbox::os_clock_seconds;
 use super::resp_bridge::{lua_error_reply_wire_bytes, LUA_REPLY_MAX_DEPTH};
+use super::script_cache::sha1_hex;
+use super::script_errors::runtime_error_payload;
 use super::{
     call_is_write_command, clear_busy_script, current_command_argv,
     function_command_would_exceed_maxmemory, function_oom_error, good_replicas_status,
@@ -20,12 +24,11 @@ use super::{
     parse_eval_shebang, record_script_rejected_command, replica_readonly_error,
     replica_readonly_lua_call_blocked, replica_readonly_lua_call_payload,
     replica_readonly_script_blocked, run_inner_command, run_massive_unpack_lpush_shortcut,
-    runtime_error_payload, script_command_not_allowed, script_is_massive_unpack_lpush,
-    script_is_synthetic_infinite_loop, script_is_unpack_range_overflow,
-    script_synthetic_loop_is_dirty, set_busy_script, sha1_hex, stale_replica_lua_call_allowed,
-    stale_replica_masterdown_error, stale_replica_scripts_blocked, unpack_range_overflow_error,
-    BusyScriptKind, BusyScriptState, ReplyValue, LUA_ERROR_ALREADY_RECORDED_FIELD,
-    LUA_REDIS_VERSION, LUA_REDIS_VERSION_NUM, NOREPLICAS_ERROR, READ_ONLY_SCRIPT_WRITE_ERROR_LUA,
+    script_command_not_allowed, script_is_massive_unpack_lpush, script_is_synthetic_infinite_loop,
+    script_is_unpack_range_overflow, script_synthetic_loop_is_dirty, set_busy_script,
+    stale_replica_lua_call_allowed, stale_replica_masterdown_error, stale_replica_scripts_blocked,
+    unpack_range_overflow_error, BusyScriptKind, BusyScriptState, ReplyValue,
+    LUA_ERROR_ALREADY_RECORDED_FIELD, NOREPLICAS_ERROR, READ_ONLY_SCRIPT_WRITE_ERROR_LUA,
     READ_ONLY_SCRIPT_WRITE_ERROR_PAYLOAD, READ_ONLY_SCRIPT_WRITE_ERROR_RESP,
     REPLICA_READONLY_ERROR_PAYLOAD,
 };
@@ -487,7 +490,7 @@ fn install_sandbox_lua_rs(lua: &Lua) -> lua_rs_runtime::Result<()> {
     let os = lua.create_table()?;
     os.set(
         "clock",
-        lua.create_function(|_lua_inner, ()| Ok(super::os_clock_seconds()))?,
+        lua.create_function(|_lua_inner, ()| Ok(os_clock_seconds()))?,
     )?;
     globals.set("os", os)?;
     Ok(())

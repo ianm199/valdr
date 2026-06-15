@@ -17,7 +17,7 @@ fn lua_error_token_is_code(token: &[u8]) -> bool {
             .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || *b == b'_')
 }
 
-fn runtime_error_payload(message: &str) -> Vec<u8> {
+pub(super) fn runtime_error_payload(message: &str) -> Vec<u8> {
     let without_trace = message
         .split_once("\nstack traceback")
         .map(|(head, _)| head)

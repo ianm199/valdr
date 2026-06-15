@@ -212,7 +212,7 @@ pub(super) fn create_script_environment(lua: &Lua) -> mlua::Result<LuaTable> {
 /// Process-relative seconds for `os.clock`. Valkey's Lua sandbox keeps only
 /// `os.clock` from the standard `os` library, and every script uses it as a
 /// delta (`os.clock - start`), so an arbitrary monotonic epoch is faithful.
-fn os_clock_seconds() -> f64 {
+pub(super) fn os_clock_seconds() -> f64 {
     static EPOCH: OnceLock<Instant> = OnceLock::new();
     EPOCH.get_or_init(Instant::now).elapsed().as_secs_f64()
 }

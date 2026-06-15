@@ -25,6 +25,10 @@ use super::function_metadata::{
     RuntimeFunctionRegistration,
 };
 use super::function_store::{FunctionDefinition, LoadedFunctionLibrary};
+use super::lua_api::{
+    install_log_function, install_redis_api_constants, install_set_repl_function,
+    install_setresp_function,
+};
 use super::lua_bit::install_bit;
 use super::lua_cjson::install_cjson;
 use super::lua_cmsgpack::install_cmsgpack;
@@ -42,12 +46,11 @@ use super::script_errors::{
 };
 use super::{
     acl_check_cmd_allowed, call_is_write_command, collect_call_args, good_replicas_status,
-    install_log_function, install_redis_api_constants, install_set_repl_function,
-    install_setresp_function, noreplicas_lua_error, noreplicas_lua_table,
-    record_script_rejected_command, redis_strings_to_lua_table, replica_readonly_lua_call_blocked,
-    replica_readonly_lua_call_error, replica_readonly_lua_call_table, run_inner_command,
-    script_command_not_allowed, stale_replica_lua_call_allowed, stale_replica_lua_call_error,
-    NOREPLICAS_ERROR, READ_ONLY_SCRIPT_WRITE_ERROR_LUA, READ_ONLY_SCRIPT_WRITE_ERROR_PAYLOAD,
+    noreplicas_lua_error, noreplicas_lua_table, record_script_rejected_command,
+    redis_strings_to_lua_table, replica_readonly_lua_call_blocked, replica_readonly_lua_call_error,
+    replica_readonly_lua_call_table, run_inner_command, script_command_not_allowed,
+    stale_replica_lua_call_allowed, stale_replica_lua_call_error, NOREPLICAS_ERROR,
+    READ_ONLY_SCRIPT_WRITE_ERROR_LUA, READ_ONLY_SCRIPT_WRITE_ERROR_PAYLOAD,
     READ_ONLY_SCRIPT_WRITE_ERROR_RESP, REPLICA_READONLY_ERROR_PAYLOAD,
 };
 
