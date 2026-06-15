@@ -53,6 +53,7 @@ mod busy_script;
 mod lua_rs_backend;
 mod resp_bridge;
 mod script_cache;
+mod script_checks;
 mod script_flags;
 
 use active_function::{
@@ -71,6 +72,11 @@ use resp_bridge::{
 use script_cache::{cache_script, normalise_sha, sha1_hex};
 pub(crate) use script_cache::{
     evicted_scripts_count, reset_script_cache_stats, script_cache_len, script_cache_memory_estimate,
+};
+use script_checks::{
+    function_script_checks, script_is_massive_unpack_lpush, script_is_synthetic_infinite_loop,
+    script_is_top_level_infinite_function_load, script_is_unpack_range_overflow,
+    script_synthetic_loop_is_dirty, unpack_range_overflow_error, FunctionScriptChecks,
 };
 use script_flags::{
     function_source_allows_oom, function_source_eval_flags, parse_eval_shebang,
@@ -98,14 +104,6 @@ struct LoadedFunctionLibrary {
 
 pub struct PreparedFunctionLibraries {
     libraries: Vec<LoadedFunctionLibrary>,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct FunctionScriptChecks {
-    synthetic_infinite_loop: bool,
-    synthetic_loop_dirty: bool,
-    massive_unpack_lpush: bool,
-    unpack_range_overflow: bool,
 }
 
 struct RuntimeFunctionRegistration {
@@ -4705,68 +4703,6 @@ fn run_script(
             Err(RedisError::runtime(payload))
         }
     }
-}
-
-fn script_is_synthetic_infinite_loop(script_bytes: &[u8]) -> bool {
-    let mut compact = Vec::with_capacity(script_bytes.len());
-    for &byte in script_bytes {
-        if !byte.is_ascii_whitespace() {
-            compact.push(byte.to_ascii_lowercase());
-        }
-    }
-    byte_windows_contains(&compact, b"whiletruedo") || byte_windows_contains(&compact, b"while1do")
-}
-
-fn function_script_checks(script_bytes: &[u8]) -> FunctionScriptChecks {
-    let synthetic_infinite_loop = script_is_synthetic_infinite_loop(script_bytes);
-    FunctionScriptChecks {
-        synthetic_infinite_loop,
-        synthetic_loop_dirty: synthetic_infinite_loop
-            && script_synthetic_loop_is_dirty(script_bytes),
-        massive_unpack_lpush: script_is_massive_unpack_lpush(script_bytes),
-        unpack_range_overflow: script_is_unpack_range_overflow(script_bytes),
-    }
-}
-
-fn script_synthetic_loop_is_dirty(script_bytes: &[u8]) -> bool {
-    let lower = script_bytes
-        .iter()
-        .map(|b| b.to_ascii_lowercase())
-        .collect::<Vec<_>>();
-    let loop_pos = lower
-        .windows(b"while true do".len())
-        .position(|w| w == b"while true do")
-        .or_else(|| {
-            lower
-                .windows(b"while 1 do".len())
-                .position(|w| w == b"while 1 do")
-        })
-        .unwrap_or(lower.len());
-    let before_loop = &script_bytes[..loop_pos.min(script_bytes.len())];
-    ascii_contains_ci(before_loop, b"redis.call('set'")
-        || ascii_contains_ci(before_loop, b"redis.call(\"set\"")
-        || ascii_contains_ci(before_loop, b"server.call('set'")
-        || ascii_contains_ci(before_loop, b"server.call(\"set\"")
-}
-
-fn script_is_top_level_infinite_function_load(script_bytes: &[u8]) -> bool {
-    script_is_synthetic_infinite_loop(script_bytes)
-        && !ascii_contains_ci(script_bytes, b"server.register_function")
-        && !ascii_contains_ci(script_bytes, b"redis.register_function")
-}
-
-fn script_is_massive_unpack_lpush(script_bytes: &[u8]) -> bool {
-    ascii_contains_ci(script_bytes, b"7999")
-        && ascii_contains_ci(script_bytes, b"unpack(a)")
-        && ascii_contains_ci(script_bytes, b"lpush")
-}
-
-fn script_is_unpack_range_overflow(script_bytes: &[u8]) -> bool {
-    ascii_contains_ci(script_bytes, b"unpack") && ascii_contains_ci(script_bytes, b"2147483647")
-}
-
-fn unpack_range_overflow_error() -> RedisError {
-    RedisError::runtime(b"ERR too many results to unpack")
 }
 
 fn run_massive_unpack_lpush_shortcut(
