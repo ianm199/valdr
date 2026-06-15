@@ -18,6 +18,7 @@
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+#[cfg(not(feature = "lua-rs-engine"))]
 use std::time::Instant;
 
 use mlua::{
@@ -69,8 +70,8 @@ mod script_flags;
 
 use active_function::function_call_active;
 use busy_script::{
-    busy_script_error, busy_script_snapshot, clear_busy_script, set_busy_script, BusyScriptKind,
-    BusyScriptState,
+    busy_script_error, busy_script_snapshot, clear_busy_script, current_command_argv,
+    maybe_enter_eval_timedout_mode, set_busy_script, BusyScriptKind, BusyScriptState,
 };
 pub(crate) use busy_script::{busy_script_error_reply, busy_script_owner_is, is_script_busy};
 #[cfg(test)]
@@ -139,44 +140,6 @@ fn record_script_rejected_command(args: &[Vec<u8>], payload: &[u8]) {
         record_command_stat(name, 0, true, false);
     }
     record_error_reply(payload);
-}
-
-fn current_command_argv(ctx: &CommandContext<'_>) -> Vec<Vec<u8>> {
-    ctx.client_ref()
-        .argv
-        .iter()
-        .map(|arg| arg.as_bytes().to_vec())
-        .collect()
-}
-
-fn maybe_enter_eval_timedout_mode(
-    ctx: &CommandContext<'_>,
-    start: Instant,
-    timedout: &Cell<bool>,
-    script_dirty: &Cell<bool>,
-) {
-    if timedout.get() {
-        redis_core::networking::process_events_while_blocked();
-        return;
-    }
-    let threshold = ctx.live_config().lua_time_limit_ms();
-    if threshold == 0 || start.elapsed().as_millis() < threshold as u128 {
-        return;
-    }
-    timedout.set(true);
-    let elapsed = start.elapsed().as_millis().max(1) as u64;
-    println!(
-        "Slow script detected: still in execution after {} milliseconds. You can try killing the script using the SCRIPT KILL command. Script name is: <eval>.",
-        elapsed
-    );
-    set_busy_script(BusyScriptState {
-        kind: BusyScriptKind::Eval,
-        owner_id: ctx.client_ref().id,
-        name: b"<eval>".to_vec(),
-        command: current_command_argv(ctx),
-        dirty: script_dirty.get(),
-    });
-    redis_core::networking::process_events_while_blocked();
 }
 
 #[derive(Clone, Copy)]

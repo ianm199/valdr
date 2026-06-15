@@ -1,8 +1,11 @@
 //! Process-wide busy-script state used by SCRIPT KILL/FUNCTION KILL gates.
 
+use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
+use redis_core::CommandContext;
 use redis_types::RedisError;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,4 +89,42 @@ pub(super) fn clear_busy_script() {
     };
     *guard = None;
     BUSY_SCRIPT_ACTIVE.store(false, AtomicOrdering::Release);
+}
+
+pub(super) fn current_command_argv(ctx: &CommandContext<'_>) -> Vec<Vec<u8>> {
+    ctx.client_ref()
+        .argv
+        .iter()
+        .map(|arg| arg.as_bytes().to_vec())
+        .collect()
+}
+
+pub(super) fn maybe_enter_eval_timedout_mode(
+    ctx: &CommandContext<'_>,
+    start: Instant,
+    timedout: &Cell<bool>,
+    script_dirty: &Cell<bool>,
+) {
+    if timedout.get() {
+        redis_core::networking::process_events_while_blocked();
+        return;
+    }
+    let threshold = ctx.live_config().lua_time_limit_ms();
+    if threshold == 0 || start.elapsed().as_millis() < threshold as u128 {
+        return;
+    }
+    timedout.set(true);
+    let elapsed = start.elapsed().as_millis().max(1) as u64;
+    println!(
+        "Slow script detected: still in execution after {} milliseconds. You can try killing the script using the SCRIPT KILL command. Script name is: <eval>.",
+        elapsed
+    );
+    set_busy_script(BusyScriptState {
+        kind: BusyScriptKind::Eval,
+        owner_id: ctx.client_ref().id,
+        name: b"<eval>".to_vec(),
+        command: current_command_argv(ctx),
+        dirty: script_dirty.get(),
+    });
+    redis_core::networking::process_events_while_blocked();
 }
