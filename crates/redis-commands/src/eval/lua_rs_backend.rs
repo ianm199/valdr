@@ -11,22 +11,23 @@ use redis_core::metrics::record_error_reply;
 use redis_core::CommandContext;
 use redis_types::{RedisError, RedisResult, RedisString};
 
+use super::resp_bridge::{lua_error_reply_wire_bytes, LUA_REPLY_MAX_DEPTH};
 use super::{
     call_is_write_command, clear_busy_script, current_command_argv,
     function_command_would_exceed_maxmemory, function_oom_error, good_replicas_status,
-    lua_error_reply_wire_bytes, lua_script_command_call_error_payload,
-    lua_script_command_error_payload, lua_script_command_reply_call_error_payload,
-    maybe_enter_eval_timedout_mode, noreplicas_error, parse_eval_shebang,
-    record_script_rejected_command, replica_readonly_error, replica_readonly_lua_call_blocked,
-    replica_readonly_lua_call_payload, replica_readonly_script_blocked, run_inner_command,
-    run_massive_unpack_lpush_shortcut, runtime_error_payload, script_command_not_allowed,
-    script_is_massive_unpack_lpush, script_is_synthetic_infinite_loop,
-    script_is_unpack_range_overflow, script_synthetic_loop_is_dirty, set_busy_script, sha1_hex,
-    stale_replica_lua_call_allowed, stale_replica_masterdown_error, stale_replica_scripts_blocked,
-    unpack_range_overflow_error, BusyScriptKind, BusyScriptState, ReplyValue,
-    LUA_ERROR_ALREADY_RECORDED_FIELD, LUA_REDIS_VERSION, LUA_REDIS_VERSION_NUM, NOREPLICAS_ERROR,
-    READ_ONLY_SCRIPT_WRITE_ERROR_LUA, READ_ONLY_SCRIPT_WRITE_ERROR_PAYLOAD,
-    READ_ONLY_SCRIPT_WRITE_ERROR_RESP, REPLICA_READONLY_ERROR_PAYLOAD,
+    lua_script_command_call_error_payload, lua_script_command_error_payload,
+    lua_script_command_reply_call_error_payload, maybe_enter_eval_timedout_mode, noreplicas_error,
+    parse_eval_shebang, record_script_rejected_command, replica_readonly_error,
+    replica_readonly_lua_call_blocked, replica_readonly_lua_call_payload,
+    replica_readonly_script_blocked, run_inner_command, run_massive_unpack_lpush_shortcut,
+    runtime_error_payload, script_command_not_allowed, script_is_massive_unpack_lpush,
+    script_is_synthetic_infinite_loop, script_is_unpack_range_overflow,
+    script_synthetic_loop_is_dirty, set_busy_script, sha1_hex, stale_replica_lua_call_allowed,
+    stale_replica_masterdown_error, stale_replica_scripts_blocked, unpack_range_overflow_error,
+    BusyScriptKind, BusyScriptState, ReplyValue, LUA_ERROR_ALREADY_RECORDED_FIELD,
+    LUA_REDIS_VERSION, LUA_REDIS_VERSION_NUM, NOREPLICAS_ERROR, READ_ONLY_SCRIPT_WRITE_ERROR_LUA,
+    READ_ONLY_SCRIPT_WRITE_ERROR_PAYLOAD, READ_ONLY_SCRIPT_WRITE_ERROR_RESP,
+    REPLICA_READONLY_ERROR_PAYLOAD,
 };
 
 pub(super) fn run_script_lua_rs(
@@ -110,7 +111,7 @@ pub(super) fn run_script_lua_rs(
     let script_timedout = Rc::new(Cell::new(false));
     let resp_view = Rc::new(Cell::new(2_u8));
 
-    let script_result: Result<LuaValue, LuaError> = lua.scope(|scope| {
+    let script_result: lua_rs_runtime::Result<LuaValue> = lua.scope(|scope| {
         let redis_tbl = lua.create_table()?;
         install_redis_api_constants_lua_rs(&redis_tbl)?;
 
@@ -388,13 +389,13 @@ pub(super) fn run_script_lua_rs(
             let resp3 = ctx.client_ref().resp_proto >= 3;
             let mut out: Vec<u8> = Vec::new();
             lua_rs_to_resp(&value, &mut out, resp3).map_err(|e| {
-                RedisError::runtime(lua_execution_error_payload_lua_rs("script", e))
+                RedisError::runtime(lua_execution_error_payload_lua_rs("script", &e))
             })?;
             ctx.client_mut().reply_buf.extend_from_slice(&out);
             Ok(())
         }
         Err(e) => {
-            let payload = lua_execution_error_payload_lua_rs("script", e);
+            let payload = lua_execution_error_payload_lua_rs("script", &e);
             if !script_error_already_recorded.get() {
                 record_error_reply(&payload);
             }
@@ -671,7 +672,7 @@ fn lua_rs_to_resp_inner(
     resp3: bool,
     depth: usize,
 ) -> lua_rs_runtime::Result<()> {
-    if depth > super::LUA_REPLY_MAX_DEPTH {
+    if depth > LUA_REPLY_MAX_DEPTH {
         out.extend_from_slice(b"-ERR reached lua stack limit\r\n");
         return Ok(());
     }
@@ -852,16 +853,16 @@ fn acl_check_cmd_allowed_lua_rs(
         .any(|pattern| glob_match(pattern.as_bytes(), key)))
 }
 
-fn lua_runtime_error(message: &str) -> LuaError {
-    LuaError::runtime(format_args!("{message}"))
+fn lua_runtime_error(message: &str) -> lua_rs_runtime::Error {
+    LuaError::runtime(format_args!("{message}")).into()
 }
 
-fn lua_runtime_error_bytes(message: &[u8]) -> LuaError {
-    LuaError::runtime(format_args!("{}", String::from_utf8_lossy(message)))
+fn lua_runtime_error_bytes(message: &[u8]) -> lua_rs_runtime::Error {
+    LuaError::runtime(format_args!("{}", String::from_utf8_lossy(message))).into()
 }
 
-fn lua_execution_error_payload_lua_rs(kind: &str, err: LuaError) -> Vec<u8> {
-    match err {
+fn lua_execution_error_payload_lua_rs(kind: &str, err: &lua_rs_runtime::Error) -> Vec<u8> {
+    match err.as_lua_error() {
         LuaError::Syntax(_) => runtime_error_payload(&format!(
             "ERR Error compiling {kind}: {}",
             err.message_lossy()

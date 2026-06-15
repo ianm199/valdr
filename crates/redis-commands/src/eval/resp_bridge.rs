@@ -301,7 +301,7 @@ pub(super) fn reply_to_lua(lua: &Lua, value: &ReplyValue, resp_view: u8) -> mlua
 /// numbers -> integer (numbers truncated), strings -> bulk, booleans -> `:1` /
 /// null, tables -> status if `.ok`, error if `.err`, otherwise a 1-indexed
 /// array (terminated at the first nil per Lua-array convention).
-const LUA_REPLY_MAX_DEPTH: usize = 200;
+pub(super) const LUA_REPLY_MAX_DEPTH: usize = 200;
 pub(super) const LUA_ERROR_ALREADY_RECORDED_FIELD: &str = "__redis_error_already_recorded";
 
 pub(super) fn lua_to_resp(value: &LuaValue, out: &mut Vec<u8>, resp3: bool) {
@@ -420,7 +420,7 @@ fn lua_to_resp_inner(value: &LuaValue, out: &mut Vec<u8>, resp3: bool, depth: us
     }
 }
 
-fn lua_error_reply_wire_bytes(bytes: &[u8]) -> Vec<u8> {
+pub(super) fn lua_error_reply_wire_bytes(bytes: &[u8]) -> Vec<u8> {
     let clean = bytes
         .split(|b| *b == b'\r' || *b == b'\n')
         .next()
