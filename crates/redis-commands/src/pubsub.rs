@@ -1,16 +1,13 @@
 //! Pub/Sub command implementations: SUBSCRIBE, UNSUBSCRIBE, PSUBSCRIBE,
 //! PUNSUBSCRIBE, PUBLISH, PUBSUB.
-//! Round 8a live wiring sits on top of the Phase-A skeleton: the global
-//! channel/pattern subscriber tables and per-client outbound senders live
-//! `redis_core::pubsub_registry::PubSubRegistry`. The handlers below take an
-//! `Arc<Mutex<PubSubRegistry>>` via `CommandContext::pubsub`, mutate the per
-//! client `Client::subscribed_channels` / `Client::subscribed_patterns` sets
-//! to mirror the registry, and encode RESP-2 push frames either into
-//! caller's `client.reply_buf` (when delivering to the active client) or into
-//! a `Vec<u8>` that gets shipped to a foreign subscriber via its mpsc sender.
-//! Cluster propagation is deferred. RESP3 push-frame headers are used for
-//! clients that negotiated RESP3; RESP2 clients receive the classic array
-//! envelope.
+//! Global channel/pattern subscriber tables and per-client outbound senders
+//! live in `redis_core::pubsub_registry::PubSubRegistry`. Handlers take an
+//! `Arc<Mutex<PubSubRegistry>>` via `CommandContext::pubsub`, mirror
+//! subscriptions onto `Client::subscribed_channels` /
+//! `Client::subscribed_patterns`, and encode RESP push frames into either the
+//! active client's `reply_buf` or a foreign subscriber's mpsc sender payload.
+//! Cluster propagation is deferred; RESP3 clients get push-frame headers and
+//! RESP2 clients receive the classic array envelope.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -26,8 +23,8 @@ use redis_protocol::RespFrame;
 use redis_types::{RedisError, RedisString};
 
 /// Distinguishes global pub/sub channels from shard-level (cluster) channels.
-/// The legacy skeleton carried both variants; only `Global` is live in Round
-/// 8a. `Shard` is retained for forward-compat with sharded pub/sub work.
+/// `Global` is live today. `Shard` is retained for forward compatibility with
+/// sharded pub/sub work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PubSubKind {
     Global,

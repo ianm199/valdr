@@ -81,4 +81,4 @@ pub use transport::Connection;
 
 // PORT STATUS: active compatibility core. Keep unresolved work local to the
 // modules that own it with TODO(port)/TODO(architect) markers instead of
-// treating the whole crate as a skeleton.
+// applying a crate-level placeholder label.

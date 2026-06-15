@@ -2,10 +2,10 @@
 //! Owners (per `harness/type-vocabulary.tsv`):
 //! - `CommandSpec` (spec.rs)
 //! The command table is generated from `reference/valkey/src/commands/*.json`
-//! by `harness/gen-command-registry.py` (TODO). The generator's output
-//! lives at `src/generated.rs` and must not be hand-edited.
-//! Pilot commands: PING, ECHO, HELLO, COMMAND (Phase 2); SET, GET, DEL,
-//! EXISTS, INCR (Phase 3).
+//! by `harness/gen-command-registry.py`. The generator's output lives at
+//! `src/generated.rs` and must not be hand-edited. Hand-written modules in
+//! this crate own command behavior, replication-facing command effects, and
+//! scripting integration used by the server runtime.
 
 pub mod acl_cmd;
 pub mod aof;
@@ -72,13 +72,6 @@ pub fn live_config_handle() -> Arc<LiveConfig> {
         .clone()
 }
 
-// ──────────────────────────────────────────────────────────────────────────
-// PORT STATUS
-//   source:        (none — scaffolding placeholder)
-//   target_crate:  redis-commands
-//   confidence:    skeleton
-//   todos:         1
-//   port_notes:    0
-//   unsafe_blocks: 0
-//   notes:         scaffolding; gen-command-registry.py is the first deliverable
-// ──────────────────────────────────────────────────────────────────────────
+// PORT STATUS: active command surface. Keep unresolved command-family work in
+// the owning modules with TODO(port)/TODO(architect) markers instead of a
+// crate-level placeholder label.
