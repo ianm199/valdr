@@ -2,7 +2,7 @@
 
 use redis_types::RedisError;
 
-use super::{ascii_contains_ci, byte_windows_contains};
+use super::ascii_contains_ci;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct FunctionScriptChecks {
@@ -31,6 +31,12 @@ pub(super) fn script_is_synthetic_infinite_loop(script_bytes: &[u8]) -> bool {
         }
     }
     byte_windows_contains(&compact, b"whiletruedo") || byte_windows_contains(&compact, b"while1do")
+}
+
+fn byte_windows_contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
 }
 
 pub(super) fn script_synthetic_loop_is_dirty(script_bytes: &[u8]) -> bool {
