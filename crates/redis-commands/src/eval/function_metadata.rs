@@ -1,13 +1,21 @@
 //! Function library metadata and `server.register_function` argument parsing.
 
 use mlua::{
-    Error as LuaError, Function as LuaFunction, Lua, MultiValue, Table as LuaTable,
+    Error as LuaError, Function as LuaFunction, Lua, MultiValue, RegistryKey, Table as LuaTable,
     Value as LuaValue,
 };
 use redis_types::{RedisError, RedisResult};
 
 use super::bytes::ascii_eq_ci;
-use super::{function_store::FunctionDefinition, RuntimeFunctionRegistration};
+use super::function_store::FunctionDefinition;
+
+pub(super) struct RuntimeFunctionRegistration {
+    pub(super) name: Vec<u8>,
+    pub(super) callback: RegistryKey,
+    pub(super) no_writes: bool,
+    pub(super) allow_oom: bool,
+    pub(super) allow_stale: bool,
+}
 
 pub(super) fn parse_function_library_header(code: &[u8]) -> RedisResult<(Vec<u8>, &[u8])> {
     if !code.starts_with(b"#!") {
