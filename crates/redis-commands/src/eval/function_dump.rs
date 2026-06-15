@@ -7,9 +7,9 @@ use redis_types::{RedisError, RedisResult, RedisString};
 
 use super::bytes::{ascii_casecmp_bytes, hex_decode, hex_encode};
 use super::{
-    compile_function_library, function_libraries, function_script_checks, install_function_library,
-    parse_function_library_header, snapshot_function_libraries, FunctionDefinition,
-    LoadedFunctionLibrary, PreparedFunctionLibraries,
+    compile_function_library, function_libraries, function_metadata::parse_function_library_header,
+    function_script_checks, install_function_library, snapshot_function_libraries,
+    FunctionDefinition, LoadedFunctionLibrary, PreparedFunctionLibraries,
 };
 
 pub(crate) fn function_library_codes_for_aof_rewrite() -> Vec<Vec<u8>> {
