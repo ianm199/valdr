@@ -8,8 +8,10 @@ use redis_core::CommandContext;
 use redis_types::{RedisError, RedisString};
 
 use super::bytes::ascii_eq_ci;
+use super::command_policy::{
+    call_is_write_command, function_command_would_exceed_maxmemory, function_oom_error,
+};
 use super::resp_bridge::{parse_reply_value, ReplyValue};
-use super::{call_is_write_command, function_command_would_exceed_maxmemory, function_oom_error};
 use crate::dispatch::{command_is_denyoom, dispatch_command_name};
 
 /// Execute one inner command for `redis.call` / `redis.pcall`, capturing

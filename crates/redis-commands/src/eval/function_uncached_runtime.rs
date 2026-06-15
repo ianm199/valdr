@@ -16,6 +16,13 @@ use redis_types::{RedisError, RedisResult, RedisString};
 
 use super::busy_script::{current_command_argv, set_busy_script, BusyScriptKind, BusyScriptState};
 use super::bytes::ascii_eq_ci;
+use super::command_policy::{
+    acl_check_cmd_allowed, call_is_write_command, collect_call_args, good_replicas_status,
+    noreplicas_error, noreplicas_lua_error, noreplicas_lua_table, record_script_rejected_command,
+    replica_readonly_lua_call_blocked, replica_readonly_lua_call_error,
+    replica_readonly_lua_call_table, script_command_not_allowed, stale_replica_lua_call_allowed,
+    stale_replica_lua_call_error, stale_replica_scripts_blocked, NOREPLICAS_ERROR,
+};
 use super::function_metadata::{
     parse_function_library_header, parse_runtime_register_function_args,
     RuntimeFunctionRegistration,
@@ -44,12 +51,8 @@ use super::script_errors::{
     lua_script_command_reply_error_payload,
 };
 use super::{
-    acl_check_cmd_allowed, call_is_write_command, collect_call_args, good_replicas_status,
-    noreplicas_error, noreplicas_lua_error, noreplicas_lua_table, record_script_rejected_command,
-    redis_strings_to_lua_table, replica_readonly_lua_call_blocked, replica_readonly_lua_call_error,
-    replica_readonly_lua_call_table, run_massive_unpack_lpush_shortcut, script_command_not_allowed,
-    stale_replica_lua_call_allowed, stale_replica_lua_call_error, stale_replica_scripts_blocked,
-    NOREPLICAS_ERROR, READ_ONLY_SCRIPT_WRITE_ERROR_LUA, READ_ONLY_SCRIPT_WRITE_ERROR_PAYLOAD,
+    redis_strings_to_lua_table, run_massive_unpack_lpush_shortcut,
+    READ_ONLY_SCRIPT_WRITE_ERROR_LUA, READ_ONLY_SCRIPT_WRITE_ERROR_PAYLOAD,
     READ_ONLY_SCRIPT_WRITE_ERROR_RESP, REPLICA_READONLY_ERROR_PAYLOAD,
 };
 

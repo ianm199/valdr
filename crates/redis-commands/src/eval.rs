@@ -17,12 +17,9 @@
 
 use std::borrow::Cow;
 
-use mlua::{Error as LuaError, Lua, MultiValue, Table as LuaTable, Value as LuaValue};
+use mlua::{Lua, Table as LuaTable};
 
-use redis_core::acl::global_acl_state;
-use redis_core::db::glob_match;
-use redis_core::memory::approximate_memory_used;
-use redis_core::metrics::{record_command_stat, record_error_reply};
+use redis_core::metrics::record_error_reply;
 use redis_core::CommandContext;
 use redis_protocol::frame::RespFrame;
 
@@ -36,11 +33,10 @@ const REPLICA_READONLY_ERROR_PAYLOAD: &[u8] =
     b"READONLY You can't write against a read only replica.";
 use redis_types::{RedisError, RedisResult, RedisString};
 
-use crate::dispatch::command_acl_categories;
-
 mod active_function;
 mod busy_script;
 mod bytes;
+mod command_policy;
 mod function_compiler;
 mod function_dump;
 mod function_metadata;
@@ -70,6 +66,11 @@ use busy_script::{
 };
 pub(crate) use busy_script::{busy_script_error_reply, busy_script_owner_is, is_script_busy};
 use bytes::{ascii_casecmp_bytes, ascii_eq_ci, glob_match_ascii_ci};
+use command_policy::{
+    function_command_would_exceed_maxmemory, function_oom_error, good_replicas_status,
+    noreplicas_error, replica_readonly_error, replica_readonly_script_blocked,
+    stale_replica_masterdown_error, stale_replica_scripts_blocked,
+};
 use function_compiler::compile_function_library;
 use function_dump::{decode_function_dump, encode_function_dump, function_library_frame};
 pub(crate) use function_dump::{
@@ -88,7 +89,7 @@ use function_store::{
 };
 use function_uncached_runtime::run_loaded_function_uncached;
 use inner_command::run_inner_command;
-use resp_bridge::{lua_to_resp, ReplyValue, LUA_ERROR_ALREADY_RECORDED_FIELD};
+use resp_bridge::{lua_to_resp, ReplyValue};
 use script_cache::{cache_script, normalise_sha};
 pub(crate) use script_cache::{
     evicted_scripts_count, reset_script_cache_stats, script_cache_len, script_cache_memory_estimate,
@@ -97,19 +98,12 @@ use script_checks::{
     function_script_checks, script_is_top_level_infinite_function_load, unpack_range_overflow_error,
 };
 pub use script_commands::script_command;
-use script_errors::{lua_arg_to_bytes, lua_execution_error_payload, lua_script_call_error_payload};
+use script_errors::lua_execution_error_payload;
 use script_flags::{
     function_source_allows_oom, function_source_eval_flags, parse_eval_shebang,
     strip_embedded_eval_shebang_lines,
 };
 use script_runtime::run_script;
-
-fn record_script_rejected_command(args: &[Vec<u8>], payload: &[u8]) {
-    if let Some(name) = args.first() {
-        record_command_stat(name, 0, true, false);
-    }
-    record_error_reply(payload);
-}
 
 #[derive(Clone, Copy)]
 enum RestoreMode {
@@ -122,110 +116,6 @@ fn function_restore_arity_error() -> RedisError {
     RedisError::runtime(
         b"ERR unknown subcommand or wrong number of arguments for 'restore'. Try FUNCTION HELP.",
     )
-}
-
-fn function_oom_error() -> RedisError {
-    RedisError::runtime(b"OOM command not allowed when used memory > 'maxmemory'.")
-}
-
-fn function_command_would_exceed_maxmemory(ctx: &CommandContext<'_>) -> bool {
-    let maxmemory = ctx.live_config().maxmemory();
-    if maxmemory == 0 {
-        return false;
-    }
-    approximate_memory_used(ctx.db()).saturating_add(1024) > maxmemory
-}
-
-fn stale_replica_scripts_blocked(ctx: &CommandContext<'_>) -> bool {
-    crate::dispatch::stale_replica_blocked(ctx)
-}
-
-fn replica_readonly_script_blocked(ctx: &CommandContext<'_>) -> bool {
-    redis_core::replication::global_replication_state().is_replica()
-        && !ctx.client_ref().is_replica
-        && !ctx.client_ref().replication_apply
-}
-
-fn replica_readonly_error() -> RedisError {
-    RedisError::runtime(REPLICA_READONLY_ERROR_PAYLOAD)
-}
-
-fn replica_readonly_lua_call_payload() -> Vec<u8> {
-    lua_script_call_error_payload(REPLICA_READONLY_ERROR_PAYLOAD.to_vec())
-}
-
-fn replica_readonly_lua_call_error() -> LuaError {
-    LuaError::RuntimeError(
-        String::from_utf8_lossy(&replica_readonly_lua_call_payload()).into_owned(),
-    )
-}
-
-fn replica_readonly_lua_call_table(lua: &Lua) -> mlua::Result<LuaValue> {
-    let t = lua.create_table()?;
-    t.raw_set(
-        "err",
-        lua.create_string(&replica_readonly_lua_call_payload())?,
-    )?;
-    t.raw_set(LUA_ERROR_ALREADY_RECORDED_FIELD, true)?;
-    Ok(LuaValue::Table(t))
-}
-
-fn replica_readonly_lua_call_blocked(ctx: &CommandContext<'_>, args: &[Vec<u8>]) -> bool {
-    call_is_write_command(args)
-        && replica_readonly_script_blocked(ctx)
-        && ctx.live_config().slave_read_only()
-}
-
-fn good_replicas_status(ctx: &CommandContext<'_>) -> bool {
-    let min_replicas = ctx.live_config().repl_min_replicas_to_write();
-    let max_lag_secs = ctx.live_config().repl_min_replicas_max_lag();
-    if min_replicas == 0 || max_lag_secs == 0 {
-        return true;
-    }
-    let repl = redis_core::replication::global_replication_state();
-    if repl.is_replica() {
-        return true;
-    }
-    repl.good_replicas_count(max_lag_secs) as u64 >= min_replicas
-}
-
-const NOREPLICAS_ERROR: &str = "NOREPLICAS Not enough good replicas to write.";
-
-fn noreplicas_error() -> RedisError {
-    RedisError::runtime(NOREPLICAS_ERROR.as_bytes())
-}
-
-fn noreplicas_lua_error() -> LuaError {
-    LuaError::RuntimeError(NOREPLICAS_ERROR.to_string())
-}
-
-fn noreplicas_lua_table(lua: &Lua) -> mlua::Result<LuaValue> {
-    let t = lua.create_table()?;
-    t.raw_set("err", lua.create_string(NOREPLICAS_ERROR)?)?;
-    t.raw_set(LUA_ERROR_ALREADY_RECORDED_FIELD, true)?;
-    Ok(LuaValue::Table(t))
-}
-
-fn stale_replica_masterdown_error() -> RedisError {
-    RedisError::runtime(
-        b"MASTERDOWN Link with MASTER is down and replica-serve-stale-data is set to 'no'.",
-    )
-}
-
-fn stale_replica_lua_call_allowed(args: &[Vec<u8>]) -> bool {
-    args.first().is_some_and(|name| {
-        let name = name.as_slice();
-        ascii_eq_ci(name, b"ECHO") || ascii_eq_ci(name, b"INFO")
-    })
-}
-
-fn stale_replica_lua_call_error() -> LuaError {
-    LuaError::RuntimeError("Can not execute the command on a stale replica".to_string())
-}
-
-fn script_command_not_allowed(args: &[Vec<u8>]) -> bool {
-    args.first()
-        .is_some_and(|name| ascii_eq_ci(name.as_slice(), b"CLUSTER"))
 }
 
 /// `FUNCTION LOAD [REPLACE] <LIBRARY CODE>`.
@@ -630,45 +520,6 @@ pub(crate) fn loaded_function_is_no_writes(name: &[u8]) -> bool {
     find_loaded_function(name).is_some_and(|(_, definition)| definition.no_writes)
 }
 
-fn acl_check_cmd_allowed(ctx: &CommandContext<'_>, args: &[Vec<u8>]) -> mlua::Result<bool> {
-    let Some(command) = args.first() else {
-        return Err(LuaError::RuntimeError(
-            "ERR Invalid command passed to server.acl_check_cmd()".to_string(),
-        ));
-    };
-    let Some(categories) = command_acl_categories(command) else {
-        return Err(LuaError::RuntimeError(
-            "ERR Invalid command passed to server.acl_check_cmd()".to_string(),
-        ));
-    };
-
-    let default_name = RedisString::from_bytes(b"default");
-    let user_name = ctx
-        .client_ref()
-        .authenticated_user
-        .clone()
-        .unwrap_or(default_name);
-    let acl = global_acl_state();
-    let guard = match acl.lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    let Some(user) = guard.users.get(&user_name) else {
-        return Ok(false);
-    };
-    if !user.can_execute_command(command, categories) {
-        return Ok(false);
-    }
-    if user.flags.allkeys || args.len() < 2 {
-        return Ok(true);
-    }
-    let key = &args[1];
-    Ok(user
-        .key_patterns
-        .iter()
-        .any(|pattern| glob_match(pattern.as_bytes(), key)))
-}
-
 fn run_loaded_function(
     ctx: &mut CommandContext<'_>,
     library: &LoadedFunctionLibrary,
@@ -773,45 +624,6 @@ fn redis_strings_to_lua_table(lua: &Lua, values: &[RedisString]) -> mlua::Result
         table.raw_set(i as i64 + 1, lua.create_string(value.as_bytes())?)?;
     }
     Ok(table)
-}
-
-fn call_is_write_command(args: &[Vec<u8>]) -> bool {
-    let Some(command) = args.first() else {
-        return false;
-    };
-    let name = command.as_slice();
-    if crate::dispatch::command_is_write_or_may_replicate(name) {
-        return true;
-    }
-    ascii_eq_ci(name, b"SET")
-        || ascii_eq_ci(name, b"SETEX")
-        || ascii_eq_ci(name, b"PSETEX")
-        || ascii_eq_ci(name, b"SETNX")
-        || ascii_eq_ci(name, b"GETSET")
-        || ascii_eq_ci(name, b"DEL")
-        || ascii_eq_ci(name, b"UNLINK")
-        || ascii_eq_ci(name, b"EXPIRE")
-        || ascii_eq_ci(name, b"PEXPIRE")
-        || ascii_eq_ci(name, b"EXPIREAT")
-        || ascii_eq_ci(name, b"PEXPIREAT")
-        || ascii_eq_ci(name, b"PERSIST")
-        || ascii_eq_ci(name, b"HSET")
-        || ascii_eq_ci(name, b"HDEL")
-        || ascii_eq_ci(name, b"LPUSH")
-        || ascii_eq_ci(name, b"RPUSH")
-        || ascii_eq_ci(name, b"LPOP")
-        || ascii_eq_ci(name, b"RPOP")
-        || ascii_eq_ci(name, b"SADD")
-        || ascii_eq_ci(name, b"SREM")
-        || ascii_eq_ci(name, b"ZADD")
-        || ascii_eq_ci(name, b"ZREM")
-        || ascii_eq_ci(name, b"INCR")
-        || ascii_eq_ci(name, b"DECR")
-        || ascii_eq_ci(name, b"INCRBY")
-        || ascii_eq_ci(name, b"DECRBY")
-        || ascii_eq_ci(name, b"APPEND")
-        || ascii_eq_ci(name, b"FLUSHDB")
-        || ascii_eq_ci(name, b"FLUSHALL")
 }
 
 /// `EVAL script numkeys key [key...] arg [arg...]`.
@@ -959,16 +771,6 @@ fn run_massive_unpack_lpush_shortcut(
         }
         _ => Ok(false),
     }
-}
-
-/// Collect the variadic Lua arguments passed to `redis.call(cmd,...)`
-/// into a byte-string argv suitable for [`run_inner_command`].
-fn collect_call_args(args: MultiValue) -> Result<Vec<Vec<u8>>, LuaError> {
-    let mut out: Vec<Vec<u8>> = Vec::with_capacity(args.len());
-    for v in args {
-        out.push(lua_arg_to_bytes(&v)?);
-    }
-    Ok(out)
 }
 
 /// Strict integer parse for `numkeys`. Reuses the canonical error string.

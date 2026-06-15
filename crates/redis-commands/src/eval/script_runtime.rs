@@ -45,6 +45,16 @@ mod mlua_runtime {
         clear_busy_script, current_command_argv, maybe_enter_eval_timedout_mode, set_busy_script,
         BusyScriptKind, BusyScriptState,
     };
+    use super::super::command_policy::{
+        acl_check_cmd_allowed, call_is_write_command, collect_call_args,
+        function_command_would_exceed_maxmemory, function_oom_error, good_replicas_status,
+        noreplicas_error, noreplicas_lua_error, noreplicas_lua_table,
+        record_script_rejected_command, replica_readonly_error, replica_readonly_lua_call_blocked,
+        replica_readonly_lua_call_error, replica_readonly_lua_call_table,
+        replica_readonly_script_blocked, script_command_not_allowed,
+        stale_replica_lua_call_allowed, stale_replica_lua_call_error,
+        stale_replica_masterdown_error, stale_replica_scripts_blocked, NOREPLICAS_ERROR,
+    };
     use super::super::inner_command::run_inner_command;
     use super::super::lua_api::{
         install_log_function, install_redis_api_constants, install_set_repl_function,
@@ -72,16 +82,9 @@ mod mlua_runtime {
     };
     use super::super::script_flags::parse_eval_shebang;
     use super::super::{
-        acl_check_cmd_allowed, call_is_write_command, collect_call_args,
-        function_command_would_exceed_maxmemory, function_oom_error, good_replicas_status,
-        noreplicas_error, noreplicas_lua_error, noreplicas_lua_table,
-        record_script_rejected_command, replica_readonly_error, replica_readonly_lua_call_blocked,
-        replica_readonly_lua_call_error, replica_readonly_lua_call_table,
-        replica_readonly_script_blocked, run_massive_unpack_lpush_shortcut,
-        script_command_not_allowed, stale_replica_lua_call_allowed, stale_replica_lua_call_error,
-        stale_replica_masterdown_error, stale_replica_scripts_blocked, NOREPLICAS_ERROR,
-        READ_ONLY_SCRIPT_WRITE_ERROR_LUA, READ_ONLY_SCRIPT_WRITE_ERROR_PAYLOAD,
-        READ_ONLY_SCRIPT_WRITE_ERROR_RESP, REPLICA_READONLY_ERROR_PAYLOAD,
+        run_massive_unpack_lpush_shortcut, READ_ONLY_SCRIPT_WRITE_ERROR_LUA,
+        READ_ONLY_SCRIPT_WRITE_ERROR_PAYLOAD, READ_ONLY_SCRIPT_WRITE_ERROR_RESP,
+        REPLICA_READONLY_ERROR_PAYLOAD,
     };
 
     /// Shared body of `EVAL` and `EVALSHA`. Creates a fresh Lua state, applies

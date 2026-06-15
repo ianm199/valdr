@@ -15,6 +15,13 @@ use super::busy_script::{
     clear_busy_script, current_command_argv, maybe_enter_eval_timedout_mode, set_busy_script,
     BusyScriptKind, BusyScriptState,
 };
+use super::command_policy::{
+    call_is_write_command, function_command_would_exceed_maxmemory, function_oom_error,
+    good_replicas_status, noreplicas_error, record_script_rejected_command, replica_readonly_error,
+    replica_readonly_lua_call_blocked, replica_readonly_lua_call_payload,
+    replica_readonly_script_blocked, script_command_not_allowed, stale_replica_lua_call_allowed,
+    stale_replica_masterdown_error, stale_replica_scripts_blocked, NOREPLICAS_ERROR,
+};
 use super::lua_api::{LUA_REDIS_VERSION, LUA_REDIS_VERSION_NUM};
 use super::lua_sandbox::os_clock_seconds;
 use super::resp_bridge::{
@@ -31,12 +38,7 @@ use super::script_errors::{
 };
 use super::script_flags::parse_eval_shebang;
 use super::{
-    call_is_write_command, function_command_would_exceed_maxmemory, function_oom_error,
-    good_replicas_status, noreplicas_error, record_script_rejected_command, replica_readonly_error,
-    replica_readonly_lua_call_blocked, replica_readonly_lua_call_payload,
-    replica_readonly_script_blocked, run_inner_command, run_massive_unpack_lpush_shortcut,
-    script_command_not_allowed, stale_replica_lua_call_allowed, stale_replica_masterdown_error,
-    stale_replica_scripts_blocked, NOREPLICAS_ERROR, READ_ONLY_SCRIPT_WRITE_ERROR_LUA,
+    run_inner_command, run_massive_unpack_lpush_shortcut, READ_ONLY_SCRIPT_WRITE_ERROR_LUA,
     READ_ONLY_SCRIPT_WRITE_ERROR_PAYLOAD, READ_ONLY_SCRIPT_WRITE_ERROR_RESP,
     REPLICA_READONLY_ERROR_PAYLOAD,
 };
