@@ -2,7 +2,7 @@
 
 use redis_types::RedisError;
 
-use super::ascii_contains_ci;
+use super::bytes::ascii_contains_ci;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct FunctionScriptChecks {

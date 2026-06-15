@@ -8,7 +8,7 @@ use std::borrow::Cow;
 
 use redis_types::{RedisError, RedisResult};
 
-use super::{ascii_eq_ci, ascii_lower, ascii_starts_with_ci};
+use super::bytes::{ascii_eq_ci, ascii_lower, ascii_starts_with_ci};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct EvalScriptFlags {
