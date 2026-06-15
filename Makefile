@@ -30,7 +30,7 @@ SERVER_REPL_KITS ?= repl_wait_for_sync_kit
 
 MATRIX_TSV = $$(ls -t harness/bench/results/*profile-matrix.tsv | head -1)
 
-.PHONY: help build test test-kit repl-kits bench bench-quick bench-p1 bench-show bench-release oracle oracle-full
+.PHONY: help build test test-kit repl-kits structure-audit bench bench-quick bench-p1 bench-show bench-release oracle oracle-full
 
 help: ## Show this help
 	@echo "Valdr targets:"
@@ -73,6 +73,9 @@ repl-kits: ## Replication/HA Rust kits only; fast debugger before long Tcl score
 	  echo "==> redis-server $$kit"; \
 	  cargo test -p redis-server --test $$kit; \
 	done
+
+structure-audit: ## Maintainability hotspot report for Valdr compatibility crates/docs/tests
+	python3 harness/structure_audit.py
 
 bench: ## Full profile matrix (p1/p16/p100 + range-heavy) vs upstream. FORMAT=json for raw JSON
 	@echo "running profile matrix (SKIP_BUILD=$(SKIP_BUILD), clients=$(CLIENTS), payload=$(PAYLOAD))…" >&2

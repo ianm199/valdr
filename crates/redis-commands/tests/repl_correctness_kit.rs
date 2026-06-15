@@ -28,7 +28,7 @@
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use redis_core::blocked_keys::{blocked_keys_index, BlockedAction, BlockedSide, BlockedWaiter};
 use redis_core::db::LOOKUP_NOTOUCH;
@@ -197,6 +197,18 @@ fn assert_reply_contains(reply: &[u8], needle: &[u8]) {
         String::from_utf8_lossy(reply),
         String::from_utf8_lossy(needle),
     );
+}
+
+fn wait_until_logically_expired(db: &RedisDb, key: &RedisString) {
+    let deadline = Instant::now() + Duration::from_millis(250);
+    while !db.is_expired(key) {
+        assert!(
+            Instant::now() < deadline,
+            "key {:?} did not become logically expired before deadline",
+            String::from_utf8_lossy(key.as_ref()),
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }
 
 fn info_field_value(reply: &[u8], name: &str) -> Option<String> {
@@ -1698,7 +1710,8 @@ fn r1_lazy_expire_recreate_propagates_delete_before_write() {
         &initial_stream,
     );
     let _ = cap.drain();
-    std::thread::sleep(Duration::from_millis(20));
+    let key = RedisString::from_static(b"s");
+    wait_until_logically_expired(&primary_db, &key);
 
     assert_eq!(
         dispatch_as_primary(37, &mut primary_db, &[b"SADD", b"s", b"foo"]),
@@ -1722,7 +1735,6 @@ fn r1_lazy_expire_recreate_propagates_delete_before_write() {
     );
 
     apply_resp_stream_as_replica_on_dbs(38, &mut replica_dbs, &mut replica_selected_db, &stream);
-    let key = RedisString::from_static(b"s");
     replica_dbs[0].set_replica_keep_expired(true);
     assert!(
         replica_dbs[0]

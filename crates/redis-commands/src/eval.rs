@@ -49,8 +49,14 @@ use redis_types::{RedisError, RedisResult, RedisString};
 
 use crate::dispatch::{command_acl_categories, command_is_denyoom, dispatch_command_name};
 
+mod active_function;
 #[cfg(feature = "lua-rs-engine")]
 mod lua_rs_backend;
+
+use active_function::{
+    active_function_call, active_function_dirty, active_function_error_recorded,
+    enter_active_function_call, function_call_active, with_active_function_context,
+};
 
 const LUA_REDIS_VERSION: &str = "7.0.0";
 const LUA_REDIS_VERSION_NUM: i64 = 7 << 16;
@@ -128,26 +134,6 @@ struct RuntimeFunctionRegistration {
     allow_stale: bool,
 }
 
-#[derive(Clone, Copy)]
-struct ActiveFunctionCall {
-    ctx: *mut CommandContext<'static>,
-    read_only: bool,
-    stale_replica_blocked: bool,
-    function_allow_stale: bool,
-    script_dirty: *const Cell<bool>,
-    script_error_already_recorded: *const Cell<bool>,
-}
-
-struct ActiveFunctionCallGuard;
-
-impl Drop for ActiveFunctionCallGuard {
-    fn drop(&mut self) {
-        ACTIVE_FUNCTION_CALL.with(|slot| {
-            *slot.borrow_mut() = None;
-        });
-    }
-}
-
 struct CachedFunctionRuntime {
     library_name: Vec<u8>,
     library_code: Vec<u8>,
@@ -156,7 +142,6 @@ struct CachedFunctionRuntime {
 }
 
 thread_local! {
-    static ACTIVE_FUNCTION_CALL: RefCell<Option<ActiveFunctionCall>> = const { RefCell::new(None) };
     static CACHED_FUNCTION_RUNTIME: RefCell<Option<CachedFunctionRuntime>> = const { RefCell::new(None) };
 }
 
@@ -2469,61 +2454,6 @@ fn maybe_enter_eval_timedout_mode(
         dirty: script_dirty.get(),
     });
     redis_core::networking::process_events_while_blocked();
-}
-
-fn function_call_active() -> bool {
-    ACTIVE_FUNCTION_CALL.with(|slot| slot.borrow().is_some())
-}
-
-fn enter_active_function_call(
-    ctx: &mut CommandContext<'_>,
-    read_only: bool,
-    stale_replica_blocked: bool,
-    function_allow_stale: bool,
-    script_dirty: &Cell<bool>,
-    script_error_already_recorded: &Cell<bool>,
-) -> ActiveFunctionCallGuard {
-    ACTIVE_FUNCTION_CALL.with(|slot| {
-        *slot.borrow_mut() = Some(ActiveFunctionCall {
-            ctx: ctx as *mut CommandContext<'_> as *mut CommandContext<'static>,
-            read_only,
-            stale_replica_blocked,
-            function_allow_stale,
-            script_dirty: script_dirty as *const Cell<bool>,
-            script_error_already_recorded: script_error_already_recorded as *const Cell<bool>,
-        });
-    });
-    ActiveFunctionCallGuard
-}
-
-fn active_function_call() -> mlua::Result<ActiveFunctionCall> {
-    ACTIVE_FUNCTION_CALL.with(|slot| {
-        slot.borrow().ok_or_else(|| {
-            LuaError::RuntimeError("FUNCTION runtime called outside active FCALL".to_string())
-        })
-    })
-}
-
-fn active_function_dirty(active: ActiveFunctionCall) -> &'static Cell<bool> {
-    // The pointer is installed only for the duration of `CachedFunctionRuntime::call`
-    // and cleared by `ActiveFunctionCallGuard` before the stack frame exits.
-    unsafe { &*active.script_dirty }
-}
-
-fn active_function_error_recorded(active: ActiveFunctionCall) -> &'static Cell<bool> {
-    // See `active_function_dirty`; both cells live in the guarded call frame.
-    unsafe { &*active.script_error_already_recorded }
-}
-
-fn with_active_function_context<R>(
-    f: impl FnOnce(&mut CommandContext<'static>, ActiveFunctionCall) -> mlua::Result<R>,
-) -> mlua::Result<R> {
-    let active = active_function_call()?;
-    // The cached Lua callbacks are process-static, but the command context is
-    // per-call. The guard above ensures this raw pointer is valid only while
-    // the callback is executing on the same thread.
-    let ctx = unsafe { &mut *active.ctx };
-    f(ctx, active)
 }
 
 fn function_libraries() -> &'static Mutex<HashMap<Vec<u8>, LoadedFunctionLibrary>> {
