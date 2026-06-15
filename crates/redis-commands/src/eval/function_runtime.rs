@@ -26,6 +26,7 @@ use super::command_policy::{
     replica_readonly_lua_call_table, script_command_not_allowed, stale_replica_lua_call_allowed,
     stale_replica_lua_call_error, NOREPLICAS_ERROR,
 };
+use super::function_commands::redis_strings_to_lua_table;
 use super::function_compiler::function_load_lua_error;
 use super::function_metadata::{
     parse_function_library_header, parse_runtime_register_function_args,
@@ -52,9 +53,8 @@ use super::script_errors::{
     lua_script_command_error_payload, lua_script_command_reply_error_payload,
 };
 use super::{
-    redis_strings_to_lua_table, run_inner_command, READ_ONLY_SCRIPT_WRITE_ERROR_LUA,
-    READ_ONLY_SCRIPT_WRITE_ERROR_PAYLOAD, READ_ONLY_SCRIPT_WRITE_ERROR_RESP,
-    REPLICA_READONLY_ERROR_PAYLOAD,
+    run_inner_command, READ_ONLY_SCRIPT_WRITE_ERROR_LUA, READ_ONLY_SCRIPT_WRITE_ERROR_PAYLOAD,
+    READ_ONLY_SCRIPT_WRITE_ERROR_RESP, REPLICA_READONLY_ERROR_PAYLOAD,
 };
 
 pub(super) struct CachedFunctionRuntime {

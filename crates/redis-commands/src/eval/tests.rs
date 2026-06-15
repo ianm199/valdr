@@ -6,12 +6,18 @@ use redis_core::{pubsub_registry::PubSubRegistry, RedisDb, RedisServer};
 use redis_types::RedisString;
 
 use super::bytes::hex_encode;
+use super::function_store::{
+    function_libraries, loaded_library_code_is_identical, LoadedFunctionLibrary,
+};
 use super::lua_bit::install_bit;
 use super::lua_cmsgpack::install_cmsgpack;
 use super::lua_sandbox::install_sandbox;
-use super::resp_bridge::reply_to_lua;
+use super::resp_bridge::{lua_to_resp, reply_to_lua};
 use super::script_cache::sha1_hex;
 use super::script_checks::FunctionScriptChecks;
+use super::script_flags::{
+    function_source_allows_oom, function_source_eval_flags, strip_embedded_eval_shebang_lines,
+};
 use super::*;
 
 #[test]
