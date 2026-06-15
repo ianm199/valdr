@@ -47,6 +47,7 @@ use crate::dispatch::{command_acl_categories, command_is_denyoom, dispatch_comma
 mod active_function;
 mod busy_script;
 mod bytes;
+mod function_compiler;
 mod function_dump;
 mod function_metadata;
 mod function_store;
@@ -74,6 +75,7 @@ pub(crate) use busy_script::{busy_script_error_reply, busy_script_owner_is, is_s
 #[cfg(test)]
 use bytes::hex_encode;
 use bytes::{ascii_casecmp_bytes, ascii_eq_ci, glob_match_ascii_ci};
+use function_compiler::{compile_function_library, function_load_lua_error};
 use function_dump::{decode_function_dump, encode_function_dump, function_library_frame};
 pub(crate) use function_dump::{
     function_library_codes_for_aof_rewrite, function_vm_memory_used_estimate,
@@ -81,10 +83,7 @@ pub(crate) use function_dump::{
 pub use function_dump::{
     function_rdb_payloads, install_rdb_function_replacement, prepare_rdb_function_replacement,
 };
-use function_metadata::{
-    parse_function_library_header, parse_register_function_args,
-    parse_runtime_register_function_args,
-};
+use function_metadata::{parse_function_library_header, parse_runtime_register_function_args};
 pub use function_store::PreparedFunctionLibraries;
 use function_store::{
     find_loaded_function, function_libraries, function_library_key, install_function_library,
@@ -96,7 +95,7 @@ use lua_cjson::install_cjson;
 use lua_cmsgpack::install_cmsgpack;
 use lua_sandbox::{
     create_disabled_loadstring, create_script_environment, create_sha1hex_function,
-    install_eval_global_protection, install_global_protection, install_keys_argv, install_sandbox,
+    install_eval_global_protection, install_keys_argv, install_sandbox,
     install_script_error_wrapper, readonly_table_proxy,
     readonly_table_proxy_with_missing_global_errors,
 };
@@ -769,67 +768,6 @@ fn fcall_command_generic(ctx: &mut CommandContext<'_>, ro: bool) -> RedisResult<
     run_loaded_function(ctx, &library, &definition, &keys, &argv, ro)
 }
 
-fn compile_function_library(library_body: &[u8]) -> RedisResult<Vec<FunctionDefinition>> {
-    let lua = Lua::new();
-    install_script_error_wrapper(&lua)
-        .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
-    install_sandbox(&lua)
-        .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
-    install_cjson(&lua)
-        .map_err(|e| RedisError::runtime(format!("ERR Lua cjson install: {}", e).into_bytes()))?;
-    install_cmsgpack(&lua).map_err(|e| {
-        RedisError::runtime(format!("ERR Lua cmsgpack install: {}", e).into_bytes())
-    })?;
-    install_bit(&lua)
-        .map_err(|e| RedisError::runtime(format!("ERR Lua bit install: {}", e).into_bytes()))?;
-    lua.globals()
-        .set("math", LuaValue::Nil)
-        .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
-
-    let registered: RefCell<Vec<FunctionDefinition>> = RefCell::new(Vec::new());
-    let load_result: Result<(), LuaError> = lua.scope(|scope| {
-        let api = lua.create_table()?;
-        install_redis_api_constants(&api)?;
-        let register_fn = {
-            let registered = &registered;
-            scope.create_function_mut(move |_lua, args: MultiValue| -> mlua::Result<()> {
-                let definition = parse_register_function_args(args)?;
-                if registered
-                    .borrow()
-                    .iter()
-                    .any(|existing| ascii_eq_ci(&existing.name, &definition.name))
-                {
-                    return Err(LuaError::RuntimeError(
-                        "Function already exists in the library".to_string(),
-                    ));
-                }
-                registered.borrow_mut().push(definition);
-                Ok(())
-            })?
-        };
-        api.raw_set("register_function", register_fn)?;
-        let api = readonly_table_proxy_with_missing_global_errors(&lua, api)?;
-        lua.globals().set("redis", api.clone())?;
-        lua.globals().set("server", api)?;
-        install_global_protection(&lua)?;
-        lua.load(library_body).set_name("function_library").exec()
-    });
-
-    match load_result {
-        Ok(()) => {
-            let functions = registered.into_inner();
-            if functions.is_empty() {
-                Err(RedisError::runtime(
-                    b"ERR No functions registered in library",
-                ))
-            } else {
-                Ok(functions)
-            }
-        }
-        Err(err) => Err(function_load_lua_error(err)),
-    }
-}
-
 fn cached_function_call(lua_inner: &Lua, args: MultiValue) -> mlua::Result<LuaValue> {
     let arg_bytes = collect_call_args(args)?;
     let is_write = call_is_write_command(&arg_bytes);
@@ -1290,17 +1228,7 @@ pub(crate) fn loaded_function_is_no_writes(name: &[u8]) -> bool {
     find_loaded_function(name).is_some_and(|(_, definition)| definition.no_writes)
 }
 
-fn function_load_lua_error(err: LuaError) -> RedisError {
-    let prefix = if matches!(err, LuaError::SyntaxError { .. }) {
-        "ERR Error compiling function library"
-    } else {
-        "ERR Error loading function library"
-    };
-    let detail = lua_error_detail(&err);
-    RedisError::runtime(format!("{}: {}", prefix, lua_error_first_line(&detail)).into_bytes())
-}
-
-fn install_redis_api_constants(redis_tbl: &LuaTable) -> mlua::Result<()> {
+pub(super) fn install_redis_api_constants(redis_tbl: &LuaTable) -> mlua::Result<()> {
     redis_tbl.raw_set("REDIS_VERSION", LUA_REDIS_VERSION)?;
     redis_tbl.raw_set("REDIS_VERSION_NUM", LUA_REDIS_VERSION_NUM)?;
     redis_tbl.raw_set("REPL_NONE", 0)?;
@@ -1463,25 +1391,6 @@ fn acl_check_cmd_allowed(ctx: &CommandContext<'_>, args: &[Vec<u8>]) -> mlua::Re
         .key_patterns
         .iter()
         .any(|pattern| glob_match(pattern.as_bytes(), key)))
-}
-
-fn lua_error_detail(err: &LuaError) -> String {
-    match err {
-        LuaError::SyntaxError { message, .. } | LuaError::RuntimeError(message) => message.clone(),
-        LuaError::CallbackError { cause, .. } => lua_error_detail(cause.as_ref()),
-        other => other.to_string(),
-    }
-}
-
-fn lua_error_first_line(message: &str) -> &str {
-    message
-        .split_once("\nstack traceback")
-        .map(|(head, _)| head)
-        .unwrap_or(message)
-        .split(['\r', '\n'])
-        .next()
-        .unwrap_or("")
-        .trim()
 }
 
 fn run_loaded_function(

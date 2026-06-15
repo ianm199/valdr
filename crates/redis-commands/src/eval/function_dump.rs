@@ -6,8 +6,8 @@ use redis_protocol::frame::RespFrame;
 use redis_types::{RedisError, RedisResult, RedisString};
 
 use super::bytes::{ascii_casecmp_bytes, hex_decode, hex_encode};
+use super::function_compiler::compile_function_library;
 use super::{
-    compile_function_library,
     function_metadata::parse_function_library_header,
     function_script_checks,
     function_store::{
