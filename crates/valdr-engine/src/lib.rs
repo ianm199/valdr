@@ -1182,16 +1182,22 @@ impl<H: Host> Engine<H> {
 
     /// Runs `script` wrapped in a Lua-level pcall harness.
     ///
-    /// The harness exists because omnilua (lua-rs) has a GC rooting bug
-    /// (lua-gc/src/heap.rs:842): an error value raised through `lua.scope`
-    /// is dereferenced after the collector swept it, aborting the process
-    /// and losing the error message. Catching every script error with an
-    /// in-Lua `pcall` means no error value ever crosses the scope boundary:
-    /// errors come back as `{err=...}` tables, which `lua_to_resp` maps to
-    /// RESP errors verbatim, preserving error codes such as WRONGTYPE from
-    /// `redis.call`. `redis.call` itself is rebound in the harness prelude
-    /// to raise the `{err=...}` table returned by the pcall-style host
-    /// function, mirroring the reference server's Lua binding.
+    /// The harness implements Redis's Lua error semantics entirely inside the
+    /// interpreter: `redis.call` raises on an error reply while `redis.pcall`
+    /// returns it, and an otherwise-uncaught script error becomes an `{err=...}`
+    /// reply instead of aborting the call. The host `redis.call`/`redis.pcall`
+    /// functions both return `{err=...}` tables (never raise); the prelude
+    /// rebinds `redis.call` in Lua to re-raise that table, and the suffix's
+    /// `pcall` catches everything and returns it. Errors therefore stay Lua
+    /// values throughout — `lua_to_resp` maps the `{err=...}` table to a RESP
+    /// error verbatim, preserving codes such as WRONGTYPE from `redis.call`,
+    /// and the engine never has to construct (or correctly root) a
+    /// value-carrying Rust error.
+    ///
+    /// Historically this also dodged an omnilua use-after-sweep when an error
+    /// value was raised through `lua.scope` — fixed upstream in omnilua 0.2.0
+    /// (issue #189, regression-tested in `scope_error_rooting.rs`), so the
+    /// harness is now a deliberate fidelity choice, not a safety workaround.
     fn run_lua_script(
         &mut self,
         script: &[u8],
