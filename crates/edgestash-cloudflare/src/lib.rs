@@ -37,8 +37,16 @@ use worker::*;
 const DURABLE_OBJECT_BINDING: &str = "EDGESTASH";
 const CLIENT_TIME_VAR: &str = "EDGESTASH_ALLOW_CLIENT_TIME";
 
+/// The interactive demo dashboard, served at `GET /`. A single self-contained
+/// HTML file (no build step, no external assets) that drives the live tenant
+/// routes and visualizes the Lua token bucket draining and refilling.
+const DASHBOARD_HTML: &str = include_str!("../assets/dashboard.html");
+
 #[event(fetch)]
 pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
+    if let Some(response) = static_asset(edge_method(req.method()), req.url()?.path()) {
+        return worker_response(response);
+    }
     let Some(tenant) = tenant_from_request(&req)? else {
         return worker_response(EdgeHttpResponse {
             status: 404,
@@ -183,6 +191,36 @@ fn tenant_from_path(path: &str) -> Option<String> {
     }
 }
 
+/// Serve the demo's static assets directly from the Worker, without routing to
+/// a Durable Object: `GET /` (and `/dashboard`) returns the dashboard page,
+/// `GET /script` returns the exact Lua limiter source the engine runs, and
+/// `GET /favicon.ico` is answered with an empty 204. Any other path returns
+/// `None`, so the caller falls through to tenant routing. `HEAD` is treated
+/// like `GET` so health checks and link unfurlers see the same status.
+fn static_asset(method: EdgeHttpMethod, path: &str) -> Option<EdgeHttpResponse> {
+    if !matches!(method, EdgeHttpMethod::Get | EdgeHttpMethod::Head) {
+        return None;
+    }
+    match path {
+        "/" | "/dashboard" => Some(EdgeHttpResponse {
+            status: 200,
+            content_type: "text/html; charset=utf-8",
+            body: DASHBOARD_HTML.as_bytes().to_vec(),
+        }),
+        "/script" => Some(EdgeHttpResponse {
+            status: 200,
+            content_type: "text/plain; charset=utf-8",
+            body: edgestash_demo::LIMITER_SCRIPT.as_bytes().to_vec(),
+        }),
+        "/favicon.ico" => Some(EdgeHttpResponse {
+            status: 204,
+            content_type: "image/x-icon",
+            body: Vec::new(),
+        }),
+        _ => None,
+    }
+}
+
 fn path_and_query(req: &Request) -> Result<String> {
     let url = req.url()?;
     let mut path = url.path().to_owned();
@@ -238,5 +276,33 @@ mod tests {
             Some("tenant-42".to_owned())
         );
         assert_eq!(tenant_from_path("/v1/cache/tenant-42/GET/foo"), None);
+    }
+
+    #[test]
+    fn static_assets_serve_dashboard_and_script_without_a_tenant() {
+        let dash = static_asset(EdgeHttpMethod::Get, "/").expect("dashboard at /");
+        assert_eq!(dash.status, 200);
+        assert_eq!(dash.content_type, "text/html; charset=utf-8");
+        assert!(dash.body.windows(9).any(|w| w == b"EdgeStash"));
+
+        let alias = static_asset(EdgeHttpMethod::Get, "/dashboard").expect("dashboard alias");
+        assert_eq!(alias.body, dash.body);
+
+        let script = static_asset(EdgeHttpMethod::Get, "/script").expect("script at /script");
+        assert_eq!(script.status, 200);
+        assert_eq!(script.content_type, "text/plain; charset=utf-8");
+        assert_eq!(script.body, edgestash_demo::LIMITER_SCRIPT.as_bytes());
+    }
+
+    #[test]
+    fn static_assets_fall_through_for_tenant_routes_and_non_get() {
+        assert!(static_asset(EdgeHttpMethod::Get, "/v1/ai/tenant-42").is_none());
+        assert!(static_asset(EdgeHttpMethod::Get, "/v1/policy/tenant-42").is_none());
+        assert!(static_asset(EdgeHttpMethod::Post, "/").is_none());
+        assert!(static_asset(EdgeHttpMethod::Put, "/script").is_none());
+        assert_eq!(
+            static_asset(EdgeHttpMethod::Get, "/favicon.ico").map(|r| r.status),
+            Some(204)
+        );
     }
 }

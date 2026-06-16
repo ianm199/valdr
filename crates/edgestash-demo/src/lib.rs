@@ -16,7 +16,10 @@ use valdr_engine::{Engine, NoopHost, RestRequest, RestResponse, SnapshotError};
 /// imports storage entries under this prefix and ignores any others.
 const KEY_PREFIX: &str = "k:";
 const APPLICATION_JSON: &str = "application/json";
-const LIMITER_SCRIPT: &str = r#"
+/// The exact Lua token-bucket script the engine runs for every limiter
+/// decision. Exposed publicly so a host adapter (e.g. the demo dashboard) can
+/// display the real source that executes at the edge rather than a paraphrase.
+pub const LIMITER_SCRIPT: &str = r#"
     local bucket_key = KEYS[1]
     local policy_key = KEYS[2]
     local now = tonumber(ARGV[1])
