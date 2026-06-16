@@ -45,7 +45,17 @@ The pattern is atomic state next to the request. Good fits:
 ## How it works
 
 ```
-request → Worker → Durable Object → valdr-engine (wasm) → Lua
+   request
+   │
+   ▼
+   edge worker  →  Durable Object  (one per tenant)
+                   │
+                   ▼
+                   valdr-engine (wasm) + Lua
+                   read → decide → persist    ← one atomic step
+                   │
+                   ▼
+   allow → forward to origin   ·   deny → 429
 ```
 
 One Durable Object owns one tenant's state and handles requests one at a time, so a multi-step decision (read the policy, refill, spend, persist) runs as a single atomic step. State is written per-key to Durable Object storage and survives cold starts.
