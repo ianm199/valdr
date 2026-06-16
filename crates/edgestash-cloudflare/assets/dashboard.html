@@ -3,206 +3,165 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>EdgeStash — Redis-compatible atomic state, in safe Rust, at the edge</title>
+<title>EdgeStash — a Redis-compatible rate limiter in WebAssembly</title>
 <style>
   :root {
-    --bg: #0b0e14;
-    --panel: #121722;
-    --panel-2: #161c2a;
-    --line: #232b3d;
-    --ink: #e6ebf5;
-    --muted: #8a96ad;
-    --accent: #59d3a4;
-    --accent-dim: #2f7a60;
-    --warn: #f0a35e;
-    --deny: #ef6f7b;
-    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
-    --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --text: #1a1a1a;
+    --muted: #6b7280;
+    --accent: #4c1d95;
+    --warn: #a84f31;
+    --code-bg: #f6f5f3;
+    --rule: #e7e5e0;
+    --serif: Charter, "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, Menlo, "JetBrains Mono", Consolas, monospace;
   }
   * { box-sizing: border-box; }
-  html, body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans); }
+  html { -webkit-text-size-adjust: 100%; }
   body {
-    background:
-      radial-gradient(1200px 600px at 80% -10%, rgba(89,211,164,0.10), transparent 60%),
-      radial-gradient(900px 500px at -10% 10%, rgba(95,140,255,0.08), transparent 55%),
-      var(--bg);
-    min-height: 100vh;
-    line-height: 1.5;
+    margin: 0; background: #fff; color: var(--text);
+    font-family: var(--serif); font-size: 18px; line-height: 1.62;
+    text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased;
   }
-  a { color: var(--accent); text-decoration: none; }
-  a:hover { text-decoration: underline; }
-  .wrap { max-width: 1080px; margin: 0 auto; padding: 32px 20px 64px; }
 
-  header.hero { display: flex; flex-direction: column; gap: 14px; margin-bottom: 26px; }
-  .badge {
-    display: inline-flex; align-items: center; gap: 8px; align-self: flex-start;
-    font-family: var(--mono); font-size: 12px; color: var(--accent);
-    border: 1px solid var(--accent-dim); background: rgba(89,211,164,0.07);
-    padding: 4px 10px; border-radius: 999px;
+  .topnav {
+    display: flex; align-items: center; gap: 18px;
+    padding: 12px 28px; border-bottom: 1px solid var(--rule);
+    font-family: var(--sans); font-size: 14px;
   }
-  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 0 rgba(89,211,164,0.6); animation: pulse 2s infinite; }
-  @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(89,211,164,0.5); } 70% { box-shadow: 0 0 0 7px rgba(89,211,164,0); } 100% { box-shadow: 0 0 0 0 rgba(89,211,164,0); } }
-  h1 { font-size: 30px; line-height: 1.15; margin: 0; letter-spacing: -0.02em; }
-  h1 .grad { background: linear-gradient(92deg, #59d3a4, #5fa8ff); -webkit-background-clip: text; background-clip: text; color: transparent; }
-  .lede { color: var(--muted); max-width: 70ch; font-size: 15.5px; margin: 0; }
-  .lede strong { color: var(--ink); font-weight: 600; }
+  .topnav .brand { font-weight: 700; font-size: 17px; letter-spacing: -0.01em; color: var(--accent); text-decoration: none; }
+  .topnav .here { color: var(--muted); margin-right: auto; }
+  .topnav a.gh { color: var(--muted); text-decoration: none; }
+  .topnav a.gh:hover { color: var(--text); }
 
-  .pipeline { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px; font-family: var(--mono); font-size: 12.5px; }
-  .chip { border: 1px solid var(--line); background: var(--panel); padding: 5px 10px; border-radius: 8px; color: var(--ink); }
-  .chip .k { color: var(--muted); }
-  .arrow { color: var(--muted); }
-  .chip.wasm { border-color: var(--accent-dim); color: var(--accent); }
+  main { max-width: 720px; margin: 0 auto; padding: 48px 28px 96px; }
+  @media (max-width: 480px) { main { padding: 36px 22px 72px; } body { font-size: 17px; } }
 
-  .grid { display: grid; grid-template-columns: 1.05fr 1fr; gap: 18px; margin-top: 22px; }
-  @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
-  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px; }
-  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 14px; font-weight: 600; }
+  h1 { font-size: 46px; margin: 0 0 6px; letter-spacing: -0.01em; color: var(--accent); font-weight: 700; }
+  .tagline { font-size: 21px; margin: 0; color: var(--muted); font-style: italic; }
+  .lead { margin: 20px 0 14px; font-size: 19px; }
+  .path { font-family: var(--mono); font-size: 13px; color: var(--muted); background: var(--code-bg); border: 1px solid var(--rule); border-radius: 3px; padding: 8px 12px; overflow-x: auto; white-space: nowrap; }
 
-  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-  .row + .row { margin-top: 12px; }
-  label { font-size: 12.5px; color: var(--muted); display: block; margin-bottom: 5px; }
-  input[type=text], input[type=number] {
-    background: var(--panel-2); border: 1px solid var(--line); color: var(--ink);
-    border-radius: 9px; padding: 9px 11px; font-family: var(--mono); font-size: 13px; width: 100%;
+  section { margin: 40px 0; }
+  h2 { font-size: 24px; font-weight: 700; margin: 0 0 8px; letter-spacing: -0.005em; }
+  p { margin: 10px 0; }
+  a { color: var(--accent); text-underline-offset: 2px; }
+
+  code { font-family: var(--mono); font-size: 14px; background: var(--code-bg); border: 1px solid var(--rule); border-radius: 3px; padding: 1px 5px; }
+
+  /* controls */
+  .row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 14px; margin: 16px 0; font-family: var(--sans); }
+  .field { display: flex; flex-direction: column; gap: 5px; }
+  .field.grow { flex: 1 1 200px; }
+  label span.lbl { font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+  input {
+    font-family: var(--mono); font-size: 14px; color: var(--text);
+    border: 1px solid var(--rule); border-radius: 3px; padding: 8px 10px; background: #fff; width: 100%;
   }
-  input:focus { outline: none; border-color: var(--accent-dim); }
-  .field { flex: 1 1 0; min-width: 92px; }
+  input:focus { outline: none; border-color: var(--accent); }
+  button { font-family: var(--sans); font-size: 14px; font-weight: 600; border-radius: 3px; padding: 9px 16px; cursor: pointer; border: 1px solid transparent; }
+  .btn-primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .btn-primary:hover { background: #3c156f; }
+  .btn-secondary { background: #fff; color: var(--text); border-color: var(--rule); }
+  .btn-secondary:hover { border-color: var(--accent); color: var(--accent); }
 
-  button {
-    font-family: var(--sans); font-size: 14px; font-weight: 600; cursor: pointer;
-    border-radius: 10px; padding: 10px 16px; border: 1px solid transparent; transition: transform .05s ease, filter .15s ease;
-  }
-  button:active { transform: translateY(1px); }
-  .btn-primary { background: linear-gradient(92deg, #59d3a4, #4ec59a); color: #06150f; }
-  .btn-primary:hover { filter: brightness(1.06); }
-  .btn-ghost { background: var(--panel-2); color: var(--ink); border-color: var(--line); }
-  .btn-ghost:hover { border-color: var(--accent-dim); }
-  .btn-warn { background: rgba(240,163,94,0.14); color: var(--warn); border-color: rgba(240,163,94,0.35); }
+  /* token meter */
+  .meter { margin: 22px 0 6px; }
+  .readout { display: flex; align-items: baseline; gap: 8px; font-family: var(--mono); }
+  .readout #remaining { font-size: 34px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+  .readout .unit { color: var(--muted); font-size: 15px; }
+  .readout .verdict { margin-left: auto; font-family: var(--sans); font-size: 13px; color: var(--muted); }
+  .readout .verdict.allow { color: var(--accent); }
+  .readout .verdict.deny { color: var(--warn); }
+  .segs { display: flex; flex-wrap: wrap; gap: 3px; margin: 12px 0; }
+  .seg { width: 15px; height: 30px; border-radius: 2px; background: var(--code-bg); border: 1px solid var(--rule); transition: background .18s, border-color .18s; }
+  .seg.on { background: var(--accent); border-color: var(--accent); }
+  .bar { display: none; height: 12px; border-radius: 2px; background: var(--code-bg); border: 1px solid var(--rule); overflow: hidden; margin: 12px 0; }
+  .bar > i { display: block; height: 100%; width: 0%; background: var(--accent); transition: width .25s; }
+  .stats { font-family: var(--mono); font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .stats b { color: var(--text); font-weight: 600; }
+  .note { color: var(--muted); font-size: 15px; font-style: italic; margin-top: 10px; }
 
-  .tenant { font-family: var(--mono); font-size: 12.5px; color: var(--muted); }
-  .tenant b { color: var(--ink); }
+  /* decision log */
+  .log { margin-top: 16px; display: flex; flex-direction: column; gap: 4px; max-height: 220px; overflow-y: auto; }
+  .entry { font-family: var(--mono); font-size: 13px; line-height: 1.45; padding: 6px 10px; border-left: 2px solid var(--rule); }
+  .entry.ok { border-left-color: var(--accent); background: rgba(76, 29, 149, 0.05); }
+  .entry.deny { border-left-color: var(--warn); background: rgba(168, 79, 49, 0.07); }
+  .entry .t { color: var(--muted); }
+  .entry .body { color: var(--muted); }
+  .entry .body b { color: var(--text); font-weight: 600; }
 
-  /* token bucket */
-  .gauge { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; }
-  .gauge .big { font-size: 40px; font-weight: 700; font-family: var(--mono); letter-spacing: -0.02em; }
-  .gauge .cap { color: var(--muted); font-family: var(--mono); font-size: 16px; }
-  .gauge .tag { margin-left: auto; font-family: var(--mono); font-size: 12px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
-  .gauge .tag.allow { color: var(--accent); border-color: var(--accent-dim); background: rgba(89,211,164,0.08); }
-  .gauge .tag.deny { color: var(--deny); border-color: rgba(239,111,123,0.4); background: rgba(239,111,123,0.08); }
-  .pips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
-  .pip { width: 18px; height: 26px; border-radius: 5px; background: var(--panel-2); border: 1px solid var(--line); transition: background .25s ease, border-color .25s ease, box-shadow .25s ease; }
-  .pip.on { background: linear-gradient(180deg, #6ee0b2, #3fae84); border-color: #3fae84; box-shadow: 0 0 10px rgba(89,211,164,0.25); }
-  .bar { height: 14px; border-radius: 8px; background: var(--panel-2); border: 1px solid var(--line); overflow: hidden; display: none; }
-  .bar > i { display: block; height: 100%; width: 0%; background: linear-gradient(90deg, #6ee0b2, #3fae84); transition: width .3s ease; }
-  .meta { display: flex; gap: 18px; flex-wrap: wrap; font-family: var(--mono); font-size: 12.5px; color: var(--muted); margin-top: 4px; }
-  .meta b { color: var(--ink); font-weight: 600; }
+  pre#script { font-family: var(--mono); font-size: 13px; line-height: 1.5; background: var(--code-bg); border: 1px solid var(--rule); border-radius: 4px; padding: 14px 16px; overflow-x: auto; margin: 12px 0; white-space: pre; }
 
-  .log { margin-top: 4px; max-height: 230px; overflow: auto; display: flex; flex-direction: column; gap: 7px; }
-  .entry { font-family: var(--mono); font-size: 12.5px; border: 1px solid var(--line); border-left-width: 3px; border-radius: 8px; padding: 8px 10px; background: var(--panel-2); }
-  .entry.ok { border-left-color: var(--accent); }
-  .entry.deny { border-left-color: var(--deny); }
-  .entry .head { display: flex; justify-content: space-between; gap: 10px; }
-  .entry .verdict.ok { color: var(--accent); }
-  .entry .verdict.deny { color: var(--deny); }
-  .entry .body { color: var(--muted); margin-top: 3px; }
-  .entry .body b { color: var(--ink); }
-
-  pre.script { font-family: var(--mono); font-size: 12px; color: #cfe3da; background: #0d1420; border: 1px solid var(--line); border-radius: 12px; padding: 16px; overflow: auto; max-height: 360px; line-height: 1.5; margin: 0; }
-  .script-card h2 .small { text-transform: none; letter-spacing: 0; color: var(--muted); font-weight: 400; }
-  footer { margin-top: 30px; color: var(--muted); font-size: 13px; display: flex; gap: 16px; flex-wrap: wrap; align-items: center; }
-  .sep { color: var(--line); }
-  .hint { color: var(--muted); font-size: 12.5px; margin-top: 10px; }
-  .full { grid-column: 1 / -1; }
+  footer { margin-top: 64px; padding-top: 18px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 14px; }
+  footer p { margin: 5px 0; }
+  footer code { font-size: 12.5px; }
+  footer a { color: var(--muted); }
+  .linkbtn { background: none; border: 0; padding: 0; font: inherit; color: var(--accent); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
 </style>
 </head>
 <body>
-<div class="wrap">
-  <header class="hero">
-    <span class="badge"><span class="dot"></span> live on Cloudflare Workers + Durable Objects</span>
-    <h1>EdgeStash — <span class="grad">Redis-compatible atomic state &amp; Lua, in safe&nbsp;Rust</span>, embedded at the edge</h1>
-    <p class="lede">
-      A token-bucket rate limiter for a fake AI endpoint, decided <strong>inside the Worker</strong> by
-      <strong>Valdr</strong> (a safe-Rust port of Valkey) compiled to <strong>wasm32</strong>, scripted with
-      <strong>safe-Rust Lua</strong>. No external Redis service, no C Lua, no network hop to a database —
-      the atomic decision runs where the request already is.
-    </p>
-    <div class="pipeline">
-      <span class="chip"><span class="k">request</span></span><span class="arrow">→</span>
-      <span class="chip">Worker</span><span class="arrow">→</span>
-      <span class="chip">Durable Object <span class="k">(per-tenant shard)</span></span><span class="arrow">→</span>
-      <span class="chip wasm">valdr-engine <span class="k">(wasm)</span></span><span class="arrow">→</span>
-      <span class="chip">Lua token bucket</span>
-    </div>
+
+<nav class="topnav">
+  <a class="brand" href="https://valdr.dev">Valdr</a>
+  <span class="here">EdgeStash demo</span>
+  <a class="gh" href="https://github.com/ianm199/valdr">GitHub ↗</a>
+</nav>
+
+<main>
+  <header>
+    <h1>EdgeStash</h1>
+    <p class="tagline">A Redis-compatible rate limiter, running in WebAssembly at the edge.</p>
+    <p class="lead">Every allow/deny below is decided by <a href="https://valdr.dev">Valdr</a>, a safe-Rust port of Valkey compiled to wasm, running a Lua token bucket inside a Cloudflare Durable Object. No external Redis.</p>
+    <p class="path">request → Worker → Durable Object → valdr-engine (wasm) → Lua</p>
   </header>
 
-  <div class="grid">
-    <!-- LEFT: controls + verdict -->
-    <section class="card">
-      <h2>AI spend limiter</h2>
-      <div class="row">
-        <div class="field" style="flex: 2 1 100%;">
-          <label for="prompt">Prompt to the (toy) edge LLM</label>
-          <input id="prompt" type="text" value="summarize Q3 invoices" />
-        </div>
-      </div>
-      <div class="row">
-        <div class="field">
-          <label for="cost">Token cost / request</label>
-          <input id="cost" type="number" min="1" max="50" value="3" />
-        </div>
-        <div class="field" style="flex: 2 1 auto; display: flex; gap: 10px; align-items: flex-end;">
-          <button class="btn-primary" id="send" style="flex:1;">Send request</button>
-          <button class="btn-warn" id="burst">Burst ×6</button>
-        </div>
-      </div>
+  <section>
+    <h2>Try it</h2>
+    <div class="row">
+      <label class="field grow"><span class="lbl">Prompt to the toy edge LLM</span><input id="prompt" type="text" value="summarize Q3 invoices" /></label>
+      <label class="field" style="flex:0 0 96px;"><span class="lbl">Tokens</span><input id="cost" type="number" min="1" max="50" value="3" /></label>
+      <button id="send" class="btn-primary">Send request</button>
+      <button id="burst" class="btn-secondary">Burst ×6</button>
+    </div>
 
-      <div style="height:1px;background:var(--line);margin:18px 0;"></div>
-
-      <div class="gauge">
-        <span class="big" id="remaining">–</span>
-        <span class="cap">/ <span id="capacity">–</span> tokens</span>
-        <span class="tag" id="verdict">ready</span>
+    <div class="meter">
+      <div class="readout">
+        <span id="remaining">–</span>
+        <span class="unit">/ <span id="capacity">–</span> tokens</span>
+        <span id="verdict" class="verdict">ready</span>
       </div>
-      <div class="pips" id="pips"></div>
+      <div class="segs" id="pips"></div>
       <div class="bar" id="bar"><i></i></div>
-      <div class="meta">
-        <span>refills to full in <b id="reset">–</b></span>
-        <span id="retryWrap" style="display:none;">retry after <b id="retry">–</b></span>
-      </div>
-      <p class="hint">Drain the bucket faster than it refills and the next request gets a <b style="color:var(--deny)">429</b> — decided locally, in microseconds, by the Lua script below.</p>
-    </section>
+      <div class="stats"><span>refills to full in <b id="reset">–</b></span><span id="retryWrap" style="display:none;"> · retry after <b id="retry">–</b></span></div>
+    </div>
+    <p class="note">Spend faster than the bucket refills and the next request gets a 429, decided locally by the Lua below.</p>
 
-    <!-- RIGHT: policy + log -->
-    <section class="card">
-      <h2>Policy <span style="text-transform:none;letter-spacing:0;color:var(--muted);font-weight:400;">— stored in a Valdr hash, read by the script</span></h2>
-      <div class="row">
-        <div class="field"><label for="p-cap">capacity</label><input id="p-cap" type="number" min="1" max="40" value="10" /></div>
-        <div class="field"><label for="p-tok">refill tokens</label><input id="p-tok" type="number" min="1" value="5" /></div>
-        <div class="field"><label for="p-ms">refill window (ms)</label><input id="p-ms" type="number" min="100" step="100" value="1000" /></div>
-        <div class="field" style="display:flex;align-items:flex-end;"><button class="btn-ghost" id="apply" style="width:100%;">Apply</button></div>
-      </div>
-      <p class="hint">Change the policy and resend — the <em>same</em> Lua script honors the new limits with no redeploy. That programmability is the point: real quota logic is rarely just <span style="font-family:var(--mono)">INCR + EXPIRE</span>.</p>
+    <div class="log" id="log"></div>
+  </section>
 
-      <h2 style="margin-top:18px;">Recent decisions</h2>
-      <div class="log" id="log"></div>
-    </section>
+  <section>
+    <h2>Policy</h2>
+    <p>Stored as a Valdr hash and read by the script. Change it and the same script honors the new limits, with no redeploy.</p>
+    <div class="row">
+      <label class="field"><span class="lbl">Capacity</span><input id="p-cap" type="number" min="1" max="40" value="10" /></label>
+      <label class="field"><span class="lbl">Refill tokens</span><input id="p-tok" type="number" min="1" value="5" /></label>
+      <label class="field"><span class="lbl">Window (ms)</span><input id="p-ms" type="number" min="100" step="100" value="1000" /></label>
+      <button id="apply" class="btn-secondary">Apply</button>
+    </div>
+  </section>
 
-    <!-- FULL: script -->
-    <section class="card script-card full">
-      <h2>The Lua running at the edge <span class="small">— fetched live from <code>/script</code>; this exact source executes in safe-Rust Lua inside the wasm engine</span></h2>
-      <pre class="script" id="script">loading…</pre>
-    </section>
-  </div>
+  <section>
+    <h2>The Lua</h2>
+    <p>The exact script the engine runs for every decision, fetched live from <code>/script</code>.</p>
+    <pre id="script">loading…</pre>
+  </section>
 
   <footer>
-    <span class="tenant">tenant: <b id="tenant">…</b></span>
-    <button class="btn-ghost" id="newTenant" style="padding:6px 12px;font-size:12.5px;">New tenant</button>
-    <span class="sep">|</span>
-    <a href="https://github.com/ianm199/valdr" target="_blank" rel="noopener">Valdr on GitHub</a>
-    <span class="sep">|</span>
-    <span>safe-Rust Valkey · safe-Rust Lua · wasm32 · no external Redis</span>
+    <p>tenant <code id="tenant">…</code> · <button id="newTenant" class="linkbtn">new tenant</button></p>
+    <p>EdgeStash runs the Valdr engine in WebAssembly with safe-Rust Lua. <a href="https://github.com/ianm199/valdr">Source on GitHub</a>.</p>
   </footer>
-</div>
+</main>
 
 <script>
 (function () {
@@ -213,8 +172,7 @@
   let pollTimer = null;
 
   function newTenantId() {
-    const r = Math.random().toString(36).slice(2, 8);
-    return "demo-" + r;
+    return "demo-" + Math.random().toString(36).slice(2, 8);
   }
 
   async function jsonFetch(method, path, body) {
@@ -240,22 +198,21 @@
     $("remaining").textContent = state.remaining;
     $("capacity").textContent = state.capacity;
 
-    // pips for small capacity, bar for large
-    const pips = $("pips"), bar = $("bar");
+    const segs = $("pips"), bar = $("bar");
     if (state.capacity <= 30) {
       bar.style.display = "none";
-      pips.style.display = "flex";
-      if (pips.childElementCount !== state.capacity) {
-        pips.innerHTML = "";
+      segs.style.display = "flex";
+      if (segs.childElementCount !== state.capacity) {
+        segs.innerHTML = "";
         for (let i = 0; i < state.capacity; i++) {
           const d = document.createElement("div");
-          d.className = "pip";
-          pips.appendChild(d);
+          d.className = "seg";
+          segs.appendChild(d);
         }
       }
-      [...pips.children].forEach((el, i) => el.classList.toggle("on", i < state.remaining));
+      [...segs.children].forEach((el, i) => el.classList.toggle("on", i < state.remaining));
     } else {
-      pips.style.display = "none";
+      segs.style.display = "none";
       bar.style.display = "block";
       bar.querySelector("i").style.width = Math.max(0, Math.min(100, (state.remaining / state.capacity) * 100)) + "%";
     }
@@ -272,7 +229,7 @@
 
   function setVerdict(kind, text) {
     const v = $("verdict");
-    v.className = "tag " + (kind || "");
+    v.className = "verdict " + (kind || "");
     v.textContent = text;
   }
 
@@ -281,8 +238,7 @@
     const e = document.createElement("div");
     e.className = "entry " + (ok ? "ok" : "deny");
     e.innerHTML =
-      '<div class="head"><span class="verdict ' + (ok ? "ok" : "deny") + '">' + title + "</span>" +
-      '<span style="color:var(--muted)">' + new Date().toLocaleTimeString() + "</span></div>" +
+      '<span class="t">' + new Date().toLocaleTimeString() + "</span>  " + escapeHtml(title) +
       '<div class="body">' + detail + "</div>";
     log.prepend(e);
     while (log.childElementCount > 25) log.removeChild(log.lastChild);
@@ -297,7 +253,7 @@
     };
     const { status } = await jsonFetch("PUT", "/v1/policy/" + tenant, body);
     if (status === 200) {
-      logEntry(true, "policy applied", "capacity <b>" + body.capacity + "</b>, refill <b>" + body.refill_tokens + "</b>/<b>" + body.refill_ms + "ms</b>");
+      logEntry(true, "policy applied", "capacity <b>" + body.capacity + "</b>, refill <b>" + body.refill_tokens + "</b> per <b>" + body.refill_ms + "ms</b>");
       await peek();
     } else {
       logEntry(false, "policy rejected", "HTTP " + status);
@@ -305,12 +261,9 @@
   }
 
   async function peek() {
-    // cost:0 advances refill and reads current state without spending
     const { status, data } = await jsonFetch("POST", "/v1/limit/" + tenant, { cost: 0 });
     if (status === 200 && data) {
       applyDecision(data);
-      // once the bucket has refilled to full, clear any stale 429 verdict so
-      // the recovered state reads cleanly.
       if (state.remaining >= state.capacity) setVerdict("", "ready");
     }
     schedulePoll();
@@ -318,10 +271,7 @@
 
   function schedulePoll() {
     if (pollTimer) clearTimeout(pollTimer);
-    // only poll while the bucket is refilling, to stay gentle
-    if (state.remaining < state.capacity) {
-      pollTimer = setTimeout(peek, 900);
-    }
+    if (state.remaining < state.capacity) pollTimer = setTimeout(peek, 900);
   }
 
   async function sendOne(cost, prompt) {
@@ -329,11 +279,11 @@
     if (status === 200 && data && data.ok) {
       applyDecision(data.limit);
       setVerdict("allow", "200 allowed");
-      logEntry(true, "200 · charged " + data.charged_tokens + " tokens", "“" + escapeHtml(data.completion) + "”");
+      logEntry(true, "200  charged " + data.charged_tokens + " tokens", "“" + escapeHtml(data.completion) + "”");
     } else if (status === 429 && data) {
       applyDecision(data.limit);
       setVerdict("deny", "429 rate-limited");
-      logEntry(false, "429 · rate_limited", "not enough tokens — retry after <b>" + data.limit.retry_after_ms + "ms</b>");
+      logEntry(false, "429  rate_limited", "not enough tokens, retry after <b>" + data.limit.retry_after_ms + "ms</b>");
     } else {
       logEntry(false, "error", "HTTP " + status);
     }
@@ -347,7 +297,7 @@
   async function loadScript() {
     try {
       const res = await fetch(api("/script"));
-      $("script").textContent = await res.text();
+      $("script").textContent = (await res.text()).trim();
     } catch (_) {
       $("script").textContent = "(could not load /script)";
     }
@@ -361,22 +311,19 @@
     await applyPolicy();
   }
 
-  // wire up
+  function clampCost() {
+    let c = parseInt($("cost").value, 10);
+    return (isNaN(c) || c < 1) ? 1 : c;
+  }
+
   $("send").addEventListener("click", () => sendOne(clampCost(), $("prompt").value || "hello"));
   $("burst").addEventListener("click", async () => {
     const c = clampCost(), p = $("prompt").value || "hello";
-    for (let i = 0; i < 6; i++) { await sendOne(c, p); }
+    for (let i = 0; i < 6; i++) await sendOne(c, p);
   });
   $("apply").addEventListener("click", applyPolicy);
   $("newTenant").addEventListener("click", resetTenant);
 
-  function clampCost() {
-    let c = parseInt($("cost").value, 10);
-    if (isNaN(c) || c < 1) c = 1;
-    return c;
-  }
-
-  // boot
   $("tenant").textContent = tenant;
   loadScript();
   applyPolicy();
