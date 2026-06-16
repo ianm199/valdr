@@ -3,15 +3,16 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Valdr — Coverage</title>
-<meta name="description" content="Valdr test coverage — full breakdown by category against Valkey's upstream test suite.">
+<title>Valdr — EdgeStash</title>
+<meta name="description" content="EdgeStash runs the Valdr engine in WebAssembly, embedded inside a Cloudflare Worker and Durable Object: Redis-compatible atomic state and safe-Rust Lua at the edge, with no external Redis.">
 <link rel="stylesheet" href="style.css">
 <style>
   .md-table { border-collapse: collapse; width: 100%; margin: 1rem 0 2rem; font-size: 0.95rem; }
-  .md-table th, .md-table td { padding: 0.45rem 0.7rem; border-bottom: 1px solid var(--border, #2a2a2a); }
-  .md-table thead th { border-bottom: 2px solid var(--border, #2a2a2a); color: var(--muted); font-weight: 600; }
-  .md-table tbody tr:hover { background: rgba(127, 127, 127, 0.06); }
-  #coverage-content h2 { margin-top: 2.4rem; }
+  .md-table th, .md-table td { padding: 0.45rem 0.7rem; border-bottom: 1px solid var(--rule, #e7e5e0); }
+  .md-table thead th { border-bottom: 2px solid var(--rule, #e7e5e0); color: var(--muted); font-weight: 600; }
+  #edgestash-content { max-width: 46rem; }
+  #edgestash-content h1 { margin-top: 1rem; }
+  #edgestash-content h2 { margin-top: 2.4rem; }
 </style>
 </head>
 <body>
@@ -20,7 +21,6 @@
   <a class="brand" href="/">Valdr</a>
   <div class="navlinks">
     <a href="/#coverage">Coverage</a>
-    <a href="/#scope">Scope</a>
     <a href="/#performance">Performance</a>
     <a href="/edgestash.html">EdgeStash</a>
     <a href="/roadmap.html">Roadmap</a>
@@ -30,8 +30,8 @@
 </nav>
 
 <main>
-<section id="coverage-detail">
-  <div id="coverage-content">loading coverage…</div>
+<section id="edgestash">
+  <div id="edgestash-content">loading…</div>
 </section>
 </main>
 
@@ -42,9 +42,8 @@
   </p>
 </footer>
 
-<!-- Content lives in coverage.md — edit that, not this file. -->
-<!-- bump ?v= whenever md.js changes, so browsers/CDN don't serve a stale cache -->
+<!-- Content lives in edgestash.md — edit that, not this file. -->
 <script src="md.js?v=2"></script>
-<script>Valdr.loadMarkdownInto('coverage-content', 'coverage.md');</script>
+<script>Valdr.loadMarkdownInto('edgestash-content', 'edgestash.md');</script>
 </body>
 </html>
