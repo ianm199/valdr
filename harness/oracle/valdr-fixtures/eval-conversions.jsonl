@@ -1,0 +1,41 @@
+{"id": "ec-number-int", "cmd": ["EVAL", "return 1", "0"]}
+{"id": "ec-number-truncates-3.7", "cmd": ["EVAL", "return 3.7", "0"]}
+{"id": "ec-number-truncates-negative-3.7", "cmd": ["EVAL", "return -3.7", "0"]}
+{"id": "ec-string", "cmd": ["EVAL", "return 'hello'", "0"]}
+{"id": "ec-empty-string", "cmd": ["EVAL", "return ''", "0"]}
+{"id": "ec-true-is-one", "cmd": ["EVAL", "return true", "0"]}
+{"id": "ec-false-is-null-bulk", "cmd": ["EVAL", "return false", "0"]}
+{"id": "ec-nil-is-null-bulk", "cmd": ["EVAL", "return nil", "0"]}
+{"id": "ec-table-array", "cmd": ["EVAL", "return {1,2,'three'}", "0"]}
+{"id": "ec-table-hole-stops-at-nil", "cmd": ["EVAL", "return {1,nil,3}", "0"]}
+{"id": "ec-nested-table", "cmd": ["EVAL", "return {1,{2,3},'x'}", "0"]}
+{"id": "ec-ok-table-simple-string", "cmd": ["EVAL", "return {ok='fine'}", "0"]}
+{"id": "ec-err-table-error", "cmd": ["EVAL", "return {err='boom'}", "0"]}
+{"id": "ec-status-reply", "cmd": ["EVAL", "return redis.status_reply('GOOD')", "0"]}
+{"id": "ec-error-reply", "cmd": ["EVAL", "return redis.error_reply('My Error')", "0"]}
+{"id": "ec-call-set-status-ok-field", "cmd": ["EVAL", "local r = redis.call('SET', KEYS[1], 'v') return r.ok", "1", "eck1"]}
+{"id": "ec-call-get-bulk", "cmd": ["EVAL", "return redis.call('GET', KEYS[1])", "1", "eck1"]}
+{"id": "ec-call-incr-integer", "cmd": ["EVAL", "return redis.call('INCR', KEYS[1])", "1", "ecctr"]}
+{"id": "ec-call-nil-bulk-direct", "cmd": ["EVAL", "return redis.call('GET', KEYS[1])", "1", "ecmissing"]}
+{"id": "ec-call-nil-bulk-lua-type", "cmd": ["EVAL", "return type(redis.call('GET', KEYS[1]))", "1", "ecmissing"]}
+{"id": "ec-hash-single-field-setup", "cmd": ["HSET", "echash", "a", "1"]}
+{"id": "ec-call-array-roundtrip", "cmd": ["EVAL", "return redis.call('HGETALL', KEYS[1])", "1", "echash"]}
+{"id": "ec-set-string-setup", "cmd": ["SET", "ecstr", "v"]}
+{"id": "ec-pcall-err-field", "cmd": ["EVAL", "local r = redis.pcall('INCR', KEYS[1]) return r.err", "1", "ecstr"]}
+{"id": "ec-pcall-return-err-table", "cmd": ["EVAL", "return redis.pcall('INCR', KEYS[1])", "1", "ecstr"]}
+{"id": "ec-call-uncaught-err", "cmd": ["EVAL", "return redis.call('INCR', KEYS[1])", "1", "ecstr"], "mode": "error_prefix"}
+{"id": "ec-hash2-setup", "cmd": ["HSET", "echash2", "f", "v"]}
+{"id": "ec-call-uncaught-wrongtype", "cmd": ["EVAL", "return redis.call('GET', KEYS[1])", "1", "echash2"], "mode": "error_prefix"}
+{"id": "ec-keys-argv-passing", "cmd": ["EVAL", "return {KEYS[1],KEYS[2],ARGV[1],ARGV[2]}", "2", "ka", "kb", "a1", "a2"]}
+{"id": "ec-argv-length", "cmd": ["EVAL", "return #ARGV", "0"]}
+{"id": "ec-tostring-tonumber-roundtrip", "cmd": ["EVAL", "return tostring(tonumber(ARGV[1]) + 1)", "0", "41"]}
+{"id": "ec-tostring-float", "cmd": ["EVAL", "return tostring(3.7)", "0"]}
+{"id": "ec-tonumber-invalid-is-nil", "cmd": ["EVAL", "return tonumber(ARGV[1])", "0", "notanumber"]}
+{"id": "ec-sha1hex-empty", "cmd": ["EVAL", "return redis.sha1hex('')", "0"]}
+{"id": "ec-lua-runtime-error", "cmd": ["EVAL", "error('boom')", "0"], "mode": "error_prefix"}
+{"id": "ec-lua-call-nil-value", "cmd": ["EVAL", "local x = nil x()", "0"], "mode": "error_prefix"}
+{"id": "ec-lua-compile-error", "cmd": ["EVAL", "this is not lua", "0"], "mode": "error_prefix"}
+{"id": "ec-blocked-eval-from-script", "cmd": ["EVAL", "return redis.pcall('EVAL','return 1','0')", "0"], "mode": "error_prefix"}
+{"id": "ec-call-boolean-arg", "cmd": ["EVAL", "return redis.call('SET', KEYS[1], true)", "1", "ecbool"], "mode": "error_prefix"}
+{"id": "ec-call-float-arg", "cmd": ["EVAL", "return redis.call('SET', KEYS[1], 3.7)", "1", "ecfloat"]}
+{"id": "ec-lua-error-message-lost-exact", "cmd": ["EVAL", "error('boom')", "0"], "mode": "error_prefix"}

@@ -1,6 +1,8 @@
 # Edge Wasm Valdr Engine
 
-**Status:** Spike in progress (2026-06-11).
+**Status:** Spike hardening (2026-06-12). Engine boundary, Cloudflare adapter,
+differential oracle, host-time authority, hot Durable Object instance, and the
+snapshot budget are in. Real deploy + cold-start measurement still pending.
 **Goal:** justify a `wasm32-unknown-unknown` Valdr command-engine build with a
 useful edge product shape, not a novelty port. The API can be Redis-compatible;
 the engine artifact is Valdr.
@@ -230,6 +232,115 @@ Checkpoint from 2026-06-11:
   lua-rs-engine` still fails before command logic; that legacy crate also still
   compiles `mlua-sys` because Redis Functions remain mlua-backed there.
 
+Checkpoint from 2026-06-12 (hardening pass):
+
+- **Time authority.** `EdgeHttpRequest` now carries the host adapter's clock
+  reading and the route layer makes it authoritative for every route,
+  including raw `/v1/valdr` command expiries (previously the engine clock
+  stayed at its last value for raw routes). Client-supplied `now_millis` in
+  limit/AI bodies is rejected with an explicit 400 unless the object is built
+  in deterministic-fixture mode (`with_client_time_allowed(true)`, wired in
+  the Cloudflare adapter to the dev-only `EDGESTASH_ALLOW_CLIENT_TIME` var).
+  Without this, a client that controls the clock can refill its own buckets.
+- **Hot Durable Object instance.** `EdgeStashObject` keeps one
+  `EdgeObject` across requests: snapshot restored from storage once, requests
+  execute against the hot engine, and the snapshot is flushed only when the
+  engine's `mutation_epoch` changed (a counter bumped by state-mutating
+  command paths, including `redis.call` inside scripts; reads and
+  script-cache changes do not bump it). Read-only requests do zero storage
+  writes. A failed flush discards the hot instance so storage stays
+  authoritative. Local hot-path latency through Worker → Durable Object →
+  Lua `EVALSHA` limiter → storage flush: ~2 ms p50 / ~3.7 ms p90 over 20
+  requests under `wrangler dev` (local workerd; a real deploy measurement is
+  still owed).
+- **Persistence policy: per-key (superseded snapshot-per-mutation).** The
+  engine tracks a dirty-key set (`take_dirty`/`export_key`/`import_key`); a
+  mutating request flushes only the keys it changed, so write cost is
+  O(changed keys) rather than O(total tenant state). Each Redis key is stored
+  under its own Durable Object value (`k:` + hex(key)); cold start restores
+  via `storage.list()` and per-key `import_key`. This replaced the original
+  whole-snapshot-per-mutation model, whose write cost grew with total state
+  (a 50k-member leaderboard re-serialized on every `ZADD`). An append log is
+  no longer needed for the bounded case; per-key writes are already minimal.
+- **Per-key budget.** `edgestash_demo::MAX_VALUE_BYTES` (120 KiB) caps one
+  key's serialized value, under Cloudflare's 128 KiB per-value Durable Object
+  storage limit. A mutating request whose single changed value would exceed
+  it gets `507` and the object is rolled back by rebuilding from storage (the
+  rare error path is O(state)), so a tenant cannot wedge its object into an
+  unpersistable state. Total tenant state is now bounded only by the DO
+  storage total, not a single value.
+- **Both smoke fixtures pass under `wrangler dev`:** `fixtures/smoke.sh`
+  (deterministic client time, requires the var) and
+  `fixtures/smoke-secure.sh` (production default: body time rejected,
+  drain/refill/session-expiry on the real Worker clock).
+- **Differential oracle.** `harness/oracle/valdr-engine-differential.py`
+  runs JSONL fixtures through valdr-engine (via
+  `crates/valdr-fixture-runner`) and the pinned reference
+  `valkey-server` over RESP2, diffing frames byte-for-byte with explicit
+  per-fixture tolerance modes. First full run: 236 fixtures, 193 pass, 21
+  stable divergences, 22 known-unsupported. After the same-day burn-down
+  lane: **352 fixtures, 333 pass, 0 divergences, 0 crashes, 19
+  known-unsupported** (`--strict` exits 0). Inherent differences are
+  absorbed only by declared modes: `error_prefix` for Lua-interpreter
+  wording, `set_equal` for HGETALL ordering (the engine sorts hash fields
+  deliberately for snapshot determinism).
+- **Command subset expanded for product workloads:** SET now supports
+  NX | XX | GET composable with EX/PX, and a ZSET subset landed — ZADD
+  (NX | XX | CH), ZSCORE, ZINCRBY, ZREM, ZCARD, ZRANK, ZREVRANK, ZRANGE
+  index form with REV/WITHSCORES, and ZRANGEBYSCORE (inclusive/exclusive/inf
+  bounds, WITHSCORES, LIMIT) — with valkey-faithful fpconv-style score
+  formatting and snapshot round-trip support, all differential-verified
+  (401 fixtures, 0 divergences).
+- **Four production-shaped demo workflows** (`crates/edgestash-demo/tests/demo_*.rs`
+  as deterministic gates + `crates/edgestash-cloudflare/fixtures/demos/*.sh`
+  over real Worker HTTP — see that dir's README), each proving an invariant
+  the atomic-edge design exists for, and **all four verified live against the
+  deployed Worker**:
+  - *Flash-sale inventory* — 50 concurrent buyers vs stock=10 returns exactly
+    10 reserved / 40 sold-out, stock never negative (DO request serialization
+    + atomic Lua = no oversell).
+  - *OTP verification* — brute-force lockout; a correct code after the attempt
+    budget is exhausted is still rejected.
+  - *Edge feature flags* — deterministic sha1 bucketing, kill > deny > allow >
+    rollout precedence, boundary flips at the user's own bucket, evaluated at
+    the edge with no round-trip.
+  - *Skill-based matchmaking* — ZRANGEBYSCORE band query + atomic dual ZREM;
+    every pair within band, ZCARD drops by exactly 2 per match, no
+    double-match.
+- **Dogfood scenario suites pass at two layers.**
+  `crates/edgestash-demo/tests/dogfood_scenarios.rs` (deterministic, via
+  `handle_http` in secure time mode): webhook idempotency keys via SET NX,
+  session revocation + request-clock expiry, AI spend guard with mid-stream
+  plan upgrade, atomic Lua room join/leave with capacity, turn-based move
+  validation, leaderboard top-N/rank surviving cold start.
+  `fixtures/dogfood.sh` replays the clock-independent versions over real
+  Worker HTTP under `wrangler dev` — all passing.
+- **Deployed and measured (2026-06-13).** Live at
+  `https://edgestash-valdr.ianmclaughlin1398.workers.dev` (deployed via the
+  `wrangler login` OAuth session — the `CLOUDFLARE_API_TOKEN` env var token
+  lacks Workers write, so the deploy command unsets it to fall back to
+  OAuth). Worker startup time reported by wrangler: 2 ms. Bundle 1649 KiB /
+  591 KiB gzip. Measured from a single off-edge client:
+  - **Cold Durable Object start** (first hit to a never-seen tenant = new DO
+    instance + snapshot restore + wasm engine init): **~0.49–0.60 s**,
+    ~0.53 s typical.
+  - **Warm round-trip** (existing DO, hot isolate, Lua limiter decision):
+    **~66 ms p50 / ~103 ms p90 total**, of which the engine itself is ~2 ms
+    (per local workerd measurement) and the rest is client→edge network RTT
+    from the probe location. An edge-co-located client sees far less.
+  This quantifies the "latency may erase the benefit" risk: budget ~0.5 s for
+  the first request that wakes a cold tenant DO, then sub-100 ms warm. The
+  cold-start cost is the open optimization target (wasm size, lazy script
+  reload, snapshot restore cost).
+- **Found upstream bug:** the differential run exposed a GC use-after-sweep
+  in omnilua (`lua-gc/src/heap.rs:842`) when an error value is raised
+  through `lua.scope` — uncaught script errors lose their message or panic
+  the embedding process. Mitigation in valdr-engine wraps user scripts in a
+  Lua-level pcall harness; the root cause belongs to the lua-rs-port lane.
+- **Build pin:** `wrangler.jsonc` pins `worker-build@=0.8.4` — 0.8.5 passes
+  `--force-enable-abort-handler` to the wasm-bindgen CLI version our
+  lockfile pins (0.2.123), which rejects it.
+
 The remaining native chain in the old full command stack is:
 
 ```text
@@ -420,17 +531,20 @@ If the demo works, we have shown:
 ## Risks and open questions
 
 - **Cloudflare deployment:** the `edgestash-cloudflare` adapter now compiles to
-  `wasm32-unknown-unknown`, maps `worker::Request` / `worker::Response`, and
-  uses Durable Object `storage.put` / `storage.get`. Wrangler dry-run build and
-  binding validation pass, and local `wrangler dev` traffic passes the limiter
-  smoke fixture. It still needs a deployed latency/cold-start measurement.
-- **Persistence policy:** the demo snapshots after each mutating route. A
-  production version still needs a decision on snapshot-every-command versus an
-  append-log durability scheme.
+  `wasm32-unknown-unknown`, maps `worker::Request` / `worker::Response`, keeps
+  a hot engine per Durable Object, and flushes snapshots on mutation epochs.
+  Both smoke fixtures pass under local `wrangler dev`. It still needs a
+  deployed latency/cold-start measurement.
+- **Persistence policy:** resolved 2026-06-13 — per-key persistence (one
+  Durable Object value per Redis key; write cost O(changed keys)), with a
+  120 KiB per-value budget and rollback. Superseded the
+  snapshot-per-mutation model, which scaled write cost with total state.
 - **Sharding:** Multi-key atomicity only exists inside one Durable Object. The
   API should require hash tags or an explicit shard key.
-- **Latency:** Durable Object placement and cold starts may erase the benefit for
-  some users. The demo must measure this.
+- **Latency:** measured 2026-06-13 against the live deploy — cold Durable
+  Object start ~0.5 s, warm round-trip ~66 ms p50 (engine ~2 ms; rest is
+  client→edge RTT). Cold start is now the named optimization target rather
+  than an unknown.
 - **Compatibility:** Upstash REST compatibility is a convenience target, not a
   license to claim complete Upstash behavior.
 - **Lua parity:** `lua-rs-port` still needs Redis Lua 5.1 conformance and the

@@ -1,0 +1,33 @@
+{"id": "set-basic", "cmd": ["SET", "k1", "v1"]}
+{"id": "get-basic", "cmd": ["GET", "k1"]}
+{"id": "get-missing", "cmd": ["GET", "nope"]}
+{"id": "set-overwrite", "cmd": ["SET", "k1", "v2"]}
+{"id": "get-after-overwrite", "cmd": ["GET", "k1"]}
+{"id": "set-empty-value", "cmd": ["SET", "kempty", ""]}
+{"id": "get-empty-value", "cmd": ["GET", "kempty"]}
+{"id": "set-value-with-spaces", "cmd": ["SET", "kspace", "a b\tc"]}
+{"id": "get-value-with-spaces", "cmd": ["GET", "kspace"]}
+{"id": "incr-new-key", "cmd": ["INCR", "ctr"]}
+{"id": "incr-existing", "cmd": ["INCR", "ctr"]}
+{"id": "incrby-positive", "cmd": ["INCRBY", "ctr", "40"]}
+{"id": "incrby-negative", "cmd": ["INCRBY", "ctr", "-2"]}
+{"id": "set-non-integer", "cmd": ["SET", "notnum", "abc"]}
+{"id": "incr-non-integer", "cmd": ["INCR", "notnum"]}
+{"id": "set-i64-max", "cmd": ["SET", "big", "9223372036854775807"]}
+{"id": "incr-overflow", "cmd": ["INCR", "big"]}
+{"id": "set-i64-min", "cmd": ["SET", "nbig", "-9223372036854775808"]}
+{"id": "incrby-overflow-negative", "cmd": ["INCRBY", "nbig", "-1"]}
+{"id": "set-leading-plus", "cmd": ["SET", "plus", "+5"]}
+{"id": "incr-leading-plus", "cmd": ["INCR", "plus"]}
+{"id": "set-leading-space", "cmd": ["SET", "sp", " 11"]}
+{"id": "incr-leading-space", "cmd": ["INCR", "sp"]}
+{"id": "incrby-non-integer-delta", "cmd": ["INCRBY", "ctr", "abc"]}
+{"id": "del-single", "cmd": ["DEL", "k1"]}
+{"id": "get-after-del", "cmd": ["GET", "k1"]}
+{"id": "set-d1", "cmd": ["SET", "d1", "x"]}
+{"id": "set-d2", "cmd": ["SET", "d2", "x"]}
+{"id": "del-multiple-with-missing", "cmd": ["DEL", "d1", "d2", "d3"]}
+{"id": "del-missing", "cmd": ["DEL", "ghost"]}
+{"id": "exists-single", "cmd": ["EXISTS", "ctr"]}
+{"id": "exists-missing", "cmd": ["EXISTS", "ghost"]}
+{"id": "exists-repeated-keys", "cmd": ["EXISTS", "ctr", "ctr", "ghost", "ctr"]}

@@ -1,4 +1,8 @@
 #!/usr/bin/env sh
+# Deterministic smoke: drives the limiter with client-supplied now_millis, so
+# the dev server must run with client time explicitly allowed:
+#   npx wrangler dev --var EDGESTASH_ALLOW_CLIENT_TIME:true
+# Without the var the limit/ai routes reject body time (see smoke-secure.sh).
 set -eu
 
 BASE="${BASE:-http://127.0.0.1:8787}"

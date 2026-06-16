@@ -1,0 +1,23 @@
+{"id": "hset-create-multi", "cmd": ["HSET", "h1", "a", "1", "b", "2", "c", "3"]}
+{"id": "hget-basic", "cmd": ["HGET", "h1", "b"]}
+{"id": "hget-missing-field", "cmd": ["HGET", "h1", "zz"]}
+{"id": "hget-missing-key", "cmd": ["HGET", "ghost", "field"]}
+{"id": "hgetall-set-equal", "cmd": ["HGETALL", "h1"], "mode": "set_equal"}
+{"id": "hset-update-existing-field", "cmd": ["HSET", "h1", "a", "9"]}
+{"id": "hget-after-update", "cmd": ["HGET", "h1", "a"]}
+{"id": "hset-insertion-order", "cmd": ["HSET", "h2", "z", "26", "a", "1", "m", "13"]}
+{"id": "hgetall-field-order-set-equal", "cmd": ["HGETALL", "h2"], "mode": "set_equal"}
+{"id": "hdel-some-fields", "cmd": ["HDEL", "h1", "a", "zz"]}
+{"id": "hdel-remaining-fields", "cmd": ["HDEL", "h1", "b", "c"]}
+{"id": "exists-after-hdel-last-field", "cmd": ["EXISTS", "h1"]}
+{"id": "hdel-missing-key", "cmd": ["HDEL", "ghost", "f"]}
+{"id": "hset-duplicate-field-one-call", "cmd": ["HSET", "h3", "f", "one", "f", "two"]}
+{"id": "hget-duplicate-field-last-wins", "cmd": ["HGET", "h3", "f"]}
+{"id": "hgetall-missing-key", "cmd": ["HGETALL", "ghost"]}
+{"id": "wrongtype-get-on-hash", "cmd": ["GET", "h2"]}
+{"id": "wrongtype-incr-on-hash", "cmd": ["INCR", "h2"]}
+{"id": "set-plain-string", "cmd": ["SET", "s1", "v"]}
+{"id": "wrongtype-hget-on-string", "cmd": ["HGET", "s1", "f"]}
+{"id": "wrongtype-hset-on-string", "cmd": ["HSET", "s1", "f", "v"]}
+{"id": "wrongtype-hgetall-on-string", "cmd": ["HGETALL", "s1"]}
+{"id": "wrongtype-hdel-on-string", "cmd": ["HDEL", "s1", "f"]}

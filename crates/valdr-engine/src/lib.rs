@@ -5,7 +5,7 @@
 //! background workers, native filesystem access, or C Lua.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use lua_rs_runtime::{
     Lua, LuaError, LuaString, LuaVersion, Table as LuaTable, Value as LuaValue, Variadic,
@@ -72,13 +72,42 @@ struct Entry {
 enum StoredValue {
     String(Vec<u8>),
     Hash(HashMap<Vec<u8>, Vec<u8>>),
+    ZSet(HashMap<Vec<u8>, f64>),
 }
+
+/// Maximum number of distinct scripts retained in the per-engine cache before
+/// the least-recently-used entry is evicted. The reference server never evicts,
+/// but at the edge one hot engine lives for the whole life of a Durable Object,
+/// so an unbounded cache is a slow-burn memory-growth surface for a tenant that
+/// keeps loading distinct scripts. Eviction is safe: a dropped script answers
+/// `EVALSHA` with `NOSCRIPT`, which clients already handle by re-sending `EVAL`.
+const MAX_CACHED_SCRIPTS: usize = 256;
+
+/// Aggregate byte ceiling for cached script bodies. A single script larger than
+/// this is still cached when it is the only entry (mirroring that one `EVAL`
+/// must always run); the ceiling only forces eviction of older entries.
+const MAX_SCRIPT_CACHE_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct Engine<H> {
     host: H,
     db: HashMap<Vec<u8>, Entry>,
     scripts: HashMap<[u8; 40], Vec<u8>>,
+    /// SHA order from least- to most-recently used, kept in lockstep with
+    /// `scripts` for LRU eviction. Touch-on-use keeps a frequently invoked
+    /// script (e.g. a tenant's limiter) resident even under load from
+    /// one-off scripts.
+    script_lru: Vec<[u8; 40]>,
+    script_cache_bytes: usize,
+    mutation_epoch: u64,
+    /// Keys whose snapshot-visible state changed since the last `take_dirty`.
+    /// Drives per-key persistence: a host writes only these keys back to
+    /// storage instead of re-serializing the whole database on every command.
+    /// Populated at every write/delete/expiry site (including `redis.call`
+    /// mutations inside scripts); passive expiry does not add to it because a
+    /// stale persisted copy of an expired key is harmless under absolute
+    /// `expire_at_ms`.
+    dirty: HashSet<Vec<u8>>,
 }
 
 impl Engine<NoopHost> {
@@ -93,6 +122,112 @@ impl<H: Host> Engine<H> {
             host,
             db: HashMap::new(),
             scripts: HashMap::new(),
+            script_lru: Vec::new(),
+            script_cache_bytes: 0,
+            mutation_epoch: 0,
+            dirty: HashSet::new(),
+        }
+    }
+
+    /// Insert (or refresh) a script in the bounded LRU cache. Re-caching an
+    /// already-resident script only marks it most-recently-used. After
+    /// inserting a new body, the oldest entries are evicted until both the
+    /// count and aggregate-byte ceilings hold, never evicting the entry just
+    /// inserted. Never bumps the mutation epoch — the script cache is excluded
+    /// from snapshots.
+    fn cache_script(&mut self, sha: [u8; 40], body: &[u8]) {
+        if self.scripts.contains_key(&sha) {
+            self.touch_script(&sha);
+            return;
+        }
+        self.scripts.insert(sha, body.to_vec());
+        self.script_lru.push(sha);
+        self.script_cache_bytes += body.len();
+        while self.script_lru.len() > 1
+            && (self.script_lru.len() > MAX_CACHED_SCRIPTS
+                || self.script_cache_bytes > MAX_SCRIPT_CACHE_BYTES)
+        {
+            let evicted = self.script_lru.remove(0);
+            if let Some(body) = self.scripts.remove(&evicted) {
+                self.script_cache_bytes -= body.len();
+            }
+        }
+    }
+
+    /// Mark a resident script most-recently-used.
+    fn touch_script(&mut self, sha: &[u8; 40]) {
+        if let Some(index) = self.script_lru.iter().position(|entry| entry == sha) {
+            let sha = self.script_lru.remove(index);
+            self.script_lru.push(sha);
+        }
+    }
+
+    fn clear_script_cache(&mut self) {
+        self.scripts.clear();
+        self.script_lru.clear();
+        self.script_cache_bytes = 0;
+    }
+
+    /// Monotonic counter bumped whenever snapshot-visible state changes:
+    /// key writes, deletes, and expiry updates, including those made through
+    /// `redis.call` inside scripts. Passive expiry of already-dead keys and
+    /// script-cache changes do not bump it because absolute `expire_at_ms`
+    /// values make a stale persisted copy of an expired key harmless and the
+    /// script cache is excluded from snapshots. Persistence layers compare
+    /// epochs to skip exporting and rewriting unchanged state.
+    pub fn mutation_epoch(&self) -> u64 {
+        self.mutation_epoch
+    }
+
+    /// Record that `key` was written, deleted, or had its expiry changed:
+    /// bumps the mutation epoch and marks the key dirty for per-key
+    /// persistence. Every mutating command path calls this with the exact
+    /// key(s) it touched, so `take_dirty` yields precisely the keys a host
+    /// must flush.
+    fn note_write(&mut self, key: &[u8]) {
+        self.mutation_epoch = self.mutation_epoch.wrapping_add(1);
+        self.dirty.insert(key.to_vec());
+    }
+
+    /// Drain the set of keys changed since the last call, sorted for
+    /// deterministic flush order. A host persists each returned key by calling
+    /// `export_key` (write the bytes) or, when it returns `None`, deleting the
+    /// key from storage.
+    pub fn take_dirty(&mut self) -> Vec<Vec<u8>> {
+        let mut keys: Vec<Vec<u8>> = self.dirty.drain().collect();
+        keys.sort();
+        keys
+    }
+
+    /// Serialize one key's live entry to the same JSON shape used inside a
+    /// full snapshot. Returns `None` when the key is absent or already expired
+    /// (the host then deletes it from storage). Purges the key first so an
+    /// expired key never round-trips.
+    pub fn export_key(&mut self, key: &[u8]) -> Option<Vec<u8>> {
+        self.purge_if_expired(key);
+        let entry = self.db.get(key)?;
+        let object = encode_entry(key, entry);
+        Some(serde_json::to_vec(&JsonValue::Object(object)).unwrap_or_default())
+    }
+
+    /// Restore one key from bytes produced by `export_key`. Does not mark the
+    /// key dirty — this is a load from authoritative storage, not a mutation.
+    pub fn import_key(&mut self, bytes: &[u8]) -> Result<(), SnapshotError> {
+        let value: JsonValue =
+            serde_json::from_slice(bytes).map_err(|_| SnapshotError::InvalidJson)?;
+        let object = value
+            .as_object()
+            .ok_or(SnapshotError::InvalidField("key"))?;
+        let (key, entry) = decode_entry(object)?;
+        self.db.insert(key, entry);
+        Ok(())
+    }
+
+    fn mark_all_dirty(&mut self) {
+        self.mutation_epoch = self.mutation_epoch.wrapping_add(1);
+        let keys: Vec<Vec<u8>> = self.db.keys().cloned().collect();
+        for key in keys {
+            self.dirty.insert(key);
         }
     }
 
@@ -116,37 +251,7 @@ impl<H: Host> Engine<H> {
 
         let mut encoded_keys = Vec::with_capacity(keys.len());
         for (key, entry) in keys {
-            let mut object = JsonMap::new();
-            object.insert("key".to_owned(), JsonValue::String(hex_encode(key)));
-            if let Some(expire_at_ms) = entry.expire_at_ms {
-                object.insert("expire_at_ms".to_owned(), json!(expire_at_ms));
-            }
-            match &entry.value {
-                StoredValue::String(value) => {
-                    object.insert("type".to_owned(), JsonValue::String("string".to_owned()));
-                    object.insert("value".to_owned(), JsonValue::String(hex_encode(value)));
-                }
-                StoredValue::Hash(fields) => {
-                    let mut field_items: Vec<_> = fields.iter().collect();
-                    field_items.sort_by(|(left, _), (right, _)| left.cmp(right));
-                    object.insert("type".to_owned(), JsonValue::String("hash".to_owned()));
-                    object.insert(
-                        "fields".to_owned(),
-                        JsonValue::Array(
-                            field_items
-                                .into_iter()
-                                .map(|(field, value)| {
-                                    JsonValue::Array(vec![
-                                        JsonValue::String(hex_encode(field)),
-                                        JsonValue::String(hex_encode(value)),
-                                    ])
-                                })
-                                .collect(),
-                        ),
-                    );
-                }
-            }
-            encoded_keys.push(JsonValue::Object(object));
+            encoded_keys.push(JsonValue::Object(encode_entry(key, entry)));
         }
 
         serde_json::to_vec(&json!({
@@ -178,71 +283,13 @@ impl<H: Host> Engine<H> {
             let object = item
                 .as_object()
                 .ok_or(SnapshotError::InvalidField("keys"))?;
-            let key = hex_decode(
-                object
-                    .get("key")
-                    .and_then(JsonValue::as_str)
-                    .ok_or(SnapshotError::MissingField("key"))?,
-            )?;
-            let expire_at_ms = match object.get("expire_at_ms") {
-                Some(value) => Some(
-                    value
-                        .as_u64()
-                        .ok_or(SnapshotError::InvalidField("expire_at_ms"))?,
-                ),
-                None => None,
-            };
-            let value = match object
-                .get("type")
-                .and_then(JsonValue::as_str)
-                .ok_or(SnapshotError::MissingField("type"))?
-            {
-                "string" => StoredValue::String(hex_decode(
-                    object
-                        .get("value")
-                        .and_then(JsonValue::as_str)
-                        .ok_or(SnapshotError::MissingField("value"))?,
-                )?),
-                "hash" => {
-                    let fields = object
-                        .get("fields")
-                        .and_then(JsonValue::as_array)
-                        .ok_or(SnapshotError::MissingField("fields"))?;
-                    let mut decoded_fields = HashMap::new();
-                    for pair in fields {
-                        let pair = pair
-                            .as_array()
-                            .ok_or(SnapshotError::InvalidField("fields"))?;
-                        if pair.len() != 2 {
-                            return Err(SnapshotError::InvalidField("fields"));
-                        }
-                        let field = hex_decode(
-                            pair[0]
-                                .as_str()
-                                .ok_or(SnapshotError::InvalidField("fields"))?,
-                        )?;
-                        let value = hex_decode(
-                            pair[1]
-                                .as_str()
-                                .ok_or(SnapshotError::InvalidField("fields"))?,
-                        )?;
-                        decoded_fields.insert(field, value);
-                    }
-                    StoredValue::Hash(decoded_fields)
-                }
-                _ => return Err(SnapshotError::InvalidField("type")),
-            };
-            next_db.insert(
-                key,
-                Entry {
-                    value,
-                    expire_at_ms,
-                },
-            );
+            let (key, entry) = decode_entry(object)?;
+            next_db.insert(key, entry);
         }
 
         self.db = next_db;
-        self.scripts.clear();
+        self.clear_script_cache();
+        self.mark_all_dirty();
         Ok(())
     }
 
@@ -291,7 +338,7 @@ impl<H: Host> Engine<H> {
 
     fn execute_inner(&mut self, argv: &[Vec<u8>], from_script: bool) -> RespFrame {
         let Some(command) = argv.first() else {
-            return err(b"ERR unknown command ''");
+            return unknown_command_error(b"", &[]);
         };
         if from_script && script_blocked_command(command) {
             return err(b"ERR This Redis command is not allowed from script");
@@ -308,9 +355,9 @@ impl<H: Host> Engine<H> {
         } else if ascii_eq(command, b"EXISTS") {
             self.exists_command(argv)
         } else if ascii_eq(command, b"INCR") {
-            self.incrby_command(argv, 1)
+            self.incr_command(argv)
         } else if ascii_eq(command, b"INCRBY") {
-            self.incrby_command_from_argv(argv)
+            self.incrby_command(argv)
         } else if ascii_eq(command, b"EXPIRE") {
             self.expire_command(argv, 1000)
         } else if ascii_eq(command, b"PEXPIRE") {
@@ -327,6 +374,24 @@ impl<H: Host> Engine<H> {
             self.hgetall_command(argv)
         } else if ascii_eq(command, b"HDEL") {
             self.hdel_command(argv)
+        } else if ascii_eq(command, b"ZADD") {
+            self.zadd_command(argv)
+        } else if ascii_eq(command, b"ZSCORE") {
+            self.zscore_command(argv)
+        } else if ascii_eq(command, b"ZINCRBY") {
+            self.zincrby_command(argv)
+        } else if ascii_eq(command, b"ZREM") {
+            self.zrem_command(argv)
+        } else if ascii_eq(command, b"ZCARD") {
+            self.zcard_command(argv)
+        } else if ascii_eq(command, b"ZRANK") {
+            self.zrank_command(argv, false)
+        } else if ascii_eq(command, b"ZREVRANK") {
+            self.zrank_command(argv, true)
+        } else if ascii_eq(command, b"ZRANGE") {
+            self.zrange_command(argv)
+        } else if ascii_eq(command, b"ZRANGEBYSCORE") {
+            self.zrangebyscore_command(argv)
         } else if ascii_eq(command, b"SCRIPT") {
             self.script_command(argv)
         } else if ascii_eq(command, b"EVAL") {
@@ -334,10 +399,7 @@ impl<H: Host> Engine<H> {
         } else if ascii_eq(command, b"EVALSHA") {
             self.evalsha_command(argv)
         } else {
-            let mut msg = b"ERR unknown command '".to_vec();
-            msg.extend_from_slice(command);
-            msg.push(b'\'');
-            err(&msg)
+            unknown_command_error(command, &argv[1..])
         }
     }
 
@@ -347,7 +409,7 @@ impl<H: Host> Engine<H> {
         }
         match self.get_value(&argv[1]).map(|entry| &entry.value) {
             Some(StoredValue::String(value)) => bulk(value),
-            Some(StoredValue::Hash(_)) => wrong_type(),
+            Some(_) => wrong_type(),
             None => RespFrame::null_bulk(),
         }
     }
@@ -357,9 +419,30 @@ impl<H: Host> Engine<H> {
             return wrong_arity(b"set");
         }
         let mut expire_at_ms = None;
+        let mut nx = false;
+        let mut xx = false;
+        let mut get = false;
         let mut index = 3;
         while index < argv.len() {
-            if ascii_eq(&argv[index], b"PX") || ascii_eq(&argv[index], b"EX") {
+            if ascii_eq(&argv[index], b"NX") {
+                if xx {
+                    return err(b"ERR syntax error");
+                }
+                nx = true;
+                index += 1;
+            } else if ascii_eq(&argv[index], b"XX") {
+                if nx {
+                    return err(b"ERR syntax error");
+                }
+                xx = true;
+                index += 1;
+            } else if ascii_eq(&argv[index], b"GET") {
+                get = true;
+                index += 1;
+            } else if ascii_eq(&argv[index], b"PX") || ascii_eq(&argv[index], b"EX") {
+                if expire_at_ms.is_some() {
+                    return err(b"ERR syntax error");
+                }
                 if index + 1 >= argv.len() {
                     return err(b"ERR syntax error");
                 }
@@ -367,7 +450,7 @@ impl<H: Host> Engine<H> {
                     return err(b"ERR value is not an integer or out of range");
                 };
                 if raw <= 0 {
-                    return err(b"ERR invalid expire time in 'set' command");
+                    return invalid_expire_time(b"set");
                 }
                 let unit = if ascii_eq(&argv[index], b"PX") {
                     1
@@ -375,16 +458,39 @@ impl<H: Host> Engine<H> {
                     1000
                 };
                 let Some(ttl) = checked_ttl_ms(raw, unit) else {
-                    return err(b"ERR invalid expire time in 'set' command");
+                    return invalid_expire_time(b"set");
                 };
                 expire_at_ms = self.host.now_millis().checked_add(ttl);
                 if expire_at_ms.is_none() {
-                    return err(b"ERR invalid expire time in 'set' command");
+                    return invalid_expire_time(b"set");
                 }
                 index += 2;
             } else {
                 return err(b"ERR syntax error");
             }
+        }
+        self.purge_if_expired(&argv[1]);
+        let mut exists = false;
+        let mut old_string = None;
+        match self.db.get(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::String(value)) => {
+                exists = true;
+                old_string = Some(value.clone());
+            }
+            Some(_) => {
+                if get {
+                    return wrong_type();
+                }
+                exists = true;
+            }
+            None => {}
+        }
+        if (nx && exists) || (xx && !exists) {
+            return if get {
+                old_string_reply(old_string)
+            } else {
+                RespFrame::null_bulk()
+            };
         }
         self.db.insert(
             argv[1].clone(),
@@ -393,7 +499,12 @@ impl<H: Host> Engine<H> {
                 expire_at_ms,
             },
         );
-        simple(b"OK")
+        self.note_write(&argv[1]);
+        if get {
+            old_string_reply(old_string)
+        } else {
+            simple(b"OK")
+        }
     }
 
     fn setex_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
@@ -404,13 +515,13 @@ impl<H: Host> Engine<H> {
             return err(b"ERR value is not an integer or out of range");
         };
         if seconds <= 0 {
-            return err(b"ERR invalid expire time in 'setex' command");
+            return invalid_expire_time(b"setex");
         }
         let Some(ttl) = checked_ttl_ms(seconds, 1000) else {
-            return err(b"ERR invalid expire time in 'setex' command");
+            return invalid_expire_time(b"setex");
         };
         let Some(expire_at_ms) = self.host.now_millis().checked_add(ttl) else {
-            return err(b"ERR invalid expire time in 'setex' command");
+            return invalid_expire_time(b"setex");
         };
         self.db.insert(
             argv[1].clone(),
@@ -419,6 +530,7 @@ impl<H: Host> Engine<H> {
                 expire_at_ms: Some(expire_at_ms),
             },
         );
+        self.note_write(&argv[1]);
         simple(b"OK")
     }
 
@@ -430,6 +542,7 @@ impl<H: Host> Engine<H> {
         for key in &argv[1..] {
             self.purge_if_expired(key);
             if self.db.remove(key).is_some() {
+                self.note_write(key);
                 deleted += 1;
             }
         }
@@ -449,25 +562,25 @@ impl<H: Host> Engine<H> {
         RespFrame::integer(count)
     }
 
-    fn incrby_command_from_argv(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+    fn incr_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 2 {
+            return wrong_arity(b"incr");
+        }
+        self.apply_increment(&argv[1], 1)
+    }
+
+    fn incrby_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
         if argv.len() != 3 {
             return wrong_arity(b"incrby");
         }
         let Some(delta) = parse_i64(&argv[2]) else {
             return err(b"ERR value is not an integer or out of range");
         };
-        self.incrby_command(argv, delta)
+        self.apply_increment(&argv[1], delta)
     }
 
-    fn incrby_command(&mut self, argv: &[Vec<u8>], delta: i64) -> RespFrame {
-        if argv.len() != 2 && argv.len() != 3 {
-            return wrong_arity(if argv.first().is_some_and(|c| ascii_eq(c, b"INCR")) {
-                b"incr"
-            } else {
-                b"incrby"
-            });
-        }
-        let current = match self.get_value(&argv[1]) {
+    fn apply_increment(&mut self, key: &[u8], delta: i64) -> RespFrame {
+        let current = match self.get_value(key) {
             Some(Entry {
                 value: StoredValue::String(value),
                 ..
@@ -475,23 +588,21 @@ impl<H: Host> Engine<H> {
                 Some(n) => n,
                 None => return err(b"ERR value is not an integer or out of range"),
             },
-            Some(Entry {
-                value: StoredValue::Hash(_),
-                ..
-            }) => return wrong_type(),
+            Some(_) => return wrong_type(),
             None => 0,
         };
         let Some(next) = current.checked_add(delta) else {
             return err(b"ERR increment or decrement would overflow");
         };
-        let expire_at_ms = self.db.get(&argv[1]).and_then(|entry| entry.expire_at_ms);
+        let expire_at_ms = self.db.get(key).and_then(|entry| entry.expire_at_ms);
         self.db.insert(
-            argv[1].clone(),
+            key.to_vec(),
             Entry {
                 value: StoredValue::String(next.to_string().into_bytes()),
                 expire_at_ms,
             },
         );
+        self.note_write(key);
         RespFrame::integer(next)
     }
 
@@ -513,10 +624,11 @@ impl<H: Host> Engine<H> {
                         added += 1;
                     }
                 }
+                self.note_write(&argv[1]);
                 RespFrame::integer(added)
             }
             Some(Entry {
-                value: StoredValue::String(_),
+                value: StoredValue::String(_) | StoredValue::ZSet(_),
                 ..
             }) => wrong_type(),
             None => {
@@ -534,6 +646,7 @@ impl<H: Host> Engine<H> {
                         expire_at_ms,
                     },
                 );
+                self.note_write(&argv[1]);
                 RespFrame::integer(added)
             }
         }
@@ -548,7 +661,7 @@ impl<H: Host> Engine<H> {
                 Some(value) => bulk(value),
                 None => RespFrame::null_bulk(),
             },
-            Some(StoredValue::String(_)) => wrong_type(),
+            Some(StoredValue::String(_) | StoredValue::ZSet(_)) => wrong_type(),
             None => RespFrame::null_bulk(),
         }
     }
@@ -568,7 +681,7 @@ impl<H: Host> Engine<H> {
                 }
                 RespFrame::array(items)
             }
-            Some(StoredValue::String(_)) => wrong_type(),
+            Some(StoredValue::String(_) | StoredValue::ZSet(_)) => wrong_type(),
             None => RespFrame::array(Vec::new()),
         }
     }
@@ -579,6 +692,7 @@ impl<H: Host> Engine<H> {
         }
         self.purge_if_expired(&argv[1]);
         let mut remove_empty_hash = false;
+        let mut mutated = false;
         let response = match self.db.get_mut(&argv[1]) {
             Some(Entry {
                 value: StoredValue::Hash(fields),
@@ -591,10 +705,11 @@ impl<H: Host> Engine<H> {
                     }
                 }
                 remove_empty_hash = fields.is_empty();
+                mutated = deleted > 0;
                 RespFrame::integer(deleted)
             }
             Some(Entry {
-                value: StoredValue::String(_),
+                value: StoredValue::String(_) | StoredValue::ZSet(_),
                 ..
             }) => wrong_type(),
             None => RespFrame::integer(0),
@@ -602,12 +717,323 @@ impl<H: Host> Engine<H> {
         if remove_empty_hash {
             self.db.remove(&argv[1]);
         }
+        if mutated {
+            self.note_write(&argv[1]);
+        }
         response
     }
 
-    fn expire_command(&mut self, argv: &[Vec<u8>], unit_ms: u64) -> RespFrame {
+    /// ZADD with the NX | XX | CH flag subset. Mirrors the reference
+    /// server's check order: flag parse, pair-shape syntax check, NX+XX
+    /// conflict, score parse for every pair, then the WRONGTYPE check.
+    fn zadd_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 4 {
+            return wrong_arity(b"zadd");
+        }
+        let mut nx = false;
+        let mut xx = false;
+        let mut ch = false;
+        let mut index = 2;
+        while index < argv.len() {
+            if ascii_eq(&argv[index], b"NX") {
+                nx = true;
+            } else if ascii_eq(&argv[index], b"XX") {
+                xx = true;
+            } else if ascii_eq(&argv[index], b"CH") {
+                ch = true;
+            } else {
+                break;
+            }
+            index += 1;
+        }
+        let pairs = &argv[index..];
+        if pairs.is_empty() || pairs.len() % 2 != 0 {
+            return err(b"ERR syntax error");
+        }
+        if nx && xx {
+            return err(b"ERR XX and NX options at the same time are not compatible");
+        }
+        let mut scored = Vec::with_capacity(pairs.len() / 2);
+        for pair in pairs.chunks_exact(2) {
+            let Some(score) = parse_score(&pair[0]) else {
+                return err(b"ERR value is not a valid float");
+            };
+            scored.push((normalize_zero(score), pair[1].clone()));
+        }
+        self.purge_if_expired(&argv[1]);
+        let (added, updated) = match self.db.get_mut(&argv[1]) {
+            Some(Entry {
+                value: StoredValue::ZSet(members),
+                ..
+            }) => apply_zadd(members, scored, nx, xx),
+            Some(_) => return wrong_type(),
+            None => {
+                if xx {
+                    (0, 0)
+                } else {
+                    let mut members = HashMap::new();
+                    let counts = apply_zadd(&mut members, scored, nx, xx);
+                    self.db.insert(
+                        argv[1].clone(),
+                        Entry {
+                            value: StoredValue::ZSet(members),
+                            expire_at_ms: None,
+                        },
+                    );
+                    counts
+                }
+            }
+        };
+        if added + updated > 0 {
+            self.note_write(&argv[1]);
+        }
+        RespFrame::integer(if ch { added + updated } else { added })
+    }
+
+    fn zscore_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
         if argv.len() != 3 {
-            return wrong_arity(if unit_ms == 1 { b"pexpire" } else { b"expire" });
+            return wrong_arity(b"zscore");
+        }
+        match self.get_value(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::ZSet(members)) => match members.get(&argv[2]) {
+                Some(score) => bulk(format_score(*score)),
+                None => RespFrame::null_bulk(),
+            },
+            Some(_) => wrong_type(),
+            None => RespFrame::null_bulk(),
+        }
+    }
+
+    fn zincrby_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 4 {
+            return wrong_arity(b"zincrby");
+        }
+        let Some(increment) = parse_score(&argv[2]) else {
+            return err(b"ERR value is not a valid float");
+        };
+        self.purge_if_expired(&argv[1]);
+        match self.db.get_mut(&argv[1]) {
+            Some(Entry {
+                value: StoredValue::ZSet(members),
+                ..
+            }) => {
+                let next = match members.get(&argv[3]) {
+                    Some(current) => current + increment,
+                    None => increment,
+                };
+                if next.is_nan() {
+                    return err(b"ERR resulting score is not a number (NaN)");
+                }
+                members.insert(argv[3].clone(), normalize_zero(next));
+                self.note_write(&argv[1]);
+                bulk(format_score(next))
+            }
+            Some(_) => wrong_type(),
+            None => {
+                let mut members = HashMap::new();
+                members.insert(argv[3].clone(), normalize_zero(increment));
+                self.db.insert(
+                    argv[1].clone(),
+                    Entry {
+                        value: StoredValue::ZSet(members),
+                        expire_at_ms: None,
+                    },
+                );
+                self.note_write(&argv[1]);
+                bulk(format_score(increment))
+            }
+        }
+    }
+
+    fn zrem_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 3 {
+            return wrong_arity(b"zrem");
+        }
+        self.purge_if_expired(&argv[1]);
+        let mut remove_empty_zset = false;
+        let mut deleted = 0;
+        let response = match self.db.get_mut(&argv[1]) {
+            Some(Entry {
+                value: StoredValue::ZSet(members),
+                ..
+            }) => {
+                for member in &argv[2..] {
+                    if members.remove(member).is_some() {
+                        deleted += 1;
+                    }
+                }
+                remove_empty_zset = members.is_empty();
+                RespFrame::integer(deleted)
+            }
+            Some(_) => wrong_type(),
+            None => RespFrame::integer(0),
+        };
+        if remove_empty_zset {
+            self.db.remove(&argv[1]);
+        }
+        if deleted > 0 {
+            self.note_write(&argv[1]);
+        }
+        response
+    }
+
+    fn zcard_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 2 {
+            return wrong_arity(b"zcard");
+        }
+        match self.get_value(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::ZSet(members)) => RespFrame::integer(members.len() as i64),
+            Some(_) => wrong_type(),
+            None => RespFrame::integer(0),
+        }
+    }
+
+    fn zrank_command(&mut self, argv: &[Vec<u8>], reverse: bool) -> RespFrame {
+        let name: &[u8] = if reverse { b"zrevrank" } else { b"zrank" };
+        if argv.len() < 3 || argv.len() > 4 {
+            return wrong_arity(name);
+        }
+        if argv.len() == 4 {
+            return err(b"ERR syntax error");
+        }
+        let members = match self.get_value(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::ZSet(members)) => members,
+            Some(_) => return wrong_type(),
+            None => return RespFrame::null_bulk(),
+        };
+        let ordered = sorted_zset_entries(members);
+        match ordered.iter().position(|(member, _)| member == &argv[2]) {
+            Some(rank) => {
+                let rank = if reverse {
+                    ordered.len() - 1 - rank
+                } else {
+                    rank
+                };
+                RespFrame::integer(rank as i64)
+            }
+            None => RespFrame::null_bulk(),
+        }
+    }
+
+    /// ZRANGE in its index form only, with the REV and WITHSCORES options.
+    fn zrange_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 4 {
+            return wrong_arity(b"zrange");
+        }
+        let mut rev = false;
+        let mut withscores = false;
+        for option in &argv[4..] {
+            if ascii_eq(option, b"REV") {
+                rev = true;
+            } else if ascii_eq(option, b"WITHSCORES") {
+                withscores = true;
+            } else {
+                return err(b"ERR syntax error");
+            }
+        }
+        let Some(start) = parse_i64(&argv[2]) else {
+            return err(b"ERR value is not an integer or out of range");
+        };
+        let Some(stop) = parse_i64(&argv[3]) else {
+            return err(b"ERR value is not an integer or out of range");
+        };
+        let members = match self.get_value(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::ZSet(members)) => members,
+            Some(_) => return wrong_type(),
+            None => return RespFrame::array(Vec::new()),
+        };
+        let mut ordered = sorted_zset_entries(members);
+        if rev {
+            ordered.reverse();
+        }
+        let len = ordered.len() as i64;
+        let mut start = if start < 0 { start + len } else { start };
+        let mut stop = if stop < 0 { stop + len } else { stop };
+        if start < 0 {
+            start = 0;
+        }
+        if start > stop || start >= len {
+            return RespFrame::array(Vec::new());
+        }
+        if stop >= len {
+            stop = len - 1;
+        }
+        let mut items = Vec::new();
+        for (member, score) in &ordered[start as usize..=stop as usize] {
+            items.push(bulk(member));
+            if withscores {
+                items.push(bulk(format_score(*score)));
+            }
+        }
+        RespFrame::array(items)
+    }
+
+    /// `ZRANGEBYSCORE key min max [WITHSCORES] [LIMIT offset count]`, the
+    /// score form only. Read-only: never marks a mutation. Mirrors the
+    /// reference command's argument order, parsing the trailing options
+    /// (WITHSCORES, LIMIT) before the min/max bounds so that a bogus option or
+    /// a non-integer LIMIT argument is reported ahead of a malformed bound,
+    /// matching `zrangeGenericCommand`.
+    fn zrangebyscore_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 4 {
+            return wrong_arity(b"zrangebyscore");
+        }
+        let mut withscores = false;
+        let mut limit: Option<(i64, i64)> = None;
+        let mut index = 4;
+        while index < argv.len() {
+            let option = &argv[index];
+            if ascii_eq(option, b"WITHSCORES") {
+                withscores = true;
+                index += 1;
+            } else if ascii_eq(option, b"LIMIT") && argv.len() - index - 1 >= 2 {
+                let Some(offset) = parse_limit_arg(&argv[index + 1]) else {
+                    return err(b"ERR value is not an integer or out of range");
+                };
+                let Some(count) = parse_limit_arg(&argv[index + 2]) else {
+                    return err(b"ERR value is not an integer or out of range");
+                };
+                limit = Some((offset, count));
+                index += 3;
+            } else {
+                return err(b"ERR syntax error");
+            }
+        }
+        let Some(min) = parse_score_bound(&argv[2]) else {
+            return err(b"ERR min or max is not a float");
+        };
+        let Some(max) = parse_score_bound(&argv[3]) else {
+            return err(b"ERR min or max is not a float");
+        };
+        let members = match self.get_value(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::ZSet(members)) => members,
+            Some(_) => return wrong_type(),
+            None => return RespFrame::array(Vec::new()),
+        };
+        let in_range: Vec<(Vec<u8>, f64)> = sorted_zset_entries(members)
+            .into_iter()
+            .filter(|(_, score)| min.gte_min(*score) && max.lte_max(*score))
+            .collect();
+        let selected = apply_score_limit(&in_range, limit);
+        let mut items = Vec::new();
+        for (member, score) in selected {
+            items.push(bulk(member));
+            if withscores {
+                items.push(bulk(format_score(*score)));
+            }
+        }
+        RespFrame::array(items)
+    }
+
+    fn expire_command(&mut self, argv: &[Vec<u8>], unit_ms: u64) -> RespFrame {
+        let name: &[u8] = if unit_ms == 1 { b"pexpire" } else { b"expire" };
+        if argv.len() < 3 {
+            return wrong_arity(name);
+        }
+        if argv.len() > 3 {
+            let mut msg = b"ERR Unsupported option ".to_vec();
+            msg.extend_from_slice(&argv[3]);
+            return err(&msg);
         }
         let Some(raw) = parse_i64(&argv[2]) else {
             return err(b"ERR value is not an integer or out of range");
@@ -615,18 +1041,22 @@ impl<H: Host> Engine<H> {
         if raw <= 0 {
             self.purge_if_expired(&argv[1]);
             let existed = self.db.remove(&argv[1]).is_some();
+            if existed {
+                self.note_write(&argv[1]);
+            }
             return RespFrame::integer(if existed { 1 } else { 0 });
         }
         self.purge_if_expired(&argv[1]);
         let Some(ttl) = checked_ttl_ms(raw, unit_ms) else {
-            return err(b"ERR invalid expire time");
+            return invalid_expire_time(name);
         };
         let Some(expire_at_ms) = self.host.now_millis().checked_add(ttl) else {
-            return err(b"ERR invalid expire time");
+            return invalid_expire_time(name);
         };
         match self.db.get_mut(&argv[1]) {
             Some(entry) => {
                 entry.expire_at_ms = Some(expire_at_ms);
+                self.note_write(&argv[1]);
                 RespFrame::integer(1)
             }
             None => RespFrame::integer(0),
@@ -648,7 +1078,7 @@ impl<H: Host> Engine<H> {
         if milliseconds {
             RespFrame::integer(remaining as i64)
         } else {
-            RespFrame::integer(remaining.div_ceil(1000) as i64)
+            RespFrame::integer(((remaining + 500) / 1000) as i64)
         }
     }
 
@@ -660,8 +1090,11 @@ impl<H: Host> Engine<H> {
             if argv.len() != 3 {
                 return wrong_arity(b"script|load");
             }
+            if let Some(message) = compile_error_message(&argv[2]) {
+                return compile_error_reply(&message);
+            }
             let sha = sha1_hex(&argv[2]);
-            self.scripts.insert(sha, argv[2].clone());
+            self.cache_script(sha, &argv[2]);
             bulk(sha.to_vec())
         } else if ascii_eq(&argv[1], b"EXISTS") {
             if argv.len() < 3 {
@@ -679,43 +1112,62 @@ impl<H: Host> Engine<H> {
                     .collect(),
             )
         } else if ascii_eq(&argv[1], b"FLUSH") {
-            if argv.len() > 3 {
-                return wrong_arity(b"script|flush");
+            if argv.len() == 3 {
+                if !(ascii_eq(&argv[2], b"SYNC") || ascii_eq(&argv[2], b"ASYNC")) {
+                    return err(b"ERR SCRIPT FLUSH only support SYNC|ASYNC option");
+                }
+            } else if argv.len() != 2 {
+                return err(b"ERR SCRIPT FLUSH only support SYNC|ASYNC option");
             }
-            self.scripts.clear();
+            self.clear_script_cache();
             simple(b"OK")
         } else {
-            err(b"ERR Unknown SCRIPT subcommand")
+            let mut msg = b"ERR unknown subcommand '".to_vec();
+            msg.extend_from_slice(&argv[1]);
+            msg.extend_from_slice(b"'. Try SCRIPT HELP.");
+            err(&msg)
         }
     }
 
+    /// EVAL registers the script in the cache exactly like the reference
+    /// server, so a later SCRIPT EXISTS / EVALSHA of the same body succeeds.
+    /// The cache insert deliberately does not bump the mutation epoch: the
+    /// script cache is excluded from snapshots.
     fn eval_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
         if argv.len() < 3 {
             return wrong_arity(b"eval");
         }
-        self.eval_script(&argv[1], &argv[2..])
+        let numkeys = match validate_numkeys(&argv[2..]) {
+            Ok(numkeys) => numkeys,
+            Err(frame) => return frame,
+        };
+        if let Some(message) = compile_error_message(&argv[1]) {
+            return compile_error_reply(&message);
+        }
+        let sha = sha1_hex(&argv[1]);
+        self.cache_script(sha, &argv[1]);
+        self.eval_script(&argv[1], &argv[2..], numkeys)
     }
 
     fn evalsha_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
         if argv.len() < 3 {
             return wrong_arity(b"evalsha");
         }
+        let numkeys = match validate_numkeys(&argv[2..]) {
+            Ok(numkeys) => numkeys,
+            Err(frame) => return frame,
+        };
         let Some(sha) = normalise_sha(&argv[1]) else {
-            return err(b"NOSCRIPT No matching script. Please use EVAL.");
+            return err(b"NOSCRIPT No matching script.");
         };
         let Some(script) = self.scripts.get(&sha).cloned() else {
-            return err(b"NOSCRIPT No matching script. Please use EVAL.");
+            return err(b"NOSCRIPT No matching script.");
         };
-        self.eval_script(&script, &argv[2..])
+        self.touch_script(&sha);
+        self.eval_script(&script, &argv[2..], numkeys)
     }
 
-    fn eval_script(&mut self, script: &[u8], rest: &[Vec<u8>]) -> RespFrame {
-        let Some(numkeys) = rest.first().and_then(|arg| parse_usize(arg)) else {
-            return err(b"ERR value is not an integer or out of range");
-        };
-        if rest.len() < 1 + numkeys {
-            return err(b"ERR Number of keys can't be greater than number of args");
-        }
+    fn eval_script(&mut self, script: &[u8], rest: &[Vec<u8>], numkeys: usize) -> RespFrame {
         let keys = &rest[1..1 + numkeys];
         let args = &rest[1 + numkeys..];
         match self.run_lua_script(script, keys, args) {
@@ -728,6 +1180,18 @@ impl<H: Host> Engine<H> {
         }
     }
 
+    /// Runs `script` wrapped in a Lua-level pcall harness.
+    ///
+    /// The harness exists because omnilua (lua-rs) has a GC rooting bug
+    /// (lua-gc/src/heap.rs:842): an error value raised through `lua.scope`
+    /// is dereferenced after the collector swept it, aborting the process
+    /// and losing the error message. Catching every script error with an
+    /// in-Lua `pcall` means no error value ever crosses the scope boundary:
+    /// errors come back as `{err=...}` tables, which `lua_to_resp` maps to
+    /// RESP errors verbatim, preserving error codes such as WRONGTYPE from
+    /// `redis.call`. `redis.call` itself is rebound in the harness prelude
+    /// to raise the `{err=...}` table returned by the pcall-style host
+    /// function, mirroring the reference server's Lua binding.
     fn run_lua_script(
         &mut self,
         script: &[u8],
@@ -747,14 +1211,7 @@ impl<H: Host> Engine<H> {
                 scope.create_function_mut(
                     &lua,
                     move |lua_inner, call_args: Variadic<LuaValue>| {
-                        let argv = collect_lua_args(call_args)?;
-                        let mut engine = cell.borrow_mut();
-                        match engine.execute_inner(&argv, true) {
-                            RespFrame::Error(message) => {
-                                Err(lua_runtime_error_bytes(message.as_bytes()))
-                            }
-                            frame => resp_to_lua(lua_inner, &frame),
-                        }
+                        host_call(cell, lua_inner, call_args)
                     },
                 )?
             };
@@ -764,12 +1221,7 @@ impl<H: Host> Engine<H> {
                 scope.create_function_mut(
                     &lua,
                     move |lua_inner, call_args: Variadic<LuaValue>| {
-                        let argv = collect_lua_args(call_args)?;
-                        let mut engine = cell.borrow_mut();
-                        match engine.execute_inner(&argv, true) {
-                            RespFrame::Error(message) => error_table(lua_inner, message.as_bytes()),
-                            frame => resp_to_lua(lua_inner, &frame),
-                        }
+                        host_call(cell, lua_inner, call_args)
                     },
                 )?
             };
@@ -803,7 +1255,9 @@ impl<H: Host> Engine<H> {
             lua.globals().set("redis", redis_table.clone())?;
             lua.globals().set("server", redis_table)?;
 
-            lua.load(script).set_name("edge_script").eval::<LuaValue>()
+            lua.load(wrap_script_in_pcall_harness(script))
+                .set_name("user_script")
+                .eval::<LuaValue>()
         })?;
         lua_to_resp(&value)
     }
@@ -1110,6 +1564,154 @@ fn rest_content_type(format: RestResponseFormat) -> &'static str {
     }
 }
 
+/// Serialize one key's entry into the canonical JSON object used both inside a
+/// full snapshot and as a standalone per-key value. Keys, hash fields, and
+/// zset members are hex-encoded; zset members are sorted by member and scores
+/// use the lossless snapshot string form so a round-trip is exact.
+fn encode_entry(key: &[u8], entry: &Entry) -> JsonMap<String, JsonValue> {
+    let mut object = JsonMap::new();
+    object.insert("key".to_owned(), JsonValue::String(hex_encode(key)));
+    if let Some(expire_at_ms) = entry.expire_at_ms {
+        object.insert("expire_at_ms".to_owned(), json!(expire_at_ms));
+    }
+    match &entry.value {
+        StoredValue::String(value) => {
+            object.insert("type".to_owned(), JsonValue::String("string".to_owned()));
+            object.insert("value".to_owned(), JsonValue::String(hex_encode(value)));
+        }
+        StoredValue::Hash(fields) => {
+            let mut field_items: Vec<_> = fields.iter().collect();
+            field_items.sort_by(|(left, _), (right, _)| left.cmp(right));
+            object.insert("type".to_owned(), JsonValue::String("hash".to_owned()));
+            object.insert(
+                "fields".to_owned(),
+                JsonValue::Array(
+                    field_items
+                        .into_iter()
+                        .map(|(field, value)| {
+                            JsonValue::Array(vec![
+                                JsonValue::String(hex_encode(field)),
+                                JsonValue::String(hex_encode(value)),
+                            ])
+                        })
+                        .collect(),
+                ),
+            );
+        }
+        StoredValue::ZSet(members) => {
+            let mut member_items: Vec<_> = members.iter().collect();
+            member_items.sort_by(|(left, _), (right, _)| left.cmp(right));
+            object.insert("type".to_owned(), JsonValue::String("zset".to_owned()));
+            object.insert(
+                "members".to_owned(),
+                JsonValue::Array(
+                    member_items
+                        .into_iter()
+                        .map(|(member, score)| {
+                            JsonValue::Array(vec![
+                                JsonValue::String(hex_encode(member)),
+                                JsonValue::String(score_snapshot_string(*score)),
+                            ])
+                        })
+                        .collect(),
+                ),
+            );
+        }
+    }
+    object
+}
+
+/// Inverse of `encode_entry`: decode one JSON key object into `(key, entry)`.
+fn decode_entry(object: &JsonMap<String, JsonValue>) -> Result<(Vec<u8>, Entry), SnapshotError> {
+    let key = hex_decode(
+        object
+            .get("key")
+            .and_then(JsonValue::as_str)
+            .ok_or(SnapshotError::MissingField("key"))?,
+    )?;
+    let expire_at_ms = match object.get("expire_at_ms") {
+        Some(value) => Some(
+            value
+                .as_u64()
+                .ok_or(SnapshotError::InvalidField("expire_at_ms"))?,
+        ),
+        None => None,
+    };
+    let value = match object
+        .get("type")
+        .and_then(JsonValue::as_str)
+        .ok_or(SnapshotError::MissingField("type"))?
+    {
+        "string" => StoredValue::String(hex_decode(
+            object
+                .get("value")
+                .and_then(JsonValue::as_str)
+                .ok_or(SnapshotError::MissingField("value"))?,
+        )?),
+        "hash" => {
+            let fields = object
+                .get("fields")
+                .and_then(JsonValue::as_array)
+                .ok_or(SnapshotError::MissingField("fields"))?;
+            let mut decoded_fields = HashMap::new();
+            for pair in fields {
+                let pair = pair
+                    .as_array()
+                    .ok_or(SnapshotError::InvalidField("fields"))?;
+                if pair.len() != 2 {
+                    return Err(SnapshotError::InvalidField("fields"));
+                }
+                let field = hex_decode(
+                    pair[0]
+                        .as_str()
+                        .ok_or(SnapshotError::InvalidField("fields"))?,
+                )?;
+                let value = hex_decode(
+                    pair[1]
+                        .as_str()
+                        .ok_or(SnapshotError::InvalidField("fields"))?,
+                )?;
+                decoded_fields.insert(field, value);
+            }
+            StoredValue::Hash(decoded_fields)
+        }
+        "zset" => {
+            let members = object
+                .get("members")
+                .and_then(JsonValue::as_array)
+                .ok_or(SnapshotError::MissingField("members"))?;
+            let mut decoded_members = HashMap::new();
+            for pair in members {
+                let pair = pair
+                    .as_array()
+                    .ok_or(SnapshotError::InvalidField("members"))?;
+                if pair.len() != 2 {
+                    return Err(SnapshotError::InvalidField("members"));
+                }
+                let member = hex_decode(
+                    pair[0]
+                        .as_str()
+                        .ok_or(SnapshotError::InvalidField("members"))?,
+                )?;
+                let score = pair[1]
+                    .as_str()
+                    .and_then(|text| parse_score(text.as_bytes()))
+                    .ok_or(SnapshotError::InvalidField("members"))?;
+                decoded_members.insert(member, score);
+            }
+            StoredValue::ZSet(decoded_members)
+        }
+        _ => return Err(SnapshotError::InvalidField("type")),
+    };
+    Ok((
+        key,
+        Entry {
+            value,
+            expire_at_ms,
+        },
+    ))
+}
+
 fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -1209,6 +1811,352 @@ fn install_keys_argv(lua: &Lua, keys: &[Vec<u8>], args: &[Vec<u8>]) -> lua_rs_ru
     Ok(())
 }
 
+/// Host side of `redis.call`/`redis.pcall`. Always returns errors as
+/// `{err=...}` tables; the script harness prelude turns them into raised
+/// Lua errors for `redis.call`. Argument-conversion failures use the
+/// reference server's wording.
+fn host_call<H: Host>(
+    cell: &RefCell<&mut Engine<H>>,
+    lua: &Lua,
+    call_args: Variadic<LuaValue>,
+) -> lua_rs_runtime::Result<LuaValue> {
+    let argv = match collect_lua_args(call_args) {
+        Ok(argv) => argv,
+        Err(_) => return error_table(lua, b"ERR Command arguments must be strings or integers"),
+    };
+    let mut engine = cell.borrow_mut();
+    match engine.execute_inner(&argv, true) {
+        RespFrame::Error(message) => error_table(lua, message.as_bytes()),
+        frame => resp_to_lua(lua, &frame),
+    }
+}
+
+/// Single-line prelude (so user code starts on chunk line 2) that rebinds
+/// `redis.call` to raise `{err=...}` tables, then opens the function the
+/// user script becomes the body of. See `run_lua_script` for why.
+const SCRIPT_HARNESS_PRELUDE: &[u8] = b"local __edge_raw_pcall = redis.pcall redis.call = function(...) local __edge_reply = __edge_raw_pcall(...) if type(__edge_reply) == 'table' and __edge_reply.err ~= nil then error(__edge_reply) end return __edge_reply end local __edge_fn = function()\n";
+
+const SCRIPT_HARNESS_SUFFIX: &[u8] = b"\nend local __edge_ok, __edge_res = pcall(__edge_fn) if __edge_ok then return __edge_res end if type(__edge_res) == 'table' and __edge_res.err ~= nil then return __edge_res end return {err='ERR ' .. tostring(__edge_res)}\n";
+
+fn wrap_script_in_pcall_harness(script: &[u8]) -> Vec<u8> {
+    let mut wrapped = Vec::with_capacity(
+        SCRIPT_HARNESS_PRELUDE.len() + script.len() + SCRIPT_HARNESS_SUFFIX.len(),
+    );
+    wrapped.extend_from_slice(SCRIPT_HARNESS_PRELUDE);
+    wrapped.extend_from_slice(script);
+    wrapped.extend_from_slice(SCRIPT_HARNESS_SUFFIX);
+    wrapped
+}
+
+/// Compiles `script` in a throwaway interpreter without executing any of it
+/// (the probe chunk only defines a local function), so SCRIPT LOAD and EVAL
+/// can reject syntax errors up front like the reference server does.
+fn compile_error_message(script: &[u8]) -> Option<String> {
+    let lua = Lua::new_versioned(LuaVersion::V51);
+    let mut probe = Vec::with_capacity(script.len() + 40);
+    probe.extend_from_slice(b"local __edge_fn = function()\n");
+    probe.extend_from_slice(script);
+    probe.extend_from_slice(b"\nend");
+    match lua.load(probe).set_name("user_script").exec() {
+        Ok(()) => None,
+        Err(error) => Some(error.message_lossy()),
+    }
+}
+
+fn compile_error_reply(message: &str) -> RespFrame {
+    let mut msg = b"ERR Error compiling script (new function): ".to_vec();
+    msg.extend_from_slice(message.as_bytes());
+    err(&msg)
+}
+
+/// Numkeys validation in the reference server's check order: integer parse,
+/// then the greater-than-args check, then the negative check.
+fn validate_numkeys(rest: &[Vec<u8>]) -> Result<usize, RespFrame> {
+    let Some(numkeys) = parse_i64(&rest[0]) else {
+        return Err(err(b"ERR value is not an integer or out of range"));
+    };
+    let available = (rest.len() - 1) as i64;
+    if numkeys > available {
+        return Err(err(
+            b"ERR Number of keys can't be greater than number of args",
+        ));
+    }
+    if numkeys < 0 {
+        return Err(err(b"ERR Number of keys can't be negative"));
+    }
+    Ok(numkeys as usize)
+}
+
+/// Formats the unknown-command error exactly like the reference server:
+/// each argument rendered as 'arg' plus a trailing space, stopping once the
+/// rendered argument text reaches 128 bytes.
+fn unknown_command_error(command: &[u8], args: &[Vec<u8>]) -> RespFrame {
+    let mut msg = b"ERR unknown command '".to_vec();
+    msg.extend_from_slice(command);
+    msg.extend_from_slice(b"', with args beginning with: ");
+    let mut rendered = Vec::new();
+    for arg in args {
+        if rendered.len() >= 128 {
+            break;
+        }
+        let budget = 128 - rendered.len();
+        rendered.push(b'\'');
+        rendered.extend_from_slice(&arg[..arg.len().min(budget)]);
+        rendered.extend_from_slice(b"' ");
+    }
+    msg.extend_from_slice(&rendered);
+    err(&msg)
+}
+
+fn invalid_expire_time(command: &[u8]) -> RespFrame {
+    let mut msg = b"ERR invalid expire time in '".to_vec();
+    msg.extend_from_slice(command);
+    msg.extend_from_slice(b"' command");
+    err(&msg)
+}
+
+fn old_string_reply(old_string: Option<Vec<u8>>) -> RespFrame {
+    match old_string {
+        Some(value) => bulk(value),
+        None => RespFrame::null_bulk(),
+    }
+}
+
+fn apply_zadd(
+    members: &mut HashMap<Vec<u8>, f64>,
+    scored: Vec<(f64, Vec<u8>)>,
+    nx: bool,
+    xx: bool,
+) -> (i64, i64) {
+    let mut added = 0;
+    let mut updated = 0;
+    for (score, member) in scored {
+        match members.get_mut(&member) {
+            Some(existing) => {
+                if !nx && *existing != score {
+                    *existing = score;
+                    updated += 1;
+                }
+            }
+            None => {
+                if !xx {
+                    members.insert(member, score);
+                    added += 1;
+                }
+            }
+        }
+    }
+    (added, updated)
+}
+
+/// Ascending (score, then member-lexicographic) order, the canonical zset
+/// ordering used by ZRANK and ZRANGE.
+fn sorted_zset_entries(members: &HashMap<Vec<u8>, f64>) -> Vec<(Vec<u8>, f64)> {
+    let mut entries: Vec<(Vec<u8>, f64)> = members
+        .iter()
+        .map(|(member, score)| (member.clone(), *score))
+        .collect();
+    entries.sort_by(|left, right| {
+        left.1
+            .partial_cmp(&right.1)
+            .expect("zset scores are never NaN")
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    entries
+}
+
+/// One side of a `ZRANGEBYSCORE` score interval: a finite-or-infinite bound
+/// value plus whether the bound itself is excluded (the leading `(` form).
+/// Mirrors the reference `zrangespec` min/max + minex/maxex fields.
+struct ScoreBound {
+    value: f64,
+    exclusive: bool,
+}
+
+impl ScoreBound {
+    /// Whether `score` satisfies this bound used as the interval minimum,
+    /// matching the reference `zslValueGteMin` (`>` when exclusive, else `>=`).
+    fn gte_min(&self, score: f64) -> bool {
+        if self.exclusive {
+            score > self.value
+        } else {
+            score >= self.value
+        }
+    }
+
+    /// Whether `score` satisfies this bound used as the interval maximum,
+    /// matching the reference `zslValueLteMax` (`<` when exclusive, else `<=`).
+    fn lte_max(&self, score: f64) -> bool {
+        if self.exclusive {
+            score < self.value
+        } else {
+            score <= self.value
+        }
+    }
+}
+
+/// Parses one `ZRANGEBYSCORE` bound exactly like the reference `zslParseRange`
+/// over `valkey_strtod_n`: a leading `(` marks the bound exclusive, the rest is
+/// a float where the inf/infinity spellings (any case, optional sign) are
+/// accepted, an empty body parses as `0.0`, and a `NaN` or trailing-garbage
+/// body is rejected.
+fn parse_score_bound(bytes: &[u8]) -> Option<ScoreBound> {
+    let (exclusive, body) = match bytes.split_first() {
+        Some((b'(', rest)) => (true, rest),
+        _ => (false, bytes),
+    };
+    if body.is_empty() {
+        return Some(ScoreBound {
+            value: 0.0,
+            exclusive,
+        });
+    }
+    let text = std::str::from_utf8(body).ok()?;
+    let value: f64 = text.parse().ok()?;
+    if value.is_nan() {
+        return None;
+    }
+    Some(ScoreBound { value, exclusive })
+}
+
+/// Parses a `LIMIT` offset/count argument the way `getLongFromObjectOrReply`
+/// does for these commands: a base-10 signed integer with no surrounding
+/// whitespace or trailing characters. Anything else yields the integer error.
+fn parse_limit_arg(bytes: &[u8]) -> Option<i64> {
+    parse_i64(bytes)
+}
+
+/// Applies the `LIMIT offset count` window to an already in-range, ascending
+/// slice, mirroring the reference forward-direction loop: a negative offset
+/// (or one at/after the end) yields nothing, and a negative count returns all
+/// remaining elements after the offset.
+fn apply_score_limit(
+    in_range: &[(Vec<u8>, f64)],
+    limit: Option<(i64, i64)>,
+) -> Vec<&(Vec<u8>, f64)> {
+    let Some((offset, count)) = limit else {
+        return in_range.iter().collect();
+    };
+    if offset < 0 {
+        return Vec::new();
+    }
+    let offset = offset as usize;
+    if offset >= in_range.len() {
+        return Vec::new();
+    }
+    let tail = &in_range[offset..];
+    if count < 0 {
+        tail.iter().collect()
+    } else {
+        tail.iter().take(count as usize).collect()
+    }
+}
+
+/// The reference server keeps small zsets listpack-encoded; listpack scores
+/// round-trip through their decimal string, where "-0" int-encodes to 0, so
+/// a stored negative zero loses its sign (only the transient ZINCRBY reply
+/// keeps it). Stored scores are normalized the same way here.
+fn normalize_zero(score: f64) -> f64 {
+    if score == 0.0 {
+        0.0
+    } else {
+        score
+    }
+}
+
+/// Score parser matching the reference server: integer-looking input goes
+/// through the long-long path first (the server int-encodes such arguments,
+/// which turns "-0" into +0.0), everything else through a string2d-style
+/// float parse that rejects garbage and NaN but accepts the inf/infinity
+/// spellings in any case.
+fn parse_score(bytes: &[u8]) -> Option<f64> {
+    if let Some(integer) = parse_i64(bytes) {
+        return Some(integer as f64);
+    }
+    let text = std::str::from_utf8(bytes).ok()?;
+    let value: f64 = text.parse().ok()?;
+    if value.is_nan() {
+        return None;
+    }
+    Some(value)
+}
+
+/// Renders a score exactly like the reference server's d2string: "inf" and
+/// "-inf" for infinities, "0"/"-0" for zeroes, plain integers via the
+/// double2ll fast path, and otherwise shortest round-trip digits laid out
+/// with the plain/decimal/scientific thresholds of fpconv's emit_digits.
+fn format_score(value: f64) -> Vec<u8> {
+    if value.is_nan() {
+        return b"nan".to_vec();
+    }
+    if value.is_infinite() {
+        return if value < 0.0 {
+            b"-inf".to_vec()
+        } else {
+            b"inf".to_vec()
+        };
+    }
+    if value == 0.0 {
+        return if value.is_sign_negative() {
+            b"-0".to_vec()
+        } else {
+            b"0".to_vec()
+        };
+    }
+    let integer_bound = (i64::MAX / 2) as f64;
+    if (-integer_bound..=integer_bound).contains(&value) && value == (value as i64) as f64 {
+        return (value as i64).to_string().into_bytes();
+    }
+    let exponential = format!("{:e}", value.abs());
+    let (mantissa, exponent) = exponential
+        .split_once('e')
+        .expect("LowerExp always emits an exponent");
+    let exp10: i32 = exponent.parse().expect("LowerExp exponent is an integer");
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let ndigits = digits.len() as i32;
+    let k = exp10 - (ndigits - 1);
+    let mut out = String::new();
+    if value < 0.0 {
+        out.push('-');
+    }
+    if k >= 0 && exp10 < ndigits + 7 {
+        out.push_str(&digits);
+        for _ in 0..k {
+            out.push('0');
+        }
+    } else if k < 0 && (k > -7 || exp10.abs() < 4) {
+        let offset = ndigits + k;
+        if offset <= 0 {
+            out.push_str("0.");
+            for _ in 0..(-offset) {
+                out.push('0');
+            }
+            out.push_str(&digits);
+        } else {
+            out.push_str(&digits[..offset as usize]);
+            out.push('.');
+            out.push_str(&digits[offset as usize..]);
+        }
+    } else {
+        out.push_str(&digits[..1]);
+        if ndigits > 1 {
+            out.push('.');
+            out.push_str(&digits[1..]);
+        }
+        out.push('e');
+        out.push(if exp10 < 0 { '-' } else { '+' });
+        out.push_str(&exp10.abs().to_string());
+    }
+    out.into_bytes()
+}
+
+/// Snapshots serialize scores as the same canonical string used in replies;
+/// both the integer fast path and the shortest-digit path round-trip f64
+/// exactly through `parse_score`.
+fn score_snapshot_string(score: f64) -> String {
+    String::from_utf8(format_score(score)).expect("score strings are ASCII")
+}
+
 fn resp_to_lua(lua: &Lua, frame: &RespFrame) -> lua_rs_runtime::Result<LuaValue> {
     match frame {
         RespFrame::Simple(value) => {
@@ -1223,7 +2171,7 @@ fn resp_to_lua(lua: &Lua, frame: &RespFrame) -> lua_rs_runtime::Result<LuaValue>
         }
         RespFrame::Integer(value) => Ok(LuaValue::Integer(*value)),
         RespFrame::Bulk(Some(value)) => Ok(LuaValue::String(lua.create_string(value.as_bytes())?)),
-        RespFrame::Bulk(None) | RespFrame::Null => Ok(LuaValue::Nil),
+        RespFrame::Bulk(None) | RespFrame::Null => Ok(LuaValue::Boolean(false)),
         RespFrame::Array(Some(items)) | RespFrame::Push(items) | RespFrame::Set(items) => {
             let table = lua.create_table()?;
             for (index, item) in items.iter().enumerate() {
@@ -1231,7 +2179,7 @@ fn resp_to_lua(lua: &Lua, frame: &RespFrame) -> lua_rs_runtime::Result<LuaValue>
             }
             Ok(LuaValue::Table(table))
         }
-        RespFrame::Array(None) => Ok(LuaValue::Nil),
+        RespFrame::Array(None) => Ok(LuaValue::Boolean(false)),
         RespFrame::Boolean(value) => Ok(LuaValue::Boolean(*value)),
         RespFrame::Double(value) => Ok(LuaValue::Number(*value)),
         RespFrame::BigNumber(value) => Ok(LuaValue::String(lua.create_string(value.as_bytes())?)),
@@ -1306,11 +2254,10 @@ fn lua_arg_to_bytes(value: &LuaValue) -> lua_rs_runtime::Result<Vec<u8>> {
             Ok((*value as i64).to_string().into_bytes())
         }
         LuaValue::Number(value) if value.is_finite() => Ok(value.to_string().into_bytes()),
-        LuaValue::Boolean(true) => Ok(b"1".to_vec()),
-        LuaValue::Boolean(false) => Ok(b"0".to_vec()),
         _ => Err(lua_runtime_error(
             "command arguments must be strings or integers",
-        )),
+        )
+        .into()),
     }
 }
 
@@ -1322,10 +2269,6 @@ fn error_table(lua: &Lua, message: &[u8]) -> lua_rs_runtime::Result<LuaValue> {
 
 fn lua_runtime_error(message: &str) -> LuaError {
     LuaError::runtime(format_args!("{message}"))
-}
-
-fn lua_runtime_error_bytes(message: &[u8]) -> LuaError {
-    LuaError::runtime(format_args!("{}", String::from_utf8_lossy(message)))
 }
 
 fn script_blocked_command(command: &[u8]) -> bool {
@@ -1368,11 +2311,6 @@ fn parse_i64(bytes: &[u8]) -> Option<i64> {
         return None;
     }
     text.parse::<i64>().ok()
-}
-
-fn parse_usize(bytes: &[u8]) -> Option<usize> {
-    let value = parse_i64(bytes)?;
-    usize::try_from(value).ok()
 }
 
 fn ascii_eq(left: &[u8], right: &[u8]) -> bool {
@@ -1489,6 +2427,261 @@ mod tests {
     use redis_protocol::encode_resp2;
 
     use super::*;
+
+    #[test]
+    fn mutation_epoch_tracks_state_changes_not_reads() {
+        let mut engine = Engine::new_in_memory();
+        let start = engine.mutation_epoch();
+
+        engine.execute(&argv(&[b"GET", b"missing"]));
+        engine.execute(&argv(&[b"EXISTS", b"missing"]));
+        engine.execute(&argv(&[b"TTL", b"missing"]));
+        engine.execute(&argv(&[b"DEL", b"missing"]));
+        engine.execute(&argv(&[b"EXPIRE", b"missing", b"10"]));
+        assert_eq!(engine.mutation_epoch(), start);
+
+        engine.execute(&argv(&[b"SET", b"k", b"v"]));
+        let after_set = engine.mutation_epoch();
+        assert_ne!(after_set, start);
+
+        engine.execute(&argv(&[b"GET", b"k"]));
+        assert_eq!(engine.mutation_epoch(), after_set);
+
+        engine.execute(&argv(&[b"EXPIRE", b"k", b"10"]));
+        let after_expire = engine.mutation_epoch();
+        assert_ne!(after_expire, after_set);
+
+        engine.execute(&argv(&[b"DEL", b"k"]));
+        assert_ne!(engine.mutation_epoch(), after_expire);
+    }
+
+    fn script_load(engine: &mut Engine<NoopHost>, body: &[u8]) -> [u8; 40] {
+        let frame = engine.execute(&argv(&[b"SCRIPT", b"LOAD", body]));
+        match frame {
+            RespFrame::Bulk(Some(sha)) => {
+                let mut out = [0u8; 40];
+                out.copy_from_slice(&sha);
+                out
+            }
+            other => panic!("SCRIPT LOAD did not return a sha: {other:?}"),
+        }
+    }
+
+    fn script_exists(engine: &mut Engine<NoopHost>, sha: &[u8; 40]) -> bool {
+        let frame = engine.execute(&argv(&[b"SCRIPT", b"EXISTS", sha]));
+        matches!(frame, RespFrame::Array(Some(items))
+            if matches!(items.first(), Some(RespFrame::Integer(1))))
+    }
+
+    #[test]
+    fn script_cache_evicts_least_recently_used_past_the_count_cap() {
+        let mut engine = Engine::new_in_memory();
+        let first = script_load(&mut engine, b"return 0");
+        let mut shas = vec![first];
+        for index in 1..=MAX_CACHED_SCRIPTS {
+            let body = format!("return {index}");
+            shas.push(script_load(&mut engine, body.as_bytes()));
+        }
+
+        assert!(
+            !script_exists(&mut engine, &shas[0]),
+            "the oldest untouched script must be evicted once the cap is exceeded"
+        );
+        assert!(
+            script_exists(&mut engine, shas.last().unwrap()),
+            "the most recent script must survive"
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"EVALSHA", &shas[0], b"0"])),
+            err(b"NOSCRIPT No matching script."),
+            "an evicted script answers EVALSHA with NOSCRIPT"
+        );
+    }
+
+    #[test]
+    fn evalsha_use_protects_a_hot_script_from_eviction() {
+        let mut engine = Engine::new_in_memory();
+        let hot = script_load(&mut engine, b"return 'hot'");
+        for index in 0..MAX_CACHED_SCRIPTS {
+            let body = format!("return {index}");
+            script_load(&mut engine, body.as_bytes());
+            engine.execute(&argv(&[b"EVALSHA", &hot, b"0"]));
+        }
+        assert!(
+            script_exists(&mut engine, &hot),
+            "a script kept warm by EVALSHA must not be evicted by one-off loads"
+        );
+    }
+
+    #[test]
+    fn script_flush_resets_the_bounded_cache() {
+        let mut engine = Engine::new_in_memory();
+        let sha = script_load(&mut engine, b"return 1");
+        assert!(script_exists(&mut engine, &sha));
+        engine.execute(&argv(&[b"SCRIPT", b"FLUSH"]));
+        assert!(!script_exists(&mut engine, &sha));
+        let reloaded = script_load(&mut engine, b"return 1");
+        assert_eq!(reloaded, sha, "the same body re-hashes to the same sha");
+        assert!(script_exists(&mut engine, &sha));
+    }
+
+    #[test]
+    fn mutation_epoch_ignores_script_cache_but_sees_script_writes() {
+        let mut engine = Engine::new_in_memory();
+        let start = engine.mutation_epoch();
+
+        engine.execute(&argv(&[b"SCRIPT", b"LOAD", b"return 1"]));
+        assert_eq!(engine.mutation_epoch(), start);
+
+        engine.execute(&argv(&[b"EVAL", b"return 1", b"0"]));
+        assert_eq!(engine.mutation_epoch(), start);
+
+        engine.execute(&argv(&[
+            b"EVAL",
+            b"return redis.call('SET', KEYS[1], ARGV[1])",
+            b"1",
+            b"k",
+            b"v",
+        ]));
+        assert_ne!(engine.mutation_epoch(), start);
+    }
+
+    /// Run `seed` (unmeasured), then assert that executing `measured` bumps the
+    /// mutation epoch whenever it changes snapshot-visible state. `export_snapshot`
+    /// is the content fingerprint: it purges already-expired keys before
+    /// serializing, so passive expiry never registers as a change and the clock
+    /// is held fixed across the before/after pair. The guarded direction is
+    /// `content changed ⇒ epoch bumped`: under-marking (a write the persistence
+    /// layer would silently drop) fails here; conservative over-marking (a bump
+    /// without a content change, e.g. HSET writing an identical value) is safe
+    /// and allowed.
+    fn assert_write_bumps_epoch(seed: &[&[&[u8]]], measured: &[&[u8]]) {
+        let label = || {
+            measured
+                .iter()
+                .map(|part| String::from_utf8_lossy(part).into_owned())
+                .collect::<Vec<_>>()
+        };
+        let mut engine = Engine::new_in_memory();
+        engine.host_mut().set_now_millis(1_000);
+        for command in seed {
+            engine.execute(&argv(command));
+        }
+        // A per-key storage map standing in for the host. Seed it with the
+        // pre-command state so the dirty-key flush has a baseline to mutate.
+        let mut storage: std::collections::HashMap<Vec<u8>, Vec<u8>> =
+            std::collections::HashMap::new();
+        for key in engine.take_dirty() {
+            if let Some(bytes) = engine.export_key(&key) {
+                storage.insert(key, bytes);
+            }
+        }
+        let before = engine.export_snapshot();
+        let epoch_before = engine.mutation_epoch();
+        engine.execute(&argv(measured));
+        let after = engine.export_snapshot();
+        let epoch_after = engine.mutation_epoch();
+        let content_changed = before != after;
+        let epoch_bumped = epoch_after != epoch_before;
+        assert!(
+            !content_changed || epoch_bumped,
+            "command {:?} changed snapshot state without bumping the mutation epoch — the persistence layer would silently drop this write",
+            label(),
+        );
+        // Flush only the dirty keys into storage, then rebuild a fresh engine
+        // from storage alone. It must reproduce the full post-command state —
+        // proving the dirty set captured every change a host needs to persist.
+        for key in engine.take_dirty() {
+            match engine.export_key(&key) {
+                Some(bytes) => {
+                    storage.insert(key, bytes);
+                }
+                None => {
+                    storage.remove(&key);
+                }
+            }
+        }
+        let mut restored = Engine::new_in_memory();
+        restored.host_mut().set_now_millis(1_000);
+        let mut storage_keys: Vec<_> = storage.keys().cloned().collect();
+        storage_keys.sort();
+        for key in storage_keys {
+            restored.import_key(&storage[&key]).unwrap();
+        }
+        assert_eq!(
+            restored.export_snapshot(),
+            after,
+            "command {:?}: per-key dirty flush did not reproduce the full state",
+            label(),
+        );
+    }
+
+    #[test]
+    fn every_command_that_writes_visible_state_bumps_the_epoch() {
+        let seed_k: &[&[u8]] = &[b"SET", b"k", b"v"];
+        let seed_n: &[&[u8]] = &[b"SET", b"n", b"5"];
+        let seed_h: &[&[u8]] = &[b"HSET", b"h", b"f", b"v"];
+        let seed_z: &[&[u8]] = &[b"ZADD", b"z", b"1", b"a"];
+
+        let cases: &[(&[&[&[u8]]], &[&[u8]])] = &[
+            (&[], &[b"SET", b"k", b"v"]),
+            (&[seed_k], &[b"GET", b"k"]),
+            (&[seed_k], &[b"EXISTS", b"k"]),
+            (&[seed_k], &[b"SET", b"k", b"v2"]),
+            (&[seed_k], &[b"SET", b"k", b"v2", b"NX"]),
+            (&[], &[b"SET", b"fresh", b"v", b"NX"]),
+            (&[seed_k], &[b"SET", b"k", b"v2", b"XX"]),
+            (&[], &[b"SET", b"missing", b"v", b"XX"]),
+            (&[seed_k], &[b"SET", b"k", b"v2", b"GET"]),
+            (&[seed_k], &[b"SETEX", b"k", b"100", b"v2"]),
+            (&[seed_k], &[b"DEL", b"k"]),
+            (&[], &[b"DEL", b"missing"]),
+            (&[seed_n], &[b"INCR", b"n"]),
+            (&[], &[b"INCR", b"new"]),
+            (&[seed_n], &[b"INCRBY", b"n", b"3"]),
+            (&[seed_k], &[b"EXPIRE", b"k", b"100"]),
+            (&[], &[b"EXPIRE", b"missing", b"100"]),
+            (&[seed_k], &[b"PEXPIRE", b"k", b"100000"]),
+            (&[seed_k], &[b"EXPIRE", b"k", b"-1"]),
+            (&[seed_k], &[b"TTL", b"k"]),
+            (&[seed_k], &[b"PTTL", b"k"]),
+            (&[seed_h], &[b"HSET", b"h", b"f2", b"v2"]),
+            (&[seed_h], &[b"HGET", b"h", b"f"]),
+            (&[seed_h], &[b"HGETALL", b"h"]),
+            (&[seed_h], &[b"HDEL", b"h", b"f"]),
+            (&[seed_h], &[b"HDEL", b"h", b"missing"]),
+            (&[], &[b"ZADD", b"z", b"1", b"a"]),
+            (&[seed_z], &[b"ZADD", b"z", b"1", b"a", b"NX"]),
+            (&[seed_z], &[b"ZADD", b"z", b"2", b"a"]),
+            (&[seed_z], &[b"ZADD", b"z", b"9", b"b", b"XX"]),
+            (&[seed_z], &[b"ZSCORE", b"z", b"a"]),
+            (&[seed_z], &[b"ZINCRBY", b"z", b"5", b"a"]),
+            (&[seed_z], &[b"ZREM", b"z", b"a"]),
+            (&[seed_z], &[b"ZREM", b"z", b"missing"]),
+            (&[seed_z], &[b"ZCARD", b"z"]),
+            (&[seed_z], &[b"ZRANGE", b"z", b"0", b"-1"]),
+            (&[seed_z], &[b"ZRANGEBYSCORE", b"z", b"-inf", b"+inf"]),
+            (&[], &[b"SCRIPT", b"LOAD", b"return 1"]),
+            (&[], &[b"EVAL", b"return 1", b"0"]),
+            (
+                &[],
+                &[
+                    b"EVAL",
+                    b"return redis.call('SET', KEYS[1], '1')",
+                    b"1",
+                    b"ek",
+                ],
+            ),
+            (
+                &[seed_k],
+                &[b"EVAL", b"return redis.call('GET', KEYS[1])", b"1", b"k"],
+            ),
+        ];
+
+        for (seed, measured) in cases {
+            assert_write_bumps_epoch(seed, measured);
+        }
+    }
 
     const TOKEN_BUCKET_SCRIPT: &[u8] = br#"
         local key = KEYS[1]
@@ -1861,10 +3054,7 @@ mod tests {
             RespFrame::simple("OK")
         );
         let missing = engine.execute(&vec![b"EVALSHA".to_vec(), sha, b"0".to_vec()]);
-        assert_eq!(
-            missing,
-            RespFrame::error("NOSCRIPT No matching script. Please use EVAL.")
-        );
+        assert_eq!(missing, RespFrame::error("NOSCRIPT No matching script."));
     }
 
     #[test]
@@ -1936,7 +3126,7 @@ mod tests {
                 {"result": "OK"},
                 {"result": 2},
                 {"result": "2"},
-                {"error": "ERR unknown command 'NOPE'"}
+                {"error": "ERR unknown command 'NOPE', with args beginning with: "}
             ])
         );
     }
@@ -2001,6 +3191,676 @@ mod tests {
         assert_eq!(
             &sha1_hex(b"abc"),
             b"a9993e364706816aba3e25717850c26c9cd0d89d"
+        );
+    }
+
+    #[test]
+    fn set_options_nx_xx_get_follow_reference_semantics() {
+        let mut engine = Engine::new(NoopHost::new(1_000));
+
+        assert_eq!(
+            engine.execute(&argv(&[b"SET", b"k", b"v1", b"NX"])),
+            RespFrame::simple("OK")
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"SET", b"k", b"v2", b"NX"])),
+            RespFrame::null_bulk()
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"GET", b"k"]))),
+            b"$2\r\nv1\r\n"
+        );
+
+        assert_eq!(
+            engine.execute(&argv(&[b"SET", b"missing", b"v", b"XX"])),
+            RespFrame::null_bulk()
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"EXISTS", b"missing"])),
+            RespFrame::integer(0)
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"SET", b"k", b"v2", b"XX"])),
+            RespFrame::simple("OK")
+        );
+
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"SET", b"k", b"v3", b"GET"]))),
+            b"$2\r\nv2\r\n"
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"SET", b"fresh", b"v1", b"GET"])),
+            RespFrame::null_bulk()
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"SET", b"k", b"v9", b"NX", b"GET"]))),
+            b"$2\r\nv3\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"GET", b"k"]))),
+            b"$2\r\nv3\r\n"
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"SET", b"missing", b"v", b"XX", b"GET"])),
+            RespFrame::null_bulk()
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"EXISTS", b"missing"])),
+            RespFrame::integer(0)
+        );
+
+        assert_eq!(
+            engine.execute(&argv(&[b"SET", b"k", b"v", b"NX", b"XX"])),
+            RespFrame::error("ERR syntax error")
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"SET", b"k", b"v", b"EX", b"10", b"PX", b"10000"])),
+            RespFrame::error("ERR syntax error")
+        );
+
+        assert_eq!(
+            engine.execute(&argv(&[b"SET", b"k2", b"v", b"NX", b"PX", b"2500"])),
+            RespFrame::simple("OK")
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"PTTL", b"k2"])),
+            RespFrame::integer(2500)
+        );
+
+        engine.execute(&argv(&[b"HSET", b"h", b"f", b"v"]));
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"SET", b"h", b"v", b"GET"]))),
+            b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"HGET", b"h", b"f"]))),
+            b"$1\r\nv\r\n"
+        );
+    }
+
+    #[test]
+    fn zset_commands_cover_leaderboard_shape() {
+        let mut engine = Engine::new(NoopHost::new(1_000));
+
+        assert_eq!(
+            engine.execute(&argv(&[
+                b"ZADD", b"board", b"1", b"a", b"2", b"b", b"2", b"bb", b"3", b"c"
+            ])),
+            RespFrame::integer(4)
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"ZCARD", b"board"])),
+            RespFrame::integer(4)
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"ZSCORE", b"board", b"b"]))),
+            b"$1\r\n2\r\n"
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"ZSCORE", b"board", b"nope"])),
+            RespFrame::null_bulk()
+        );
+
+        assert_eq!(
+            engine.execute(&argv(&[b"ZADD", b"board", b"5", b"a"])),
+            RespFrame::integer(0)
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"ZADD", b"board", b"CH", b"6", b"a", b"4", b"d"])),
+            RespFrame::integer(2)
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"ZADD", b"board", b"NX", b"9", b"a"])),
+            RespFrame::integer(0)
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"ZSCORE", b"board", b"a"]))),
+            b"$1\r\n6\r\n"
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"ZADD", b"board", b"XX", b"8", b"nope2"])),
+            RespFrame::integer(0)
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"ZSCORE", b"board", b"nope2"])),
+            RespFrame::null_bulk()
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"ZADD", b"board", b"NX", b"XX", b"1", b"m"])),
+            RespFrame::error("ERR XX and NX options at the same time are not compatible")
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"ZADD", b"board", b"oops", b"m"])),
+            RespFrame::error("ERR value is not a valid float")
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"ZADD", b"board", b"1", b"m", b"2"])),
+            RespFrame::error("ERR syntax error")
+        );
+
+        assert_eq!(
+            engine.execute(&argv(&[b"ZRANK", b"board", b"b"])),
+            RespFrame::integer(0)
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"ZRANK", b"board", b"bb"])),
+            RespFrame::integer(1)
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"ZREVRANK", b"board", b"a"])),
+            RespFrame::integer(0)
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"ZREVRANK", b"board", b"b"])),
+            RespFrame::integer(4)
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"ZRANK", b"board", b"zzz"])),
+            RespFrame::null_bulk()
+        );
+
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"ZRANGE", b"board", b"0", b"2"]))),
+            b"*3\r\n$1\r\nb\r\n$2\r\nbb\r\n$1\r\nc\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"ZRANGE", b"board", b"-2", b"-1", b"WITHSCORES"]))),
+            b"*4\r\n$1\r\nd\r\n$1\r\n4\r\n$1\r\na\r\n$1\r\n6\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"ZRANGE", b"board", b"0", b"1", b"REV"]))),
+            b"*2\r\n$1\r\na\r\n$1\r\nd\r\n"
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"ZRANGE", b"board", b"5", b"9"])),
+            RespFrame::array(Vec::new())
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"ZRANGE", b"board", b"0", b"-1", b"BOGUS"])),
+            RespFrame::error("ERR syntax error")
+        );
+
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"ZINCRBY", b"board", b"1.5", b"b"]))),
+            b"$3\r\n3.5\r\n"
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"ZINCRBY", b"board", b"oops", b"b"])),
+            RespFrame::error("ERR value is not a valid float")
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"ZINCRBY", b"znan", b"inf", b"m"]))),
+            b"$3\r\ninf\r\n"
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"ZINCRBY", b"znan", b"-inf", b"m"])),
+            RespFrame::error("ERR resulting score is not a number (NaN)")
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"ZINCRBY", b"zneg", b"-0.0", b"m"]))),
+            b"$2\r\n-0\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"ZSCORE", b"zneg", b"m"]))),
+            b"$1\r\n0\r\n"
+        );
+
+        assert_eq!(
+            engine.execute(&argv(&[b"ZREM", b"board", b"a", b"missing"])),
+            RespFrame::integer(1)
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"ZREM", b"board", b"b", b"bb", b"c", b"d"])),
+            RespFrame::integer(4)
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"EXISTS", b"board"])),
+            RespFrame::integer(0)
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"ZREM", b"board", b"a"])),
+            RespFrame::integer(0)
+        );
+
+        engine.execute(&argv(&[b"SET", b"s", b"v"]));
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"ZADD", b"s", b"1", b"m"]))),
+            b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"GET", b"znan"]))),
+            b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+        );
+    }
+
+    #[test]
+    fn zrangebyscore_matches_reference_ranges_options_and_errors() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[
+            b"ZADD", b"z", b"1", b"a", b"2", b"b", b"2", b"bb", b"3", b"c", b"4", b"d",
+        ]));
+        let epoch = engine.mutation_epoch();
+
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"ZRANGEBYSCORE", b"z", b"2", b"3"]))),
+            b"*3\r\n$1\r\nb\r\n$2\r\nbb\r\n$1\r\nc\r\n"
+        );
+        assert_eq!(engine.mutation_epoch(), epoch, "ZRANGEBYSCORE is read-only");
+
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"ZRANGEBYSCORE", b"z", b"(2", b"3"]))),
+            b"*1\r\n$1\r\nc\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"ZRANGEBYSCORE", b"z", b"2", b"(3"]))),
+            b"*2\r\n$1\r\nb\r\n$2\r\nbb\r\n"
+        );
+
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[
+                b"ZRANGEBYSCORE",
+                b"z",
+                b"-inf",
+                b"+inf",
+                b"WITHSCORES"
+            ]))),
+            b"*10\r\n$1\r\na\r\n$1\r\n1\r\n$1\r\nb\r\n$1\r\n2\r\n$2\r\nbb\r\n$1\r\n2\r\n$1\r\nc\r\n$1\r\n3\r\n$1\r\nd\r\n$1\r\n4\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"ZRANGEBYSCORE", b"z", b"-inf", b"inf"]))),
+            b"*5\r\n$1\r\na\r\n$1\r\nb\r\n$2\r\nbb\r\n$1\r\nc\r\n$1\r\nd\r\n"
+        );
+
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[
+                b"ZRANGEBYSCORE",
+                b"z",
+                b"-inf",
+                b"+inf",
+                b"LIMIT",
+                b"1",
+                b"2"
+            ]))),
+            b"*2\r\n$1\r\nb\r\n$2\r\nbb\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[
+                b"ZRANGEBYSCORE",
+                b"z",
+                b"-inf",
+                b"+inf",
+                b"LIMIT",
+                b"1",
+                b"-1"
+            ]))),
+            b"*4\r\n$1\r\nb\r\n$2\r\nbb\r\n$1\r\nc\r\n$1\r\nd\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[
+                b"ZRANGEBYSCORE",
+                b"z",
+                b"-inf",
+                b"+inf",
+                b"LIMIT",
+                b"3",
+                b"100"
+            ]))),
+            b"*2\r\n$1\r\nc\r\n$1\r\nd\r\n"
+        );
+        assert_eq!(
+            engine.execute(&argv(&[
+                b"ZRANGEBYSCORE",
+                b"z",
+                b"-inf",
+                b"+inf",
+                b"LIMIT",
+                b"100",
+                b"5"
+            ])),
+            RespFrame::array(Vec::new())
+        );
+        assert_eq!(
+            engine.execute(&argv(&[
+                b"ZRANGEBYSCORE",
+                b"z",
+                b"-inf",
+                b"+inf",
+                b"LIMIT",
+                b"-1",
+                b"2"
+            ])),
+            RespFrame::array(Vec::new())
+        );
+
+        assert_eq!(
+            engine.execute(&argv(&[b"ZRANGEBYSCORE", b"z", b"100", b"200"])),
+            RespFrame::array(Vec::new())
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"ZRANGEBYSCORE", b"nokey", b"0", b"10"])),
+            RespFrame::array(Vec::new())
+        );
+
+        assert_eq!(
+            engine.execute(&argv(&[b"ZRANGEBYSCORE", b"z", b"foo", b"10"])),
+            RespFrame::error("ERR min or max is not a float")
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"ZRANGEBYSCORE", b"z", b"(foo", b"10"])),
+            RespFrame::error("ERR min or max is not a float")
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"ZRANGEBYSCORE", b"z", b"nan", b"10"])),
+            RespFrame::error("ERR min or max is not a float")
+        );
+
+        assert_eq!(
+            engine.execute(&argv(&[
+                b"ZRANGEBYSCORE",
+                b"z",
+                b"-inf",
+                b"+inf",
+                b"LIMIT",
+                b"x",
+                b"2"
+            ])),
+            RespFrame::error("ERR value is not an integer or out of range")
+        );
+        assert_eq!(
+            engine.execute(&argv(&[
+                b"ZRANGEBYSCORE",
+                b"z",
+                b"-inf",
+                b"+inf",
+                b"LIMIT",
+                b"1"
+            ])),
+            RespFrame::error("ERR syntax error")
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"ZRANGEBYSCORE", b"z", b"-inf", b"+inf", b"BOGUS"])),
+            RespFrame::error("ERR syntax error")
+        );
+
+        assert_eq!(
+            engine.execute(&argv(&[b"ZRANGEBYSCORE", b"z", b"foo", b"10", b"BOGUS"])),
+            RespFrame::error("ERR syntax error"),
+            "option parse precedes bound parse"
+        );
+        assert_eq!(
+            engine.execute(&argv(&[
+                b"ZRANGEBYSCORE",
+                b"z",
+                b"foo",
+                b"10",
+                b"LIMIT",
+                b"x",
+                b"y"
+            ])),
+            RespFrame::error("ERR value is not an integer or out of range"),
+            "LIMIT integer error precedes bound parse"
+        );
+
+        assert_eq!(
+            engine.execute(&argv(&[b"ZRANGEBYSCORE", b"z", b"0"])),
+            RespFrame::error("ERR wrong number of arguments for 'zrangebyscore' command")
+        );
+
+        engine.execute(&argv(&[b"SET", b"zstr", b"v"]));
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"ZRANGEBYSCORE", b"zstr", b"0", b"10"]))),
+            b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+        );
+    }
+
+    #[test]
+    fn zrangebyscore_handles_lex_tiebreak_inf_members_and_empty_bound() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[
+            b"ZADD", b"z", b"1.5", b"a", b"-2.5", b"neg", b"0", b"zero", b"3.0e15", b"big", b"0.1",
+            b"tenth", b"inf", b"top", b"-inf", b"bottom",
+        ]));
+
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[
+                b"ZRANGEBYSCORE",
+                b"z",
+                b"-inf",
+                b"+inf",
+                b"WITHSCORES"
+            ]))),
+            b"*14\r\n$6\r\nbottom\r\n$4\r\n-inf\r\n$3\r\nneg\r\n$4\r\n-2.5\r\n$4\r\nzero\r\n$1\r\n0\r\n$5\r\ntenth\r\n$3\r\n0.1\r\n$1\r\na\r\n$3\r\n1.5\r\n$3\r\nbig\r\n$16\r\n3000000000000000\r\n$3\r\ntop\r\n$3\r\ninf\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[
+                b"ZRANGEBYSCORE",
+                b"z",
+                b"100",
+                b"(inf",
+                b"WITHSCORES"
+            ]))),
+            b"*2\r\n$3\r\nbig\r\n$16\r\n3000000000000000\r\n"
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"ZRANGEBYSCORE", b"z", b"(-inf", b"-100"])),
+            RespFrame::array(Vec::new())
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[
+                b"ZRANGEBYSCORE",
+                b"z",
+                b"-inf",
+                b"-100",
+                b"WITHSCORES"
+            ]))),
+            b"*2\r\n$6\r\nbottom\r\n$4\r\n-inf\r\n"
+        );
+
+        engine.execute(&argv(&[
+            b"ZADD", b"lex", b"5", b"banana", b"5", b"apple", b"5", b"cherry",
+        ]));
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"ZRANGEBYSCORE", b"lex", b"5", b"5"]))),
+            b"*3\r\n$5\r\napple\r\n$6\r\nbanana\r\n$6\r\ncherry\r\n"
+        );
+
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"ZRANGEBYSCORE", b"z", b"", b"0.1"]))),
+            b"*2\r\n$4\r\nzero\r\n$5\r\ntenth\r\n",
+            "an empty bound body parses as 0.0, inclusive"
+        );
+    }
+
+    #[test]
+    fn zset_score_replies_match_reference_formatting() {
+        let cases: &[(&[u8], &[u8])] = &[
+            (b"0", b"0"),
+            (b"1", b"1"),
+            (b"-1", b"-1"),
+            (b"1.5", b"1.5"),
+            (b"3.0e15", b"3000000000000000"),
+            (b"0.1", b"0.1"),
+            (b"-0", b"0"),
+            (b"-0.0", b"0"),
+            (b"0.001", b"0.001"),
+            (b"100.25", b"100.25"),
+            (b"1e300", b"1e+300"),
+            (b"1e-9", b"1e-9"),
+            (b"inf", b"inf"),
+            (b"-Infinity", b"-inf"),
+        ];
+        let mut engine = Engine::new_in_memory();
+        for (index, (input, expected)) in cases.iter().enumerate() {
+            let member = format!("m{index}").into_bytes();
+            engine.execute(&vec![
+                b"ZADD".to_vec(),
+                b"fmt".to_vec(),
+                input.to_vec(),
+                member.clone(),
+            ]);
+            let reply = engine.execute(&vec![b"ZSCORE".to_vec(), b"fmt".to_vec(), member]);
+            match reply {
+                RespFrame::Bulk(Some(value)) => assert_eq!(
+                    value.as_bytes(),
+                    *expected,
+                    "score input {:?}",
+                    String::from_utf8_lossy(input)
+                ),
+                other => panic!("unexpected ZSCORE reply for {input:?}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_round_trip_preserves_zsets() {
+        let mut engine = Engine::new(NoopHost::new(1_000));
+        engine.execute(&argv(&[
+            b"ZADD",
+            b"board",
+            b"1.5",
+            b"alice",
+            b"0.1",
+            b"bob",
+            b"3000000000000000",
+            b"carol",
+            b"-1",
+            b"dave",
+        ]));
+        engine.execute(&argv(&[
+            b"ZADD", b"edges", b"inf", b"top", b"-inf", b"bottom",
+        ]));
+
+        let snapshot = engine.export_snapshot();
+        let mut restored = Engine::new(NoopHost::new(1_000));
+        restored.import_snapshot(&snapshot).unwrap();
+
+        for key in [&b"board"[..], b"edges"] {
+            assert_eq!(
+                resp2(&engine.execute(&argv(&[b"ZRANGE", key, b"0", b"-1", b"WITHSCORES"]))),
+                resp2(&restored.execute(&argv(&[b"ZRANGE", key, b"0", b"-1", b"WITHSCORES"])))
+            );
+        }
+        assert_eq!(
+            resp2(&restored.execute(&argv(&[b"ZSCORE", b"board", b"bob"]))),
+            b"$3\r\n0.1\r\n"
+        );
+        assert_eq!(
+            resp2(&restored.execute(&argv(&[b"ZSCORE", b"edges", b"top"]))),
+            b"$3\r\ninf\r\n"
+        );
+    }
+
+    #[test]
+    fn mutation_epoch_zset_and_set_options_contract() {
+        let mut engine = Engine::new_in_memory();
+        let start = engine.mutation_epoch();
+
+        engine.execute(&argv(&[b"ZADD", b"z", b"1", b"a"]));
+        let after_zadd = engine.mutation_epoch();
+        assert_ne!(after_zadd, start);
+
+        engine.execute(&argv(&[b"ZSCORE", b"z", b"a"]));
+        engine.execute(&argv(&[b"ZRANGE", b"z", b"0", b"-1", b"WITHSCORES"]));
+        engine.execute(&argv(&[b"ZRANK", b"z", b"a"]));
+        engine.execute(&argv(&[b"ZREVRANK", b"z", b"a"]));
+        engine.execute(&argv(&[b"ZCARD", b"z"]));
+        assert_eq!(engine.mutation_epoch(), after_zadd);
+
+        engine.execute(&argv(&[b"ZADD", b"z", b"1", b"a"]));
+        assert_eq!(engine.mutation_epoch(), after_zadd);
+        engine.execute(&argv(&[b"ZADD", b"z", b"XX", b"5", b"missing"]));
+        assert_eq!(engine.mutation_epoch(), after_zadd);
+
+        engine.execute(&argv(&[b"ZINCRBY", b"z", b"1", b"a"]));
+        let after_zincrby = engine.mutation_epoch();
+        assert_ne!(after_zincrby, after_zadd);
+
+        engine.execute(&argv(&[b"ZREM", b"z", b"missing"]));
+        assert_eq!(engine.mutation_epoch(), after_zincrby);
+        engine.execute(&argv(&[b"ZREM", b"z", b"a"]));
+        let after_zrem = engine.mutation_epoch();
+        assert_ne!(after_zrem, after_zincrby);
+
+        engine.execute(&argv(&[b"SET", b"k", b"v"]));
+        let after_set = engine.mutation_epoch();
+        engine.execute(&argv(&[b"SET", b"k", b"v2", b"NX"]));
+        assert_eq!(engine.mutation_epoch(), after_set);
+        engine.execute(&argv(&[b"SET", b"other", b"v", b"XX"]));
+        assert_eq!(engine.mutation_epoch(), after_set);
+        engine.execute(&argv(&[b"SET", b"k", b"v2", b"XX", b"GET"]));
+        assert_ne!(engine.mutation_epoch(), after_set);
+    }
+
+    #[test]
+    fn eval_registers_script_in_cache_for_evalsha() {
+        let mut engine = Engine::new_in_memory();
+        assert_eq!(
+            engine.execute(&argv(&[b"EVAL", b"return 2", b"0"])),
+            RespFrame::integer(2)
+        );
+        let sha = sha1_hex(b"return 2");
+        let exists = engine.execute(&vec![b"SCRIPT".to_vec(), b"EXISTS".to_vec(), sha.to_vec()]);
+        assert_eq!(resp2(&exists), b"*1\r\n:1\r\n");
+        assert_eq!(
+            engine.execute(&vec![b"EVALSHA".to_vec(), sha.to_vec(), b"0".to_vec()]),
+            RespFrame::integer(2)
+        );
+    }
+
+    #[test]
+    fn eval_uncaught_script_errors_return_resp_errors() {
+        let mut engine = Engine::new_in_memory();
+
+        let reply = engine.execute(&argv(&[b"EVAL", b"error('boom')", b"0"]));
+        match &reply {
+            RespFrame::Error(message) => {
+                let text = String::from_utf8_lossy(message.as_bytes()).into_owned();
+                assert!(text.starts_with("ERR "), "unexpected error shape: {text}");
+                assert!(text.contains("boom"), "error message lost: {text}");
+            }
+            other => panic!("expected error frame, got {other:?}"),
+        }
+
+        engine.execute(&argv(&[b"SET", b"s", b"v"]));
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[
+                b"EVAL",
+                b"return redis.call('INCR', KEYS[1])",
+                b"1",
+                b"s"
+            ]))),
+            b"-ERR value is not an integer or out of range\r\n"
+        );
+
+        engine.execute(&argv(&[b"HSET", b"h", b"f", b"v"]));
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[
+                b"EVAL",
+                b"return redis.call('GET', KEYS[1])",
+                b"1",
+                b"h"
+            ]))),
+            b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+        );
+
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[
+                b"EVAL",
+                b"return redis.call('SET', KEYS[1], true)",
+                b"1",
+                b"b"
+            ]))),
+            b"-ERR Command arguments must be strings or integers\r\n"
+        );
+
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[
+                b"EVAL",
+                b"return type(redis.call('GET', KEYS[1]))",
+                b"1",
+                b"missing"
+            ]))),
+            b"$7\r\nboolean\r\n"
         );
     }
 }

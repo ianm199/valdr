@@ -1,0 +1,49 @@
+{"id": "zrbs-setup", "cmd": ["ZADD", "z", "1", "a", "2", "b", "2", "bb", "3", "c", "4", "d"]}
+{"id": "zrbs-happy-ascending", "cmd": ["ZRANGEBYSCORE", "z", "2", "3"]}
+{"id": "zrbs-exclusive-min", "cmd": ["ZRANGEBYSCORE", "z", "(2", "3"]}
+{"id": "zrbs-exclusive-max", "cmd": ["ZRANGEBYSCORE", "z", "2", "(3"]}
+{"id": "zrbs-exclusive-both", "cmd": ["ZRANGEBYSCORE", "z", "(1", "(4"]}
+{"id": "zrbs-neg-inf-pos-inf", "cmd": ["ZRANGEBYSCORE", "z", "-inf", "+inf"]}
+{"id": "zrbs-neg-inf-inf", "cmd": ["ZRANGEBYSCORE", "z", "-inf", "inf"]}
+{"id": "zrbs-exclusive-inf-bounds", "cmd": ["ZRANGEBYSCORE", "z", "(-inf", "(inf"]}
+{"id": "zrbs-withscores", "cmd": ["ZRANGEBYSCORE", "z", "-inf", "+inf", "WITHSCORES"]}
+{"id": "zrbs-withscores-narrow", "cmd": ["ZRANGEBYSCORE", "z", "2", "3", "WITHSCORES"]}
+{"id": "zrbs-limit-offset-count", "cmd": ["ZRANGEBYSCORE", "z", "-inf", "+inf", "LIMIT", "1", "2"]}
+{"id": "zrbs-limit-negative-count", "cmd": ["ZRANGEBYSCORE", "z", "-inf", "+inf", "LIMIT", "1", "-1"]}
+{"id": "zrbs-limit-count-past-end", "cmd": ["ZRANGEBYSCORE", "z", "-inf", "+inf", "LIMIT", "3", "100"]}
+{"id": "zrbs-limit-offset-past-end", "cmd": ["ZRANGEBYSCORE", "z", "-inf", "+inf", "LIMIT", "100", "5"]}
+{"id": "zrbs-limit-negative-offset", "cmd": ["ZRANGEBYSCORE", "z", "-inf", "+inf", "LIMIT", "-1", "2"]}
+{"id": "zrbs-limit-zero-offset", "cmd": ["ZRANGEBYSCORE", "z", "-inf", "+inf", "LIMIT", "0", "3"]}
+{"id": "zrbs-limit-with-withscores", "cmd": ["ZRANGEBYSCORE", "z", "-inf", "+inf", "WITHSCORES", "LIMIT", "1", "2"]}
+{"id": "zrbs-empty-numeric-range", "cmd": ["ZRANGEBYSCORE", "z", "100", "200"]}
+{"id": "zrbs-empty-after-exclusion", "cmd": ["ZRANGEBYSCORE", "z", "(4", "4"]}
+{"id": "zrbs-min-gt-max", "cmd": ["ZRANGEBYSCORE", "z", "10", "1"]}
+{"id": "zrbs-missing-key", "cmd": ["ZRANGEBYSCORE", "nokey", "0", "10"]}
+{"id": "zrbs-empty-bound-body", "cmd": ["ZRANGEBYSCORE", "z", "", "2"]}
+{"id": "zrbs-empty-exclusive-bound", "cmd": ["ZRANGEBYSCORE", "z", "(", "2"]}
+{"id": "zrbs-bad-float-min", "cmd": ["ZRANGEBYSCORE", "z", "foo", "10"]}
+{"id": "zrbs-bad-float-max", "cmd": ["ZRANGEBYSCORE", "z", "0", "bar"]}
+{"id": "zrbs-bad-float-exclusive", "cmd": ["ZRANGEBYSCORE", "z", "(foo", "10"]}
+{"id": "zrbs-nan-bound", "cmd": ["ZRANGEBYSCORE", "z", "nan", "10"]}
+{"id": "zrbs-trailing-garbage-bound", "cmd": ["ZRANGEBYSCORE", "z", "1.5x", "10"]}
+{"id": "zrbs-leading-space-bound", "cmd": ["ZRANGEBYSCORE", "z", " 1", "10"]}
+{"id": "zrbs-limit-bad-offset", "cmd": ["ZRANGEBYSCORE", "z", "-inf", "+inf", "LIMIT", "x", "2"]}
+{"id": "zrbs-limit-bad-count", "cmd": ["ZRANGEBYSCORE", "z", "-inf", "+inf", "LIMIT", "1", "y"]}
+{"id": "zrbs-limit-one-arg", "cmd": ["ZRANGEBYSCORE", "z", "-inf", "+inf", "LIMIT", "1"]}
+{"id": "zrbs-limit-zero-args", "cmd": ["ZRANGEBYSCORE", "z", "-inf", "+inf", "LIMIT"]}
+{"id": "zrbs-bogus-option", "cmd": ["ZRANGEBYSCORE", "z", "-inf", "+inf", "BOGUS"]}
+{"id": "zrbs-option-precedes-bad-bound", "cmd": ["ZRANGEBYSCORE", "z", "foo", "10", "BOGUS"]}
+{"id": "zrbs-limit-int-error-precedes-bad-bound", "cmd": ["ZRANGEBYSCORE", "z", "foo", "10", "LIMIT", "x", "y"]}
+{"id": "zrbs-arity-too-few", "cmd": ["ZRANGEBYSCORE", "z", "0"]}
+{"id": "zrbs-fmt-setup", "cmd": ["ZADD", "zfmt", "1.5", "a", "-2.5", "neg", "0", "zero", "3.0e15", "big", "0.1", "tenth", "inf", "top", "-inf", "bottom"]}
+{"id": "zrbs-fmt-withscores", "cmd": ["ZRANGEBYSCORE", "zfmt", "-inf", "+inf", "WITHSCORES"]}
+{"id": "zrbs-fmt-exclusive-inf-max", "cmd": ["ZRANGEBYSCORE", "zfmt", "100", "(inf", "WITHSCORES"]}
+{"id": "zrbs-fmt-exclusive-neg-inf-min", "cmd": ["ZRANGEBYSCORE", "zfmt", "(-inf", "-100"]}
+{"id": "zrbs-fmt-inclusive-neg-inf-min", "cmd": ["ZRANGEBYSCORE", "zfmt", "-inf", "-100", "WITHSCORES"]}
+{"id": "zrbs-fmt-fractional-window", "cmd": ["ZRANGEBYSCORE", "zfmt", "0", "1.5", "WITHSCORES"]}
+{"id": "zrbs-lex-setup", "cmd": ["ZADD", "lex", "5", "banana", "5", "apple", "5", "cherry"]}
+{"id": "zrbs-lex-tiebreak", "cmd": ["ZRANGEBYSCORE", "lex", "5", "5"]}
+{"id": "zrbs-lex-tiebreak-withscores", "cmd": ["ZRANGEBYSCORE", "lex", "5", "5", "WITHSCORES"]}
+{"id": "zrbs-string-setup", "cmd": ["SET", "zstr", "v"]}
+{"id": "zrbs-wrongtype", "cmd": ["ZRANGEBYSCORE", "zstr", "0", "10"]}
+{"id": "zrbs-wrongtype-with-options", "cmd": ["ZRANGEBYSCORE", "zstr", "0", "10", "WITHSCORES", "LIMIT", "0", "5"]}

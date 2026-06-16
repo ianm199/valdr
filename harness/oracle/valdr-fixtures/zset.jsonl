@@ -1,0 +1,89 @@
+{"id": "zadd-create-multi", "cmd": ["ZADD", "z1", "1", "a", "2", "b", "3", "c"]}
+{"id": "zcard-basic", "cmd": ["ZCARD", "z1"]}
+{"id": "zcard-missing", "cmd": ["ZCARD", "zmissing"]}
+{"id": "zscore-existing", "cmd": ["ZSCORE", "z1", "b"]}
+{"id": "zscore-missing-member", "cmd": ["ZSCORE", "z1", "nope"]}
+{"id": "zscore-missing-key", "cmd": ["ZSCORE", "zmissing", "m"]}
+{"id": "zadd-update-score", "cmd": ["ZADD", "z1", "5", "a"]}
+{"id": "zadd-update-applied", "cmd": ["ZSCORE", "z1", "a"]}
+{"id": "zadd-ch-counts-added-and-changed", "cmd": ["ZADD", "z1", "CH", "6", "a", "4", "d"]}
+{"id": "zadd-ch-same-score-not-changed", "cmd": ["ZADD", "z1", "CH", "6", "a"]}
+{"id": "zadd-nx-skips-existing", "cmd": ["ZADD", "z1", "NX", "9", "a"]}
+{"id": "zadd-nx-skip-applied", "cmd": ["ZSCORE", "z1", "a"]}
+{"id": "zadd-nx-adds-new", "cmd": ["ZADD", "z1", "NX", "7", "e"]}
+{"id": "zadd-xx-skips-new", "cmd": ["ZADD", "z1", "XX", "8", "f"]}
+{"id": "zadd-xx-skip-applied", "cmd": ["ZSCORE", "z1", "f"]}
+{"id": "zadd-xx-ch-updates-existing", "cmd": ["ZADD", "z1", "XX", "CH", "8", "e"]}
+{"id": "zadd-xx-missing-key", "cmd": ["ZADD", "zxxmiss", "XX", "1", "m"]}
+{"id": "zadd-xx-missing-key-not-created", "cmd": ["EXISTS", "zxxmiss"]}
+{"id": "zadd-nx-xx-conflict", "cmd": ["ZADD", "z1", "NX", "XX", "1", "m"]}
+{"id": "zadd-bad-score", "cmd": ["ZADD", "z1", "notafloat", "m"]}
+{"id": "zadd-odd-pairs", "cmd": ["ZADD", "z1", "1", "m", "2"]}
+{"id": "zadd-flags-no-pairs", "cmd": ["ZADD", "z1", "NX", "CH"]}
+{"id": "zadd-arity-key-only", "cmd": ["ZADD", "z1"]}
+{"id": "zadd-arity-no-member", "cmd": ["ZADD", "z1", "1"]}
+{"id": "zrank-setup", "cmd": ["ZADD", "z2", "1", "a", "2", "b", "2", "bb", "3", "c"]}
+{"id": "zrank-first", "cmd": ["ZRANK", "z2", "a"]}
+{"id": "zrank-tie-lex", "cmd": ["ZRANK", "z2", "bb"]}
+{"id": "zrank-missing-member", "cmd": ["ZRANK", "z2", "x"]}
+{"id": "zrank-missing-key", "cmd": ["ZRANK", "zrmissing", "x"]}
+{"id": "zrank-extra-bogus-arg", "cmd": ["ZRANK", "z2", "a", "BOGUS"]}
+{"id": "zrevrank-first", "cmd": ["ZREVRANK", "z2", "c"]}
+{"id": "zrevrank-tie", "cmd": ["ZREVRANK", "z2", "b"]}
+{"id": "zrange-all", "cmd": ["ZRANGE", "z2", "0", "-1"]}
+{"id": "zrange-withscores", "cmd": ["ZRANGE", "z2", "0", "-1", "WITHSCORES"]}
+{"id": "zrange-rev", "cmd": ["ZRANGE", "z2", "0", "1", "REV"]}
+{"id": "zrange-rev-withscores", "cmd": ["ZRANGE", "z2", "0", "-1", "REV", "WITHSCORES"]}
+{"id": "zrange-negative-start", "cmd": ["ZRANGE", "z2", "-2", "-1"]}
+{"id": "zrange-out-of-range", "cmd": ["ZRANGE", "z2", "5", "10"]}
+{"id": "zrange-start-gt-stop", "cmd": ["ZRANGE", "z2", "2", "1"]}
+{"id": "zrange-missing-key", "cmd": ["ZRANGE", "zrmissing", "0", "-1"]}
+{"id": "zrange-non-integer-index", "cmd": ["ZRANGE", "z2", "a", "1"]}
+{"id": "zrange-bogus-option", "cmd": ["ZRANGE", "z2", "0", "-1", "BOGUS"]}
+{"id": "zrange-arity", "cmd": ["ZRANGE", "z2", "0"]}
+{"id": "zincrby-new-key", "cmd": ["ZINCRBY", "z3", "2.5", "m"]}
+{"id": "zincrby-existing", "cmd": ["ZINCRBY", "z3", "0.5", "m"]}
+{"id": "zincrby-negative", "cmd": ["ZINCRBY", "z3", "-4.5", "m"]}
+{"id": "zincrby-bad-increment", "cmd": ["ZINCRBY", "z3", "abc", "m"]}
+{"id": "zincrby-to-inf", "cmd": ["ZINCRBY", "z3", "inf", "m"]}
+{"id": "zincrby-nan-result", "cmd": ["ZINCRBY", "z3", "-inf", "m"]}
+{"id": "zincrby-arity", "cmd": ["ZINCRBY", "z3", "1"]}
+{"id": "zrem-some", "cmd": ["ZREM", "z2", "a", "x"]}
+{"id": "zrem-missing-key", "cmd": ["ZREM", "zrmissing", "a"]}
+{"id": "zrem-all-deletes-key", "cmd": ["ZREM", "z2", "b", "bb", "c"]}
+{"id": "zrem-key-gone", "cmd": ["EXISTS", "z2"]}
+{"id": "zrem-arity", "cmd": ["ZREM", "z2"]}
+{"id": "zset-string-setup", "cmd": ["SET", "zstr", "v"]}
+{"id": "zadd-on-string", "cmd": ["ZADD", "zstr", "1", "m"]}
+{"id": "zscore-on-string", "cmd": ["ZSCORE", "zstr", "m"]}
+{"id": "zincrby-on-string", "cmd": ["ZINCRBY", "zstr", "1", "m"]}
+{"id": "zrem-on-string", "cmd": ["ZREM", "zstr", "m"]}
+{"id": "zcard-on-string", "cmd": ["ZCARD", "zstr"]}
+{"id": "zrank-on-string", "cmd": ["ZRANK", "zstr", "m"]}
+{"id": "zrange-on-string", "cmd": ["ZRANGE", "zstr", "0", "-1"]}
+{"id": "get-on-zset", "cmd": ["GET", "z1"]}
+{"id": "hget-on-zset", "cmd": ["HGET", "z1", "f"]}
+{"id": "zadd-score-formats", "cmd": ["ZADD", "zfmt", "0", "zero", "1", "one", "-1", "negone", "1.5", "onefive", "3.0e15", "big", "0.1", "tenth"]}
+{"id": "zscore-format-zero", "cmd": ["ZSCORE", "zfmt", "zero"]}
+{"id": "zscore-format-one", "cmd": ["ZSCORE", "zfmt", "one"]}
+{"id": "zscore-format-negone", "cmd": ["ZSCORE", "zfmt", "negone"]}
+{"id": "zscore-format-onefive", "cmd": ["ZSCORE", "zfmt", "onefive"]}
+{"id": "zscore-format-big", "cmd": ["ZSCORE", "zfmt", "big"]}
+{"id": "zscore-format-tenth", "cmd": ["ZSCORE", "zfmt", "tenth"]}
+{"id": "zadd-inf-scores", "cmd": ["ZADD", "zfmt", "inf", "top", "-inf", "bottom"]}
+{"id": "zscore-format-inf", "cmd": ["ZSCORE", "zfmt", "top"]}
+{"id": "zscore-format-neg-inf", "cmd": ["ZSCORE", "zfmt", "bottom"]}
+{"id": "zadd-1e300", "cmd": ["ZADD", "zfmt", "1e300", "huge"]}
+{"id": "zscore-format-1e300", "cmd": ["ZSCORE", "zfmt", "huge"]}
+{"id": "zadd-neg-zero-int", "cmd": ["ZADD", "zfmt", "-0", "negzeroint"]}
+{"id": "zscore-format-neg-zero-int", "cmd": ["ZSCORE", "zfmt", "negzeroint"]}
+{"id": "zadd-neg-zero", "cmd": ["ZADD", "zfmt", "-0.0", "negzero"]}
+{"id": "zscore-format-neg-zero", "cmd": ["ZSCORE", "zfmt", "negzero"]}
+{"id": "zincrby-neg-zero-reply", "cmd": ["ZINCRBY", "znegz", "-0.0", "m"]}
+{"id": "zincrby-neg-zero-stored", "cmd": ["ZSCORE", "znegz", "m"]}
+{"id": "zrange-format-withscores", "cmd": ["ZRANGE", "zfmt", "0", "-1", "WITHSCORES"]}
+{"id": "zexp-setup", "cmd": ["ZADD", "zexp", "1", "m"]}
+{"id": "zexp-pexpire", "cmd": ["PEXPIRE", "zexp", "100"]}
+{"id": "zexp-read-after-expiry", "cmd": ["ZSCORE", "zexp", "m"], "sleep_ms": 300}
+{"id": "zexp-zrange-after-expiry", "cmd": ["ZRANGE", "zexp", "0", "-1"]}
+{"id": "zexp-key-gone", "cmd": ["EXISTS", "zexp"]}

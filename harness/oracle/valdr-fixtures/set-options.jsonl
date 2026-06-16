@@ -1,0 +1,31 @@
+{"id": "setopt-nx-fresh", "cmd": ["SET", "k1", "v1", "NX"]}
+{"id": "setopt-nx-existing", "cmd": ["SET", "k1", "v2", "NX"]}
+{"id": "setopt-nx-unchanged", "cmd": ["GET", "k1"]}
+{"id": "setopt-xx-missing", "cmd": ["SET", "k2", "v", "XX"]}
+{"id": "setopt-xx-missing-not-created", "cmd": ["EXISTS", "k2"]}
+{"id": "setopt-xx-existing", "cmd": ["SET", "k1", "v3", "XX"]}
+{"id": "setopt-xx-updated", "cmd": ["GET", "k1"]}
+{"id": "setopt-get-missing", "cmd": ["SET", "k3", "v1", "GET"]}
+{"id": "setopt-get-existing", "cmd": ["SET", "k3", "v2", "GET"]}
+{"id": "setopt-get-nx-existing", "cmd": ["SET", "k3", "v9", "NX", "GET"]}
+{"id": "setopt-get-nx-existing-unchanged", "cmd": ["GET", "k3"]}
+{"id": "setopt-get-nx-missing", "cmd": ["SET", "k4", "v1", "NX", "GET"]}
+{"id": "setopt-get-nx-missing-set", "cmd": ["GET", "k4"]}
+{"id": "setopt-get-xx-missing", "cmd": ["SET", "k5", "v", "XX", "GET"]}
+{"id": "setopt-get-xx-missing-not-created", "cmd": ["EXISTS", "k5"]}
+{"id": "setopt-get-xx-existing", "cmd": ["SET", "k4", "v2", "XX", "GET"]}
+{"id": "setopt-nx-xx-conflict", "cmd": ["SET", "k6", "v", "NX", "XX"]}
+{"id": "setopt-xx-nx-conflict", "cmd": ["SET", "k6", "v", "XX", "NX"]}
+{"id": "setopt-ex-px-conflict", "cmd": ["SET", "k6", "v", "EX", "10", "PX", "10000"]}
+{"id": "setopt-nx-ex", "cmd": ["SET", "k7", "v", "NX", "EX", "100"], "now_millis": 5000}
+{"id": "setopt-nx-ex-ttl", "cmd": ["TTL", "k7"], "now_millis": 5000, "mode": "ttl_band", "band": 1}
+{"id": "setopt-xx-get-px", "cmd": ["SET", "k7", "v2", "XX", "GET", "PX", "5000"], "now_millis": 5000}
+{"id": "setopt-xx-get-px-pttl", "cmd": ["PTTL", "k7"], "now_millis": 5000, "mode": "ttl_band", "band": 100}
+{"id": "setopt-plain-set-clears-ttl", "cmd": ["SET", "k7", "v3"]}
+{"id": "setopt-ttl-cleared", "cmd": ["TTL", "k7"]}
+{"id": "setopt-hash-setup", "cmd": ["HSET", "hk", "f", "v"]}
+{"id": "setopt-get-on-hash", "cmd": ["SET", "hk", "v", "GET"]}
+{"id": "setopt-get-on-hash-unchanged", "cmd": ["HGET", "hk", "f"]}
+{"id": "setopt-nx-get-on-hash", "cmd": ["SET", "hk", "v", "NX", "GET"]}
+{"id": "setopt-lowercase-nx-get", "cmd": ["SET", "k8", "v", "nx", "get"]}
+{"id": "setopt-lowercase-applied", "cmd": ["GET", "k8"]}

@@ -1,0 +1,19 @@
+{"id": "s-load-return-1", "cmd": ["SCRIPT", "LOAD", "return 1"]}
+{"id": "s-exists-loaded-and-bogus", "cmd": ["SCRIPT", "EXISTS", "e0e1f9fabfc9d4800c877a703b823ac0578ff8db", "ffffffffffffffffffffffffffffffffffffffff"]}
+{"id": "s-exists-uppercase-sha", "cmd": ["SCRIPT", "EXISTS", "E0E1F9FABFC9D4800C877A703B823AC0578FF8DB"]}
+{"id": "s-evalsha-exec", "cmd": ["EVALSHA", "e0e1f9fabfc9d4800c877a703b823ac0578ff8db", "0"]}
+{"id": "s-evalsha-uppercase-sha", "cmd": ["EVALSHA", "E0E1F9FABFC9D4800C877A703B823AC0578FF8DB", "0"]}
+{"id": "s-eval-return-2", "cmd": ["EVAL", "return 2", "0"]}
+{"id": "s-exists-after-eval-caches", "cmd": ["SCRIPT", "EXISTS", "7f923f79fe76194c868d7e1d0820de36700eb649"]}
+{"id": "s-evalsha-after-eval-caches", "cmd": ["EVALSHA", "7f923f79fe76194c868d7e1d0820de36700eb649", "0"]}
+{"id": "s-flush", "cmd": ["SCRIPT", "FLUSH"]}
+{"id": "s-exists-after-flush", "cmd": ["SCRIPT", "EXISTS", "e0e1f9fabfc9d4800c877a703b823ac0578ff8db"]}
+{"id": "s-evalsha-after-flush", "cmd": ["EVALSHA", "e0e1f9fabfc9d4800c877a703b823ac0578ff8db", "0"]}
+{"id": "s-load-again", "cmd": ["SCRIPT", "LOAD", "return 1"]}
+{"id": "s-flush-async", "cmd": ["SCRIPT", "FLUSH", "ASYNC"]}
+{"id": "s-load-again-2", "cmd": ["SCRIPT", "LOAD", "return 1"]}
+{"id": "s-flush-sync", "cmd": ["SCRIPT", "FLUSH", "SYNC"]}
+{"id": "s-flush-bogus-option", "cmd": ["SCRIPT", "FLUSH", "BOGUS"]}
+{"id": "s-load-invalid-lua", "cmd": ["SCRIPT", "LOAD", "this is not lua"], "mode": "error_prefix"}
+{"id": "s-load-empty-script", "cmd": ["SCRIPT", "LOAD", ""]}
+{"id": "s-evalsha-short-sha", "cmd": ["EVALSHA", "abc", "0"]}

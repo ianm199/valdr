@@ -1,0 +1,49 @@
+{"id": "setex-basic", "cmd": ["SETEX", "sx", "100", "hello"]}
+{"id": "get-after-setex", "cmd": ["GET", "sx"]}
+{"id": "ttl-after-setex", "cmd": ["TTL", "sx"], "mode": "ttl_band", "band": 2}
+{"id": "pttl-after-setex", "cmd": ["PTTL", "sx"], "mode": "ttl_band", "band": 2000}
+{"id": "set-ex", "cmd": ["SET", "ke", "v", "EX", "100"]}
+{"id": "ttl-after-set-ex", "cmd": ["TTL", "ke"], "mode": "ttl_band", "band": 2}
+{"id": "pttl-after-set-ex", "cmd": ["PTTL", "ke"], "mode": "ttl_band", "band": 2000}
+{"id": "set-px", "cmd": ["SET", "kp", "v", "PX", "100000"]}
+{"id": "pttl-after-set-px", "cmd": ["PTTL", "kp"], "mode": "ttl_band", "band": 2000}
+{"id": "ttl-after-set-px", "cmd": ["TTL", "kp"], "mode": "ttl_band", "band": 2}
+{"id": "set-ex-lowercase", "cmd": ["SET", "kl", "v", "ex", "100"]}
+{"id": "ttl-after-set-ex-lowercase", "cmd": ["TTL", "kl"], "mode": "ttl_band", "band": 2}
+{"id": "set-px-lowercase", "cmd": ["SET", "kl2", "v", "px", "50000"]}
+{"id": "pttl-after-set-px-lowercase", "cmd": ["PTTL", "kl2"], "mode": "ttl_band", "band": 2000}
+{"id": "set-then-expire", "cmd": ["SET", "xx", "v"]}
+{"id": "ttl-before-expire", "cmd": ["TTL", "xx"]}
+{"id": "expire-existing", "cmd": ["EXPIRE", "xx", "100"]}
+{"id": "ttl-after-expire", "cmd": ["TTL", "xx"], "mode": "ttl_band", "band": 2}
+{"id": "pexpire-existing", "cmd": ["PEXPIRE", "xx", "250000"]}
+{"id": "pttl-after-pexpire", "cmd": ["PTTL", "xx"], "mode": "ttl_band", "band": 2000}
+{"id": "expire-missing-key", "cmd": ["EXPIRE", "ghost", "100"]}
+{"id": "pexpire-missing-key", "cmd": ["PEXPIRE", "ghost", "100"]}
+{"id": "ttl-missing-key", "cmd": ["TTL", "ghost"]}
+{"id": "pttl-missing-key", "cmd": ["PTTL", "ghost"]}
+{"id": "set-no-expiry", "cmd": ["SET", "noexp", "v"]}
+{"id": "ttl-no-expiry", "cmd": ["TTL", "noexp"]}
+{"id": "pttl-no-expiry", "cmd": ["PTTL", "noexp"]}
+{"id": "set-ez", "cmd": ["SET", "ez", "v"]}
+{"id": "expire-zero-deletes", "cmd": ["EXPIRE", "ez", "0"]}
+{"id": "exists-after-expire-zero", "cmd": ["EXISTS", "ez"]}
+{"id": "set-en", "cmd": ["SET", "en", "v"]}
+{"id": "expire-negative-deletes", "cmd": ["EXPIRE", "en", "-5"]}
+{"id": "exists-after-expire-negative", "cmd": ["EXISTS", "en"]}
+{"id": "set-ei", "cmd": ["SET", "ei", "v"]}
+{"id": "expire-non-integer", "cmd": ["EXPIRE", "ei", "abc"]}
+{"id": "expire-overflow", "cmd": ["EXPIRE", "ei", "99999999999999999"]}
+{"id": "pexpire-overflow", "cmd": ["PEXPIRE", "ei", "99999999999999999999"]}
+{"id": "set-rt", "cmd": ["SET", "rt", "v"]}
+{"id": "pexpire-2400ms", "cmd": ["PEXPIRE", "rt", "2400"]}
+{"id": "ttl-rounding-2400ms-band0", "cmd": ["TTL", "rt"], "mode": "ttl_band", "band": 0}
+{"id": "pexpire-2600ms", "cmd": ["PEXPIRE", "rt", "2600"]}
+{"id": "ttl-rounding-2600ms-band0", "cmd": ["TTL", "rt"], "mode": "ttl_band", "band": 0}
+{"id": "set-ex-zero", "cmd": ["SET", "z", "v", "EX", "0"]}
+{"id": "set-px-negative", "cmd": ["SET", "z", "v", "PX", "-1"]}
+{"id": "set-ex-non-integer", "cmd": ["SET", "z", "v", "EX", "abc"]}
+{"id": "set-ex-missing-operand", "cmd": ["SET", "z", "v", "EX"]}
+{"id": "setex-real-expiry", "cmd": ["SETEX", "gone", "1", "bye"]}
+{"id": "get-after-real-expiry", "cmd": ["GET", "gone"], "sleep_ms": 1300}
+{"id": "exists-after-real-expiry", "cmd": ["EXISTS", "gone"]}

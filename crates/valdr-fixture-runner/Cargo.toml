@@ -1,0 +1,11 @@
+[package]
+name = "valdr-fixture-runner"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "JSONL stdin/stdout driver exposing valdr-engine for the differential oracle."
+
+[dependencies]
+valdr-engine = { workspace = true }
+redis-protocol = { workspace = true }
+serde_json = { workspace = true }

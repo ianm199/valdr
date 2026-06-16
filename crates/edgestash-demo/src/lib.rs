@@ -5,12 +5,16 @@
 //! Valdr engine per shard, tenant policy stored in hashes, and Lua `EVALSHA`
 //! decisions through the Upstash-style REST adapter.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::{json, Value as JsonValue};
 use valdr_engine::{Engine, NoopHost, RestRequest, RestResponse, SnapshotError};
 
-const DEFAULT_SNAPSHOT_KEY: &str = "valdr-engine-snapshot-v1";
+/// Prefix for every storage key that holds one Redis key's serialized entry.
+/// The storage layout is `format!("k:{}", hex(redis_key))` so an arbitrary
+/// binary Redis key maps to a safe storage-key string. `open`/restore only
+/// imports storage entries under this prefix and ignores any others.
+const KEY_PREFIX: &str = "k:";
 const APPLICATION_JSON: &str = "application/json";
 const LIMITER_SCRIPT: &str = r#"
     local bucket_key = KEYS[1]
@@ -113,9 +117,14 @@ pub struct LimitDecision {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DemoAiRequest {
-    now_millis: u64,
+    now_millis: Option<u64>,
     prompt: String,
     tokens: i64,
+}
+
+struct LimitBody {
+    now_millis: Option<u64>,
+    cost: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,6 +136,7 @@ pub enum EdgeError {
     RestError { status: u16, body: Vec<u8> },
     MissingResult,
     UnexpectedResult,
+    ValueBudgetExceeded { value_bytes: usize },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,35 +148,43 @@ pub enum EdgeHttpMethod {
     Other,
 }
 
+/// One HTTP request as seen by the route layer. `now_millis` is the host
+/// adapter's clock reading for this request and is the time authority for
+/// every route unless the object was explicitly built with
+/// `with_client_time_allowed(true)` for deterministic fixtures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EdgeHttpRequest<'a> {
     pub method: EdgeHttpMethod,
     pub path: &'a str,
     pub body: &'a [u8],
+    pub now_millis: u64,
 }
 
 impl<'a> EdgeHttpRequest<'a> {
-    pub fn get(path: &'a str) -> Self {
+    pub fn get(path: &'a str, now_millis: u64) -> Self {
         Self {
             method: EdgeHttpMethod::Get,
             path,
             body: &[],
+            now_millis,
         }
     }
 
-    pub fn post(path: &'a str, body: &'a [u8]) -> Self {
+    pub fn post(path: &'a str, body: &'a [u8], now_millis: u64) -> Self {
         Self {
             method: EdgeHttpMethod::Post,
             path,
             body,
+            now_millis,
         }
     }
 
-    pub fn put(path: &'a str, body: &'a [u8]) -> Self {
+    pub fn put(path: &'a str, body: &'a [u8], now_millis: u64) -> Self {
         Self {
             method: EdgeHttpMethod::Put,
             path,
             body,
+            now_millis,
         }
     }
 }
@@ -181,22 +199,44 @@ pub struct EdgeHttpResponse {
 pub trait ObjectStorage {
     fn get(&mut self, key: &str) -> Result<Option<Vec<u8>>, EdgeError>;
     fn put(&mut self, key: &str, value: &[u8]) -> Result<(), EdgeError>;
+    fn delete(&mut self, key: &str) -> Result<(), EdgeError>;
+    fn scan(&mut self) -> Result<Vec<(String, Vec<u8>)>, EdgeError>;
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// In-memory per-key key/value store with a change-log. Each `put` or `delete`
+/// records the storage-key in `dirty`, so a host adapter can flush only what
+/// changed since the last `drain_dirty` instead of rewriting the whole store.
+#[derive(Debug, Clone, Default)]
 pub struct MemoryObjectStorage {
     values: HashMap<String, Vec<u8>>,
+    dirty: HashSet<String>,
 }
 
 impl MemoryObjectStorage {
-    pub fn with_snapshot_bytes(snapshot: Vec<u8>) -> Self {
-        let mut values = HashMap::new();
-        values.insert(DEFAULT_SNAPSHOT_KEY.to_owned(), snapshot);
-        Self { values }
+    /// Build a store from already-persisted entries with an empty change-log.
+    /// A host adapter uses this on cold start after listing provider storage.
+    pub fn from_entries(entries: Vec<(String, Vec<u8>)>) -> Self {
+        Self {
+            values: entries.into_iter().collect(),
+            dirty: HashSet::new(),
+        }
     }
 
-    pub fn snapshot_bytes(&self) -> Option<&[u8]> {
-        self.values.get(DEFAULT_SNAPSHOT_KEY).map(Vec::as_slice)
+    /// Drain the set of storage-keys put or deleted since the last call,
+    /// sorted for deterministic flush order. A host resolves each returned
+    /// key to put-vs-delete with `value`.
+    pub fn drain_dirty(&mut self) -> Vec<String> {
+        let mut keys: Vec<String> = self.dirty.drain().collect();
+        keys.sort();
+        keys
+    }
+
+    /// Read the final stored value of a storage-key, or `None` when the key
+    /// was deleted. A host adapter calls this for each drained dirty key to
+    /// decide whether to write the bytes or delete the key from provider
+    /// storage.
+    pub fn value(&self, key: &str) -> Option<&[u8]> {
+        self.values.get(key).map(Vec::as_slice)
     }
 }
 
@@ -207,56 +247,112 @@ impl ObjectStorage for MemoryObjectStorage {
 
     fn put(&mut self, key: &str, value: &[u8]) -> Result<(), EdgeError> {
         self.values.insert(key.to_owned(), value.to_vec());
+        self.dirty.insert(key.to_owned());
         Ok(())
     }
+
+    fn delete(&mut self, key: &str) -> Result<(), EdgeError> {
+        self.values.remove(key);
+        self.dirty.insert(key.to_owned());
+        Ok(())
+    }
+
+    fn scan(&mut self) -> Result<Vec<(String, Vec<u8>)>, EdgeError> {
+        Ok(self
+            .values
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect())
+    }
+}
+
+/// Ceiling on one exported key's serialized value. Cloudflare Durable Object
+/// storage caps a single value at 128 KiB; this leaves headroom below that
+/// limit. A mutating request that would write one key whose value exceeds the
+/// ceiling is rejected with HTTP 507 and the in-memory state is rolled back to
+/// the last persisted state, so storage stays authoritative.
+pub const MAX_VALUE_BYTES: usize = 120 * 1024;
+
+/// Storage-key under which one Redis key's serialized entry is held:
+/// `format!("k:{}", hex(redis_key))`, lowercase hex of the raw key bytes.
+fn key_storage_key(redis_key: &[u8]) -> String {
+    let mut out = String::with_capacity(KEY_PREFIX.len() + redis_key.len() * 2);
+    out.push_str(KEY_PREFIX);
+    for byte in redis_key {
+        out.push(char::from_digit((byte >> 4) as u32, 16).unwrap());
+        out.push(char::from_digit((byte & 0x0f) as u32, 16).unwrap());
+    }
+    out
 }
 
 #[derive(Debug, Clone)]
 pub struct EdgeObject<S> {
     shard: EdgeShard,
     storage: S,
-    snapshot_key: String,
+    allow_client_time: bool,
+    persisted_epoch: u64,
 }
 
 impl<S: ObjectStorage> EdgeObject<S> {
-    pub fn open(storage: S) -> Result<Self, EdgeError> {
-        Self::open_with_snapshot_key(storage, DEFAULT_SNAPSHOT_KEY)
-    }
-
-    pub fn open_with_snapshot_key(
-        mut storage: S,
-        snapshot_key: impl Into<String>,
-    ) -> Result<Self, EdgeError> {
-        let snapshot_key = snapshot_key.into();
-        let shard = match storage.get(&snapshot_key)? {
-            Some(snapshot) => EdgeShard::from_snapshot(&snapshot)?,
-            None => EdgeShard::new(),
-        };
+    /// Restore from per-key storage entries: scan the store and import every
+    /// entry whose storage-key carries `KEY_PREFIX`, ignoring any others.
+    /// `persisted_epoch` starts at the freshly-imported shard's epoch (0 after
+    /// a clean cold start, since `import_key` does not dirty anything), which
+    /// is correct because nothing is pending a flush.
+    pub fn open(mut storage: S) -> Result<Self, EdgeError> {
+        let mut shard = EdgeShard::new();
+        for (skey, bytes) in storage.scan()? {
+            if skey.starts_with(KEY_PREFIX) {
+                shard.import_key(&bytes)?;
+            }
+        }
+        let persisted_epoch = shard.mutation_epoch();
         Ok(Self {
             shard,
             storage,
-            snapshot_key,
+            allow_client_time: false,
+            persisted_epoch,
         })
+    }
+
+    /// Deterministic-fixture mode: routes take `now_millis` from request
+    /// bodies and the engine clock advances only through those values. The
+    /// default (false) makes the host adapter's request clock authoritative
+    /// and rejects client-supplied time, because a client that controls the
+    /// clock can refill its own rate-limit buckets.
+    pub fn with_client_time_allowed(mut self, allowed: bool) -> Self {
+        self.allow_client_time = allowed;
+        self
+    }
+
+    /// Engine mutation epoch covered by the bytes last written to (or read
+    /// from) the underlying storage. Host adapters compare this against their
+    /// own last-flushed epoch to skip redundant writes to provider storage.
+    pub fn persisted_epoch(&self) -> u64 {
+        self.persisted_epoch
     }
 
     pub fn install_policy(&mut self, tenant_id: &str, policy: Policy) -> Result<(), EdgeError> {
         self.shard.install_policy(tenant_id, policy)?;
-        self.persist_snapshot()
+        self.persist()
     }
 
     pub fn check(&mut self, request: LimitRequest<'_>) -> Result<LimitDecision, EdgeError> {
         let decision = self.shard.check(request)?;
-        self.persist_snapshot()?;
+        self.persist()?;
         Ok(decision)
     }
 
     pub fn execute_rest(&mut self, request: RestRequest<'_>) -> Result<RestResponse, EdgeError> {
         let response = self.shard.execute_rest(request);
-        self.persist_snapshot()?;
+        self.persist()?;
         Ok(response)
     }
 
     pub fn handle_http(&mut self, request: EdgeHttpRequest<'_>) -> EdgeHttpResponse {
+        if !self.allow_client_time {
+            self.shard.set_now_millis(request.now_millis);
+        }
         let (path, query) = split_query(request.path);
         let segments = match route_segments(path) {
             Ok(segments) => segments,
@@ -281,11 +377,19 @@ impl<S: ObjectStorage> EdgeObject<S> {
             if request.method != EdgeHttpMethod::Post {
                 return http_error(405, "ERR limit route requires POST");
             }
-            let limit = match limit_from_json(&segments[2], request.body) {
-                Ok(limit) => limit,
+            let body = match limit_body_from_json(request.body) {
+                Ok(body) => body,
                 Err(message) => return http_error(400, message),
             };
-            return match self.check(limit) {
+            let now_millis = match self.resolve_now(body.now_millis, request.now_millis) {
+                Ok(now_millis) => now_millis,
+                Err(message) => return http_error(400, message),
+            };
+            return match self.check(LimitRequest {
+                tenant_id: &segments[2],
+                now_millis,
+                cost: body.cost,
+            }) {
                 Ok(decision) => json_response(200, limit_decision_json(decision)),
                 Err(error) => edge_error_response(error),
             };
@@ -299,9 +403,13 @@ impl<S: ObjectStorage> EdgeObject<S> {
                 Ok(demo) => demo,
                 Err(message) => return http_error(400, message),
             };
+            let now_millis = match self.resolve_now(demo.now_millis, request.now_millis) {
+                Ok(now_millis) => now_millis,
+                Err(message) => return http_error(400, message),
+            };
             let decision = match self.check(LimitRequest {
                 tenant_id: &segments[2],
-                now_millis: demo.now_millis,
+                now_millis,
                 cost: demo.tokens,
             }) {
                 Ok(decision) => decision,
@@ -375,9 +483,61 @@ impl<S: ObjectStorage> EdgeObject<S> {
         self.storage
     }
 
-    fn persist_snapshot(&mut self) -> Result<(), EdgeError> {
-        let snapshot = self.shard.export_snapshot();
-        self.storage.put(&self.snapshot_key, &snapshot)
+    /// Flush only the keys the shard changed since the last flush, O(dirty).
+    /// Pass one exports every dirty key and rejects the whole flush if any one
+    /// value exceeds the per-key budget, rolling state back from storage on
+    /// that rare error path. Pass two commits the writes and deletes.
+    fn persist(&mut self) -> Result<(), EdgeError> {
+        let dirty = self.shard.take_dirty();
+        if dirty.is_empty() {
+            return Ok(());
+        }
+        let mut writes: Vec<(String, Option<Vec<u8>>)> = Vec::with_capacity(dirty.len());
+        for key in &dirty {
+            let bytes = self.shard.export_key(key);
+            if let Some(ref b) = bytes {
+                if b.len() > MAX_VALUE_BYTES {
+                    let value_bytes = b.len();
+                    self.rollback_from_storage()?;
+                    return Err(EdgeError::ValueBudgetExceeded { value_bytes });
+                }
+            }
+            writes.push((key_storage_key(key), bytes));
+        }
+        for (skey, bytes) in writes {
+            match bytes {
+                Some(b) => self.storage.put(&skey, &b)?,
+                None => self.storage.delete(&skey)?,
+            }
+        }
+        self.persisted_epoch = self.shard.mutation_epoch();
+        Ok(())
+    }
+
+    /// Rebuild the shard from authoritative storage, discarding the in-flight
+    /// mutation that triggered the rollback. The limiter script cache resets,
+    /// which is fine because it reloads on next use.
+    fn rollback_from_storage(&mut self) -> Result<(), EdgeError> {
+        let entries = self.storage.scan()?;
+        let mut shard = EdgeShard::new();
+        for (skey, bytes) in entries {
+            if skey.starts_with(KEY_PREFIX) {
+                shard.import_key(&bytes)?;
+            }
+        }
+        self.shard = shard;
+        self.persisted_epoch = self.shard.mutation_epoch();
+        Ok(())
+    }
+
+    fn resolve_now(&self, client_now: Option<u64>, request_now: u64) -> Result<u64, &'static str> {
+        if self.allow_client_time {
+            return client_now.ok_or("ERR missing now_millis");
+        }
+        match client_now {
+            Some(_) => Err("ERR client now_millis is not allowed; server time is authoritative"),
+            None => Ok(request_now),
+        }
     }
 }
 
@@ -445,8 +605,37 @@ impl EdgeShard {
         self.engine.execute_rest(request)
     }
 
+    pub fn set_now_millis(&mut self, now_millis: u64) {
+        self.engine.host_mut().set_now_millis(now_millis);
+    }
+
+    pub fn mutation_epoch(&self) -> u64 {
+        self.engine.mutation_epoch()
+    }
+
     pub fn export_snapshot(&mut self) -> Vec<u8> {
         self.engine.export_snapshot()
+    }
+
+    /// Drain the Redis keys the engine changed since the last call, sorted.
+    /// A host flushes each one with `export_key`.
+    pub fn take_dirty(&mut self) -> Vec<Vec<u8>> {
+        self.engine.take_dirty()
+    }
+
+    /// Serialize one Redis key's live entry, or `None` when it is absent or
+    /// expired (the host then deletes the matching storage-key).
+    pub fn export_key(&mut self, key: &[u8]) -> Option<Vec<u8>> {
+        self.engine.export_key(key)
+    }
+
+    /// Restore one Redis key from bytes produced by `export_key`. Does not
+    /// dirty. The cached limiter sha is cleared so it is re-derived from the
+    /// freshly-imported script state on next use.
+    pub fn import_key(&mut self, bytes: &[u8]) -> Result<(), EdgeError> {
+        self.engine.import_key(bytes).map_err(EdgeError::Snapshot)?;
+        self.limiter_sha = None;
+        Ok(())
     }
 
     pub fn import_snapshot(&mut self, snapshot: &[u8]) -> Result<(), EdgeError> {
@@ -577,16 +766,22 @@ fn policy_from_json(body: &[u8]) -> Result<Policy, &'static str> {
     })
 }
 
-fn limit_from_json<'a>(tenant_id: &'a str, body: &[u8]) -> Result<LimitRequest<'a>, &'static str> {
+fn limit_body_from_json(body: &[u8]) -> Result<LimitBody, &'static str> {
     let value: JsonValue = serde_json::from_slice(body).map_err(|_| "ERR invalid limit JSON")?;
-    Ok(LimitRequest {
-        tenant_id,
-        now_millis: value
-            .get("now_millis")
-            .and_then(JsonValue::as_u64)
-            .ok_or("ERR missing now_millis")?,
+    Ok(LimitBody {
+        now_millis: optional_now_millis(&value)?,
         cost: required_i64(&value, "cost")?,
     })
+}
+
+fn optional_now_millis(value: &JsonValue) -> Result<Option<u64>, &'static str> {
+    match value.get("now_millis") {
+        Some(raw) => raw
+            .as_u64()
+            .map(Some)
+            .ok_or("ERR now_millis must be a non-negative integer"),
+        None => Ok(None),
+    }
 }
 
 fn demo_ai_from_json(body: &[u8]) -> Result<DemoAiRequest, &'static str> {
@@ -604,10 +799,7 @@ fn demo_ai_from_json(body: &[u8]) -> Result<DemoAiRequest, &'static str> {
         return Err("ERR tokens must be positive");
     }
     Ok(DemoAiRequest {
-        now_millis: value
-            .get("now_millis")
-            .and_then(JsonValue::as_u64)
-            .ok_or("ERR missing now_millis")?,
+        now_millis: optional_now_millis(&value)?,
         prompt: prompt.to_owned(),
         tokens,
     })
@@ -653,6 +845,10 @@ fn edge_error_response(error: EdgeError) -> EdgeHttpResponse {
             content_type: APPLICATION_JSON,
             body,
         },
+        EdgeError::ValueBudgetExceeded { .. } => http_error(
+            507,
+            "ERR value too large; request rolled back to last persisted state",
+        ),
         other => http_error(500, edge_error_message(&other)),
     }
 }
@@ -666,6 +862,7 @@ fn edge_error_message(error: &EdgeError) -> &'static str {
         EdgeError::RestError { .. } => "ERR command failed",
         EdgeError::MissingResult => "ERR missing result",
         EdgeError::UnexpectedResult => "ERR unexpected result",
+        EdgeError::ValueBudgetExceeded { .. } => "ERR value too large",
     }
 }
 
@@ -936,7 +1133,12 @@ mod tests {
         object
             .install_policy("tenant-42", Policy::token_bucket(10, 5, 1_000, 60_000))
             .unwrap();
-        assert!(object.storage().snapshot_bytes().is_some());
+        assert!(object
+            .storage_mut()
+            .scan()
+            .unwrap()
+            .iter()
+            .any(|(skey, _)| skey.starts_with(KEY_PREFIX)));
 
         assert_eq!(
             object
@@ -996,7 +1198,9 @@ mod tests {
     #[test]
     fn http_policy_and_limit_routes_persist_across_reopen() {
         let storage = MemoryObjectStorage::default();
-        let mut object = EdgeObject::open(storage).unwrap();
+        let mut object = EdgeObject::open(storage)
+            .unwrap()
+            .with_client_time_allowed(true);
 
         let policy = br#"{
             "capacity": 10,
@@ -1004,7 +1208,7 @@ mod tests {
             "refill_ms": 1000,
             "ttl_ms": 60000
         }"#;
-        let response = object.handle_http(EdgeHttpRequest::put("/v1/policy/tenant-42", policy));
+        let response = object.handle_http(EdgeHttpRequest::put("/v1/policy/tenant-42", policy, 0));
         assert_eq!(response.status, 200);
         assert_eq!(
             serde_json::from_slice::<JsonValue>(&response.body).unwrap(),
@@ -1014,6 +1218,7 @@ mod tests {
         let response = object.handle_http(EdgeHttpRequest::post(
             "/v1/limit/tenant-42",
             br#"{"now_millis":1000,"cost":7}"#,
+            0,
         ));
         assert_eq!(response.status, 200);
         assert_eq!(
@@ -1028,10 +1233,13 @@ mod tests {
         );
 
         let storage = object.into_storage();
-        let mut reopened = EdgeObject::open(storage).unwrap();
+        let mut reopened = EdgeObject::open(storage)
+            .unwrap()
+            .with_client_time_allowed(true);
         let response = reopened.handle_http(EdgeHttpRequest::post(
             "/v1/limit/tenant-42",
             br#"{"now_millis":1100,"cost":7}"#,
+            0,
         ));
         assert_eq!(response.status, 200);
         assert_eq!(
@@ -1053,6 +1261,7 @@ mod tests {
 
         let response = object.handle_http(EdgeHttpRequest::get(
             "/v1/valdr/tenant-42/SET/raw%2Fkey/hello%20edge",
+            1_000,
         ));
         assert_eq!(response.status, 200);
         assert_eq!(
@@ -1062,8 +1271,10 @@ mod tests {
 
         let storage = object.into_storage();
         let mut reopened = EdgeObject::open(storage).unwrap();
-        let response =
-            reopened.handle_http(EdgeHttpRequest::get("/v1/valdr/tenant-42/GET/raw%2Fkey"));
+        let response = reopened.handle_http(EdgeHttpRequest::get(
+            "/v1/valdr/tenant-42/GET/raw%2Fkey",
+            2_000,
+        ));
         assert_eq!(response.status, 200);
         assert_eq!(
             serde_json::from_slice::<JsonValue>(&response.body).unwrap(),
@@ -1074,7 +1285,9 @@ mod tests {
     #[test]
     fn http_ai_demo_route_spends_tokens_through_lua_limiter() {
         let storage = MemoryObjectStorage::default();
-        let mut object = EdgeObject::open(storage).unwrap();
+        let mut object = EdgeObject::open(storage)
+            .unwrap()
+            .with_client_time_allowed(true);
 
         let policy = br#"{
             "capacity": 10,
@@ -1084,7 +1297,7 @@ mod tests {
         }"#;
         assert_eq!(
             object
-                .handle_http(EdgeHttpRequest::put("/v1/policy/tenant-42", policy))
+                .handle_http(EdgeHttpRequest::put("/v1/policy/tenant-42", policy, 0))
                 .status,
             200
         );
@@ -1092,6 +1305,7 @@ mod tests {
         let response = object.handle_http(EdgeHttpRequest::post(
             "/v1/ai/tenant-42",
             br#"{"now_millis":1000,"tokens":7,"prompt":"summarize invoices"}"#,
+            0,
         ));
         assert_eq!(response.status, 200);
         assert_eq!(
@@ -1113,10 +1327,13 @@ mod tests {
         );
 
         let storage = object.into_storage();
-        let mut reopened = EdgeObject::open(storage).unwrap();
+        let mut reopened = EdgeObject::open(storage)
+            .unwrap()
+            .with_client_time_allowed(true);
         let response = reopened.handle_http(EdgeHttpRequest::post(
             "/v1/ai/tenant-42",
             br#"{"now_millis":1100,"tokens":7,"prompt":"summarize invoices"}"#,
+            0,
         ));
         assert_eq!(response.status, 429);
         assert_eq!(
@@ -1141,7 +1358,7 @@ mod tests {
     fn http_routes_return_explicit_errors_for_bad_requests() {
         let mut object = EdgeObject::open(MemoryObjectStorage::default()).unwrap();
 
-        let response = object.handle_http(EdgeHttpRequest::get("/v1/limit/tenant-42"));
+        let response = object.handle_http(EdgeHttpRequest::get("/v1/limit/tenant-42", 0));
         assert_eq!(response.status, 405);
         assert_eq!(
             serde_json::from_slice::<JsonValue>(&response.body).unwrap(),
@@ -1151,6 +1368,7 @@ mod tests {
         let response = object.handle_http(EdgeHttpRequest::put(
             "/v1/policy/tenant-42",
             br#"{"capacity":10}"#,
+            0,
         ));
         assert_eq!(response.status, 400);
         assert_eq!(
@@ -1161,6 +1379,7 @@ mod tests {
         let response = object.handle_http(EdgeHttpRequest::post(
             "/v1/ai/tenant-42",
             br#"{"now_millis":1000,"tokens":0,"prompt":"hello"}"#,
+            0,
         ));
         assert_eq!(response.status, 400);
         assert_eq!(
@@ -1187,6 +1406,196 @@ mod tests {
         assert_eq!(
             EdgeWorker::new(0).unwrap_err(),
             EdgeError::InvalidShardCount
+        );
+    }
+
+    #[test]
+    fn secure_mode_rejects_client_now_millis() {
+        let mut object = EdgeObject::open(MemoryObjectStorage::default()).unwrap();
+        let policy = br#"{"capacity":10,"refill_tokens":5,"refill_ms":1000,"ttl_ms":60000}"#;
+        assert_eq!(
+            object
+                .handle_http(EdgeHttpRequest::put("/v1/policy/tenant-42", policy, 500))
+                .status,
+            200
+        );
+
+        let response = object.handle_http(EdgeHttpRequest::post(
+            "/v1/limit/tenant-42",
+            br#"{"now_millis":1000,"cost":7}"#,
+            1_000,
+        ));
+        assert_eq!(response.status, 400);
+        assert_eq!(
+            serde_json::from_slice::<JsonValue>(&response.body).unwrap(),
+            json!({"error": "ERR client now_millis is not allowed; server time is authoritative"})
+        );
+
+        let response = object.handle_http(EdgeHttpRequest::post(
+            "/v1/ai/tenant-42",
+            br#"{"now_millis":1000,"tokens":7,"prompt":"hello"}"#,
+            1_000,
+        ));
+        assert_eq!(response.status, 400);
+    }
+
+    #[test]
+    fn secure_mode_limiter_runs_on_request_clock() {
+        let mut object = EdgeObject::open(MemoryObjectStorage::default()).unwrap();
+        let policy = br#"{"capacity":10,"refill_tokens":5,"refill_ms":1000,"ttl_ms":60000}"#;
+        assert_eq!(
+            object
+                .handle_http(EdgeHttpRequest::put("/v1/policy/tenant-42", policy, 500))
+                .status,
+            200
+        );
+
+        let first = object.handle_http(EdgeHttpRequest::post(
+            "/v1/limit/tenant-42",
+            br#"{"cost":7}"#,
+            1_000,
+        ));
+        assert_eq!(first.status, 200);
+        assert_eq!(
+            serde_json::from_slice::<JsonValue>(&first.body).unwrap(),
+            json!({
+                "allowed": true,
+                "remaining": 3,
+                "reset_ms": 2400,
+                "retry_after_ms": 0,
+                "capacity": 10
+            })
+        );
+
+        let second = object.handle_http(EdgeHttpRequest::post(
+            "/v1/limit/tenant-42",
+            br#"{"cost":7}"#,
+            1_100,
+        ));
+        assert_eq!(second.status, 200);
+        assert_eq!(
+            serde_json::from_slice::<JsonValue>(&second.body).unwrap(),
+            json!({
+                "allowed": false,
+                "remaining": 3,
+                "reset_ms": 2400,
+                "retry_after_ms": 700,
+                "capacity": 10
+            })
+        );
+    }
+
+    #[test]
+    fn secure_mode_raw_route_expiries_follow_request_clock() {
+        let mut object = EdgeObject::open(MemoryObjectStorage::default()).unwrap();
+        let response = object.handle_http(EdgeHttpRequest::get(
+            "/v1/valdr/tenant-42/SET/session/abc?PX=5000",
+            10_000,
+        ));
+        assert_eq!(response.status, 200);
+
+        let response = object.handle_http(EdgeHttpRequest::get(
+            "/v1/valdr/tenant-42/PTTL/session",
+            12_000,
+        ));
+        assert_eq!(
+            serde_json::from_slice::<JsonValue>(&response.body).unwrap(),
+            json!({"result": 3000})
+        );
+
+        let response = object.handle_http(EdgeHttpRequest::get(
+            "/v1/valdr/tenant-42/GET/session",
+            16_000,
+        ));
+        assert_eq!(
+            serde_json::from_slice::<JsonValue>(&response.body).unwrap(),
+            json!({"result": JsonValue::Null})
+        );
+    }
+
+    #[test]
+    fn read_only_requests_do_not_advance_persisted_epoch() {
+        let mut object = EdgeObject::open(MemoryObjectStorage::default()).unwrap();
+        let response = object.handle_http(EdgeHttpRequest::get(
+            "/v1/valdr/tenant-42/SET/raw-key/42",
+            1_000,
+        ));
+        assert_eq!(response.status, 200);
+        let epoch_after_write = object.persisted_epoch();
+
+        let response = object.handle_http(EdgeHttpRequest::get(
+            "/v1/valdr/tenant-42/GET/raw-key",
+            2_000,
+        ));
+        assert_eq!(response.status, 200);
+        assert_eq!(object.persisted_epoch(), epoch_after_write);
+
+        let response = object.handle_http(EdgeHttpRequest::get(
+            "/v1/valdr/tenant-42/SET/raw-key/43",
+            3_000,
+        ));
+        assert_eq!(response.status, 200);
+        assert_ne!(object.persisted_epoch(), epoch_after_write);
+    }
+
+    #[test]
+    fn value_budget_rejects_oversized_state_and_rolls_back() {
+        let mut object = EdgeObject::open(MemoryObjectStorage::default()).unwrap();
+        let response = object.handle_http(EdgeHttpRequest::get(
+            "/v1/valdr/tenant-42/SET/small/keep-me",
+            1_000,
+        ));
+        assert_eq!(response.status, 200);
+
+        let oversized = vec![b'x'; MAX_VALUE_BYTES];
+        let response = object.handle_http(EdgeHttpRequest {
+            method: EdgeHttpMethod::Post,
+            path: "/v1/valdr/tenant-42/SET/big",
+            body: &oversized,
+            now_millis: 2_000,
+        });
+        assert_eq!(response.status, 507);
+        assert_eq!(
+            serde_json::from_slice::<JsonValue>(&response.body).unwrap(),
+            json!({"error": "ERR value too large; request rolled back to last persisted state"})
+        );
+
+        let response =
+            object.handle_http(EdgeHttpRequest::get("/v1/valdr/tenant-42/GET/big", 3_000));
+        assert_eq!(
+            serde_json::from_slice::<JsonValue>(&response.body).unwrap(),
+            json!({"result": JsonValue::Null})
+        );
+        let response =
+            object.handle_http(EdgeHttpRequest::get("/v1/valdr/tenant-42/GET/small", 3_000));
+        assert_eq!(
+            serde_json::from_slice::<JsonValue>(&response.body).unwrap(),
+            json!({"result": "keep-me"})
+        );
+    }
+
+    #[test]
+    fn value_budget_on_fresh_object_resets_to_empty_state() {
+        let mut object = EdgeObject::open(MemoryObjectStorage::default()).unwrap();
+        let oversized = vec![b'x'; MAX_VALUE_BYTES];
+        let response = object.handle_http(EdgeHttpRequest {
+            method: EdgeHttpMethod::Post,
+            path: "/v1/valdr/tenant-42/SET/big",
+            body: &oversized,
+            now_millis: 1_000,
+        });
+        assert_eq!(response.status, 507);
+
+        let response = object.handle_http(EdgeHttpRequest::get(
+            "/v1/valdr/tenant-42/SET/after/ok",
+            2_000,
+        ));
+        assert_eq!(response.status, 200);
+        let response =
+            object.handle_http(EdgeHttpRequest::get("/v1/valdr/tenant-42/GET/after", 3_000));
+        assert_eq!(
+            serde_json::from_slice::<JsonValue>(&response.body).unwrap(),
+            json!({"result": "ok"})
         );
     }
 }

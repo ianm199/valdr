@@ -1,0 +1,37 @@
+{"id": "unknown-command", "cmd": ["NOPE"]}
+{"id": "unknown-command-with-args", "cmd": ["NOPE", "a", "b"]}
+{"id": "empty-command-name", "cmd": [""]}
+{"id": "arity-get-none", "cmd": ["GET"]}
+{"id": "arity-get-extra", "cmd": ["GET", "a", "b"]}
+{"id": "arity-set-missing-value", "cmd": ["SET", "k"]}
+{"id": "arity-del-none", "cmd": ["DEL"]}
+{"id": "arity-exists-none", "cmd": ["EXISTS"]}
+{"id": "arity-incr-none", "cmd": ["INCR"]}
+{"id": "set-ax", "cmd": ["SET", "ax", "1"]}
+{"id": "arity-incr-extra-arg", "cmd": ["INCR", "ax", "extra"]}
+{"id": "arity-incrby-missing-delta", "cmd": ["INCRBY", "k"]}
+{"id": "arity-incrby-extra", "cmd": ["INCRBY", "k", "1", "2"]}
+{"id": "arity-ttl-extra", "cmd": ["TTL", "k", "x"]}
+{"id": "arity-pttl-none", "cmd": ["PTTL"]}
+{"id": "arity-expire-missing-seconds", "cmd": ["EXPIRE", "k"]}
+{"id": "arity-pexpire-extra", "cmd": ["PEXPIRE", "k", "1", "2"]}
+{"id": "arity-hget-missing-field", "cmd": ["HGET", "h"]}
+{"id": "arity-hset-no-pairs", "cmd": ["HSET", "h", "f"]}
+{"id": "arity-hset-odd-pairs", "cmd": ["HSET", "h", "f", "v", "f2"]}
+{"id": "arity-hgetall-extra", "cmd": ["HGETALL", "h", "x"]}
+{"id": "arity-hdel-no-fields", "cmd": ["HDEL", "h"]}
+{"id": "arity-setex-missing-value", "cmd": ["SETEX", "k", "10"]}
+{"id": "setex-non-integer-seconds", "cmd": ["SETEX", "k", "abc", "v"]}
+{"id": "setex-zero-seconds", "cmd": ["SETEX", "k", "0", "v"]}
+{"id": "setex-negative-seconds", "cmd": ["SETEX", "k", "-1", "v"]}
+{"id": "set-unknown-option", "cmd": ["SET", "k", "v", "BLAH"]}
+{"id": "arity-eval-none", "cmd": ["EVAL"]}
+{"id": "arity-eval-missing-numkeys", "cmd": ["EVAL", "return 1"]}
+{"id": "eval-numkeys-negative", "cmd": ["EVAL", "return 1", "-1"]}
+{"id": "eval-numkeys-greater-than-args", "cmd": ["EVAL", "return 1", "3", "k1"]}
+{"id": "eval-numkeys-non-integer", "cmd": ["EVAL", "return 1", "abc"]}
+{"id": "arity-evalsha-none", "cmd": ["EVALSHA"]}
+{"id": "arity-evalsha-missing-numkeys", "cmd": ["EVALSHA", "abc"]}
+{"id": "arity-script-none", "cmd": ["SCRIPT"]}
+{"id": "script-unknown-subcommand", "cmd": ["SCRIPT", "BLAH"]}
+{"id": "arity-script-load-none", "cmd": ["SCRIPT", "LOAD"]}
