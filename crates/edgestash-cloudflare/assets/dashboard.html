@@ -92,6 +92,11 @@
   .entry .body b { color: var(--text); font-weight: 600; }
 
   pre#script { font-family: var(--mono); font-size: 13px; line-height: 1.5; background: var(--code-bg); border: 1px solid var(--rule); border-radius: 4px; padding: 14px 16px; overflow-x: auto; margin: 12px 0; white-space: pre; }
+  pre#script .k { color: var(--accent); font-weight: 600; }  /* keyword */
+  pre#script .b { color: #0f766e; }                          /* builtin / global */
+  pre#script .s { color: #3f6212; }                          /* string */
+  pre#script .n { color: var(--warn); }                      /* number */
+  pre#script .c { color: var(--muted); font-style: italic; } /* comment */
 
   footer { margin-top: 64px; padding-top: 18px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 14px; }
   footer p { margin: 5px 0; }
@@ -294,10 +299,28 @@
     return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   }
 
+  // Minimal self-contained Lua highlighter (no CDN). Tokenizes comments,
+  // strings, numbers, and identifiers; everything else passes through escaped.
+  const LUA_KW = new Set("and break do else elseif end false for function goto if in local nil not or repeat return then true until while".split(" "));
+  const LUA_BI = new Set("redis server KEYS ARGV tonumber tostring type pairs ipairs select math string table pcall error assert".split(" "));
+  function highlightLua(src) {
+    const re = /(--\[\[[\s\S]*?\]\]|--[^\n]*)|('(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*")|(\b\d+(?:\.\d+)?\b)|([A-Za-z_]\w*)|([\s\S])/g;
+    let out = "", m;
+    while ((m = re.exec(src)) !== null) {
+      if (m[1] != null) out += tok("c", m[1]);
+      else if (m[2] != null) out += tok("s", m[2]);
+      else if (m[3] != null) out += tok("n", m[3]);
+      else if (m[4] != null) out += LUA_KW.has(m[4]) ? tok("k", m[4]) : (LUA_BI.has(m[4]) ? tok("b", m[4]) : escapeHtml(m[4]));
+      else out += escapeHtml(m[5]);
+    }
+    return out;
+  }
+  function tok(cls, text) { return '<span class="' + cls + '">' + escapeHtml(text) + "</span>"; }
+
   async function loadScript() {
     try {
       const res = await fetch(api("/script"));
-      $("script").textContent = (await res.text()).trim();
+      $("script").innerHTML = highlightLua((await res.text()).trim());
     } catch (_) {
       $("script").textContent = "(could not load /script)";
     }
