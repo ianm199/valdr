@@ -1,51 +1,55 @@
 [← Valdr blog](blog.html)
 
-# Valdr 1.0 — a memory-safe Valkey, and its first life beyond the server
+# Valdr 1.0: a memory-safe Valkey, now running in WebAssembly
 
 *2026-06-16*
 
-We started Valdr with one question: can the core infrastructure the web runs on be rebuilt in memory-safe Rust, and *proven* to behave exactly like the thing it replaces? Two milestones now say yes. The single-node core has reached the bar we set for calling it stable. And we have our first use case that shows Valdr is more than a server port — the same engine, compiled to WebAssembly, running Lua at the edge.
+Valdr is a reimplementation of Valkey in Rust. We've been building it to answer a fairly blunt question: can you rebuild infrastructure this critical in a memory-safe language and prove it behaves exactly like the original?
 
-## What "1.0" means
+The single-node core now passes Valkey's own test suite, so we're calling it stable. That's what 1.0 means here. The rest of this post is about the first thing we've run on top of it that isn't a server: the Valdr engine, compiled to WebAssembly, executing Lua at the edge.
 
-Valdr 1.0 is the **single-node** milestone, and we're deliberate about that scope.
+## What 1.0 covers
 
-- **It passes Valkey's own test suite.** The single-node core suite is green: **3,035 of 3,035** counted assertions across the upstream 54-file suite, and 2,525 of 2,526 source-test blocks. We treat the upstream suite as the oracle — if Valdr and Valkey disagree on a single byte, that is a bug, not a footnote. [Full coverage →](coverage.html)
-- **It runs real workloads over TLS.** Memory-safe TLS via **rustls** — no OpenSSL, no `fork()`, no C in the hot path.
-- **It is fast.** At parity with, or faster than, Valkey on most common commands. [Benchmarks →](index.html)
-- **It is mostly memory-safe by construction** — safe Rust with a small, audited `unsafe` budget, enforced in CI.
+1.0 is the single-node milestone, and only that.
 
-What 1.0 does **not** claim yet: multi-node replication, Sentinel, or Cluster. Those are the active frontier, and we will not blur a single-node claim into a high-availability one. [Roadmap →](roadmap.html)
+- It passes Valkey's own test suite: 3,035 of 3,035 counted assertions across the upstream 54-file suite, plus 2,525 of 2,526 source-test blocks. We run that suite as an oracle. If Valdr and Valkey disagree on a single byte, we treat it as a bug.
+- It serves real traffic over TLS, on rustls instead of OpenSSL. No C in the TLS path, and no `fork()` anywhere in the server.
+- It's competitive on speed: at parity with or faster than Valkey on most of the common commands. The [benchmarks](index.html) have the per-command numbers.
+- It's mostly safe Rust. There's a small `unsafe` budget that's audited and capped in CI, with no sprawl.
 
-## The first real use case: Valkey semantics in WebAssembly, with Lua
+What 1.0 deliberately leaves out: replication, Sentinel, and Cluster. Multi-node is the work in progress, and we'd rather ship an honest single-node claim than a vague "production-ready" one. The [roadmap](roadmap.html) tracks the rest.
 
-Passing the suite proves correctness. The more interesting question was whether the engine is *clean* enough to live somewhere an ordinary Redis can't go. So we took the Valdr command engine, compiled it to `wasm32`, and embedded it inside a Cloudflare Worker — with a Durable Object as the per-tenant shard. We call it **EdgeStash**.
+## Running the engine in WebAssembly
 
-The demo is an AI-spend rate limiter: a fake AI endpoint protected by a token bucket written in Lua, with the entire allow/deny decision running **inside the Worker**, next to the request — no round trip to an external Redis service.
+Passing a test suite tells you the engine is correct. It doesn't tell you it's clean. What I actually wanted to know was whether we could lift the command engine out of the server and run it somewhere an ordinary Redis can't go.
 
-[Try the live demo →](https://edgestash-valdr.ianmclaughlin1398.workers.dev)
+So we compiled it to `wasm32` and dropped it inside a Cloudflare Worker, with a Durable Object holding each tenant's state. We're calling that EdgeStash.
 
-Why Lua? A real rate limiter — or quota, or idempotency check — is an atomic *read-decide-write*: read the bucket, compute the refill, decide, persist. Several steps, with arithmetic and a branch. No single command does that, and a transaction cannot decide mid-flight. A Lua script can: it runs as one atomic unit, where the data is. Change the policy (which is stored as data) and the same script honors the new limits with no redeploy.
+The demo is a spend limiter for an AI endpoint. A token bucket, written in Lua, decides allow-or-deny on every request, and it runs inside the Worker right next to the request. Nothing calls out to an external Redis. [Try it live.](https://edgestash-valdr.ianmclaughlin1398.workers.dev)
 
-And here is the part we are proudest of: **the Lua is also safe Rust.** EdgeStash runs on **omniLua**, a pure-Rust Lua 5.1 — no C Lua. So the whole stack is memory-safe by default, end to end:
+Why Lua, and not just a couple of commands? A rate limiter is an atomic read-decide-write. You read the bucket, work out how much it has refilled, decide, and write the new value back. That's several steps with arithmetic and a branch in the middle. No single Redis command does it, and a `MULTI` transaction can't either, because a transaction can't read a value and then decide what to do about it. A script can. It runs as one atomic unit, on the data itself, and because the limits live in their own key you can retune them without touching the script.
+
+The Lua is also safe Rust, and that's the part I find most interesting. EdgeStash runs on omniLua, a Lua 5.1 interpreter written in Rust, so there's no C Lua anywhere in the request path. The whole stack ends up memory-safe by default:
 
 | Layer | Implementation |
 |---|---|
-| Command engine | Valdr — safe Rust |
-| TLS | rustls — safe Rust, no OpenSSL |
-| Lua scripting | omniLua — safe Rust, no C Lua |
+| Command engine | Valdr, safe Rust |
+| TLS | rustls, no OpenSSL |
+| Lua scripting | omniLua, no C Lua |
 | Isolation | WebAssembly sandbox |
 
-We hold the engine to the same bar as the server: every command it runs is **differentially tested** against a real `valkey-server` — more than 400 fixtures, **zero divergences**. A warm limiter decision is about **2 ms** of engine time.
+We hold the engine to the same standard as the server. Every command it runs gets diffed against a real `valkey-server` across more than 400 fixtures, and there are currently zero divergences. A warm limiter decision is about 2ms of engine time; the rest of a request is network.
 
-## Why this shape matters
+## Why bother with the WebAssembly version
 
-The durable result is not the demo — it is the boundary that made it possible. Because Valdr is safe Rust with a clean split between the command engine and the transport, it can be a **server** when that is the right shape, and an **embeddable, programmable state engine** when the request is already running somewhere constrained — an edge worker, a browser, another process. Redis-compatible atomic state, with real Lua logic, embedded where you need it.
+The demo is a toy. The boundary underneath it isn't. Once the command engine is cleanly split from networking and storage, it stops needing to be a server at all. It can be a library you embed wherever the request already runs: an edge worker now, a browser or another process later. You get Redis-style atomic state with real scripting, without standing up a Redis to talk to.
 
-## What is next
+## What's next
 
-- **Replication and high availability** — the current frontier, held to its own evidence gates.
-- **omniLua library parity** — `cjson`, `cmsgpack`, `struct`, and `bit`, so more existing Redis scripts run unchanged.
-- **Edge cold-start** — trimming the first-request latency when a tenant shard wakes.
+Roughly in order:
 
-Valdr is BSD-3-licensed and developed in the open. [GitHub →](https://github.com/ianm199/valdr)
+- Replication and failover. This is the current focus, and it earns its own test gates before we claim it works.
+- More of the Lua standard library in omniLua (`cjson`, `cmsgpack`, `struct`, `bit`), so existing Redis scripts run without edits.
+- Edge cold starts. The first request to a sleeping tenant takes about half a second today, and most of that is ours to cut.
+
+Valdr is BSD-3 licensed and built in the open. The code is on [GitHub](https://github.com/ianm199/valdr).
