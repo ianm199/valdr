@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Valdr — Blog</title>
+<meta name="description" content="Notes on building Valdr, a memory-safe Valkey in Rust.">
+<link rel="stylesheet" href="style.css">
+<style>
+  #blog-content { max-width: 46rem; }
+  #blog-content h2 { margin-top: 2.4rem; }
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <a class="brand" href="/">Valdr</a>
+  <div class="navlinks">
+    <a href="/#coverage">Coverage</a>
+    <a href="/#scope">Scope</a>
+    <a href="/#performance">Performance</a>
+    <a href="/roadmap.html">Roadmap</a>
+    <a href="/#try">Try it</a>
+  </div>
+  <a class="nav-gh" href="https://github.com/ianm199/valdr">GitHub ↗</a>
+</nav>
+
+<main>
+<section id="blog">
+  <div id="blog-content">loading…</div>
+</section>
+</main>
+
+<footer>
+  <p>
+    Valdr · alpha · BSD 3-Clause ·
+    <a href="https://github.com/ianm199/valdr">github.com/ianm199/valdr</a>
+  </p>
+</footer>
+
+<!-- Content lives in blog.md — edit that, not this file. -->
+<script src="md.js?v=2"></script>
+<script>Valdr.loadMarkdownInto('blog-content', 'blog.md');</script>
+</body>
+</html>
