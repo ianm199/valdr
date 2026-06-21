@@ -138,24 +138,29 @@ class CostLine:
 PRICING_AS_OF = "2026-06-21"
 
 DO_REQUEST_USD_PER_M = 0.15
-"""Cloudflare Durable Objects request price, $/million (1M included free). Verified
-2026-06-21 against Cloudflare's Durable Objects pricing docs."""
+"""Durable Objects request price, $/million (1M included/month). Verified 2026-06-21
+against developers.cloudflare.com/durable-objects/platform/pricing."""
 
 DO_DURATION_USD_PER_GB_S = 12.50
-"""Durable Objects active-duration price, $/million GB-seconds. NOT re-verified this
-session; confirm against the live pricing page before citing."""
+"""Durable Objects active-duration price, $/million GB-seconds (400,000 GB-s
+included/month), billed at the 128 MB tier. Verified 2026-06-21 against
+developers.cloudflare.com/durable-objects/platform/pricing. Concurrent requests to
+one object share its wall-clock, so per-decision duration is an upper bound."""
 
 WORKER_REQUEST_USD_PER_M = 0.30
-"""Workers request price, $/million (10M included on the paid plan). NOT re-verified
-this session; confirm before citing."""
+"""Workers request price, $/million (10M included/month). Verified 2026-06-21 against
+developers.cloudflare.com/workers/platform/pricing. Workers bill CPU time ($0.02/M
+CPU-ms, 30M included) — NOT wall-clock duration — and a reserve's CPU is well within
+the included tier, so only requests appear as a Worker line here."""
 
 KV_READ_USD_PER_M = 0.50
 KV_WRITE_USD_PER_M = 5.00
-"""Workers KV read / write price, $/million. NOT re-verified this session; KV writes
-are the expensive operation and dominate this use case, so confirm before citing."""
+"""Workers KV read / write price, $/million (reads 10M included, writes 1M included).
+Verified 2026-06-21 against developers.cloudflare.com/kv/platform/pricing. The write
+is the expensive op and dominates a KV reserve, which costs one read + one write."""
 
 DO_OBJECT_MEMORY_GB = 128 / 1024
-"""A Durable Object is billed duration at the 128 MiB tier while it is active."""
+"""A Durable Object is billed duration at the 128 MB tier while it is active."""
 
 
 def cost_inventory(backend: str, active_ms: float) -> CostLine:
@@ -172,7 +177,7 @@ def cost_inventory(backend: str, active_ms: float) -> CostLine:
             f"worker ${WORKER_REQUEST_USD_PER_M:.2f} + kv-read ${KV_READ_USD_PER_M:.2f}"
             f" + kv-write ${KV_WRITE_USD_PER_M:.2f}"
         )
-        return CostLine("kv", usd, breakdown, verified=False)
+        return CostLine("kv", usd, breakdown, verified=True)
 
     duration_gb_s_per_m = (active_ms / 1000.0) * DO_OBJECT_MEMORY_GB * 1_000_000
     duration_usd = (duration_gb_s_per_m / 1_000_000) * DO_DURATION_USD_PER_GB_S
@@ -181,7 +186,7 @@ def cost_inventory(backend: str, active_ms: float) -> CostLine:
         f"worker ${WORKER_REQUEST_USD_PER_M:.2f} + do-req ${DO_REQUEST_USD_PER_M:.2f}"
         f" + do-dur ${duration_usd:.4f} (@{active_ms:.1f}ms active)"
     )
-    return CostLine(backend, usd, breakdown, verified=False)
+    return CostLine(backend, usd, breakdown, verified=True)
 
 
 def simulate_serialized(buyers: int, stock: int) -> UseCaseResult:
@@ -416,7 +421,10 @@ class Matrix:
                 lines.append(f"{name:<16}{lat.p50:>8.1f}{lat.p90:>8.1f}{lat.p99:>8.1f}{lat.samples:>10}")
         if self.costs:
             lines.append("")
-            lines.append(f"modeled cost per million decisions (pricing as of {PRICING_AS_OF})")
+            lines.append(
+                f"marginal (overage) cost per million decisions — Cloudflare docs as of {PRICING_AS_OF}"
+            )
+            lines.append("(generous monthly free tiers apply first; this is the at-scale per-million rate)")
             for name, cost in self.costs.items():
                 mark = "" if cost.verified else "  ⚠ unverified pricing"
                 lines.append(f"{name:<16}${cost.usd_per_million:>7.2f}/M   {cost.breakdown}{mark}")
