@@ -112,19 +112,23 @@ socket reproduces a bug "sometimes."
 
 ## Hooks (mechanical guardrails)
 
-Wired via `.claude/settings.json`. Each one fails a tool call or a Stop event:
+Wired via `.claude/settings.json` — **that file is the source of truth; this
+table mirrors it.** Defined ≠ wired: scripts exist in `.claude/hooks/` for more
+guardrails than are registered. As of 2026-06-21 exactly **three** are live:
 
-| Hook | Enforces |
-|---|---|
-| `unsafe-budget.sh`        | per-crate `unsafe` block ceiling |
-| `forbidden-pattern.sh`    | banned patterns (e.g. raw `*mut` outside GC) |
-| `trailer-required.sh`     | every `.rs` carries a PORT STATUS trailer |
-| `verify-gate.sh`          | cannot mark a test PASS without reading the evidence file |
-| `pretooluse-vocab.sh`     | type-vocabulary registry: every cross-cutting type has one owner |
-| `commit-on-stop.sh`       | auto-commits agent work so nothing is lost |
+| Hook | Event | Wired? | Enforces |
+|---|---|---|---|
+| `verify-gate.sh`           | PreToolUse (Write\|Edit) | ✅ wired | cannot mark a test PASS without reading the evidence file |
+| `pretooluse-type-vocab.sh` | PreToolUse (Write\|Edit) | ✅ wired | type-vocabulary registry: every cross-cutting type has one owner |
+| `commit-on-stop.sh`        | Stop                     | ✅ wired | auto-commits agent work so nothing is lost |
+| `unsafe-budget.sh`         | —                        | defined, **not wired** | per-crate `unsafe` block ceiling |
+| `forbidden-import.sh`      | —                        | defined, **not wired** | banned patterns (e.g. raw `*mut` outside GC) |
+| `trailer-required.sh`      | —                        | defined, **not wired** | every `.rs` carries a PORT STATUS trailer |
+| `type-vocabulary.sh`, `rebuild-before-measure.sh` | — | defined, **not wired** | chassis guardrails available to wire |
 
-Hooks live in `port-harness/hooks/` (canonical) with thin wrappers in
-`.claude/hooks/`.
+Hooks live in `port-harness/hooks/` (canonical, 12 scripts) with thin wrappers
+in `.claude/hooks/`; this project wires 3 of them. To enable more, register them
+in `.claude/settings.json` — don't assume a script being present means it runs.
 
 ## Recent structural changes (2026-05-28)
 
