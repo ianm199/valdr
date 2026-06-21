@@ -1,0 +1,19 @@
+{
+  "name": "fitbench-raw-do",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-01-01",
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SKU",
+        "class_name": "SkuObject"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["SkuObject"]
+    }
+  ]
+}
