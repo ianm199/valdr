@@ -146,6 +146,12 @@ Prep: profile hotpaths, stage fixes; gate any claim on a clean interactive bench
 ---
 
 ## Log (newest first)
+- 2026-06-23 — Waves 14-16 landed: BITFIELD/BITFIELD_RO/BITOP (`5f977af`),
+  HyperLogLog PFADD/PFCOUNT/PFMERGE with full estimation parity 1000→1002
+  (`238a8c0`), hash-field TTL HEXPIRE/HTTL/HGETEX/HGETDEL/HSETEX (Wave 16,
+  fix-forward after a sub-agent 500: get_value field-purge bug + deterministic
+  fixtures). Oracle 1717/0/20. Engine 161 cmds, gap 39. Learned: `ttl_band` is
+  scalar-only (see playbook) — use absolute HEXPIRETIME for array TTL asserts.
 - 2026-06-23 — Wave 13 landed (`c0c77be`): stream consumer groups (XGROUP/
   XREADGROUP/XACK/XPENDING summary/XINFO STREAM+GROUPS) + PEL in snapshot codec;
   fixed a latent Wave-11 trim bug. Oracle 1500/0/20, 42 cargo tests. Gap 57.

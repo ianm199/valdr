@@ -37,6 +37,13 @@ Build success is **not** signal. A clean build with a divergence is a regression
 - Use a **key namespace unique to the file** so nothing leaks across files.
 - Line format: `{"id": "...", "cmd": ["NAME", "arg", ...]}`.
   Optional: `"mode": "ttl_band", "band": N` (TTL fuzz), `"now_millis": N`, `"sleep_ms": N`.
+- **`ttl_band` mode is SCALAR-ONLY** — it only band-compares a single `:integer`
+  reply (oracle `compare()`). Array-returning TTL reads (HTTL/HPTTL/HEXPIRETIME
+  FIELDS...) CANNOT be band-checked; they pass only when ms/seconds align by luck
+  and silently flake. To assert a relative TTL on an array reply, instead set it
+  with an ABSOLUTE command (HEXPIREAT/HPEXPIREAT) and read it back with the
+  absolute reader (HEXPIRETIME/HPEXPIRETIME) under `exact` mode — the returned
+  timestamp is deterministic (it's the value you set), no clock drift.
 - A `"known_unsupported": true` line is **record-only** (never a verdict). To
   "close" a gap: implement the command, then **remove the flag** (or rehome the
   fixture into its type file with a proper setup sequence) so it becomes a real
