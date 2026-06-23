@@ -67,13 +67,13 @@ SADD, SREM, SMEMBERS, SISMEMBER, SMISMEMBER, SCARD, SPOP, SRANDMEMBER. Then the
 multi-key set ops: SINTER, SUNION, SDIFF, SINTERSTORE, SUNIONSTORE, SDIFFSTORE,
 SINTERCARD, SMOVE. Fixtures: new `set.jsonl`.
 
-### Wave 6 — ZSet surface fill-in  `[~]`
+### Wave 6 — ZSet surface fill-in  `[x]`  (d356364 — oracle 883/0/12; ZRANDMEMBER/ZSCAN/aggregates deferred → Wave 6b)
 ZPOPMIN, ZPOPMAX, ZCOUNT, ZMSCORE, ZLEXCOUNT, ZRANGEBYLEX, ZREVRANGE,
 ZREVRANGEBYSCORE, ZREVRANGEBYLEX, ZREMRANGEBYRANK, ZREMRANGEBYSCORE,
 ZREMRANGEBYLEX, ZRANDMEMBER. Then aggregates: ZUNION, ZINTER, ZDIFF,
 ZUNIONSTORE, ZINTERSTORE, ZDIFFSTORE, ZRANGESTORE, ZINTERCARD, ZMPOP. Fixtures: `zset.jsonl`.
 
-### Wave 7 — Bitmaps + numeric strings  `[ ]`
+### Wave 7 — Bitmaps + numeric strings  `[x]`  (b266130 — oracle 1036/0/17; INCRBYFLOAT/HINCRBYFLOAT/BITFIELD/BITOP deferred)
 SETBIT, GETBIT, BITCOUNT, BITPOS, BITOP, BITFIELD, BITFIELD_RO; GETRANGE,
 SETRANGE, SUBSTR, GETEX, PSETEX, MSET, MSETNX. Fixtures: `bitmap.jsonl`, `strings.jsonl`.
 
@@ -142,6 +142,13 @@ Prep: profile hotpaths, stage fixes; gate any claim on a clean interactive bench
 ---
 
 ## Log (newest first)
+- 2026-06-23 — Wave 7 landed (`b266130`): +11 string-range + bitmap (GETRANGE/
+  SUBSTR/SETRANGE/MSET/MSETNX/PSETEX/GETEX/SETBIT/GETBIT/BITCOUNT/BITPOS). Oracle
+  1036/0/17 (crossed 1000 fixtures). Gap 92. Disk recovered to 18G. Next: aggregates.
+- 2026-06-22 — Wave 6 landed (`d356364`): +12 zset single-key (ZPOPMIN/ZPOPMAX/
+  ZMSCORE/ZCOUNT/ZLEXCOUNT/ZRANGEBYLEX/ZREVRANGE/ZREVRANGEBYSCORE/ZREVRANGEBYLEX/
+  ZREMRANGEBY{RANK,SCORE,LEX}). Oracle 883/0/12. Gap 103. Verified. Disk dipped to
+  1.3G → freed lua-rs-port/target (3.3G) → 4.6G. Aggregates deferred to Wave 6b.
 - 2026-06-22 — Wave 5 landed (`f9d6e3f`): Set value type (cross-cutting) + 14
   commands (SADD/SREM/SCARD/SISMEMBER/SMISMEMBER/SMEMBERS/SMOVE/SINTER/SUNION/
   SDIFF/SINTERCARD/+STORE; SPOP/SRANDMEMBER/SSCAN deferred — RNG/cursor). Oracle
