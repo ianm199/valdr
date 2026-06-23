@@ -12503,6 +12503,28 @@ const RDB_TYPE_HASH_LISTPACK: u8 = 16;
 const RDB_TYPE_ZSET_LISTPACK: u8 = 17;
 const RDB_TYPE_LIST_QUICKLIST_2: u8 = 18;
 const RDB_TYPE_SET_LISTPACK: u8 = 20;
+/// `RDB_TYPE_HASH_2` (type byte 22, `rdb.h`): a hashtable-encoded hash carrying
+/// per-field expiration, added in RDB 80 (valkey 9.0). The body is a field
+/// count followed by `<field><value><8-byte-LE-i64-expiry-ms>` triples, where
+/// the expiry is the C `EXPIRY_NONE` sentinel (`-1`, all-`0xff`) for a field
+/// with no TTL. Any hash with at least one field TTL is hashtable-encoded in
+/// valkey 9.1.0 (there is no listpack-with-expiry encoding in this version),
+/// so this is the only DUMP type the edge engine emits for a TTL-carrying hash.
+const RDB_TYPE_HASH_2: u8 = 22;
+
+/// The C `EXPIRY_NONE` sentinel (`expire.h`): the per-field expiry value meaning
+/// "no TTL". Serialized in `RDB_TYPE_HASH_2` as the 8-byte little-endian `-1`.
+const HASH_EXPIRY_NONE: i64 = -1;
+
+/// The largest hash field count for which valkey's hashtable iterates in
+/// **insertion order** for a clean (append-only, no delete-then-readd) hash, so
+/// the edge engine's `IndexMap` order reproduces valkey's `RDB_TYPE_HASH_2`
+/// field order byte-for-byte. Confirmed against valkey-server 9.1.0: at 1..=6
+/// fields the small hashtable preserves insertion order across server restarts;
+/// at 7 fields the table resizes and iteration becomes hash-seed bucket order
+/// the engine cannot reproduce. A TTL-carrying hash with more than this many
+/// fields is therefore deferred (the caller emits the aggregate-deferral error).
+const HASH_RDB2_INSERTION_ORDER_MAX: usize = 6;
 
 /// `QUICKLIST_NODE_CONTAINER_PACKED` (`quicklist.h`): a quicklist node whose
 /// payload is a listpack (vs `_PLAIN` = 1, a single oversized raw element).
@@ -12726,8 +12748,9 @@ fn rdb_save_raw_string(out: &mut Vec<u8>, s: &[u8]) {
 /// RDB object-type byte the reference would (given valkey's default encoding
 /// thresholds), serializes the body byte-identically, then appends the version
 /// footer and CRC64. Returns `None` when the value cannot be reproduced
-/// byte-for-byte — either an unsupported type (Stream), a hash carrying a
-/// per-field TTL (a `RDB_TYPE_HASH_2` hashtable in valkey), a SET valkey would
+/// byte-for-byte — either an unsupported type (Stream), a TTL-carrying hash
+/// past `HASH_RDB2_INSERTION_ORDER_MAX` fields (valkey's hashtable then iterates
+/// in hash-seed bucket order), a SET valkey would
 /// keep as a hashtable, or a collection past the compact-encoding thresholds
 /// (valkey would have
 /// converted it to hashtable/skiplist/multi-node-quicklist, whose iteration
@@ -12760,9 +12783,15 @@ fn rdb_create_dump_payload(value: &StoredValue) -> Option<Vec<u8>> {
             rdb_save_raw_string(&mut payload, &blob);
         }
         StoredValue::Hash(fields) => {
-            let lp = rdb_hash_to_listpack(fields)?;
-            payload.push(RDB_TYPE_HASH_LISTPACK);
-            rdb_save_raw_string(&mut payload, &lp);
+            if fields.values().any(|f| f.expire_at_ms.is_some()) {
+                let body = rdb_hash_to_hash2(fields)?;
+                payload.push(RDB_TYPE_HASH_2);
+                payload.extend_from_slice(&body);
+            } else {
+                let lp = rdb_hash_to_listpack(fields)?;
+                payload.push(RDB_TYPE_HASH_LISTPACK);
+                rdb_save_raw_string(&mut payload, &lp);
+            }
         }
         StoredValue::Stream(_) => return None,
     }
@@ -12841,6 +12870,38 @@ fn rdb_hash_to_listpack(fields: &IndexMap<Vec<u8>, HashField>) -> Option<Vec<u8>
         lp.append_auto(&stored.value);
     }
     Some(lp.into_bytes())
+}
+
+/// Build the `RDB_TYPE_HASH_2` body for a hash carrying at least one per-field
+/// TTL — the `rdbSaveObject` `OBJ_ENCODING_HASHTABLE` path (`rdb.c`): a field
+/// count (`rdbSaveLen`), then for each field a `field` raw string, a `value`
+/// raw string, and the field's expiry as an 8-byte little-endian `i64`
+/// millisecond time (`rdbSaveMillisecondTime`) — `EXPIRY_NONE` (`-1`,
+/// all-`0xff`) for a field with no TTL. Fields are emitted in the engine's
+/// `IndexMap` insertion order, which matches valkey's small-hashtable iteration
+/// order. Returns `None` (deferred) when:
+/// - the hash has more than `HASH_RDB2_INSERTION_ORDER_MAX` fields (valkey's
+///   hashtable resizes and iterates in hash-seed bucket order the engine cannot
+///   reproduce); or
+/// - any field or value exceeds the listpack value cap — not a real constraint
+///   for a hashtable-encoded hash, but kept symmetric with the listpack path so
+///   only genuinely small, byte-reproducible hashes are emitted.
+fn rdb_hash_to_hash2(fields: &IndexMap<Vec<u8>, HashField>) -> Option<Vec<u8>> {
+    if fields.len() > HASH_RDB2_INSERTION_ORDER_MAX {
+        return None;
+    }
+    let mut body = Vec::new();
+    rdb_save_len(&mut body, fields.len() as u64);
+    for (field, stored) in fields {
+        rdb_save_raw_string(&mut body, field);
+        rdb_save_raw_string(&mut body, &stored.value);
+        let expiry: i64 = match stored.expire_at_ms {
+            Some(ms) => ms as i64,
+            None => HASH_EXPIRY_NONE,
+        };
+        body.extend_from_slice(&expiry.to_le_bytes());
+    }
+    Some(body)
 }
 
 /// The encoding a SET ends up in, with the contents valkey would store. The
@@ -13346,6 +13407,37 @@ fn rdb_load_dump_value(data: &[u8]) -> Option<StoredValue> {
             let mut it = entries.into_iter();
             while let (Some(field), Some(value)) = (it.next(), it.next()) {
                 fields.insert(field, HashField::new(value));
+            }
+            Some(StoredValue::Hash(fields))
+        }
+        RDB_TYPE_HASH_2 => {
+            // A hashtable-encoded hash with per-field TTLs: a field count, then
+            // for each field a `field`/`value` raw string and an 8-byte LE i64
+            // expiry-ms (`EXPIRY_NONE` = -1 means no TTL). Mirrors the
+            // `RDB_TYPE_HASH_2` arm of `rdbLoadObject`.
+            let (count, _) = rdb_load_len(body, &mut pos)?;
+            let mut fields: IndexMap<Vec<u8>, HashField> = IndexMap::new();
+            for _ in 0..count {
+                let field = rdb_load_string(body, &mut pos)?;
+                let value = rdb_load_string(body, &mut pos)?;
+                let expiry_bytes = body.get(pos..pos + 8)?;
+                pos += 8;
+                let expiry = i64::from_le_bytes(expiry_bytes.try_into().ok()?);
+                if expiry < HASH_EXPIRY_NONE {
+                    return None;
+                }
+                let expire_at_ms = if expiry == HASH_EXPIRY_NONE {
+                    None
+                } else {
+                    Some(expiry as u64)
+                };
+                fields.insert(
+                    field,
+                    HashField {
+                        value,
+                        expire_at_ms,
+                    },
+                );
             }
             Some(StoredValue::Hash(fields))
         }
@@ -17817,15 +17909,143 @@ mod tests {
         );
     }
 
-    /// A HASH carrying any per-field TTL is a hashtable in valkey
-    /// (`RDB_TYPE_HASH_2`), which the engine cannot reproduce byte-for-byte, so
-    /// its DUMP is deferred with the aggregate-deferral error.
+    /// A small HASH carrying per-field TTLs is hashtable-encoded in valkey and
+    /// DUMPs as `RDB_TYPE_HASH_2` (type byte 22): a field count, then
+    /// `<field><value><8-byte-LE-i64-expiry-ms>` triples in insertion order
+    /// (`EXPIRY_NONE` = -1 = all-`0xff` for an untracked field). Captured from
+    /// valkey-server 9.1.0 with `HEXPIREAT key 99999999999 FIELDS ...` (the
+    /// deadline stored is `99999999999 * 1000` ms = `183c7a10f35a0000` LE).
     #[test]
-    fn dump_hash_with_field_ttl_is_deferred() {
+    fn dump_byte_parity_hash2_single_field_ttl() {
+        // f -> v, TTL on f.
         let mut engine = Engine::new(NoopHost::new(1_000));
-        engine.execute(&argv(&[b"HSET", b"h", b"a", b"1", b"b", b"2"]));
+        engine.execute(&argv(&[b"HSET", b"h", b"f", b"v"]));
         engine.execute(&argv(&[
-            b"HEXPIRE", b"h", b"100000", b"FIELDS", b"1", b"a",
+            b"HEXPIREAT", b"h", b"99999999999", b"FIELDS", b"1", b"f",
+        ]));
+        let got = dump_bytes(&mut engine, b"h");
+        assert_eq!(
+            got,
+            hex("160101660176183c7a10f35a0000500034d044f1e78b2d4e"),
+            "got {}",
+            hex_encode(&got)
+        );
+    }
+
+    /// HASH_2 with a tracked first field and two untracked fields, integer
+    /// values: `a`→1 (TTL), `b`→2, `c`→3. The untracked fields carry the
+    /// `EXPIRY_NONE` (all-`0xff`) 8-byte sentinel. Captured from valkey 9.1.0.
+    #[test]
+    fn dump_byte_parity_hash2_mixed_ttl() {
+        let mut engine = Engine::new(NoopHost::new(1_000));
+        engine.execute(&argv(&[b"HSET", b"h", b"a", b"1", b"b", b"2", b"c", b"3"]));
+        engine.execute(&argv(&[
+            b"HEXPIREAT", b"h", b"99999999999", b"FIELDS", b"1", b"a",
+        ]));
+        let got = dump_bytes(&mut engine, b"h");
+        assert_eq!(
+            got,
+            hex("16030161c001183c7a10f35a00000162c002ffffffffffffffff0163c003ffffffffffffffff5000492f6728cfd335ce"),
+            "got {}",
+            hex_encode(&got)
+        );
+    }
+
+    /// HASH_2 where both fields carry a TTL: `x`→10, `y`→20, both tracked with
+    /// the same absolute deadline. Captured from valkey 9.1.0.
+    #[test]
+    fn dump_byte_parity_hash2_all_ttl() {
+        let mut engine = Engine::new(NoopHost::new(1_000));
+        engine.execute(&argv(&[b"HSET", b"h", b"x", b"10", b"y", b"20"]));
+        engine.execute(&argv(&[
+            b"HEXPIREAT", b"h", b"99999999999", b"FIELDS", b"2", b"x", b"y",
+        ]));
+        let got = dump_bytes(&mut engine, b"h");
+        assert_eq!(
+            got,
+            hex("16020178c00a183c7a10f35a00000179c014183c7a10f35a000050005aed679b940bbdbc"),
+            "got {}",
+            hex_encode(&got)
+        );
+    }
+
+    /// RESTORE of a real valkey 9.1.0 `RDB_TYPE_HASH_2` payload reconstructs the
+    /// fields, values, and per-field TTLs. Uses the `hb` capture (a TTL, b/c
+    /// untracked); after RESTORE, `HGET` returns the values and `HPEXPIRETIME`
+    /// returns the tracked deadline for `a` and -1 for the untracked fields.
+    #[test]
+    fn restore_real_valkey_hash2_payload() {
+        let mut engine = Engine::new(NoopHost::new(1_000));
+        let payload = hex(
+            "16030161c001183c7a10f35a00000162c002ffffffffffffffff0163c003ffffffffffffffff5000492f6728cfd335ce",
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"RESTORE", b"h", b"0", &payload]))),
+            b"+OK\r\n"
+        );
+        for (f, v) in [(&b"a"[..], &b"1"[..]), (b"b", b"2"), (b"c", b"3")] {
+            let got = engine.execute(&argv(&[b"HGET", b"h", f]));
+            assert_eq!(
+                got,
+                RespFrame::Bulk(Some(RedisString::from_bytes(v.to_vec()))),
+                "field {:?}",
+                f
+            );
+        }
+        // HPEXPIRETIME a -> the tracked absolute ms deadline (99999999999000).
+        let got = engine.execute(&argv(&[
+            b"HPEXPIRETIME", b"h", b"FIELDS", b"3", b"a", b"b", b"c",
+        ]));
+        assert_eq!(
+            got,
+            RespFrame::array(vec![
+                RespFrame::integer(99999999999000),
+                RespFrame::integer(-1),
+                RespFrame::integer(-1),
+            ])
+        );
+    }
+
+    /// In-process DUMP→RESTORE round-trip for a TTL-carrying hash: the
+    /// reconstructed value carries the same fields, values, and the tracked
+    /// per-field deadline.
+    #[test]
+    fn dump_restore_round_trip_hash2() {
+        let mut engine = Engine::new(NoopHost::new(1_000));
+        engine.execute(&argv(&[b"HSET", b"src", b"a", b"1", b"b", b"2"]));
+        engine.execute(&argv(&[
+            b"HEXPIREAT", b"src", b"99999999999", b"FIELDS", b"1", b"a",
+        ]));
+        let payload = dump_bytes(&mut engine, b"src");
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"RESTORE", b"dst", b"0", &payload]))),
+            b"+OK\r\n"
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"HGET", b"dst", b"a"])),
+            RespFrame::Bulk(Some(RedisString::from_bytes(b"1".to_vec())))
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"HPEXPIRETIME", b"dst", b"FIELDS", b"2", b"a", b"b"])),
+            RespFrame::array(vec![
+                RespFrame::integer(99999999999000),
+                RespFrame::integer(-1),
+            ])
+        );
+    }
+
+    /// A TTL-carrying HASH past `HASH_RDB2_INSERTION_ORDER_MAX` fields is still
+    /// deferred: valkey's hashtable iterates in hash-seed bucket order the
+    /// engine cannot reproduce, so DUMP returns the aggregate-deferral error.
+    #[test]
+    fn dump_hash2_large_is_deferred() {
+        let mut engine = Engine::new(NoopHost::new(1_000));
+        engine.execute(&argv(&[
+            b"HSET", b"h", b"a", b"1", b"b", b"2", b"c", b"3", b"d", b"4", b"e", b"5", b"f", b"6",
+            b"g", b"7",
+        ]));
+        engine.execute(&argv(&[
+            b"HEXPIREAT", b"h", b"99999999999", b"FIELDS", b"1", b"a",
         ]));
         assert!(matches!(
             engine.execute(&argv(&[b"DUMP", b"h"])),

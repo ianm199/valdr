@@ -62,3 +62,21 @@
 {"id": "da-set-lp-srem-order-dump", "cmd": ["DUMP", "da:ls7"]}
 {"id": "da-set-smembers-listpack", "cmd": ["SMEMBERS", "da:ls1"], "mode": "exact"}
 {"id": "da-set-smembers-intset", "cmd": ["SMEMBERS", "da:s1"], "mode": "exact"}
+{"id": "da-hashttl-single-hset", "cmd": ["HSET", "da:ht1", "f", "v"]}
+{"id": "da-hashttl-single-hexpireat", "cmd": ["HEXPIREAT", "da:ht1", "99999999999", "FIELDS", "1", "f"]}
+{"id": "da-hashttl-single-dump", "cmd": ["DUMP", "da:ht1"]}
+{"id": "da-hashttl-mixed-hset", "cmd": ["HSET", "da:ht2", "a", "1", "b", "2", "c", "3"]}
+{"id": "da-hashttl-mixed-hexpireat", "cmd": ["HEXPIREAT", "da:ht2", "99999999999", "FIELDS", "1", "a"]}
+{"id": "da-hashttl-mixed-dump", "cmd": ["DUMP", "da:ht2"]}
+{"id": "da-hashttl-all-hset", "cmd": ["HSET", "da:ht3", "x", "10", "y", "20"]}
+{"id": "da-hashttl-all-hexpireat", "cmd": ["HEXPIREAT", "da:ht3", "99999999999", "FIELDS", "2", "x", "y"]}
+{"id": "da-hashttl-all-dump", "cmd": ["DUMP", "da:ht3"]}
+{"id": "da-hashttl-strvals-hset", "cmd": ["HSET", "da:ht4", "name", "alice", "city", "paris"]}
+{"id": "da-hashttl-strvals-hexpireat", "cmd": ["HEXPIREAT", "da:ht4", "99999999999", "FIELDS", "1", "name"]}
+{"id": "da-hashttl-strvals-dump", "cmd": ["DUMP", "da:ht4"]}
+{"id": "da-hashttl-nonasc-hset", "cmd": ["HSET", "da:ht5", "z", "1", "m", "2", "a", "3", "q", "4"]}
+{"id": "da-hashttl-nonasc-hexpireat", "cmd": ["HEXPIREAT", "da:ht5", "99999999999", "FIELDS", "1", "z"]}
+{"id": "da-hashttl-nonasc-dump", "cmd": ["DUMP", "da:ht5"]}
+{"id": "da-hashttl-six-hset", "cmd": ["HSET", "da:ht6", "k1", "1", "k2", "2", "k3", "3", "k4", "4", "k5", "5", "k6", "6"]}
+{"id": "da-hashttl-six-hexpireat", "cmd": ["HEXPIREAT", "da:ht6", "99999999999", "FIELDS", "2", "k2", "k5"]}
+{"id": "da-hashttl-six-dump", "cmd": ["DUMP", "da:ht6"]}
