@@ -28,7 +28,7 @@ edgestash-cloudflare = { path = "crates/edgestash-cloudflare" }
 redis-commands = { path = "crates/redis-commands" }
 redis-ds = { path = "crates/redis-ds" }
 mlua = { version = "0.10", features = ["lua51", "vendored"] }
-lua-rs-runtime = { package = "omnilua", path = "../lua-rs-port/crates/lua-rs-runtime" }
+lua-rs-runtime = { package = "omnilua", version = "0.3.3" }
 libc = "0.2"
 mio = { version = "1", features = ["os-poll", "net"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }

@@ -418,7 +418,9 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
 name = "lua-code"
-version = "0.3.2"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd6db7291853c14df74d04da7868689c505c785dcbe7887ffa40f10efc6652bb"
 dependencies = [
  "lua-types",
  "lua-vm",
@@ -426,11 +428,15 @@ dependencies = [
 
 [[package]]
 name = "lua-gc"
-version = "0.3.2"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "25c55e611ba65f12104cdb0545607e0c70ef842883a778730a64e27436ae9517"
 
 [[package]]
 name = "lua-lex"
-version = "0.3.2"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "98f3d44c63c682f5c4e6469f4bcfbe8689b4ef7539b7aef0a149a39ae5f47d75"
 dependencies = [
  "lua-types",
  "lua-vm",
@@ -438,7 +444,9 @@ dependencies = [
 
 [[package]]
 name = "lua-parse"
-version = "0.3.2"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a3f6e22b6ae99f307e057e75abf96b3ff21ada25f2cd066f61c08a1303363207"
 dependencies = [
  "lua-code",
  "lua-lex",
@@ -457,7 +465,9 @@ dependencies = [
 
 [[package]]
 name = "lua-stdlib"
-version = "0.3.2"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd7e436996209eb82e2875f3a22146f6a69b2ac4c559a520d391bde21ba533ff"
 dependencies = [
  "lua-types",
  "lua-vm",
@@ -465,14 +475,18 @@ dependencies = [
 
 [[package]]
 name = "lua-types"
-version = "0.3.2"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab57c41fed2c4f3c3e30bb7e35d1ffc38c37a7e067af2154adf80741606f63c9"
 dependencies = [
  "lua-gc",
 ]
 
 [[package]]
 name = "lua-vm"
-version = "0.3.2"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3faf338a719fca478c1b362e15fbe8d3ae1fed4f7049dabb5b8a4ba5a5549cc4"
 dependencies = [
  "lua-gc",
  "lua-types",
@@ -551,7 +565,9 @@ dependencies = [
 
 [[package]]
 name = "omnilua"
-version = "0.3.2"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a3e8f1d803d3d19bdee309bc8d42c807eeab7124650d2975ced5a9aa5d4f6584"
 dependencies = [
  "lua-gc",
  "lua-parse",
