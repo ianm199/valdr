@@ -81,3 +81,86 @@
 {"id": "bm-getbit-wrongtype", "cmd": ["GETBIT", "bm:wt", "0"]}
 {"id": "bm-bitcount-wrongtype", "cmd": ["BITCOUNT", "bm:wt"]}
 {"id": "bm-bitpos-wrongtype", "cmd": ["BITPOS", "bm:wt", "1"]}
+{"id": "bf-set-u8-new", "cmd": ["BITFIELD", "bf:a", "SET", "u8", "0", "200"]}
+{"id": "bf-set-u8-old", "cmd": ["BITFIELD", "bf:a", "SET", "u8", "0", "100"]}
+{"id": "bf-get-u8", "cmd": ["BITFIELD", "bf:a", "GET", "u8", "0"]}
+{"id": "bf-incrby-u8", "cmd": ["BITFIELD", "bf:a", "INCRBY", "u8", "0", "10"]}
+{"id": "bf-get-i8", "cmd": ["BITFIELD", "bf:a", "GET", "i8", "0"]}
+{"id": "bf-multiop", "cmd": ["BITFIELD", "bf:a", "GET", "u8", "0", "SET", "u8", "0", "1", "INCRBY", "u8", "0", "5"]}
+{"id": "bf-foobar-setup", "cmd": ["SET", "bf:fb", "foobar"]}
+{"id": "bf-foobar-get-u8-0", "cmd": ["BITFIELD", "bf:fb", "GET", "u8", "0"]}
+{"id": "bf-foobar-get-i8-0", "cmd": ["BITFIELD", "bf:fb", "GET", "i8", "0"]}
+{"id": "bf-foobar-get-hash1", "cmd": ["BITFIELD", "bf:fb", "GET", "u8", "#1"]}
+{"id": "bf-foobar-get-u16-0", "cmd": ["BITFIELD", "bf:fb", "GET", "u16", "0"]}
+{"id": "bf-hash-set", "cmd": ["BITFIELD", "bf:h", "SET", "u8", "#2", "99", "GET", "u8", "16"]}
+{"id": "bf-hash-strlen", "cmd": ["STRLEN", "bf:h"]}
+{"id": "bf-u8-sat-max", "cmd": ["BITFIELD", "bf:s1", "SET", "u8", "0", "255", "OVERFLOW", "SAT", "INCRBY", "u8", "0", "10"]}
+{"id": "bf-u8-sat-min", "cmd": ["BITFIELD", "bf:s2", "SET", "u8", "0", "100", "OVERFLOW", "SAT", "INCRBY", "u8", "0", "-200"]}
+{"id": "bf-u8-wrap-over", "cmd": ["BITFIELD", "bf:s3", "SET", "u8", "0", "255", "OVERFLOW", "WRAP", "INCRBY", "u8", "0", "10"]}
+{"id": "bf-u8-fail-over", "cmd": ["BITFIELD", "bf:s4", "SET", "u8", "0", "255", "OVERFLOW", "FAIL", "INCRBY", "u8", "0", "10"]}
+{"id": "bf-i8-sat-max", "cmd": ["BITFIELD", "bf:s5", "SET", "i8", "0", "127", "OVERFLOW", "SAT", "INCRBY", "i8", "0", "10"]}
+{"id": "bf-i8-sat-min", "cmd": ["BITFIELD", "bf:s6", "SET", "i8", "0", "-128", "OVERFLOW", "SAT", "INCRBY", "i8", "0", "-10"]}
+{"id": "bf-i8-wrap-max", "cmd": ["BITFIELD", "bf:s7", "SET", "i8", "0", "127", "OVERFLOW", "WRAP", "INCRBY", "i8", "0", "1"]}
+{"id": "bf-i8-wrap-min", "cmd": ["BITFIELD", "bf:s8", "SET", "i8", "0", "-128", "OVERFLOW", "WRAP", "INCRBY", "i8", "0", "-1"]}
+{"id": "bf-i8-fail-min", "cmd": ["BITFIELD", "bf:s9", "SET", "i8", "0", "-128", "OVERFLOW", "FAIL", "INCRBY", "i8", "0", "-1"]}
+{"id": "bf-set-u8-wrap-value", "cmd": ["BITFIELD", "bf:sw", "SET", "u8", "0", "300"]}
+{"id": "bf-set-u8-wrap-stored", "cmd": ["BITFIELD", "bf:sw", "GET", "u8", "0"]}
+{"id": "bf-set-u8-sat-value", "cmd": ["BITFIELD", "bf:ss", "OVERFLOW", "SAT", "SET", "u8", "0", "300"]}
+{"id": "bf-set-u8-sat-stored", "cmd": ["BITFIELD", "bf:ss", "GET", "u8", "0"]}
+{"id": "bf-set-u8-fail-value", "cmd": ["BITFIELD", "bf:sf", "OVERFLOW", "FAIL", "SET", "u8", "0", "300"]}
+{"id": "bf-set-u8-fail-exists", "cmd": ["EXISTS", "bf:sf"]}
+{"id": "bf-set-i8-wrap-value", "cmd": ["BITFIELD", "bf:si", "SET", "i8", "0", "200"]}
+{"id": "bf-set-i8-wrap-stored", "cmd": ["BITFIELD", "bf:si", "GET", "i8", "0"]}
+{"id": "bf-i64-sat-max", "cmd": ["BITFIELD", "bf:i64", "SET", "i64", "0", "9223372036854775807", "OVERFLOW", "SAT", "INCRBY", "i64", "0", "1"]}
+{"id": "bf-i64-wrap-max", "cmd": ["BITFIELD", "bf:i64w", "SET", "i64", "0", "9223372036854775807", "OVERFLOW", "WRAP", "INCRBY", "i64", "0", "1"]}
+{"id": "bf-u63-sat-max", "cmd": ["BITFIELD", "bf:u63", "SET", "u63", "0", "9223372036854775807", "OVERFLOW", "SAT", "INCRBY", "u63", "0", "1"]}
+{"id": "bf-u16-roundtrip", "cmd": ["BITFIELD", "bf:u16", "SET", "u16", "0", "65535", "GET", "u16", "0"]}
+{"id": "bf-multi-overflow-scope", "cmd": ["BITFIELD", "bf:ms", "OVERFLOW", "SAT", "INCRBY", "u8", "0", "300", "OVERFLOW", "WRAP", "INCRBY", "u8", "0", "300"]}
+{"id": "bf-err-u64", "cmd": ["BITFIELD", "bf:e", "GET", "u64", "0"]}
+{"id": "bf-err-i65", "cmd": ["BITFIELD", "bf:e", "GET", "i65", "0"]}
+{"id": "bf-err-u0", "cmd": ["BITFIELD", "bf:e", "GET", "u0", "0"]}
+{"id": "bf-err-badtype", "cmd": ["BITFIELD", "bf:e", "GET", "x8", "0"]}
+{"id": "bf-err-neg-offset", "cmd": ["BITFIELD", "bf:e", "GET", "u8", "-1"]}
+{"id": "bf-err-nan-offset", "cmd": ["BITFIELD", "bf:e", "GET", "u8", "notanum"]}
+{"id": "bf-err-bad-overflow", "cmd": ["BITFIELD", "bf:e", "OVERFLOW", "BOGUS", "GET", "u8", "0"]}
+{"id": "bf-err-syntax", "cmd": ["BITFIELD", "bf:e", "BOGUS", "u8", "0"]}
+{"id": "bf-ro-setup", "cmd": ["SET", "bf:ro", "foobar"]}
+{"id": "bf-ro-get", "cmd": ["BITFIELD_RO", "bf:ro", "GET", "u8", "0"]}
+{"id": "bf-ro-get-multi", "cmd": ["BITFIELD_RO", "bf:ro", "GET", "u8", "0", "GET", "i8", "8"]}
+{"id": "bf-ro-reject-set", "cmd": ["BITFIELD_RO", "bf:ro", "SET", "u8", "0", "1"]}
+{"id": "bf-ro-reject-incrby", "cmd": ["BITFIELD_RO", "bf:ro", "INCRBY", "u8", "0", "1"]}
+{"id": "bf-ro-overflow-then-get", "cmd": ["BITFIELD_RO", "bf:ro", "OVERFLOW", "SAT", "GET", "u8", "0"]}
+{"id": "bf-ttl-setup", "cmd": ["SET", "bf:ttl", "abc", "EX", "100"]}
+{"id": "bf-ttl-write", "cmd": ["BITFIELD", "bf:ttl", "SET", "u8", "0", "1"]}
+{"id": "bf-ttl-kept", "cmd": ["TTL", "bf:ttl"], "mode": "ttl_band", "band": 2}
+{"id": "bf-wrongtype-setup", "cmd": ["LPUSH", "bf:wt", "x"]}
+{"id": "bf-wrongtype-get", "cmd": ["BITFIELD", "bf:wt", "GET", "u8", "0"]}
+{"id": "bf-wrongtype-set", "cmd": ["BITFIELD", "bf:wt", "SET", "u8", "0", "1"]}
+{"id": "bo-and-setup-a", "cmd": ["SET", "bo:a", "abc"]}
+{"id": "bo-and-setup-b", "cmd": ["SET", "bo:b", "abd"]}
+{"id": "bo-and", "cmd": ["BITOP", "AND", "bo:dand", "bo:a", "bo:b"]}
+{"id": "bo-and-result", "cmd": ["GET", "bo:dand"]}
+{"id": "bo-or-setup-a", "cmd": ["SET", "bo:oa", "abcdef"]}
+{"id": "bo-or-setup-b", "cmd": ["SET", "bo:ob", "12"]}
+{"id": "bo-or-unequal", "cmd": ["BITOP", "OR", "bo:dor", "bo:oa", "bo:ob"]}
+{"id": "bo-or-result", "cmd": ["GET", "bo:dor"]}
+{"id": "bo-xor-setup-a", "cmd": ["SET", "bo:xa", "abc"]}
+{"id": "bo-xor-setup-b", "cmd": ["SET", "bo:xb", "abc"]}
+{"id": "bo-xor-equal", "cmd": ["BITOP", "XOR", "bo:dxor", "bo:xa", "bo:xb"]}
+{"id": "bo-xor-result", "cmd": ["GET", "bo:dxor"]}
+{"id": "bo-xor-strlen", "cmd": ["STRLEN", "bo:dxor"]}
+{"id": "bo-not-setup", "cmd": ["SET", "bo:na", "abc"]}
+{"id": "bo-not", "cmd": ["BITOP", "NOT", "bo:dnot", "bo:na"]}
+{"id": "bo-not-result", "cmd": ["GET", "bo:dnot"]}
+{"id": "bo-not-multi-err", "cmd": ["BITOP", "NOT", "bo:dnot", "bo:na", "bo:b"]}
+{"id": "bo-bad-op", "cmd": ["BITOP", "BOGUS", "bo:d", "bo:a"]}
+{"id": "bo-multi-source", "cmd": ["BITOP", "AND", "bo:dmulti", "bo:a", "bo:b", "bo:oa"]}
+{"id": "bo-multi-strlen", "cmd": ["STRLEN", "bo:dmulti"]}
+{"id": "bo-missing-source", "cmd": ["BITOP", "AND", "bo:dmiss", "bo:a", "bo:nokey"]}
+{"id": "bo-missing-strlen", "cmd": ["STRLEN", "bo:dmiss"]}
+{"id": "bo-missing-result", "cmd": ["GET", "bo:dmiss"]}
+{"id": "bo-empty-dest-setup", "cmd": ["SET", "bo:edel", "preexisting"]}
+{"id": "bo-empty-deletes", "cmd": ["BITOP", "AND", "bo:edel", "bo:m1", "bo:m2"]}
+{"id": "bo-empty-dest-gone", "cmd": ["EXISTS", "bo:edel"]}
+{"id": "bo-wrongtype-setup", "cmd": ["LPUSH", "bo:lst", "x"]}
+{"id": "bo-wrongtype", "cmd": ["BITOP", "AND", "bo:dwt", "bo:a", "bo:lst"]}

@@ -1017,6 +1017,12 @@ impl<H: Host> Engine<H> {
             self.bitcount_command(argv)
         } else if ascii_eq(command, b"BITPOS") {
             self.bitpos_command(argv)
+        } else if ascii_eq(command, b"BITFIELD") {
+            self.bitfield_command(argv, false)
+        } else if ascii_eq(command, b"BITFIELD_RO") {
+            self.bitfield_command(argv, true)
+        } else if ascii_eq(command, b"BITOP") {
+            self.bitop_command(argv)
         } else if ascii_eq(command, b"SCRIPT") {
             self.script_command(argv)
         } else if ascii_eq(command, b"EVAL") {
@@ -2020,6 +2026,317 @@ impl<H: Host> Engine<H> {
             -1
         };
         RespFrame::integer(final_pos)
+    }
+
+    /// BITFIELD / BITFIELD_RO (`bitfieldGeneric`, `bitops.c`). Parses every
+    /// GET/SET/INCRBY/OVERFLOW subcommand in a first pass (all argument errors
+    /// surface before any write), then executes them in order against a single
+    /// zero-extended string buffer, replying with one array element per op
+    /// (SET returns the old value, INCRBY the new value, FAIL-overflow nil).
+    /// When `readonly` is true only GET is accepted.
+    fn bitfield_command(&mut self, argv: &[Vec<u8>], readonly: bool) -> RespFrame {
+        if argv.len() < 2 {
+            return wrong_arity(if readonly { b"bitfield_ro" } else { b"bitfield" });
+        }
+        let mut ops: Vec<BitfieldOp> = Vec::new();
+        let mut owtype = BfOverflow::Wrap;
+        let mut is_readonly_access = true;
+        let mut highest_write_offset: u64 = 0;
+        let mut j = 2;
+        while j < argv.len() {
+            let remargs = argv.len() - j - 1;
+            let subcmd = &argv[j];
+            let opcode = if ascii_eq(subcmd, b"get") && remargs >= 2 {
+                BitfieldOpcode::Get
+            } else if ascii_eq(subcmd, b"set") && remargs >= 3 {
+                BitfieldOpcode::Set
+            } else if ascii_eq(subcmd, b"incrby") && remargs >= 3 {
+                BitfieldOpcode::IncrBy
+            } else if ascii_eq(subcmd, b"overflow") && remargs >= 1 {
+                let owtypename = &argv[j + 1];
+                j += 1;
+                if ascii_eq(owtypename, b"wrap") {
+                    owtype = BfOverflow::Wrap;
+                } else if ascii_eq(owtypename, b"sat") {
+                    owtype = BfOverflow::Sat;
+                } else if ascii_eq(owtypename, b"fail") {
+                    owtype = BfOverflow::Fail;
+                } else {
+                    return err(b"ERR Invalid OVERFLOW type specified");
+                }
+                j += 1;
+                continue;
+            } else {
+                return err(b"ERR syntax error");
+            };
+
+            let (sign, bits) = match get_bitfield_type_from_argument(&argv[j + 1]) {
+                Ok(parsed) => (parsed.0, parsed.1),
+                Err(frame) => return frame,
+            };
+            let bitoffset = match get_bitfield_offset_from_argument(&argv[j + 2], bits) {
+                Ok(offset) => offset,
+                Err(frame) => return frame,
+            };
+
+            let mut i64val = 0i64;
+            if opcode != BitfieldOpcode::Get {
+                is_readonly_access = false;
+                if highest_write_offset < bitoffset + bits as u64 - 1 {
+                    highest_write_offset = bitoffset + bits as u64 - 1;
+                }
+                let Some(parsed) = parse_i64(&argv[j + 3]) else {
+                    return err(b"ERR value is not an integer or out of range");
+                };
+                i64val = parsed;
+            }
+
+            ops.push(BitfieldOp {
+                offset: bitoffset,
+                i64: i64val,
+                opcode,
+                owtype,
+                bits,
+                sign,
+            });
+
+            j += 4 - usize::from(opcode == BitfieldOpcode::Get);
+        }
+
+        let mut buffer: Vec<u8>;
+        let mut preserved_ttl: Option<u64> = None;
+        let mut dirty = false;
+
+        if is_readonly_access {
+            self.purge_if_expired(&argv[1]);
+            buffer = match self.db.get(&argv[1]).map(|entry| &entry.value) {
+                Some(StoredValue::String(value)) => value.clone(),
+                Some(_) => return wrong_type(),
+                None => Vec::new(),
+            };
+        } else {
+            if readonly {
+                return err(b"ERR BITFIELD_RO only supports the GET subcommand");
+            }
+            self.purge_if_expired(&argv[1]);
+            let byte = (highest_write_offset >> 3) as usize;
+            let min_len = byte + 1;
+            match self.db.remove(&argv[1]) {
+                Some(Entry {
+                    value: StoredValue::String(existing),
+                    expire_at_ms,
+                }) => {
+                    buffer = existing;
+                    preserved_ttl = expire_at_ms;
+                }
+                Some(other) => {
+                    self.db.insert(argv[1].clone(), other);
+                    return wrong_type();
+                }
+                None => {
+                    buffer = Vec::new();
+                    dirty = true;
+                }
+            }
+            if buffer.len() < min_len {
+                buffer.resize(min_len, 0u8);
+                dirty = true;
+            }
+        }
+
+        let mut changes = 0i64;
+        let mut replies: Vec<RespFrame> = Vec::with_capacity(ops.len());
+        for op in &ops {
+            match op.opcode {
+                BitfieldOpcode::Set | BitfieldOpcode::IncrBy => {
+                    if op.sign {
+                        let oldval = get_signed_bitfield(&buffer, op.offset, op.bits);
+                        let (overflow, wrapped, newval, retval) =
+                            if op.opcode == BitfieldOpcode::IncrBy {
+                                let (overflow, wrapped) = check_signed_bitfield_overflow(
+                                    oldval, op.i64, op.bits, op.owtype,
+                                );
+                                let newval = if overflow {
+                                    wrapped
+                                } else {
+                                    oldval.wrapping_add(op.i64)
+                                };
+                                (overflow, wrapped, newval, newval)
+                            } else {
+                                let mut newval = op.i64;
+                                let (overflow, wrapped) = check_signed_bitfield_overflow(
+                                    newval, 0, op.bits, op.owtype,
+                                );
+                                if overflow {
+                                    newval = wrapped;
+                                }
+                                (overflow, wrapped, newval, oldval)
+                            };
+                        let _ = wrapped;
+                        if !(overflow && op.owtype == BfOverflow::Fail) {
+                            replies.push(RespFrame::integer(retval));
+                            set_signed_bitfield(&mut buffer, op.offset, op.bits, newval);
+                            if dirty || oldval != newval {
+                                changes += 1;
+                            }
+                        } else {
+                            replies.push(RespFrame::null_bulk());
+                        }
+                    } else {
+                        let oldval = get_unsigned_bitfield(&buffer, op.offset, op.bits);
+                        let (overflow, newval, retval) =
+                            if op.opcode == BitfieldOpcode::IncrBy {
+                                let mut newval = oldval.wrapping_add(op.i64 as u64);
+                                let (overflow, wrapped) = check_unsigned_bitfield_overflow(
+                                    oldval, op.i64, op.bits, op.owtype,
+                                );
+                                if overflow {
+                                    newval = wrapped;
+                                }
+                                (overflow, newval, newval)
+                            } else {
+                                let mut newval = op.i64 as u64;
+                                let (overflow, wrapped) = check_unsigned_bitfield_overflow(
+                                    newval, 0, op.bits, op.owtype,
+                                );
+                                if overflow {
+                                    newval = wrapped;
+                                }
+                                (overflow, newval, oldval)
+                            };
+                        if !(overflow && op.owtype == BfOverflow::Fail) {
+                            replies.push(RespFrame::integer(retval as i64));
+                            set_unsigned_bitfield(&mut buffer, op.offset, op.bits, newval);
+                            if dirty || oldval != newval {
+                                changes += 1;
+                            }
+                        } else {
+                            replies.push(RespFrame::null_bulk());
+                        }
+                    }
+                }
+                BitfieldOpcode::Get => {
+                    let mut buf = [0u8; 9];
+                    let byte = (op.offset >> 3) as usize;
+                    for (i, slot) in buf.iter_mut().enumerate() {
+                        if i + byte >= buffer.len() {
+                            break;
+                        }
+                        *slot = buffer[i + byte];
+                    }
+                    let local_offset = op.offset - (byte as u64) * 8;
+                    if op.sign {
+                        let val = get_signed_bitfield(&buf, local_offset, op.bits);
+                        replies.push(RespFrame::integer(val));
+                    } else {
+                        let val = get_unsigned_bitfield(&buf, local_offset, op.bits);
+                        replies.push(RespFrame::integer(val as i64));
+                    }
+                }
+            }
+        }
+
+        if !is_readonly_access {
+            self.db.insert(
+                argv[1].clone(),
+                Entry {
+                    value: StoredValue::String(buffer),
+                    expire_at_ms: preserved_ttl,
+                },
+            );
+            if changes > 0 {
+                self.note_write(&argv[1]);
+            }
+        }
+
+        RespFrame::array(replies)
+    }
+
+    /// BITOP AND|OR|XOR|NOT destkey srckey [srckey...] (`bitopCommand`,
+    /// `bitops.c`). Combines source strings (zero-extended to the longest)
+    /// bitwise into destkey and replies with the result's byte length. An
+    /// all-empty result deletes destkey. NOT accepts exactly one source.
+    fn bitop_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 4 {
+            return wrong_arity(b"bitop");
+        }
+        let op = if ascii_eq(&argv[1], b"and") {
+            BitopKind::And
+        } else if ascii_eq(&argv[1], b"or") {
+            BitopKind::Or
+        } else if ascii_eq(&argv[1], b"xor") {
+            BitopKind::Xor
+        } else if ascii_eq(&argv[1], b"not") {
+            BitopKind::Not
+        } else {
+            return err(b"ERR syntax error");
+        };
+        if op == BitopKind::Not && argv.len() != 4 {
+            return err(b"ERR BITOP NOT must be called with a single source key.");
+        }
+
+        let targetkey = &argv[2];
+        let numkeys = argv.len() - 3;
+        let mut srcs: Vec<Vec<u8>> = Vec::with_capacity(numkeys);
+        for src_key in &argv[3..] {
+            self.purge_if_expired(src_key);
+            match self.db.get(src_key).map(|entry| &entry.value) {
+                Some(StoredValue::String(value)) => srcs.push(value.clone()),
+                Some(_) => return wrong_type(),
+                None => srcs.push(Vec::new()),
+            }
+        }
+
+        let maxlen = srcs.iter().map(|s| s.len()).max().unwrap_or(0);
+        let mut res = Vec::new();
+        if maxlen > 0 {
+            res = vec![0u8; maxlen];
+            for (idx, out) in res.iter_mut().enumerate() {
+                let mut output = if srcs[0].len() <= idx { 0 } else { srcs[0][idx] };
+                if op == BitopKind::Not {
+                    output = !output;
+                }
+                for src in &srcs[1..] {
+                    let byte = if src.len() <= idx { 0 } else { src[idx] };
+                    match op {
+                        BitopKind::And => {
+                            output &= byte;
+                            if output == 0 {
+                                break;
+                            }
+                        }
+                        BitopKind::Or => {
+                            output |= byte;
+                            if output == 0xff {
+                                break;
+                            }
+                        }
+                        BitopKind::Xor => output ^= byte,
+                        BitopKind::Not => {}
+                    }
+                }
+                *out = output;
+            }
+        }
+
+        if maxlen > 0 {
+            let res_len = res.len() as i64;
+            let preserved_ttl = None;
+            self.db.insert(
+                targetkey.clone(),
+                Entry {
+                    value: StoredValue::String(res),
+                    expire_at_ms: preserved_ttl,
+                },
+            );
+            self.note_write(targetkey);
+            RespFrame::integer(res_len)
+        } else {
+            if self.db.remove(targetkey).is_some() {
+                self.note_write(targetkey);
+            }
+            RespFrame::integer(0)
+        }
     }
 
     fn hset_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
@@ -8041,6 +8358,9 @@ fn command_arity(command: &[u8]) -> Option<i64> {
     let arity = match upper.as_slice() {
         b"APPEND" => 3,
         b"BITCOUNT" => -2,
+        b"BITFIELD" => -2,
+        b"BITFIELD_RO" => -2,
+        b"BITOP" => -4,
         b"BITPOS" => -3,
         b"COPY" => -3,
         b"DECR" => 2,
@@ -8257,6 +8577,209 @@ fn server_bitpos(data: &[u8], count: usize, bit: i32) -> i64 {
         pos += 1;
     }
     pos
+}
+
+/// BITFIELD overflow mode (`BFOVERFLOW_*`, `bitops.c`). Sets how SET/INCRBY
+/// behave when the result exceeds the field's signed/unsigned range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BfOverflow {
+    Wrap,
+    Sat,
+    Fail,
+}
+
+/// A parsed BITFIELD subcommand (`struct bitfieldOp`, `bitops.c`).
+struct BitfieldOp {
+    offset: u64,
+    i64: i64,
+    opcode: BitfieldOpcode,
+    owtype: BfOverflow,
+    bits: u32,
+    sign: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BitfieldOpcode {
+    Get,
+    Set,
+    IncrBy,
+}
+
+/// BITOP operation kind (`BITOP_*`, `bitops.c`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BitopKind {
+    And,
+    Or,
+    Xor,
+    Not,
+}
+
+/// Write `value`'s low `bits` bits big-endian-msb-first starting at bit
+/// `offset` (`setUnsignedBitfield`, `bitops.c`). `p` must be large enough.
+fn set_unsigned_bitfield(p: &mut [u8], mut offset: u64, bits: u32, value: u64) {
+    for j in 0..bits {
+        let bitval = ((value & (1u64 << (bits - 1 - j))) != 0) as u8;
+        let byte = (offset >> 3) as usize;
+        let bit = 7 - (offset & 0x7);
+        let mut byteval = p[byte];
+        byteval &= !(1u8 << bit);
+        byteval |= bitval << bit;
+        p[byte] = byteval;
+        offset += 1;
+    }
+}
+
+/// Signed counterpart of `set_unsigned_bitfield` (`setSignedBitfield`).
+fn set_signed_bitfield(p: &mut [u8], offset: u64, bits: u32, value: i64) {
+    set_unsigned_bitfield(p, offset, bits, value as u64);
+}
+
+/// Read `bits` bits big-endian-msb-first at bit `offset`
+/// (`getUnsignedBitfield`, `bitops.c`). `p` must be large enough.
+fn get_unsigned_bitfield(p: &[u8], mut offset: u64, bits: u32) -> u64 {
+    let mut value: u64 = 0;
+    for _ in 0..bits {
+        let byte = (offset >> 3) as usize;
+        let bit = 7 - (offset & 0x7);
+        let bitval = (p[byte] >> bit) & 1;
+        value = (value << 1) | bitval as u64;
+        offset += 1;
+    }
+    value
+}
+
+/// Sign-extending counterpart of `get_unsigned_bitfield`
+/// (`getSignedBitfield`, `bitops.c`).
+fn get_signed_bitfield(p: &[u8], offset: u64, bits: u32) -> i64 {
+    let mut value = get_unsigned_bitfield(p, offset, bits) as i64;
+    if bits < 64 && (value & (1i64 << (bits - 1))) != 0 {
+        value |= (-1i64) << bits;
+    }
+    value
+}
+
+/// `checkUnsignedBitfieldOverflow` (`bitops.c`). Returns `(overflow, limit)`
+/// where `overflow` is true on over/underflow and `limit` is the value to
+/// store under the requested overflow mode (only meaningful when `overflow`).
+fn check_unsigned_bitfield_overflow(
+    value: u64,
+    incr: i64,
+    bits: u32,
+    owtype: BfOverflow,
+) -> (bool, u64) {
+    let max = if bits == 64 { u64::MAX } else { (1u64 << bits) - 1 };
+    let maxincr = max.wrapping_sub(value) as i64;
+    let minincr = (0u64.wrapping_sub(value)) as i64;
+    let handle_wrap = || {
+        let mask = (-1i64 as u64) << bits;
+        (value.wrapping_add(incr as u64)) & !mask
+    };
+    if value > max || (incr > 0 && incr > maxincr) {
+        let limit = match owtype {
+            BfOverflow::Wrap => handle_wrap(),
+            BfOverflow::Sat => max,
+            BfOverflow::Fail => 0,
+        };
+        return (true, limit);
+    } else if incr < 0 && incr < minincr {
+        let limit = match owtype {
+            BfOverflow::Wrap => handle_wrap(),
+            BfOverflow::Sat => 0,
+            BfOverflow::Fail => 0,
+        };
+        return (true, limit);
+    }
+    (false, 0)
+}
+
+/// `checkSignedBitfieldOverflow` (`bitops.c`). Returns `(overflow, limit)`.
+fn check_signed_bitfield_overflow(
+    value: i64,
+    incr: i64,
+    bits: u32,
+    owtype: BfOverflow,
+) -> (bool, i64) {
+    let max = if bits == 64 {
+        i64::MAX
+    } else {
+        (1i64 << (bits - 1)) - 1
+    };
+    let min = (-max) - 1;
+    let maxincr = (max as u64).wrapping_sub(value as u64) as i64;
+    let minincr = (min as u64).wrapping_sub(value as u64) as i64;
+    let handle_wrap = || {
+        let msb = 1u64 << (bits - 1);
+        let mut c = (value as u64).wrapping_add(incr as u64);
+        if bits < 64 {
+            let mask = (-1i64 as u64) << bits;
+            if c & msb != 0 {
+                c |= mask;
+            } else {
+                c &= !mask;
+            }
+        }
+        c as i64
+    };
+    if value > max
+        || (bits != 64 && incr > maxincr)
+        || (value >= 0 && incr > 0 && incr > maxincr)
+    {
+        let limit = match owtype {
+            BfOverflow::Wrap => handle_wrap(),
+            BfOverflow::Sat => max,
+            BfOverflow::Fail => 0,
+        };
+        return (true, limit);
+    } else if value < min
+        || (bits != 64 && incr < minincr)
+        || (value < 0 && incr < 0 && incr < minincr)
+    {
+        let limit = match owtype {
+            BfOverflow::Wrap => handle_wrap(),
+            BfOverflow::Sat => min,
+            BfOverflow::Fail => 0,
+        };
+        return (true, limit);
+    }
+    (false, 0)
+}
+
+/// Parse a BITFIELD `<sign><bits>` type argument (`getBitfieldTypeFromArgument`,
+/// `bitops.c`). Returns `(sign, bits)` where `sign` is true for signed. Unsigned
+/// is capped at 63 bits, signed at 64, both ≥ 1.
+fn get_bitfield_type_from_argument(arg: &[u8]) -> Result<(bool, u32), RespFrame> {
+    const ERR: &[u8] = b"ERR Invalid bitfield type. Use something like i16 u8. Note that u64 is not supported but i64 is.";
+    let sign = match arg.first() {
+        Some(b'i') => true,
+        Some(b'u') => false,
+        _ => return Err(err(ERR)),
+    };
+    let Some(llbits) = parse_i64(&arg[1..]) else {
+        return Err(err(ERR));
+    };
+    if llbits < 1 || (sign && llbits > 64) || (!sign && llbits > 63) {
+        return Err(err(ERR));
+    }
+    Ok((sign, llbits as u32))
+}
+
+/// Parse a BITFIELD bit-offset argument supporting the `#<n>` form
+/// (`getBitOffsetFromArgument` with `hash=1`, `bitops.c`). `#<n>` multiplies
+/// the parsed value by `bits`.
+fn get_bitfield_offset_from_argument(arg: &[u8], bits: u32) -> Result<u64, RespFrame> {
+    const ERR: &[u8] = b"ERR bit offset is not an integer or out of range";
+    let usehash = matches!(arg.first(), Some(b'#')) && bits > 0;
+    let body = if usehash { &arg[1..] } else { arg };
+    let Some(mut loffset) = parse_i64(body) else {
+        return Err(err(ERR));
+    };
+    if usehash {
+        loffset = loffset.wrapping_mul(bits as i64);
+    }
+    if loffset < 0 || (loffset >> 3) >= PROTO_MAX_BULK_LEN {
+        return Err(err(ERR));
+    }
+    Ok(loffset as u64)
 }
 
 /// Parse the trailing NX|XX|GT|LT flags of the EXPIRE family, mirroring
