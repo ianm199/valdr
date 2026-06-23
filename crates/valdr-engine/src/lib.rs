@@ -600,6 +600,14 @@ impl<H: Host> Engine<H> {
             self.lrem_command(argv)
         } else if ascii_eq(command, b"LTRIM") {
             self.ltrim_command(argv)
+        } else if ascii_eq(command, b"RPOPLPUSH") {
+            self.rpoplpush_command(argv)
+        } else if ascii_eq(command, b"LMOVE") {
+            self.lmove_command(argv)
+        } else if ascii_eq(command, b"LMPOP") {
+            self.lmpop_command(argv)
+        } else if ascii_eq(command, b"LPOS") {
+            self.lpos_command(argv)
         } else if ascii_eq(command, b"SADD") {
             self.sadd_command(argv)
         } else if ascii_eq(command, b"SREM") {
@@ -3480,6 +3488,319 @@ impl<H: Host> Engine<H> {
         simple(b"OK")
     }
 
+    /// RPOPLPUSH source destination (`rpoplpushCommand`, `t_list.c`): pop the
+    /// tail of `source`, push it to the head of `destination`, and reply the
+    /// moved element. Equivalent to `LMOVE source destination RIGHT LEFT`.
+    fn rpoplpush_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 3 {
+            return wrong_arity(b"rpoplpush");
+        }
+        self.lmove_generic(&argv[1], &argv[2], ListEnd::Tail, ListEnd::Head)
+    }
+
+    /// LMOVE source destination LEFT|RIGHT LEFT|RIGHT (`lmoveCommand`,
+    /// `t_list.c`): pop from the `from` end of `source` and push to the `to`
+    /// end of `destination`, replying the moved element.
+    fn lmove_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 5 {
+            return wrong_arity(b"lmove");
+        }
+        let Some(wherefrom) = parse_list_position(&argv[3]) else {
+            return err(b"ERR syntax error");
+        };
+        let Some(whereto) = parse_list_position(&argv[4]) else {
+            return err(b"ERR syntax error");
+        };
+        self.lmove_generic(&argv[1], &argv[2], wherefrom, whereto)
+    }
+
+    /// Shared core of LMOVE / RPOPLPUSH (`lmoveGenericCommand`, `t_list.c`).
+    /// Replies a null bulk when `source` is missing or empty. WRONGTYPE if
+    /// either key holds a non-list value (destination is type-checked before
+    /// the pop, matching the C order). `source == destination` rotates the list
+    /// in place. Emptying `source` deletes the key; `destination` is created on
+    /// demand. Both keys are noted as written.
+    fn lmove_generic(
+        &mut self,
+        src: &[u8],
+        dst: &[u8],
+        wherefrom: ListEnd,
+        whereto: ListEnd,
+    ) -> RespFrame {
+        self.purge_if_expired(src);
+        self.purge_if_expired(dst);
+
+        match self.db.get(src) {
+            Some(Entry { value: StoredValue::List(_), .. }) => {}
+            Some(_) => return wrong_type(),
+            None => return RespFrame::null_bulk(),
+        }
+        match self.db.get(dst) {
+            Some(Entry { value: StoredValue::List(_), .. }) | None => {}
+            Some(_) => return wrong_type(),
+        }
+
+        let value = match self.db.get_mut(src) {
+            Some(Entry { value: StoredValue::List(items), .. }) => match wherefrom {
+                ListEnd::Head => items.pop_front(),
+                ListEnd::Tail => items.pop_back(),
+            },
+            _ => None,
+        };
+        let value = match value {
+            Some(v) => v,
+            None => return RespFrame::null_bulk(),
+        };
+
+        let src_empty = matches!(
+            self.db.get(src),
+            Some(Entry { value: StoredValue::List(items), .. }) if items.is_empty()
+        );
+        if src_empty {
+            self.db.remove(src);
+        }
+
+        match self.db.get_mut(dst) {
+            Some(Entry { value: StoredValue::List(items), .. }) => match whereto {
+                ListEnd::Head => items.push_front(value.clone()),
+                ListEnd::Tail => items.push_back(value.clone()),
+            },
+            _ => {
+                let mut items = VecDeque::new();
+                match whereto {
+                    ListEnd::Head => items.push_front(value.clone()),
+                    ListEnd::Tail => items.push_back(value.clone()),
+                }
+                self.db.insert(
+                    dst.to_vec(),
+                    Entry {
+                        value: StoredValue::List(items),
+                        expire_at_ms: None,
+                    },
+                );
+            }
+        }
+
+        self.note_write(src);
+        self.note_write(dst);
+        bulk(value)
+    }
+
+    /// LMPOP numkeys key [key ...] LEFT|RIGHT [COUNT count]
+    /// (`lmpopGenericCommand` + `mpopGenericCommand`, `t_list.c`). Pops up to
+    /// `count` (default 1) elements from the first non-empty list among the
+    /// keys and replies `[key, [elem, ...]]`. When every key is missing or
+    /// empty replies a null array (`*-1`). Popping with `RIGHT` returns the
+    /// elements in reverse list order (tail first). Emptying a list deletes the
+    /// key. A non-list value among the keys is WRONGTYPE.
+    fn lmpop_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 4 {
+            return wrong_arity(b"lmpop");
+        }
+        let Some(numkeys) = parse_i64(&argv[1]) else {
+            return err(b"ERR numkeys should be greater than 0");
+        };
+        if numkeys <= 0 {
+            return err(b"ERR numkeys should be greater than 0");
+        }
+        let numkeys = numkeys as usize;
+        let where_idx = 1 + numkeys + 1;
+        if where_idx >= argv.len() {
+            return err(b"ERR syntax error");
+        }
+        let Some(position) = parse_list_position(&argv[where_idx]) else {
+            return err(b"ERR syntax error");
+        };
+        let mut count: i64 = -1;
+        let mut j = where_idx + 1;
+        while j < argv.len() {
+            let moreargs = argv.len() - 1 - j;
+            if count == -1 && ascii_eq(&argv[j], b"COUNT") && moreargs >= 1 {
+                let Some(parsed) = parse_i64(&argv[j + 1]) else {
+                    return err(b"ERR count should be greater than 0");
+                };
+                if parsed <= 0 {
+                    return err(b"ERR count should be greater than 0");
+                }
+                count = parsed;
+                j += 2;
+            } else {
+                return err(b"ERR syntax error");
+            }
+        }
+        let count = if count == -1 { 1 } else { count } as usize;
+
+        let keys: Vec<Vec<u8>> = argv[2..2 + numkeys].to_vec();
+        for key in &keys {
+            self.purge_if_expired(key);
+            let has_data = match self.db.get(key) {
+                Some(Entry { value: StoredValue::List(items), .. }) => !items.is_empty(),
+                Some(_) => return wrong_type(),
+                None => false,
+            };
+            if !has_data {
+                continue;
+            }
+            let popped: Vec<Vec<u8>> = match self.db.get_mut(key) {
+                Some(Entry { value: StoredValue::List(items), .. }) => {
+                    let take = count.min(items.len());
+                    let mut out = Vec::with_capacity(take);
+                    for _ in 0..take {
+                        let next = match position {
+                            ListEnd::Head => items.pop_front(),
+                            ListEnd::Tail => items.pop_back(),
+                        };
+                        match next {
+                            Some(v) => out.push(v),
+                            None => break,
+                        }
+                    }
+                    out
+                }
+                _ => Vec::new(),
+            };
+            let list_now_empty = matches!(
+                self.db.get(key),
+                Some(Entry { value: StoredValue::List(items), .. }) if items.is_empty()
+            );
+            if list_now_empty {
+                self.db.remove(key);
+            }
+            self.note_write(key);
+            let elems = popped.into_iter().map(bulk).collect();
+            return RespFrame::array(vec![bulk(key), RespFrame::array(elems)]);
+        }
+        RespFrame::null_array()
+    }
+
+    /// LPOS key element [RANK rank] [COUNT num] [MAXLEN len] (`lposCommand`,
+    /// `t_list.c`). Without COUNT, replies the index of the (rank-th) match as
+    /// an integer, or a null bulk when there is no match / no key. With COUNT,
+    /// replies an array of indices (empty when no key / no match); `COUNT 0`
+    /// returns every match. A negative RANK scans from the tail; `RANK 0` is an
+    /// error. MAXLEN caps the number of entries compared (0 = unlimited).
+    fn lpos_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 3 {
+            return wrong_arity(b"lpos");
+        }
+        let element = &argv[2];
+        let mut rank: i64 = 1;
+        let mut count: Option<i64> = None;
+        let mut maxlen: i64 = 0;
+        let mut j = 3usize;
+        while j < argv.len() {
+            let moreargs = argv.len() - 1 - j;
+            if ascii_eq(&argv[j], b"RANK") && moreargs >= 1 {
+                let Some(parsed) = parse_i64(&argv[j + 1]) else {
+                    return err(b"ERR value is not an integer or out of range");
+                };
+                if parsed == 0 {
+                    return err(b"ERR RANK can't be zero: use 1 to start from the first match, 2 from the second ... or use negative to start from the end of the list");
+                }
+                if parsed.checked_neg().is_none() {
+                    return err(b"ERR value is out of range");
+                }
+                rank = parsed;
+                j += 2;
+            } else if ascii_eq(&argv[j], b"COUNT") && moreargs >= 1 {
+                let Some(parsed) = parse_i64(&argv[j + 1]) else {
+                    return err(b"ERR value is not an integer or out of range");
+                };
+                if parsed < 0 {
+                    return err(b"ERR COUNT can't be negative");
+                }
+                count = Some(parsed);
+                j += 2;
+            } else if ascii_eq(&argv[j], b"MAXLEN") && moreargs >= 1 {
+                let Some(parsed) = parse_i64(&argv[j + 1]) else {
+                    return err(b"ERR value is not an integer or out of range");
+                };
+                if parsed < 0 {
+                    return err(b"ERR MAXLEN can't be negative");
+                }
+                maxlen = parsed;
+                j += 2;
+            } else {
+                return err(b"ERR syntax error");
+            }
+        }
+
+        let items = match self.get_value(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::List(items)) => items,
+            Some(_) => return wrong_type(),
+            None => {
+                return match count {
+                    None => RespFrame::null_bulk(),
+                    Some(_) => RespFrame::array(Vec::new()),
+                };
+            }
+        };
+
+        let len = items.len();
+        let forward = rank > 0;
+        let skip = rank.unsigned_abs() as usize - 1;
+        let want_all = matches!(count, Some(0));
+        let want_one = count.is_none();
+        let limit = count.map(|c| c as usize);
+        let maxlen = maxlen as usize;
+        let mut matches: Vec<i64> = Vec::new();
+        let mut seen = 0usize;
+        let mut scanned = 0usize;
+
+        if forward {
+            for (idx, item) in items.iter().enumerate() {
+                if maxlen != 0 && scanned >= maxlen {
+                    break;
+                }
+                scanned += 1;
+                if item == element {
+                    if seen >= skip {
+                        matches.push(idx as i64);
+                        if want_one {
+                            break;
+                        }
+                        if let Some(c) = limit {
+                            if !want_all && matches.len() >= c {
+                                break;
+                            }
+                        }
+                    }
+                    seen += 1;
+                }
+            }
+        } else {
+            for (rev_idx, item) in items.iter().rev().enumerate() {
+                if maxlen != 0 && scanned >= maxlen {
+                    break;
+                }
+                scanned += 1;
+                if item == element {
+                    if seen >= skip {
+                        matches.push((len - 1 - rev_idx) as i64);
+                        if want_one {
+                            break;
+                        }
+                        if let Some(c) = limit {
+                            if !want_all && matches.len() >= c {
+                                break;
+                            }
+                        }
+                    }
+                    seen += 1;
+                }
+            }
+        }
+
+        if want_one {
+            match matches.first() {
+                None => RespFrame::null_bulk(),
+                Some(v) => RespFrame::integer(*v),
+            }
+        } else {
+            RespFrame::array(matches.into_iter().map(RespFrame::integer).collect())
+        }
+    }
+
     /// SADD key member [member ...] (`saddCommand`, `t_set.c`). Creates the set
     /// when missing, adds each member that is not already present, and replies
     /// the count of newly-added members. Mutates (and bumps the epoch) only
@@ -5785,6 +6106,19 @@ fn ascii_eq(left: &[u8], right: &[u8]) -> bool {
             .all(|(l, r)| l.eq_ignore_ascii_case(r))
 }
 
+/// Parse a `LEFT`/`RIGHT` direction argument (`getListPositionFromObjectOrReply`,
+/// `t_list.c`). `LEFT` is the head, `RIGHT` is the tail. Returns `None` for any
+/// other token so the caller can emit a syntax error.
+fn parse_list_position(bytes: &[u8]) -> Option<ListEnd> {
+    if ascii_eq(bytes, b"LEFT") {
+        Some(ListEnd::Head)
+    } else if ascii_eq(bytes, b"RIGHT") {
+        Some(ListEnd::Tail)
+    } else {
+        None
+    }
+}
+
 fn normalise_sha(bytes: &[u8]) -> Option<[u8; 40]> {
     if bytes.len() != 40 {
         return None;
@@ -6177,6 +6511,18 @@ mod tests {
             (&[&[b"RPUSH", b"l", b"a", b"a", b"a"]], &[b"LREM", b"l", b"0", b"a"]),
             (&[seed_l], &[b"LTRIM", b"l", b"1", b"1"]),
             (&[seed_l], &[b"LTRIM", b"l", b"5", b"9"]),
+            (&[seed_l], &[b"RPOPLPUSH", b"l", b"dst"]),
+            (&[&[b"RPUSH", b"l", b"x"]], &[b"RPOPLPUSH", b"l", b"dst"]),
+            (&[], &[b"RPOPLPUSH", b"missing", b"dst"]),
+            (&[seed_l], &[b"RPOPLPUSH", b"l", b"l"]),
+            (&[seed_l], &[b"LMOVE", b"l", b"dst", b"LEFT", b"RIGHT"]),
+            (&[seed_l], &[b"LMOVE", b"l", b"dst", b"RIGHT", b"LEFT"]),
+            (&[seed_l], &[b"LMPOP", b"1", b"l", b"LEFT"]),
+            (&[seed_l], &[b"LMPOP", b"2", b"missing", b"l", b"RIGHT", b"COUNT", b"2"]),
+            (&[], &[b"LMPOP", b"1", b"missing", b"LEFT"]),
+            (&[&[b"RPUSH", b"l", b"x"]], &[b"LMPOP", b"1", b"l", b"LEFT"]),
+            (&[seed_l], &[b"LPOS", b"l", b"a"]),
+            (&[seed_l], &[b"LPOS", b"l", b"missing", b"COUNT", b"0"]),
             (&[], &[b"SADD", b"s", b"a", b"b", b"c"]),
             (&[seed_s], &[b"SADD", b"s", b"a"]),
             (&[seed_s], &[b"SADD", b"s", b"d"]),

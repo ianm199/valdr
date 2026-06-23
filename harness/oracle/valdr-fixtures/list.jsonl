@@ -86,3 +86,82 @@
 {"id": "wrongtype-strlen-on-list", "cmd": ["STRLEN", "list:w"], "mode": "error_prefix"}
 {"id": "lpush-arity-error", "cmd": ["LPUSH", "list:w"], "mode": "error_prefix"}
 {"id": "lindex-non-integer", "cmd": ["LINDEX", "list:w", "notanint"], "mode": "error_prefix"}
+{"id": "rpoplpush-src-build", "cmd": ["RPUSH", "list:src", "a", "b", "c"]}
+{"id": "rpoplpush-normal", "cmd": ["RPOPLPUSH", "list:src", "list:dst"]}
+{"id": "rpoplpush-src-after", "cmd": ["LRANGE", "list:src", "0", "-1"]}
+{"id": "rpoplpush-dst-created", "cmd": ["LRANGE", "list:dst", "0", "-1"]}
+{"id": "rpoplpush-dst-type", "cmd": ["TYPE", "list:dst"]}
+{"id": "rpoplpush-again", "cmd": ["RPOPLPUSH", "list:src", "list:dst"]}
+{"id": "rpoplpush-dst-after-second", "cmd": ["LRANGE", "list:dst", "0", "-1"]}
+{"id": "rpoplpush-drains-src", "cmd": ["RPOPLPUSH", "list:src", "list:dst"]}
+{"id": "rpoplpush-src-deleted-when-emptied", "cmd": ["EXISTS", "list:src"]}
+{"id": "rpoplpush-empty-source", "cmd": ["RPOPLPUSH", "list:src", "list:dst"]}
+{"id": "rpoplpush-missing-source", "cmd": ["RPOPLPUSH", "list:nope", "list:dst"]}
+{"id": "rpoplpush-rotate-build", "cmd": ["RPUSH", "list:rot", "1", "2", "3"]}
+{"id": "rpoplpush-rotate-self", "cmd": ["RPOPLPUSH", "list:rot", "list:rot"]}
+{"id": "rpoplpush-rotate-after", "cmd": ["LRANGE", "list:rot", "0", "-1"]}
+{"id": "rpoplpush-rotate-self-again", "cmd": ["RPOPLPUSH", "list:rot", "list:rot"]}
+{"id": "rpoplpush-rotate-after2", "cmd": ["LRANGE", "list:rot", "0", "-1"]}
+{"id": "rpoplpush-wrongtype-src-build", "cmd": ["SET", "list:wstr", "x"]}
+{"id": "rpoplpush-wrongtype-source", "cmd": ["RPOPLPUSH", "list:wstr", "list:dst"], "mode": "error_prefix"}
+{"id": "rpoplpush-wrongtype-dst-build", "cmd": ["RPUSH", "list:wsrc", "a"]}
+{"id": "rpoplpush-wrongtype-dest", "cmd": ["RPOPLPUSH", "list:wsrc", "list:wstr"], "mode": "error_prefix"}
+{"id": "rpoplpush-wrongtype-src-untouched", "cmd": ["LRANGE", "list:wsrc", "0", "-1"]}
+{"id": "rpoplpush-arity", "cmd": ["RPOPLPUSH", "list:wsrc"], "mode": "error_prefix"}
+{"id": "lmove-build", "cmd": ["RPUSH", "list:mv", "a", "b", "c", "d"]}
+{"id": "lmove-left-left", "cmd": ["LMOVE", "list:mv", "list:mv2", "LEFT", "LEFT"]}
+{"id": "lmove-ll-src", "cmd": ["LRANGE", "list:mv", "0", "-1"]}
+{"id": "lmove-ll-dst", "cmd": ["LRANGE", "list:mv2", "0", "-1"]}
+{"id": "lmove-left-right", "cmd": ["LMOVE", "list:mv", "list:mv2", "LEFT", "RIGHT"]}
+{"id": "lmove-lr-dst", "cmd": ["LRANGE", "list:mv2", "0", "-1"]}
+{"id": "lmove-right-left", "cmd": ["LMOVE", "list:mv", "list:mv2", "RIGHT", "LEFT"]}
+{"id": "lmove-rl-dst", "cmd": ["LRANGE", "list:mv2", "0", "-1"]}
+{"id": "lmove-right-right", "cmd": ["LMOVE", "list:mv", "list:mv2", "RIGHT", "RIGHT"]}
+{"id": "lmove-rr-dst", "cmd": ["LRANGE", "list:mv2", "0", "-1"]}
+{"id": "lmove-src-now-empty", "cmd": ["EXISTS", "list:mv"]}
+{"id": "lmove-missing-source", "cmd": ["LMOVE", "list:mv", "list:mv2", "LEFT", "RIGHT"]}
+{"id": "lmove-bad-direction", "cmd": ["LMOVE", "list:mv2", "list:mv3", "UP", "DOWN"], "mode": "error_prefix"}
+{"id": "lmove-arity", "cmd": ["LMOVE", "list:mv2", "list:mv3", "LEFT"], "mode": "error_prefix"}
+{"id": "lmpop-build-a", "cmd": ["RPUSH", "list:lm:a", "a1", "a2", "a3"]}
+{"id": "lmpop-build-b", "cmd": ["RPUSH", "list:lm:b", "b1", "b2"]}
+{"id": "lmpop-first-nonempty-left", "cmd": ["LMPOP", "2", "list:lm:miss", "list:lm:a", "LEFT"]}
+{"id": "lmpop-first-nonempty-right", "cmd": ["LMPOP", "2", "list:lm:miss", "list:lm:a", "RIGHT"]}
+{"id": "lmpop-count-left", "cmd": ["LMPOP", "2", "list:lm:miss", "list:lm:b", "LEFT", "COUNT", "5"]}
+{"id": "lmpop-count-emptied-key", "cmd": ["EXISTS", "list:lm:b"]}
+{"id": "lmpop-a-remaining", "cmd": ["LRANGE", "list:lm:a", "0", "-1"]}
+{"id": "lmpop-drain-a", "cmd": ["LMPOP", "1", "list:lm:a", "RIGHT", "COUNT", "10"]}
+{"id": "lmpop-a-deleted", "cmd": ["EXISTS", "list:lm:a"]}
+{"id": "lmpop-all-empty-nil", "cmd": ["LMPOP", "2", "list:lm:a", "list:lm:b", "LEFT"]}
+{"id": "lmpop-numkeys-zero", "cmd": ["LMPOP", "0", "LEFT"], "mode": "error_prefix"}
+{"id": "lmpop-numkeys-negative", "cmd": ["LMPOP", "-1", "list:lm:a", "LEFT"], "mode": "error_prefix"}
+{"id": "lmpop-numkeys-nan", "cmd": ["LMPOP", "abc", "list:lm:a", "LEFT"], "mode": "error_prefix"}
+{"id": "lmpop-missing-direction", "cmd": ["LMPOP", "1", "list:lm:a"], "mode": "error_prefix"}
+{"id": "lmpop-bad-direction", "cmd": ["LMPOP", "1", "list:lm:a", "MIDDLE"], "mode": "error_prefix"}
+{"id": "lmpop-count-zero-error", "cmd": ["LMPOP", "1", "list:lm:a", "LEFT", "COUNT", "0"], "mode": "error_prefix"}
+{"id": "lmpop-arity", "cmd": ["LMPOP", "1", "list:lm:a"], "mode": "error_prefix"}
+{"id": "lmpop-wrongtype-build", "cmd": ["SET", "list:lm:str", "v"]}
+{"id": "lmpop-wrongtype", "cmd": ["LMPOP", "1", "list:lm:str", "LEFT"], "mode": "error_prefix"}
+{"id": "lpos-build", "cmd": ["RPUSH", "list:pos", "a", "b", "c", "a", "b", "a"]}
+{"id": "lpos-found-first", "cmd": ["LPOS", "list:pos", "a"]}
+{"id": "lpos-found-other", "cmd": ["LPOS", "list:pos", "c"]}
+{"id": "lpos-not-found", "cmd": ["LPOS", "list:pos", "zzz"]}
+{"id": "lpos-rank-2", "cmd": ["LPOS", "list:pos", "a", "RANK", "2"]}
+{"id": "lpos-rank-negative", "cmd": ["LPOS", "list:pos", "a", "RANK", "-1"]}
+{"id": "lpos-rank-negative-2", "cmd": ["LPOS", "list:pos", "a", "RANK", "-2"]}
+{"id": "lpos-rank-zero-error", "cmd": ["LPOS", "list:pos", "a", "RANK", "0"], "mode": "error_prefix"}
+{"id": "lpos-count-0-all", "cmd": ["LPOS", "list:pos", "a", "COUNT", "0"]}
+{"id": "lpos-count-2", "cmd": ["LPOS", "list:pos", "a", "COUNT", "2"]}
+{"id": "lpos-count-0-not-found", "cmd": ["LPOS", "list:pos", "zzz", "COUNT", "0"]}
+{"id": "lpos-count-larger-than-matches", "cmd": ["LPOS", "list:pos", "a", "COUNT", "10"]}
+{"id": "lpos-rank-negative-count-0", "cmd": ["LPOS", "list:pos", "a", "RANK", "-1", "COUNT", "0"]}
+{"id": "lpos-maxlen-limits", "cmd": ["LPOS", "list:pos", "a", "COUNT", "0", "MAXLEN", "3"]}
+{"id": "lpos-maxlen-single", "cmd": ["LPOS", "list:pos", "b", "MAXLEN", "1"]}
+{"id": "lpos-missing-key-no-count", "cmd": ["LPOS", "list:pos:miss", "a"]}
+{"id": "lpos-missing-key-with-count", "cmd": ["LPOS", "list:pos:miss", "a", "COUNT", "0"]}
+{"id": "lpos-rank-count-combo", "cmd": ["LPOS", "list:pos", "a", "RANK", "2", "COUNT", "2"]}
+{"id": "lpos-count-negative-error", "cmd": ["LPOS", "list:pos", "a", "COUNT", "-1"], "mode": "error_prefix"}
+{"id": "lpos-maxlen-negative-error", "cmd": ["LPOS", "list:pos", "a", "MAXLEN", "-1"], "mode": "error_prefix"}
+{"id": "lpos-syntax-error", "cmd": ["LPOS", "list:pos", "a", "BOGUS", "1"], "mode": "error_prefix"}
+{"id": "lpos-wrongtype-build", "cmd": ["SET", "list:pos:str", "v"]}
+{"id": "lpos-wrongtype", "cmd": ["LPOS", "list:pos:str", "a"], "mode": "error_prefix"}
+{"id": "lpos-arity", "cmd": ["LPOS", "list:pos"], "mode": "error_prefix"}

@@ -22,3 +22,8 @@
 {"id": "ku-bitop-seed-a", "cmd": ["SET", "ku:bopa", "abc"]}
 {"id": "ku-bitop-seed-b", "cmd": ["SET", "ku:bopb", "abd"]}
 {"id": "ku-bitop", "cmd": ["BITOP", "AND", "ku:bopdest", "ku:bopa", "ku:bopb"], "known_unsupported": true, "reason": "multi-key BITOP deferred to Wave 7b"}
+{"id": "ku-blpop", "cmd": ["BLPOP", "ku:blk:miss", "0.05"], "known_unsupported": true, "reason": "scope-review: blocking list pop does not fit the request/response Durable Object model (Wave 9 defer)"}
+{"id": "ku-brpop", "cmd": ["BRPOP", "ku:blk:miss", "0.05"], "known_unsupported": true, "reason": "scope-review: blocking list pop does not fit the request/response Durable Object model (Wave 9 defer)"}
+{"id": "ku-brpoplpush", "cmd": ["BRPOPLPUSH", "ku:blk:miss", "ku:blk:dst", "0.05"], "known_unsupported": true, "reason": "scope-review: blocking RPOPLPUSH does not fit the request/response Durable Object model (Wave 9 defer)"}
+{"id": "ku-blmove", "cmd": ["BLMOVE", "ku:blk:miss", "ku:blk:dst", "LEFT", "RIGHT", "0.05"], "known_unsupported": true, "reason": "scope-review: blocking LMOVE does not fit the request/response Durable Object model (Wave 9 defer)"}
+{"id": "ku-blmpop", "cmd": ["BLMPOP", "0.05", "1", "ku:blk:miss", "LEFT"], "known_unsupported": true, "reason": "scope-review: blocking LMPOP does not fit the request/response Durable Object model (Wave 9 defer)"}
