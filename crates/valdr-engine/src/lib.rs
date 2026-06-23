@@ -75,6 +75,37 @@ enum StoredValue {
     ZSet(HashMap<Vec<u8>, f64>),
 }
 
+impl StoredValue {
+    /// The Valkey `TYPE` name for this value, mirroring `getObjectTypeName`
+    /// (`db.c`). Only the variants the edge engine currently models appear
+    /// here; later type waves extend both the enum and this mapping.
+    fn type_name(&self) -> &'static [u8] {
+        match self {
+            StoredValue::String(_) => b"string",
+            StoredValue::Hash(_) => b"hash",
+            StoredValue::ZSet(_) => b"zset",
+        }
+    }
+}
+
+/// Unit of the relative/absolute argument to the EXPIRE family. Seconds inputs
+/// are scaled to milliseconds before being applied as absolute deadlines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExpireUnit {
+    Seconds,
+    Milliseconds,
+}
+
+/// Optional trailing condition flag of the EXPIRE family
+/// (`parseExtendedExpireArgumentsOrReply`, `expire.c`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExpireCondition {
+    Nx,
+    Xx,
+    Gt,
+    Lt,
+}
+
 /// Maximum number of distinct scripts retained in the per-engine cache before
 /// the least-recently-used entry is evicted. The reference server never evicts,
 /// but at the edge one hot engine lives for the whole life of a Durable Object,
@@ -351,7 +382,7 @@ impl<H: Host> Engine<H> {
         } else if ascii_eq(command, b"SETEX") {
             self.setex_command(argv)
         } else if ascii_eq(command, b"DEL") {
-            self.del_command(argv)
+            self.del_command(argv, b"del")
         } else if ascii_eq(command, b"EXISTS") {
             self.exists_command(argv)
         } else if ascii_eq(command, b"INCR") {
@@ -375,13 +406,41 @@ impl<H: Host> Engine<H> {
         } else if ascii_eq(command, b"MGET") {
             self.mget_command(argv)
         } else if ascii_eq(command, b"EXPIRE") {
-            self.expire_command(argv, 1000)
+            self.expire_command(argv, ExpireUnit::Seconds, false)
         } else if ascii_eq(command, b"PEXPIRE") {
-            self.expire_command(argv, 1)
+            self.expire_command(argv, ExpireUnit::Milliseconds, false)
+        } else if ascii_eq(command, b"EXPIREAT") {
+            self.expire_command(argv, ExpireUnit::Seconds, true)
+        } else if ascii_eq(command, b"PEXPIREAT") {
+            self.expire_command(argv, ExpireUnit::Milliseconds, true)
+        } else if ascii_eq(command, b"PERSIST") {
+            self.persist_command(argv)
         } else if ascii_eq(command, b"TTL") {
-            self.ttl_command(argv, false)
+            self.ttl_command(argv, false, false)
         } else if ascii_eq(command, b"PTTL") {
-            self.ttl_command(argv, true)
+            self.ttl_command(argv, true, false)
+        } else if ascii_eq(command, b"EXPIRETIME") {
+            self.ttl_command(argv, false, true)
+        } else if ascii_eq(command, b"PEXPIRETIME") {
+            self.ttl_command(argv, true, true)
+        } else if ascii_eq(command, b"TYPE") {
+            self.type_command(argv)
+        } else if ascii_eq(command, b"RENAME") {
+            self.rename_command(argv, false)
+        } else if ascii_eq(command, b"RENAMENX") {
+            self.rename_command(argv, true)
+        } else if ascii_eq(command, b"COPY") {
+            self.copy_command(argv)
+        } else if ascii_eq(command, b"TOUCH") {
+            self.touch_command(argv)
+        } else if ascii_eq(command, b"UNLINK") {
+            self.del_command(argv, b"unlink")
+        } else if ascii_eq(command, b"PING") {
+            self.ping_command(argv)
+        } else if ascii_eq(command, b"ECHO") {
+            self.echo_command(argv)
+        } else if ascii_eq(command, b"FLUSHALL") {
+            self.flushall_command(argv)
         } else if ascii_eq(command, b"HSET") {
             self.hset_command(argv)
         } else if ascii_eq(command, b"HGET") {
@@ -597,9 +656,9 @@ impl<H: Host> Engine<H> {
         simple(b"OK")
     }
 
-    fn del_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+    fn del_command(&mut self, argv: &[Vec<u8>], name: &[u8]) -> RespFrame {
         if argv.len() < 2 {
-            return wrong_arity(b"del");
+            return wrong_arity(name);
         }
         let mut deleted = 0;
         for key in &argv[1..] {
@@ -1438,47 +1497,124 @@ impl<H: Host> Engine<H> {
         RespFrame::array(items)
     }
 
-    fn expire_command(&mut self, argv: &[Vec<u8>], unit_ms: u64) -> RespFrame {
-        let name: &[u8] = if unit_ms == 1 { b"pexpire" } else { b"expire" };
+    /// The generic EXPIRE / PEXPIRE / EXPIREAT / PEXPIREAT implementation,
+    /// mirroring `expireGenericCommand` (`expire.c`). `unit` scales `argv[2]`;
+    /// `absolute` selects the basetime (0 for the *AT variants, the current
+    /// wall clock for the relative variants). The optional trailing flag is
+    /// parsed exactly like `parseExtendedExpireArgumentsOrReply`, including the
+    /// NX/XX/GT/LT conflict checks.
+    fn expire_command(
+        &mut self,
+        argv: &[Vec<u8>],
+        unit: ExpireUnit,
+        absolute: bool,
+    ) -> RespFrame {
+        let name: &[u8] = match (unit, absolute) {
+            (ExpireUnit::Seconds, false) => b"expire",
+            (ExpireUnit::Milliseconds, false) => b"pexpire",
+            (ExpireUnit::Seconds, true) => b"expireat",
+            (ExpireUnit::Milliseconds, true) => b"pexpireat",
+        };
         if argv.len() < 3 {
             return wrong_arity(name);
         }
-        if argv.len() > 3 {
-            let mut msg = b"ERR Unsupported option ".to_vec();
-            msg.extend_from_slice(&argv[3]);
-            return err(&msg);
-        }
-        let Some(raw) = parse_i64(&argv[2]) else {
+
+        let condition = match parse_expire_condition(&argv[3..]) {
+            Ok(condition) => condition,
+            Err(frame) => return frame,
+        };
+
+        let Some(mut when) = parse_i64(&argv[2]) else {
             return err(b"ERR value is not an integer or out of range");
         };
-        if raw <= 0 {
-            self.purge_if_expired(&argv[1]);
-            let existed = self.db.remove(&argv[1]).is_some();
-            if existed {
-                self.note_write(&argv[1]);
+
+        if unit == ExpireUnit::Seconds {
+            if when > i64::MAX / 1000 || when < i64::MIN / 1000 {
+                return invalid_expire_time(name);
             }
-            return RespFrame::integer(if existed { 1 } else { 0 });
+            when *= 1000;
+        }
+
+        let basetime: i64 = if absolute {
+            0
+        } else {
+            self.host.now_millis() as i64
+        };
+        if when > i64::MAX - basetime {
+            return invalid_expire_time(name);
+        }
+        when += basetime;
+        if when < 0 {
+            when = 0;
+        }
+
+        self.purge_if_expired(&argv[1]);
+        let current_expire: Option<u64> = match self.db.get(&argv[1]) {
+            Some(entry) => entry.expire_at_ms,
+            None => return RespFrame::integer(0),
+        };
+
+        if let Some(condition) = condition {
+            let current = current_expire.map(|value| value as i64);
+            let blocked = match condition {
+                ExpireCondition::Nx => current.is_some(),
+                ExpireCondition::Xx => current.is_none(),
+                ExpireCondition::Gt => match current {
+                    None => true,
+                    Some(value) => when <= value,
+                },
+                ExpireCondition::Lt => match current {
+                    None => false,
+                    Some(value) => when >= value,
+                },
+            };
+            if blocked {
+                return RespFrame::integer(0);
+            }
+        }
+
+        if when <= self.host.now_millis() as i64 {
+            self.db.remove(&argv[1]);
+            self.note_write(&argv[1]);
+            return RespFrame::integer(1);
+        }
+
+        if let Some(entry) = self.db.get_mut(&argv[1]) {
+            entry.expire_at_ms = Some(when as u64);
+            self.note_write(&argv[1]);
+        }
+        RespFrame::integer(1)
+    }
+
+    /// PERSIST key (`persistCommand`, `expire.c`): drop a key's TTL, replying
+    /// :1 only when a TTL was actually removed.
+    fn persist_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 2 {
+            return wrong_arity(b"persist");
         }
         self.purge_if_expired(&argv[1]);
-        let Some(ttl) = checked_ttl_ms(raw, unit_ms) else {
-            return invalid_expire_time(name);
-        };
-        let Some(expire_at_ms) = self.host.now_millis().checked_add(ttl) else {
-            return invalid_expire_time(name);
-        };
         match self.db.get_mut(&argv[1]) {
-            Some(entry) => {
-                entry.expire_at_ms = Some(expire_at_ms);
+            Some(entry) if entry.expire_at_ms.is_some() => {
+                entry.expire_at_ms = None;
                 self.note_write(&argv[1]);
                 RespFrame::integer(1)
             }
-            None => RespFrame::integer(0),
+            _ => RespFrame::integer(0),
         }
     }
 
-    fn ttl_command(&mut self, argv: &[Vec<u8>], milliseconds: bool) -> RespFrame {
+    /// TTL / PTTL / EXPIRETIME / PEXPIRETIME (`ttlGenericCommand`, `expire.c`).
+    /// `milliseconds` selects ms vs second granularity; `absolute` returns the
+    /// absolute expiry timestamp rather than the remaining TTL.
+    fn ttl_command(&mut self, argv: &[Vec<u8>], milliseconds: bool, absolute: bool) -> RespFrame {
+        let name: &[u8] = match (milliseconds, absolute) {
+            (false, false) => b"ttl",
+            (true, false) => b"pttl",
+            (false, true) => b"expiretime",
+            (true, true) => b"pexpiretime",
+        };
         if argv.len() != 2 {
-            return wrong_arity(if milliseconds { b"pttl" } else { b"ttl" });
+            return wrong_arity(name);
         }
         self.purge_if_expired(&argv[1]);
         let Some(entry) = self.db.get(&argv[1]) else {
@@ -1487,12 +1623,154 @@ impl<H: Host> Engine<H> {
         let Some(expire_at_ms) = entry.expire_at_ms else {
             return RespFrame::integer(-1);
         };
-        let remaining = expire_at_ms.saturating_sub(self.host.now_millis());
-        if milliseconds {
-            RespFrame::integer(remaining as i64)
+        let ttl = if absolute {
+            expire_at_ms
         } else {
-            RespFrame::integer(((remaining + 500) / 1000) as i64)
+            expire_at_ms.saturating_sub(self.host.now_millis())
+        };
+        if milliseconds {
+            RespFrame::integer(ttl as i64)
+        } else {
+            RespFrame::integer(((ttl + 500) / 1000) as i64)
         }
+    }
+
+    /// TYPE key (`typeCommand`, `db.c`): a simple-string naming the value's
+    /// type, or `none` for a missing key. Only the variants the engine models
+    /// today are reachable; later type waves extend `StoredValue::type_name`.
+    fn type_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 2 {
+            return wrong_arity(b"type");
+        }
+        self.purge_if_expired(&argv[1]);
+        match self.db.get(&argv[1]) {
+            Some(entry) => simple(entry.value.type_name()),
+            None => simple(b"none"),
+        }
+    }
+
+    /// RENAME / RENAMENX (`renameGenericCommand`, `db.c`). The source value and
+    /// its TTL move to the destination, overwriting any existing destination
+    /// (RENAME) unless RENAMENX finds the destination already present. A missing
+    /// source replies "ERR no such key". src == dst is a no-op that still
+    /// validates the source exists.
+    fn rename_command(&mut self, argv: &[Vec<u8>], nx: bool) -> RespFrame {
+        if argv.len() != 3 {
+            return wrong_arity(if nx { b"renamenx" } else { b"rename" });
+        }
+        let samekey = argv[1] == argv[2];
+        self.purge_if_expired(&argv[1]);
+        if !self.db.contains_key(&argv[1]) {
+            return err(b"ERR no such key");
+        }
+        if samekey {
+            return if nx {
+                RespFrame::integer(0)
+            } else {
+                simple(b"OK")
+            };
+        }
+        self.purge_if_expired(&argv[2]);
+        if self.db.contains_key(&argv[2]) && nx {
+            return RespFrame::integer(0);
+        }
+        let entry = self.db.remove(&argv[1]).expect("source verified present");
+        self.db.insert(argv[2].clone(), entry);
+        self.note_write(&argv[1]);
+        self.note_write(&argv[2]);
+        if nx {
+            RespFrame::integer(1)
+        } else {
+            simple(b"OK")
+        }
+    }
+
+    /// COPY src dst [REPLACE] (`copyCommand`, `db.c`). Deep-copies the source
+    /// value and its TTL to the destination. Replies :0 when the source is
+    /// missing, or when the destination already exists without REPLACE. src ==
+    /// dst replies the same-object error. The optional DB target form is out of
+    /// scope for the single-database edge engine.
+    fn copy_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 3 {
+            return wrong_arity(b"copy");
+        }
+        let mut replace = false;
+        let mut index = 3;
+        while index < argv.len() {
+            if ascii_eq(&argv[index], b"REPLACE") {
+                replace = true;
+                index += 1;
+            } else {
+                return err(b"ERR syntax error");
+            }
+        }
+        if argv[1] == argv[2] {
+            return err(b"ERR source and destination objects are the same");
+        }
+        self.purge_if_expired(&argv[1]);
+        let Some(entry) = self.db.get(&argv[1]).cloned() else {
+            return RespFrame::integer(0);
+        };
+        self.purge_if_expired(&argv[2]);
+        if self.db.contains_key(&argv[2]) && !replace {
+            return RespFrame::integer(0);
+        }
+        self.db.insert(argv[2].clone(), entry);
+        self.note_write(&argv[2]);
+        RespFrame::integer(1)
+    }
+
+    /// TOUCH key [key ...] (`touchCommand`, `expire.c`): count of existing keys
+    /// with no mutation.
+    fn touch_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 2 {
+            return wrong_arity(b"touch");
+        }
+        let mut touched = 0;
+        for key in &argv[1..] {
+            if self.get_value(key).is_some() {
+                touched += 1;
+            }
+        }
+        RespFrame::integer(touched)
+    }
+
+    /// PING [message] (`pingCommand`, `server.c`): +PONG with no argument, the
+    /// echoed message otherwise. More than one argument is an arity error.
+    fn ping_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() > 2 {
+            return wrong_arity(b"ping");
+        }
+        if argv.len() == 2 {
+            bulk(argv[1].clone())
+        } else {
+            simple(b"PONG")
+        }
+    }
+
+    /// ECHO message (`echoCommand`, `server.c`): bulk-string echo of the
+    /// argument.
+    fn echo_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 2 {
+            return wrong_arity(b"echo");
+        }
+        bulk(argv[1].clone())
+    }
+
+    /// FLUSHALL [ASYNC|SYNC] (`flushallCommand`, `db.c`): clear every key and
+    /// reply +OK. Every removed key is marked dirty *before* the database is
+    /// cleared, so a host flushes the deletions back to storage.
+    fn flushall_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() == 2 {
+            if !(ascii_eq(&argv[1], b"ASYNC") || ascii_eq(&argv[1], b"SYNC")) {
+                return err(b"ERR syntax error");
+            }
+        } else if argv.len() != 1 {
+            return err(b"ERR syntax error");
+        }
+        self.mark_all_dirty();
+        self.db.clear();
+        simple(b"OK")
     }
 
     fn script_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
@@ -2334,6 +2612,49 @@ fn invalid_expire_time(command: &[u8]) -> RespFrame {
     err(&msg)
 }
 
+/// Parse the trailing NX|XX|GT|LT flags of the EXPIRE family, mirroring
+/// `parseExtendedExpireArgumentsOrReply` (`expire.c`). Returns the resolved
+/// condition (the edge engine accepts at most one), or an error frame for an
+/// unsupported option or an incompatible flag combination. Empty `opts` yields
+/// `None` (no condition).
+fn parse_expire_condition(opts: &[Vec<u8>]) -> Result<Option<ExpireCondition>, RespFrame> {
+    let mut nx = false;
+    let mut xx = false;
+    let mut gt = false;
+    let mut lt = false;
+    let mut chosen = None;
+    for opt in opts {
+        if ascii_eq(opt, b"NX") {
+            nx = true;
+            chosen = Some(ExpireCondition::Nx);
+        } else if ascii_eq(opt, b"XX") {
+            xx = true;
+            chosen = Some(ExpireCondition::Xx);
+        } else if ascii_eq(opt, b"GT") {
+            gt = true;
+            chosen = Some(ExpireCondition::Gt);
+        } else if ascii_eq(opt, b"LT") {
+            lt = true;
+            chosen = Some(ExpireCondition::Lt);
+        } else {
+            let mut msg = b"ERR Unsupported option ".to_vec();
+            msg.extend_from_slice(opt);
+            return Err(err(&msg));
+        }
+    }
+    if (nx && xx) || (nx && gt) || (nx && lt) {
+        return Err(err(
+            b"ERR NX and XX, GT or LT options at the same time are not compatible",
+        ));
+    }
+    if gt && lt {
+        return Err(err(
+            b"ERR GT and LT options at the same time are not compatible",
+        ));
+    }
+    Ok(chosen)
+}
+
 fn old_string_reply(old_string: Option<Vec<u8>>) -> RespFrame {
     match old_string {
         Some(value) => bulk(value),
@@ -3062,8 +3383,37 @@ mod tests {
             (&[], &[b"EXPIRE", b"missing", b"100"]),
             (&[seed_k], &[b"PEXPIRE", b"k", b"100000"]),
             (&[seed_k], &[b"EXPIRE", b"k", b"-1"]),
+            (&[seed_k], &[b"EXPIREAT", b"k", b"99999999999"]),
+            (&[seed_k], &[b"PEXPIREAT", b"k", b"99999999999000"]),
+            (&[seed_k], &[b"EXPIREAT", b"k", b"1"]),
+            (
+                &[&[b"SET", b"k", b"v", b"EX", b"100"]],
+                &[b"PERSIST", b"k"],
+            ),
+            (&[seed_k], &[b"PERSIST", b"k"]),
             (&[seed_k], &[b"TTL", b"k"]),
             (&[seed_k], &[b"PTTL", b"k"]),
+            (&[seed_k], &[b"EXPIRETIME", b"k"]),
+            (&[seed_k], &[b"PEXPIRETIME", b"k"]),
+            (&[seed_k], &[b"TYPE", b"k"]),
+            (&[], &[b"TYPE", b"missing"]),
+            (&[seed_k], &[b"TOUCH", b"k"]),
+            (&[seed_k], &[b"UNLINK", b"k"]),
+            (&[seed_k], &[b"RENAME", b"k", b"k2"]),
+            (
+                &[&[b"SET", b"k", b"v", b"EX", b"100"]],
+                &[b"RENAME", b"k", b"k2"],
+            ),
+            (&[seed_k], &[b"RENAMENX", b"k", b"k2"]),
+            (&[seed_k], &[b"COPY", b"k", b"k2"]),
+            (
+                &[&[b"SET", b"k", b"v", b"EX", b"100"]],
+                &[b"COPY", b"k", b"k2"],
+            ),
+            (&[seed_k], &[b"FLUSHALL"]),
+            (&[seed_k, seed_h, seed_z], &[b"FLUSHALL"]),
+            (&[], &[b"PING"]),
+            (&[], &[b"ECHO", b"hi"]),
             (&[seed_h], &[b"HSET", b"h", b"f2", b"v2"]),
             (&[seed_h], &[b"HGET", b"h", b"f"]),
             (&[seed_h], &[b"HGETALL", b"h"]),

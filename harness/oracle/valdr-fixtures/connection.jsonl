@@ -1,0 +1,14 @@
+{"id": "con-ping", "cmd": ["PING"]}
+{"id": "con-ping-msg", "cmd": ["PING", "hi"]}
+{"id": "con-ping-msg-binary", "cmd": ["PING", "a b c"]}
+{"id": "con-ping-too-many", "cmd": ["PING", "a", "b"]}
+{"id": "con-echo", "cmd": ["ECHO", "hello world"]}
+{"id": "con-echo-empty", "cmd": ["ECHO", ""]}
+{"id": "con-echo-arity", "cmd": ["ECHO"]}
+{"id": "con-script-load", "cmd": ["SCRIPT", "LOAD", "return 1"]}
+{"id": "con-script-exists-loaded", "cmd": ["SCRIPT", "EXISTS", "e0e1f9fabfc9d4800c877a703b823ac0578ff8db"]}
+{"id": "con-script-exists-unknown", "cmd": ["SCRIPT", "EXISTS", "0000000000000000000000000000000000000000"]}
+{"id": "con-script-exists-multi", "cmd": ["SCRIPT", "EXISTS", "e0e1f9fabfc9d4800c877a703b823ac0578ff8db", "0000000000000000000000000000000000000000"]}
+{"id": "con-eval-registers", "cmd": ["EVAL", "return 2", "0"]}
+{"id": "con-script-exists-after-eval", "cmd": ["SCRIPT", "EXISTS", "7f923f79fe76194c868d7e1d0820de36700eb649"]}
+{"id": "con-script-exists-no-sha-arity", "cmd": ["SCRIPT", "EXISTS"]}

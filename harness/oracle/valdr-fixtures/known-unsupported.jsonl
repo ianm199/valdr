@@ -1,8 +1,3 @@
-{"id": "ku-persist", "cmd": ["PERSIST", "ku:app"], "known_unsupported": true}
-{"id": "ku-expireat", "cmd": ["EXPIREAT", "ku:app", "33177117200"], "known_unsupported": true}
-{"id": "ku-expire-nx-option", "cmd": ["EXPIRE", "ku:app", "100", "NX"], "known_unsupported": true}
-{"id": "ku-type", "cmd": ["TYPE", "ku:app"], "known_unsupported": true}
-{"id": "ku-ping", "cmd": ["PING"], "known_unsupported": true}
-{"id": "ku-echo", "cmd": ["ECHO", "hi"], "known_unsupported": true}
-{"id": "ku-script-exists-no-sha", "cmd": ["SCRIPT", "EXISTS"], "known_unsupported": true}
-{"id": "ku-flushall", "cmd": ["FLUSHALL"], "known_unsupported": true}
+{"id": "ku-object-encoding", "cmd": ["OBJECT", "ENCODING", "ku:obj"], "known_unsupported": true}
+{"id": "ku-time", "cmd": ["TIME"], "known_unsupported": true}
+{"id": "ku-randomkey", "cmd": ["RANDOMKEY"], "known_unsupported": true}

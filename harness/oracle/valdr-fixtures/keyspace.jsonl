@@ -1,0 +1,65 @@
+{"id": "ks-set-string", "cmd": ["SET", "ks:str", "v"]}
+{"id": "ks-type-string", "cmd": ["TYPE", "ks:str"]}
+{"id": "ks-hset", "cmd": ["HSET", "ks:hash", "f", "v"]}
+{"id": "ks-type-hash", "cmd": ["TYPE", "ks:hash"]}
+{"id": "ks-zadd", "cmd": ["ZADD", "ks:zset", "1", "a"]}
+{"id": "ks-type-zset", "cmd": ["TYPE", "ks:zset"]}
+{"id": "ks-type-none", "cmd": ["TYPE", "ks:ghost"]}
+{"id": "ks-set-rename-src", "cmd": ["SET", "ks:r1", "rv"]}
+{"id": "ks-rename-ok", "cmd": ["RENAME", "ks:r1", "ks:r1dst"]}
+{"id": "ks-rename-dst-has-value", "cmd": ["GET", "ks:r1dst"]}
+{"id": "ks-rename-src-gone", "cmd": ["EXISTS", "ks:r1"]}
+{"id": "ks-rename-missing", "cmd": ["RENAME", "ks:rghost", "ks:rx"]}
+{"id": "ks-set-rsame", "cmd": ["SET", "ks:rsame", "v"]}
+{"id": "ks-rename-samekey", "cmd": ["RENAME", "ks:rsame", "ks:rsame"]}
+{"id": "ks-rename-samekey-still", "cmd": ["GET", "ks:rsame"]}
+{"id": "ks-set-rov-src", "cmd": ["SET", "ks:rov", "v1", "EX", "100"]}
+{"id": "ks-set-rov-dst", "cmd": ["SET", "ks:rovd", "old"]}
+{"id": "ks-rename-overwrite", "cmd": ["RENAME", "ks:rov", "ks:rovd"]}
+{"id": "ks-rename-overwrite-value", "cmd": ["GET", "ks:rovd"]}
+{"id": "ks-rename-overwrite-ttl", "cmd": ["TTL", "ks:rovd"], "mode": "ttl_band", "band": 2}
+{"id": "ks-set-rnx-src", "cmd": ["SET", "ks:rnx", "v"]}
+{"id": "ks-renamenx-ok", "cmd": ["RENAMENX", "ks:rnx", "ks:rnxd"]}
+{"id": "ks-renamenx-ok-value", "cmd": ["GET", "ks:rnxd"]}
+{"id": "ks-set-rnx2-src", "cmd": ["SET", "ks:rnx2", "v"]}
+{"id": "ks-set-rnx2-dst", "cmd": ["SET", "ks:rnx2d", "x"]}
+{"id": "ks-renamenx-dst-exists", "cmd": ["RENAMENX", "ks:rnx2", "ks:rnx2d"]}
+{"id": "ks-renamenx-src-survives", "cmd": ["GET", "ks:rnx2"]}
+{"id": "ks-renamenx-missing", "cmd": ["RENAMENX", "ks:rnxghost", "ks:rnxy"]}
+{"id": "ks-set-rnxsame", "cmd": ["SET", "ks:rnxsame", "v"]}
+{"id": "ks-renamenx-samekey", "cmd": ["RENAMENX", "ks:rnxsame", "ks:rnxsame"]}
+{"id": "ks-set-copy-src", "cmd": ["SET", "ks:c1", "cv"]}
+{"id": "ks-copy-ok", "cmd": ["COPY", "ks:c1", "ks:c1d"]}
+{"id": "ks-copy-dst-value", "cmd": ["GET", "ks:c1d"]}
+{"id": "ks-copy-src-survives", "cmd": ["GET", "ks:c1"]}
+{"id": "ks-set-copy2-src", "cmd": ["SET", "ks:c2", "cv2"]}
+{"id": "ks-set-copy2-dst", "cmd": ["SET", "ks:c2d", "existing"]}
+{"id": "ks-copy-dst-exists-no-replace", "cmd": ["COPY", "ks:c2", "ks:c2d"]}
+{"id": "ks-copy-dst-unchanged", "cmd": ["GET", "ks:c2d"]}
+{"id": "ks-copy-replace", "cmd": ["COPY", "ks:c2", "ks:c2d", "REPLACE"]}
+{"id": "ks-copy-replace-value", "cmd": ["GET", "ks:c2d"]}
+{"id": "ks-copy-src-missing", "cmd": ["COPY", "ks:cghost", "ks:cz"]}
+{"id": "ks-copy-same", "cmd": ["COPY", "ks:c1", "ks:c1"]}
+{"id": "ks-set-copyttl", "cmd": ["SET", "ks:cttl", "v", "EX", "100"]}
+{"id": "ks-copy-carries-ttl", "cmd": ["COPY", "ks:cttl", "ks:cttld"]}
+{"id": "ks-copy-ttl-band", "cmd": ["TTL", "ks:cttld"], "mode": "ttl_band", "band": 2}
+{"id": "ks-set-touch1", "cmd": ["SET", "ks:t1", "v"]}
+{"id": "ks-set-touch2", "cmd": ["SET", "ks:t2", "v"]}
+{"id": "ks-touch-counts", "cmd": ["TOUCH", "ks:t1", "ks:t2", "ks:tghost"]}
+{"id": "ks-touch-no-mutate", "cmd": ["GET", "ks:t1"]}
+{"id": "ks-set-unlink1", "cmd": ["SET", "ks:u1", "v"]}
+{"id": "ks-set-unlink2", "cmd": ["SET", "ks:u2", "v"]}
+{"id": "ks-unlink-counts", "cmd": ["UNLINK", "ks:u1", "ks:u2", "ks:ughost"]}
+{"id": "ks-unlink-gone", "cmd": ["EXISTS", "ks:u1"]}
+{"id": "ks-set-flush1", "cmd": ["SET", "ks:f1", "v"]}
+{"id": "ks-hset-flush2", "cmd": ["HSET", "ks:f2", "f", "v"]}
+{"id": "ks-flushall", "cmd": ["FLUSHALL"]}
+{"id": "ks-flush-f1-gone", "cmd": ["EXISTS", "ks:f1"]}
+{"id": "ks-flush-f2-gone", "cmd": ["EXISTS", "ks:f2"]}
+{"id": "ks-set-flush-async", "cmd": ["SET", "ks:fa", "v"]}
+{"id": "ks-flushall-async", "cmd": ["FLUSHALL", "ASYNC"]}
+{"id": "ks-flush-async-gone", "cmd": ["EXISTS", "ks:fa"]}
+{"id": "ks-set-flush-sync", "cmd": ["SET", "ks:fs", "v"]}
+{"id": "ks-flushall-sync", "cmd": ["FLUSHALL", "SYNC"]}
+{"id": "ks-flush-sync-gone", "cmd": ["EXISTS", "ks:fs"]}
+{"id": "ks-flushall-bad-arg", "cmd": ["FLUSHALL", "NOPE"]}

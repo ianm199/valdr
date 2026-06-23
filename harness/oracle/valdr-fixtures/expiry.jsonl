@@ -64,3 +64,59 @@
 {"id": "set-keepttl-before-ex-conflict", "cmd": ["SET", "exk", "v", "KEEPTTL", "EX", "10"]}
 {"id": "set-exat-zero-invalid", "cmd": ["SET", "exk", "v", "EXAT", "0"]}
 {"id": "set-exat-and-px-conflict", "cmd": ["SET", "exk", "v", "EXAT", "99999999999", "PX", "100"]}
+{"id": "w3-set-persist", "cmd": ["SET", "w3per", "v", "EX", "100"]}
+{"id": "w3-ttl-before-persist", "cmd": ["TTL", "w3per"], "mode": "ttl_band", "band": 2}
+{"id": "w3-persist-removes-ttl", "cmd": ["PERSIST", "w3per"]}
+{"id": "w3-ttl-after-persist", "cmd": ["TTL", "w3per"]}
+{"id": "w3-persist-no-ttl", "cmd": ["PERSIST", "w3per"]}
+{"id": "w3-persist-missing", "cmd": ["PERSIST", "w3ghost"]}
+{"id": "w3-get-after-persist", "cmd": ["GET", "w3per"]}
+{"id": "w3-set-at", "cmd": ["SET", "w3at", "v"]}
+{"id": "w3-expireat-future", "cmd": ["EXPIREAT", "w3at", "99999999999"]}
+{"id": "w3-expiretime-at", "cmd": ["EXPIRETIME", "w3at"]}
+{"id": "w3-pexpiretime-at", "cmd": ["PEXPIRETIME", "w3at"]}
+{"id": "w3-ttl-after-expireat", "cmd": ["TTL", "w3at"], "mode": "ttl_band", "band": 5}
+{"id": "w3-set-pat", "cmd": ["SET", "w3pat", "v"]}
+{"id": "w3-pexpireat-future", "cmd": ["PEXPIREAT", "w3pat", "99999999999000"]}
+{"id": "w3-pexpiretime-pat", "cmd": ["PEXPIRETIME", "w3pat"]}
+{"id": "w3-pttl-after-pexpireat", "cmd": ["PTTL", "w3pat"], "mode": "ttl_band", "band": 5000}
+{"id": "w3-expireat-missing", "cmd": ["EXPIREAT", "w3ghost", "99999999999"]}
+{"id": "w3-pexpireat-missing", "cmd": ["PEXPIREAT", "w3ghost", "99999999999000"]}
+{"id": "w3-set-past", "cmd": ["SET", "w3past", "v"]}
+{"id": "w3-expireat-past-deletes", "cmd": ["EXPIREAT", "w3past", "1"]}
+{"id": "w3-exists-after-past", "cmd": ["EXISTS", "w3past"]}
+{"id": "w3-set-pat-past", "cmd": ["SET", "w3patp", "v"]}
+{"id": "w3-pexpireat-past-deletes", "cmd": ["PEXPIREAT", "w3patp", "1000"]}
+{"id": "w3-exists-after-pat-past", "cmd": ["EXISTS", "w3patp"]}
+{"id": "w3-expiretime-no-ttl", "cmd": ["SET", "w3not", "v"]}
+{"id": "w3-expiretime-no-ttl-reply", "cmd": ["EXPIRETIME", "w3not"]}
+{"id": "w3-pexpiretime-no-ttl-reply", "cmd": ["PEXPIRETIME", "w3not"]}
+{"id": "w3-expiretime-missing", "cmd": ["EXPIRETIME", "w3ghost"]}
+{"id": "w3-pexpiretime-missing", "cmd": ["PEXPIRETIME", "w3ghost"]}
+{"id": "w3-set-opt", "cmd": ["SET", "w3opt", "v"]}
+{"id": "w3-expire-xx-no-ttl", "cmd": ["EXPIRE", "w3opt", "100", "XX"]}
+{"id": "w3-ttl-after-xx-noop", "cmd": ["TTL", "w3opt"]}
+{"id": "w3-expire-nx-no-ttl", "cmd": ["EXPIRE", "w3opt", "100", "NX"]}
+{"id": "w3-ttl-after-nx-set", "cmd": ["TTL", "w3opt"], "mode": "ttl_band", "band": 2}
+{"id": "w3-expire-nx-has-ttl", "cmd": ["EXPIRE", "w3opt", "100", "NX"]}
+{"id": "w3-expire-gt-higher", "cmd": ["EXPIRE", "w3opt", "200", "GT"]}
+{"id": "w3-ttl-after-gt-higher", "cmd": ["TTL", "w3opt"], "mode": "ttl_band", "band": 2}
+{"id": "w3-expire-gt-lower", "cmd": ["EXPIRE", "w3opt", "50", "GT"]}
+{"id": "w3-ttl-after-gt-lower", "cmd": ["TTL", "w3opt"], "mode": "ttl_band", "band": 2}
+{"id": "w3-expire-lt-lower", "cmd": ["EXPIRE", "w3opt", "10", "LT"]}
+{"id": "w3-ttl-after-lt-lower", "cmd": ["TTL", "w3opt"], "mode": "ttl_band", "band": 2}
+{"id": "w3-expire-lt-higher", "cmd": ["EXPIRE", "w3opt", "999", "LT"]}
+{"id": "w3-ttl-after-lt-higher", "cmd": ["TTL", "w3opt"], "mode": "ttl_band", "band": 2}
+{"id": "w3-set-gtnot", "cmd": ["SET", "w3gtnot", "v"]}
+{"id": "w3-expire-gt-no-ttl", "cmd": ["EXPIRE", "w3gtnot", "100", "GT"]}
+{"id": "w3-ttl-gt-no-ttl", "cmd": ["TTL", "w3gtnot"]}
+{"id": "w3-set-ltnot", "cmd": ["SET", "w3ltnot", "v"]}
+{"id": "w3-expire-lt-no-ttl", "cmd": ["EXPIRE", "w3ltnot", "100", "LT"]}
+{"id": "w3-ttl-lt-no-ttl", "cmd": ["TTL", "w3ltnot"], "mode": "ttl_band", "band": 2}
+{"id": "w3-expire-xx-missing", "cmd": ["EXPIRE", "w3optmiss", "100", "XX"]}
+{"id": "w3-expire-nx-xx-conflict", "cmd": ["EXPIRE", "w3opt", "100", "NX", "XX"]}
+{"id": "w3-expire-gt-lt-conflict", "cmd": ["EXPIRE", "w3opt", "100", "GT", "LT"]}
+{"id": "w3-expire-bad-option", "cmd": ["EXPIRE", "w3opt", "100", "ZZ"]}
+{"id": "w3-pexpire-nx-no-ttl", "cmd": ["SET", "w3popt", "v"]}
+{"id": "w3-pexpire-nx-applies", "cmd": ["PEXPIRE", "w3popt", "100000", "NX"]}
+{"id": "w3-pttl-after-pexpire-nx", "cmd": ["PTTL", "w3popt"], "mode": "ttl_band", "band": 2000}
