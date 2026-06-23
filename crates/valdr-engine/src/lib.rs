@@ -509,7 +509,31 @@ impl<H: Host> Engine<H> {
         } else if ascii_eq(command, b"ZRANGE") {
             self.zrange_command(argv)
         } else if ascii_eq(command, b"ZRANGEBYSCORE") {
-            self.zrangebyscore_command(argv)
+            self.zrangebyscore_command(argv, false)
+        } else if ascii_eq(command, b"ZREVRANGEBYSCORE") {
+            self.zrangebyscore_command(argv, true)
+        } else if ascii_eq(command, b"ZREVRANGE") {
+            self.zrevrange_command(argv)
+        } else if ascii_eq(command, b"ZPOPMIN") {
+            self.zpop_command(argv, false)
+        } else if ascii_eq(command, b"ZPOPMAX") {
+            self.zpop_command(argv, true)
+        } else if ascii_eq(command, b"ZMSCORE") {
+            self.zmscore_command(argv)
+        } else if ascii_eq(command, b"ZCOUNT") {
+            self.zcount_command(argv)
+        } else if ascii_eq(command, b"ZLEXCOUNT") {
+            self.zlexcount_command(argv)
+        } else if ascii_eq(command, b"ZRANGEBYLEX") {
+            self.zrangebylex_command(argv, false)
+        } else if ascii_eq(command, b"ZREVRANGEBYLEX") {
+            self.zrangebylex_command(argv, true)
+        } else if ascii_eq(command, b"ZREMRANGEBYRANK") {
+            self.zremrangebyrank_command(argv)
+        } else if ascii_eq(command, b"ZREMRANGEBYSCORE") {
+            self.zremrangebyscore_command(argv)
+        } else if ascii_eq(command, b"ZREMRANGEBYLEX") {
+            self.zremrangebylex_command(argv)
         } else if ascii_eq(command, b"LPUSH") {
             self.push_command(argv, ListEnd::Head, false)
         } else if ascii_eq(command, b"RPUSH") {
@@ -1535,15 +1559,23 @@ impl<H: Host> Engine<H> {
         RespFrame::array(items)
     }
 
-    /// `ZRANGEBYSCORE key min max [WITHSCORES] [LIMIT offset count]`, the
-    /// score form only. Read-only: never marks a mutation. Mirrors the
-    /// reference command's argument order, parsing the trailing options
-    /// (WITHSCORES, LIMIT) before the min/max bounds so that a bogus option or
-    /// a non-integer LIMIT argument is reported ahead of a malformed bound,
-    /// matching `zrangeGenericCommand`.
-    fn zrangebyscore_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+    /// `ZRANGEBYSCORE key min max [WITHSCORES] [LIMIT offset count]` and its
+    /// reverse twin `ZREVRANGEBYSCORE key max min ...`. Score form only.
+    /// Read-only: never marks a mutation. Mirrors the reference command's
+    /// argument order, parsing the trailing options (WITHSCORES, LIMIT) before
+    /// the min/max bounds so that a bogus option or a non-integer LIMIT
+    /// argument is reported ahead of a malformed bound, matching
+    /// `zrangeGenericCommand`. In the reverse form the two range arguments are
+    /// supplied max-then-min and the matched members are emitted in descending
+    /// order, with the LIMIT window applied after the reversal.
+    fn zrangebyscore_command(&mut self, argv: &[Vec<u8>], reverse: bool) -> RespFrame {
+        let name: &[u8] = if reverse {
+            b"zrevrangebyscore"
+        } else {
+            b"zrangebyscore"
+        };
         if argv.len() < 4 {
-            return wrong_arity(b"zrangebyscore");
+            return wrong_arity(name);
         }
         let mut withscores = false;
         let mut limit: Option<(i64, i64)> = None;
@@ -1566,10 +1598,15 @@ impl<H: Host> Engine<H> {
                 return err(b"ERR syntax error");
             }
         }
-        let Some(min) = parse_score_bound(&argv[2]) else {
+        let (min_arg, max_arg) = if reverse {
+            (&argv[3], &argv[2])
+        } else {
+            (&argv[2], &argv[3])
+        };
+        let Some(min) = parse_score_bound(min_arg) else {
             return err(b"ERR min or max is not a float");
         };
-        let Some(max) = parse_score_bound(&argv[3]) else {
+        let Some(max) = parse_score_bound(max_arg) else {
             return err(b"ERR min or max is not a float");
         };
         let members = match self.get_value(&argv[1]).map(|entry| &entry.value) {
@@ -1577,10 +1614,13 @@ impl<H: Host> Engine<H> {
             Some(_) => return wrong_type(),
             None => return RespFrame::array(Vec::new()),
         };
-        let in_range: Vec<(Vec<u8>, f64)> = sorted_zset_entries(members)
+        let mut in_range: Vec<(Vec<u8>, f64)> = sorted_zset_entries(members)
             .into_iter()
             .filter(|(_, score)| min.gte_min(*score) && max.lte_max(*score))
             .collect();
+        if reverse {
+            in_range.reverse();
+        }
         let selected = apply_score_limit(&in_range, limit);
         let mut items = Vec::new();
         for (member, score) in selected {
@@ -1590,6 +1630,387 @@ impl<H: Host> Engine<H> {
             }
         }
         RespFrame::array(items)
+    }
+
+    /// `ZREVRANGE key start stop [WITHSCORES]`: ZRANGE in its index form with
+    /// the ordering reversed (`zrevrangeCommand` delegates to
+    /// `zrangeGenericCommand` with `reverse=1`). The start/stop indices address
+    /// the already-reversed (descending) order, so this is the index form of
+    /// `ZRANGE ... REV`.
+    fn zrevrange_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 4 {
+            return wrong_arity(b"zrevrange");
+        }
+        let mut withscores = false;
+        for option in &argv[4..] {
+            if ascii_eq(option, b"WITHSCORES") {
+                withscores = true;
+            } else {
+                return err(b"ERR syntax error");
+            }
+        }
+        let Some(start) = parse_i64(&argv[2]) else {
+            return err(b"ERR value is not an integer or out of range");
+        };
+        let Some(stop) = parse_i64(&argv[3]) else {
+            return err(b"ERR value is not an integer or out of range");
+        };
+        let members = match self.get_value(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::ZSet(members)) => members,
+            Some(_) => return wrong_type(),
+            None => return RespFrame::array(Vec::new()),
+        };
+        let mut ordered = sorted_zset_entries(members);
+        ordered.reverse();
+        let len = ordered.len() as i64;
+        let mut start = if start < 0 { start + len } else { start };
+        let mut stop = if stop < 0 { stop + len } else { stop };
+        if start < 0 {
+            start = 0;
+        }
+        if start > stop || start >= len {
+            return RespFrame::array(Vec::new());
+        }
+        if stop >= len {
+            stop = len - 1;
+        }
+        let mut items = Vec::new();
+        for (member, score) in &ordered[start as usize..=stop as usize] {
+            items.push(bulk(member));
+            if withscores {
+                items.push(bulk(format_score(*score)));
+            }
+        }
+        RespFrame::array(items)
+    }
+
+    /// `ZPOPMIN key [count]` / `ZPOPMAX key [count]` (`genericZpopCommand`).
+    /// Without a count, pops the single lowest- (ZPOPMIN) or highest-scoring
+    /// (ZPOPMAX) member and replies the `member, score` pair as a flat array,
+    /// or an empty array if the key is absent. With a count, pops up to `count`
+    /// members in pop order and replies them as a flat `member, score, ...`
+    /// array. A negative count is rejected. Removing the final member deletes
+    /// the key. `note_write` fires only when at least one member is popped.
+    fn zpop_command(&mut self, argv: &[Vec<u8>], reverse: bool) -> RespFrame {
+        let name: &[u8] = if reverse { b"zpopmax" } else { b"zpopmin" };
+        if argv.len() < 2 || argv.len() > 3 {
+            return wrong_arity(name);
+        }
+        let count_arg: Option<i64> = if argv.len() == 3 {
+            let Some(count) = parse_i64(&argv[2]) else {
+                return err(b"ERR value is out of range, must be positive");
+            };
+            if count < 0 {
+                return err(b"ERR value is out of range, must be positive");
+            }
+            Some(count)
+        } else {
+            None
+        };
+        self.purge_if_expired(&argv[1]);
+        let mut popped: Vec<(Vec<u8>, f64)> = Vec::new();
+        let became_empty = match self.db.get_mut(&argv[1]) {
+            Some(Entry {
+                value: StoredValue::ZSet(members),
+                ..
+            }) => {
+                let mut ordered = sorted_zset_entries(members);
+                if reverse {
+                    ordered.reverse();
+                }
+                let take = count_arg.unwrap_or(1).max(0) as usize;
+                let take = take.min(ordered.len());
+                for (member, score) in ordered.into_iter().take(take) {
+                    members.remove(&member);
+                    popped.push((member, score));
+                }
+                members.is_empty()
+            }
+            Some(_) => return wrong_type(),
+            None => false,
+        };
+        if became_empty {
+            self.db.remove(&argv[1]);
+        }
+        if !popped.is_empty() {
+            self.note_write(&argv[1]);
+        }
+        let mut items = Vec::new();
+        for (member, score) in popped {
+            items.push(bulk(&member));
+            items.push(bulk(format_score(score)));
+        }
+        RespFrame::array(items)
+    }
+
+    /// `ZMSCORE key member [member...]` (`zmscoreCommand`): replies an array of
+    /// one element per requested member — its bulk-string score, or a null bulk
+    /// when the member (or the key) is absent. Read-only.
+    fn zmscore_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 3 {
+            return wrong_arity(b"zmscore");
+        }
+        let members = match self.get_value(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::ZSet(members)) => Some(members),
+            Some(_) => return wrong_type(),
+            None => None,
+        };
+        let mut items = Vec::new();
+        for member in &argv[2..] {
+            let score = members.and_then(|m| m.get(member));
+            match score {
+                Some(score) => items.push(bulk(format_score(*score))),
+                None => items.push(RespFrame::null_bulk()),
+            }
+        }
+        RespFrame::array(items)
+    }
+
+    /// `ZCOUNT key min max` (`zcountCommand`): counts members whose score is in
+    /// the `[min,max]` score interval, honouring the `(` exclusive form and the
+    /// inf/infinity spellings on either bound. Read-only.
+    fn zcount_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 4 {
+            return wrong_arity(b"zcount");
+        }
+        let Some(min) = parse_score_bound(&argv[2]) else {
+            return err(b"ERR min or max is not a float");
+        };
+        let Some(max) = parse_score_bound(&argv[3]) else {
+            return err(b"ERR min or max is not a float");
+        };
+        let members = match self.get_value(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::ZSet(members)) => members,
+            Some(_) => return wrong_type(),
+            None => return RespFrame::integer(0),
+        };
+        let count = members
+            .values()
+            .filter(|score| min.gte_min(**score) && max.lte_max(**score))
+            .count();
+        RespFrame::integer(count as i64)
+    }
+
+    /// `ZLEXCOUNT key min max` (`zlexcountCommand`): counts members in the lex
+    /// range. The zset is assumed to have equal scores; the `[`/`(`/`-`/`+`
+    /// bound forms are parsed exactly like the reference `zslParseLexRangeItem`.
+    /// Read-only.
+    fn zlexcount_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 4 {
+            return wrong_arity(b"zlexcount");
+        }
+        let Some(min) = parse_lex_bound(&argv[2]) else {
+            return err(b"ERR min or max not valid string range item");
+        };
+        let Some(max) = parse_lex_bound(&argv[3]) else {
+            return err(b"ERR min or max not valid string range item");
+        };
+        let members = match self.get_value(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::ZSet(members)) => members,
+            Some(_) => return wrong_type(),
+            None => return RespFrame::integer(0),
+        };
+        let count = members
+            .keys()
+            .filter(|member| min.gte_min(member) && max.lte_max(member))
+            .count();
+        RespFrame::integer(count as i64)
+    }
+
+    /// `ZRANGEBYLEX key min max [LIMIT offset count]` and its reverse twin
+    /// `ZREVRANGEBYLEX key max min ...` (`genericZrangebylexCommand`). Returns
+    /// the members in the lex range; the reverse form supplies the bounds
+    /// max-then-min and emits members in descending order, applying the LIMIT
+    /// window after the reversal. Read-only.
+    fn zrangebylex_command(&mut self, argv: &[Vec<u8>], reverse: bool) -> RespFrame {
+        let name: &[u8] = if reverse {
+            b"zrevrangebylex"
+        } else {
+            b"zrangebylex"
+        };
+        if argv.len() < 4 {
+            return wrong_arity(name);
+        }
+        let mut limit: Option<(i64, i64)> = None;
+        let mut index = 4;
+        while index < argv.len() {
+            if ascii_eq(&argv[index], b"LIMIT") && argv.len() - index - 1 >= 2 {
+                let Some(offset) = parse_limit_arg(&argv[index + 1]) else {
+                    return err(b"ERR value is not an integer or out of range");
+                };
+                let Some(count) = parse_limit_arg(&argv[index + 2]) else {
+                    return err(b"ERR value is not an integer or out of range");
+                };
+                limit = Some((offset, count));
+                index += 3;
+            } else {
+                return err(b"ERR syntax error");
+            }
+        }
+        let (min_arg, max_arg) = if reverse {
+            (&argv[3], &argv[2])
+        } else {
+            (&argv[2], &argv[3])
+        };
+        let Some(min) = parse_lex_bound(min_arg) else {
+            return err(b"ERR min or max not valid string range item");
+        };
+        let Some(max) = parse_lex_bound(max_arg) else {
+            return err(b"ERR min or max not valid string range item");
+        };
+        let members = match self.get_value(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::ZSet(members)) => members,
+            Some(_) => return wrong_type(),
+            None => return RespFrame::array(Vec::new()),
+        };
+        let mut in_range: Vec<(Vec<u8>, f64)> = sorted_zset_entries(members)
+            .into_iter()
+            .filter(|(member, _)| min.gte_min(member) && max.lte_max(member))
+            .collect();
+        if reverse {
+            in_range.reverse();
+        }
+        let selected = apply_score_limit(&in_range, limit);
+        let items = selected.into_iter().map(|(member, _)| bulk(member)).collect();
+        RespFrame::array(items)
+    }
+
+    /// `ZREMRANGEBYRANK key start stop` (`zremrangeGenericCommand`,
+    /// `ZRANGE_RANK`): removes the members whose ascending rank falls in the
+    /// clamped `[start,stop]` window and replies the number removed. Negative
+    /// indices count from the end. Emptying the zset deletes the key;
+    /// `note_write` fires only when at least one member is removed.
+    fn zremrangebyrank_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 4 {
+            return wrong_arity(b"zremrangebyrank");
+        }
+        let Some(start) = parse_i64(&argv[2]) else {
+            return err(b"ERR value is not an integer or out of range");
+        };
+        let Some(stop) = parse_i64(&argv[3]) else {
+            return err(b"ERR value is not an integer or out of range");
+        };
+        self.purge_if_expired(&argv[1]);
+        let mut removed = 0;
+        let became_empty = match self.db.get_mut(&argv[1]) {
+            Some(Entry {
+                value: StoredValue::ZSet(members),
+                ..
+            }) => {
+                let ordered = sorted_zset_entries(members);
+                let len = ordered.len() as i64;
+                let mut lo = if start < 0 { start + len } else { start };
+                let hi = if stop < 0 { stop + len } else { stop };
+                if lo < 0 {
+                    lo = 0;
+                }
+                if lo <= hi && lo < len {
+                    let hi = if hi >= len { len - 1 } else { hi };
+                    for (member, _) in &ordered[lo as usize..=hi as usize] {
+                        members.remove(member);
+                        removed += 1;
+                    }
+                }
+                members.is_empty()
+            }
+            Some(_) => return wrong_type(),
+            None => return RespFrame::integer(0),
+        };
+        if became_empty {
+            self.db.remove(&argv[1]);
+        }
+        if removed > 0 {
+            self.note_write(&argv[1]);
+        }
+        RespFrame::integer(removed)
+    }
+
+    /// `ZREMRANGEBYSCORE key min max` (`zremrangeGenericCommand`,
+    /// `ZRANGE_SCORE`): removes members whose score is in the `[min,max]`
+    /// interval and replies the number removed. Emptying the zset deletes the
+    /// key; `note_write` fires only when at least one member is removed.
+    fn zremrangebyscore_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 4 {
+            return wrong_arity(b"zremrangebyscore");
+        }
+        let Some(min) = parse_score_bound(&argv[2]) else {
+            return err(b"ERR min or max is not a float");
+        };
+        let Some(max) = parse_score_bound(&argv[3]) else {
+            return err(b"ERR min or max is not a float");
+        };
+        self.purge_if_expired(&argv[1]);
+        let mut removed = 0;
+        let became_empty = match self.db.get_mut(&argv[1]) {
+            Some(Entry {
+                value: StoredValue::ZSet(members),
+                ..
+            }) => {
+                let targets: Vec<Vec<u8>> = members
+                    .iter()
+                    .filter(|(_, score)| min.gte_min(**score) && max.lte_max(**score))
+                    .map(|(member, _)| member.clone())
+                    .collect();
+                for member in targets {
+                    members.remove(&member);
+                    removed += 1;
+                }
+                members.is_empty()
+            }
+            Some(_) => return wrong_type(),
+            None => return RespFrame::integer(0),
+        };
+        if became_empty {
+            self.db.remove(&argv[1]);
+        }
+        if removed > 0 {
+            self.note_write(&argv[1]);
+        }
+        RespFrame::integer(removed)
+    }
+
+    /// `ZREMRANGEBYLEX key min max` (`zremrangeGenericCommand`, `ZRANGE_LEX`):
+    /// removes members in the lex range and replies the number removed.
+    /// Emptying the zset deletes the key; `note_write` fires only when at least
+    /// one member is removed.
+    fn zremrangebylex_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 4 {
+            return wrong_arity(b"zremrangebylex");
+        }
+        let Some(min) = parse_lex_bound(&argv[2]) else {
+            return err(b"ERR min or max not valid string range item");
+        };
+        let Some(max) = parse_lex_bound(&argv[3]) else {
+            return err(b"ERR min or max not valid string range item");
+        };
+        self.purge_if_expired(&argv[1]);
+        let mut removed = 0;
+        let became_empty = match self.db.get_mut(&argv[1]) {
+            Some(Entry {
+                value: StoredValue::ZSet(members),
+                ..
+            }) => {
+                let targets: Vec<Vec<u8>> = members
+                    .keys()
+                    .filter(|member| min.gte_min(member) && max.lte_max(member))
+                    .cloned()
+                    .collect();
+                for member in targets {
+                    members.remove(&member);
+                    removed += 1;
+                }
+                members.is_empty()
+            }
+            Some(_) => return wrong_type(),
+            None => return RespFrame::integer(0),
+        };
+        if became_empty {
+            self.db.remove(&argv[1]);
+        }
+        if removed > 0 {
+            self.note_write(&argv[1]);
+        }
+        RespFrame::integer(removed)
     }
 
     /// LPUSH / RPUSH / LPUSHX / RPUSHX (`pushGenericCommand`, `t_list.c`).
@@ -3751,6 +4172,56 @@ fn parse_score_bound(bytes: &[u8]) -> Option<ScoreBound> {
         return None;
     }
     Some(ScoreBound { value, exclusive })
+}
+
+/// One side of a `ZRANGEBYLEX`/`ZLEXCOUNT`/`ZREMRANGEBYLEX` lex interval,
+/// mirroring the reference `zlexrangespec` after `zslParseLexRangeItem`: the
+/// bare `-`/`+` sentinels stand for "less than every member" / "greater than
+/// every member", a `[member` bound is inclusive and a `(member` bound is
+/// exclusive. Comparison is byte-wise (`sdscmp`).
+enum LexBound {
+    Min,
+    Max,
+    Inclusive(Vec<u8>),
+    Exclusive(Vec<u8>),
+}
+
+impl LexBound {
+    /// Whether `member` satisfies this bound used as the interval minimum,
+    /// matching `zslLexValueGteMin` (`>` when exclusive, else `>=`).
+    fn gte_min(&self, member: &[u8]) -> bool {
+        match self {
+            LexBound::Min => true,
+            LexBound::Max => false,
+            LexBound::Inclusive(bound) => member >= bound.as_slice(),
+            LexBound::Exclusive(bound) => member > bound.as_slice(),
+        }
+    }
+
+    /// Whether `member` satisfies this bound used as the interval maximum,
+    /// matching `zslLexValueLteMax` (`<` when exclusive, else `<=`).
+    fn lte_max(&self, member: &[u8]) -> bool {
+        match self {
+            LexBound::Min => false,
+            LexBound::Max => true,
+            LexBound::Inclusive(bound) => member <= bound.as_slice(),
+            LexBound::Exclusive(bound) => member < bound.as_slice(),
+        }
+    }
+}
+
+/// Parses one lex bound exactly like the reference `zslParseLexRangeItem`: a
+/// bare `+`/`-` is the max/min sentinel (any trailing byte is an error), a
+/// leading `[`/`(` marks the rest inclusive/exclusive, and anything else
+/// (including an empty argument) is rejected with the string-range error.
+fn parse_lex_bound(bytes: &[u8]) -> Option<LexBound> {
+    match bytes.split_first() {
+        Some((b'+', rest)) if rest.is_empty() => Some(LexBound::Max),
+        Some((b'-', rest)) if rest.is_empty() => Some(LexBound::Min),
+        Some((b'[', rest)) => Some(LexBound::Inclusive(rest.to_vec())),
+        Some((b'(', rest)) => Some(LexBound::Exclusive(rest.to_vec())),
+        _ => None,
+    }
 }
 
 /// Parses a `LIMIT` offset/count argument the way `getLongFromObjectOrReply`

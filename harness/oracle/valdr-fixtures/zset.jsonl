@@ -87,3 +87,100 @@
 {"id": "zexp-read-after-expiry", "cmd": ["ZSCORE", "zexp", "m"], "sleep_ms": 300}
 {"id": "zexp-zrange-after-expiry", "cmd": ["ZRANGE", "zexp", "0", "-1"]}
 {"id": "zexp-key-gone", "cmd": ["EXISTS", "zexp"]}
+{"id": "zw6-pop-setup", "cmd": ["ZADD", "zw6:pop", "1", "a", "2", "b", "3", "c"]}
+{"id": "zw6-popmin-no-count", "cmd": ["ZPOPMIN", "zw6:pop"]}
+{"id": "zw6-popmax-no-count", "cmd": ["ZPOPMAX", "zw6:pop"]}
+{"id": "zw6-popmin-empty-array", "cmd": ["ZPOPMIN", "zw6:popmissing"]}
+{"id": "zw6-popmax-empty-array", "cmd": ["ZPOPMAX", "zw6:popmissing"]}
+{"id": "zw6-pop2-setup", "cmd": ["ZADD", "zw6:pop2", "1", "a", "2", "b", "3", "c", "4", "d"]}
+{"id": "zw6-popmin-count", "cmd": ["ZPOPMIN", "zw6:pop2", "2"]}
+{"id": "zw6-popmax-count", "cmd": ["ZPOPMAX", "zw6:pop2", "2"]}
+{"id": "zw6-popmin-count-empties", "cmd": ["ZPOPMIN", "zw6:pop2", "5"]}
+{"id": "zw6-popmin-count-deletes-key", "cmd": ["EXISTS", "zw6:pop2"]}
+{"id": "zw6-pop0-setup", "cmd": ["ZADD", "zw6:pop0", "1", "a"]}
+{"id": "zw6-popmin-count-zero", "cmd": ["ZPOPMIN", "zw6:pop0", "0"]}
+{"id": "zw6-popmin-count-zero-keeps-key", "cmd": ["EXISTS", "zw6:pop0"]}
+{"id": "zw6-popneg-setup", "cmd": ["ZADD", "zw6:popneg", "1", "a"]}
+{"id": "zw6-popmin-neg-count", "cmd": ["ZPOPMIN", "zw6:popneg", "-1"]}
+{"id": "zw6-popmin-arity", "cmd": ["ZPOPMIN"]}
+{"id": "zw6-popmax-arity", "cmd": ["ZPOPMAX"]}
+{"id": "zw6-ms-setup", "cmd": ["ZADD", "zw6:ms", "1", "a", "2", "b", "3", "c"]}
+{"id": "zw6-mscore-hit-miss", "cmd": ["ZMSCORE", "zw6:ms", "a", "b", "nope", "c"]}
+{"id": "zw6-mscore-missing-key", "cmd": ["ZMSCORE", "zw6:msmissing", "a", "b"]}
+{"id": "zw6-mscore-single", "cmd": ["ZMSCORE", "zw6:ms", "a"]}
+{"id": "zw6-mscore-arity", "cmd": ["ZMSCORE", "zw6:ms"]}
+{"id": "zw6-cnt-setup", "cmd": ["ZADD", "zw6:cnt", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e"]}
+{"id": "zw6-zcount-inclusive", "cmd": ["ZCOUNT", "zw6:cnt", "2", "4"]}
+{"id": "zw6-zcount-excl-min", "cmd": ["ZCOUNT", "zw6:cnt", "(2", "4"]}
+{"id": "zw6-zcount-excl-both", "cmd": ["ZCOUNT", "zw6:cnt", "(2", "(4"]}
+{"id": "zw6-zcount-inf", "cmd": ["ZCOUNT", "zw6:cnt", "-inf", "+inf"]}
+{"id": "zw6-zcount-out-of-range", "cmd": ["ZCOUNT", "zw6:cnt", "10", "20"]}
+{"id": "zw6-zcount-missing-key", "cmd": ["ZCOUNT", "zw6:cntmissing", "0", "5"]}
+{"id": "zw6-zcount-bad-bound", "cmd": ["ZCOUNT", "zw6:cnt", "bad", "5"]}
+{"id": "zw6-zcount-arity", "cmd": ["ZCOUNT", "zw6:cnt", "0"]}
+{"id": "zw6-lex-setup", "cmd": ["ZADD", "zw6:lex", "0", "a", "0", "b", "0", "c", "0", "d", "0", "e"]}
+{"id": "zw6-zlexcount-all", "cmd": ["ZLEXCOUNT", "zw6:lex", "-", "+"]}
+{"id": "zw6-zlexcount-incl", "cmd": ["ZLEXCOUNT", "zw6:lex", "[b", "[d"]}
+{"id": "zw6-zlexcount-excl", "cmd": ["ZLEXCOUNT", "zw6:lex", "(b", "(d"]}
+{"id": "zw6-zlexcount-mixed", "cmd": ["ZLEXCOUNT", "zw6:lex", "[b", "(d"]}
+{"id": "zw6-zlexcount-missing-key", "cmd": ["ZLEXCOUNT", "zw6:lexmissing", "-", "+"]}
+{"id": "zw6-zlexcount-bad-bound", "cmd": ["ZLEXCOUNT", "zw6:lex", "bad", "+"]}
+{"id": "zw6-zrangebylex-all", "cmd": ["ZRANGEBYLEX", "zw6:lex", "-", "+"]}
+{"id": "zw6-zrangebylex-incl", "cmd": ["ZRANGEBYLEX", "zw6:lex", "[b", "[d"]}
+{"id": "zw6-zrangebylex-excl", "cmd": ["ZRANGEBYLEX", "zw6:lex", "(a", "(e"]}
+{"id": "zw6-zrangebylex-limit", "cmd": ["ZRANGEBYLEX", "zw6:lex", "-", "+", "LIMIT", "1", "2"]}
+{"id": "zw6-zrangebylex-partial-key", "cmd": ["ZRANGEBYLEX", "zw6:lex", "[aaa", "[c"]}
+{"id": "zw6-zrangebylex-empty", "cmd": ["ZRANGEBYLEX", "zw6:lex", "[x", "[z"]}
+{"id": "zw6-zrangebylex-bad-bound", "cmd": ["ZRANGEBYLEX", "zw6:lex", "bad", "+"]}
+{"id": "zw6-zrevrangebylex-all", "cmd": ["ZREVRANGEBYLEX", "zw6:lex", "+", "-"]}
+{"id": "zw6-zrevrangebylex-incl", "cmd": ["ZREVRANGEBYLEX", "zw6:lex", "[d", "[b"]}
+{"id": "zw6-zrevrangebylex-limit", "cmd": ["ZREVRANGEBYLEX", "zw6:lex", "+", "-", "LIMIT", "1", "2"]}
+{"id": "zw6-rr-setup", "cmd": ["ZADD", "zw6:rr", "1", "a", "2", "b", "2", "bb", "3", "c"]}
+{"id": "zw6-zrevrange-all", "cmd": ["ZREVRANGE", "zw6:rr", "0", "-1"]}
+{"id": "zw6-zrevrange-head", "cmd": ["ZREVRANGE", "zw6:rr", "0", "1"]}
+{"id": "zw6-zrevrange-withscores", "cmd": ["ZREVRANGE", "zw6:rr", "0", "-1", "WITHSCORES"]}
+{"id": "zw6-zrevrange-negative", "cmd": ["ZREVRANGE", "zw6:rr", "-2", "-1"]}
+{"id": "zw6-zrevrange-out-of-range", "cmd": ["ZREVRANGE", "zw6:rr", "5", "10"]}
+{"id": "zw6-zrevrange-missing-key", "cmd": ["ZREVRANGE", "zw6:rrmissing", "0", "-1"]}
+{"id": "zw6-zrevrange-bogus-option", "cmd": ["ZREVRANGE", "zw6:rr", "0", "-1", "BOGUS"]}
+{"id": "zw6-rbs-setup", "cmd": ["ZADD", "zw6:rbs", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e"]}
+{"id": "zw6-zrevrangebyscore-basic", "cmd": ["ZREVRANGEBYSCORE", "zw6:rbs", "4", "2"]}
+{"id": "zw6-zrevrangebyscore-inf", "cmd": ["ZREVRANGEBYSCORE", "zw6:rbs", "+inf", "-inf"]}
+{"id": "zw6-zrevrangebyscore-withscores", "cmd": ["ZREVRANGEBYSCORE", "zw6:rbs", "5", "1", "WITHSCORES"]}
+{"id": "zw6-zrevrangebyscore-limit", "cmd": ["ZREVRANGEBYSCORE", "zw6:rbs", "+inf", "-inf", "LIMIT", "1", "2"]}
+{"id": "zw6-zrevrangebyscore-excl", "cmd": ["ZREVRANGEBYSCORE", "zw6:rbs", "(4", "(2"]}
+{"id": "zw6-zrevrangebyscore-missing-key", "cmd": ["ZREVRANGEBYSCORE", "zw6:rbsmissing", "5", "1"]}
+{"id": "zw6-rmr-setup", "cmd": ["ZADD", "zw6:rmr", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e"]}
+{"id": "zw6-zremrangebyrank", "cmd": ["ZREMRANGEBYRANK", "zw6:rmr", "1", "3"]}
+{"id": "zw6-zremrangebyrank-applied", "cmd": ["ZRANGE", "zw6:rmr", "0", "-1", "WITHSCORES"]}
+{"id": "zw6-rmr2-setup", "cmd": ["ZADD", "zw6:rmr2", "1", "a", "2", "b"]}
+{"id": "zw6-zremrangebyrank-all", "cmd": ["ZREMRANGEBYRANK", "zw6:rmr2", "0", "-1"]}
+{"id": "zw6-zremrangebyrank-deletes-key", "cmd": ["EXISTS", "zw6:rmr2"]}
+{"id": "zw6-zremrangebyrank-missing-key", "cmd": ["ZREMRANGEBYRANK", "zw6:rmrmissing", "0", "-1"]}
+{"id": "zw6-rms-setup", "cmd": ["ZADD", "zw6:rms", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e"]}
+{"id": "zw6-zremrangebyscore", "cmd": ["ZREMRANGEBYSCORE", "zw6:rms", "2", "4"]}
+{"id": "zw6-zremrangebyscore-applied", "cmd": ["ZRANGE", "zw6:rms", "0", "-1", "WITHSCORES"]}
+{"id": "zw6-rms2-setup", "cmd": ["ZADD", "zw6:rms2", "1", "a", "2", "b"]}
+{"id": "zw6-zremrangebyscore-all", "cmd": ["ZREMRANGEBYSCORE", "zw6:rms2", "-inf", "+inf"]}
+{"id": "zw6-zremrangebyscore-deletes-key", "cmd": ["EXISTS", "zw6:rms2"]}
+{"id": "zw6-zremrangebyscore-missing-key", "cmd": ["ZREMRANGEBYSCORE", "zw6:rmsmissing", "0", "5"]}
+{"id": "zw6-rml-setup", "cmd": ["ZADD", "zw6:rml", "0", "a", "0", "b", "0", "c", "0", "d", "0", "e"]}
+{"id": "zw6-zremrangebylex", "cmd": ["ZREMRANGEBYLEX", "zw6:rml", "[b", "[d"]}
+{"id": "zw6-zremrangebylex-applied", "cmd": ["ZRANGE", "zw6:rml", "0", "-1"]}
+{"id": "zw6-rml2-setup", "cmd": ["ZADD", "zw6:rml2", "0", "a", "0", "b"]}
+{"id": "zw6-zremrangebylex-all", "cmd": ["ZREMRANGEBYLEX", "zw6:rml2", "-", "+"]}
+{"id": "zw6-zremrangebylex-deletes-key", "cmd": ["EXISTS", "zw6:rml2"]}
+{"id": "zw6-zremrangebylex-missing-key", "cmd": ["ZREMRANGEBYLEX", "zw6:rmlmissing", "-", "+"]}
+{"id": "zw6-wrongtype-setup", "cmd": ["SET", "zw6:str", "v"]}
+{"id": "zw6-popmin-wrongtype", "cmd": ["ZPOPMIN", "zw6:str"]}
+{"id": "zw6-popmax-wrongtype", "cmd": ["ZPOPMAX", "zw6:str"]}
+{"id": "zw6-mscore-wrongtype", "cmd": ["ZMSCORE", "zw6:str", "a"]}
+{"id": "zw6-zcount-wrongtype", "cmd": ["ZCOUNT", "zw6:str", "0", "5"]}
+{"id": "zw6-zlexcount-wrongtype", "cmd": ["ZLEXCOUNT", "zw6:str", "-", "+"]}
+{"id": "zw6-zrangebylex-wrongtype", "cmd": ["ZRANGEBYLEX", "zw6:str", "-", "+"]}
+{"id": "zw6-zrevrangebylex-wrongtype", "cmd": ["ZREVRANGEBYLEX", "zw6:str", "+", "-"]}
+{"id": "zw6-zrevrange-wrongtype", "cmd": ["ZREVRANGE", "zw6:str", "0", "-1"]}
+{"id": "zw6-zrevrangebyscore-wrongtype", "cmd": ["ZREVRANGEBYSCORE", "zw6:str", "5", "1"]}
+{"id": "zw6-zremrangebyrank-wrongtype", "cmd": ["ZREMRANGEBYRANK", "zw6:str", "0", "-1"]}
+{"id": "zw6-zremrangebyscore-wrongtype", "cmd": ["ZREMRANGEBYSCORE", "zw6:str", "0", "5"]}
+{"id": "zw6-zremrangebylex-wrongtype", "cmd": ["ZREMRANGEBYLEX", "zw6:str", "-", "+"]}
