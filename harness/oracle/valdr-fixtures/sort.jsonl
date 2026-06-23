@@ -1,0 +1,71 @@
+{"id": "setup-nums", "cmd": ["RPUSH", "so:nums", "3", "1", "2", "5", "4"]}
+{"id": "numeric-asc-default", "cmd": ["SORT", "so:nums"]}
+{"id": "numeric-asc-explicit", "cmd": ["SORT", "so:nums", "ASC"]}
+{"id": "numeric-desc", "cmd": ["SORT", "so:nums", "DESC"]}
+{"id": "limit-offset-count", "cmd": ["SORT", "so:nums", "LIMIT", "1", "2"]}
+{"id": "limit-negative-count-all-from-offset", "cmd": ["SORT", "so:nums", "LIMIT", "2", "-1"]}
+{"id": "limit-offset-out-of-range-empty", "cmd": ["SORT", "so:nums", "LIMIT", "10", "5"]}
+{"id": "limit-negative-offset-treated-as-zero", "cmd": ["SORT", "so:nums", "LIMIT", "-3", "2"]}
+{"id": "setup-words", "cmd": ["RPUSH", "so:words", "banana", "apple", "cherry", "date"]}
+{"id": "alpha-sort", "cmd": ["SORT", "so:words", "ALPHA"]}
+{"id": "alpha-sort-desc", "cmd": ["SORT", "so:words", "ALPHA", "DESC"]}
+{"id": "alpha-sort-limit", "cmd": ["SORT", "so:words", "ALPHA", "LIMIT", "1", "2"]}
+{"id": "non-numeric-without-alpha-errors", "cmd": ["SORT", "so:words"]}
+{"id": "setup-zset", "cmd": ["ZADD", "so:z", "100", "33", "50", "11", "75", "22"]}
+{"id": "zset-numeric-sort", "cmd": ["SORT", "so:z"]}
+{"id": "zset-alpha-sort", "cmd": ["SORT", "so:z", "ALPHA"]}
+{"id": "zset-numeric-desc", "cmd": ["SORT", "so:z", "DESC"]}
+{"id": "setup-set", "cmd": ["SADD", "so:s", "5", "3", "9", "1", "7"]}
+{"id": "set-numeric-sort", "cmd": ["SORT", "so:s"]}
+{"id": "set-alpha-sort", "cmd": ["SORT", "so:s", "ALPHA"]}
+{"id": "setup-by-list", "cmd": ["RPUSH", "so:ml", "a", "b", "c", "d"]}
+{"id": "setup-by-weights", "cmd": ["MSET", "so:w_a", "30", "so:w_b", "10", "so:w_c", "20", "so:w_d", "5"]}
+{"id": "by-external-key-numeric", "cmd": ["SORT", "so:ml", "BY", "so:w_*"]}
+{"id": "by-external-key-numeric-desc", "cmd": ["SORT", "so:ml", "BY", "so:w_*", "DESC"]}
+{"id": "by-external-key-alpha", "cmd": ["SORT", "so:ml", "BY", "so:w_*", "ALPHA"]}
+{"id": "by-missing-weight-del", "cmd": ["DEL", "so:w_a"]}
+{"id": "by-missing-weight-treated-as-zero", "cmd": ["SORT", "so:ml", "BY", "so:w_*"]}
+{"id": "by-missing-weight-restore", "cmd": ["SET", "so:w_a", "30"]}
+{"id": "setup-by-hash-a", "cmd": ["HSET", "so:h_a", "w", "30", "name", "Alice"]}
+{"id": "setup-by-hash-b", "cmd": ["HSET", "so:h_b", "w", "10", "name", "Bob"]}
+{"id": "setup-by-hash-c", "cmd": ["HSET", "so:h_c", "w", "20", "name", "Carol"]}
+{"id": "setup-by-hash-d", "cmd": ["HSET", "so:h_d", "w", "5", "name", "Dave"]}
+{"id": "by-hash-field", "cmd": ["SORT", "so:ml", "BY", "so:h_*->w"]}
+{"id": "by-nosort-literal-list", "cmd": ["SORT", "so:ml", "BY", "nosort"]}
+{"id": "by-nosort-literal-list-desc", "cmd": ["SORT", "so:ml", "BY", "nosort", "DESC"]}
+{"id": "setup-get-data", "cmd": ["MSET", "so:d_a", "AAA", "so:d_b", "BBB", "so:d_c", "CCC", "so:d_d", "DDD"]}
+{"id": "get-pound-returns-element", "cmd": ["SORT", "so:ml", "BY", "so:w_*", "GET", "#"]}
+{"id": "get-pattern", "cmd": ["SORT", "so:ml", "BY", "so:w_*", "GET", "so:d_*"]}
+{"id": "get-multiple-interleave", "cmd": ["SORT", "so:ml", "BY", "so:w_*", "GET", "#", "GET", "so:d_*"]}
+{"id": "get-hash-field", "cmd": ["SORT", "so:ml", "BY", "so:h_*->w", "GET", "so:h_*->name"]}
+{"id": "get-missing-key-del", "cmd": ["DEL", "so:d_b"]}
+{"id": "get-missing-key-nil", "cmd": ["SORT", "so:ml", "BY", "so:w_*", "GET", "so:d_*"]}
+{"id": "get-missing-key-restore", "cmd": ["SET", "so:d_b", "BBB"]}
+{"id": "setup-store-list", "cmd": ["RPUSH", "so:sl", "5", "2", "8", "1", "9"]}
+{"id": "store-returns-length", "cmd": ["SORT", "so:sl", "STORE", "so:dest"]}
+{"id": "store-dest-is-sorted-list", "cmd": ["LRANGE", "so:dest", "0", "-1"]}
+{"id": "store-dest-type-is-list", "cmd": ["TYPE", "so:dest"]}
+{"id": "setup-store-get-data", "cmd": ["MSET", "so:g_5", "FIVE", "so:g_2", "TWO", "so:g_8", "EIGHT", "so:g_1", "ONE", "so:g_9", "NINE"]}
+{"id": "store-with-get-length", "cmd": ["SORT", "so:sl", "GET", "so:g_*", "STORE", "so:gdest"]}
+{"id": "store-with-get-contents", "cmd": ["LRANGE", "so:gdest", "0", "-1"]}
+{"id": "setup-store-with-missing-get-data", "cmd": ["MSET", "so:g_5", "FIVE", "so:g_2", "TWO", "so:g_8", "EIGHT", "so:g_1", "ONE"]}
+{"id": "store-with-missing-get-key-del", "cmd": ["DEL", "so:g_9"]}
+{"id": "store-missing-get-stores-empty-string", "cmd": ["SORT", "so:sl", "GET", "so:g_*", "STORE", "so:gdest2"]}
+{"id": "store-missing-get-contents", "cmd": ["LRANGE", "so:gdest2", "0", "-1"]}
+{"id": "setup-store-empty-predest", "cmd": ["RPUSH", "so:predest", "x", "y", "z"]}
+{"id": "store-empty-predest-exists-before", "cmd": ["EXISTS", "so:predest"]}
+{"id": "store-empty-result-returns-zero", "cmd": ["SORT", "so:nonexistent", "STORE", "so:predest"]}
+{"id": "store-empty-result-deletes-dest", "cmd": ["EXISTS", "so:predest"]}
+{"id": "sort-ro-basic", "cmd": ["SORT_RO", "so:sl"]}
+{"id": "sort-ro-rejects-store", "cmd": ["SORT_RO", "so:sl", "STORE", "so:rox"]}
+{"id": "setup-wrongtype-string", "cmd": ["SET", "so:str", "hello"]}
+{"id": "wrongtype-on-string", "cmd": ["SORT", "so:str"]}
+{"id": "setup-wrongtype-hash", "cmd": ["HSET", "so:hk", "f", "v"]}
+{"id": "wrongtype-on-hash", "cmd": ["SORT", "so:hk"]}
+{"id": "missing-key-empty-array", "cmd": ["SORT", "so:absent"]}
+{"id": "arity-error", "cmd": ["SORT"]}
+{"id": "syntax-error-unknown-token", "cmd": ["SORT", "so:sl", "bogus"]}
+{"id": "limit-non-integer-error", "cmd": ["SORT", "so:sl", "LIMIT", "a", "b"]}
+{"id": "setup-store-numeric-error-list", "cmd": ["RPUSH", "so:bad", "x", "y", "z"]}
+{"id": "store-numeric-error-takes-precedence", "cmd": ["SORT", "so:bad", "STORE", "so:baddest"]}
+{"id": "store-numeric-error-dest-not-created", "cmd": ["EXISTS", "so:baddest"]}

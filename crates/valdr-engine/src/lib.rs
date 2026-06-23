@@ -1090,6 +1090,10 @@ impl<H: Host> Engine<H> {
             self.pfcount_command(argv)
         } else if ascii_eq(command, b"PFMERGE") {
             self.pfmerge_command(argv)
+        } else if ascii_eq(command, b"SORT") {
+            self.sort_command(argv, false)
+        } else if ascii_eq(command, b"SORT_RO") {
+            self.sort_command(argv, true)
         } else {
             unknown_command_error(command, &argv[1..])
         }
@@ -7196,6 +7200,328 @@ impl<H: Host> Engine<H> {
             ]));
         }
         RespFrame::array(out)
+    }
+
+    /// SORT key [BY pattern] [LIMIT offset count] [GET pattern ...] [ASC|DESC]
+    /// [ALPHA] [STORE destination], and SORT_RO (same minus STORE).
+    /// `sortCommandGeneric` (`sort.c`). Sorts the multiset of elements held by a
+    /// LIST, SET, or ZSET. Default is an ascending numeric sort: each element is
+    /// parsed as a double, and any non-numeric element (without ALPHA) yields
+    /// "ERR One or more scores can't be converted into double". ALPHA switches to
+    /// a lexicographic byte sort; DESC reverses; numeric ties (and ALPHA ties)
+    /// break on the element bytes for determinism. BY substitutes the first `*`
+    /// in the pattern with the element to form a weight key (a hash field via
+    /// `key->field`); a missing weight is score 0 (numeric) / NULL (alpha, sorts
+    /// first); a BY pattern with no `*` means "don't sort" (native order). GET
+    /// emits the value of the substituted key per element, `GET #` emits the
+    /// element itself, missing GET keys reply nil. LIMIT slices after sorting.
+    /// STORE writes the result list and replies its length, deleting the
+    /// destination when the result is empty. SORT_RO rejects STORE (it is not a
+    /// recognized token there, so it falls through to the syntax error).
+    fn sort_command(&mut self, argv: &[Vec<u8>], readonly: bool) -> RespFrame {
+        let cmd_name: &[u8] = if readonly { b"sort_ro" } else { b"sort" };
+        if argv.len() < 2 {
+            return wrong_arity(cmd_name);
+        }
+
+        let mut desc = false;
+        let mut alpha = false;
+        let mut limit_start: i64 = 0;
+        let mut limit_count: i64 = -1;
+        let mut dontsort = false;
+        let mut sortby: Option<Vec<u8>> = None;
+        let mut storekey: Option<Vec<u8>> = None;
+        let mut operations: Vec<Vec<u8>> = Vec::new();
+
+        let mut j = 2usize;
+        while j < argv.len() {
+            let leftargs = argv.len() - j - 1;
+            let arg = &argv[j];
+            if ascii_eq(arg, b"asc") {
+                desc = false;
+            } else if ascii_eq(arg, b"desc") {
+                desc = true;
+            } else if ascii_eq(arg, b"alpha") {
+                alpha = true;
+            } else if ascii_eq(arg, b"limit") && leftargs >= 2 {
+                let start = match parse_i64(&argv[j + 1]) {
+                    Some(n) => n,
+                    None => return err(b"ERR value is not an integer or out of range"),
+                };
+                let count = match parse_i64(&argv[j + 2]) {
+                    Some(n) => n,
+                    None => return err(b"ERR value is not an integer or out of range"),
+                };
+                limit_start = start;
+                limit_count = count;
+                j += 2;
+            } else if !readonly && ascii_eq(arg, b"store") && leftargs >= 1 {
+                storekey = Some(argv[j + 1].clone());
+                j += 1;
+            } else if ascii_eq(arg, b"by") && leftargs >= 1 {
+                let by_arg = &argv[j + 1];
+                if !by_arg.contains(&b'*') {
+                    dontsort = true;
+                }
+                sortby = Some(argv[j + 1].clone());
+                j += 1;
+            } else if ascii_eq(arg, b"get") && leftargs >= 1 {
+                operations.push(argv[j + 1].clone());
+                j += 1;
+            } else {
+                return err(b"ERR syntax error");
+            }
+            j += 1;
+        }
+
+        let key = &argv[1];
+        self.purge_if_expired(key);
+
+        // Validate type and collect the element multiset into `elements`.
+        let elements: Vec<Vec<u8>> = match self.db.get(key).map(|entry| &entry.value) {
+            None => Vec::new(),
+            Some(StoredValue::List(items)) => items.iter().cloned().collect(),
+            Some(StoredValue::Set(items)) => items.iter().cloned().collect(),
+            Some(StoredValue::ZSet(members)) => members.keys().cloned().collect(),
+            Some(_) => return wrong_type(),
+        };
+
+        let is_set = matches!(
+            self.db.get(key).map(|entry| &entry.value),
+            Some(StoredValue::Set(_))
+        );
+        let is_list = matches!(
+            self.db.get(key).map(|entry| &entry.value),
+            Some(StoredValue::List(_))
+        );
+        let is_zset = matches!(
+            self.db.get(key).map(|entry| &entry.value),
+            Some(StoredValue::ZSet(_))
+        );
+
+        // `dontsort` override: a SET sorted in native (hash) order is
+        // non-deterministic across scripting/replication, so the C code forces
+        // ALPHA when the result would be stored. The engine has no script
+        // context, so only the STORE arm of `(storekey || script)` applies.
+        if dontsort && is_set && storekey.is_some() {
+            dontsort = false;
+            alpha = true;
+            sortby = None;
+        }
+
+        let getop = std::mem::take(&mut operations);
+
+        // Build the sort vector in native order. For a ZSet, native order is
+        // ascending-by-score; we approximate the C skiplist walk by sorting on
+        // score (stored members are unique so ties cannot occur here for a real
+        // SORT path because `dontsort` ZSets are rare; numeric/alpha SORT
+        // re-sorts the vector anyway).
+        let mut vector: Vec<Vec<u8>> = if is_zset {
+            let mut scored: Vec<(f64, Vec<u8>)> = match self.db.get(key).map(|e| &e.value) {
+                Some(StoredValue::ZSet(members)) => members
+                    .iter()
+                    .map(|(member, score)| (*score, member.clone()))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            scored.sort_by(|(sa, ma), (sb, mb)| {
+                sa.partial_cmp(sb)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| ma.cmp(mb))
+            });
+            scored.into_iter().map(|(_, m)| m).collect()
+        } else {
+            // List preserves push order; Set's iteration order is sorted below
+            // when it actually participates in a sort, and a SET with `dontsort`
+            // and no STORE is the only native-order case (deterministic only as
+            // far as our fixtures avoid it).
+            elements
+        };
+        let _ = is_set;
+
+        let vectorlen = vector.len() as i64;
+
+        // LIMIT sanity (mirrors the C clamping arithmetic exactly).
+        let start = limit_start.max(0).min(vectorlen);
+        let limit_count = limit_count.max(-1).min(vectorlen);
+        let end0 = if limit_count < 0 {
+            vectorlen - 1
+        } else {
+            start + limit_count - 1
+        };
+        let (start, mut end) = if start >= vectorlen {
+            (vectorlen - 1, vectorlen - 2)
+        } else {
+            (start, end0)
+        };
+        if end >= vectorlen {
+            end = vectorlen - 1;
+        }
+
+        // For a list/zset with `dontsort`, honor DESC by reversing the native
+        // order. (Numeric/alpha sorts ignore `desc` here; the comparator applies
+        // it.) This matches the C direct-load path for lists and zsets.
+        if dontsort && (is_list || is_zset) && desc {
+            vector.reverse();
+        }
+
+        // ── Load scores / compare keys, then sort ──────────────────────────
+        let mut int_conversion_error = false;
+        // Per-element comparison key. `Numeric(f64)` for the default sort,
+        // `Alpha(Option<Vec<u8>>)` for ALPHA (None == missing BY weight).
+        enum Cmp {
+            Numeric(f64),
+            Alpha(Option<Vec<u8>>),
+        }
+        let mut keyed: Vec<(Cmp, Vec<u8>)> = Vec::with_capacity(vector.len());
+
+        if !dontsort {
+            for element in vector.iter() {
+                let byval: Option<Vec<u8>> = if let Some(by) = &sortby {
+                    self.sort_lookup_by_pattern(by, element)
+                } else {
+                    Some(element.clone())
+                };
+
+                let cmp = if alpha {
+                    if sortby.is_some() {
+                        Cmp::Alpha(byval)
+                    } else {
+                        Cmp::Alpha(Some(element.clone()))
+                    }
+                } else {
+                    match byval {
+                        None => Cmp::Numeric(0.0),
+                        Some(bytes) => match parse_score(&bytes) {
+                            Some(f) => Cmp::Numeric(f),
+                            None => {
+                                int_conversion_error = true;
+                                Cmp::Numeric(0.0)
+                            }
+                        },
+                    }
+                };
+                keyed.push((cmp, element.clone()));
+            }
+
+            keyed.sort_by(|(ca, ea), (cb, eb)| {
+                let ord = match (ca, cb) {
+                    (Cmp::Numeric(a), Cmp::Numeric(b)) => match a.partial_cmp(b) {
+                        Some(o) if o != std::cmp::Ordering::Equal => o,
+                        _ => ea.cmp(eb),
+                    },
+                    (Cmp::Alpha(a), Cmp::Alpha(b)) => match (a, b) {
+                        (None, None) => std::cmp::Ordering::Equal,
+                        (None, Some(_)) => std::cmp::Ordering::Less,
+                        (Some(_), None) => std::cmp::Ordering::Greater,
+                        (Some(a), Some(b)) => a.cmp(b),
+                    },
+                    _ => std::cmp::Ordering::Equal,
+                };
+                if desc {
+                    ord.reverse()
+                } else {
+                    ord
+                }
+            });
+            vector = keyed.into_iter().map(|(_, e)| e).collect();
+        }
+
+        // ── Compute output length ──────────────────────────────────────────
+        let range_len = if end >= start { (end - start + 1) as usize } else { 0 };
+        let getn = getop.len();
+        let outputlen = if getn > 0 { getn * range_len } else { range_len };
+
+        if int_conversion_error {
+            return err(b"ERR One or more scores can't be converted into double");
+        }
+
+        if storekey.is_none() {
+            let mut items: Vec<RespFrame> = Vec::with_capacity(outputlen);
+            if range_len > 0 {
+                for idx in start..=end {
+                    let element = &vector[idx as usize];
+                    if getn == 0 {
+                        items.push(bulk(element));
+                    }
+                    for pattern in &getop {
+                        match self.sort_lookup_by_pattern(pattern, element) {
+                            Some(val) => items.push(bulk(&val)),
+                            None => items.push(RespFrame::null_bulk()),
+                        }
+                    }
+                }
+            }
+            RespFrame::array(items)
+        } else {
+            let store_key = storekey.expect("storekey present");
+            let mut result: VecDeque<Vec<u8>> = VecDeque::with_capacity(outputlen);
+            if range_len > 0 {
+                for idx in start..=end {
+                    let element = &vector[idx as usize];
+                    if getn == 0 {
+                        result.push_back(element.clone());
+                    } else {
+                        for pattern in &getop {
+                            match self.sort_lookup_by_pattern(pattern, element) {
+                                Some(val) => result.push_back(val),
+                                None => result.push_back(Vec::new()),
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !result.is_empty() {
+                let entry = Entry {
+                    value: StoredValue::List(result),
+                    expire_at_ms: None,
+                };
+                self.db.insert(store_key.clone(), entry);
+                self.note_write(&store_key);
+            } else if self.db.remove(&store_key).is_some() {
+                self.note_write(&store_key);
+            }
+            RespFrame::integer(outputlen as i64)
+        }
+    }
+
+    /// `lookupKeyByPattern` (`sort.c`): resolve a BY/GET pattern against one
+    /// element. `#` returns the element itself. Otherwise the first `*` is
+    /// replaced by the element; if a `->field` suffix is present the substituted
+    /// key is dereferenced as a hash field, else it is read as a plain string
+    /// value. Returns `None` when the pattern has no `*`, the key is absent, the
+    /// type is wrong, or the hash field is missing.
+    fn sort_lookup_by_pattern(&mut self, pattern: &[u8], subst: &[u8]) -> Option<Vec<u8>> {
+        if pattern == b"#" {
+            return Some(subst.to_vec());
+        }
+        let star = pattern.iter().position(|&b| b == b'*')?;
+        let prefix = &pattern[..star];
+        let after = &pattern[star + 1..];
+
+        // Detect a `->field` hash dereference in the bytes after the `*`.
+        let (postfix, field): (&[u8], Option<&[u8]>) =
+            match after.windows(2).position(|w| w == b"->") {
+                Some(arrow) if arrow + 2 < after.len() => {
+                    (&after[..arrow], Some(&after[arrow + 2..]))
+                }
+                _ => (after, None),
+            };
+
+        let mut keybytes = Vec::with_capacity(prefix.len() + subst.len() + postfix.len());
+        keybytes.extend_from_slice(prefix);
+        keybytes.extend_from_slice(subst);
+        keybytes.extend_from_slice(postfix);
+
+        self.purge_if_expired(&keybytes);
+        match (self.db.get(&keybytes).map(|e| &e.value), field) {
+            (Some(StoredValue::Hash(fields)), Some(field_name)) => {
+                fields.get(field_name).map(|f| f.value.clone())
+            }
+            (Some(StoredValue::String(value)), None) => Some(value.clone()),
+            _ => None,
+        }
     }
 
     /// TYPE key (`typeCommand`, `db.c`): a simple-string naming the value's
