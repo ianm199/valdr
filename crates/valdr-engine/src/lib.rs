@@ -363,6 +363,13 @@ pub struct Engine<H> {
     /// create/modify/delete trips `dirty_cas`. Connection state, never
     /// serialized into snapshots and excluded from `mutation_epoch`/`dirty`.
     key_versions: HashMap<Vec<u8>, u64>,
+    /// True only while an EVAL_RO/EVALSHA_RO script is executing, mirroring
+    /// `SCRIPT_READ_ONLY` (`script.c`). While set, any `redis.call`/`redis.pcall`
+    /// of a command carrying the WRITE (or MAY_REPLICATE) command flag is
+    /// rejected by `execute_inner` with valkey's exact read-only-script error,
+    /// before the command runs. Reset to false once the script returns, so
+    /// ordinary EVAL and direct commands are never gated.
+    script_readonly: bool,
 }
 
 impl Engine<NoopHost> {
@@ -387,6 +394,7 @@ impl<H: Host> Engine<H> {
             watched: HashMap::new(),
             dirty_cas: false,
             key_versions: HashMap::new(),
+            script_readonly: false,
         }
     }
 
@@ -779,6 +787,9 @@ impl<H: Host> Engine<H> {
         if from_script && script_blocked_command(command) {
             return err(b"ERR This Redis command is not allowed from script");
         }
+        if from_script && self.script_readonly && argv_is_write(argv) {
+            return err(b"ERR Write commands are not allowed from read-only scripts.");
+        }
 
         if ascii_eq(command, b"GET") {
             self.get_command(argv)
@@ -1052,6 +1063,10 @@ impl<H: Host> Engine<H> {
             self.mset_command(argv, false)
         } else if ascii_eq(command, b"MSETNX") {
             self.mset_command(argv, true)
+        } else if ascii_eq(command, b"MSETEX") {
+            self.msetex_command(argv)
+        } else if ascii_eq(command, b"DELIFEQ") {
+            self.delifeq_command(argv)
         } else if ascii_eq(command, b"PSETEX") {
             self.psetex_command(argv)
         } else if ascii_eq(command, b"GETEX") {
@@ -1073,9 +1088,13 @@ impl<H: Host> Engine<H> {
         } else if ascii_eq(command, b"SCRIPT") {
             self.script_command(argv)
         } else if ascii_eq(command, b"EVAL") {
-            self.eval_command(argv)
+            self.eval_command(argv, false)
+        } else if ascii_eq(command, b"EVAL_RO") {
+            self.eval_command(argv, true)
         } else if ascii_eq(command, b"EVALSHA") {
-            self.evalsha_command(argv)
+            self.evalsha_command(argv, false)
+        } else if ascii_eq(command, b"EVALSHA_RO") {
+            self.evalsha_command(argv, true)
         } else if ascii_eq(command, b"INCRBYFLOAT") {
             self.incrbyfloat_command(argv)
         } else if ascii_eq(command, b"HINCRBYFLOAT") {
@@ -1673,6 +1692,169 @@ impl<H: Host> Engine<H> {
         } else {
             simple(b"OK")
         }
+    }
+
+    /// DELIFEQ key value (`delifeqCommand`, `t_string.c`). A Valkey extension:
+    /// delete `key` only if it holds a STRING binary-equal to `value`. Replies
+    /// `:1` when the key was deleted, `:0` when the key is missing or its value
+    /// differs, and WRONGTYPE when the key holds a non-string. `note_write` is
+    /// called exactly once, only on the deleting path (mirroring the C
+    /// `signalModifiedKey` + `server.dirty++` that run only after the delete).
+    fn delifeq_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 3 {
+            return wrong_arity(b"delifeq");
+        }
+        self.purge_if_expired(&argv[1]);
+        match self.db.get(&argv[1]).map(|entry| &entry.value) {
+            None => RespFrame::integer(0),
+            Some(StoredValue::String(value)) => {
+                if value.as_slice() != argv[2].as_slice() {
+                    return RespFrame::integer(0);
+                }
+                self.db.remove(&argv[1]);
+                self.note_write(&argv[1]);
+                RespFrame::integer(1)
+            }
+            Some(_) => wrong_type(),
+        }
+    }
+
+    /// MSETEX numkeys key value [key value ...] [NX|XX]
+    ///        [EX sec | PX ms | EXAT ts | PXAT ts | KEEPTTL]
+    /// (`msetexCommand`, `t_string.c`). Atomically sets `numkeys` key/value
+    /// pairs, optionally with a shared expiry and an optional all-or-nothing
+    /// NX/XX precondition. Replies `:1` when all keys were set, `:0` when the
+    /// NX/XX condition rejected the whole batch. Check order mirrors the C: parse
+    /// numkeys, validate the pair count, parse the trailing options, validate the
+    /// expiry, evaluate the NX/XX precondition over all keys, then apply.
+    fn msetex_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 4 {
+            return wrong_arity(b"msetex");
+        }
+        let Some(numkeys) = parse_i64(&argv[1]) else {
+            return err(b"ERR invalid numkeys value or out of range");
+        };
+        if numkeys < 1 || numkeys > i32::MAX as i64 {
+            return err(b"ERR invalid numkeys value or out of range");
+        }
+        let numkeys = numkeys as usize;
+        let args_start = 2 + numkeys * 2;
+        if args_start > argv.len() {
+            return err(b"ERR syntax error");
+        }
+
+        let mut nx = false;
+        let mut xx = false;
+        let mut keepttl = false;
+        let mut expire: Option<MsetexExpire> = None;
+        let mut index = args_start;
+        while index < argv.len() {
+            let opt = &argv[index];
+            let next = argv.get(index + 1);
+            if ascii_eq(opt, b"NX") && !(xx) {
+                nx = true;
+                index += 1;
+            } else if ascii_eq(opt, b"XX") && !(nx) {
+                xx = true;
+                index += 1;
+            } else if ascii_eq(opt, b"KEEPTTL")
+                && !keepttl
+                && expire.is_none()
+            {
+                keepttl = true;
+                index += 1;
+            } else if ascii_eq(opt, b"EX") && !keepttl && next.is_some() {
+                expire = Some(MsetexExpire::Relative {
+                    raw: next.unwrap().clone(),
+                    unit_ms: 1000,
+                });
+                index += 2;
+            } else if ascii_eq(opt, b"PX") && !keepttl && next.is_some() {
+                expire = Some(MsetexExpire::Relative {
+                    raw: next.unwrap().clone(),
+                    unit_ms: 1,
+                });
+                index += 2;
+            } else if ascii_eq(opt, b"EXAT") && !keepttl && next.is_some() {
+                expire = Some(MsetexExpire::Absolute {
+                    raw: next.unwrap().clone(),
+                    unit_ms: 1000,
+                });
+                index += 2;
+            } else if ascii_eq(opt, b"PXAT") && !keepttl && next.is_some() {
+                expire = Some(MsetexExpire::Absolute {
+                    raw: next.unwrap().clone(),
+                    unit_ms: 1,
+                });
+                index += 2;
+            } else {
+                return err(b"ERR syntax error");
+            }
+        }
+
+        let expire_at_ms = match expire {
+            None => None,
+            Some(MsetexExpire::Relative { raw, unit_ms }) => {
+                let Some(value) = parse_i64(&raw) else {
+                    return err(b"ERR value is not an integer or out of range");
+                };
+                if value <= 0 {
+                    return invalid_expire_time(b"msetex");
+                }
+                let Some(ttl) = checked_ttl_ms(value, unit_ms) else {
+                    return invalid_expire_time(b"msetex");
+                };
+                let Some(at) = self.host.now_millis().checked_add(ttl) else {
+                    return invalid_expire_time(b"msetex");
+                };
+                Some(at)
+            }
+            Some(MsetexExpire::Absolute { raw, unit_ms }) => {
+                let Some(value) = parse_i64(&raw) else {
+                    return err(b"ERR value is not an integer or out of range");
+                };
+                if value <= 0 {
+                    return invalid_expire_time(b"msetex");
+                }
+                let Some(at) = (value as u64).checked_mul(unit_ms) else {
+                    return invalid_expire_time(b"msetex");
+                };
+                Some(at)
+            }
+        };
+
+        if nx || xx {
+            let mut j = 2;
+            while j < args_start {
+                self.purge_if_expired(&argv[j]);
+                let exists = self.db.contains_key(&argv[j]);
+                if (nx && exists) || (xx && !exists) {
+                    return RespFrame::integer(0);
+                }
+                j += 2;
+            }
+        }
+
+        let mut j = 2;
+        while j < args_start {
+            let key = &argv[j];
+            let value = argv[j + 1].clone();
+            let new_expire = if keepttl {
+                self.db.get(key).and_then(|entry| entry.expire_at_ms)
+            } else {
+                expire_at_ms
+            };
+            self.db.insert(
+                key.clone(),
+                Entry {
+                    value: StoredValue::String(value),
+                    expire_at_ms: new_expire,
+                },
+            );
+            self.note_write(key);
+            j += 2;
+        }
+        RespFrame::integer(1)
     }
 
     /// PSETEX key milliseconds value (`psetexCommand`, `t_string.c`): SETEX with
@@ -7919,9 +8101,14 @@ impl<H: Host> Engine<H> {
     /// server, so a later SCRIPT EXISTS / EVALSHA of the same body succeeds.
     /// The cache insert deliberately does not bump the mutation epoch: the
     /// script cache is excluded from snapshots.
-    fn eval_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+    /// `read_only` is true for EVAL_RO, mirroring `evalRoCommand` passing `ro=1`
+    /// to `evalGenericCommand` (`eval.c`). It threads through to `eval_script`
+    /// so a write `redis.call` inside the script is rejected exactly as valkey
+    /// rejects it; the script body, cache, and reply shapes are otherwise
+    /// identical to EVAL.
+    fn eval_command(&mut self, argv: &[Vec<u8>], read_only: bool) -> RespFrame {
         if argv.len() < 3 {
-            return wrong_arity(b"eval");
+            return wrong_arity(if read_only { b"eval_ro" } else { b"eval" });
         }
         let numkeys = match validate_numkeys(&argv[2..]) {
             Ok(numkeys) => numkeys,
@@ -7932,12 +8119,12 @@ impl<H: Host> Engine<H> {
         }
         let sha = sha1_hex(&argv[1]);
         self.cache_script(sha, &argv[1]);
-        self.eval_script(&argv[1], &argv[2..], numkeys)
+        self.eval_script(&argv[1], &argv[2..], numkeys, read_only)
     }
 
-    fn evalsha_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+    fn evalsha_command(&mut self, argv: &[Vec<u8>], read_only: bool) -> RespFrame {
         if argv.len() < 3 {
-            return wrong_arity(b"evalsha");
+            return wrong_arity(if read_only { b"evalsha_ro" } else { b"evalsha" });
         }
         let numkeys = match validate_numkeys(&argv[2..]) {
             Ok(numkeys) => numkeys,
@@ -7950,13 +8137,27 @@ impl<H: Host> Engine<H> {
             return err(b"NOSCRIPT No matching script.");
         };
         self.touch_script(&sha);
-        self.eval_script(&script, &argv[2..], numkeys)
+        self.eval_script(&script, &argv[2..], numkeys, read_only)
     }
 
-    fn eval_script(&mut self, script: &[u8], rest: &[Vec<u8>], numkeys: usize) -> RespFrame {
-        let keys = &rest[1..1 + numkeys];
-        let args = &rest[1 + numkeys..];
-        match self.run_lua_script(script, keys, args) {
+    /// Runs `script` and, when `read_only` is set, marks the engine read-only
+    /// for the duration so `execute_inner` rejects write `redis.call`s
+    /// (`SCRIPT_READ_ONLY` in `script.c`). The flag is always cleared after the
+    /// run, even on error, so it can never leak into a later non-RO command.
+    fn eval_script(
+        &mut self,
+        script: &[u8],
+        rest: &[Vec<u8>],
+        numkeys: usize,
+        read_only: bool,
+    ) -> RespFrame {
+        let keys = rest[1..1 + numkeys].to_vec();
+        let args = rest[1 + numkeys..].to_vec();
+        let previous = self.script_readonly;
+        self.script_readonly = read_only;
+        let result = self.run_lua_script(script, &keys, &args);
+        self.script_readonly = previous;
+        match result {
             Ok(frame) => frame,
             Err(error) => {
                 let mut msg = b"ERR ".to_vec();
@@ -10142,10 +10343,13 @@ fn command_arity(command: &[u8]) -> Option<i64> {
         b"DECR" => 2,
         b"DECRBY" => 3,
         b"DEL" => -2,
+        b"DELIFEQ" => 3,
         b"DISCARD" => 1,
         b"ECHO" => 2,
         b"EVAL" => -3,
+        b"EVAL_RO" => -3,
         b"EVALSHA" => -3,
+        b"EVALSHA_RO" => -3,
         b"EXEC" => 1,
         b"EXISTS" => -3,
         b"EXPIRE" => -3,
@@ -10211,6 +10415,7 @@ fn command_arity(command: &[u8]) -> Option<i64> {
         b"LTRIM" => 4,
         b"MGET" => -2,
         b"MSET" => -3,
+        b"MSETEX" => -4,
         b"MSETNX" => -3,
         b"MULTI" => 1,
         b"PERSIST" => 2,
@@ -10312,6 +10517,142 @@ fn invalid_expire_time(command: &[u8]) -> RespFrame {
     msg.extend_from_slice(command);
     msg.extend_from_slice(b"' command");
     err(&msg)
+}
+
+/// The pending expiry option captured while parsing MSETEX's trailing
+/// arguments, deferring the integer parse and overflow checks until after the
+/// whole option list has been validated (matching `msetexCommand`'s order:
+/// parse all options first, then run `getExpireMillisecondsOrReply`). `EX`/`PX`
+/// are relative to now; `EXAT`/`PXAT` are absolute. `unit_ms` is the
+/// multiplier that converts the raw value to milliseconds.
+enum MsetexExpire {
+    Relative { raw: Vec<u8>, unit_ms: u64 },
+    Absolute { raw: Vec<u8>, unit_ms: u64 },
+}
+
+/// Whether `argv` is a write command for read-only-script gating. Resolves the
+/// container command `XGROUP` to its subcommand exactly as valkey does
+/// (`XGROUP HELP` is read-only; `CREATE`/`DESTROY`/etc. write), then defers to
+/// `is_write_command` for the flat command set.
+fn argv_is_write(argv: &[Vec<u8>]) -> bool {
+    let command = &argv[0];
+    if ascii_eq(command, b"XGROUP") {
+        return match argv.get(1) {
+            Some(sub) => !ascii_eq(sub, b"HELP"),
+            None => false,
+        };
+    }
+    is_write_command(command)
+}
+
+/// True for commands carrying valkey's WRITE or MAY_REPLICATE command flag,
+/// among the set `execute_inner` dispatches. EVAL_RO/EVALSHA_RO reject any such
+/// command issued via `redis.call`/`redis.pcall`, mirroring `scriptIsReadOnly()`
+/// gating on `cmd_flags & (CMD_WRITE | CMD_MAY_REPLICATE)` (`module.c`,
+/// `scriptCall` path). The check is on the static command flag, not the runtime
+/// arguments, so e.g. `SORT ... ` (no STORE) and `GETEX key` (no TTL change) are
+/// still rejected, exactly as valkey rejects them, while their `*_RO` siblings
+/// are allowed. EVAL/EVALSHA/SCRIPT are not listed here because
+/// `script_blocked_command` already rejects them from scripts first. `XGROUP` is
+/// resolved per-subcommand by `argv_is_write`, not here. Derived from
+/// `reference/valkey/src/commands/*.json` `command_flags`.
+fn is_write_command(command: &[u8]) -> bool {
+    let upper = command.to_ascii_uppercase();
+    matches!(
+        upper.as_slice(),
+        b"APPEND"
+            | b"BITFIELD"
+            | b"BITOP"
+            | b"COPY"
+            | b"DECR"
+            | b"DECRBY"
+            | b"DEL"
+            | b"DELIFEQ"
+            | b"EXPIRE"
+            | b"EXPIREAT"
+            | b"FLUSHALL"
+            | b"GEOADD"
+            | b"GEORADIUS"
+            | b"GEORADIUSBYMEMBER"
+            | b"GEOSEARCHSTORE"
+            | b"GETDEL"
+            | b"GETEX"
+            | b"GETSET"
+            | b"HDEL"
+            | b"HEXPIRE"
+            | b"HEXPIREAT"
+            | b"HGETDEL"
+            | b"HGETEX"
+            | b"HINCRBY"
+            | b"HINCRBYFLOAT"
+            | b"HMSET"
+            | b"HPERSIST"
+            | b"HPEXPIRE"
+            | b"HPEXPIREAT"
+            | b"HSET"
+            | b"HSETEX"
+            | b"HSETNX"
+            | b"INCR"
+            | b"INCRBY"
+            | b"INCRBYFLOAT"
+            | b"LINSERT"
+            | b"LMOVE"
+            | b"LMPOP"
+            | b"LPOP"
+            | b"LPUSH"
+            | b"LPUSHX"
+            | b"LREM"
+            | b"LSET"
+            | b"LTRIM"
+            | b"MSET"
+            | b"MSETEX"
+            | b"MSETNX"
+            | b"PERSIST"
+            | b"PEXPIRE"
+            | b"PEXPIREAT"
+            | b"PFADD"
+            | b"PFCOUNT"
+            | b"PFMERGE"
+            | b"PSETEX"
+            | b"RENAME"
+            | b"RENAMENX"
+            | b"RPOP"
+            | b"RPOPLPUSH"
+            | b"RPUSH"
+            | b"RPUSHX"
+            | b"SADD"
+            | b"SDIFFSTORE"
+            | b"SET"
+            | b"SETBIT"
+            | b"SETEX"
+            | b"SETNX"
+            | b"SETRANGE"
+            | b"SINTERSTORE"
+            | b"SMOVE"
+            | b"SORT"
+            | b"SREM"
+            | b"SUNIONSTORE"
+            | b"UNLINK"
+            | b"XACK"
+            | b"XADD"
+            | b"XDEL"
+            | b"XREADGROUP"
+            | b"XSETID"
+            | b"XTRIM"
+            | b"ZADD"
+            | b"ZDIFFSTORE"
+            | b"ZINCRBY"
+            | b"ZINTERSTORE"
+            | b"ZMPOP"
+            | b"ZPOPMAX"
+            | b"ZPOPMIN"
+            | b"ZRANGESTORE"
+            | b"ZREM"
+            | b"ZREMRANGEBYLEX"
+            | b"ZREMRANGEBYRANK"
+            | b"ZREMRANGEBYSCORE"
+            | b"ZUNIONSTORE"
+    )
 }
 
 /// Which extended command grammar `parse_hash_set_options` is parsing.
@@ -14240,6 +14581,224 @@ mod tests {
                 b"missing"
             ]))),
             b"$7\r\nboolean\r\n"
+        );
+    }
+
+    #[test]
+    fn eval_ro_rejects_writes_but_allows_reads() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"SET", b"ro:k", b"hello"]));
+
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[
+                b"EVAL_RO",
+                b"return redis.call('get', KEYS[1])",
+                b"1",
+                b"ro:k"
+            ]))),
+            b"$5\r\nhello\r\n",
+            "read-only script that only reads matches EVAL"
+        );
+
+        let epoch_before = engine.mutation_epoch();
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[
+                b"EVAL_RO",
+                b"return redis.call('set', KEYS[1], 'v')",
+                b"1",
+                b"ro:k"
+            ]))),
+            b"-ERR Write commands are not allowed from read-only scripts.\r\n",
+            "uncaught write via redis.call surfaces valkey's exact read-only error"
+        );
+        assert_eq!(
+            engine.mutation_epoch(),
+            epoch_before,
+            "rejected write must not mutate state"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"GET", b"ro:k"]))),
+            b"$5\r\nhello\r\n",
+            "value is unchanged after the rejected write"
+        );
+
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[
+                b"EVAL_RO",
+                b"local r = redis.pcall('set', KEYS[1], 'v') return r.err",
+                b"1",
+                b"ro:k"
+            ]))),
+            b"$58\r\nERR Write commands are not allowed from read-only scripts.\r\n",
+            "pcall returns the exact error string (with code) in its err field, matching valkey on the wire"
+        );
+
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[
+                b"EVAL",
+                b"return redis.call('set', KEYS[1], 'world')",
+                b"1",
+                b"ro:k"
+            ]))),
+            b"+OK\r\n",
+            "ordinary EVAL after EVAL_RO is never gated"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"GET", b"ro:k"]))),
+            b"$5\r\nworld\r\n"
+        );
+    }
+
+    #[test]
+    fn evalsha_ro_gates_writes_via_static_command_flag() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"RPUSH", b"ro:lst", b"c", b"a", b"b"]));
+
+        let load = engine.execute(&argv(&[
+            b"SCRIPT",
+            b"LOAD",
+            b"return redis.call('sort', KEYS[1], 'ALPHA')",
+        ]));
+        let sha = match &load {
+            RespFrame::Bulk(Some(bytes)) => bytes.as_bytes().to_vec(),
+            other => panic!("expected sha bulk, got {other:?}"),
+        };
+
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[
+                b"EVALSHA_RO",
+                sha.as_slice(),
+                b"1",
+                b"ro:lst"
+            ]))),
+            b"-ERR Write commands are not allowed from read-only scripts.\r\n",
+            "SORT carries the WRITE flag, so it is rejected even without STORE"
+        );
+
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[
+                b"EVAL_RO",
+                b"return redis.call('sort_ro', KEYS[1], 'ALPHA')",
+                b"1",
+                b"ro:lst"
+            ]))),
+            b"*3\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n",
+            "SORT_RO is a read-only sibling and is allowed"
+        );
+    }
+
+    #[test]
+    fn delifeq_deletes_only_on_exact_string_match() {
+        let mut engine = Engine::new_in_memory();
+
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"DELIFEQ", b"de:missing", b"x"]))),
+            b":0\r\n",
+            "missing key replies :0"
+        );
+
+        engine.execute(&argv(&[b"SET", b"de:k", b"val1"]));
+        let epoch_mismatch = engine.mutation_epoch();
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"DELIFEQ", b"de:k", b"other"]))),
+            b":0\r\n",
+            "value mismatch keeps the key and replies :0"
+        );
+        assert_eq!(
+            engine.mutation_epoch(),
+            epoch_mismatch,
+            "a non-deleting DELIFEQ is a read: no epoch bump"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"GET", b"de:k"]))),
+            b"$4\r\nval1\r\n"
+        );
+
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"DELIFEQ", b"de:k", b"val1"]))),
+            b":1\r\n",
+            "exact match deletes and replies :1"
+        );
+        assert_eq!(resp2(&engine.execute(&argv(&[b"EXISTS", b"de:k"]))), b":0\r\n");
+
+        engine.execute(&argv(&[b"RPUSH", b"de:lst", b"x"]));
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"DELIFEQ", b"de:lst", b"x"]))),
+            b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n",
+            "a non-string key replies WRONGTYPE"
+        );
+    }
+
+    #[test]
+    fn msetex_sets_all_keys_with_optional_expiry_and_conditions() {
+        let mut engine = Engine::new_in_memory();
+
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[
+                b"MSETEX", b"2", b"mx:a", b"1", b"mx:b", b"2"
+            ]))),
+            b":1\r\n"
+        );
+        assert_eq!(resp2(&engine.execute(&argv(&[b"GET", b"mx:a"]))), b"$1\r\n1\r\n");
+        assert_eq!(resp2(&engine.execute(&argv(&[b"GET", b"mx:b"]))), b"$1\r\n2\r\n");
+        assert_eq!(resp2(&engine.execute(&argv(&[b"TTL", b"mx:a"]))), b":-1\r\n");
+
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[
+                b"MSETEX",
+                b"1",
+                b"mx:c",
+                b"cv",
+                b"PXAT",
+                b"99999999999999"
+            ]))),
+            b":1\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"PEXPIRETIME", b"mx:c"]))),
+            b":99999999999999\r\n",
+            "absolute PXAT is stored verbatim"
+        );
+
+        engine.execute(&argv(&[b"SET", b"mx:nx", b"old"]));
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[
+                b"MSETEX", b"1", b"mx:nx", b"new", b"NX"
+            ]))),
+            b":0\r\n",
+            "NX on an existing key rejects the whole batch"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"GET", b"mx:nx"]))),
+            b"$3\r\nold\r\n"
+        );
+
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[
+                b"MSETEX", b"1", b"mx:nx", b"xv", b"XX"
+            ]))),
+            b":1\r\n",
+            "XX on an existing key applies"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"GET", b"mx:nx"]))),
+            b"$2\r\nxv\r\n"
+        );
+
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"MSETEX", b"0", b"x", b"y"]))),
+            b"-ERR invalid numkeys value or out of range\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"MSETEX", b"2", b"mx:a", b"1"]))),
+            b"-ERR syntax error\r\n",
+            "too few key/value pairs is a syntax error"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[
+                b"MSETEX", b"1", b"mx:a", b"1", b"EX", b"0"
+            ]))),
+            b"-ERR invalid expire time in 'msetex' command\r\n"
         );
     }
 

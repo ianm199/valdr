@@ -1,0 +1,29 @@
+{"id": "evro-setup-string", "cmd": ["SET", "evro:k1", "hello"]}
+{"id": "evro-setup-list", "cmd": ["RPUSH", "evro:lst", "c", "a", "b"]}
+{"id": "evro-read-matches-eval", "cmd": ["EVAL_RO", "return redis.call('get', KEYS[1])", "1", "evro:k1"]}
+{"id": "evro-read-eval-baseline", "cmd": ["EVAL", "return redis.call('get', KEYS[1])", "1", "evro:k1"]}
+{"id": "evro-keys-argv-passing", "cmd": ["EVAL_RO", "return {KEYS[1], ARGV[1]}", "1", "evro:k1", "myarg"]}
+{"id": "evro-setup-counter", "cmd": ["SET", "evro:ctr", "41"]}
+{"id": "evro-read-arithmetic", "cmd": ["EVAL_RO", "return tonumber(redis.call('get', KEYS[1])) + 1", "1", "evro:ctr"]}
+{"id": "evro-call-write-uncaught", "cmd": ["EVAL_RO", "return redis.call('set', KEYS[1], 'v')", "1", "evro:k1"], "mode": "error_prefix"}
+{"id": "evro-call-write-unchanged", "cmd": ["GET", "evro:k1"]}
+{"id": "evro-pcall-write-err-field", "cmd": ["EVAL_RO", "local r = redis.pcall('set', KEYS[1], 'v') return r.err", "1", "evro:k1"]}
+{"id": "evro-pcall-write-return-table", "cmd": ["EVAL_RO", "return redis.pcall('set', KEYS[1], 'v')", "1", "evro:k1"], "mode": "error_prefix"}
+{"id": "evro-call-del-write", "cmd": ["EVAL_RO", "return redis.call('del', KEYS[1])", "1", "evro:k1"], "mode": "error_prefix"}
+{"id": "evro-call-incr-write", "cmd": ["EVAL_RO", "return redis.call('incr', KEYS[1])", "1", "evro:ctr"], "mode": "error_prefix"}
+{"id": "evro-call-expire-write", "cmd": ["EVAL_RO", "return redis.call('expire', KEYS[1], 100)", "1", "evro:k1"], "mode": "error_prefix"}
+{"id": "evro-numkeys-negative", "cmd": ["EVAL_RO", "return 1", "-1"], "mode": "error_prefix"}
+{"id": "evro-numkeys-too-large", "cmd": ["EVAL_RO", "return 1", "5"], "mode": "error_prefix"}
+{"id": "evro-numkeys-not-integer", "cmd": ["EVAL_RO", "return 1", "abc"], "mode": "error_prefix"}
+{"id": "evro-wrong-arity", "cmd": ["EVAL_RO", "return 1"], "mode": "error_prefix"}
+{"id": "evro-load-read-script", "cmd": ["SCRIPT", "LOAD", "return redis.call('get', KEYS[1])"]}
+{"id": "evro-evalsha-ro-read", "cmd": ["EVALSHA_RO", "4e6d8fc8bb01276962cce5371fa795a7763657ae", "1", "evro:k1"]}
+{"id": "evro-load-write-script", "cmd": ["SCRIPT", "LOAD", "return redis.call('set', KEYS[1], 'v')"]}
+{"id": "evro-evalsha-ro-write-rejected", "cmd": ["EVALSHA_RO", "b0e7bbc2efc136be74cdebcb73a106ad46ea881b", "1", "evro:k1"], "mode": "error_prefix"}
+{"id": "evro-evalsha-ro-write-unchanged", "cmd": ["GET", "evro:k1"]}
+{"id": "evro-evalsha-ro-noscript", "cmd": ["EVALSHA_RO", "ffffffffffffffffffffffffffffffffffffffff", "0"], "mode": "error_prefix"}
+{"id": "evro-call-sort-write-flag", "cmd": ["EVAL_RO", "return redis.call('sort', KEYS[1], 'ALPHA')", "1", "evro:lst"], "mode": "error_prefix"}
+{"id": "evro-call-sort-ro-allowed", "cmd": ["EVAL_RO", "return redis.call('sort_ro', KEYS[1], 'ALPHA')", "1", "evro:lst"]}
+{"id": "evro-call-getex-write-flag", "cmd": ["EVAL_RO", "return redis.call('getex', KEYS[1])", "1", "evro:k1"], "mode": "error_prefix"}
+{"id": "evro-call-bitfield-write-flag", "cmd": ["EVAL_RO", "return redis.call('bitfield', KEYS[1], 'GET', 'u8', 0)", "1", "evro:k1"], "mode": "error_prefix"}
+{"id": "evro-call-bitfield-ro-allowed", "cmd": ["EVAL_RO", "return redis.call('bitfield_ro', KEYS[1], 'GET', 'u8', 0)", "1", "evro:k1"]}

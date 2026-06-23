@@ -1,0 +1,46 @@
+{"id": "msx-basic-two-keys", "cmd": ["MSETEX", "2", "msx:a", "1", "msx:b", "2"]}
+{"id": "msx-basic-read-a", "cmd": ["GET", "msx:a"]}
+{"id": "msx-basic-read-b", "cmd": ["GET", "msx:b"]}
+{"id": "msx-basic-no-ttl-a", "cmd": ["TTL", "msx:a"]}
+{"id": "msx-pxat-absolute", "cmd": ["MSETEX", "1", "msx:c", "cv", "PXAT", "99999999999999"]}
+{"id": "msx-pxat-read-value", "cmd": ["GET", "msx:c"]}
+{"id": "msx-pxat-read-expiretime", "cmd": ["PEXPIRETIME", "msx:c"]}
+{"id": "msx-exat-absolute", "cmd": ["MSETEX", "1", "msx:d", "dv", "EXAT", "99999999999"]}
+{"id": "msx-exat-read-expiretime", "cmd": ["EXPIRETIME", "msx:d"]}
+{"id": "msx-multikey-pxat", "cmd": ["MSETEX", "2", "msx:e", "ev", "msx:f", "fv", "PXAT", "88888888888888"]}
+{"id": "msx-multikey-pxat-e", "cmd": ["PEXPIRETIME", "msx:e"]}
+{"id": "msx-multikey-pxat-f", "cmd": ["PEXPIRETIME", "msx:f"]}
+{"id": "msx-setup-nx-existing", "cmd": ["SET", "msx:nxk", "old"]}
+{"id": "msx-nx-existing-rejected", "cmd": ["MSETEX", "1", "msx:nxk", "new", "NX"]}
+{"id": "msx-nx-existing-unchanged", "cmd": ["GET", "msx:nxk"]}
+{"id": "msx-nx-new-key-set", "cmd": ["MSETEX", "1", "msx:nxnew", "fresh", "NX"]}
+{"id": "msx-nx-new-key-read", "cmd": ["GET", "msx:nxnew"]}
+{"id": "msx-nx-atomic-one-exists", "cmd": ["MSETEX", "2", "msx:nxnew", "v1", "msx:nxbrand", "v2", "NX"]}
+{"id": "msx-nx-atomic-second-not-set", "cmd": ["EXISTS", "msx:nxbrand"]}
+{"id": "msx-xx-existing-set", "cmd": ["MSETEX", "1", "msx:nxk", "xxval", "XX"]}
+{"id": "msx-xx-existing-read", "cmd": ["GET", "msx:nxk"]}
+{"id": "msx-xx-missing-rejected", "cmd": ["MSETEX", "1", "msx:xxmiss", "v", "XX"]}
+{"id": "msx-xx-missing-not-set", "cmd": ["EXISTS", "msx:xxmiss"]}
+{"id": "msx-setup-keepttl", "cmd": ["MSETEX", "1", "msx:kt", "first", "PXAT", "77777777777777"]}
+{"id": "msx-keepttl-preserves", "cmd": ["MSETEX", "1", "msx:kt", "second", "KEEPTTL"]}
+{"id": "msx-keepttl-value", "cmd": ["GET", "msx:kt"]}
+{"id": "msx-keepttl-expiretime", "cmd": ["PEXPIRETIME", "msx:kt"]}
+{"id": "msx-no-ttl-clears", "cmd": ["MSETEX", "1", "msx:kt", "third"]}
+{"id": "msx-no-ttl-cleared", "cmd": ["PTTL", "msx:kt"]}
+{"id": "msx-numkeys-zero", "cmd": ["MSETEX", "0", "x", "y"], "mode": "error_prefix"}
+{"id": "msx-numkeys-negative", "cmd": ["MSETEX", "-1", "x", "y"], "mode": "error_prefix"}
+{"id": "msx-numkeys-not-integer", "cmd": ["MSETEX", "abc", "x", "y"], "mode": "error_prefix"}
+{"id": "msx-too-few-pairs", "cmd": ["MSETEX", "2", "msx:a", "1"], "mode": "error_prefix"}
+{"id": "msx-odd-args-wrong-arity", "cmd": ["MSETEX", "1", "msx:a"], "mode": "error_prefix"}
+{"id": "msx-only-numkeys-wrong-arity", "cmd": ["MSETEX", "1"], "mode": "error_prefix"}
+{"id": "msx-bad-ex-value", "cmd": ["MSETEX", "1", "msx:a", "1", "EX", "notanint"], "mode": "error_prefix"}
+{"id": "msx-ex-zero-invalid", "cmd": ["MSETEX", "1", "msx:a", "1", "EX", "0"], "mode": "error_prefix"}
+{"id": "msx-ex-negative-invalid", "cmd": ["MSETEX", "1", "msx:a", "1", "EX", "-5"], "mode": "error_prefix"}
+{"id": "msx-unknown-option-syntax", "cmd": ["MSETEX", "1", "msx:a", "1", "FOO"], "mode": "error_prefix"}
+{"id": "msx-nx-and-xx-syntax", "cmd": ["MSETEX", "1", "msx:a", "1", "NX", "XX"], "mode": "error_prefix"}
+{"id": "msx-keepttl-then-ex-syntax", "cmd": ["MSETEX", "1", "msx:a", "1", "KEEPTTL", "EX", "100"], "mode": "error_prefix"}
+{"id": "msx-numkeys-overflow-syntax", "cmd": ["MSETEX", "100", "msx:a", "1"], "mode": "error_prefix"}
+{"id": "msx-ex-missing-value-syntax", "cmd": ["MSETEX", "1", "msx:a", "1", "EX"], "mode": "error_prefix"}
+{"id": "msx-nx-then-ex-combo", "cmd": ["MSETEX", "1", "msx:combo", "cv", "NX", "PXAT", "66666666666666"]}
+{"id": "msx-nx-then-ex-value", "cmd": ["GET", "msx:combo"]}
+{"id": "msx-nx-then-ex-ttl", "cmd": ["PEXPIRETIME", "msx:combo"]}

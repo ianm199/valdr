@@ -1,0 +1,18 @@
+{"id": "dieq-setup-match", "cmd": ["SET", "dieq:k1", "val1"]}
+{"id": "dieq-match-deletes", "cmd": ["DELIFEQ", "dieq:k1", "val1"]}
+{"id": "dieq-match-gone", "cmd": ["EXISTS", "dieq:k1"]}
+{"id": "dieq-missing-key", "cmd": ["DELIFEQ", "dieq:missing", "whatever"]}
+{"id": "dieq-setup-mismatch", "cmd": ["SET", "dieq:k2", "actual"]}
+{"id": "dieq-mismatch-keeps", "cmd": ["DELIFEQ", "dieq:k2", "expected"]}
+{"id": "dieq-mismatch-still-there", "cmd": ["GET", "dieq:k2"]}
+{"id": "dieq-setup-empty-value", "cmd": ["SET", "dieq:k3", ""]}
+{"id": "dieq-match-empty-value", "cmd": ["DELIFEQ", "dieq:k3", ""]}
+{"id": "dieq-empty-gone", "cmd": ["EXISTS", "dieq:k3"]}
+{"id": "dieq-setup-multibyte", "cmd": ["SET", "dieq:k4", "alpha beta"]}
+{"id": "dieq-multibyte-mismatch", "cmd": ["DELIFEQ", "dieq:k4", "alpha"]}
+{"id": "dieq-multibyte-match", "cmd": ["DELIFEQ", "dieq:k4", "alpha beta"]}
+{"id": "dieq-setup-list", "cmd": ["RPUSH", "dieq:lst", "x"]}
+{"id": "dieq-wrongtype", "cmd": ["DELIFEQ", "dieq:lst", "x"]}
+{"id": "dieq-wrongtype-still-there", "cmd": ["LRANGE", "dieq:lst", "0", "-1"]}
+{"id": "dieq-arity-too-few", "cmd": ["DELIFEQ", "dieq:k2"], "mode": "error_prefix"}
+{"id": "dieq-arity-too-many", "cmd": ["DELIFEQ", "dieq:k2", "a", "b"], "mode": "error_prefix"}
