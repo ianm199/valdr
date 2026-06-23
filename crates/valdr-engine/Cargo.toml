@@ -10,3 +10,4 @@ lua-rs-runtime = { workspace = true }
 redis-protocol = { workspace = true }
 redis-types = { workspace = true }
 serde_json = { workspace = true }
+indexmap = { workspace = true }

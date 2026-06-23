@@ -7,6 +7,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use indexmap::IndexMap;
 use lua_rs_runtime::{
     Lua, LuaError, LuaString, LuaVersion, Table as LuaTable, Value as LuaValue, Variadic,
 };
@@ -71,7 +72,13 @@ struct Entry {
 #[derive(Debug, Clone)]
 enum StoredValue {
     String(Vec<u8>),
-    Hash(HashMap<Vec<u8>, HashField>),
+    /// A hash value. `IndexMap` preserves **field insertion order** (matching
+    /// valkey's listpack/hashtable ordering for HGETALL/HKEYS/HVALS/HSCAN)
+    /// while keeping O(1) field lookup. New fields append at the end; an
+    /// overwrite of an existing field keeps its position (`IndexMap::insert`
+    /// semantics); deletions use `shift_remove` to preserve the order of the
+    /// remaining fields, mirroring `hashTypeDelete`.
+    Hash(IndexMap<Vec<u8>, HashField>),
     ZSet(HashMap<Vec<u8>, f64>),
     List(VecDeque<Vec<u8>>),
     Set(HashSet<Vec<u8>>),
@@ -2788,7 +2795,7 @@ impl<H: Host> Engine<H> {
                 ..
             }) => wrong_type(),
             None => {
-                let mut fields = HashMap::new();
+                let mut fields = IndexMap::new();
                 let mut added = 0;
                 for pair in argv[2..].chunks_exact(2) {
                     if fields
@@ -2835,10 +2842,10 @@ impl<H: Host> Engine<H> {
         self.purge_expired_fields(&argv[1]);
         match self.get_value(&argv[1]).map(|entry| &entry.value) {
             Some(StoredValue::Hash(fields)) => {
-                let mut pairs: Vec<_> = fields.iter().collect();
-                pairs.sort_by(|(left, _), (right, _)| left.cmp(right));
+                // Insertion order, matching valkey's listpack/hashtable iteration
+                // (`hashTypeGetAll` → field, value pairs in stored order).
                 let mut items = Vec::with_capacity(fields.len() * 2);
-                for (field, field_value) in pairs {
+                for (field, field_value) in fields {
                     items.push(bulk(field));
                     items.push(bulk(&field_value.value));
                 }
@@ -2865,7 +2872,7 @@ impl<H: Host> Engine<H> {
             }) => {
                 let mut deleted = 0;
                 for field in &argv[2..] {
-                    if fields.remove(field).is_some() {
+                    if fields.shift_remove(field).is_some() {
                         deleted += 1;
                     }
                 }
@@ -2952,9 +2959,8 @@ impl<H: Host> Engine<H> {
         self.purge_expired_fields(&argv[1]);
         match self.get_value(&argv[1]).map(|entry| &entry.value) {
             Some(StoredValue::Hash(fields)) => {
-                let mut keys: Vec<_> = fields.keys().collect();
-                keys.sort();
-                RespFrame::array(keys.into_iter().map(|field| bulk(field)).collect())
+                // Insertion order (`hashTypeGetAll` with HASH_KEY).
+                RespFrame::array(fields.keys().map(|field| bulk(field)).collect())
             }
             Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_) | StoredValue::Stream(_)) => {
                 wrong_type()
@@ -2970,12 +2976,11 @@ impl<H: Host> Engine<H> {
         self.purge_expired_fields(&argv[1]);
         match self.get_value(&argv[1]).map(|entry| &entry.value) {
             Some(StoredValue::Hash(fields)) => {
-                let mut pairs: Vec<_> = fields.iter().collect();
-                pairs.sort_by(|(left, _), (right, _)| left.cmp(right));
+                // Insertion order (`hashTypeGetAll` with HASH_VALUE).
                 RespFrame::array(
-                    pairs
-                        .into_iter()
-                        .map(|(_, field_value)| bulk(&field_value.value))
+                    fields
+                        .values()
+                        .map(|field_value| bulk(&field_value.value))
                         .collect(),
                 )
             }
@@ -3026,7 +3031,7 @@ impl<H: Host> Engine<H> {
                 ..
             }) => wrong_type(),
             None => {
-                let mut fields = HashMap::new();
+                let mut fields = IndexMap::new();
                 fields.insert(argv[2].clone(), HashField::new(argv[3].clone()));
                 self.db.insert(
                     argv[1].clone(),
@@ -3063,7 +3068,7 @@ impl<H: Host> Engine<H> {
                 self.db.insert(
                     argv[1].clone(),
                     Entry {
-                        value: StoredValue::Hash(HashMap::new()),
+                        value: StoredValue::Hash(IndexMap::new()),
                         expire_at_ms,
                     },
                 );
@@ -3127,7 +3132,7 @@ impl<H: Host> Engine<H> {
                 self.db.insert(
                     argv[1].clone(),
                     Entry {
-                        value: StoredValue::Hash(HashMap::new()),
+                        value: StoredValue::Hash(IndexMap::new()),
                         expire_at_ms,
                     },
                 );
@@ -3181,7 +3186,7 @@ impl<H: Host> Engine<H> {
                 ..
             }) => return wrong_type(),
             None => {
-                let mut fields = HashMap::new();
+                let mut fields = IndexMap::new();
                 for pair in argv[2..].chunks_exact(2) {
                     fields.insert(pair[0].clone(), HashField::new(pair[1].clone()));
                 }
@@ -3319,7 +3324,7 @@ impl<H: Host> Engine<H> {
                     if blocked {
                         0
                     } else if time_is_expired {
-                        fields.remove(field);
+                        fields.shift_remove(field);
                         changed = true;
                         2
                     } else {
@@ -3549,7 +3554,7 @@ impl<H: Host> Engine<H> {
                 Some(stored) => {
                     items.push(bulk(&stored.value));
                     if set_expired {
-                        fields.remove(field);
+                        fields.shift_remove(field);
                         changed = true;
                         if fields.is_empty() {
                             self.db.remove(&argv[1]);
@@ -3605,7 +3610,7 @@ impl<H: Host> Engine<H> {
         let mut items = Vec::with_capacity(field_args.len());
         let mut changed = false;
         for field in field_args {
-            match fields.remove(field) {
+            match fields.shift_remove(field) {
                 Some(stored) => {
                     items.push(bulk(&stored.value));
                     changed = true;
@@ -3690,7 +3695,7 @@ impl<H: Host> Engine<H> {
         // Field-level FNX/FXX conditions: every pair must satisfy them or the
         // whole command is a no-op replying 0.
         if opts.fnx || opts.fxx {
-            let existing: Option<&HashMap<Vec<u8>, HashField>> =
+            let existing: Option<&IndexMap<Vec<u8>, HashField>> =
                 match self.db.get(&argv[1]).map(|entry| &entry.value) {
                     Some(StoredValue::Hash(fields)) => Some(fields),
                     _ => None,
@@ -3708,7 +3713,7 @@ impl<H: Host> Engine<H> {
             self.db.insert(
                 argv[1].clone(),
                 Entry {
-                    value: StoredValue::Hash(HashMap::new()),
+                    value: StoredValue::Hash(IndexMap::new()),
                     expire_at_ms: None,
                 },
             );
@@ -3723,7 +3728,7 @@ impl<H: Host> Engine<H> {
 
         for pair in pair_args.chunks_exact(2) {
             if set_expired {
-                fields.remove(&pair[0]);
+                fields.shift_remove(&pair[0]);
             } else if opts.keepttl {
                 // Keep any existing field TTL; new fields get no TTL.
                 let existing_ttl = fields.get(&pair[0]).and_then(|stored| stored.expire_at_ms);
@@ -9611,14 +9616,15 @@ fn encode_entry(key: &[u8], entry: &Entry) -> JsonMap<String, JsonValue> {
             object.insert("value".to_owned(), JsonValue::String(hex_encode(value)));
         }
         StoredValue::Hash(fields) => {
-            let mut field_items: Vec<_> = fields.iter().collect();
-            field_items.sort_by(|(left, _), (right, _)| left.cmp(right));
+            // Serialize fields in insertion order (the `IndexMap` order),
+            // matching valkey's stored hash order so a DUMP listpack and a
+            // snapshot round-trip both preserve it.
             object.insert("type".to_owned(), JsonValue::String("hash".to_owned()));
             object.insert(
                 "fields".to_owned(),
                 JsonValue::Array(
-                    field_items
-                        .into_iter()
+                    fields
+                        .iter()
                         .map(|(field, field_value)| {
                             // Two-element `[field, value]` for a field with no
                             // TTL (round-trips with old snapshots); a third
@@ -9857,7 +9863,7 @@ fn decode_entry(object: &JsonMap<String, JsonValue>) -> Result<(Vec<u8>, Entry),
                 .get("fields")
                 .and_then(JsonValue::as_array)
                 .ok_or(SnapshotError::MissingField("fields"))?;
-            let mut decoded_fields = HashMap::new();
+            let mut decoded_fields = IndexMap::new();
             for pair in fields {
                 let pair = pair
                     .as_array()
@@ -12190,10 +12196,14 @@ const RDB_ENC_LZF: u8 = 3;
 
 /// RDB object-type bytes (`rdb.h` `enum RdbType`). The engine emits and
 /// accepts the compact small-collection encodings only; the larger
-/// hashtable/skiplist encodings (and HASH / non-integer SET, which lose
-/// insertion order through the engine's HashMap/HashSet) stay deferred.
+/// hashtable/skiplist encodings (and non-integer SET, which loses insertion
+/// order through the engine's HashSet) stay deferred. A plain (no-field-TTL)
+/// hash now preserves insertion order (`IndexMap`), so it DUMPs to the compact
+/// `RDB_TYPE_HASH_LISTPACK`; a hash carrying any per-field TTL is `RDB_TYPE_HASH_2`
+/// (hashtable+expiry, type byte 22) in the reference and stays deferred.
 const RDB_TYPE_STRING: u8 = 0;
 const RDB_TYPE_SET_INTSET: u8 = 11;
+const RDB_TYPE_HASH_LISTPACK: u8 = 16;
 const RDB_TYPE_ZSET_LISTPACK: u8 = 17;
 const RDB_TYPE_LIST_QUICKLIST_2: u8 = 18;
 
@@ -12210,6 +12220,15 @@ const QUICKLIST_NODE_CONTAINER_PACKED: u64 = 2;
 const ZSET_MAX_LISTPACK_ENTRIES: usize = 128;
 const ZSET_MAX_LISTPACK_VALUE: usize = 64;
 const SET_MAX_INTSET_ENTRIES: usize = 512;
+
+/// `hash-max-listpack-entries` / `hash-max-listpack-value` defaults (`config.c`,
+/// confirmed against valkey-server 9.1.0: 512 entries, 64-byte field/value).
+/// A hash within both limits and with no per-field TTL stays
+/// `OBJ_ENCODING_LISTPACK` and DUMPs to `RDB_TYPE_HASH_LISTPACK`; past either
+/// limit it is a hashtable (`RDB_TYPE_HASH`), which the engine cannot reproduce
+/// byte-for-byte, so it is deferred.
+const HASH_MAX_LISTPACK_ENTRIES: usize = 512;
+const HASH_MAX_LISTPACK_VALUE: usize = 64;
 
 /// `list-max-listpack-size` default of `-2` → an 8 KiB per-node byte budget
 /// (`optimization_level[1]`, `quicklist.c`). A small list whose single
@@ -12402,7 +12421,8 @@ fn rdb_save_raw_string(out: &mut Vec<u8>, s: &[u8]) {
 /// RDB object-type byte the reference would (given valkey's default encoding
 /// thresholds), serializes the body byte-identically, then appends the version
 /// footer and CRC64. Returns `None` when the value cannot be reproduced
-/// byte-for-byte — either an unsupported type (HASH, non-integer SET, Stream)
+/// byte-for-byte — either an unsupported type (Stream), a hash carrying a
+/// per-field TTL (a `RDB_TYPE_HASH_2` hashtable in valkey), a non-integer SET,
 /// or a collection past the compact-encoding thresholds (valkey would have
 /// converted it to hashtable/skiplist/multi-node-quicklist, whose iteration
 /// order the engine's flat containers cannot match). The caller turns `None`
@@ -12433,7 +12453,12 @@ fn rdb_create_dump_payload(value: &StoredValue) -> Option<Vec<u8>> {
             payload.push(RDB_TYPE_SET_INTSET);
             rdb_save_raw_string(&mut payload, &blob);
         }
-        StoredValue::Hash(_) | StoredValue::Stream(_) => return None,
+        StoredValue::Hash(fields) => {
+            let lp = rdb_hash_to_listpack(fields)?;
+            payload.push(RDB_TYPE_HASH_LISTPACK);
+            rdb_save_raw_string(&mut payload, &lp);
+        }
+        StoredValue::Stream(_) => return None,
     }
     payload.push((RDB_DUMP_VERSION & 0xff) as u8);
     payload.push(((RDB_DUMP_VERSION >> 8) & 0xff) as u8);
@@ -12480,6 +12505,34 @@ fn rdb_zset_to_listpack(members: &HashMap<Vec<u8>, f64>) -> Option<Vec<u8>> {
             Some(lscore) => lp.append_integer(lscore),
             None => lp.append_auto(&format_score(*score)),
         }
+    }
+    Some(lp.into_bytes())
+}
+
+/// Build the listpack body for a HASH, in field insertion order (the engine's
+/// `IndexMap` already holds valkey's stored order). Each field is followed by
+/// its value as the next listpack entry (`hashTypeSet`/`lpAppend`), with the
+/// same canonical-integer auto-detection valkey applies, so the bytes match a
+/// reference `RDB_TYPE_HASH_LISTPACK` DUMP. Returns `None` (deferred) when:
+/// - any field carries a per-field TTL — valkey then keeps the hash as a
+///   hashtable and DUMPs `RDB_TYPE_HASH_2` (type byte 22, a different format the
+///   engine cannot reproduce byte-for-byte this wave); or
+/// - the hash is past `hash-max-listpack-{entries,value}` (it would be a
+///   hashtable in valkey, `RDB_TYPE_HASH`).
+fn rdb_hash_to_listpack(fields: &IndexMap<Vec<u8>, HashField>) -> Option<Vec<u8>> {
+    if fields.len() > HASH_MAX_LISTPACK_ENTRIES {
+        return None;
+    }
+    let mut lp = ListpackWriter::new();
+    for (field, stored) in fields {
+        if stored.expire_at_ms.is_some() {
+            return None;
+        }
+        if field.len() > HASH_MAX_LISTPACK_VALUE || stored.value.len() > HASH_MAX_LISTPACK_VALUE {
+            return None;
+        }
+        lp.append_auto(field);
+        lp.append_auto(&stored.value);
     }
     Some(lp.into_bytes())
 }
@@ -12834,6 +12887,20 @@ fn rdb_load_dump_value(data: &[u8]) -> Option<StoredValue> {
                 members.insert(v.to_string().into_bytes());
             }
             Some(StoredValue::Set(members))
+        }
+        RDB_TYPE_HASH_LISTPACK => {
+            // A listpack of alternating field, value entries in insertion order.
+            let blob = rdb_load_string(body, &mut pos)?;
+            let entries = listpack_iter(&blob)?;
+            if entries.len() % 2 != 0 {
+                return None;
+            }
+            let mut fields: IndexMap<Vec<u8>, HashField> = IndexMap::new();
+            let mut it = entries.into_iter();
+            while let (Some(field), Some(value)) = (it.next(), it.next()) {
+                fields.insert(field, HashField::new(value));
+            }
+            Some(StoredValue::Hash(fields))
         }
         _ => None,
     }
@@ -14967,9 +15034,12 @@ mod tests {
             engine.execute(&argv(&[b"HGET", b"policy", b"missing"])),
             RespFrame::null_bulk()
         );
+        // HGETALL returns fields in INSERTION order (matching valkey's
+        // listpack/hashtable ordering), i.e. the order the HSET supplied them:
+        // capacity, refill_tokens, refill_ms, ttl_ms.
         assert_eq!(
             resp2(&engine.execute(&argv(&[b"HGETALL", b"policy"]))),
-            b"*8\r\n$8\r\ncapacity\r\n$2\r\n10\r\n$9\r\nrefill_ms\r\n$4\r\n1000\r\n$13\r\nrefill_tokens\r\n$1\r\n5\r\n$6\r\nttl_ms\r\n$5\r\n60000\r\n"
+            b"*8\r\n$8\r\ncapacity\r\n$2\r\n10\r\n$13\r\nrefill_tokens\r\n$1\r\n5\r\n$9\r\nrefill_ms\r\n$4\r\n1000\r\n$6\r\nttl_ms\r\n$5\r\n60000\r\n"
         );
         assert_eq!(
             engine.execute(&argv(&[b"HDEL", b"policy", b"ttl_ms", b"missing"])),
@@ -16693,14 +16763,16 @@ mod tests {
         ));
     }
 
-    /// DUMP of a still-deferred type (HASH, whose insertion order the engine's
-    /// HashMap cannot reproduce) yields the aggregate-deferral error. Wave 22
-    /// added LIST/ZSET/integer-SET, so those no longer error here.
+    /// DUMP of a still-deferred type (a Stream, whose RDB encoding the engine
+    /// does not reproduce) yields the aggregate-deferral error. Wave 22 added
+    /// LIST/ZSET/integer-SET and Wave 23 added plain HASH, so those no longer
+    /// error here; a non-integer SET and a hash-with-field-TTL are also
+    /// deferred (asserted in their own tests).
     #[test]
     fn dump_wrong_type_is_deferral_error() {
         let mut engine = Engine::new_in_memory();
-        engine.execute(&argv(&[b"HSET", b"h", b"f", b"v"]));
-        let reply = engine.execute(&argv(&[b"DUMP", b"h"]));
+        engine.execute(&argv(&[b"XADD", b"st", b"1-1", b"f", b"v"]));
+        let reply = engine.execute(&argv(&[b"DUMP", b"st"]));
         assert!(matches!(reply, RespFrame::Error(_)));
     }
 
@@ -17133,11 +17205,81 @@ mod tests {
         ));
     }
 
-    /// A HASH is deferred (insertion order lost).
+    /// HASH {a:1, b:2, c:3} → RDB_TYPE_HASH_LISTPACK, field/value pairs in
+    /// insertion order, both members integer-encoded where canonical. Captured
+    /// from valkey-server 9.1.0.
     #[test]
-    fn dump_hash_is_deferred() {
+    fn dump_byte_parity_hash_int_values() {
         let mut engine = Engine::new_in_memory();
-        engine.execute(&argv(&[b"HSET", b"h", b"f", b"v"]));
+        engine.execute(&argv(&[b"HSET", b"h", b"a", b"1", b"b", b"2", b"c", b"3"]));
+        let got = dump_bytes(&mut engine, b"h");
+        assert_eq!(
+            got,
+            hex("1016160000000600816102010181620202018163020301ff500077b14e27930cd9aa"),
+            "got {}",
+            hex_encode(&got)
+        );
+    }
+
+    /// HASH with string field and string value (`only` → `val`).
+    #[test]
+    fn dump_byte_parity_hash_single_string() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"HSET", b"h", b"only", b"val"]));
+        let got = dump_bytes(&mut engine, b"h");
+        assert_eq!(
+            got,
+            hex("1012120000000200846f6e6c79058376616c04ff500032e703df7d285a7c"),
+            "got {}",
+            hex_encode(&got)
+        );
+    }
+
+    /// HASH with multiple string fields/values, insertion order preserved
+    /// (`name`→`alice`, `city`→`paris`).
+    #[test]
+    fn dump_byte_parity_hash_string_pairs() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[
+            b"HSET", b"h", b"name", b"alice", b"city", b"paris",
+        ]));
+        let got = dump_bytes(&mut engine, b"h");
+        assert_eq!(
+            got,
+            hex("1021210000000400846e616d650585616c6963650684636974790585706172697306ff50008bc625e47b16652b"),
+            "got {}",
+            hex_encode(&got)
+        );
+    }
+
+    /// HASH whose values span the listpack integer widths (8/16/32-bit):
+    /// `f1`→`100`, `f2`→`-128`, `f3`→`70000`. Confirms each integer value is
+    /// encoded with the exact width valkey uses.
+    #[test]
+    fn dump_byte_parity_hash_int_widths() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[
+            b"HSET", b"h", b"f1", b"100", b"f2", b"-128", b"f3", b"70000",
+        ]));
+        let got = dump_bytes(&mut engine, b"h");
+        assert_eq!(
+            got,
+            hex("101d1d000000060082663103640182663203df800282663303f270110104ff5000a4ada730493e09a9"),
+            "got {}",
+            hex_encode(&got)
+        );
+    }
+
+    /// A HASH carrying any per-field TTL is a hashtable in valkey
+    /// (`RDB_TYPE_HASH_2`), which the engine cannot reproduce byte-for-byte, so
+    /// its DUMP is deferred with the aggregate-deferral error.
+    #[test]
+    fn dump_hash_with_field_ttl_is_deferred() {
+        let mut engine = Engine::new(NoopHost::new(1_000));
+        engine.execute(&argv(&[b"HSET", b"h", b"a", b"1", b"b", b"2"]));
+        engine.execute(&argv(&[
+            b"HEXPIRE", b"h", b"100000", b"FIELDS", b"1", b"a",
+        ]));
         assert!(matches!(
             engine.execute(&argv(&[b"DUMP", b"h"])),
             RespFrame::Error(_)
@@ -17287,6 +17429,74 @@ mod tests {
         assert_eq!(
             resp2(&engine.execute(&argv(&[b"SISMEMBER", b"s", b"100"]))),
             b":1\r\n"
+        );
+    }
+
+    /// In-process DUMP→RESTORE round-trip for a HASH, asserting the
+    /// reconstructed value matches in insertion order via HGETALL.
+    #[test]
+    fn dump_restore_round_trip_hash() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[
+            b"HSET", b"src", b"z", b"26", b"a", b"1", b"m", b"hello world",
+        ]));
+        let payload = dump_bytes(&mut engine, b"src");
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"RESTORE", b"dst", b"0", &payload]))),
+            b"+OK\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"TYPE", b"dst"]))),
+            b"+hash\r\n"
+        );
+        // HGETALL preserves the original insertion order (z, a, m).
+        let got = engine.execute(&argv(&[b"HGETALL", b"dst"]));
+        let RespFrame::Array(Some(items)) = got else {
+            panic!("expected array, got {got:?}");
+        };
+        let vals: Vec<Vec<u8>> = items
+            .iter()
+            .map(|f| match f {
+                RespFrame::Bulk(Some(b)) => b.as_bytes().to_vec(),
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            vals,
+            vec![
+                b"z".to_vec(),
+                b"26".to_vec(),
+                b"a".to_vec(),
+                b"1".to_vec(),
+                b"m".to_vec(),
+                b"hello world".to_vec(),
+            ]
+        );
+    }
+
+    /// RESTORE a hardcoded real valkey HASH_LISTPACK dump (captured from
+    /// valkey-server 9.1.0: `HSET h a 1 b 2 c 3`).
+    #[test]
+    fn restore_hardcoded_valkey_hash_dump() {
+        let mut engine = Engine::new_in_memory();
+        let payload =
+            hex("1016160000000600816102010181620202018163020301ff500077b14e27930cd9aa");
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"RESTORE", b"h", b"0", &payload]))),
+            b"+OK\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"TYPE", b"h"]))),
+            b"+hash\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"HGET", b"h", b"b"]))),
+            b"$1\r\n2\r\n"
+        );
+        // Insertion order is reconstructed exactly (a, b, c).
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"HKEYS", b"h"]))),
+            b"*3\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n"
         );
     }
 
