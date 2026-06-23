@@ -14,6 +14,12 @@ crates/
   redis-core/      live state: RedisServer/RedisDb/etc. (40,792 LOC, 68 files)
   redis-commands/  every command + the dispatch router  (51,873 LOC, 32 files)
   redis-server/    the binary main loop                  (5,162 LOC,  4 files)
+
+  # EdgeStash — Valdr's edge/wasm lane (NOT part of redis-server; see section below)
+  valdr-engine/         wasm-safe embeddable command engine    (~19,000 LOC)
+  edgestash-demo/       provider-neutral HTTP + Lua limiter     (~1,830 LOC)
+  edgestash-cloudflare/ Cloudflare Worker + Durable Object        (~400 LOC)
+  valdr-fixture-runner/ JSONL driver for the differential oracle  (~115 LOC)
 ```
 
 Dependencies flow downward only: `types → protocol → ds → core → commands → server`.
@@ -147,6 +153,26 @@ etc.) keep working — wildcard re-exports preserve the paths. New code should
 import from the canonical module (e.g. `redis_commands::config_cmd::apply_config_set`,
 not `redis_commands::connection::apply_config_set`).
 
+## EdgeStash — Valdr's edge / wasm lane
+
+Four of the crates above are **not** part of the native `redis-server`. They are
+**EdgeStash**: `valdr-engine` compiled to `wasm32-unknown-unknown` and run inside a
+Cloudflare Durable Object — Redis-style atomic state at the edge, with Lua, no
+external Redis service. It is **deployed and measured**
+(`edgestash-valdr.ianmclaughlin1398.workers.dev`; cold DO ~0.5 s, warm ~66 ms p50)
+and has **its own differential oracle** vs real `valkey-server`
+(`harness/oracle/valdr-engine-differential.py`, 352 fixtures / 0 divergences) —
+independent of the native-server Tcl suite. EdgeStash is the proof that Valdr
+yields a reusable embeddable engine, not just a TCP server; the lazy per-key
+cold-load (`command_keys` → O(touched), not O(state)) is its scale-to-zero story.
+
+- **Front door / how to run it (press `e` for the Local Explorer):**
+  [crates/edgestash-cloudflare/CLAUDE.md](crates/edgestash-cloudflare/CLAUDE.md)
+- **Engine internals + the wasm-safety invariant:**
+  [crates/valdr-engine/CLAUDE.md](crates/valdr-engine/CLAUDE.md)
+- **Design + dated status log:**
+  [docs/EDGE_WASM_COMMAND_ENGINE.md](docs/EDGE_WASM_COMMAND_ENGINE.md)
+
 ## Per-crate briefings
 
 Each crate has its own `CLAUDE.md` with the module map, footguns, and common
@@ -161,6 +187,8 @@ keep them current.
 | `redis-core`     | [crates/redis-core/CLAUDE.md](crates/redis-core/CLAUDE.md) |
 | `redis-commands` | [crates/redis-commands/CLAUDE.md](crates/redis-commands/CLAUDE.md) |
 | `redis-server`   | [crates/redis-server/CLAUDE.md](crates/redis-server/CLAUDE.md) |
+| `valdr-engine` *(EdgeStash)* | [crates/valdr-engine/CLAUDE.md](crates/valdr-engine/CLAUDE.md) |
+| `edgestash-cloudflare` *(EdgeStash)* | [crates/edgestash-cloudflare/CLAUDE.md](crates/edgestash-cloudflare/CLAUDE.md) |
 
 Strategy, harness/oracle model, agent roles, and the security thesis live in
 the parent [`../CLAUDE.md`](../CLAUDE.md).
