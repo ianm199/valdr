@@ -167,6 +167,16 @@ deferrals**, each blocked by a concrete reason — NOT by effort. Run
   doesn't model.
 
 ## Log (newest first)
+- 2026-06-23 — Waves 22-24 landed: DUMP/RESTORE aggregate byte-parity — list/zset/
+  intset (`d8a32c7`), then hash insertion-order fidelity + hash DUMP via IndexMap
+  (`ae460f8`, tightened 4 HGETALL/HKEYS/HVALS fixtures set_equal→exact), then set
+  insertion-order + non-int-set DUMP via IndexSet (`810c10f`, SMEMBERS tightened to
+  exact with a faithful intset↔listpack encoding state machine). Oracle 2093/0/18,
+  109 cargo tests. DUMP now covers strings + list/zset/set/hash (all non-stream,
+  non-field-TTL types) byte-identically. Hash+Set now return valkey-EXACT order
+  (was sorted — a real fidelity win). Deferred: stream DUMP, hash-with-field-TTL
+  DUMP (valkey uses a different RDB_TYPE_HASH_2 encoding), large-collection
+  encodings (hashtable/skiplist; fixtures stay small).
 - 2026-06-23 — Wave 21 landed (`cf24ca8`): DUMP/RESTORE for STRING values with
   full byte-parity incl. LZF-compressed long strings (RDB ver 80, CRC64-Jones;
   validated vs 2282 captured valkey dumps, 0 diverge). RESTORE via 21 cargo unit
