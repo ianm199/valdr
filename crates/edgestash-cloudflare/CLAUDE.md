@@ -76,8 +76,36 @@ rate-limit buckets).
 | `/v1/limit/{tenant}` | POST | Token-bucket decision via Lua `EVALSHA` |
 | `/v1/ai/{tenant}` | POST | Toy AI spend-guard (same limiter); `429` + state when denied |
 | `/v1/valdr/{tenant}/CMD/arg…` | GET/POST/PUT | Raw Upstash-style command pass-through, tenant-scoped |
+| `/v1/_debug/{tenant}` | GET | **dev-only** keyspace dump (engine snapshot JSON, `FullKeyspace`); 403 unless `EDGESTASH_ALLOW_DEBUG=true`. Read-only — writes nothing. |
 
-## Build & run (climb the cheapest rung — see parent CLAUDE.md ladder)
+## The iteration ladder (EdgeStash-specific)
+
+The parent CLAUDE.md "climb the cheapest rung" doctrine, applied to EdgeStash.
+**`wrangler dev` is the integration gate, not the inner loop** — most development
+happens three rungs below it, because `edgestash-demo` deliberately models the
+Worker/DO shape (the `ObjectStorage` trait + in-memory mocks) so routing, lazy-load,
+and persistence semantics are testable with zero Cloudflare. Push behavior *into*
+that provider-neutral core; the more that lives there, the less wrangler's fidelity
+gaps cost you.
+
+| Tier | What | Cost | When |
+|---|---|---|---|
+| 1 | `cargo check --target wasm32-unknown-unknown -p edgestash-cloudflare` | <2s | does the wasm boundary still hold? (the load-bearing invariant) |
+| 2 | `cargo test -p valdr-engine` (+ `lazy_loader_kit`) | ms | engine behavior; run the parity kit after touching `command_keys` |
+| 3 | `cargo test -p edgestash-demo` | ms | **the inner loop you develop against** — the Worker/DO shape (routing, per-key lazy load, persistence) in-memory and deterministic via `RecordingStorage`, no wrangler. A new `/v1/*` route and its `http_request_key_access` get proven here. |
+| 4 | `python3 harness/oracle/valdr-engine-differential.py --strict` | tens of s | correctness bar: engine vs real `valkey-server`. The truth-teller for command semantics. |
+| 5 | `npx wrangler dev …` + `sh fixtures/smoke*.sh` | ~15–40s | **integration gate**: does the real Cloudflare wiring work — workerd, DO, SQLite, time mode, bindings? NOT where you iterate logic. |
+| 6 | `npx wrangler deploy --dry-run --outdir …` | ~20s | bundle + binding validation without deploying |
+| 7 | `npx wrangler deploy` + measure | minutes | **the only place the physics is real** — cold-start, hibernation/sleep durability, placement, network latency, quota. wrangler dev reproduces none of these (no real sleep, R2 = local disk, no RTT). |
+
+The trap: rungs 1–5 all go green while the things that actually make EdgeStash *hard*
+— cold-start cost (~0.5 s, wasm-size-bound) and durability-on-sleep — live only at
+rung 7. When you work that frontier the loop is **deploy-and-measure** (or a
+purpose-built measurement harness), not `wrangler dev`. Per-binding `remote: true` is
+the one way to buy a slice of realism locally (one binding → real R2/D1 with real
+latency) without going fully remote.
+
+## Build & run (the commands for each rung)
 
 ```bash
 # rung 1 — does the wasm boundary still hold? (fastest real signal)
@@ -91,8 +119,9 @@ cargo test -p edgestash-demo
 cd crates/edgestash-cloudflare && worker-build --release        # -> build/index.js
 
 # run it locally (npx downloads wrangler; node already present)
-npx wrangler dev --ip 127.0.0.1 --port 8787                                   # production time
-npx wrangler dev --ip 127.0.0.1 --port 8787 --var EDGESTASH_ALLOW_CLIENT_TIME:true  # fixtures
+npx wrangler dev --ip 127.0.0.1 --port 8787 --var EDGESTASH_ALLOW_DEBUG:true        # USE THIS for the dashboard: production time + live Keyspace panel
+npx wrangler dev --ip 127.0.0.1 --port 8787                                         # production time, no debug panel
+npx wrangler dev --ip 127.0.0.1 --port 8787 --var EDGESTASH_ALLOW_CLIENT_TIME:true  # deterministic fixtures ONLY (smoke.sh)
 
 # prove it serves
 sh fixtures/smoke.sh          # deterministic decisions (needs the var)
@@ -123,9 +152,16 @@ f=.wrangler/state/v3/do/edgestash-valdr-EdgeStashObject/<id>.sqlite
 sqlite3 "$f" "SELECT name FROM __miniflare_do_name"      # which tenant this DO is
 sqlite3 "$f" "SELECT key, length(value) FROM _cf_KV"     # its keyspace (hex-decode k:…)
 ```
-The product dashboard at `/` is the human view. For a clean storage view that also
-works in production, prefer a small debug keyspace-dump route on the Worker over the
-Explorer. Reset local state with `rm -rf .wrangler/state`.
+The cleanest view is the built-in debug route: `GET /v1/_debug/<tenant>` returns the
+engine's whole-DB snapshot JSON (`{"format":"valdr-engine-snapshot","version":1,
+"keys":[{key,type,value|fields,expire_at_ms}]}`, hex-encoded keys/values). It is
+gated behind `EDGESTASH_ALLOW_DEBUG=true` (off by default, so a deploy never exposes
+tenant keyspaces) and is read-only (writes nothing). The dashboard at `/` renders it
+as a live **Keyspace** panel. Enable it locally with
+`npx wrangler dev --var EDGESTASH_ALLOW_DEBUG:true`. Route + gate live in
+`edgestash-demo` (`handle_http` / `http_request_key_access`) and the adapter
+(`debug_allowed`); covered by `tests/debug_keyspace.rs`. Reset local state with
+`rm -rf .wrangler/state`.
 
 ## The oracle (the bar — build success is NOT the bar)
 

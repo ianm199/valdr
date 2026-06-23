@@ -336,6 +336,10 @@ pub struct EdgeObject<S> {
     shard: EdgeShard,
     storage: S,
     allow_client_time: bool,
+    /// Gate for the read-only `/v1/_debug/<tenant>` keyspace-dump route, off by
+    /// default. A host adapter opts in (typically from a dev-only env var); a
+    /// deployment leaves it off so it never exposes a tenant's whole keyspace.
+    allow_debug: bool,
     persisted_epoch: u64,
     /// `None` for an eagerly-opened object (the whole keyspace was imported at
     /// `open`); `Some` for a lazily-opened one, which imports each key on first
@@ -363,6 +367,7 @@ impl<S: ObjectStorage> EdgeObject<S> {
             shard,
             storage,
             allow_client_time: false,
+            allow_debug: false,
             persisted_epoch,
             lazy: None,
         })
@@ -383,6 +388,7 @@ impl<S: ObjectStorage> EdgeObject<S> {
             shard: EdgeShard::new(),
             storage,
             allow_client_time: false,
+            allow_debug: false,
             persisted_epoch: 0,
             lazy: Some(LazyState::default()),
         })
@@ -395,6 +401,14 @@ impl<S: ObjectStorage> EdgeObject<S> {
     /// clock can refill its own rate-limit buckets.
     pub fn with_client_time_allowed(mut self, allowed: bool) -> Self {
         self.allow_client_time = allowed;
+        self
+    }
+
+    /// Enable the read-only `/v1/_debug/<tenant>` keyspace-dump route. A host
+    /// adapter wires this to a dev-only var; left off (the default) the route
+    /// returns 403, so a deployment does not expose tenant keyspaces by accident.
+    pub fn with_debug_allowed(mut self, allowed: bool) -> Self {
+        self.allow_debug = allowed;
         self
     }
 
@@ -581,6 +595,23 @@ impl<S: ObjectStorage> EdgeObject<S> {
             );
         }
 
+        if segments.len() == 3 && segments[0] == "v1" && segments[1] == "_debug" {
+            if request.method != EdgeHttpMethod::Get {
+                return http_error(405, "ERR debug route requires GET");
+            }
+            if !self.allow_debug {
+                return http_error(403, "ERR debug endpoint disabled");
+            }
+            if let Err(error) = self.ensure_loaded(KeyAccess::FullKeyspace) {
+                return edge_error_response(error);
+            }
+            return EdgeHttpResponse {
+                status: 200,
+                content_type: "application/json",
+                body: self.shard.export_snapshot(),
+            };
+        }
+
         if segments.len() >= 4 && segments[0] == "v1" && segments[1] == "valdr" {
             let rest_path = valdr_rest_path(&segments[3..], query);
             let rest_method = match request.method {
@@ -729,6 +760,10 @@ pub fn http_request_key_access(request: &EdgeHttpRequest<'_>) -> KeyAccess {
             bucket_key(tenant).into_bytes(),
             policy_key(tenant).into_bytes(),
         ]);
+    }
+
+    if segments.len() == 3 && segments[0] == "v1" && segments[1] == "_debug" {
+        return KeyAccess::FullKeyspace;
     }
 
     if segments.len() >= 4 && segments[0] == "v1" && segments[1] == "valdr" {

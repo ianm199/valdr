@@ -98,6 +98,14 @@
   pre#script .n { color: var(--warn); }                      /* number */
   pre#script .c { color: var(--muted); font-style: italic; } /* comment */
 
+  .keyspace { margin: 12px 0; display: flex; flex-direction: column; gap: 3px; max-height: 260px; overflow-y: auto; font-family: var(--mono); font-size: 13px; }
+  .ks-row { display: flex; gap: 10px; align-items: baseline; padding: 5px 10px; border-left: 2px solid var(--rule); }
+  .ks-row:hover { background: var(--code-bg); }
+  .ks-key { color: var(--accent); font-weight: 600; word-break: break-all; flex: 1 1 40%; }
+  .ks-type { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; flex: 0 0 auto; }
+  .ks-val { color: var(--text); flex: 2 1 50%; word-break: break-all; }
+  .ks-empty { color: var(--muted); font-style: italic; font-family: var(--serif); }
+
   footer { margin-top: 64px; padding-top: 18px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 14px; }
   footer p { margin: 5px 0; }
   footer code { font-size: 12.5px; }
@@ -154,6 +162,13 @@
       <label class="field"><span class="lbl">Window (ms)</span><input id="p-ms" type="number" min="100" step="100" value="1000" /></label>
       <button id="apply" class="btn-secondary">Apply</button>
     </div>
+  </section>
+
+  <section>
+    <h2>Keyspace</h2>
+    <p>What the Durable Object actually persists for this tenant — each Redis key under its own value, dumped live from <code>/v1/_debug/&lt;tenant&gt;</code>. The wrangler Local Explorer can't read a Rust Durable Object over RPC, so this is the in-product view.</p>
+    <div class="row"><button id="refreshKeys" class="btn-secondary">Refresh keyspace</button></div>
+    <div class="keyspace" id="keyspace"><span class="ks-empty">loading…</span></div>
   </section>
 
   <section>
@@ -260,6 +275,7 @@
     if (status === 200) {
       logEntry(true, "policy applied", "capacity <b>" + body.capacity + "</b>, refill <b>" + body.refill_tokens + "</b> per <b>" + body.refill_ms + "ms</b>");
       await peek();
+      await renderKeyspace();
     } else {
       logEntry(false, "policy rejected", "HTTP " + status);
     }
@@ -293,10 +309,55 @@
       logEntry(false, "error", "HTTP " + status);
     }
     schedulePoll();
+    renderKeyspace();
   }
 
   function escapeHtml(s) {
     return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  }
+
+  function decodeHex(hex) {
+    let out = "";
+    for (let i = 0; i + 1 < hex.length; i += 2) out += String.fromCharCode(parseInt(hex.slice(i, i + 2), 16));
+    return out;
+  }
+
+  function keyPreview(entry) {
+    if (entry.type === "string") return escapeHtml(decodeHex(entry.value));
+    if (entry.type === "hash") {
+      return entry.fields.map((p) => escapeHtml(decodeHex(p[0])) + "=" + escapeHtml(decodeHex(p[1]))).join("  ·  ");
+    }
+    return escapeHtml(entry.type);
+  }
+
+  async function renderKeyspace() {
+    const box = $("keyspace");
+    let res;
+    try {
+      res = await fetch(api("/v1/_debug/" + tenant));
+    } catch (_) {
+      box.innerHTML = '<span class="ks-empty">could not reach the worker</span>';
+      return;
+    }
+    if (res.status === 403) {
+      box.innerHTML = '<span class="ks-empty">debug dump disabled — run <code>wrangler dev --var EDGESTASH_ALLOW_DEBUG:true</code></span>';
+      return;
+    }
+    if (res.status !== 200) {
+      box.innerHTML = '<span class="ks-empty">keyspace unavailable (HTTP ' + res.status + ")</span>";
+      return;
+    }
+    const snap = await res.json();
+    if (!snap.keys.length) {
+      box.innerHTML = '<span class="ks-empty">no keys yet — send a request</span>';
+      return;
+    }
+    box.innerHTML = snap.keys
+      .map((e) =>
+        '<div class="ks-row"><span class="ks-key">' + escapeHtml(decodeHex(e.key)) +
+        '</span><span class="ks-type">' + escapeHtml(e.type) +
+        '</span><span class="ks-val">' + keyPreview(e) + "</span></div>")
+      .join("");
   }
 
   // Minimal self-contained Lua highlighter (no CDN). Tokenizes comments,
@@ -346,10 +407,12 @@
   });
   $("apply").addEventListener("click", applyPolicy);
   $("newTenant").addEventListener("click", resetTenant);
+  $("refreshKeys").addEventListener("click", renderKeyspace);
 
   $("tenant").textContent = tenant;
   loadScript();
   applyPolicy();
+  renderKeyspace();
 })();
 </script>
 </body>

@@ -49,6 +49,7 @@ use worker::*;
 
 const DURABLE_OBJECT_BINDING: &str = "EDGESTASH";
 const CLIENT_TIME_VAR: &str = "EDGESTASH_ALLOW_CLIENT_TIME";
+const DEBUG_VAR: &str = "EDGESTASH_ALLOW_DEBUG";
 
 /// The interactive demo dashboard, served at `GET /`. A single self-contained
 /// HTML file (no build step, no external assets) that drives the live tenant
@@ -113,7 +114,8 @@ impl DurableObject for EdgeStashObject {
         if self.hot.borrow().is_none() {
             let object = EdgeObject::open_lazy(MemoryObjectStorage::default())
                 .map_err(edge_error)?
-                .with_client_time_allowed(client_time_allowed(&self.env));
+                .with_client_time_allowed(client_time_allowed(&self.env))
+                .with_debug_allowed(debug_allowed(&self.env));
             *self.hot.borrow_mut() = Some(object);
             self.loaded.borrow_mut().clear();
             *self.fully_loaded.borrow_mut() = false;
@@ -269,6 +271,13 @@ fn client_time_allowed(env: &Env) -> bool {
     }
 }
 
+fn debug_allowed(env: &Env) -> bool {
+    match env.var(DEBUG_VAR) {
+        Ok(value) => value.to_string() == "true",
+        Err(_) => false,
+    }
+}
+
 fn tenant_from_request(req: &Request) -> Result<Option<String>> {
     let path = req.url()?.path().to_owned();
     Ok(tenant_from_path(&path))
@@ -277,7 +286,7 @@ fn tenant_from_request(req: &Request) -> Result<Option<String>> {
 fn tenant_from_path(path: &str) -> Option<String> {
     let mut segments = path.trim_start_matches('/').split('/');
     match (segments.next(), segments.next(), segments.next()) {
-        (Some("v1"), Some("policy" | "limit" | "ai" | "valdr"), Some(tenant))
+        (Some("v1"), Some("policy" | "limit" | "ai" | "valdr" | "_debug"), Some(tenant))
             if !tenant.is_empty() =>
         {
             Some(tenant.to_owned())
@@ -368,6 +377,10 @@ mod tests {
         );
         assert_eq!(
             tenant_from_path("/v1/valdr/tenant-42/GET/foo"),
+            Some("tenant-42".to_owned())
+        );
+        assert_eq!(
+            tenant_from_path("/v1/_debug/tenant-42"),
             Some("tenant-42".to_owned())
         );
         assert_eq!(tenant_from_path("/v1/cache/tenant-42/GET/foo"), None);
