@@ -9,9 +9,20 @@
 //! Storage layout: the Durable Object `Storage` is itself a key/value store, so
 //! each Redis key is held under its own storage-key (`k:<hex>`) rather than in
 //! one whole-DB blob. Values are the raw UTF-8 JSON that `export_key` produces,
-//! stored as `String` so they round-trip cleanly through `Storage::put`/`get`
-//! and the `Storage::list` cold-start scan. A mutating request writes only the
-//! keys it changed — O(dirty) async writes, not one O(state) blob rewrite.
+//! stored as `String` so they round-trip cleanly through `Storage::put`/`get`.
+//! A mutating request writes only the keys it changed — O(dirty) async writes,
+//! not one O(state) blob rewrite.
+//!
+//! Cold start is lazy and per-key: a cold Durable Object does NOT list its whole
+//! keyspace on the first request. The hot engine starts empty
+//! (`EdgeObject::open_lazy`); before each command runs, the worker computes the
+//! keys the request touches with `edgestash_demo::http_request_key_access` and
+//! reads exactly those from `Storage::get` into the in-memory store. First-request
+//! latency is therefore O(keys the request touches), independent of total tenant
+//! state — a Durable Object holding 10k keys serves a single-key request after
+//! one `Storage::get`, never a 10k-entry `Storage::list`. Only a keyspace-spanning
+//! command (`SCAN`/`KEYS`/`FLUSHALL`/`EVAL`/…) falls back to one `Storage::list`,
+//! after which the keyspace is marked fully loaded so repeats serve from memory.
 //!
 //! Time authority: every request carries `Date::now()` from the Workers
 //! runtime. Client-supplied `now_millis` in request bodies is rejected unless
@@ -26,9 +37,11 @@
 //! storage actually accepted.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 
 use edgestash_demo::{
-    EdgeHttpMethod, EdgeHttpRequest, EdgeHttpResponse, EdgeObject, MemoryObjectStorage,
+    http_request_key_access, key_storage_key, EdgeHttpMethod, EdgeHttpRequest, EdgeHttpResponse,
+    EdgeObject, KeyAccess, MemoryObjectStorage,
 };
 use worker::durable::{DurableObject, State};
 use worker::js_sys::Map as JsMap;
@@ -64,6 +77,16 @@ pub struct EdgeStashObject {
     state: State,
     env: Env,
     hot: RefCell<Option<EdgeObject<MemoryObjectStorage>>>,
+    /// Storage-keys (`k:<hex>`) already pulled from Durable Object storage into
+    /// the hot object's in-memory store this session, so a warm request for the
+    /// same key does no second Durable Object read. A key fetched and found
+    /// absent is still recorded, so a later request for the same missing key
+    /// does not re-read.
+    loaded: RefCell<HashSet<String>>,
+    /// Set once a whole-keyspace `storage.list()` has run (a keyspace-spanning
+    /// command), so a later spanning command serves from memory without
+    /// re-listing.
+    fully_loaded: RefCell<bool>,
 }
 
 impl DurableObject for EdgeStashObject {
@@ -72,6 +95,8 @@ impl DurableObject for EdgeStashObject {
             state,
             env,
             hot: RefCell::new(None),
+            loaded: RefCell::new(HashSet::new()),
+            fully_loaded: RefCell::new(false),
         }
     }
 
@@ -81,25 +106,39 @@ impl DurableObject for EdgeStashObject {
         let body = req.bytes().await?;
         let now_millis = Date::now().as_millis();
 
+        // Cold start no longer lists the whole keyspace: a fresh hot object
+        // starts empty and is filled per request with only the keys the request
+        // touches. Cold-start cost is O(keys this request touches), not O(total
+        // tenant state).
         if self.hot.borrow().is_none() {
-            let entries = self.load_entries().await?;
-            let object = EdgeObject::open(MemoryObjectStorage::from_entries(entries))
+            let object = EdgeObject::open_lazy(MemoryObjectStorage::default())
                 .map_err(edge_error)?
                 .with_client_time_allowed(client_time_allowed(&self.env));
             *self.hot.borrow_mut() = Some(object);
+            self.loaded.borrow_mut().clear();
+            *self.fully_loaded.borrow_mut() = false;
         }
+
+        let request = EdgeHttpRequest {
+            method,
+            path: &path,
+            body: &body,
+            now_millis,
+        };
+
+        // Async-prefetch exactly the keys this request needs from Durable Object
+        // storage into the hot object's in-memory store, BEFORE running the
+        // command. `http_request_key_access` returns the same key set the
+        // lazily-opened `EdgeObject` would import internally; doing the fetch
+        // here bridges the sync `ObjectStorage` trait to async DO storage.
+        self.prefetch_for(&request).await?;
 
         let (response, flush) = {
             let mut hot = self.hot.borrow_mut();
             let object = hot
                 .as_mut()
                 .ok_or_else(|| Error::RustError("hot engine instance missing".to_owned()))?;
-            let response = object.handle_http(EdgeHttpRequest {
-                method,
-                path: &path,
-                body: &body,
-                now_millis,
-            });
+            let response = object.handle_http(request);
             let flush = drain_flush(object)?;
             (response, flush)
         };
@@ -111,8 +150,12 @@ impl DurableObject for EdgeStashObject {
             };
             if let Err(error) = result {
                 *self.hot.borrow_mut() = None;
+                self.loaded.borrow_mut().clear();
+                *self.fully_loaded.borrow_mut() = false;
                 return Err(error);
             }
+            // The flushed key is now authoritative in storage and in memory.
+            self.loaded.borrow_mut().insert(skey);
         }
 
         worker_response(response)
@@ -120,28 +163,80 @@ impl DurableObject for EdgeStashObject {
 }
 
 impl EdgeStashObject {
-    /// Cold-start scan: read every Durable Object storage entry and turn each
-    /// into a `(storage_key, value_bytes)` pair. Values were written as `String`
-    /// (raw UTF-8 JSON from `export_key`), so each list value is a JS string we
-    /// decode back to bytes. `EdgeObject::open` keeps only the `k:`-prefixed
-    /// entries, so any unrelated bookkeeping key is harmless here.
-    async fn load_entries(&self) -> Result<Vec<(String, Vec<u8>)>> {
-        let map: JsMap = self.state.storage().list().await?;
-        let mut entries: Vec<(String, Vec<u8>)> = Vec::with_capacity(map.size() as usize);
-        let mut decode_error: Option<Error> = None;
-        map.for_each(&mut |value, key| {
-            let (Some(key), Some(value)) = (key.as_string(), value.as_string()) else {
-                decode_error = Some(Error::RustError(
-                    "Durable Object entry was not a string".to_owned(),
-                ));
-                return;
-            };
-            entries.push((key, value.into_bytes()));
-        });
-        match decode_error {
-            Some(error) => Err(error),
-            None => Ok(entries),
+    /// Load exactly the keys a request touches into the hot object's in-memory
+    /// store before the command runs. For `Keys(ks)` this is one Durable Object
+    /// `get` per not-yet-loaded touched key (`O(touched)`); for `FullKeyspace`
+    /// (a `SCAN`/`KEYS`/`FLUSHALL`/`EVAL`/… command whose key set spans or is not
+    /// statically knowable) it falls back to one whole-keyspace `list()`. A
+    /// `get`/`list` result is seeded WITHOUT marking the in-memory store dirty,
+    /// so prefetched-but-unchanged keys are never flushed back as fresh writes.
+    async fn prefetch_for(&self, request: &EdgeHttpRequest<'_>) -> Result<()> {
+        match http_request_key_access(request) {
+            KeyAccess::FullKeyspace => self.prefetch_full().await,
+            KeyAccess::Keys(keys) => {
+                for key in &keys {
+                    self.prefetch_key(key).await?;
+                }
+                Ok(())
+            }
         }
+    }
+
+    /// Read one touched key from Durable Object storage into the in-memory store
+    /// if it has not already been loaded this session. A key found absent is
+    /// still recorded as loaded, so a later request for the same missing key does
+    /// no second Durable Object read.
+    async fn prefetch_key(&self, redis_key: &[u8]) -> Result<()> {
+        let skey = key_storage_key(redis_key);
+        if *self.fully_loaded.borrow() || self.loaded.borrow().contains(&skey) {
+            return Ok(());
+        }
+        // Durable Object `get::<String>` is `Result<Option<String>>`: a present
+        // key is seeded into the in-memory store; an absent key (`Ok(None)`) is
+        // simply recorded as loaded so the engine treats "absent in memory" as
+        // "absent in storage"; a real storage error propagates.
+        if let Some(value) = self.state.storage().get::<String>(&skey).await? {
+            let mut hot = self.hot.borrow_mut();
+            if let Some(object) = hot.as_mut() {
+                object.storage_mut().seed(&skey, value.as_bytes());
+            }
+        }
+        self.loaded.borrow_mut().insert(skey);
+        Ok(())
+    }
+
+    /// Read every Durable Object storage entry into the in-memory store exactly
+    /// once: the fallback for a keyspace-spanning command. Values were written as
+    /// `String` (raw UTF-8 JSON from `export_key`), so each list value is a JS
+    /// string decoded back to bytes. Already-loaded keys are harmlessly
+    /// overwritten with their authoritative storage bytes.
+    async fn prefetch_full(&self) -> Result<()> {
+        if *self.fully_loaded.borrow() {
+            return Ok(());
+        }
+        let map: JsMap = self.state.storage().list().await?;
+        let mut decode_error: Option<Error> = None;
+        {
+            let mut hot = self.hot.borrow_mut();
+            let object = hot
+                .as_mut()
+                .ok_or_else(|| Error::RustError("hot engine instance missing".to_owned()))?;
+            let storage = object.storage_mut();
+            map.for_each(&mut |value, key| {
+                let (Some(key), Some(value)) = (key.as_string(), value.as_string()) else {
+                    decode_error = Some(Error::RustError(
+                        "Durable Object entry was not a string".to_owned(),
+                    ));
+                    return;
+                };
+                storage.seed(&key, value.as_bytes());
+            });
+        }
+        if let Some(error) = decode_error {
+            return Err(error);
+        }
+        *self.fully_loaded.borrow_mut() = true;
+        Ok(())
     }
 }
 

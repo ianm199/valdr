@@ -9476,6 +9476,29 @@ fn rest_command_from_request(request: RestRequest<'_>) -> Result<RestCommand, Ve
     Ok(RestCommand::Single(argv))
 }
 
+/// Resolve the [`KeyAccess`] a REST request touches, reusing the exact same
+/// `RestRequest` -> argv parsing [`Engine::execute_rest`] runs so a lazy
+/// per-key loader sees byte-identical commands to what will execute. A single
+/// command yields its `command_keys`; a `/pipeline` batch yields the
+/// [`KeyAccess::merge`] union of every command in the batch (the request as a
+/// whole touches every key any of its commands touches, and degrades to
+/// `FullKeyspace` if any one does). A malformed request that cannot be parsed
+/// into commands touches no keys, so the loader fetches nothing and the request
+/// fails the same way it would have eagerly.
+pub fn rest_command_keys(request: RestRequest<'_>) -> KeyAccess {
+    match rest_command_from_request(request) {
+        Ok(RestCommand::Single(argv)) => command_keys(&argv),
+        Ok(RestCommand::Pipeline(commands)) => {
+            let mut access = KeyAccess::Keys(Vec::new());
+            for argv in &commands {
+                access = access.merge(command_keys(argv));
+            }
+            access
+        }
+        Err(_) => KeyAccess::Keys(Vec::new()),
+    }
+}
+
 fn split_path_query(path: &str) -> (&str, &str) {
     match path.split_once('?') {
         Some((path, query)) => (path, query),

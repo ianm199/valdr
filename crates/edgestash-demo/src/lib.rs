@@ -8,7 +8,14 @@
 use std::collections::{HashMap, HashSet};
 
 use serde_json::{json, Value as JsonValue};
-use valdr_engine::{Engine, NoopHost, RestRequest, RestResponse, SnapshotError};
+use valdr_engine::{
+    rest_command_keys, Engine, NoopHost, RestRequest, RestResponse, SnapshotError,
+};
+
+/// Re-export so a host adapter can match a request's [`http_request_key_access`]
+/// result (`Keys` vs `FullKeyspace`) without depending on `valdr-engine`
+/// directly. Also the in-crate name used by the lazy `EdgeObject` paths.
+pub use valdr_engine::KeyAccess;
 
 /// Prefix for every storage key that holds one Redis key's serialized entry.
 /// The storage layout is `format!("k:{}", hex(redis_key))` so an arbitrary
@@ -199,11 +206,18 @@ pub struct EdgeHttpResponse {
     pub body: Vec<u8>,
 }
 
+/// Per-key provider storage seen by the edge object. `get`/`put`/`delete` are
+/// the O(1) point operations the lazy per-key cold load runs for the keys a
+/// request actually touches; `list` is the O(state) whole-keyspace enumeration
+/// reserved for the keyspace-spanning commands (`SCAN`/`KEYS`/`FLUSHALL`/…) and
+/// the eager `open`/rollback paths. The lazy request path never calls `list`
+/// unless a command genuinely needs the whole keyspace, so cold-start cost is
+/// O(touched) not O(total tenant state).
 pub trait ObjectStorage {
     fn get(&mut self, key: &str) -> Result<Option<Vec<u8>>, EdgeError>;
     fn put(&mut self, key: &str, value: &[u8]) -> Result<(), EdgeError>;
     fn delete(&mut self, key: &str) -> Result<(), EdgeError>;
-    fn scan(&mut self) -> Result<Vec<(String, Vec<u8>)>, EdgeError>;
+    fn list(&mut self) -> Result<Vec<(String, Vec<u8>)>, EdgeError>;
 }
 
 /// In-memory per-key key/value store with a change-log. Each `put` or `delete`
@@ -223,6 +237,15 @@ impl MemoryObjectStorage {
             values: entries.into_iter().collect(),
             dirty: HashSet::new(),
         }
+    }
+
+    /// Insert an already-persisted storage entry WITHOUT marking it dirty. A
+    /// host adapter whose real backing store is async (e.g. a Cloudflare Durable
+    /// Object) uses this to seed the in-memory store with a key it prefetched
+    /// for a lazily-opened `EdgeObject`: the bytes already live in provider
+    /// storage, so they must not be flushed back as a fresh write.
+    pub fn seed(&mut self, key: &str, value: &[u8]) {
+        self.values.insert(key.to_owned(), value.to_vec());
     }
 
     /// Drain the set of storage-keys put or deleted since the last call,
@@ -260,7 +283,7 @@ impl ObjectStorage for MemoryObjectStorage {
         Ok(())
     }
 
-    fn scan(&mut self) -> Result<Vec<(String, Vec<u8>)>, EdgeError> {
+    fn list(&mut self) -> Result<Vec<(String, Vec<u8>)>, EdgeError> {
         Ok(self
             .values
             .iter()
@@ -277,8 +300,12 @@ impl ObjectStorage for MemoryObjectStorage {
 pub const MAX_VALUE_BYTES: usize = 120 * 1024;
 
 /// Storage-key under which one Redis key's serialized entry is held:
-/// `format!("k:{}", hex(redis_key))`, lowercase hex of the raw key bytes.
-fn key_storage_key(redis_key: &[u8]) -> String {
+/// `format!("k:{}", hex(redis_key))`, lowercase hex of the raw key bytes. A host
+/// adapter that prefetches a request's touched keys (see
+/// [`http_request_key_access`]) maps each raw Redis key to its storage-key with
+/// this, so the prefetch reads the same `k:`-prefixed entries the eager
+/// `open`/`list` path would have read.
+pub fn key_storage_key(redis_key: &[u8]) -> String {
     let mut out = String::with_capacity(KEY_PREFIX.len() + redis_key.len() * 2);
     out.push_str(KEY_PREFIX);
     for byte in redis_key {
@@ -288,23 +315,45 @@ fn key_storage_key(redis_key: &[u8]) -> String {
     out
 }
 
+/// Per-key cold-load bookkeeping for an `EdgeObject` opened lazily. Tracks which
+/// Redis keys have already been imported from provider storage this session so a
+/// repeat touch of the same key never re-fetches, and whether a full
+/// `storage.list()` has already imported the whole keyspace so repeat
+/// keyspace-spanning commands serve from memory without re-listing.
+///
+/// A key marked resident may be *absent in storage* — "absent in memory" then
+/// correctly equals "absent in storage" for it, so a later command for the same
+/// missing key does not re-fetch. Keys the engine writes are also marked
+/// resident at flush time.
+#[derive(Debug, Clone, Default)]
+struct LazyState {
+    resident: HashSet<Vec<u8>>,
+    fully_loaded: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct EdgeObject<S> {
     shard: EdgeShard,
     storage: S,
     allow_client_time: bool,
     persisted_epoch: u64,
+    /// `None` for an eagerly-opened object (the whole keyspace was imported at
+    /// `open`); `Some` for a lazily-opened one, which imports each key on first
+    /// touch via [`EdgeObject::ensure_loaded`].
+    lazy: Option<LazyState>,
 }
 
 impl<S: ObjectStorage> EdgeObject<S> {
-    /// Restore from per-key storage entries: scan the store and import every
-    /// entry whose storage-key carries `KEY_PREFIX`, ignoring any others.
+    /// Restore eagerly from per-key storage entries: list the store and import
+    /// every entry whose storage-key carries `KEY_PREFIX`, ignoring any others.
     /// `persisted_epoch` starts at the freshly-imported shard's epoch (0 after
     /// a clean cold start, since `import_key` does not dirty anything), which
-    /// is correct because nothing is pending a flush.
+    /// is correct because nothing is pending a flush. This pays the O(state)
+    /// whole-keyspace `list()` up front; prefer [`EdgeObject::open_lazy`] on a
+    /// cold start where most requests touch only a handful of keys.
     pub fn open(mut storage: S) -> Result<Self, EdgeError> {
         let mut shard = EdgeShard::new();
-        for (skey, bytes) in storage.scan()? {
+        for (skey, bytes) in storage.list()? {
             if skey.starts_with(KEY_PREFIX) {
                 shard.import_key(&bytes)?;
             }
@@ -315,6 +364,27 @@ impl<S: ObjectStorage> EdgeObject<S> {
             storage,
             allow_client_time: false,
             persisted_epoch,
+            lazy: None,
+        })
+    }
+
+    /// Open without paying the cold-start `list()`: start with an empty shard
+    /// and import each key on first touch from provider storage, driven by
+    /// `valdr_engine::command_keys` / `rest_command_keys` for the command(s) a
+    /// request runs. Cold-start cost becomes O(keys the request touches) instead
+    /// of O(total tenant state) — a Durable Object holding 10k keys serves a
+    /// single-key request after one `storage.get`, never a 10k-entry `list()`.
+    /// A keyspace-spanning command (`SCAN`/`KEYS`/`FLUSHALL`/`EVAL`/…) falls back
+    /// to one `list()` and marks the keyspace fully loaded so repeats do not
+    /// re-list. Behaves identically to [`EdgeObject::open`] for every request —
+    /// only the per-request storage I/O shape differs.
+    pub fn open_lazy(storage: S) -> Result<Self, EdgeError> {
+        Ok(Self {
+            shard: EdgeShard::new(),
+            storage,
+            allow_client_time: false,
+            persisted_epoch: 0,
+            lazy: Some(LazyState::default()),
         })
     }
 
@@ -336,20 +406,88 @@ impl<S: ObjectStorage> EdgeObject<S> {
     }
 
     pub fn install_policy(&mut self, tenant_id: &str, policy: Policy) -> Result<(), EdgeError> {
+        self.ensure_loaded(self.shard.install_policy_key_access(tenant_id))?;
         self.shard.install_policy(tenant_id, policy)?;
         self.persist()
     }
 
     pub fn check(&mut self, request: LimitRequest<'_>) -> Result<LimitDecision, EdgeError> {
+        self.ensure_loaded(self.shard.check_key_access(request))?;
         let decision = self.shard.check(request)?;
         self.persist()?;
         Ok(decision)
     }
 
     pub fn execute_rest(&mut self, request: RestRequest<'_>) -> Result<RestResponse, EdgeError> {
+        self.ensure_loaded(rest_command_keys(request))?;
         let response = self.shard.execute_rest(request);
         self.persist()?;
         Ok(response)
+    }
+
+    /// Make every key a request needs resident before it runs. A no-op for an
+    /// eagerly-opened object (the whole keyspace is already imported). For a
+    /// lazily-opened one: `Keys(ks)` imports each non-resident key with one
+    /// `storage.get`; `FullKeyspace` does a single `storage.list()` and imports
+    /// everything, then marks the keyspace fully loaded so later spanning
+    /// commands serve from memory. Importing a key never dirties the shard, so
+    /// the `persisted_epoch`/flush accounting is unaffected.
+    fn ensure_loaded(&mut self, access: KeyAccess) -> Result<(), EdgeError> {
+        if self.lazy.is_none() {
+            return Ok(());
+        }
+        match access {
+            KeyAccess::FullKeyspace => self.ensure_fully_loaded(),
+            KeyAccess::Keys(keys) => {
+                for key in &keys {
+                    self.ensure_resident(key)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Import one key from provider storage if it is not already resident. A
+    /// missing storage entry still marks the key resident, so a later command
+    /// for the same absent key does not re-fetch ("absent in memory" then
+    /// equals "absent in storage" for it).
+    fn ensure_resident(&mut self, key: &[u8]) -> Result<(), EdgeError> {
+        let Some(lazy) = self.lazy.as_ref() else {
+            return Ok(());
+        };
+        if lazy.fully_loaded || lazy.resident.contains(key) {
+            return Ok(());
+        }
+        if let Some(bytes) = self.storage.get(&key_storage_key(key))? {
+            self.shard.import_key(&bytes)?;
+        }
+        if let Some(lazy) = self.lazy.as_mut() {
+            lazy.resident.insert(key.to_vec());
+        }
+        Ok(())
+    }
+
+    /// Import the whole keyspace exactly once: the fallback for a command whose
+    /// key set is keyspace-spanning or not statically knowable. Re-importing a
+    /// key already made resident this session is harmless — every command
+    /// flushes its writes before returning, so provider storage is authoritative
+    /// for resident keys too, and `import_key` restores byte-identical state.
+    /// Subsequent spanning commands serve from memory without re-listing.
+    fn ensure_fully_loaded(&mut self) -> Result<(), EdgeError> {
+        let already = self.lazy.as_ref().is_some_and(|lazy| lazy.fully_loaded);
+        if already {
+            return Ok(());
+        }
+        for (skey, bytes) in self.storage.list()? {
+            if skey.starts_with(KEY_PREFIX) {
+                self.shard.import_key(&bytes)?;
+            }
+        }
+        if let Some(lazy) = self.lazy.as_mut() {
+            lazy.resident.clear();
+            lazy.fully_loaded = true;
+        }
+        Ok(())
     }
 
     pub fn handle_http(&mut self, request: EdgeHttpRequest<'_>) -> EdgeHttpResponse {
@@ -513,15 +651,21 @@ impl<S: ObjectStorage> EdgeObject<S> {
                 None => self.storage.delete(&skey)?,
             }
         }
+        if let Some(lazy) = self.lazy.as_mut() {
+            for key in &dirty {
+                lazy.resident.insert(key.clone());
+            }
+        }
         self.persisted_epoch = self.shard.mutation_epoch();
         Ok(())
     }
 
     /// Rebuild the shard from authoritative storage, discarding the in-flight
     /// mutation that triggered the rollback. The limiter script cache resets,
-    /// which is fine because it reloads on next use.
+    /// which is fine because it reloads on next use. This lists the whole
+    /// keyspace, so a lazily-opened object is now fully loaded.
     fn rollback_from_storage(&mut self) -> Result<(), EdgeError> {
-        let entries = self.storage.scan()?;
+        let entries = self.storage.list()?;
         let mut shard = EdgeShard::new();
         for (skey, bytes) in entries {
             if skey.starts_with(KEY_PREFIX) {
@@ -530,6 +674,10 @@ impl<S: ObjectStorage> EdgeObject<S> {
         }
         self.shard = shard;
         self.persisted_epoch = self.shard.mutation_epoch();
+        if let Some(lazy) = self.lazy.as_mut() {
+            lazy.resident.clear();
+            lazy.fully_loaded = true;
+        }
         Ok(())
     }
 
@@ -542,6 +690,65 @@ impl<S: ObjectStorage> EdgeObject<S> {
             None => Ok(request_now),
         }
     }
+}
+
+/// Resolve which Redis keys an `EdgeHttpRequest` will touch, mirroring exactly
+/// the route dispatch in [`EdgeObject::handle_http`] but without running the
+/// command. A host adapter whose provider storage is async (e.g. a Cloudflare
+/// Durable Object) uses this to prefetch precisely the touched keys into an
+/// in-memory `ObjectStorage` before calling `handle_http`, so cold-start cost is
+/// O(keys the request touches) not O(total tenant state) even though the
+/// `ObjectStorage` trait's `get`/`list` are synchronous and the real backing
+/// store is not. The key sets returned here are identical to what
+/// `EdgeObject::handle_http` loads internally on a lazily-opened object:
+///
+/// - `/v1/policy/<tenant>` → the tenant's policy hash (`HSET`).
+/// - `/v1/limit/<tenant>` and `/v1/ai/<tenant>` → the tenant's bucket + policy
+///   keys (the fixed limiter `EVALSHA`, whose key set is fully known).
+/// - `/v1/valdr/<tenant>/<command…>` → `rest_command_keys` of the reconstructed
+///   REST command (the precise per-command key set, `FullKeyspace` for an
+///   enumerating or arbitrary-script command).
+/// - any other / malformed route → no keys (the request errors without touching
+///   data, exactly as `handle_http` returns a 404/405/400 before any command).
+pub fn http_request_key_access(request: &EdgeHttpRequest<'_>) -> KeyAccess {
+    let (path, query) = split_query(request.path);
+    let Ok(segments) = route_segments(path) else {
+        return KeyAccess::Keys(Vec::new());
+    };
+
+    if segments.len() == 3 && segments[0] == "v1" && segments[1] == "policy" {
+        return KeyAccess::Keys(vec![policy_key(&segments[2]).into_bytes()]);
+    }
+
+    if segments.len() == 3
+        && segments[0] == "v1"
+        && (segments[1] == "limit" || segments[1] == "ai")
+    {
+        let tenant = &segments[2];
+        return KeyAccess::Keys(vec![
+            bucket_key(tenant).into_bytes(),
+            policy_key(tenant).into_bytes(),
+        ]);
+    }
+
+    if segments.len() >= 4 && segments[0] == "v1" && segments[1] == "valdr" {
+        let rest_path = valdr_rest_path(&segments[3..], query);
+        let rest_method = match request.method {
+            EdgeHttpMethod::Get => valdr_engine::RestMethod::Get,
+            EdgeHttpMethod::Post => valdr_engine::RestMethod::Post,
+            EdgeHttpMethod::Put => valdr_engine::RestMethod::Put,
+            EdgeHttpMethod::Head => valdr_engine::RestMethod::Head,
+            EdgeHttpMethod::Other => return KeyAccess::Keys(Vec::new()),
+        };
+        return rest_command_keys(RestRequest {
+            method: rest_method,
+            path: &rest_path,
+            body: request.body,
+            response_format: valdr_engine::RestResponseFormat::Json,
+        });
+    }
+
+    KeyAccess::Keys(Vec::new())
 }
 
 #[derive(Debug, Clone)]
@@ -671,6 +878,25 @@ impl EdgeShard {
         .map_err(|_| EdgeError::JsonBody)?;
         let response = self.engine.execute_rest(RestRequest::post("/", &body));
         ensure_ok(response).map(|_| ())
+    }
+
+    /// The keys `install_policy` touches: the one `HSET` it runs writes only the
+    /// tenant's policy hash. A lazy adapter loads exactly this before running.
+    pub fn install_policy_key_access(&self, tenant_id: &str) -> KeyAccess {
+        KeyAccess::Keys(vec![policy_key(tenant_id).into_bytes()])
+    }
+
+    /// The keys `check` touches: the limiter `EVALSHA` is run with KEYS
+    /// `[bucket_key, policy_key]` and the script (`LIMITER_SCRIPT`) `redis.call`s
+    /// only those two keys, so the precise access is those two keys — narrower
+    /// than the conservative `FullKeyspace` `command_keys` returns for an
+    /// arbitrary `EVALSHA`, because here the script is fixed and fully known.
+    /// `SCRIPT LOAD` (run on first use) touches no data keys.
+    pub fn check_key_access(&self, request: LimitRequest<'_>) -> KeyAccess {
+        KeyAccess::Keys(vec![
+            bucket_key(request.tenant_id).into_bytes(),
+            policy_key(request.tenant_id).into_bytes(),
+        ])
     }
 
     pub fn check(&mut self, request: LimitRequest<'_>) -> Result<LimitDecision, EdgeError> {
@@ -1138,7 +1364,7 @@ mod tests {
             .unwrap();
         assert!(object
             .storage_mut()
-            .scan()
+            .list()
             .unwrap()
             .iter()
             .any(|(skey, _)| skey.starts_with(KEY_PREFIX)));
