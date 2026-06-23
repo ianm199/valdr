@@ -1166,9 +1166,140 @@ impl<H: Host> Engine<H> {
             self.georadius_generic(argv, 1, GEO_FLAG_MEMBER)
         } else if ascii_eq(command, b"GEORADIUSBYMEMBER_RO") {
             self.georadius_generic(argv, 1, GEO_FLAG_MEMBER | GEO_FLAG_NOSTORE)
+        } else if ascii_eq(command, b"DUMP") {
+            self.dump_command(argv)
+        } else if ascii_eq(command, b"RESTORE") {
+            self.restore_command(argv)
         } else {
             unknown_command_error(command, &argv[1..])
         }
+    }
+
+    /// `DUMP key` (`dumpCommand`, `cluster.c`). Produces the serialized
+    /// representation of the value stored at `key`: a bulk string of
+    /// `<type-byte><serialized-value><2-byte RDB version LE><8-byte CRC64 LE>`,
+    /// byte-identical to the reference (the differential oracle compares these
+    /// bytes). Returns a null bulk when the key is missing. Aggregate value
+    /// types are deferred this wave; DUMP of a non-string returns a deferral
+    /// error so we never emit a non-faithful payload (see `ku-dump-aggregate`).
+    fn dump_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 2 {
+            return wrong_arity(b"dump");
+        }
+        self.purge_if_expired(&argv[1]);
+        let value = match self.db.get(&argv[1]) {
+            None => return RespFrame::null_bulk(),
+            Some(entry) => &entry.value,
+        };
+        match value {
+            StoredValue::String(bytes) => {
+                let payload = rdb_create_dump_payload_string(bytes);
+                bulk(&payload)
+            }
+            _ => err(b"ERR DUMP of this value type is not yet supported by the edge engine"),
+        }
+    }
+
+    /// `RESTORE key ttl serialized-value [REPLACE] [ABSTTL] [IDLETIME n]
+    /// [FREQ n]` (`restoreCommand`, `cluster.c`). Parses the binary DUMP blob,
+    /// verifies the trailing RDB version and CRC64, decodes the value, and
+    /// stores it with the requested TTL. Option parsing, check ordering, and
+    /// error strings mirror the reference exactly. IDLETIME/FREQ are validated
+    /// (range-checked) but otherwise ignored — the edge engine has no
+    /// LRU/LFU eviction. String values are restored faithfully; a payload
+    /// holding a non-string aggregate type errors with "Bad data format"
+    /// (the engine cannot reconstruct aggregate encodings this wave).
+    fn restore_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 4 {
+            return wrong_arity(b"restore");
+        }
+        let mut replace = false;
+        let mut absttl = false;
+        let mut lru_idle: i64 = -1;
+        let mut lfu_freq: i64 = -1;
+        let mut j = 4;
+        while j < argv.len() {
+            let additional = argv.len() - j - 1;
+            if ascii_eq(&argv[j], b"REPLACE") {
+                replace = true;
+            } else if ascii_eq(&argv[j], b"ABSTTL") {
+                absttl = true;
+            } else if ascii_eq(&argv[j], b"IDLETIME") && additional >= 1 && lfu_freq == -1 {
+                let Some(v) = parse_i64(&argv[j + 1]) else {
+                    return err(b"ERR value is not an integer or out of range");
+                };
+                if v < 0 {
+                    return err(b"ERR Invalid IDLETIME value, must be >= 0");
+                }
+                lru_idle = v;
+                j += 1;
+            } else if ascii_eq(&argv[j], b"FREQ") && additional >= 1 && lru_idle == -1 {
+                let Some(v) = parse_i64(&argv[j + 1]) else {
+                    return err(b"ERR value is not an integer or out of range");
+                };
+                if !(0..=255).contains(&v) {
+                    return err(b"ERR Invalid FREQ value, must be >= 0 and <= 255");
+                }
+                lfu_freq = v;
+                j += 1;
+            } else {
+                return err(b"ERR syntax error");
+            }
+            j += 1;
+        }
+
+        let key = &argv[1];
+        self.purge_if_expired(key);
+        if !replace && self.db.contains_key(key) {
+            return err(b"BUSYKEY Target key name already exists.");
+        }
+
+        let Some(ttl) = parse_i64(&argv[2]) else {
+            return err(b"ERR value is not an integer or out of range");
+        };
+        if ttl < 0 {
+            return err(b"ERR Invalid TTL value, must be >= 0");
+        }
+
+        let blob = &argv[3];
+        if rdb_verify_dump_payload(blob).is_none() {
+            return err(b"ERR DUMP payload version or checksum are wrong");
+        }
+
+        let value = match rdb_load_dump_value(blob) {
+            Some(v) => v,
+            None => return err(b"ERR Bad data format"),
+        };
+
+        let key = argv[1].clone();
+        let expire_at_ms = if ttl == 0 {
+            None
+        } else if absttl {
+            Some(ttl as u64)
+        } else {
+            match self.host.now_millis().checked_add(ttl as u64) {
+                Some(deadline) => Some(deadline),
+                None => return err(b"ERR Invalid TTL value, must be >= 0"),
+            }
+        };
+
+        if let Some(deadline) = expire_at_ms {
+            if deadline <= self.host.now_millis() {
+                self.db.remove(&key);
+                self.note_write(&key);
+                return simple(b"OK");
+            }
+        }
+
+        self.db.insert(
+            key.clone(),
+            Entry {
+                value,
+                expire_at_ms,
+            },
+        );
+        self.note_write(&key);
+        simple(b"OK")
     }
 
     fn get_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
@@ -12036,6 +12167,563 @@ fn hll_is_valid(buf: &[u8]) -> bool {
     buf.len() == HLL_DENSE_SIZE && &buf[0..4] == b"HYLL" && buf[4] == HLL_DENSE
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// RDB DUMP/RESTORE framing — faithful port of cluster.c (createDumpPayload /
+// verifyDumpPayload), rdb.c (rdbSaveRawString / string load), crc64.c, and
+// lzf_c.c / lzf_d.c. Confined to STRING values + the DUMP framing this wave.
+// Confirmed against valkey-server 9.1.0: RDB_VERSION = 80 (footer bytes
+// `0x50 0x00`, little-endian), CRC64 = Jones variant over the payload+version
+// bytes (memrev64ifbe is a no-op on LE hosts, so CRC is stored LE).
+// ──────────────────────────────────────────────────────────────────────────
+
+/// `RDB_VERSION` from `rdb.h` (valkey 9.1.0). Written into the DUMP footer and
+/// the maximum accepted RESTORE version under the default (strict) policy.
+const RDB_DUMP_VERSION: u16 = 80;
+
+/// Top-2-bit length-encoding selectors (`rdbSaveLen` / `rdbLoadLen`).
+const RDB_6BITLEN: u8 = 0;
+const RDB_14BITLEN: u8 = 1;
+const RDB_32BITLEN: u8 = 0x80;
+const RDB_64BITLEN: u8 = 0x81;
+const RDB_ENCVAL: u8 = 3;
+const RDB_ENC_INT8: u8 = 0;
+const RDB_ENC_INT16: u8 = 1;
+const RDB_ENC_INT32: u8 = 2;
+const RDB_ENC_LZF: u8 = 3;
+
+/// `RDB_TYPE_STRING` — the only value-type byte this wave emits/accepts.
+const RDB_TYPE_STRING: u8 = 0;
+
+const CRC64_REFLECTED_POLY: u64 = 0x95ac9329ac4bc9b5;
+
+const fn crc64_make_table() -> [u64; 256] {
+    let mut table = [0u64; 256];
+    let mut i = 0usize;
+    while i < 256 {
+        let mut crc = i as u64;
+        let mut j = 0;
+        while j < 8 {
+            if crc & 1 != 0 {
+                crc = (crc >> 1) ^ CRC64_REFLECTED_POLY;
+            } else {
+                crc >>= 1;
+            }
+            j += 1;
+        }
+        table[i] = crc;
+        i += 1;
+    }
+    table
+}
+
+static CRC64_TABLE: [u64; 256] = crc64_make_table();
+
+/// CRC-64 (Jones variant), matching valkey's `crc64(crc, data, len)`. Pass
+/// `crc = 0` for a one-shot checksum.
+fn crc64(crc: u64, data: &[u8]) -> u64 {
+    let mut state = crc;
+    for &byte in data {
+        let index = ((state ^ (byte as u64)) & 0xff) as usize;
+        state = (state >> 8) ^ CRC64_TABLE[index];
+    }
+    state
+}
+
+/// `string2ll` (`util.c`) — parse `s` as a canonical decimal integer fitting in
+/// an `i64`. Canonical means: no leading zeros (except a lone "0"), an optional
+/// single leading `-` (but never "-0"), and no other characters. Returns `None`
+/// when `s` is not such a value — exactly the cases where the reference falls
+/// through to a raw string in `rdbSaveRawString`.
+fn string2ll(s: &[u8]) -> Option<i64> {
+    if s.is_empty() {
+        return None;
+    }
+    if s.len() == 1 && s[0].is_ascii_digit() {
+        return Some((s[0] - b'0') as i64);
+    }
+    let mut idx = 0usize;
+    let negative = s[0] == b'-';
+    if negative {
+        idx = 1;
+        if idx == s.len() {
+            return None;
+        }
+    }
+    if !(s[idx] >= b'1' && s[idx] <= b'9') {
+        return None;
+    }
+    let mut v: u64 = (s[idx] - b'0') as u64;
+    idx += 1;
+    while idx < s.len() {
+        let c = s[idx];
+        if !c.is_ascii_digit() {
+            return None;
+        }
+        v = v.checked_mul(10)?;
+        v = v.checked_add((c - b'0') as u64)?;
+        idx += 1;
+    }
+    if negative {
+        let limit = (i64::MAX as u64) + 1;
+        if v > limit {
+            return None;
+        }
+        Some((v as i128 * -1) as i64)
+    } else {
+        if v > i64::MAX as u64 {
+            return None;
+        }
+        Some(v as i64)
+    }
+}
+
+/// `rdbEncodeInteger` (`rdb.c`): if `value` fits in i8/i16/i32, emit the
+/// `RDB_ENCVAL`-prefixed INT8/16/32 encoding (LE payload). Returns `None` for
+/// values outside i32 (the reference then stores them as a raw decimal string).
+fn rdb_encode_integer(value: i64) -> Option<Vec<u8>> {
+    if (-(1 << 7)..=(1 << 7) - 1).contains(&value) {
+        Some(vec![(RDB_ENCVAL << 6) | RDB_ENC_INT8, value as u8])
+    } else if (-(1 << 15)..=(1 << 15) - 1).contains(&value) {
+        let mut out = vec![(RDB_ENCVAL << 6) | RDB_ENC_INT16];
+        out.extend_from_slice(&(value as i16).to_le_bytes());
+        Some(out)
+    } else if (-(1_i64 << 31)..=(1_i64 << 31) - 1).contains(&value) {
+        let mut out = vec![(RDB_ENCVAL << 6) | RDB_ENC_INT32];
+        out.extend_from_slice(&(value as i32).to_le_bytes());
+        Some(out)
+    } else {
+        None
+    }
+}
+
+/// `rdbSaveLen` (`rdb.c`): RDB variable-length integer. 6-bit, 14-bit (BE),
+/// 32-bit (BE) or 64-bit (BE) per the top two bits of the first byte.
+fn rdb_save_len(out: &mut Vec<u8>, len: u64) {
+    if len <= 63 {
+        out.push((RDB_6BITLEN << 6) | (len as u8));
+    } else if len <= 16383 {
+        out.push((RDB_14BITLEN << 6) | ((len >> 8) as u8 & 0x3f));
+        out.push((len & 0xff) as u8);
+    } else if len <= u32::MAX as u64 {
+        out.push(RDB_32BITLEN);
+        out.extend_from_slice(&(len as u32).to_be_bytes());
+    } else {
+        out.push(RDB_64BITLEN);
+        out.extend_from_slice(&len.to_be_bytes());
+    }
+}
+
+/// Read one `rdbLoadLen` value from `data` at `*pos`. Returns `(value,
+/// is_encoded)`; when `is_encoded` the value holds the low-6-bit `RDB_ENC_*`
+/// discriminant. Advances `*pos`. `None` on truncation.
+fn rdb_load_len(data: &[u8], pos: &mut usize) -> Option<(u64, bool)> {
+    let first = *data.get(*pos)?;
+    *pos += 1;
+    match (first & 0xc0) >> 6 {
+        0 => Some(((first & 0x3f) as u64, false)),
+        1 => {
+            let second = *data.get(*pos)?;
+            *pos += 1;
+            Some(((((first & 0x3f) as u64) << 8) | second as u64, false))
+        }
+        2 => {
+            let sub = first & 0x3f;
+            if sub == 0 {
+                let bytes = data.get(*pos..*pos + 4)?;
+                *pos += 4;
+                Some((u32::from_be_bytes(bytes.try_into().ok()?) as u64, false))
+            } else if sub == 1 {
+                let bytes = data.get(*pos..*pos + 8)?;
+                *pos += 8;
+                Some((u64::from_be_bytes(bytes.try_into().ok()?), false))
+            } else {
+                None
+            }
+        }
+        3 => Some(((first & 0x3f) as u64, true)),
+        _ => unreachable!(),
+    }
+}
+
+/// `rdbSaveRawString` (`rdb.c`) for a STRING value. Tries integer encoding
+/// (only when `len <= 11` and the bytes are a canonical i32-fitting integer),
+/// then LZF compression (only when `len > 20` and the result actually shrinks),
+/// otherwise stores `<len><bytes>` verbatim. `rdb_compression` is on by default
+/// in the reference, so this always attempts LZF for long strings.
+fn rdb_save_raw_string(out: &mut Vec<u8>, s: &[u8]) {
+    if s.len() <= 11 {
+        if let Some(value) = string2ll(s) {
+            if let Some(enc) = rdb_encode_integer(value) {
+                out.extend_from_slice(&enc);
+                return;
+            }
+        }
+    }
+    if s.len() > 20 {
+        if let Some(compressed) = lzf_compress(s) {
+            // rdbSaveLzfStringObject only writes the blob when compression
+            // saved space (lzf_compress returns None here when it didn't).
+            out.push((RDB_ENCVAL << 6) | RDB_ENC_LZF);
+            rdb_save_len(out, compressed.len() as u64);
+            rdb_save_len(out, s.len() as u64);
+            out.extend_from_slice(&compressed);
+            return;
+        }
+    }
+    rdb_save_len(out, s.len() as u64);
+    out.extend_from_slice(s);
+}
+
+/// `createDumpPayload` (`cluster.c`) for a STRING value: the RDB type byte,
+/// the serialized string, the 2-byte RDB version (LE), and the 8-byte CRC64
+/// (Jones) over everything before it (LE). Byte-identical to the reference.
+fn rdb_create_dump_payload_string(value: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.push(RDB_TYPE_STRING);
+    rdb_save_raw_string(&mut payload, value);
+    payload.push((RDB_DUMP_VERSION & 0xff) as u8);
+    payload.push(((RDB_DUMP_VERSION >> 8) & 0xff) as u8);
+    let crc = crc64(0, &payload);
+    payload.extend_from_slice(&crc.to_le_bytes());
+    payload
+}
+
+/// `verifyDumpPayload` (`cluster.c`): check the 2-byte RDB version (must be
+/// accepted by the strict policy: `1 <= ver <= RDB_VERSION` and not a foreign
+/// version) and the trailing CRC64 over `data[..len-8]`. Returns the parsed
+/// version on success, `None` (→ "DUMP payload version or checksum are wrong")
+/// otherwise.
+fn rdb_verify_dump_payload(data: &[u8]) -> Option<u16> {
+    if data.len() < 10 {
+        return None;
+    }
+    let footer = &data[data.len() - 10..];
+    let rdbver = (footer[1] as u16) << 8 | footer[0] as u16;
+    if !rdb_is_version_accepted(rdbver) {
+        return None;
+    }
+    let expected = crc64(0, &data[..data.len() - 8]);
+    let stored = u64::from_le_bytes(data[data.len() - 8..].try_into().ok()?);
+    if expected != stored {
+        return None;
+    }
+    Some(rdbver)
+}
+
+/// `rdbIsVersionAccepted` (`rdb.c`) under the default strict policy: reject
+/// versions below 1, foreign versions (12..=79), and any version above the
+/// engine's own `RDB_VERSION`.
+fn rdb_is_version_accepted(rdbver: u16) -> bool {
+    if rdbver < 1 {
+        return false;
+    }
+    if rdbver > RDB_DUMP_VERSION {
+        return false;
+    }
+    // RDB_FOREIGN_VERSION_MIN..=RDB_FOREIGN_VERSION_MAX (12..=79, rdb.h).
+    if (12..=79).contains(&rdbver) {
+        return false;
+    }
+    true
+}
+
+/// Decode the value carried by a verified DUMP payload. Only `RDB_TYPE_STRING`
+/// is supported this wave — any other type byte yields `None` (→ "Bad data
+/// format"). Mirrors `rdbLoadObjectType` + the string path of `rdbLoadObject`.
+fn rdb_load_dump_value(data: &[u8]) -> Option<StoredValue> {
+    if data.len() < 10 {
+        return None;
+    }
+    let body = &data[..data.len() - 10];
+    let mut pos = 0usize;
+    let type_byte = *body.get(pos)?;
+    pos += 1;
+    if type_byte != RDB_TYPE_STRING {
+        return None;
+    }
+    let bytes = rdb_load_string(body, &mut pos)?;
+    // The reference tolerates trailing bytes (it only reads what the type
+    // needs); a faithful string load consumes exactly its encoding.
+    Some(StoredValue::String(bytes))
+}
+
+/// `rdbGenericLoadStringObject` (`rdb.c`) for a STRING: dispatch on the
+/// length-encoding header into an INT8/16/32 decimal string, an LZF blob, or a
+/// verbatim raw run. Advances `*pos`. `None` on malformed input.
+fn rdb_load_string(data: &[u8], pos: &mut usize) -> Option<Vec<u8>> {
+    let (len, is_encoded) = rdb_load_len(data, pos)?;
+    if is_encoded {
+        match len as u8 {
+            RDB_ENC_INT8 => {
+                let b = *data.get(*pos)?;
+                *pos += 1;
+                Some((b as i8 as i64).to_string().into_bytes())
+            }
+            RDB_ENC_INT16 => {
+                let bytes = data.get(*pos..*pos + 2)?;
+                *pos += 2;
+                Some((i16::from_le_bytes(bytes.try_into().ok()?) as i64).to_string().into_bytes())
+            }
+            RDB_ENC_INT32 => {
+                let bytes = data.get(*pos..*pos + 4)?;
+                *pos += 4;
+                Some((i32::from_le_bytes(bytes.try_into().ok()?) as i64).to_string().into_bytes())
+            }
+            RDB_ENC_LZF => {
+                let (clen, _) = rdb_load_len(data, pos)?;
+                let (ulen, _) = rdb_load_len(data, pos)?;
+                let compressed = data.get(*pos..*pos + clen as usize)?;
+                *pos += clen as usize;
+                lzf_decompress(compressed, ulen as usize)
+            }
+            _ => None,
+        }
+    } else {
+        let bytes = data.get(*pos..*pos + len as usize)?;
+        *pos += len as usize;
+        Some(bytes.to_vec())
+    }
+}
+
+/// `lzf_compress` (`lzf_c.c`) with valkey's compile config (`HLOG=16`,
+/// `VERY_FAST=1`, `ULTRA_FAST=0`, `INIT_HTAB=0`, `STRICT_ALIGN`-safe). Returns
+/// the compressed bytes when they fit in `in_len - 1` (the buffer bound the
+/// reference passes via `outlen = len - 4`, but we mirror the in-place behavior
+/// by allocating `len` and rejecting non-shrinking output), or `None` when the
+/// data is incompressible — exactly when `rdbSaveLzfStringObject` returns 0 and
+/// the caller stores the string verbatim. Byte-identical to the reference for
+/// inputs short enough that the uninitialized C hash table cannot diverge
+/// (validated against captured valkey-server output in the unit tests).
+fn lzf_compress(in_data: &[u8]) -> Option<Vec<u8>> {
+    const HLOG: usize = 16;
+    const HSIZE: usize = 1 << HLOG;
+    const MAX_LIT: usize = 1 << 5;
+    const MAX_OFF: usize = 1 << 13;
+    const MAX_REF: usize = (1 << 8) + (1 << 3);
+
+    let in_len = in_data.len();
+    // rdbSaveLzfStringObject requires len > 4 and outlen = len - 4.
+    if in_len <= 4 {
+        return None;
+    }
+    let out_len = in_len - 4;
+    // The C code passes a buffer of exactly `out_len` bytes and bounds every
+    // write against `out_end = out + out_len`. Replicating that boundary
+    // EXACTLY is what makes the output byte-identical: it is precisely the
+    // out-of-space test (`op + 4 >= out_end`) that makes the reference bail to
+    // a verbatim store on inputs that compress only marginally (e.g. the
+    // 21-byte "012...0"). We bound-check against `out_end` while over-allocating
+    // the backing buffer so a benign write never panics in Rust.
+    let out_end = out_len;
+
+    // htab stores 1-based input indices (0 == empty), matching the C code's
+    // `*hslot ? (*hslot + BIAS) : NULL` with BIAS = in_data (slot 0 = NULL).
+    let mut htab = vec![0usize; HSIZE];
+    let mut out = vec![0u8; out_len + 8];
+
+    let frst = |p: usize| -> u32 { ((in_data[p] as u32) << 8) | in_data[p + 1] as u32 };
+    let next = |v: u32, p: usize| -> u32 { (v << 8) | in_data[p + 2] as u32 };
+    // VERY_FAST IDX.
+    let idx = |h: u32| -> usize {
+        (((h >> (3 * 8 - HLOG as u32)).wrapping_sub(h.wrapping_mul(5))) as usize) & (HSIZE - 1)
+    };
+
+    let mut ip: usize = 0;
+    let mut op: usize = 1; // op++ start run
+    let mut lit: i64 = 0;
+
+    if in_len < 2 {
+        return None;
+    }
+    let mut hval = frst(ip);
+
+    while ip < in_len.saturating_sub(2) {
+        hval = next(hval, ip);
+        let hslot = idx(hval);
+        let reference = htab[hslot]; // 0 == NULL, else (idx+1)
+        htab[hslot] = ip + 1;
+
+        let mut matched = false;
+        if reference != 0 {
+            let ref_idx = reference - 1;
+            let off = ip.wrapping_sub(ref_idx).wrapping_sub(1);
+            if off < MAX_OFF
+                && ref_idx > 0
+                && in_data[ref_idx + 2] == in_data[ip + 2]
+                && in_data[ref_idx] == in_data[ip]
+                && in_data[ref_idx + 1] == in_data[ip + 1]
+            {
+                matched = true;
+                let mut len: usize = 2;
+                let mut maxlen = in_len - ip - len;
+                if maxlen > MAX_REF {
+                    maxlen = MAX_REF;
+                }
+
+                // Conservative + exact out-of-space test (against out_end).
+                if op + 3 + 1 >= out_end && op - (lit == 0) as usize + 3 + 1 >= out_end {
+                    return None;
+                }
+
+                out[op - lit as usize - 1] = (lit - 1) as u8; // stop run
+                if lit == 0 {
+                    op -= 1; // undo run if zero
+                }
+
+                // Extend match.
+                loop {
+                    if maxlen > 16 {
+                        let mut broke = false;
+                        for _ in 0..16 {
+                            len += 1;
+                            if in_data[ref_idx + len] != in_data[ip + len] {
+                                broke = true;
+                                break;
+                            }
+                        }
+                        if broke {
+                            break;
+                        }
+                    }
+                    len += 1;
+                    while len < maxlen && in_data[ref_idx + len] == in_data[ip + len] {
+                        len += 1;
+                    }
+                    break;
+                }
+
+                len -= 2; // #octets - 1
+                ip += 1;
+
+                if len < 7 {
+                    out[op] = ((off >> 8) + (len << 5)) as u8;
+                    op += 1;
+                } else {
+                    out[op] = ((off >> 8) + (7 << 5)) as u8;
+                    op += 1;
+                    out[op] = (len - 7) as u8;
+                    op += 1;
+                }
+                out[op] = off as u8;
+                op += 1;
+
+                lit = 0;
+                op += 1; // start run
+
+                ip += len + 1;
+
+                if ip >= in_len.saturating_sub(2) {
+                    break;
+                }
+
+                // VERY_FAST && !ULTRA_FAST rehash path.
+                ip -= 1;
+                ip -= 1;
+                hval = frst(ip);
+                hval = next(hval, ip);
+                htab[idx(hval)] = ip + 1;
+                ip += 1;
+                hval = next(hval, ip);
+                htab[idx(hval)] = ip + 1;
+                ip += 1;
+            }
+        }
+
+        if !matched {
+            // one literal byte
+            if op >= out_end {
+                return None;
+            }
+            out[op] = in_data[ip];
+            op += 1;
+            ip += 1;
+            lit += 1;
+            if lit as usize == MAX_LIT {
+                out[op - lit as usize - 1] = (lit - 1) as u8; // stop run
+                lit = 0;
+                op += 1; // start run
+            }
+        }
+    }
+
+    if op + 3 > out_end {
+        return None;
+    }
+
+    while ip < in_len {
+        lit += 1;
+        out[op] = in_data[ip];
+        op += 1;
+        ip += 1;
+        if lit as usize == MAX_LIT {
+            out[op - lit as usize - 1] = (lit - 1) as u8;
+            lit = 0;
+            op += 1;
+        }
+    }
+
+    out[op - lit as usize - 1] = (lit - 1) as u8; // end run
+    if lit == 0 {
+        op -= 1; // undo run if zero
+    }
+
+    out.truncate(op);
+    Some(out)
+}
+
+/// `lzf_decompress` (`lzf_d.c`): expand `input` into exactly `output_len`
+/// bytes. `None` on malformed input or length mismatch.
+fn lzf_decompress(input: &[u8], output_len: usize) -> Option<Vec<u8>> {
+    let mut out = vec![0u8; output_len];
+    let mut ip = 0usize;
+    let mut op = 0usize;
+
+    while ip < input.len() {
+        let ctrl = input[ip] as usize;
+        ip += 1;
+
+        if ctrl < 32 {
+            let run = ctrl + 1;
+            if op + run > output_len || ip + run > input.len() {
+                return None;
+            }
+            out[op..op + run].copy_from_slice(&input[ip..ip + run]);
+            ip += run;
+            op += run;
+        } else {
+            let mut len = ctrl >> 5;
+            let mut back = ((ctrl & 0x1f) << 8) + 1;
+            if ip >= input.len() {
+                return None;
+            }
+            if len == 7 {
+                len += input[ip] as usize;
+                ip += 1;
+                if ip >= input.len() {
+                    return None;
+                }
+            }
+            back += input[ip] as usize;
+            ip += 1;
+            len += 2;
+            if op + len > output_len || back > op {
+                return None;
+            }
+            let mut src = op - back;
+            for _ in 0..len {
+                out[op] = out[src];
+                op += 1;
+                src += 1;
+            }
+        }
+    }
+
+    if op != output_len {
+        return None;
+    }
+    Some(out)
+}
+
 fn bulk(value: impl AsRef<[u8]>) -> RespFrame {
     RespFrame::bulk(RedisString::from_bytes(value))
 }
@@ -15368,6 +16056,422 @@ mod tests {
         for i in 0..HLL_REGISTERS {
             let v = (i % (HLL_REGISTER_MAX as usize + 1)) as u8;
             assert_eq!(hll_dense_get_register(&regs, i), v);
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // DUMP / RESTORE — RDB framing, LZF, CRC64
+    // ──────────────────────────────────────────────────────────────────────
+
+    fn hex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    fn dump_bytes(engine: &mut Engine<NoopHost>, key: &[u8]) -> Vec<u8> {
+        match engine.execute(&argv(&[b"DUMP", key])) {
+            RespFrame::Bulk(Some(bytes)) => bytes.as_bytes().to_vec(),
+            other => panic!("expected bulk DUMP reply, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn crc64_jones_known_vector() {
+        assert_eq!(crc64(0, b"123456789"), 0xe9c6d914c4b8d9ca);
+    }
+
+    /// DUMP must be byte-identical to valkey-server 9.1.0. These payloads were
+    /// captured by running `SET k v; DUMP k` against the reference binary.
+    #[test]
+    fn dump_byte_parity_integers_and_short_strings() {
+        // (value, expected DUMP hex) — captured from valkey-server 9.1.0.
+        let cases: &[(&[u8], &str)] = &[
+            (b"7", "00c0075000bbe781331df9a966"),
+            (b"-7", "00c0f95000910c18a149f0255f"),
+            (b"12345", "00c13930500052be23b60dae6f4d"),
+            (b"1000", "00c1e803500046fb8e1f2496d090"),
+            (b"100000", "00c2a086010050003e0ecac1f17dc180"),
+            (b"99999999999", "000b39393939393939393939395000ec9a816a9089888b"),
+            (b"hello", "000568656c6c6f5000ac5816e7fb6647fe"),
+            (b"", "0000500092b195d1912dc52e"),
+            (b"01234567890123456789", "00143031323334353637383930313233343536373839500019bc68b4636080b8"),
+            (b"012345678901234567890", "001530313233343536373839303132333435363738393050002b61bc1664a3947b"),
+        ];
+        for (value, expected) in cases {
+            let mut engine = Engine::new_in_memory();
+            engine.execute(&argv(&[b"SET", b"k", value]));
+            let got = dump_bytes(&mut engine, b"k");
+            assert_eq!(
+                got,
+                hex(expected),
+                "DUMP parity failed for value {:?}: got {} want {}",
+                String::from_utf8_lossy(value),
+                hex_encode(&got),
+                expected
+            );
+        }
+    }
+
+    /// Long, compressible strings: DUMP must reproduce valkey's exact
+    /// LZF-compressed payload byte-for-byte. Incompressible long strings must
+    /// store verbatim (the `rand_noncompress` case). Captured from
+    /// valkey-server 9.1.0.
+    #[test]
+    fn dump_byte_parity_long_strings_lzf() {
+        let a64: Vec<u8> = vec![b'a'; 64];
+        let a200: Vec<u8> = vec![b'a'; 200];
+        let ab_rep: Vec<u8> = b"ab".iter().cycle().take(80).copied().collect();
+        let lorem: Vec<u8> = b"the quick brown fox jumps over the lazy dog "
+            .iter()
+            .cycle()
+            .take(44 * 5)
+            .copied()
+            .collect();
+        let mixed: Vec<u8> = b"hello world hello world hello world hello world!!!".to_vec();
+        let json: Vec<u8> = {
+            let unit = br#"{"name":"valdr","type":"engine","wave":21,"name":"valdr"}"#;
+            unit.iter().chain(unit.iter()).copied().collect()
+        };
+        let spaces: Vec<u8> = vec![b' '; 50];
+        let rand_noncompress: Vec<u8> = (0u8..64).collect();
+
+        let cases: &[(&[u8], &str)] = &[
+            (&a64, "00c3094040016161e0330001616150000c4f5f83504ea398"),
+            (&a200, "00c30940c8016161e0bb000161615000d0b33ebf9fe06a17"),
+            (&ab_rep, "00c30a405002616261e0420101616250005bb7969f2f8cc3b1"),
+            (&lorem, "00c33440dc1f74686520717569636b2062726f776e20666f78206a756d7073206f7665722074201e076c617a7920646f67600ce0a12b01672050000d01c00229d0be05"),
+            (&mixed, "00c315320c68656c6c6f20776f726c642068e0190b022121215000eb013a6f466048d7"),
+            (&json, "00c3394072137b226e616d65223a2276616c6472222c22747970400e05656e67696e65200f02776176200f0232312ce00528017d7be0050fe01f3801227d5000e4085c453d3ab387"),
+            (&spaces, "00c30932012020e025000120205000019e274029dcfea9"),
+            (&rand_noncompress, "004040000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f50004326ce3d6b5ad3b1"),
+        ];
+        for (value, expected) in cases {
+            let mut engine = Engine::new_in_memory();
+            engine.execute(&argv(&[b"SET", b"k", value]));
+            let got = dump_bytes(&mut engine, b"k");
+            assert_eq!(
+                got,
+                hex(expected),
+                "LZF DUMP parity failed (len {}): got {}",
+                value.len(),
+                hex_encode(&got)
+            );
+        }
+    }
+
+    #[test]
+    fn dump_missing_key_is_nil() {
+        let mut engine = Engine::new_in_memory();
+        assert!(matches!(
+            engine.execute(&argv(&[b"DUMP", b"nope"])),
+            RespFrame::Bulk(None)
+        ));
+    }
+
+    #[test]
+    fn dump_wrong_type_is_deferral_error() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"RPUSH", b"l", b"a"]));
+        let reply = engine.execute(&argv(&[b"DUMP", b"l"]));
+        assert!(matches!(reply, RespFrame::Error(_)));
+    }
+
+    /// In-process DUMP→RESTORE round-trip: RESTORE the engine's own DUMP into a
+    /// new key and assert the restored value equals the original.
+    #[test]
+    fn dump_restore_round_trip_strings() {
+        let values: &[&[u8]] = &[
+            b"7",
+            b"-7",
+            b"12345",
+            b"100000",
+            b"99999999999",
+            b"hello",
+            b"",
+            b"01234567890123456789",
+            &[b'a'; 200],
+            b"the quick brown fox jumps over the lazy dog repeated repeated repeated",
+        ];
+        for value in values {
+            let mut engine = Engine::new_in_memory();
+            engine.execute(&argv(&[b"SET", b"src", value]));
+            let payload = dump_bytes(&mut engine, b"src");
+            let reply = engine.execute(&argv(&[b"RESTORE", b"dst", b"0", &payload]));
+            assert_eq!(resp2(&reply), b"+OK\r\n", "RESTORE failed for {value:?}");
+            let restored = engine.execute(&argv(&[b"GET", b"dst"]));
+            match restored {
+                RespFrame::Bulk(Some(bytes)) => assert_eq!(bytes.as_bytes(), *value),
+                RespFrame::Bulk(None) if value.is_empty() => {
+                    // empty-string GET still returns a bulk of length 0
+                    panic!("empty string should round-trip to an empty bulk, got nil");
+                }
+                other => panic!("unexpected GET after RESTORE: {other:?}"),
+            }
+        }
+    }
+
+    /// RESTORE a hardcoded real valkey integer-string dump (`SET k 12345; DUMP
+    /// k` on valkey-server 9.1.0) and assert the value decodes correctly.
+    #[test]
+    fn restore_hardcoded_valkey_integer_dump() {
+        let mut engine = Engine::new_in_memory();
+        let payload = hex("00c13930500052be23b60dae6f4d");
+        let reply = engine.execute(&argv(&[b"RESTORE", b"k", b"0", &payload]));
+        assert_eq!(resp2(&reply), b"+OK\r\n");
+        match engine.execute(&argv(&[b"GET", b"k"])) {
+            RespFrame::Bulk(Some(bytes)) => assert_eq!(bytes.as_bytes(), b"12345"),
+            other => panic!("unexpected GET: {other:?}"),
+        }
+        // TYPE must be string.
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"TYPE", b"k"]))),
+            b"+string\r\n"
+        );
+    }
+
+    /// RESTORE a hardcoded real valkey short-string dump (`SET k hello; DUMP k`).
+    #[test]
+    fn restore_hardcoded_valkey_short_string_dump() {
+        let mut engine = Engine::new_in_memory();
+        let payload = hex("000568656c6c6f5000ac5816e7fb6647fe");
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"RESTORE", b"k", b"0", &payload]))),
+            b"+OK\r\n"
+        );
+        match engine.execute(&argv(&[b"GET", b"k"])) {
+            RespFrame::Bulk(Some(bytes)) => assert_eq!(bytes.as_bytes(), b"hello"),
+            other => panic!("unexpected GET: {other:?}"),
+        }
+    }
+
+    /// RESTORE a hardcoded real valkey LZF-compressed long-string dump
+    /// (`SET k aaaa...(64); DUMP k`) — exercises the `lzf_decompress` path.
+    #[test]
+    fn restore_hardcoded_valkey_lzf_dump() {
+        let mut engine = Engine::new_in_memory();
+        let payload = hex("00c3094040016161e0330001616150000c4f5f83504ea398");
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"RESTORE", b"k", b"0", &payload]))),
+            b"+OK\r\n"
+        );
+        match engine.execute(&argv(&[b"GET", b"k"])) {
+            RespFrame::Bulk(Some(bytes)) => assert_eq!(bytes.as_bytes(), vec![b'a'; 64].as_slice()),
+            other => panic!("unexpected GET: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn restore_busykey_without_replace() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"SET", b"k", b"existing"]));
+        let payload = hex("000568656c6c6f5000ac5816e7fb6647fe");
+        let reply = engine.execute(&argv(&[b"RESTORE", b"k", b"0", &payload]));
+        assert_eq!(
+            resp2(&reply),
+            b"-BUSYKEY Target key name already exists.\r\n"
+        );
+        // value unchanged
+        match engine.execute(&argv(&[b"GET", b"k"])) {
+            RespFrame::Bulk(Some(bytes)) => assert_eq!(bytes.as_bytes(), b"existing"),
+            other => panic!("unexpected GET: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn restore_replace_overwrites() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"SET", b"k", b"existing"]));
+        let payload = hex("000568656c6c6f5000ac5816e7fb6647fe");
+        let reply = engine.execute(&argv(&[b"RESTORE", b"k", b"0", &payload, b"REPLACE"]));
+        assert_eq!(resp2(&reply), b"+OK\r\n");
+        match engine.execute(&argv(&[b"GET", b"k"])) {
+            RespFrame::Bulk(Some(bytes)) => assert_eq!(bytes.as_bytes(), b"hello"),
+            other => panic!("unexpected GET: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn restore_bad_checksum_errors() {
+        let mut engine = Engine::new_in_memory();
+        let mut payload = hex("000568656c6c6f5000ac5816e7fb6647fe");
+        let last = payload.len() - 1;
+        payload[last] ^= 0xff; // corrupt the CRC
+        let reply = engine.execute(&argv(&[b"RESTORE", b"k", b"0", &payload]));
+        assert_eq!(
+            resp2(&reply),
+            b"-ERR DUMP payload version or checksum are wrong\r\n"
+        );
+    }
+
+    #[test]
+    fn restore_future_version_errors() {
+        let mut engine = Engine::new_in_memory();
+        // Re-frame "hello" with a bumped RDB version (81 > 80) so the CRC is
+        // valid but the version is rejected.
+        let mut payload = Vec::new();
+        payload.push(RDB_TYPE_STRING);
+        rdb_save_raw_string(&mut payload, b"hello");
+        payload.push(81u8); // version low byte
+        payload.push(0u8); // version high byte
+        let crc = crc64(0, &payload);
+        payload.extend_from_slice(&crc.to_le_bytes());
+        let reply = engine.execute(&argv(&[b"RESTORE", b"k", b"0", &payload]));
+        assert_eq!(
+            resp2(&reply),
+            b"-ERR DUMP payload version or checksum are wrong\r\n"
+        );
+    }
+
+    #[test]
+    fn restore_truncated_payload_errors() {
+        let mut engine = Engine::new_in_memory();
+        let reply = engine.execute(&argv(&[b"RESTORE", b"k", b"0", b"short"]));
+        assert_eq!(
+            resp2(&reply),
+            b"-ERR DUMP payload version or checksum are wrong\r\n"
+        );
+    }
+
+    #[test]
+    fn restore_negative_ttl_errors() {
+        let mut engine = Engine::new_in_memory();
+        let payload = hex("000568656c6c6f5000ac5816e7fb6647fe");
+        let reply = engine.execute(&argv(&[b"RESTORE", b"k", b"-1", &payload]));
+        assert_eq!(resp2(&reply), b"-ERR Invalid TTL value, must be >= 0\r\n");
+    }
+
+    #[test]
+    fn restore_relative_ttl_applied() {
+        let mut engine = Engine::new(NoopHost::new(1_000));
+        let payload = hex("000568656c6c6f5000ac5816e7fb6647fe");
+        // ttl = 5000ms relative → expire_at = 1000 + 5000 = 6000.
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"RESTORE", b"k", b"5000", &payload]))),
+            b"+OK\r\n"
+        );
+        // PTTL should be ~5000.
+        match engine.execute(&argv(&[b"PTTL", b"k"])) {
+            RespFrame::Integer(ms) => assert_eq!(ms, 5000),
+            other => panic!("unexpected PTTL: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn restore_absttl_applied() {
+        let mut engine = Engine::new(NoopHost::new(1_000));
+        let payload = hex("000568656c6c6f5000ac5816e7fb6647fe");
+        // absolute deadline 9000.
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[
+                b"RESTORE", b"k", b"9000", &payload, b"ABSTTL"
+            ]))),
+            b"+OK\r\n"
+        );
+        match engine.execute(&argv(&[b"PTTL", b"k"])) {
+            RespFrame::Integer(ms) => assert_eq!(ms, 8000),
+            other => panic!("unexpected PTTL: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn restore_already_expired_absttl_does_not_store() {
+        let mut engine = Engine::new(NoopHost::new(10_000));
+        let payload = hex("000568656c6c6f5000ac5816e7fb6647fe");
+        // absolute deadline 5000 < now 10000 → key is not created, reply +OK.
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[
+                b"RESTORE", b"k", b"5000", &payload, b"ABSTTL"
+            ]))),
+            b"+OK\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"EXISTS", b"k"]))),
+            b":0\r\n"
+        );
+    }
+
+    #[test]
+    fn restore_idletime_and_freq_accepted_and_validated() {
+        let mut engine = Engine::new_in_memory();
+        let payload = hex("000568656c6c6f5000ac5816e7fb6647fe");
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[
+                b"RESTORE", b"k", b"0", &payload, b"IDLETIME", b"100"
+            ]))),
+            b"+OK\r\n"
+        );
+        let payload2 = hex("000568656c6c6f5000ac5816e7fb6647fe");
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[
+                b"RESTORE", b"k2", b"0", &payload2, b"FREQ", b"5"
+            ]))),
+            b"+OK\r\n"
+        );
+        // FREQ out of range.
+        let payload3 = hex("000568656c6c6f5000ac5816e7fb6647fe");
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[
+                b"RESTORE", b"k3", b"0", &payload3, b"FREQ", b"300"
+            ]))),
+            b"-ERR Invalid FREQ value, must be >= 0 and <= 255\r\n"
+        );
+    }
+
+    #[test]
+    fn restore_bad_data_format_for_unsupported_type() {
+        let mut engine = Engine::new_in_memory();
+        // Type byte 0x0e (a quicklist) with a valid CRC but unsupported type.
+        let mut payload = vec![0x0eu8, 0x00];
+        payload.push(80u8);
+        payload.push(0u8);
+        let crc = crc64(0, &payload);
+        payload.extend_from_slice(&crc.to_le_bytes());
+        let reply = engine.execute(&argv(&[b"RESTORE", b"k", b"0", &payload]));
+        assert_eq!(resp2(&reply), b"-ERR Bad data format\r\n");
+    }
+
+    /// One-off brute-force parity check against a captured valkey corpus.
+    /// Ignored by default; run with the corpus path in VALDR_DUMP_CORPUS:
+    /// `VALDR_DUMP_CORPUS=/path/corpus.tsv cargo test -p valdr-engine \
+    ///   dump_corpus_byte_parity -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn dump_corpus_byte_parity() {
+        let path = std::env::var("VALDR_DUMP_CORPUS").expect("set VALDR_DUMP_CORPUS");
+        let text = std::fs::read_to_string(path).unwrap();
+        let mut total = 0usize;
+        let mut diverge = 0usize;
+        for line in text.lines() {
+            let mut parts = line.split('\t');
+            let value = hex(parts.next().unwrap());
+            let expected = hex(parts.next().unwrap());
+            let mut engine = Engine::new_in_memory();
+            engine.execute(&argv(&[b"SET", b"k", &value]));
+            let got = dump_bytes(&mut engine, b"k");
+            total += 1;
+            if got != expected {
+                diverge += 1;
+                println!(
+                    "DIVERGE len={} value={:?}\n  got  {}\n  want {}",
+                    value.len(),
+                    String::from_utf8_lossy(&value),
+                    hex_encode(&got),
+                    hex_encode(&expected)
+                );
+            }
+        }
+        println!("corpus parity: {}/{} match, {} diverge", total - diverge, total, diverge);
+        assert_eq!(diverge, 0, "{diverge} DUMP divergences vs valkey");
+    }
+
+    #[test]
+    fn lzf_compress_decompress_internal_round_trip() {
+        let input: Vec<u8> = b"abcabcabcabcabcabcabcabcabcabcabcabc".to_vec();
+        if let Some(compressed) = lzf_compress(&input) {
+            let back = lzf_decompress(&compressed, input.len()).unwrap();
+            assert_eq!(back, input);
         }
     }
 }

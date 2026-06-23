@@ -1,0 +1,40 @@
+{"id": "du-missing-nil", "cmd": ["DUMP", "du:absent"]}
+{"id": "du-set-int-small", "cmd": ["SET", "du:i1", "7"]}
+{"id": "du-dump-int-small", "cmd": ["DUMP", "du:i1"]}
+{"id": "du-set-int-neg", "cmd": ["SET", "du:i2", "-7"]}
+{"id": "du-dump-int-neg", "cmd": ["DUMP", "du:i2"]}
+{"id": "du-set-int16", "cmd": ["SET", "du:i3", "12345"]}
+{"id": "du-dump-int16", "cmd": ["DUMP", "du:i3"]}
+{"id": "du-set-int16b", "cmd": ["SET", "du:i4", "1000"]}
+{"id": "du-dump-int16b", "cmd": ["DUMP", "du:i4"]}
+{"id": "du-set-int32", "cmd": ["SET", "du:i5", "100000"]}
+{"id": "du-dump-int32", "cmd": ["DUMP", "du:i5"]}
+{"id": "du-set-int-too-big", "cmd": ["SET", "du:i6", "99999999999"]}
+{"id": "du-dump-int-too-big", "cmd": ["DUMP", "du:i6"]}
+{"id": "du-set-int-zero", "cmd": ["SET", "du:i7", "0"]}
+{"id": "du-dump-int-zero", "cmd": ["DUMP", "du:i7"]}
+{"id": "du-set-noncanon-leading-zero", "cmd": ["SET", "du:i8", "007"]}
+{"id": "du-dump-noncanon-leading-zero", "cmd": ["DUMP", "du:i8"]}
+{"id": "du-set-neg-zero", "cmd": ["SET", "du:i9", "-0"]}
+{"id": "du-dump-neg-zero", "cmd": ["DUMP", "du:i9"]}
+{"id": "du-set-short-string", "cmd": ["SET", "du:s1", "hello"]}
+{"id": "du-dump-short-string", "cmd": ["DUMP", "du:s1"]}
+{"id": "du-set-empty", "cmd": ["SET", "du:s2", ""]}
+{"id": "du-dump-empty", "cmd": ["DUMP", "du:s2"]}
+{"id": "du-set-len20", "cmd": ["SET", "du:s3", "01234567890123456789"]}
+{"id": "du-dump-len20", "cmd": ["DUMP", "du:s3"]}
+{"id": "du-set-len21-verbatim", "cmd": ["SET", "du:s4", "012345678901234567890"]}
+{"id": "du-dump-len21-verbatim", "cmd": ["DUMP", "du:s4"]}
+{"id": "du-set-long-lzf-a64", "cmd": ["SET", "du:l1", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}
+{"id": "du-dump-long-lzf-a64", "cmd": ["DUMP", "du:l1"]}
+{"id": "du-set-long-lzf-mixed", "cmd": ["SET", "du:l2", "hello world hello world hello world hello world!!!"]}
+{"id": "du-dump-long-lzf-mixed", "cmd": ["DUMP", "du:l2"]}
+{"id": "du-set-long-lzf-words", "cmd": ["SET", "du:l3", "the quick brown fox jumps over the lazy dog the quick brown fox jumps over the lazy dog"]}
+{"id": "du-dump-long-lzf-words", "cmd": ["DUMP", "du:l3"]}
+{"id": "du-set-long-incompressible", "cmd": ["SET", "du:l4", "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghij"]}
+{"id": "du-dump-long-incompressible", "cmd": ["DUMP", "du:l4"]}
+{"id": "du-dump-arity-too-few", "cmd": ["DUMP"], "mode": "error_prefix"}
+{"id": "du-dump-arity-too-many", "cmd": ["DUMP", "du:s1", "extra"], "mode": "error_prefix"}
+{"id": "du-restore-arity-too-few", "cmd": ["RESTORE", "du:r1", "0"], "mode": "error_prefix"}
+{"id": "du-restore-bad-payload", "cmd": ["RESTORE", "du:r1", "0", "notavalidpayload"], "mode": "error_prefix"}
+{"id": "du-restore-bad-ttl", "cmd": ["RESTORE", "du:r1", "notanint", "x"], "mode": "error_prefix"}
