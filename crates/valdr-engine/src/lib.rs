@@ -1094,6 +1094,26 @@ impl<H: Host> Engine<H> {
             self.sort_command(argv, false)
         } else if ascii_eq(command, b"SORT_RO") {
             self.sort_command(argv, true)
+        } else if ascii_eq(command, b"GEOADD") {
+            self.geoadd_command(argv)
+        } else if ascii_eq(command, b"GEOPOS") {
+            self.geopos_command(argv)
+        } else if ascii_eq(command, b"GEODIST") {
+            self.geodist_command(argv)
+        } else if ascii_eq(command, b"GEOHASH") {
+            self.geohash_command(argv)
+        } else if ascii_eq(command, b"GEOSEARCH") {
+            self.georadius_generic(argv, 1, GEO_FLAG_SEARCH)
+        } else if ascii_eq(command, b"GEOSEARCHSTORE") {
+            self.georadius_generic(argv, 2, GEO_FLAG_SEARCH | GEO_FLAG_SEARCHSTORE)
+        } else if ascii_eq(command, b"GEORADIUS") {
+            self.georadius_generic(argv, 1, GEO_FLAG_COORDS)
+        } else if ascii_eq(command, b"GEORADIUS_RO") {
+            self.georadius_generic(argv, 1, GEO_FLAG_COORDS | GEO_FLAG_NOSTORE)
+        } else if ascii_eq(command, b"GEORADIUSBYMEMBER") {
+            self.georadius_generic(argv, 1, GEO_FLAG_MEMBER)
+        } else if ascii_eq(command, b"GEORADIUSBYMEMBER_RO") {
+            self.georadius_generic(argv, 1, GEO_FLAG_MEMBER | GEO_FLAG_NOSTORE)
         } else {
             unknown_command_error(command, &argv[1..])
         }
@@ -8186,6 +8206,563 @@ impl<H: Host> Engine<H> {
         RespFrame::simple("OK")
     }
 
+    /// `GEOADD key [NX|XX] [CH] lon lat member [lon lat member ...]`. Encodes
+    /// each `(lon, lat)` into the 52-bit interleaved geohash that the reference
+    /// `geoaddCommand` synthesises as a ZADD score, then delegates to the ZSET
+    /// add semantics. Mirrors the reference option/triple parsing,
+    /// longitude/latitude validation, and the `NX`+`XX` incompatibility (a plain
+    /// `ERR syntax error`).
+    fn geoadd_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 5 {
+            return wrong_arity(b"geoadd");
+        }
+        let mut nx = false;
+        let mut xx = false;
+        let mut ch = false;
+        let mut longidx = 2;
+        while longidx < argv.len() {
+            let opt = &argv[longidx];
+            if ascii_eq(opt, b"NX") {
+                nx = true;
+            } else if ascii_eq(opt, b"XX") {
+                xx = true;
+            } else if ascii_eq(opt, b"CH") {
+                ch = true;
+            } else {
+                break;
+            }
+            longidx += 1;
+        }
+        if (argv.len() - longidx) % 3 != 0 || (argv.len() - longidx) == 0 || (xx && nx) {
+            return err(b"ERR syntax error");
+        }
+        let mut scored: Vec<(f64, Vec<u8>)> = Vec::new();
+        let mut index = longidx;
+        while index < argv.len() {
+            let lon = match parse_geo_double(&argv[index]) {
+                Some(v) => v,
+                None => return err(b"ERR value is not a valid float"),
+            };
+            let lat = match parse_geo_double(&argv[index + 1]) {
+                Some(v) => v,
+                None => return err(b"ERR value is not a valid float"),
+            };
+            if !(GEO_LONG_MIN..=GEO_LONG_MAX).contains(&lon)
+                || !(GEO_LAT_MIN..=GEO_LAT_MAX).contains(&lat)
+            {
+                let mut msg = b"ERR invalid longitude,latitude pair ".to_vec();
+                msg.extend_from_slice(format_c_double(lon).as_bytes());
+                msg.push(b',');
+                msg.extend_from_slice(format_c_double(lat).as_bytes());
+                return err(&msg);
+            }
+            let bits = geo_encode_score(lon, lat);
+            scored.push((bits as f64, argv[index + 2].clone()));
+            index += 3;
+        }
+        self.purge_if_expired(&argv[1]);
+        let (added, updated) = match self.db.get_mut(&argv[1]) {
+            Some(Entry {
+                value: StoredValue::ZSet(members),
+                ..
+            }) => apply_zadd(members, scored, nx, xx),
+            Some(_) => return wrong_type(),
+            None => {
+                if xx {
+                    (0, 0)
+                } else {
+                    let mut members = HashMap::new();
+                    let counts = apply_zadd(&mut members, scored, nx, xx);
+                    self.db.insert(
+                        argv[1].clone(),
+                        Entry {
+                            value: StoredValue::ZSet(members),
+                            expire_at_ms: None,
+                        },
+                    );
+                    counts
+                }
+            }
+        };
+        if added + updated > 0 {
+            self.note_write(&argv[1]);
+        }
+        RespFrame::integer(if ch { added + updated } else { added })
+    }
+
+    /// `GEOPOS key member [member ...]`: an array of two-element `[lon, lat]`
+    /// arrays decoded from each member's geohash score, or a null-array element
+    /// for a missing member. Coordinates are emitted with the same
+    /// `addReplyHumanLongDouble` formatting (`%.17Lf` + trailing-zero trim) the
+    /// reference uses. Read-only.
+    fn geopos_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 2 {
+            return wrong_arity(b"geopos");
+        }
+        let members = match self.get_value(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::ZSet(members)) => Some(members.clone()),
+            Some(_) => return wrong_type(),
+            None => None,
+        };
+        let mut items = Vec::with_capacity(argv.len() - 2);
+        for member in &argv[2..] {
+            let score = members.as_ref().and_then(|m| m.get(member).copied());
+            match score {
+                Some(score) => {
+                    let (x, y) = geo_decode_score(score as u64);
+                    items.push(RespFrame::array(vec![
+                        bulk(format_human_long_double(x)),
+                        bulk(format_human_long_double(y)),
+                    ]));
+                }
+                None => items.push(RespFrame::null_array()),
+            }
+        }
+        RespFrame::array(items)
+    }
+
+    /// `GEODIST key member1 member2 [unit]`: the haversine great-circle distance
+    /// between the two members' decoded coordinates, divided by the unit factor
+    /// and rendered with `fixedpoint_d2string(_, 4)` (4 fractional digits,
+    /// round-half-to-even). A missing key or member yields a null bulk; a bad
+    /// unit yields the reference unit error. Read-only.
+    fn geodist_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 4 {
+            return wrong_arity(b"geodist");
+        }
+        let to_meter = if argv.len() == 4 {
+            1.0
+        } else if argv.len() == 5 {
+            match geo_unit_to_meters(&argv[4]) {
+                Some(v) => v,
+                None => return err(b"ERR unsupported unit provided. please use M, KM, FT, MI"),
+            }
+        } else {
+            return err(b"ERR syntax error");
+        };
+        let members = match self.get_value(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::ZSet(members)) => members,
+            Some(_) => return wrong_type(),
+            None => return RespFrame::null_bulk(),
+        };
+        let (score1, score2) = match (members.get(&argv[2]), members.get(&argv[3])) {
+            (Some(a), Some(b)) => (*a, *b),
+            _ => return RespFrame::null_bulk(),
+        };
+        let (x1, y1) = geo_decode_score(score1 as u64);
+        let (x2, y2) = geo_decode_score(score2 as u64);
+        let distance = geo_haversine(x1, y1, x2, y2) / to_meter;
+        bulk(geo_format_distance(distance))
+    }
+
+    /// `GEOHASH key member [member ...]`: an array of 11-character standard
+    /// geohash strings. Each member's internal score is decoded back to
+    /// `(lon, lat)` and re-encoded with the standard `-180..180`/`-90..90` ranges
+    /// at step 26, then rendered through valkey's specific base32 alphabet with a
+    /// trailing zero-padding character (`geohashCommand`). Missing members and a
+    /// missing key both yield null bulk elements. Read-only.
+    fn geohash_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 2 {
+            return wrong_arity(b"geohash");
+        }
+        let members = match self.get_value(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::ZSet(members)) => Some(members.clone()),
+            Some(_) => return wrong_type(),
+            None => None,
+        };
+        let mut items = Vec::with_capacity(argv.len() - 2);
+        for member in &argv[2..] {
+            match members.as_ref().and_then(|m| m.get(member).copied()) {
+                Some(score) => items.push(bulk(geo_hash_string(score as u64))),
+                None => items.push(RespFrame::null_bulk()),
+            }
+        }
+        RespFrame::array(items)
+    }
+
+    /// Shared engine for `GEOSEARCH`, `GEOSEARCHSTORE`, `GEORADIUS[BYMEMBER]` and
+    /// the `_RO` variants — a faithful port of `georadiusGeneric`. `src_key_index`
+    /// is the source-key argument position (1 for everything except
+    /// GEOSEARCHSTORE, whose argv[1] is the destination). `flags` selects the
+    /// argument layout and the allowed options. Builds a `GeoShape`, computes the
+    /// 9 candidate geohash boxes, filters the source ZSET by membership in the
+    /// shape, optionally sorts by distance, then either replies (with the
+    /// requested WITH* annotations) or stores the result into `dest`.
+    fn georadius_generic(
+        &mut self,
+        argv: &[Vec<u8>],
+        src_key_index: usize,
+        flags: u32,
+    ) -> RespFrame {
+        let min_args: usize = if flags & GEO_FLAG_COORDS != 0 {
+            6
+        } else if flags & GEO_FLAG_MEMBER != 0 {
+            5
+        } else if flags & GEO_FLAG_SEARCHSTORE != 0 {
+            8
+        } else {
+            7
+        };
+        if argv.len() < min_args {
+            let name: &[u8] = if flags & GEO_FLAG_SEARCHSTORE != 0 {
+                b"geosearchstore"
+            } else if flags & GEO_FLAG_SEARCH != 0 {
+                b"geosearch"
+            } else if flags & GEO_FLAG_MEMBER != 0 {
+                if flags & GEO_FLAG_NOSTORE != 0 {
+                    b"georadiusbymember_ro"
+                } else {
+                    b"georadiusbymember"
+                }
+            } else if flags & GEO_FLAG_NOSTORE != 0 {
+                b"georadius_ro"
+            } else {
+                b"georadius"
+            };
+            return wrong_arity(name);
+        }
+
+        let src_key = argv[src_key_index].clone();
+        let zset = match self.get_value(&src_key).map(|entry| &entry.value) {
+            Some(StoredValue::ZSet(members)) => Some(members.clone()),
+            Some(_) => return wrong_type(),
+            None => None,
+        };
+
+        let mut storekey: Option<Vec<u8>> = None;
+        let mut storedist = false;
+        let mut shape = GeoShape::default();
+        let base_args: usize;
+
+        if flags & GEO_FLAG_COORDS != 0 {
+            base_args = 6;
+            shape.kind = GEO_CIRCULAR;
+            let lon = match parse_geo_double(&argv[2]) {
+                Some(v) => v,
+                None => return err(b"ERR value is not a valid float"),
+            };
+            let lat = match parse_geo_double(&argv[3]) {
+                Some(v) => v,
+                None => return err(b"ERR value is not a valid float"),
+            };
+            if let Some(e) = geo_check_lonlat(lon, lat) {
+                return e;
+            }
+            shape.xy = [lon, lat];
+            match geo_extract_distance(&argv[4], &argv[5]) {
+                Ok((conversion, radius)) => {
+                    shape.conversion = conversion;
+                    shape.radius = radius;
+                }
+                Err(e) => return e,
+            }
+        } else if flags & GEO_FLAG_MEMBER != 0 && zset.is_none() {
+            base_args = 5;
+        } else if flags & GEO_FLAG_MEMBER != 0 {
+            base_args = 5;
+            shape.kind = GEO_CIRCULAR;
+            let members = zset.as_ref().expect("zset present in this branch");
+            let score = match members.get(&argv[2]) {
+                Some(s) => *s,
+                None => {
+                    let mut m = b"ERR member ".to_vec();
+                    m.extend_from_slice(&argv[2]);
+                    m.extend_from_slice(b" does not exist");
+                    return err(&m);
+                }
+            };
+            let (x, y) = geo_decode_score(score as u64);
+            shape.xy = [x, y];
+            match geo_extract_distance(&argv[3], &argv[4]) {
+                Ok((conversion, radius)) => {
+                    shape.conversion = conversion;
+                    shape.radius = radius;
+                }
+                Err(e) => return e,
+            }
+        } else if flags & GEO_FLAG_SEARCH != 0 {
+            base_args = if flags & GEO_FLAG_SEARCHSTORE != 0 {
+                storekey = Some(argv[1].clone());
+                3
+            } else {
+                2
+            };
+        } else {
+            return err(b"ERR Unknown georadius search type");
+        }
+
+        let mut withdist = false;
+        let mut withhash = false;
+        let mut withcoords = false;
+        let mut frommember = false;
+        let mut fromloc = false;
+        let mut byradius = false;
+        let mut bybox = false;
+        let mut sort = GEO_SORT_NONE;
+        let mut any = false;
+        let mut count: i64 = 0;
+
+        if argv.len() > base_args {
+            let remaining = argv.len() - base_args;
+            let mut i = 0usize;
+            while i < remaining {
+                let arg = &argv[base_args + i];
+                if ascii_eq(arg, b"withdist") {
+                    withdist = true;
+                } else if ascii_eq(arg, b"withhash") {
+                    withhash = true;
+                } else if ascii_eq(arg, b"withcoord") {
+                    withcoords = true;
+                } else if ascii_eq(arg, b"any") {
+                    any = true;
+                } else if ascii_eq(arg, b"asc") {
+                    sort = GEO_SORT_ASC;
+                } else if ascii_eq(arg, b"desc") {
+                    sort = GEO_SORT_DESC;
+                } else if ascii_eq(arg, b"count") && (i + 1) < remaining {
+                    let Some(value) = parse_i64(&argv[base_args + i + 1]) else {
+                        return err(b"ERR value is not an integer or out of range");
+                    };
+                    if value <= 0 {
+                        return err(b"ERR COUNT must be > 0");
+                    }
+                    count = value;
+                    i += 1;
+                } else if ascii_eq(arg, b"store")
+                    && (i + 1) < remaining
+                    && flags & GEO_FLAG_NOSTORE == 0
+                    && flags & GEO_FLAG_SEARCH == 0
+                {
+                    storekey = Some(argv[base_args + i + 1].clone());
+                    storedist = false;
+                    i += 1;
+                } else if ascii_eq(arg, b"storedist")
+                    && (i + 1) < remaining
+                    && flags & GEO_FLAG_NOSTORE == 0
+                    && flags & GEO_FLAG_SEARCH == 0
+                {
+                    storekey = Some(argv[base_args + i + 1].clone());
+                    storedist = true;
+                    i += 1;
+                } else if ascii_eq(arg, b"storedist")
+                    && flags & GEO_FLAG_SEARCH != 0
+                    && flags & GEO_FLAG_SEARCHSTORE != 0
+                {
+                    storedist = true;
+                } else if ascii_eq(arg, b"frommember")
+                    && (i + 1) < remaining
+                    && flags & GEO_FLAG_SEARCH != 0
+                    && !fromloc
+                {
+                    if zset.is_none() {
+                        frommember = true;
+                        i += 1;
+                        i += 1;
+                        continue;
+                    }
+                    let members = zset.as_ref().expect("zset present");
+                    let member = &argv[base_args + i + 1];
+                    let score = match members.get(member) {
+                        Some(s) => *s,
+                        None => {
+                            let mut m = b"ERR member ".to_vec();
+                            m.extend_from_slice(member);
+                            m.extend_from_slice(b" does not exist");
+                            return err(&m);
+                        }
+                    };
+                    let (x, y) = geo_decode_score(score as u64);
+                    shape.xy = [x, y];
+                    frommember = true;
+                    i += 1;
+                } else if ascii_eq(arg, b"fromlonlat")
+                    && (i + 2) < remaining
+                    && flags & GEO_FLAG_SEARCH != 0
+                    && !frommember
+                {
+                    let lon = match parse_geo_double(&argv[base_args + i + 1]) {
+                        Some(v) => v,
+                        None => return err(b"ERR value is not a valid float"),
+                    };
+                    let lat = match parse_geo_double(&argv[base_args + i + 2]) {
+                        Some(v) => v,
+                        None => return err(b"ERR value is not a valid float"),
+                    };
+                    if let Some(e) = geo_check_lonlat(lon, lat) {
+                        return e;
+                    }
+                    shape.xy = [lon, lat];
+                    fromloc = true;
+                    i += 2;
+                } else if ascii_eq(arg, b"byradius")
+                    && (i + 2) < remaining
+                    && flags & GEO_FLAG_SEARCH != 0
+                    && !bybox
+                {
+                    match geo_extract_distance(&argv[base_args + i + 1], &argv[base_args + i + 2]) {
+                        Ok((conversion, radius)) => {
+                            shape.conversion = conversion;
+                            shape.radius = radius;
+                        }
+                        Err(e) => return e,
+                    }
+                    shape.kind = GEO_CIRCULAR;
+                    byradius = true;
+                    i += 2;
+                } else if ascii_eq(arg, b"bybox")
+                    && (i + 3) < remaining
+                    && flags & GEO_FLAG_SEARCH != 0
+                    && !byradius
+                {
+                    match geo_extract_box(
+                        &argv[base_args + i + 1],
+                        &argv[base_args + i + 2],
+                        &argv[base_args + i + 3],
+                    ) {
+                        Ok((conversion, width, height)) => {
+                            shape.conversion = conversion;
+                            shape.width = width;
+                            shape.height = height;
+                        }
+                        Err(e) => return e,
+                    }
+                    shape.kind = GEO_RECTANGLE;
+                    bybox = true;
+                    i += 3;
+                } else {
+                    return err(b"ERR syntax error");
+                }
+                i += 1;
+            }
+        }
+
+        if storekey.is_some() && (withdist || withhash || withcoords) {
+            let prefix: &[u8] = if flags & GEO_FLAG_SEARCHSTORE != 0 {
+                b"ERR GEOSEARCHSTORE"
+            } else {
+                b"ERR STORE option in GEORADIUS"
+            };
+            let mut msg = prefix.to_vec();
+            msg.extend_from_slice(
+                b" is not compatible with WITHDIST, WITHHASH and WITHCOORD options",
+            );
+            return err(&msg);
+        }
+
+        if flags & GEO_FLAG_SEARCH != 0 && !(frommember || fromloc) {
+            let mut msg = b"ERR exactly one of FROMMEMBER or FROMLONLAT can be specified for ".to_vec();
+            msg.extend_from_slice(&argv[0]);
+            return err(&msg);
+        }
+        if flags & GEO_FLAG_SEARCH != 0 && !(byradius || bybox) {
+            let mut msg = b"ERR exactly one of BYRADIUS, BYBOX and BYPOLYGON can be specified for ".to_vec();
+            msg.extend_from_slice(&argv[0]);
+            return err(&msg);
+        }
+        if any && count == 0 {
+            return err(b"ERR the ANY argument requires COUNT argument");
+        }
+
+        if zset.is_none() {
+            if let Some(dest) = storekey {
+                let existed = self.db.remove(&dest).is_some();
+                if existed {
+                    self.note_write(&dest);
+                }
+                return RespFrame::integer(0);
+            }
+            return RespFrame::array(Vec::new());
+        }
+
+        if count != 0 && sort == GEO_SORT_NONE && !any {
+            sort = GEO_SORT_ASC;
+        }
+
+        let members = zset.expect("zset present past this point");
+        let limit = if any { count as u64 } else { 0 };
+        let mut points = geo_search_points(&members, &shape, limit);
+
+        if storekey.is_none() && points.is_empty() {
+            return RespFrame::array(Vec::new());
+        }
+
+        let result_length = points.len() as i64;
+        let returned_items = if count == 0 || result_length < count {
+            result_length
+        } else {
+            count
+        } as usize;
+
+        if sort == GEO_SORT_ASC {
+            points.sort_by(|a, b| a.dist.partial_cmp(&b.dist).expect("geo dist is finite"));
+        } else if sort == GEO_SORT_DESC {
+            points.sort_by(|a, b| b.dist.partial_cmp(&a.dist).expect("geo dist is finite"));
+        }
+
+        match storekey {
+            None => {
+                let mut option_length = 0;
+                if withdist {
+                    option_length += 1;
+                }
+                if withcoords {
+                    option_length += 1;
+                }
+                if withhash {
+                    option_length += 1;
+                }
+                let mut out = Vec::with_capacity(returned_items);
+                for gp in points.iter().take(returned_items) {
+                    let dist = gp.dist / shape.conversion;
+                    if option_length > 0 {
+                        let mut sub = Vec::with_capacity(option_length + 1);
+                        sub.push(bulk(&gp.member));
+                        if withdist {
+                            sub.push(bulk(geo_format_distance(dist)));
+                        }
+                        if withhash {
+                            sub.push(RespFrame::integer(gp.score as i64));
+                        }
+                        if withcoords {
+                            sub.push(RespFrame::array(vec![
+                                bulk(format_human_long_double(gp.longitude)),
+                                bulk(format_human_long_double(gp.latitude)),
+                            ]));
+                        }
+                        out.push(RespFrame::array(sub));
+                    } else {
+                        out.push(bulk(&gp.member));
+                    }
+                }
+                RespFrame::array(out)
+            }
+            Some(dest) => {
+                if returned_items > 0 {
+                    let mut stored: HashMap<Vec<u8>, f64> = HashMap::new();
+                    for gp in points.iter().take(returned_items) {
+                        let dist = gp.dist / shape.conversion;
+                        let score = if storedist { dist } else { gp.score as f64 };
+                        stored.insert(gp.member.clone(), normalize_zero(score));
+                    }
+                    self.db.insert(
+                        dest.clone(),
+                        Entry {
+                            value: StoredValue::ZSet(stored),
+                            expire_at_ms: None,
+                        },
+                    );
+                    self.note_write(&dest);
+                } else {
+                    let existed = self.db.remove(&dest).is_some();
+                    if existed {
+                        self.note_write(&dest);
+                    }
+                }
+                RespFrame::integer(returned_items as i64)
+            }
+        }
+    }
+
     fn get_value(&mut self, key: &[u8]) -> Option<&Entry> {
         self.purge_expired_fields(key);
         self.db.get(key)
@@ -9575,6 +10152,16 @@ fn command_arity(command: &[u8]) -> Option<i64> {
         b"EXPIREAT" => -3,
         b"EXPIRETIME" => 2,
         b"FLUSHALL" => -1,
+        b"GEOADD" => -5,
+        b"GEODIST" => -4,
+        b"GEOHASH" => -2,
+        b"GEOPOS" => -2,
+        b"GEORADIUS" => -6,
+        b"GEORADIUSBYMEMBER" => -5,
+        b"GEORADIUSBYMEMBER_RO" => -5,
+        b"GEORADIUS_RO" => -6,
+        b"GEOSEARCH" => -7,
+        b"GEOSEARCHSTORE" => -8,
         b"GET" => -2,
         b"GETBIT" => 3,
         b"GETDEL" => 2,
@@ -11031,6 +11618,654 @@ fn format_human_long_double(value: f64) -> Vec<u8> {
     text.into_bytes()
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// GEO subsystem — a faithful port of geohash.c / geohash_helper.c / geo.c.
+// Members are stored in a ZSET whose score is the 52-bit interleaved geohash
+// (step 26) of (lon, lat). All float ops, constants and formatting mirror the
+// reference so GEOPOS/GEODIST/GEOHASH/GEOSEARCH outputs are byte-identical.
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Coordinate-range constraints (EPSG:900913); we cannot geocode at the poles.
+const GEO_LAT_MIN: f64 = -85.05112878;
+const GEO_LAT_MAX: f64 = 85.05112878;
+const GEO_LONG_MIN: f64 = -180.0;
+const GEO_LONG_MAX: f64 = 180.0;
+/// `26*2 = 52` bits of precision (`GEO_STEP_MAX`).
+const GEO_STEP_MAX: u8 = 26;
+/// Earth's quadratic mean radius for WGS-84, used by the haversine.
+const GEO_EARTH_RADIUS_IN_METERS: f64 = 6372797.560856;
+const GEO_MERCATOR_MAX: f64 = 20037726.37;
+const GEO_DEG_TO_RAD: f64 = std::f64::consts::PI / 180.0;
+
+const GEO_CIRCULAR: i32 = 1;
+const GEO_RECTANGLE: i32 = 2;
+
+const GEO_SORT_NONE: u8 = 0;
+const GEO_SORT_ASC: u8 = 1;
+const GEO_SORT_DESC: u8 = 2;
+
+const GEO_FLAG_COORDS: u32 = 1 << 0;
+const GEO_FLAG_MEMBER: u32 = 1 << 1;
+const GEO_FLAG_NOSTORE: u32 = 1 << 2;
+const GEO_FLAG_SEARCH: u32 = 1 << 3;
+const GEO_FLAG_SEARCHSTORE: u32 = 1 << 4;
+
+/// Interleave the low bits of `xlo` and `ylo` (x in even positions, y in odd),
+/// the bit-twiddle from `geohash.c interleave64`.
+fn geo_interleave64(xlo: u32, ylo: u32) -> u64 {
+    const B: [u64; 5] = [
+        0x5555555555555555,
+        0x3333333333333333,
+        0x0F0F0F0F0F0F0F0F,
+        0x00FF00FF00FF00FF,
+        0x0000FFFF0000FFFF,
+    ];
+    const S: [u32; 5] = [1, 2, 4, 8, 16];
+    let mut x = xlo as u64;
+    let mut y = ylo as u64;
+    x = (x | (x << S[4])) & B[4];
+    y = (y | (y << S[4])) & B[4];
+    x = (x | (x << S[3])) & B[3];
+    y = (y | (y << S[3])) & B[3];
+    x = (x | (x << S[2])) & B[2];
+    y = (y | (y << S[2])) & B[2];
+    x = (x | (x << S[1])) & B[1];
+    y = (y | (y << S[1])) & B[1];
+    x = (x | (x << S[0])) & B[0];
+    y = (y | (y << S[0])) & B[0];
+    x | (y << 1)
+}
+
+/// Reverse `geo_interleave64` (`geohash.c deinterleave64`).
+fn geo_deinterleave64(interleaved: u64) -> u64 {
+    const B: [u64; 6] = [
+        0x5555555555555555,
+        0x3333333333333333,
+        0x0F0F0F0F0F0F0F0F,
+        0x00FF00FF00FF00FF,
+        0x0000FFFF0000FFFF,
+        0x00000000FFFFFFFF,
+    ];
+    const S: [u32; 6] = [0, 1, 2, 4, 8, 16];
+    let mut x = interleaved;
+    let mut y = interleaved >> 1;
+    x = (x | (x >> S[0])) & B[0];
+    y = (y | (y >> S[0])) & B[0];
+    x = (x | (x >> S[1])) & B[1];
+    y = (y | (y >> S[1])) & B[1];
+    x = (x | (x >> S[2])) & B[2];
+    y = (y | (y >> S[2])) & B[2];
+    x = (x | (x >> S[3])) & B[3];
+    y = (y | (y >> S[3])) & B[3];
+    x = (x | (x >> S[4])) & B[4];
+    y = (y | (y >> S[4])) & B[4];
+    x = (x | (x >> S[5])) & B[5];
+    y = (y | (y >> S[5])) & B[5];
+    x | (y << 32)
+}
+
+#[derive(Clone, Copy, Default)]
+struct GeoHashBits {
+    bits: u64,
+    step: u8,
+}
+
+#[derive(Clone, Copy, Default)]
+struct GeoHashArea {
+    lon_min: f64,
+    lon_max: f64,
+    lat_min: f64,
+    lat_max: f64,
+}
+
+/// Encode `(lon, lat)` to a `GeoHashBits` at the given step over the WGS-84
+/// coordinate range (`geohashEncode` with the standard ranges).
+fn geo_encode_step(lon: f64, lat: f64, step: u8) -> GeoHashBits {
+    let lat_offset = (lat - GEO_LAT_MIN) / (GEO_LAT_MAX - GEO_LAT_MIN);
+    let long_offset = (lon - GEO_LONG_MIN) / (GEO_LONG_MAX - GEO_LONG_MIN);
+    let lat_offset = lat_offset * ((1u64 << step) as f64);
+    let long_offset = long_offset * ((1u64 << step) as f64);
+    GeoHashBits {
+        bits: geo_interleave64(lat_offset as u32, long_offset as u32),
+        step,
+    }
+}
+
+/// The 52-bit-aligned score for a member at `(lon, lat)` (`geohashEncodeWGS84`
+/// at `GEO_STEP_MAX` then `geohashAlign52Bits` — at step 26 that shift is zero).
+fn geo_encode_score(lon: f64, lat: f64) -> u64 {
+    geo_align_52_bits(geo_encode_step(lon, lat, GEO_STEP_MAX))
+}
+
+/// Left-shift a hash's bits up to the fixed 52-bit field (`geohashAlign52Bits`).
+fn geo_align_52_bits(hash: GeoHashBits) -> u64 {
+    hash.bits << (52 - hash.step * 2)
+}
+
+/// Decode a `GeoHashBits` into its bounding box (`geohashDecode`). A zeroed hash
+/// (bits == 0 && step == 0) decodes to the default empty area.
+fn geo_decode_area(hash: GeoHashBits) -> GeoHashArea {
+    if hash.bits == 0 && hash.step == 0 {
+        return GeoHashArea::default();
+    }
+    let step = hash.step;
+    let hash_sep = geo_deinterleave64(hash.bits);
+    let lat_scale = GEO_LAT_MAX - GEO_LAT_MIN;
+    let long_scale = GEO_LONG_MAX - GEO_LONG_MIN;
+    let ilato = (hash_sep & 0xFFFF_FFFF) as u32;
+    let ilono = (hash_sep >> 32) as u32;
+    let scale = (1u64 << step) as f64;
+    GeoHashArea {
+        lat_min: GEO_LAT_MIN + (ilato as f64 / scale) * lat_scale,
+        lat_max: GEO_LAT_MIN + ((ilato as f64 + 1.0) / scale) * lat_scale,
+        lon_min: GEO_LONG_MIN + (ilono as f64 / scale) * long_scale,
+        lon_max: GEO_LONG_MIN + ((ilono as f64 + 1.0) / scale) * long_scale,
+    }
+}
+
+/// Decode a 52-bit score to the center `(lon, lat)`, clamped to the valid range
+/// (`decodeGeohash` → `geohashDecodeToLongLatWGS84` → `geohashDecodeAreaToLongLat`).
+fn geo_decode_score(score: u64) -> (f64, f64) {
+    let area = geo_decode_area(GeoHashBits {
+        bits: score,
+        step: GEO_STEP_MAX,
+    });
+    let mut x = (area.lon_min + area.lon_max) / 2.0;
+    if x > GEO_LONG_MAX {
+        x = GEO_LONG_MAX;
+    }
+    if x < GEO_LONG_MIN {
+        x = GEO_LONG_MIN;
+    }
+    let mut y = (area.lat_min + area.lat_max) / 2.0;
+    if y > GEO_LAT_MAX {
+        y = GEO_LAT_MAX;
+    }
+    if y < GEO_LAT_MIN {
+        y = GEO_LAT_MIN;
+    }
+    (x, y)
+}
+
+/// Shift a hash one cell east/west in interleaved space (`geohash_move_x`).
+fn geo_move_x(hash: &mut GeoHashBits, d: i8) {
+    if d == 0 {
+        return;
+    }
+    let mut x = hash.bits & 0xaaaa_aaaa_aaaa_aaaa;
+    let y = hash.bits & 0x5555_5555_5555_5555;
+    let zz = 0x5555_5555_5555_5555u64 >> (64 - hash.step as u32 * 2);
+    if d > 0 {
+        x = x.wrapping_add(zz + 1);
+    } else {
+        x |= zz;
+        x = x.wrapping_sub(zz + 1);
+    }
+    x &= 0xaaaa_aaaa_aaaa_aaaau64 >> (64 - hash.step as u32 * 2);
+    hash.bits = x | y;
+}
+
+/// Shift a hash one cell north/south in interleaved space (`geohash_move_y`).
+fn geo_move_y(hash: &mut GeoHashBits, d: i8) {
+    if d == 0 {
+        return;
+    }
+    let x = hash.bits & 0xaaaa_aaaa_aaaa_aaaa;
+    let mut y = hash.bits & 0x5555_5555_5555_5555;
+    let zz = 0xaaaa_aaaa_aaaa_aaaau64 >> (64 - hash.step as u32 * 2);
+    if d > 0 {
+        y = y.wrapping_add(zz + 1);
+    } else {
+        y |= zz;
+        y = y.wrapping_sub(zz + 1);
+    }
+    y &= 0x5555_5555_5555_5555u64 >> (64 - hash.step as u32 * 2);
+    hash.bits = x | y;
+}
+
+#[derive(Clone, Copy, Default)]
+struct GeoNeighbors {
+    north: GeoHashBits,
+    east: GeoHashBits,
+    west: GeoHashBits,
+    south: GeoHashBits,
+    north_east: GeoHashBits,
+    south_east: GeoHashBits,
+    north_west: GeoHashBits,
+    south_west: GeoHashBits,
+}
+
+/// Compute the 8 neighbor boxes of `hash` (`geohashNeighbors`).
+fn geo_neighbors(hash: GeoHashBits) -> GeoNeighbors {
+    let mk = |dx: i8, dy: i8| {
+        let mut t = hash;
+        geo_move_x(&mut t, dx);
+        geo_move_y(&mut t, dy);
+        t
+    };
+    GeoNeighbors {
+        east: mk(1, 0),
+        west: mk(-1, 0),
+        south: mk(0, -1),
+        north: mk(0, 1),
+        north_west: mk(-1, 1),
+        north_east: mk(1, 1),
+        south_east: mk(1, -1),
+        south_west: mk(-1, -1),
+    }
+}
+
+fn geo_deg_rad(ang: f64) -> f64 {
+    ang * GEO_DEG_TO_RAD
+}
+
+fn geo_rad_deg(ang: f64) -> f64 {
+    ang / GEO_DEG_TO_RAD
+}
+
+/// Simplified latitude-only great-circle distance (`geohashGetLatDistance`).
+fn geo_lat_distance(lat1d: f64, lat2d: f64) -> f64 {
+    GEO_EARTH_RADIUS_IN_METERS * (geo_deg_rad(lat2d) - geo_deg_rad(lat1d)).abs()
+}
+
+/// Haversine great-circle distance in meters (`geohashGetDistance`), including
+/// the same-longitude fast path guarded by `GEO_EPSILON`.
+fn geo_haversine(lon1d: f64, lat1d: f64, lon2d: f64, lat2d: f64) -> f64 {
+    let lon1r = geo_deg_rad(lon1d);
+    let lon2r = geo_deg_rad(lon2d);
+    let v = ((lon2r - lon1r) / 2.0).sin();
+    const GEO_EPSILON: f64 = 1e-15;
+    if v.abs() <= GEO_EPSILON {
+        return geo_lat_distance(lat1d, lat2d);
+    }
+    let lat1r = geo_deg_rad(lat1d);
+    let lat2r = geo_deg_rad(lat2d);
+    let u = ((lat2r - lat1r) / 2.0).sin();
+    let a = u * u + lat1r.cos() * lat2r.cos() * v * v;
+    2.0 * GEO_EARTH_RADIUS_IN_METERS * a.sqrt().asin()
+}
+
+/// Estimate the geohash step (precision) covering `range_meters` at `lat`
+/// (`geohashEstimateStepsByRadius`).
+fn geo_estimate_steps(range_meters: f64, lat: f64) -> u8 {
+    if range_meters == 0.0 {
+        return 26;
+    }
+    let mut step: i32 = 1;
+    let mut rm = range_meters;
+    while rm < GEO_MERCATOR_MAX {
+        rm *= 2.0;
+        step += 1;
+    }
+    step -= 2;
+    if lat > 66.0 || lat < -66.0 {
+        step -= 1;
+        if lat > 80.0 || lat < -80.0 {
+            step -= 1;
+        }
+    }
+    if step < 1 {
+        step = 1;
+    }
+    if step > 26 {
+        step = 26;
+    }
+    step as u8
+}
+
+#[derive(Clone, Copy, Default)]
+struct GeoShape {
+    kind: i32,
+    xy: [f64; 2],
+    conversion: f64,
+    radius: f64,
+    width: f64,
+    height: f64,
+    bounds: [f64; 4],
+}
+
+/// Compute the lon/lat bounding box of the search shape into `shape.bounds`
+/// (`geohashBoundingBox`, circular/rectangle cases).
+fn geo_bounding_box(shape: &mut GeoShape) {
+    let (height, width) = if shape.kind == GEO_CIRCULAR {
+        (shape.conversion * shape.radius, shape.conversion * shape.radius)
+    } else {
+        (
+            shape.conversion * shape.height / 2.0,
+            shape.conversion * shape.width / 2.0,
+        )
+    };
+    let lon = shape.xy[0];
+    let lat = shape.xy[1];
+    let lat_delta = geo_rad_deg(height / GEO_EARTH_RADIUS_IN_METERS);
+    let long_delta_top =
+        geo_rad_deg(width / GEO_EARTH_RADIUS_IN_METERS / geo_deg_rad(lat + lat_delta).cos());
+    let long_delta_bottom =
+        geo_rad_deg(width / GEO_EARTH_RADIUS_IN_METERS / geo_deg_rad(lat - lat_delta).cos());
+    let southern = lat < 0.0;
+    shape.bounds[0] = if southern {
+        lon - long_delta_bottom
+    } else {
+        lon - long_delta_top
+    };
+    shape.bounds[2] = if southern {
+        lon + long_delta_bottom
+    } else {
+        lon + long_delta_top
+    };
+    shape.bounds[1] = lat - lat_delta;
+    shape.bounds[3] = lat + lat_delta;
+}
+
+struct GeoRadius {
+    hash: GeoHashBits,
+    neighbors: GeoNeighbors,
+}
+
+/// Calculate the center hash + 8 neighbor boxes covering the search shape
+/// (`geohashCalculateAreasByShapeWGS84`), including the step-decrease correction
+/// near edges and the useless-neighbor pruning.
+fn geo_calculate_areas(shape: &mut GeoShape) -> GeoRadius {
+    geo_bounding_box(shape);
+    let min_lon = shape.bounds[0];
+    let min_lat = shape.bounds[1];
+    let max_lon = shape.bounds[2];
+    let max_lat = shape.bounds[3];
+    let lon = shape.xy[0];
+    let lat = shape.xy[1];
+    let mut radius_meters = if shape.kind == GEO_CIRCULAR {
+        shape.radius
+    } else {
+        ((shape.width / 2.0).powi(2) + (shape.height / 2.0).powi(2)).sqrt()
+    };
+    radius_meters *= shape.conversion;
+    let mut steps = geo_estimate_steps(radius_meters, lat);
+    let mut hash = geo_encode_step(lon, lat, steps);
+    let mut neighbors = geo_neighbors(hash);
+    let mut area = geo_decode_area(hash);
+    let mut decrease = false;
+    {
+        let north = geo_decode_area(neighbors.north);
+        let south = geo_decode_area(neighbors.south);
+        let east = geo_decode_area(neighbors.east);
+        let west = geo_decode_area(neighbors.west);
+        if north.lat_max < max_lat {
+            decrease = true;
+        }
+        if south.lat_min > min_lat {
+            decrease = true;
+        }
+        if east.lon_max < max_lon {
+            decrease = true;
+        }
+        if west.lon_min > min_lon {
+            decrease = true;
+        }
+    }
+    if steps > 1 && decrease {
+        steps -= 1;
+        hash = geo_encode_step(lon, lat, steps);
+        neighbors = geo_neighbors(hash);
+        area = geo_decode_area(hash);
+    }
+    if steps >= 2 {
+        if area.lat_min < min_lat {
+            neighbors.south = GeoHashBits::default();
+            neighbors.south_west = GeoHashBits::default();
+            neighbors.south_east = GeoHashBits::default();
+        }
+        if area.lat_max > max_lat {
+            neighbors.north = GeoHashBits::default();
+            neighbors.north_east = GeoHashBits::default();
+            neighbors.north_west = GeoHashBits::default();
+        }
+        if area.lon_min < min_lon {
+            neighbors.west = GeoHashBits::default();
+            neighbors.south_west = GeoHashBits::default();
+            neighbors.north_west = GeoHashBits::default();
+        }
+        if area.lon_max > max_lon {
+            neighbors.east = GeoHashBits::default();
+            neighbors.south_east = GeoHashBits::default();
+            neighbors.north_east = GeoHashBits::default();
+        }
+    }
+    GeoRadius { hash, neighbors }
+}
+
+/// Check whether a decoded point is inside the search shape, returning its
+/// distance to the center (`geoWithinShape` for circular/rectangle).
+fn geo_within_shape(shape: &GeoShape, x: f64, y: f64) -> Option<f64> {
+    if shape.kind == GEO_CIRCULAR {
+        let d = geo_haversine(shape.xy[0], shape.xy[1], x, y);
+        if d > shape.radius * shape.conversion {
+            return None;
+        }
+        Some(d)
+    } else {
+        let lat_distance = geo_lat_distance(y, shape.xy[1]);
+        if lat_distance > shape.height * shape.conversion / 2.0 {
+            return None;
+        }
+        let lon_distance = geo_haversine(x, y, shape.xy[0], y);
+        if lon_distance > shape.width * shape.conversion / 2.0 {
+            return None;
+        }
+        Some(geo_haversine(shape.xy[0], shape.xy[1], x, y))
+    }
+}
+
+struct GeoPoint {
+    member: Vec<u8>,
+    dist: f64,
+    score: u64,
+    longitude: f64,
+    latitude: f64,
+}
+
+/// Search `members` for all points inside `shape`, mirroring
+/// `membersOfAllNeighbors`/`membersOfGeoHashBox`/`geoGetPointsInRange`. We don't
+/// have a skiplist, so we filter the whole ZSET by each box's `[min, max)` score
+/// window, dedup across overlapping boxes, and stop early once `limit` (>0) hits.
+fn geo_search_points(
+    members: &HashMap<Vec<u8>, f64>,
+    shape: &GeoShape,
+    limit: u64,
+) -> Vec<GeoPoint> {
+    let mut work = *shape;
+    let radius = geo_calculate_areas(&mut work);
+    let boxes = [
+        radius.hash,
+        radius.neighbors.north,
+        radius.neighbors.south,
+        radius.neighbors.east,
+        radius.neighbors.west,
+        radius.neighbors.north_east,
+        radius.neighbors.north_west,
+        radius.neighbors.south_east,
+        radius.neighbors.south_west,
+    ];
+    let sorted = sorted_zset_entries(members);
+    let mut result: Vec<GeoPoint> = Vec::new();
+    let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+    let mut last: Option<GeoHashBits> = None;
+    for (idx, b) in boxes.iter().enumerate() {
+        if b.bits == 0 && b.step == 0 {
+            continue;
+        }
+        if idx > 0 {
+            if let Some(prev) = last {
+                if b.bits == prev.bits && b.step == prev.step {
+                    continue;
+                }
+            }
+        }
+        if limit != 0 && result.len() as u64 >= limit {
+            break;
+        }
+        let min = geo_align_52_bits(*b);
+        let mut bplus = *b;
+        bplus.bits += 1;
+        let max = geo_align_52_bits(bplus);
+        for (member, score) in &sorted {
+            let s = *score as u64;
+            if s < min {
+                continue;
+            }
+            if s >= max {
+                continue;
+            }
+            let (x, y) = geo_decode_score(s);
+            if let Some(dist) = geo_within_shape(shape, x, y) {
+                if seen.insert(member.clone()) {
+                    result.push(GeoPoint {
+                        member: member.clone(),
+                        dist,
+                        score: s,
+                        longitude: x,
+                        latitude: y,
+                    });
+                }
+            }
+            if limit != 0 && result.len() as u64 >= limit {
+                break;
+            }
+        }
+        last = Some(*b);
+    }
+    result
+}
+
+/// Render a distance with `fixedpoint_d2string(_, 4)`: 4 fractional digits,
+/// `llrint` (round-half-to-even) scaling.
+fn geo_format_distance(distance: f64) -> Vec<u8> {
+    let scaled = distance * 10000.0;
+    let rounded = scaled.round_ties_even() as i64;
+    let negative = rounded < 0;
+    let value = rounded.unsigned_abs();
+    let int_part = value / 10000;
+    let frac = value % 10000;
+    let mut out = String::new();
+    if negative {
+        out.push('-');
+    }
+    out.push_str(&int_part.to_string());
+    out.push('.');
+    out.push_str(&format!("{:04}", frac));
+    out.into_bytes()
+}
+
+/// Re-encode a member's internal score as the 11-character standard geohash
+/// string valkey emits (`geohashCommand`): decode to `(lon, lat)`, re-encode
+/// over the standard `-180..180`/`-90..90` ranges at step 26, then read 5-bit
+/// groups through valkey's base32 alphabet (the 11th char is always `0`).
+fn geo_hash_string(score: u64) -> Vec<u8> {
+    const ALPHABET: &[u8; 32] = b"0123456789bcdefghjkmnpqrstuvwxyz";
+    let (x, y) = geo_decode_score(score);
+    let lat_offset = (y - (-90.0)) / 180.0 * ((1u64 << 26) as f64);
+    let long_offset = (x - (-180.0)) / 360.0 * ((1u64 << 26) as f64);
+    let bits = geo_interleave64(lat_offset as u32, long_offset as u32);
+    let mut buf = Vec::with_capacity(11);
+    for i in 0..11u32 {
+        let idx = if i == 10 {
+            0
+        } else {
+            ((bits >> (52 - ((i + 1) * 5))) & 0x1f) as usize
+        };
+        buf.push(ALPHABET[idx]);
+    }
+    buf
+}
+
+/// Parse a longitude/latitude/radius argument exactly like
+/// `getDoubleFromObjectOrReply` (`strtod` over the whole string, rejecting NaN
+/// and trailing garbage; the inf spellings are accepted by strtod but lie
+/// outside the coordinate range so the caller rejects them).
+fn parse_geo_double(bytes: &[u8]) -> Option<f64> {
+    let text = std::str::from_utf8(bytes).ok()?.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let value: f64 = text.parse().ok()?;
+    if value.is_nan() {
+        return None;
+    }
+    Some(value)
+}
+
+/// Format a double the way C `printf("%f", v)` does (6 fractional digits), used
+/// only inside the `invalid longitude,latitude pair %f,%f` error.
+fn format_c_double(value: f64) -> String {
+    format!("{:.6}", value)
+}
+
+/// Returns the conversion factor to meters for a GEO unit (`extractUnitOrReply`),
+/// or `None` for an unknown unit.
+fn geo_unit_to_meters(unit: &[u8]) -> Option<f64> {
+    if ascii_eq(unit, b"m") {
+        Some(1.0)
+    } else if ascii_eq(unit, b"km") {
+        Some(1000.0)
+    } else if ascii_eq(unit, b"ft") {
+        Some(0.3048)
+    } else if ascii_eq(unit, b"mi") {
+        Some(1609.34)
+    } else {
+        None
+    }
+}
+
+/// Validate a `(lon, lat)` pair, returning the reference error frame if out of
+/// range (`extractLongLatOrReply`'s range check).
+fn geo_check_lonlat(lon: f64, lat: f64) -> Option<RespFrame> {
+    if !(GEO_LONG_MIN..=GEO_LONG_MAX).contains(&lon) || !(GEO_LAT_MIN..=GEO_LAT_MAX).contains(&lat) {
+        let mut msg = b"ERR invalid longitude,latitude pair ".to_vec();
+        msg.extend_from_slice(format_c_double(lon).as_bytes());
+        msg.push(b',');
+        msg.extend_from_slice(format_c_double(lat).as_bytes());
+        return Some(err(&msg));
+    }
+    None
+}
+
+/// Parse `<radius> <unit>` into `(conversion_to_meters, radius)`
+/// (`extractDistanceOrReply`), rejecting a non-numeric radius, a negative
+/// radius, or a bad unit with the reference error strings.
+fn geo_extract_distance(radius_arg: &[u8], unit_arg: &[u8]) -> Result<(f64, f64), RespFrame> {
+    let Some(distance) = parse_geo_double(radius_arg) else {
+        return Err(err(b"ERR need numeric radius"));
+    };
+    if distance < 0.0 {
+        return Err(err(b"ERR radius cannot be negative"));
+    }
+    let Some(to_meters) = geo_unit_to_meters(unit_arg) else {
+        return Err(err(b"ERR unsupported unit provided. please use M, KM, FT, MI"));
+    };
+    Ok((to_meters, distance))
+}
+
+/// Parse `<width> <height> <unit>` into `(conversion, width, height)`
+/// (`extractBoxOrReply`).
+fn geo_extract_box(
+    width_arg: &[u8],
+    height_arg: &[u8],
+    unit_arg: &[u8],
+) -> Result<(f64, f64, f64), RespFrame> {
+    let Some(width) = parse_geo_double(width_arg) else {
+        return Err(err(b"ERR need numeric width"));
+    };
+    let Some(height) = parse_geo_double(height_arg) else {
+        return Err(err(b"ERR need numeric height"));
+    };
+    if height < 0.0 || width < 0.0 {
+        return Err(err(b"ERR height or width cannot be negative"));
+    }
+    let Some(to_meters) = geo_unit_to_meters(unit_arg) else {
+        return Err(err(b"ERR unsupported unit provided. please use M, KM, FT, MI"));
+    };
+    Ok((to_meters, width, height))
+}
+
 /// Glob match following valkey's `stringmatchlen` (`util.c`, case-sensitive):
 /// `*` (any run), `?` (any single byte), `[...]` classes with `^` negation,
 /// `a-z` ranges, and `\` escape. Faithful recursive port of `stringmatchlen_impl`
@@ -11255,6 +12490,32 @@ mod tests {
     use redis_protocol::encode_resp2;
 
     use super::*;
+
+    #[test]
+    fn geo_encode_decode_distance_match_valkey_sicily() {
+        // Ground truth captured from the pinned reference valkey-server for the
+        // canonical Sicily example. Locks the 52-bit score, the %.17Lf-trimmed
+        // GEOPOS coordinate strings, the 4-digit GEODIST output across units,
+        // and the 11-char GEOHASH re-encoding so a refactor can't silently
+        // break byte-for-byte float parity without this fast test catching it.
+        let palermo = geo_encode_score(13.361389, 38.115556);
+        let catania = geo_encode_score(15.087269, 37.502669);
+        assert_eq!(palermo, 3479099956230698);
+        assert_eq!(catania, 3479447370796909);
+
+        let (px, py) = geo_decode_score(palermo);
+        assert_eq!(format_human_long_double(px), b"13.36138933897018433".to_vec());
+        assert_eq!(format_human_long_double(py), b"38.11555639549629859".to_vec());
+
+        let dist = geo_haversine(px, py, geo_decode_score(catania).0, geo_decode_score(catania).1);
+        assert_eq!(geo_format_distance(dist), b"166274.1516".to_vec());
+        assert_eq!(geo_format_distance(dist / 1000.0), b"166.2742".to_vec());
+        assert_eq!(geo_format_distance(dist / 1609.34), b"103.3182".to_vec());
+        assert_eq!(geo_format_distance(dist / 0.3048), b"545518.8700".to_vec());
+
+        assert_eq!(geo_hash_string(palermo), b"sqc8b49rny0".to_vec());
+        assert_eq!(geo_hash_string(catania), b"sqdtr74hyu0".to_vec());
+    }
 
     #[test]
     fn mutation_epoch_tracks_state_changes_not_reads() {

@@ -1,0 +1,78 @@
+{"id": "geo-add-sicily", "cmd": ["GEOADD", "geo:sicily", "13.361389", "38.115556", "Palermo", "15.087269", "37.502669", "Catania"]}
+{"id": "geo-add-agrigento", "cmd": ["GEOADD", "geo:sicily", "13.583333", "37.316667", "Agrigento"]}
+{"id": "geo-add-again-noop", "cmd": ["GEOADD", "geo:sicily", "13.361389", "38.115556", "Palermo"]}
+{"id": "geo-add-ch-changed", "cmd": ["GEOADD", "geo:sicily", "CH", "13.0", "38.0", "Palermo"]}
+{"id": "geo-add-restore-palermo", "cmd": ["GEOADD", "geo:sicily", "13.361389", "38.115556", "Palermo"]}
+{"id": "geo-add-nx-existing", "cmd": ["GEOADD", "geo:sicily", "NX", "10.0", "30.0", "Palermo"]}
+{"id": "geo-add-nx-new", "cmd": ["GEOADD", "geo:sicily", "NX", "12.0", "44.0", "Genoa"]}
+{"id": "geo-add-xx-missing", "cmd": ["GEOADD", "geo:sicily", "XX", "1.0", "2.0", "Nowhere"]}
+{"id": "geo-card-after-add", "cmd": ["ZCARD", "geo:sicily"]}
+{"id": "geo-rem-genoa", "cmd": ["ZREM", "geo:sicily", "Genoa"]}
+{"id": "geo-pos-two", "cmd": ["GEOPOS", "geo:sicily", "Palermo", "Catania"]}
+{"id": "geo-pos-agrigento", "cmd": ["GEOPOS", "geo:sicily", "Agrigento"]}
+{"id": "geo-pos-with-missing", "cmd": ["GEOPOS", "geo:sicily", "Palermo", "NonExisting", "Catania"]}
+{"id": "geo-pos-missing-key", "cmd": ["GEOPOS", "geo:absent", "Palermo"]}
+{"id": "geo-dist-default-meters", "cmd": ["GEODIST", "geo:sicily", "Palermo", "Catania"]}
+{"id": "geo-dist-km", "cmd": ["GEODIST", "geo:sicily", "Palermo", "Catania", "km"]}
+{"id": "geo-dist-mi", "cmd": ["GEODIST", "geo:sicily", "Palermo", "Catania", "mi"]}
+{"id": "geo-dist-ft", "cmd": ["GEODIST", "geo:sicily", "Palermo", "Catania", "ft"]}
+{"id": "geo-dist-m-explicit", "cmd": ["GEODIST", "geo:sicily", "Palermo", "Catania", "m"]}
+{"id": "geo-dist-palermo-agrigento", "cmd": ["GEODIST", "geo:sicily", "Palermo", "Agrigento", "km"]}
+{"id": "geo-dist-missing-member", "cmd": ["GEODIST", "geo:sicily", "Palermo", "NonExisting"]}
+{"id": "geo-dist-missing-key", "cmd": ["GEODIST", "geo:absent", "a", "b"]}
+{"id": "geo-dist-bad-unit", "cmd": ["GEODIST", "geo:sicily", "Palermo", "Catania", "yards"]}
+{"id": "geo-hash-two", "cmd": ["GEOHASH", "geo:sicily", "Palermo", "Catania"]}
+{"id": "geo-hash-three", "cmd": ["GEOHASH", "geo:sicily", "Palermo", "Catania", "Agrigento"]}
+{"id": "geo-hash-with-missing", "cmd": ["GEOHASH", "geo:sicily", "Palermo", "NonExisting"]}
+{"id": "geo-hash-missing-key", "cmd": ["GEOHASH", "geo:absent", "Palermo"]}
+{"id": "geo-search-radius-asc", "cmd": ["GEOSEARCH", "geo:sicily", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "ASC"]}
+{"id": "geo-search-radius-desc", "cmd": ["GEOSEARCH", "geo:sicily", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "DESC"]}
+{"id": "geo-search-radius-withdist", "cmd": ["GEOSEARCH", "geo:sicily", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "ASC", "WITHDIST"]}
+{"id": "geo-search-radius-withcoord", "cmd": ["GEOSEARCH", "geo:sicily", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "ASC", "WITHCOORD"]}
+{"id": "geo-search-radius-withhash", "cmd": ["GEOSEARCH", "geo:sicily", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "ASC", "WITHHASH"]}
+{"id": "geo-search-radius-all-annotations", "cmd": ["GEOSEARCH", "geo:sicily", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "ASC", "WITHCOORD", "WITHDIST", "WITHHASH"]}
+{"id": "geo-search-radius-count", "cmd": ["GEOSEARCH", "geo:sicily", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "ASC", "COUNT", "1"]}
+{"id": "geo-search-radius-count-withdist", "cmd": ["GEOSEARCH", "geo:sicily", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "COUNT", "2", "WITHDIST"]}
+{"id": "geo-search-box-asc", "cmd": ["GEOSEARCH", "geo:sicily", "FROMLONLAT", "15", "37", "BYBOX", "400", "400", "km", "ASC"]}
+{"id": "geo-search-box-withdist", "cmd": ["GEOSEARCH", "geo:sicily", "FROMLONLAT", "15", "37", "BYBOX", "400", "400", "km", "ASC", "WITHDIST"]}
+{"id": "geo-search-box-narrow", "cmd": ["GEOSEARCH", "geo:sicily", "FROMLONLAT", "15", "37", "BYBOX", "120", "120", "km", "ASC"]}
+{"id": "geo-search-frommember", "cmd": ["GEOSEARCH", "geo:sicily", "FROMMEMBER", "Palermo", "BYRADIUS", "200", "km", "ASC"]}
+{"id": "geo-search-frommember-withdist", "cmd": ["GEOSEARCH", "geo:sicily", "FROMMEMBER", "Agrigento", "BYRADIUS", "150", "km", "ASC", "WITHDIST"]}
+{"id": "geo-search-empty-radius", "cmd": ["GEOSEARCH", "geo:sicily", "FROMLONLAT", "15", "37", "BYRADIUS", "1", "m", "ASC"]}
+{"id": "geo-search-missing-key", "cmd": ["GEOSEARCH", "geo:absent", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "ASC"]}
+{"id": "geo-search-frommember-missing", "cmd": ["GEOSEARCH", "geo:sicily", "FROMMEMBER", "NonExisting", "BYRADIUS", "200", "km"]}
+{"id": "geo-search-both-from", "cmd": ["GEOSEARCH", "geo:sicily", "FROMMEMBER", "Palermo", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km"]}
+{"id": "geo-search-store-incompatible", "cmd": ["GEOSEARCH", "geo:sicily", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "STORE", "x"]}
+{"id": "geo-searchstore-basic", "cmd": ["GEOSEARCHSTORE", "geo:dst", "geo:sicily", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "ASC"]}
+{"id": "geo-searchstore-zrange", "cmd": ["ZRANGE", "geo:dst", "0", "-1", "WITHSCORES"]}
+{"id": "geo-searchstore-storedist", "cmd": ["GEOSEARCHSTORE", "geo:dst2", "geo:sicily", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "ASC", "STOREDIST"]}
+{"id": "geo-searchstore-storedist-zrange", "cmd": ["ZRANGE", "geo:dst2", "0", "-1", "WITHSCORES"]}
+{"id": "geo-searchstore-empty-deletes", "cmd": ["GEOSEARCHSTORE", "geo:dst", "geo:sicily", "FROMLONLAT", "15", "37", "BYRADIUS", "1", "m"]}
+{"id": "geo-searchstore-empty-result", "cmd": ["EXISTS", "geo:dst"]}
+{"id": "geo-searchstore-missing-src", "cmd": ["GEOSEARCHSTORE", "geo:dst3", "geo:absent", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km"]}
+{"id": "geo-searchstore-withdist-incompatible", "cmd": ["GEOSEARCHSTORE", "geo:dst", "geo:sicily", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "WITHDIST"]}
+{"id": "geo-radius-legacy-asc", "cmd": ["GEORADIUS", "geo:sicily", "15", "37", "200", "km", "ASC"]}
+{"id": "geo-radius-legacy-withdist", "cmd": ["GEORADIUS", "geo:sicily", "15", "37", "200", "km", "ASC", "WITHDIST"]}
+{"id": "geo-radius-legacy-withcoord", "cmd": ["GEORADIUS", "geo:sicily", "15", "37", "200", "km", "ASC", "WITHCOORD"]}
+{"id": "geo-radius-ro", "cmd": ["GEORADIUS_RO", "geo:sicily", "15", "37", "200", "km", "ASC"]}
+{"id": "geo-radius-bymember", "cmd": ["GEORADIUSBYMEMBER", "geo:sicily", "Agrigento", "100", "km", "ASC"]}
+{"id": "geo-radius-bymember-ro", "cmd": ["GEORADIUSBYMEMBER_RO", "geo:sicily", "Palermo", "200", "km", "ASC"]}
+{"id": "geo-radius-bymember-missing", "cmd": ["GEORADIUSBYMEMBER", "geo:sicily", "NonExisting", "200", "km"]}
+{"id": "geo-radius-store", "cmd": ["GEORADIUS", "geo:sicily", "15", "37", "200", "km", "ASC", "STORE", "geo:rstore"]}
+{"id": "geo-radius-store-zrange", "cmd": ["ZRANGE", "geo:rstore", "0", "-1", "WITHSCORES"]}
+{"id": "geo-radius-storedist", "cmd": ["GEORADIUS", "geo:sicily", "15", "37", "200", "km", "ASC", "STOREDIST", "geo:rstored"]}
+{"id": "geo-radius-storedist-zrange", "cmd": ["ZRANGE", "geo:rstored", "0", "-1", "WITHSCORES"]}
+{"id": "geo-add-invalid-longitude", "cmd": ["GEOADD", "geo:sicily", "999", "37", "BadPoint"]}
+{"id": "geo-add-invalid-latitude", "cmd": ["GEOADD", "geo:sicily", "15", "99", "BadPoint"]}
+{"id": "geo-add-nx-xx-conflict", "cmd": ["GEOADD", "geo:sicily", "NX", "XX", "13", "38", "A"]}
+{"id": "geo-add-odd-args", "cmd": ["GEOADD", "geo:sicily", "13", "38"]}
+{"id": "geo-add-wrongtype-setup", "cmd": ["SET", "geo:str", "value"]}
+{"id": "geo-add-wrongtype", "cmd": ["GEOADD", "geo:str", "13", "38", "X"]}
+{"id": "geo-pos-wrongtype", "cmd": ["GEOPOS", "geo:str", "X"]}
+{"id": "geo-dist-wrongtype", "cmd": ["GEODIST", "geo:str", "a", "b"]}
+{"id": "geo-hash-wrongtype", "cmd": ["GEOHASH", "geo:str", "X"]}
+{"id": "geo-search-wrongtype", "cmd": ["GEOSEARCH", "geo:str", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km"]}
+{"id": "geo-radius-wrongtype", "cmd": ["GEORADIUS", "geo:str", "15", "37", "200", "km"]}
+{"id": "geo-radius-negative-radius", "cmd": ["GEORADIUS", "geo:sicily", "15", "37", "-5", "km"]}
+{"id": "geo-search-any-without-count", "cmd": ["GEOSEARCH", "geo:sicily", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "ANY"]}
+{"id": "geo-search-count-zero", "cmd": ["GEOSEARCH", "geo:sicily", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "COUNT", "0"]}
