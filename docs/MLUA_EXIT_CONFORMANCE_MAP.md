@@ -5,6 +5,20 @@ which is the intent; this is the measured delta + phased plan). The omnilua #189
 GC blocker that older notes cite is CLOSED (fixed omnilua 0.2.0) — it is NOT a
 blocker. Base Lua 5.1 is NOT the bottleneck.
 
+## PROGRESS (2026-06-23) — EVAL scripting essentially ported
+
+- **omnilua API unblock** (`lua-rs-port` `e61a179`): added `Table::raw_get/raw_set/
+  raw_pairs/set_metatable/get_metatable` (additive glue over existing `RawLuaTable`;
+  omnilua suite + official Lua 44/44 still green). Path dep → instantly available to valdr.
+- **Phase A** (`08ebbc6`): cjson/cmsgpack/bit injected into the lua-rs backend (byte-parity vs mlua).
+- **Phase B** (`60e4150`): RESP converter raw-iterates via `raw_pairs` (no metamethod aborts),
+  readonly `_G`/redis via `set_metatable`, RESP3 map/set/double, insecure-api reset.
+- **Result: lua-rs `unit/scripting` 356 → 423/424 (99.76%)** vs mlua 424/424. The file now
+  completes (no abort). The lone failure is `random numbers are random now` (bucket F).
+- **Remaining for full mlua-exit:** bucket F (RNG determinism, 1 test) · `struct` lib (net-new)
+  · **port FUNCTION/FCALL to lua-rs** (the big chunk — `unit/functions` is still 100% mlua) ·
+  then flip the default + drop mlua/lua-src.
+
 ## Measured delta (default mlua vs `--features redis-commands/lua-rs-engine`)
 
 | Suite | mlua | lua-rs | Note |
