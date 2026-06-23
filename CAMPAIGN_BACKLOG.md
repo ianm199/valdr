@@ -142,6 +142,9 @@ Prep: profile hotpaths, stage fixes; gate any claim on a clean interactive bench
 ---
 
 ## Log (newest first)
+- 2026-06-23 — Wave 8 landed (`ce13532`): +9 zset aggregates (ZUNION/ZINTER/ZDIFF/
+  +STORE/ZRANGESTORE/ZINTERCARD/ZMPOP, WEIGHTS+AGGREGATE). Oracle 1135/0/17. Gap 83.
+  Verified. Engine 117 cmds.
 - 2026-06-23 — Wave 7 landed (`b266130`): +11 string-range + bitmap (GETRANGE/
   SUBSTR/SETRANGE/MSET/MSETNX/PSETEX/GETEX/SETBIT/GETBIT/BITCOUNT/BITPOS). Oracle
   1036/0/17 (crossed 1000 fixtures). Gap 92. Disk recovered to 18G. Next: aggregates.
