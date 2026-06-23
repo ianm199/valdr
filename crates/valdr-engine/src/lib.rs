@@ -186,6 +186,31 @@ pub struct Engine<H> {
     /// stale persisted copy of an expired key is harmless under absolute
     /// `expire_at_ms`.
     dirty: HashSet<Vec<u8>>,
+    /// True between `MULTI` and the closing `EXEC`/`DISCARD`. While set, every
+    /// command other than the transaction-control verbs is queued rather than
+    /// executed, mirroring `c->flag.multi` (`multi.c`).
+    in_multi: bool,
+    /// Commands accumulated since `MULTI`, each as its own argv vector. Replayed
+    /// in order by `EXEC`, mirroring `c->mstate->commands`.
+    multi_queue: Vec<Vec<Vec<u8>>>,
+    /// Set when a queued command failed queue-time validation (unknown command
+    /// or wrong arity), mirroring `c->flag.dirty_exec`. Makes `EXEC` answer
+    /// `EXECABORT` and discard the batch.
+    multi_error: bool,
+    /// Watched key → the per-key version observed at `WATCH` time, mirroring the
+    /// per-db `watched_keys` CAS index (`multi.c`). `EXEC` compares against the
+    /// live versions to decide whether the transaction was invalidated.
+    watched: HashMap<Vec<u8>, u64>,
+    /// Set when any watched key was touched after `WATCH`, mirroring
+    /// `c->flag.dirty_cas`. Makes `EXEC` return a null array and discard the
+    /// batch.
+    dirty_cas: bool,
+    /// Monotonic per-key write counter. `note_write` bumps the entry for the
+    /// touched key; the version of an absent/never-written key is `0`. `WATCH`
+    /// snapshots these and `EXEC`'s CAS check compares them, so a watched key's
+    /// create/modify/delete trips `dirty_cas`. Connection state, never
+    /// serialized into snapshots and excluded from `mutation_epoch`/`dirty`.
+    key_versions: HashMap<Vec<u8>, u64>,
 }
 
 impl Engine<NoopHost> {
@@ -204,6 +229,12 @@ impl<H: Host> Engine<H> {
             script_cache_bytes: 0,
             mutation_epoch: 0,
             dirty: HashSet::new(),
+            in_multi: false,
+            multi_queue: Vec::new(),
+            multi_error: false,
+            watched: HashMap::new(),
+            dirty_cas: false,
+            key_versions: HashMap::new(),
         }
     }
 
@@ -265,6 +296,21 @@ impl<H: Host> Engine<H> {
     fn note_write(&mut self, key: &[u8]) {
         self.mutation_epoch = self.mutation_epoch.wrapping_add(1);
         self.dirty.insert(key.to_vec());
+        self.bump_key_version(key);
+    }
+
+    /// Advance the WATCH/CAS version of `key` and, if the key is currently
+    /// watched, mark the transaction dirty so the next `EXEC` aborts. Mirrors
+    /// `touchWatchedKey` (`multi.c`): any create/modify/delete of a watched key
+    /// — including by this same connection before `EXEC` — invalidates the CAS.
+    /// Transaction bookkeeping only; never touches `mutation_epoch`/`dirty` and
+    /// is excluded from snapshots.
+    fn bump_key_version(&mut self, key: &[u8]) {
+        let version = self.key_versions.entry(key.to_vec()).or_insert(0);
+        *version = version.wrapping_add(1);
+        if self.watched.contains_key(key) {
+            self.dirty_cas = true;
+        }
     }
 
     /// Drain the set of keys changed since the last call, sorted for
@@ -305,6 +351,7 @@ impl<H: Host> Engine<H> {
         self.mutation_epoch = self.mutation_epoch.wrapping_add(1);
         let keys: Vec<Vec<u8>> = self.db.keys().cloned().collect();
         for key in keys {
+            self.bump_key_version(&key);
             self.dirty.insert(key);
         }
     }
@@ -317,8 +364,167 @@ impl<H: Host> Engine<H> {
         &mut self.host
     }
 
+    /// Top-level client entry point. This is the only place transaction
+    /// queueing happens: `MULTI`/`EXEC`/`DISCARD`/`WATCH`/`UNWATCH` always run
+    /// immediately, and while a transaction is open every other command is
+    /// validated and queued instead of executed. Script `redis.call` goes
+    /// straight to `execute_inner` and is therefore never queued — a script
+    /// runs atomically, mirroring that the reference server dispatches script
+    /// commands outside `processCommand`'s MULTI gate.
     pub fn execute(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        let Some(command) = argv.first() else {
+            return unknown_command_error(b"", &[]);
+        };
+
+        if ascii_eq(command, b"MULTI") {
+            return self.multi_command(argv);
+        } else if ascii_eq(command, b"EXEC") {
+            return self.exec_command(argv);
+        } else if ascii_eq(command, b"DISCARD") {
+            return self.discard_command(argv);
+        } else if ascii_eq(command, b"WATCH") {
+            return self.watch_command(argv);
+        } else if ascii_eq(command, b"UNWATCH") {
+            return self.unwatch_command(argv);
+        }
+
+        if self.in_multi {
+            return self.queue_command(argv);
+        }
+
         self.execute_inner(argv, false)
+    }
+
+    /// `MULTI` — open a transaction block. Nesting is rejected with the same
+    /// `CMD_NO_MULTI` message the reference server emits (`server.c`); the
+    /// rejection flags the open transaction dirty so its `EXEC` aborts.
+    fn multi_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 1 {
+            return wrong_arity(b"multi");
+        }
+        if self.in_multi {
+            self.multi_error = true;
+            return err(b"ERR Command 'multi' not allowed inside a transaction");
+        }
+        self.in_multi = true;
+        simple(b"OK")
+    }
+
+    /// `DISCARD` — abort the open transaction, clearing the queue, the
+    /// dirty flags, and the WATCH set. Mirrors `discardCommand`/`discardTransaction`.
+    fn discard_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 1 {
+            return wrong_arity(b"discard");
+        }
+        if !self.in_multi {
+            return err(b"ERR DISCARD without MULTI");
+        }
+        self.reset_transaction();
+        simple(b"OK")
+    }
+
+    /// `EXEC` — run the queued batch. Mirrors `execCommand`: aborts with
+    /// `EXECABORT` when a queued command failed validation, returns a null
+    /// array when a watched key changed (CAS), otherwise replays every queued
+    /// command via `execute_inner` and returns the array of replies. A queued
+    /// command that errors at runtime contributes its error frame to the array
+    /// — only queue-time validation errors abort the whole transaction.
+    fn exec_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 1 {
+            return wrong_arity(b"exec");
+        }
+        if !self.in_multi {
+            return err(b"ERR EXEC without MULTI");
+        }
+        if self.multi_error {
+            self.reset_transaction();
+            return err(b"EXECABORT Transaction discarded because of previous errors.");
+        }
+        if self.dirty_cas {
+            self.reset_transaction();
+            return RespFrame::null_array();
+        }
+        let queued = std::mem::take(&mut self.multi_queue);
+        let mut replies = Vec::with_capacity(queued.len());
+        for command in &queued {
+            replies.push(self.execute_inner(command, false));
+        }
+        self.reset_transaction();
+        RespFrame::array(replies)
+    }
+
+    /// `WATCH key [key …]` — snapshot each key's current version for CAS.
+    /// Rejected inside a transaction with the `CMD_NO_MULTI` message (which
+    /// flags the open transaction dirty), mirroring the reference server.
+    fn watch_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 2 {
+            return wrong_arity(b"watch");
+        }
+        if self.in_multi {
+            self.multi_error = true;
+            return err(b"ERR Command 'watch' not allowed inside a transaction");
+        }
+        for key in &argv[1..] {
+            let version = self.key_versions.get(key.as_slice()).copied().unwrap_or(0);
+            self.watched.insert(key.clone(), version);
+        }
+        simple(b"OK")
+    }
+
+    /// `UNWATCH` — drop every CAS watcher and clear the dirty-CAS flag.
+    /// Mirrors `unwatchCommand`/`unwatchAllKeys`.
+    fn unwatch_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 1 {
+            return wrong_arity(b"unwatch");
+        }
+        self.watched.clear();
+        self.dirty_cas = false;
+        simple(b"OK")
+    }
+
+    /// Validate a command for queueing and either queue it (`+QUEUED`) or reject
+    /// it. A queue-time validation failure (unknown command or wrong arity)
+    /// flags the transaction dirty so the eventual `EXEC` answers `EXECABORT`,
+    /// mirroring `flagTransaction` being called from `processCommand`'s
+    /// pre-execution checks (`server.c`). Mirrors `queueMultiCommand` short-
+    /// circuiting once the transaction is already aborted.
+    fn queue_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if let Err(reply) = self.validate_for_queue(argv) {
+            self.multi_error = true;
+            return reply;
+        }
+        if !self.multi_error {
+            self.multi_queue.push(argv.to_vec());
+        }
+        simple(b"QUEUED")
+    }
+
+    /// Queue-time command validation, mirroring the command lookup + arity
+    /// checks the reference server runs in `processCommand` before deciding to
+    /// queue. Returns the exact rejection frame (`unknown command` / wrong
+    /// arity) on failure. Uses the engine's own dispatchable-command set so the
+    /// check matches what `execute_inner` would actually accept.
+    fn validate_for_queue(&self, argv: &[Vec<u8>]) -> Result<(), RespFrame> {
+        let command = &argv[0];
+        let Some(arity) = command_arity(command) else {
+            return Err(unknown_command_error(command, &argv[1..]));
+        };
+        let argc = argv.len() as i64;
+        if (arity > 0 && arity != argc) || argc < -arity {
+            return Err(wrong_arity(&command.to_ascii_lowercase()));
+        }
+        Ok(())
+    }
+
+    /// Clear all transaction state: the multi bit, the queue, both dirty flags,
+    /// and the WATCH set. Mirrors `discardTransaction`. Called by `EXEC` (after
+    /// the batch runs), `DISCARD`, and the abort paths.
+    fn reset_transaction(&mut self) {
+        self.in_multi = false;
+        self.multi_queue.clear();
+        self.multi_error = false;
+        self.watched.clear();
+        self.dirty_cas = false;
     }
 
     pub fn export_snapshot(&mut self) -> Vec<u8> {
@@ -5406,6 +5612,148 @@ fn validate_numkeys(rest: &[Vec<u8>]) -> Result<usize, RespFrame> {
 /// Formats the unknown-command error exactly like the reference server:
 /// each argument rendered as 'arg' plus a trailing space, stopping once the
 /// rendered argument text reaches 128 bytes.
+/// Arity of every command the engine dispatches plus the transaction-control
+/// verbs, mirroring the `arity` field of `reference/valkey/src/commands/*.json`
+/// (via `harness/command-registry.json`). A positive value requires exactly
+/// that many arguments (command name included); a negative value requires at
+/// least its absolute value. `None` means the command is unknown to the engine,
+/// which the queue-time validator reports as an unknown-command error — matching
+/// that these are precisely the commands `execute_inner` would accept. Match is
+/// case-insensitive, mirroring `lookupCommand`'s case-folding.
+fn command_arity(command: &[u8]) -> Option<i64> {
+    let upper = command.to_ascii_uppercase();
+    let arity = match upper.as_slice() {
+        b"APPEND" => 3,
+        b"BITCOUNT" => -2,
+        b"BITPOS" => -3,
+        b"COPY" => -3,
+        b"DECR" => 2,
+        b"DECRBY" => 3,
+        b"DEL" => -2,
+        b"DISCARD" => 1,
+        b"ECHO" => 2,
+        b"EVAL" => -3,
+        b"EVALSHA" => -3,
+        b"EXEC" => 1,
+        b"EXISTS" => -3,
+        b"EXPIRE" => -3,
+        b"EXPIREAT" => -3,
+        b"EXPIRETIME" => 2,
+        b"FLUSHALL" => -1,
+        b"GET" => -2,
+        b"GETBIT" => 3,
+        b"GETDEL" => 2,
+        b"GETEX" => -2,
+        b"GETRANGE" => 4,
+        b"GETSET" => 3,
+        b"HDEL" => -3,
+        b"HEXISTS" => 3,
+        b"HGET" => 3,
+        b"HGETALL" => 2,
+        b"HINCRBY" => 4,
+        b"HKEYS" => 2,
+        b"HLEN" => 2,
+        b"HMGET" => -3,
+        b"HMSET" => -4,
+        b"HSET" => -4,
+        b"HSETNX" => 4,
+        b"HSTRLEN" => 3,
+        b"HVALS" => 2,
+        b"INCR" => 2,
+        b"INCRBY" => 3,
+        b"LINDEX" => 3,
+        b"LINSERT" => 5,
+        b"LLEN" => 2,
+        b"LMOVE" => 5,
+        b"LMPOP" => -4,
+        b"LPOP" => -2,
+        b"LPOS" => -3,
+        b"LPUSH" => -3,
+        b"LPUSHX" => -3,
+        b"LRANGE" => 4,
+        b"LREM" => 4,
+        b"LSET" => 4,
+        b"LTRIM" => 4,
+        b"MGET" => -2,
+        b"MSET" => -3,
+        b"MSETNX" => -3,
+        b"MULTI" => 1,
+        b"PERSIST" => 2,
+        b"PEXPIRE" => -3,
+        b"PEXPIREAT" => -3,
+        b"PEXPIRETIME" => 2,
+        b"PING" => -1,
+        b"PSETEX" => 4,
+        b"PTTL" => 2,
+        b"RENAME" => 3,
+        b"RENAMENX" => 3,
+        b"RPOP" => -2,
+        b"RPOPLPUSH" => 3,
+        b"RPUSH" => -3,
+        b"RPUSHX" => -3,
+        b"SADD" => -3,
+        b"SCARD" => 2,
+        b"SCRIPT" => -2,
+        b"SDIFF" => -2,
+        b"SDIFFSTORE" => -3,
+        b"SET" => -3,
+        b"SETBIT" => 4,
+        b"SETEX" => 4,
+        b"SETNX" => 3,
+        b"SETRANGE" => 4,
+        b"SINTER" => -2,
+        b"SINTERCARD" => -3,
+        b"SINTERSTORE" => -3,
+        b"SISMEMBER" => 3,
+        b"SMEMBERS" => 2,
+        b"SMISMEMBER" => -3,
+        b"SMOVE" => 4,
+        b"SREM" => -3,
+        b"STRLEN" => 2,
+        b"SUBSTR" => 4,
+        b"SUNION" => -2,
+        b"SUNIONSTORE" => -3,
+        b"TOUCH" => -2,
+        b"TTL" => 2,
+        b"TYPE" => 2,
+        b"UNLINK" => -2,
+        b"UNWATCH" => 1,
+        b"WATCH" => -2,
+        b"ZADD" => -4,
+        b"ZCARD" => 2,
+        b"ZCOUNT" => 4,
+        b"ZDIFF" => -3,
+        b"ZDIFFSTORE" => -4,
+        b"ZINCRBY" => 4,
+        b"ZINTER" => -3,
+        b"ZINTERCARD" => -3,
+        b"ZINTERSTORE" => -4,
+        b"ZLEXCOUNT" => 4,
+        b"ZMPOP" => -4,
+        b"ZMSCORE" => -3,
+        b"ZPOPMAX" => -2,
+        b"ZPOPMIN" => -2,
+        b"ZRANGE" => -4,
+        b"ZRANGEBYLEX" => -4,
+        b"ZRANGEBYSCORE" => -4,
+        b"ZRANGESTORE" => -5,
+        b"ZRANK" => -3,
+        b"ZREM" => -3,
+        b"ZREMRANGEBYLEX" => 4,
+        b"ZREMRANGEBYRANK" => 4,
+        b"ZREMRANGEBYSCORE" => 4,
+        b"ZREVRANGE" => -4,
+        b"ZREVRANGEBYLEX" => -4,
+        b"ZREVRANGEBYSCORE" => -4,
+        b"ZREVRANK" => -3,
+        b"ZSCORE" => 3,
+        b"ZUNION" => -3,
+        b"ZUNIONSTORE" => -4,
+        _ => return None,
+    };
+    Some(arity)
+}
+
 fn unknown_command_error(command: &[u8], args: &[Vec<u8>]) -> RespFrame {
     let mut msg = b"ERR unknown command '".to_vec();
     msg.extend_from_slice(command);
@@ -7806,6 +8154,197 @@ mod tests {
                 b"missing"
             ]))),
             b"$7\r\nboolean\r\n"
+        );
+    }
+
+    #[test]
+    fn multi_exec_runs_queued_commands_in_order() {
+        let mut engine = Engine::new_in_memory();
+        assert_eq!(resp2(&engine.execute(&argv(&[b"MULTI"]))), b"+OK\r\n");
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"SET", b"mx:k", b"1"]))),
+            b"+QUEUED\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"INCR", b"mx:k"]))),
+            b"+QUEUED\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"EXEC"]))),
+            b"*2\r\n+OK\r\n:2\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"GET", b"mx:k"]))),
+            b"$1\r\n2\r\n"
+        );
+    }
+
+    #[test]
+    fn exec_without_multi_and_discard_without_multi_error() {
+        let mut engine = Engine::new_in_memory();
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"EXEC"]))),
+            b"-ERR EXEC without MULTI\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"DISCARD"]))),
+            b"-ERR DISCARD without MULTI\r\n"
+        );
+    }
+
+    #[test]
+    fn nested_multi_aborts_the_transaction() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"MULTI"]));
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"MULTI"]))),
+            b"-ERR Command 'multi' not allowed inside a transaction\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"EXEC"]))),
+            b"-EXECABORT Transaction discarded because of previous errors.\r\n"
+        );
+    }
+
+    #[test]
+    fn discard_rolls_back_the_queue() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"MULTI"]));
+        engine.execute(&argv(&[b"SET", b"mx:d", b"9"]));
+        assert_eq!(resp2(&engine.execute(&argv(&[b"DISCARD"]))), b"+OK\r\n");
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"GET", b"mx:d"]))),
+            b"$-1\r\n"
+        );
+    }
+
+    #[test]
+    fn queue_time_error_makes_exec_abort_and_applies_nothing() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"MULTI"]));
+        assert!(resp2(&engine.execute(&argv(&[b"NOTACOMMAND", b"a", b"b"])))
+            .starts_with(b"-ERR unknown command 'NOTACOMMAND'"));
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"SET", b"mx:q", b"1"]))),
+            b"+QUEUED\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"EXEC"]))),
+            b"-EXECABORT Transaction discarded because of previous errors.\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"GET", b"mx:q"]))),
+            b"$-1\r\n"
+        );
+    }
+
+    #[test]
+    fn queue_time_arity_error_aborts() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"MULTI"]));
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"GET"]))),
+            b"-ERR wrong number of arguments for 'get' command\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"EXEC"]))),
+            b"-EXECABORT Transaction discarded because of previous errors.\r\n"
+        );
+    }
+
+    #[test]
+    fn runtime_error_inside_exec_does_not_abort_the_batch() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"MULTI"]));
+        engine.execute(&argv(&[b"SET", b"mx:r", b"v"]));
+        engine.execute(&argv(&[b"INCR", b"mx:r"]));
+        engine.execute(&argv(&[b"LPUSH", b"mx:r", b"x"]));
+        let frame = resp2(&engine.execute(&argv(&[b"EXEC"])));
+        assert_eq!(
+            frame,
+            b"*3\r\n+OK\r\n-ERR value is not an integer or out of range\r\n-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"GET", b"mx:r"]))),
+            b"$1\r\nv\r\n"
+        );
+    }
+
+    #[test]
+    fn watch_cas_returns_null_array_when_a_watched_key_changes() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"SET", b"mx:w", b"1"]));
+        engine.execute(&argv(&[b"WATCH", b"mx:w"]));
+        engine.execute(&argv(&[b"SET", b"mx:w", b"2"]));
+        engine.execute(&argv(&[b"MULTI"]));
+        engine.execute(&argv(&[b"GET", b"mx:w"]));
+        assert_eq!(resp2(&engine.execute(&argv(&[b"EXEC"]))), b"*-1\r\n");
+    }
+
+    #[test]
+    fn watch_happy_path_runs_when_no_watched_key_changes() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"SET", b"mx:w", b"1"]));
+        engine.execute(&argv(&[b"WATCH", b"mx:w"]));
+        engine.execute(&argv(&[b"MULTI"]));
+        engine.execute(&argv(&[b"GET", b"mx:w"]));
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"EXEC"]))),
+            b"*1\r\n$1\r\n1\r\n"
+        );
+    }
+
+    #[test]
+    fn unwatch_clears_dirty_cas() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"SET", b"mx:w", b"1"]));
+        engine.execute(&argv(&[b"WATCH", b"mx:w"]));
+        engine.execute(&argv(&[b"SET", b"mx:w", b"2"]));
+        assert_eq!(resp2(&engine.execute(&argv(&[b"UNWATCH"]))), b"+OK\r\n");
+        engine.execute(&argv(&[b"MULTI"]));
+        engine.execute(&argv(&[b"GET", b"mx:w"]));
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"EXEC"]))),
+            b"*1\r\n$1\r\n2\r\n"
+        );
+    }
+
+    #[test]
+    fn transaction_state_does_not_leak_into_snapshots_or_epoch() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"SET", b"mx:s", b"v"]));
+        let _ = engine.take_dirty();
+        let snapshot_before = engine.export_snapshot();
+        let epoch_before = engine.mutation_epoch();
+
+        engine.execute(&argv(&[b"WATCH", b"mx:s"]));
+        engine.execute(&argv(&[b"MULTI"]));
+        engine.execute(&argv(&[b"GET", b"mx:s"]));
+        engine.execute(&argv(&[b"EXEC"]));
+
+        assert_eq!(engine.export_snapshot(), snapshot_before);
+        assert_eq!(engine.mutation_epoch(), epoch_before);
+        assert!(engine.take_dirty().is_empty());
+    }
+
+    #[test]
+    fn script_internal_calls_run_atomically_when_a_queued_eval_executes() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"MULTI"]));
+        let reply = resp2(&engine.execute(&argv(&[
+            b"EVAL",
+            b"redis.call('SET', KEYS[1], '1'); return redis.call('INCR', KEYS[1])",
+            b"1",
+            b"mx:script",
+        ])));
+        assert_eq!(reply, b"+QUEUED\r\n");
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"EXEC"]))),
+            b"*1\r\n:2\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"GET", b"mx:script"]))),
+            b"$1\r\n2\r\n"
         );
     }
 }

@@ -1,0 +1,50 @@
+{"id": "basic-multi", "cmd": ["MULTI"]}
+{"id": "basic-queue-set", "cmd": ["SET", "mx:k", "1"]}
+{"id": "basic-queue-incr", "cmd": ["INCR", "mx:k"]}
+{"id": "basic-exec", "cmd": ["EXEC"]}
+{"id": "basic-get-applied", "cmd": ["GET", "mx:k"]}
+{"id": "exec-without-multi", "cmd": ["EXEC"]}
+{"id": "discard-without-multi", "cmd": ["DISCARD"]}
+{"id": "nested-open", "cmd": ["MULTI"]}
+{"id": "nested-inner", "cmd": ["MULTI"]}
+{"id": "nested-exec-aborts", "cmd": ["EXEC"]}
+{"id": "discard-open", "cmd": ["MULTI"]}
+{"id": "discard-queue-set", "cmd": ["SET", "mx:d", "9"]}
+{"id": "discard-abort", "cmd": ["DISCARD"]}
+{"id": "discard-not-applied", "cmd": ["GET", "mx:d"]}
+{"id": "qerr-open", "cmd": ["MULTI"]}
+{"id": "qerr-unknown", "cmd": ["NOTACOMMAND", "a", "b"]}
+{"id": "qerr-queue-set", "cmd": ["SET", "mx:q", "1"]}
+{"id": "qerr-exec-aborts", "cmd": ["EXEC"]}
+{"id": "qerr-not-applied", "cmd": ["GET", "mx:q"]}
+{"id": "qarity-open", "cmd": ["MULTI"]}
+{"id": "qarity-bad", "cmd": ["GET"]}
+{"id": "qarity-queue-set", "cmd": ["SET", "mx:a", "1"]}
+{"id": "qarity-exec-aborts", "cmd": ["EXEC"]}
+{"id": "qarity-not-applied", "cmd": ["GET", "mx:a"]}
+{"id": "runtime-open", "cmd": ["MULTI"]}
+{"id": "runtime-queue-set", "cmd": ["SET", "mx:r", "v"]}
+{"id": "runtime-queue-incr", "cmd": ["INCR", "mx:r"]}
+{"id": "runtime-queue-lpush", "cmd": ["LPUSH", "mx:r", "x"]}
+{"id": "runtime-exec-mixed", "cmd": ["EXEC"]}
+{"id": "runtime-set-survived", "cmd": ["GET", "mx:r"]}
+{"id": "watch-seed", "cmd": ["SET", "mx:w", "1"]}
+{"id": "watch-cas", "cmd": ["WATCH", "mx:w"]}
+{"id": "watch-cas-modify", "cmd": ["SET", "mx:w", "2"]}
+{"id": "watch-cas-open", "cmd": ["MULTI"]}
+{"id": "watch-cas-queue-get", "cmd": ["GET", "mx:w"]}
+{"id": "watch-cas-exec-nil", "cmd": ["EXEC"]}
+{"id": "watch-happy", "cmd": ["WATCH", "mx:w"]}
+{"id": "watch-happy-open", "cmd": ["MULTI"]}
+{"id": "watch-happy-queue-get", "cmd": ["GET", "mx:w"]}
+{"id": "watch-happy-exec", "cmd": ["EXEC"]}
+{"id": "unwatch-seed", "cmd": ["SET", "mx:u", "1"]}
+{"id": "unwatch-watch", "cmd": ["WATCH", "mx:u"]}
+{"id": "unwatch-modify", "cmd": ["SET", "mx:u", "2"]}
+{"id": "unwatch-clear", "cmd": ["UNWATCH"]}
+{"id": "unwatch-open", "cmd": ["MULTI"]}
+{"id": "unwatch-queue-get", "cmd": ["GET", "mx:u"]}
+{"id": "unwatch-exec-runs", "cmd": ["EXEC"]}
+{"id": "watch-in-multi-open", "cmd": ["MULTI"]}
+{"id": "watch-in-multi-reject", "cmd": ["WATCH", "mx:w"]}
+{"id": "watch-in-multi-exec-aborts", "cmd": ["EXEC"]}
