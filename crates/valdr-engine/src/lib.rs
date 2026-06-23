@@ -141,17 +141,68 @@ impl StreamId {
     }
 }
 
+/// The sentinel `entries_read` value meaning "the group's logical read counter
+/// is not obtainable" (`SCG_INVALID_ENTRIES_READ`, `stream.h`). Stored as the
+/// `-1` C sentinel; rendered as a RESP null in XINFO GROUPS.
+const SCG_INVALID_ENTRIES_READ: i64 = -1;
+
+/// One entry in a group's PEL (pending entries list), mirroring `streamNACK`
+/// (`stream.h`). `delivery_time_ms` is the host clock at delivery and is
+/// serialized but never asserted in differential fixtures (clock-nondeterministic).
+#[derive(Debug, Clone)]
+struct PendingEntry {
+    consumer: Vec<u8>,
+    delivery_time_ms: u64,
+    delivery_count: u64,
+}
+
+/// One consumer in a group, mirroring `streamConsumer` (`stream.h`). `pending`
+/// is the set of IDs this consumer owns in the group PEL. `seen_time_ms` /
+/// `active_time_ms` are host-clock timestamps, serialized but clock-nondeterministic.
+#[derive(Debug, Clone, Default)]
+struct Consumer {
+    pending: std::collections::BTreeSet<StreamId>,
+    seen_time_ms: u64,
+    active_time_ms: u64,
+}
+
+/// One consumer group, mirroring `streamCG` (`stream.h`). `pending` is the
+/// group PEL keyed by ID; `consumers` maps consumer name → `Consumer`.
+/// `entries_read` is the group's logical read counter (or `SCG_INVALID_ENTRIES_READ`).
+#[derive(Debug, Clone)]
+struct Group {
+    last_delivered_id: StreamId,
+    pending: std::collections::BTreeMap<StreamId, PendingEntry>,
+    consumers: std::collections::HashMap<Vec<u8>, Consumer>,
+    entries_read: i64,
+}
+
+impl Default for Group {
+    fn default() -> Self {
+        Group {
+            last_delivered_id: StreamId::MIN,
+            pending: std::collections::BTreeMap::new(),
+            consumers: std::collections::HashMap::new(),
+            entries_read: SCG_INVALID_ENTRIES_READ,
+        }
+    }
+}
+
 /// The internal state of a single stream value, mirroring the parts of the C
-/// `stream` struct (`stream.h`) the non-blocking core needs. Consumer groups
-/// (`cgroups`) are deferred. Entries are an ordered map by ID; the flat
-/// `BTreeMap` replaces the C radix-tree-of-listpacks but preserves the same
-/// observable ordering and range semantics.
+/// `stream` struct (`stream.h`) the non-blocking core needs. Entries are an
+/// ordered map by ID; the flat `BTreeMap` replaces the C radix-tree-of-listpacks
+/// but preserves the same observable ordering and range semantics. `groups`
+/// holds consumer-group state (`cgroups`). `first_id` mirrors `s->first_id`
+/// (the recorded-first-entry-id), which is only recomputed when the actual
+/// first entry is removed — it is NOT simply the current minimum.
 #[derive(Debug, Clone, Default)]
 struct StreamValue {
     entries: std::collections::BTreeMap<StreamId, Vec<(Vec<u8>, Vec<u8>)>>,
     last_id: StreamId,
     max_deleted_id: StreamId,
     entries_added: u64,
+    first_id: StreamId,
+    groups: std::collections::HashMap<Vec<u8>, Group>,
 }
 
 impl StoredValue {
@@ -936,6 +987,16 @@ impl<H: Host> Engine<H> {
             self.xsetid_command(argv)
         } else if ascii_eq(command, b"XREAD") {
             self.xread_command(argv)
+        } else if ascii_eq(command, b"XGROUP") {
+            self.xgroup_command(argv)
+        } else if ascii_eq(command, b"XREADGROUP") {
+            self.xreadgroup_command(argv)
+        } else if ascii_eq(command, b"XACK") {
+            self.xack_command(argv)
+        } else if ascii_eq(command, b"XPENDING") {
+            self.xpending_command(argv)
+        } else if ascii_eq(command, b"XINFO") {
+            self.xinfo_command(argv)
         } else if ascii_eq(command, b"GETRANGE") || ascii_eq(command, b"SUBSTR") {
             self.getrange_command(argv)
         } else if ascii_eq(command, b"SETRANGE") {
@@ -4934,6 +4995,9 @@ impl<H: Host> Engine<H> {
         stream.entries.insert(new_id, fields);
         stream.last_id = new_id;
         stream.entries_added += 1;
+        if stream.entries.len() == 1 {
+            stream.first_id = new_id;
+        }
 
         if let Some(t) = &trim {
             apply_stream_trim(stream, t);
@@ -5113,8 +5177,12 @@ impl<H: Host> Engine<H> {
             None => return RespFrame::integer(0),
         };
         let mut deleted = 0i64;
+        let mut first_entry_removed = false;
         for id in ids {
             if stream.entries.remove(&id).is_some() {
+                if id == stream.first_id {
+                    first_entry_removed = true;
+                }
                 if id > stream.max_deleted_id {
                     stream.max_deleted_id = id;
                 }
@@ -5122,6 +5190,11 @@ impl<H: Host> Engine<H> {
             }
         }
         if deleted > 0 {
+            if stream.entries.is_empty() {
+                stream.first_id = StreamId::MIN;
+            } else if first_entry_removed {
+                stream.first_id = *stream.entries.keys().next().expect("non-empty");
+            }
             self.note_write(&argv[1]);
         }
         RespFrame::integer(deleted)
@@ -5391,6 +5464,748 @@ impl<H: Host> Engine<H> {
         } else {
             RespFrame::array(result)
         }
+    }
+
+    /// XGROUP CREATE|SETID|DESTROY|CREATECONSUMER|DELCONSUMER (`xgroupCommand`,
+    /// `t_stream.c`). Manages consumer-group lifecycle. The missing-key and
+    /// missing-group checks mirror the C ordering exactly.
+    fn xgroup_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 2 {
+            return wrong_arity(b"xgroup");
+        }
+        let subcommand = &argv[1];
+        let create = ascii_eq(subcommand, b"CREATE");
+        let setid = ascii_eq(subcommand, b"SETID");
+        let destroy = ascii_eq(subcommand, b"DESTROY");
+        let createconsumer = ascii_eq(subcommand, b"CREATECONSUMER");
+        let delconsumer = ascii_eq(subcommand, b"DELCONSUMER");
+
+        if !(create || setid || destroy || createconsumer || delconsumer) {
+            return subcommand_syntax_error(b"XGROUP", subcommand);
+        }
+        if argv.len() < 4 {
+            return subcommand_syntax_error(b"XGROUP", subcommand);
+        }
+
+        let mut mkstream = false;
+        let mut entries_read: i64 = SCG_INVALID_ENTRIES_READ;
+        let mut i = 5usize;
+        while i < argv.len() {
+            if create && ascii_eq(&argv[i], b"MKSTREAM") {
+                mkstream = true;
+                i += 1;
+            } else if (create || setid) && ascii_eq(&argv[i], b"ENTRIESREAD") && i + 1 < argv.len() {
+                let Some(n) = parse_i64(&argv[i + 1]) else {
+                    return err(b"ERR value is not an integer or out of range");
+                };
+                if n < 0 && n != SCG_INVALID_ENTRIES_READ {
+                    return err(b"ERR value for ENTRIESREAD must be positive or -1");
+                }
+                entries_read = n;
+                i += 2;
+            } else {
+                return subcommand_syntax_error(b"XGROUP", subcommand);
+            }
+        }
+
+        let key = &argv[2];
+        self.purge_if_expired(key);
+        let key_exists = match self.db.get(key) {
+            Some(Entry {
+                value: StoredValue::Stream(_),
+                ..
+            }) => true,
+            Some(_) => return wrong_type(),
+            None => false,
+        };
+        let grpname = &argv[3];
+
+        if !mkstream && !key_exists {
+            return err(
+                b"ERR The XGROUP subcommand requires the key to exist. Note that for CREATE you may want to use the MKSTREAM option to create an empty stream automatically.",
+            );
+        }
+
+        if !mkstream && key_exists && (setid || createconsumer || delconsumer) {
+            let group_exists = match self.db.get(key) {
+                Some(Entry {
+                    value: StoredValue::Stream(stream),
+                    ..
+                }) => stream.groups.contains_key(grpname.as_slice()),
+                _ => false,
+            };
+            if !group_exists {
+                let mut msg = b"NOGROUP No such consumer group '".to_vec();
+                msg.extend_from_slice(grpname);
+                msg.extend_from_slice(b"' for key name '");
+                msg.extend_from_slice(key);
+                msg.extend_from_slice(b"'");
+                return err(&msg);
+            }
+        }
+
+        if create {
+            if argv.len() < 5 || argv.len() > 8 {
+                return subcommand_syntax_error(b"XGROUP", subcommand);
+            }
+            let id = if argv[4].len() == 1 && argv[4][0] == b'$' {
+                match self.db.get(key) {
+                    Some(Entry {
+                        value: StoredValue::Stream(stream),
+                        ..
+                    }) => stream.last_id,
+                    _ => StreamId::MIN,
+                }
+            } else {
+                match parse_stream_id_strict(&argv[4], 0) {
+                    Ok((id, _)) => id,
+                    Err(frame) => return frame,
+                }
+            };
+            if !key_exists {
+                self.db.insert(
+                    key.clone(),
+                    Entry {
+                        value: StoredValue::Stream(StreamValue::default()),
+                        expire_at_ms: None,
+                    },
+                );
+            }
+            let stream = match self.db.get_mut(key) {
+                Some(Entry {
+                    value: StoredValue::Stream(stream),
+                    ..
+                }) => stream,
+                _ => unreachable!("stream just created or verified"),
+            };
+            if stream.groups.contains_key(grpname.as_slice()) {
+                return err(b"BUSYGROUP Consumer Group name already exists");
+            }
+            stream.groups.insert(
+                grpname.clone(),
+                Group {
+                    last_delivered_id: id,
+                    entries_read,
+                    ..Group::default()
+                },
+            );
+            self.note_write(key);
+            simple(b"OK")
+        } else if setid {
+            if argv.len() != 5 && argv.len() != 7 {
+                return subcommand_syntax_error(b"XGROUP", subcommand);
+            }
+            let id = if argv[4].len() == 1 && argv[4][0] == b'$' {
+                match self.db.get(key) {
+                    Some(Entry {
+                        value: StoredValue::Stream(stream),
+                        ..
+                    }) => stream.last_id,
+                    _ => StreamId::MIN,
+                }
+            } else {
+                match parse_stream_range_id_or_normal(&argv[4]) {
+                    Ok(id) => id,
+                    Err(frame) => return frame,
+                }
+            };
+            let stream = self.stream_mut_unchecked(key);
+            let group = stream.groups.get_mut(grpname.as_slice()).expect("verified");
+            group.last_delivered_id = id;
+            group.entries_read = entries_read;
+            self.note_write(key);
+            simple(b"OK")
+        } else if destroy {
+            if argv.len() != 4 {
+                return subcommand_syntax_error(b"XGROUP", subcommand);
+            }
+            let stream = self.stream_mut_unchecked(key);
+            let removed = stream.groups.remove(grpname.as_slice()).is_some();
+            if removed {
+                self.note_write(key);
+            }
+            RespFrame::integer(if removed { 1 } else { 0 })
+        } else if createconsumer {
+            if argv.len() != 5 {
+                return subcommand_syntax_error(b"XGROUP", subcommand);
+            }
+            let now = self.host.now_millis();
+            let stream = self.stream_mut_unchecked(key);
+            let group = stream.groups.get_mut(grpname.as_slice()).expect("verified");
+            let consumer_name = &argv[4];
+            let created = if group.consumers.contains_key(consumer_name.as_slice()) {
+                false
+            } else {
+                group.consumers.insert(
+                    consumer_name.clone(),
+                    Consumer {
+                        seen_time_ms: now,
+                        ..Consumer::default()
+                    },
+                );
+                true
+            };
+            if created {
+                self.note_write(key);
+            }
+            RespFrame::integer(if created { 1 } else { 0 })
+        } else {
+            if argv.len() != 5 {
+                return subcommand_syntax_error(b"XGROUP", subcommand);
+            }
+            let stream = self.stream_mut_unchecked(key);
+            let group = stream.groups.get_mut(grpname.as_slice()).expect("verified");
+            let consumer_name = &argv[4];
+            let pending = match group.consumers.remove(consumer_name.as_slice()) {
+                Some(consumer) => {
+                    let count = consumer.pending.len() as i64;
+                    for id in &consumer.pending {
+                        group.pending.remove(id);
+                    }
+                    count
+                }
+                None => 0,
+            };
+            if pending > 0 {
+                self.note_write(key);
+            }
+            RespFrame::integer(pending)
+        }
+    }
+
+    /// Borrow the stream at `key` mutably, asserting it exists and is a stream.
+    /// Only call after the caller has already verified both conditions.
+    fn stream_mut_unchecked(&mut self, key: &[u8]) -> &mut StreamValue {
+        match self.db.get_mut(key) {
+            Some(Entry {
+                value: StoredValue::Stream(stream),
+                ..
+            }) => stream,
+            _ => unreachable!("stream existence verified by caller"),
+        }
+    }
+
+    /// XREADGROUP GROUP g c [COUNT n] [NOACK] STREAMS key... id...
+    /// (`xreadCommand`, group path, `t_stream.c`). For id `>` delivers new
+    /// messages after the group's last_delivered_id and records them in the PEL;
+    /// for an explicit id serves the consumer's own history from the PEL.
+    fn xreadgroup_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 4 {
+            return wrong_arity(b"xreadgroup");
+        }
+        let mut count: i64 = 0;
+        let mut noack = false;
+        let mut groupname: Option<Vec<u8>> = None;
+        let mut consumername: Option<Vec<u8>> = None;
+        let mut streams_arg: Option<usize> = None;
+        let mut i = 1usize;
+        while i < argv.len() {
+            let moreargs = argv.len() - i - 1;
+            let opt = &argv[i];
+            if ascii_eq(opt, b"BLOCK") && moreargs >= 1 {
+                if parse_i64(&argv[i + 1]).is_none() {
+                    return err(b"ERR timeout is not an integer or out of range");
+                }
+                i += 1;
+            } else if ascii_eq(opt, b"COUNT") && moreargs >= 1 {
+                let Some(n) = parse_i64(&argv[i + 1]) else {
+                    return err(b"ERR value is not an integer or out of range");
+                };
+                count = if n < 0 { 0 } else { n };
+                i += 1;
+            } else if ascii_eq(opt, b"GROUP") && moreargs >= 2 {
+                groupname = Some(argv[i + 1].clone());
+                consumername = Some(argv[i + 2].clone());
+                i += 2;
+            } else if ascii_eq(opt, b"NOACK") {
+                noack = true;
+            } else if ascii_eq(opt, b"STREAMS") && moreargs >= 1 {
+                streams_arg = Some(i + 1);
+                break;
+            } else {
+                return err(b"ERR syntax error");
+            }
+            i += 1;
+        }
+
+        let Some(streams_arg) = streams_arg else {
+            return err(b"ERR syntax error");
+        };
+        let Some(groupname) = groupname else {
+            return err(b"ERR Missing GROUP option for XREADGROUP");
+        };
+        let consumername = consumername.expect("set alongside groupname");
+
+        let remaining = argv.len() - streams_arg;
+        if remaining == 0 || remaining % 2 != 0 {
+            return err(b"ERR Unbalanced 'xreadgroup' list of streams: for each stream key an ID or '>' must be specified.");
+        }
+        let streams_count = remaining / 2;
+
+        enum ReadId {
+            New,
+            History(StreamId),
+        }
+        let mut read_ids: Vec<ReadId> = Vec::with_capacity(streams_count);
+        for k in 0..streams_count {
+            let key = &argv[streams_arg + k];
+            let id_arg = &argv[streams_arg + streams_count + k];
+            self.purge_if_expired(key);
+            let group_present = match self.db.get(key) {
+                Some(Entry {
+                    value: StoredValue::Stream(stream),
+                    ..
+                }) => stream.groups.contains_key(groupname.as_slice()),
+                Some(_) => return wrong_type(),
+                None => false,
+            };
+            if !group_present {
+                let mut msg = b"NOGROUP No such key '".to_vec();
+                msg.extend_from_slice(key);
+                msg.extend_from_slice(b"' or consumer group '");
+                msg.extend_from_slice(&groupname);
+                msg.extend_from_slice(b"' in XREADGROUP with GROUP option");
+                return err(&msg);
+            }
+            if id_arg.len() == 1 && id_arg[0] == b'$' {
+                return err(
+                    b"ERR The $ ID is meaningless in the context of XREADGROUP: you want to read the history of this consumer by specifying a proper ID, or use the > ID to get new messages. The $ ID would just return an empty result set.",
+                );
+            } else if id_arg.len() == 1 && id_arg[0] == b'+' {
+                return err(
+                    b"ERR The + ID is meaningless in the context of XREADGROUP: you want to read the history of this consumer by specifying a proper ID, or use the > ID to get new messages. The + ID would just return an empty result set.",
+                );
+            } else if id_arg.len() == 1 && id_arg[0] == b'>' {
+                read_ids.push(ReadId::New);
+            } else {
+                match parse_stream_id_strict(id_arg, 0) {
+                    Ok((id, _)) => read_ids.push(ReadId::History(id)),
+                    Err(frame) => return frame,
+                }
+            }
+        }
+
+        let now = self.host.now_millis();
+        let mut result = Vec::new();
+        for k in 0..streams_count {
+            let key = argv[streams_arg + k].clone();
+            match &read_ids[k] {
+                ReadId::New => {
+                    if let Some(frame) =
+                        self.xreadgroup_serve_new(&key, &groupname, &consumername, count, noack, now)
+                    {
+                        result.push(frame);
+                    }
+                }
+                ReadId::History(start_after) => {
+                    let entries = self.xreadgroup_serve_history(
+                        &key,
+                        &groupname,
+                        &consumername,
+                        *start_after,
+                        count,
+                        now,
+                    );
+                    result.push(RespFrame::array(vec![bulk(&key), RespFrame::array(entries)]));
+                }
+            }
+        }
+
+        if result.is_empty() {
+            RespFrame::null_array()
+        } else {
+            RespFrame::array(result)
+        }
+    }
+
+    /// Serve the `>` (new messages) path for one stream in XREADGROUP. Delivers
+    /// undelivered entries after the group's last_delivered_id, advances it,
+    /// updates the group entries_read counter, and records the deliveries in the
+    /// group + consumer PEL unless `noack`. Returns the `[key, entries]` frame
+    /// when at least one entry was served, else `None`.
+    fn xreadgroup_serve_new(
+        &mut self,
+        key: &[u8],
+        groupname: &[u8],
+        consumername: &[u8],
+        count: i64,
+        noack: bool,
+        now: u64,
+    ) -> Option<RespFrame> {
+        let stream = self.stream_mut_unchecked(key);
+        let group = stream.groups.get(groupname).expect("verified");
+        let start = match group.last_delivered_id.incr() {
+            Some(id) => id,
+            None => return None,
+        };
+        let to_deliver: Vec<(StreamId, Vec<(Vec<u8>, Vec<u8>)>)> = stream
+            .entries
+            .range(start..)
+            .take(if count > 0 { count as usize } else { usize::MAX })
+            .map(|(id, fields)| (*id, fields.clone()))
+            .collect();
+
+        let group = stream.groups.get_mut(groupname).expect("verified");
+        if !group.consumers.contains_key(consumername) {
+            group.consumers.insert(
+                consumername.to_vec(),
+                Consumer {
+                    seen_time_ms: now,
+                    ..Consumer::default()
+                },
+            );
+        }
+        if let Some(consumer) = group.consumers.get_mut(consumername) {
+            consumer.seen_time_ms = now;
+        }
+
+        if to_deliver.is_empty() {
+            return None;
+        }
+
+        let mut out = Vec::with_capacity(to_deliver.len());
+        let first_id = stream.first_id;
+        let stream_entries_added = stream.entries_added;
+        let stream_length = stream.entries.len() as u64;
+        let stream_last_id = stream.last_id;
+        let stream_max_deleted = stream.max_deleted_id;
+        for (id, fields) in &to_deliver {
+            out.push(render_stream_entry(*id, fields));
+        }
+
+        let group = stream.groups.get_mut(groupname).expect("verified");
+        for (id, _) in &to_deliver {
+            if *id > group.last_delivered_id {
+                if group.entries_read != SCG_INVALID_ENTRIES_READ
+                    && group.last_delivered_id >= first_id
+                    && stream_max_deleted == StreamId::MIN
+                {
+                    group.entries_read += 1;
+                } else if stream_entries_added != 0 {
+                    group.entries_read = estimate_distance_from_first(
+                        stream_entries_added,
+                        stream_length,
+                        first_id,
+                        stream_last_id,
+                        stream_max_deleted,
+                        *id,
+                    );
+                }
+                group.last_delivered_id = *id;
+            }
+            if !noack {
+                if let Some(existing) = group.pending.get(id).cloned() {
+                    if let Some(prev) = group.consumers.get_mut(&existing.consumer) {
+                        prev.pending.remove(id);
+                    }
+                }
+                group.pending.insert(
+                    *id,
+                    PendingEntry {
+                        consumer: consumername.to_vec(),
+                        delivery_time_ms: now,
+                        delivery_count: 1,
+                    },
+                );
+                if let Some(consumer) = group.consumers.get_mut(consumername) {
+                    consumer.pending.insert(*id);
+                    consumer.active_time_ms = now;
+                }
+            }
+        }
+        self.note_write(key);
+        Some(RespFrame::array(vec![bulk(key), RespFrame::array(out)]))
+    }
+
+    /// Serve the history path (explicit id) for one stream in XREADGROUP,
+    /// re-reading the consumer's own PEL with id > `start_after`
+    /// (`streamReplyWithRangeFromConsumerPEL`, `t_stream.c`). Entries no longer
+    /// present in the stream are emitted as `[id, nil]`.
+    fn xreadgroup_serve_history(
+        &mut self,
+        key: &[u8],
+        groupname: &[u8],
+        consumername: &[u8],
+        start_after: StreamId,
+        count: i64,
+        now: u64,
+    ) -> Vec<RespFrame> {
+        let stream = self.stream_mut_unchecked(key);
+        let group = stream.groups.get_mut(groupname).expect("verified");
+        if !group.consumers.contains_key(consumername) {
+            group.consumers.insert(
+                consumername.to_vec(),
+                Consumer {
+                    seen_time_ms: now,
+                    ..Consumer::default()
+                },
+            );
+        }
+        if let Some(consumer) = group.consumers.get_mut(consumername) {
+            consumer.seen_time_ms = now;
+        }
+
+        let pending_ids: Vec<StreamId> = match (group.consumers.get(consumername), start_after.incr()) {
+            (Some(consumer), Some(range_start)) => consumer
+                .pending
+                .range(range_start..)
+                .take(if count > 0 { count as usize } else { usize::MAX })
+                .copied()
+                .collect(),
+            _ => Vec::new(),
+        };
+
+        let mut out = Vec::with_capacity(pending_ids.len());
+        for id in pending_ids {
+            match stream.entries.get(&id) {
+                Some(fields) => {
+                    out.push(render_stream_entry(id, fields));
+                    if let Some(nack) = stream
+                        .groups
+                        .get_mut(groupname)
+                        .expect("verified")
+                        .pending
+                        .get_mut(&id)
+                    {
+                        nack.delivery_time_ms = now;
+                        nack.delivery_count += 1;
+                    }
+                }
+                None => {
+                    out.push(RespFrame::array(vec![
+                        bulk(id.to_string_bytes()),
+                        RespFrame::null_array(),
+                    ]));
+                }
+            }
+        }
+        out
+    }
+
+    /// XACK key group id... (`xackCommand`, `t_stream.c`): remove the named IDs
+    /// from the group PEL and their owning consumer's PEL, returning the count
+    /// actually acknowledged. Missing key/group → `:0`.
+    fn xack_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 4 {
+            return wrong_arity(b"xack");
+        }
+        let mut ids = Vec::with_capacity(argv.len() - 3);
+        for raw in &argv[3..] {
+            match parse_stream_id_strict(raw, 0) {
+                Ok((id, _)) => ids.push(id),
+                Err(frame) => return frame,
+            }
+        }
+        self.purge_if_expired(&argv[1]);
+        let stream = match self.db.get_mut(&argv[1]) {
+            Some(Entry {
+                value: StoredValue::Stream(stream),
+                ..
+            }) => stream,
+            Some(_) => return wrong_type(),
+            None => return RespFrame::integer(0),
+        };
+        let Some(group) = stream.groups.get_mut(argv[2].as_slice()) else {
+            return RespFrame::integer(0);
+        };
+        let mut acknowledged = 0i64;
+        for id in ids {
+            if let Some(nack) = group.pending.remove(&id) {
+                if let Some(consumer) = group.consumers.get_mut(&nack.consumer) {
+                    consumer.pending.remove(&id);
+                }
+                acknowledged += 1;
+            }
+        }
+        if acknowledged > 0 {
+            self.note_write(&argv[1]);
+        }
+        RespFrame::integer(acknowledged)
+    }
+
+    /// XPENDING key group (`xpendingCommand`, summary form, `t_stream.c`):
+    /// `[total, min-id, max-id, [[consumer, count]...]]`, or `[0, nil, nil, nil]`
+    /// when the PEL is empty. The extended IDLE/start/end/count/consumer form is
+    /// deferred (it exposes consumer idle time = host clock).
+    fn xpending_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 3 {
+            return wrong_arity(b"xpending");
+        }
+        if argv.len() != 3 && (argv.len() < 6 || argv.len() > 9) {
+            return err(b"ERR syntax error");
+        }
+        self.purge_if_expired(&argv[1]);
+        let group = match self.db.get(&argv[1]) {
+            Some(Entry {
+                value: StoredValue::Stream(stream),
+                ..
+            }) => stream.groups.get(argv[2].as_slice()),
+            Some(_) => return wrong_type(),
+            None => None,
+        };
+        let Some(group) = group else {
+            let mut msg = b"NOGROUP No such key '".to_vec();
+            msg.extend_from_slice(&argv[1]);
+            msg.extend_from_slice(b"' or consumer group '");
+            msg.extend_from_slice(&argv[2]);
+            msg.extend_from_slice(b"'");
+            return err(&msg);
+        };
+        if argv.len() != 3 {
+            return err(
+                b"ERR The extended XPENDING form is not supported by this engine in this wave",
+            );
+        }
+        let total = group.pending.len();
+        if total == 0 {
+            return RespFrame::array(vec![
+                RespFrame::integer(0),
+                RespFrame::null_bulk(),
+                RespFrame::null_bulk(),
+                RespFrame::null_array(),
+            ]);
+        }
+        let min_id = *group.pending.keys().next().expect("non-empty");
+        let max_id = *group.pending.keys().next_back().expect("non-empty");
+        let mut consumer_counts: std::collections::BTreeMap<&[u8], usize> =
+            std::collections::BTreeMap::new();
+        for nack in group.pending.values() {
+            *consumer_counts.entry(nack.consumer.as_slice()).or_insert(0) += 1;
+        }
+        let consumers: Vec<RespFrame> = consumer_counts
+            .into_iter()
+            .map(|(name, count)| {
+                RespFrame::array(vec![
+                    bulk(name),
+                    bulk(count.to_string().into_bytes()),
+                ])
+            })
+            .collect();
+        RespFrame::array(vec![
+            RespFrame::integer(total as i64),
+            bulk(min_id.to_string_bytes()),
+            bulk(max_id.to_string_bytes()),
+            RespFrame::array(consumers),
+        ])
+    }
+
+    /// XINFO STREAM|GROUPS (`xinfoCommand`, `t_stream.c`). CONSUMERS is deferred
+    /// (it exposes idle/inactive = host clock). STREAM FULL is deferred.
+    fn xinfo_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 2 {
+            return wrong_arity(b"xinfo");
+        }
+        let subcommand = &argv[1];
+        if ascii_eq(subcommand, b"STREAM") {
+            if argv.len() < 3 {
+                return subcommand_syntax_error(b"XINFO", subcommand);
+            }
+            if argv.len() > 3 {
+                return err(
+                    b"ERR XINFO STREAM FULL is not supported by this engine in this wave",
+                );
+            }
+            self.purge_if_expired(&argv[2]);
+            let stream = match self.db.get(&argv[2]) {
+                Some(Entry {
+                    value: StoredValue::Stream(stream),
+                    ..
+                }) => stream,
+                Some(_) => return wrong_type(),
+                None => return err(b"ERR no such key"),
+            };
+            self.xinfo_stream_reply(stream)
+        } else if ascii_eq(subcommand, b"GROUPS") {
+            if argv.len() != 3 {
+                return subcommand_syntax_error(b"XINFO", subcommand);
+            }
+            self.purge_if_expired(&argv[2]);
+            let stream = match self.db.get(&argv[2]) {
+                Some(Entry {
+                    value: StoredValue::Stream(stream),
+                    ..
+                }) => stream,
+                Some(_) => return wrong_type(),
+                None => return err(b"ERR no such key"),
+            };
+            self.xinfo_groups_reply(stream)
+        } else if ascii_eq(subcommand, b"CONSUMERS") {
+            err(b"ERR XINFO CONSUMERS is not supported by this engine in this wave")
+        } else {
+            subcommand_syntax_error(b"XINFO", subcommand)
+        }
+    }
+
+    /// Build the XINFO STREAM map (RESP2 flat array). `radix-tree-keys` /
+    /// `radix-tree-nodes` are modelled for the single-listpack-node case that a
+    /// flat BTreeMap represents: 0 entries → keys 0 / nodes 1, else keys 1 /
+    /// nodes 2 (matching valkey for streams that fit one listpack node).
+    fn xinfo_stream_reply(&self, stream: &StreamValue) -> RespFrame {
+        let length = stream.entries.len();
+        let (radix_keys, radix_nodes) = if length == 0 { (0, 1) } else { (1, 2) };
+        let first_entry = match stream.entries.iter().next() {
+            Some((id, fields)) => render_stream_entry(*id, fields),
+            None => RespFrame::null_bulk(),
+        };
+        let last_entry = match stream.entries.iter().next_back() {
+            Some((id, fields)) => render_stream_entry(*id, fields),
+            None => RespFrame::null_bulk(),
+        };
+        RespFrame::array(vec![
+            bulk(b"length"),
+            RespFrame::integer(length as i64),
+            bulk(b"radix-tree-keys"),
+            RespFrame::integer(radix_keys),
+            bulk(b"radix-tree-nodes"),
+            RespFrame::integer(radix_nodes),
+            bulk(b"last-generated-id"),
+            bulk(stream.last_id.to_string_bytes()),
+            bulk(b"max-deleted-entry-id"),
+            bulk(stream.max_deleted_id.to_string_bytes()),
+            bulk(b"entries-added"),
+            RespFrame::integer(stream.entries_added as i64),
+            bulk(b"recorded-first-entry-id"),
+            bulk(stream.first_id.to_string_bytes()),
+            bulk(b"groups"),
+            RespFrame::integer(stream.groups.len() as i64),
+            bulk(b"first-entry"),
+            first_entry,
+            bulk(b"last-entry"),
+            last_entry,
+        ])
+    }
+
+    /// Build the XINFO GROUPS reply (array of per-group maps). Each group:
+    /// name, consumers, pending, last-delivered-id, entries-read, lag — all
+    /// deterministic (entries-read/lag derived from the same counters valkey uses).
+    fn xinfo_groups_reply(&self, stream: &StreamValue) -> RespFrame {
+        let mut names: Vec<&Vec<u8>> = stream.groups.keys().collect();
+        names.sort();
+        let mut out = Vec::with_capacity(names.len());
+        for name in names {
+            let group = &stream.groups[name];
+            let entries_read = if group.entries_read != SCG_INVALID_ENTRIES_READ {
+                RespFrame::integer(group.entries_read)
+            } else {
+                RespFrame::null_bulk()
+            };
+            let lag = stream_cg_lag(stream, group);
+            out.push(RespFrame::array(vec![
+                bulk(b"name"),
+                bulk(name),
+                bulk(b"consumers"),
+                RespFrame::integer(group.consumers.len() as i64),
+                bulk(b"pending"),
+                RespFrame::integer(group.pending.len() as i64),
+                bulk(b"last-delivered-id"),
+                bulk(group.last_delivered_id.to_string_bytes()),
+                bulk(b"entries-read"),
+                entries_read,
+                bulk(b"lag"),
+                lag,
+            ]));
+        }
+        RespFrame::array(out)
     }
 
     /// TYPE key (`typeCommand`, `db.c`): a simple-string naming the value's
@@ -6323,6 +7138,105 @@ fn encode_entry(key: &[u8], entry: &Entry) -> JsonMap<String, JsonValue> {
                 )),
             );
             object.insert("entries_added".to_owned(), json!(stream.entries_added));
+            object.insert(
+                "first_id".to_owned(),
+                JsonValue::String(format!("{}-{}", stream.first_id.ms, stream.first_id.seq)),
+            );
+            let mut group_names: Vec<&Vec<u8>> = stream.groups.keys().collect();
+            group_names.sort();
+            object.insert(
+                "groups".to_owned(),
+                JsonValue::Array(
+                    group_names
+                        .into_iter()
+                        .map(|name| {
+                            let group = &stream.groups[name];
+                            let mut g = JsonMap::new();
+                            g.insert("name".to_owned(), JsonValue::String(hex_encode(name)));
+                            g.insert(
+                                "last_delivered_id".to_owned(),
+                                JsonValue::String(format!(
+                                    "{}-{}",
+                                    group.last_delivered_id.ms, group.last_delivered_id.seq
+                                )),
+                            );
+                            g.insert("entries_read".to_owned(), json!(group.entries_read));
+                            g.insert(
+                                "pending".to_owned(),
+                                JsonValue::Array(
+                                    group
+                                        .pending
+                                        .iter()
+                                        .map(|(id, nack)| {
+                                            let mut p = JsonMap::new();
+                                            p.insert(
+                                                "id".to_owned(),
+                                                JsonValue::String(format!("{}-{}", id.ms, id.seq)),
+                                            );
+                                            p.insert(
+                                                "consumer".to_owned(),
+                                                JsonValue::String(hex_encode(&nack.consumer)),
+                                            );
+                                            p.insert(
+                                                "delivery_time_ms".to_owned(),
+                                                json!(nack.delivery_time_ms),
+                                            );
+                                            p.insert(
+                                                "delivery_count".to_owned(),
+                                                json!(nack.delivery_count),
+                                            );
+                                            JsonValue::Object(p)
+                                        })
+                                        .collect(),
+                                ),
+                            );
+                            let mut consumer_names: Vec<&Vec<u8>> = group.consumers.keys().collect();
+                            consumer_names.sort();
+                            g.insert(
+                                "consumers".to_owned(),
+                                JsonValue::Array(
+                                    consumer_names
+                                        .into_iter()
+                                        .map(|cname| {
+                                            let consumer = &group.consumers[cname];
+                                            let mut cobj = JsonMap::new();
+                                            cobj.insert(
+                                                "name".to_owned(),
+                                                JsonValue::String(hex_encode(cname)),
+                                            );
+                                            cobj.insert(
+                                                "seen_time_ms".to_owned(),
+                                                json!(consumer.seen_time_ms),
+                                            );
+                                            cobj.insert(
+                                                "active_time_ms".to_owned(),
+                                                json!(consumer.active_time_ms),
+                                            );
+                                            cobj.insert(
+                                                "pending".to_owned(),
+                                                JsonValue::Array(
+                                                    consumer
+                                                        .pending
+                                                        .iter()
+                                                        .map(|id| {
+                                                            JsonValue::String(format!(
+                                                                "{}-{}",
+                                                                id.ms, id.seq
+                                                            ))
+                                                        })
+                                                        .collect(),
+                                                ),
+                                            );
+                                            JsonValue::Object(cobj)
+                                        })
+                                        .collect(),
+                                ),
+                            );
+                            JsonValue::Object(g)
+                        })
+                        .collect(),
+                ),
+            );
         }
     }
     object
@@ -6489,11 +7403,125 @@ fn decode_entry(object: &JsonMap<String, JsonValue>) -> Result<(Vec<u8>, Entry),
                 .get("entries_added")
                 .and_then(JsonValue::as_u64)
                 .ok_or(SnapshotError::MissingField("entries_added"))?;
+            let first_id = decode_stream_id(
+                object
+                    .get("first_id")
+                    .and_then(JsonValue::as_str)
+                    .ok_or(SnapshotError::MissingField("first_id"))?,
+            )?;
+            let groups_raw = object
+                .get("groups")
+                .and_then(JsonValue::as_array)
+                .ok_or(SnapshotError::MissingField("groups"))?;
+            let mut groups = std::collections::HashMap::with_capacity(groups_raw.len());
+            for group_raw in groups_raw {
+                let g = group_raw
+                    .as_object()
+                    .ok_or(SnapshotError::InvalidField("groups"))?;
+                let name = hex_decode(
+                    g.get("name")
+                        .and_then(JsonValue::as_str)
+                        .ok_or(SnapshotError::InvalidField("groups"))?,
+                )?;
+                let last_delivered_id = decode_stream_id(
+                    g.get("last_delivered_id")
+                        .and_then(JsonValue::as_str)
+                        .ok_or(SnapshotError::InvalidField("groups"))?,
+                )?;
+                let entries_read = g
+                    .get("entries_read")
+                    .and_then(JsonValue::as_i64)
+                    .ok_or(SnapshotError::InvalidField("groups"))?;
+                let pending_raw = g
+                    .get("pending")
+                    .and_then(JsonValue::as_array)
+                    .ok_or(SnapshotError::InvalidField("groups"))?;
+                let mut pending = std::collections::BTreeMap::new();
+                for p in pending_raw {
+                    let p = p.as_object().ok_or(SnapshotError::InvalidField("groups"))?;
+                    let id = decode_stream_id(
+                        p.get("id")
+                            .and_then(JsonValue::as_str)
+                            .ok_or(SnapshotError::InvalidField("groups"))?,
+                    )?;
+                    let consumer = hex_decode(
+                        p.get("consumer")
+                            .and_then(JsonValue::as_str)
+                            .ok_or(SnapshotError::InvalidField("groups"))?,
+                    )?;
+                    let delivery_time_ms = p
+                        .get("delivery_time_ms")
+                        .and_then(JsonValue::as_u64)
+                        .ok_or(SnapshotError::InvalidField("groups"))?;
+                    let delivery_count = p
+                        .get("delivery_count")
+                        .and_then(JsonValue::as_u64)
+                        .ok_or(SnapshotError::InvalidField("groups"))?;
+                    pending.insert(
+                        id,
+                        PendingEntry {
+                            consumer,
+                            delivery_time_ms,
+                            delivery_count,
+                        },
+                    );
+                }
+                let consumers_raw = g
+                    .get("consumers")
+                    .and_then(JsonValue::as_array)
+                    .ok_or(SnapshotError::InvalidField("groups"))?;
+                let mut consumers = std::collections::HashMap::with_capacity(consumers_raw.len());
+                for c in consumers_raw {
+                    let c = c.as_object().ok_or(SnapshotError::InvalidField("groups"))?;
+                    let cname = hex_decode(
+                        c.get("name")
+                            .and_then(JsonValue::as_str)
+                            .ok_or(SnapshotError::InvalidField("groups"))?,
+                    )?;
+                    let seen_time_ms = c
+                        .get("seen_time_ms")
+                        .and_then(JsonValue::as_u64)
+                        .ok_or(SnapshotError::InvalidField("groups"))?;
+                    let active_time_ms = c
+                        .get("active_time_ms")
+                        .and_then(JsonValue::as_u64)
+                        .ok_or(SnapshotError::InvalidField("groups"))?;
+                    let cpending_raw = c
+                        .get("pending")
+                        .and_then(JsonValue::as_array)
+                        .ok_or(SnapshotError::InvalidField("groups"))?;
+                    let mut cpending = std::collections::BTreeSet::new();
+                    for id in cpending_raw {
+                        cpending.insert(decode_stream_id(
+                            id.as_str().ok_or(SnapshotError::InvalidField("groups"))?,
+                        )?);
+                    }
+                    consumers.insert(
+                        cname,
+                        Consumer {
+                            pending: cpending,
+                            seen_time_ms,
+                            active_time_ms,
+                        },
+                    );
+                }
+                groups.insert(
+                    name,
+                    Group {
+                        last_delivered_id,
+                        pending,
+                        consumers,
+                        entries_read,
+                    },
+                );
+            }
             StoredValue::Stream(StreamValue {
                 entries: decoded_entries,
                 last_id,
                 max_deleted_id,
                 entries_added,
+                first_id,
+                groups,
             })
         }
         _ => return Err(SnapshotError::InvalidField("type")),
@@ -6561,6 +7589,8 @@ enum StreamTrimThreshold {
 /// (`streamTrim`, `t_stream.c`). MAXLEN removes the oldest entries until the
 /// length is at most the threshold; MINID removes every entry with an ID
 /// strictly less than the threshold. Always trims exactly (see `StreamTrim`).
+/// Trimming does NOT touch `max_deleted_id` (only XDEL does, per the C); it
+/// updates `first_id` (0-0 when empty, else the new smallest entry).
 fn apply_stream_trim(stream: &mut StreamValue, trim: &StreamTrim) -> u64 {
     let mut removed = 0u64;
     match trim.threshold {
@@ -6570,9 +7600,6 @@ fn apply_stream_trim(stream: &mut StreamValue, trim: &StreamTrim) -> u64 {
                     break;
                 };
                 stream.entries.remove(&id);
-                if id > stream.max_deleted_id {
-                    stream.max_deleted_id = id;
-                }
                 removed += 1;
             }
         }
@@ -6584,12 +7611,15 @@ fn apply_stream_trim(stream: &mut StreamValue, trim: &StreamTrim) -> u64 {
                 .collect();
             for id in to_remove {
                 stream.entries.remove(&id);
-                if id > stream.max_deleted_id {
-                    stream.max_deleted_id = id;
-                }
                 removed += 1;
             }
         }
+    }
+    if removed > 0 {
+        stream.first_id = match stream.entries.keys().next() {
+            Some(id) => *id,
+            None => StreamId::MIN,
+        };
     }
     removed
 }
@@ -6647,6 +7677,87 @@ fn render_stream_entry(id: StreamId, fields: &[(Vec<u8>, Vec<u8>)]) -> RespFrame
         flat.push(bulk(value));
     }
     RespFrame::array(vec![bulk(id.to_string_bytes()), RespFrame::array(flat)])
+}
+
+/// The `-ERR unknown subcommand '<sub>'. Try <CMD> HELP.` reply
+/// (`addReplySubcommandSyntaxError`, `server.c`). The subcommand name is echoed
+/// in its original case.
+fn subcommand_syntax_error(command: &[u8], subcommand: &[u8]) -> RespFrame {
+    let mut msg = b"ERR unknown subcommand '".to_vec();
+    msg.extend_from_slice(subcommand);
+    msg.extend_from_slice(b"'. Try ");
+    msg.extend_from_slice(command);
+    msg.extend_from_slice(b" HELP.");
+    err(&msg)
+}
+
+/// Parse a (non-strict) stream ID for XGROUP SETID (`streamParseIDOrReply`,
+/// `t_stream.c`): a bare `ms` fills seq 0; `-`/`+` are not special here.
+fn parse_stream_range_id_or_normal(raw: &[u8]) -> Result<StreamId, RespFrame> {
+    parse_stream_id_strict(raw, 0).map(|(id, _)| id)
+}
+
+/// `streamEstimateDistanceFromFirstEverEntry` (`t_stream.c`): the ID's logical
+/// read counter, or `SCG_INVALID_ENTRIES_READ` when unobtainable. Operates on
+/// the scalar stream fields rather than the whole struct so callers can compute
+/// it while holding a mutable borrow of a group.
+fn estimate_distance_from_first(
+    entries_added: u64,
+    length: u64,
+    first_id: StreamId,
+    last_id: StreamId,
+    max_deleted_id: StreamId,
+    id: StreamId,
+) -> i64 {
+    if entries_added == 0 {
+        return 0;
+    }
+    if length == 0 && id <= last_id {
+        return entries_added as i64;
+    }
+    if id != StreamId::MIN && id < max_deleted_id {
+        return SCG_INVALID_ENTRIES_READ;
+    }
+    if id == last_id {
+        return entries_added as i64;
+    } else if id > last_id {
+        return SCG_INVALID_ENTRIES_READ;
+    }
+    if max_deleted_id == StreamId::MIN || max_deleted_id < first_id {
+        if id < first_id {
+            return (entries_added - length) as i64;
+        } else if id == first_id {
+            return (entries_added - length + 1) as i64;
+        }
+    }
+    SCG_INVALID_ENTRIES_READ
+}
+
+/// `streamReplyWithCGLag` (`t_stream.c`): the group's lag as a RESP integer, or
+/// a RESP null when not computable. Our flat model never has tombstones beyond
+/// `max_deleted_id`, so `streamRangeHasTombstones` reduces to a max_deleted check.
+fn stream_cg_lag(stream: &StreamValue, group: &Group) -> RespFrame {
+    let entries_added = stream.entries_added;
+    if entries_added == 0 {
+        return RespFrame::integer(0);
+    }
+    let no_tombstones_ahead = group.last_delivered_id >= stream.max_deleted_id;
+    if group.entries_read != SCG_INVALID_ENTRIES_READ && no_tombstones_ahead {
+        return RespFrame::integer(entries_added as i64 - group.entries_read);
+    }
+    let estimate = estimate_distance_from_first(
+        entries_added,
+        stream.entries.len() as u64,
+        stream.first_id,
+        stream.last_id,
+        stream.max_deleted_id,
+        group.last_delivered_id,
+    );
+    if estimate != SCG_INVALID_ENTRIES_READ {
+        RespFrame::integer(entries_added as i64 - estimate)
+    } else {
+        RespFrame::null_bulk()
+    }
 }
 
 /// Parse a strict stream ID (`streamParseStrictIDOrReply`, `t_stream.c`):
@@ -9542,6 +10653,48 @@ mod tests {
             resp2(&restored.execute(&argv(&[b"XADD", b"s", b"6-1", b"x", b"y"]))),
             b"$3\r\n6-1\r\n",
             "last_id (5-5 via XSETID) must survive so 6-1 is accepted"
+        );
+    }
+
+    #[test]
+    fn snapshot_round_trip_preserves_stream_groups_and_pel() {
+        let mut engine = Engine::new(NoopHost::new(1_000));
+        engine.execute(&argv(&[b"XADD", b"s", b"1-1", b"a", b"1"]));
+        engine.execute(&argv(&[b"XADD", b"s", b"2-2", b"b", b"2"]));
+        engine.execute(&argv(&[b"XADD", b"s", b"3-3", b"c", b"3"]));
+        engine.execute(&argv(&[b"XGROUP", b"CREATE", b"s", b"g1", b"0"]));
+        engine.execute(&argv(&[
+            b"XREADGROUP", b"GROUP", b"g1", b"alice", b"COUNT", b"2", b"STREAMS", b"s", b">",
+        ]));
+        engine.execute(&argv(&[b"XACK", b"s", b"g1", b"1-1"]));
+
+        let snapshot = engine.export_snapshot();
+        let mut restored = Engine::new(NoopHost::new(1_000));
+        restored.import_snapshot(&snapshot).unwrap();
+
+        for cmd in [
+            &[b"XPENDING".as_ref(), b"s", b"g1"][..],
+            &[b"XINFO".as_ref(), b"GROUPS", b"s"][..],
+            &[b"XINFO".as_ref(), b"STREAM", b"s"][..],
+            &[b"XLEN".as_ref(), b"s"][..],
+        ] {
+            assert_eq!(
+                resp2(&engine.execute(&argv(cmd))),
+                resp2(&restored.execute(&argv(cmd))),
+                "stream-group round-trip mismatch for {cmd:?}"
+            );
+        }
+        assert_eq!(
+            resp2(&restored.execute(&argv(&[b"XPENDING", b"s", b"g1"]))),
+            b"*4\r\n:1\r\n$3\r\n2-2\r\n$3\r\n2-2\r\n*1\r\n*2\r\n$5\r\nalice\r\n$1\r\n1\r\n",
+            "restored group PEL must contain only 2-2 owned by alice after ack of 1-1"
+        );
+        assert_eq!(
+            resp2(&restored.execute(&argv(&[
+                b"XREADGROUP", b"GROUP", b"g1", b"alice", b"STREAMS", b"s", b">",
+            ]))),
+            b"*1\r\n*2\r\n$1\r\ns\r\n*1\r\n*2\r\n$3\r\n3-3\r\n*2\r\n$1\r\nc\r\n$1\r\n3\r\n",
+            "restored last_delivered_id (2-2) must survive so > delivers only 3-3"
         );
     }
 

@@ -1,0 +1,82 @@
+{"id": "build-1", "cmd": ["XADD", "sg:s", "1-1", "a", "1"]}
+{"id": "build-2", "cmd": ["XADD", "sg:s", "2-2", "b", "2"]}
+{"id": "build-3", "cmd": ["XADD", "sg:s", "3-3", "c", "3"]}
+{"id": "xgroup-create-missing-key", "cmd": ["XGROUP", "CREATE", "sg:nokey", "g1", "0"]}
+{"id": "xgroup-create-ok", "cmd": ["XGROUP", "CREATE", "sg:s", "g1", "0"]}
+{"id": "xgroup-create-busygroup", "cmd": ["XGROUP", "CREATE", "sg:s", "g1", "0"]}
+{"id": "xgroup-create-mkstream", "cmd": ["XGROUP", "CREATE", "sg:mk", "gm", "$", "MKSTREAM"]}
+{"id": "xlen-mkstream", "cmd": ["XLEN", "sg:mk"]}
+{"id": "type-mkstream", "cmd": ["TYPE", "sg:mk"]}
+{"id": "xgroup-setid-missing-key", "cmd": ["XGROUP", "SETID", "sg:nokey", "g1", "0"]}
+{"id": "xgroup-setid-missing-group", "cmd": ["XGROUP", "SETID", "sg:s", "ghost", "0"]}
+{"id": "xinfo-groups-before-read", "cmd": ["XINFO", "GROUPS", "sg:s"]}
+{"id": "xinfo-stream-before-read", "cmd": ["XINFO", "STREAM", "sg:s"]}
+{"id": "xreadgroup-new-count2", "cmd": ["XREADGROUP", "GROUP", "g1", "alice", "COUNT", "2", "STREAMS", "sg:s", ">"]}
+{"id": "xinfo-groups-after-2", "cmd": ["XINFO", "GROUPS", "sg:s"]}
+{"id": "xpending-summary-after-2", "cmd": ["XPENDING", "sg:s", "g1"]}
+{"id": "xreadgroup-new-rest", "cmd": ["XREADGROUP", "GROUP", "g1", "alice", "STREAMS", "sg:s", ">"]}
+{"id": "xpending-summary-after-3", "cmd": ["XPENDING", "sg:s", "g1"]}
+{"id": "xreadgroup-new-nothing", "cmd": ["XREADGROUP", "GROUP", "g1", "alice", "STREAMS", "sg:s", ">"]}
+{"id": "xinfo-groups-after-all", "cmd": ["XINFO", "GROUPS", "sg:s"]}
+{"id": "xack-one", "cmd": ["XACK", "sg:s", "g1", "1-1"]}
+{"id": "xack-already-acked", "cmd": ["XACK", "sg:s", "g1", "1-1"]}
+{"id": "xpending-summary-after-ack", "cmd": ["XPENDING", "sg:s", "g1"]}
+{"id": "xreadgroup-history", "cmd": ["XREADGROUP", "GROUP", "g1", "alice", "STREAMS", "sg:s", "0"]}
+{"id": "xreadgroup-history-after-2-2", "cmd": ["XREADGROUP", "GROUP", "g1", "alice", "STREAMS", "sg:s", "2-2"]}
+{"id": "xreadgroup-history-new-consumer", "cmd": ["XREADGROUP", "GROUP", "g1", "bob", "STREAMS", "sg:s", "0"]}
+{"id": "xack-remaining", "cmd": ["XACK", "sg:s", "g1", "2-2", "3-3"]}
+{"id": "xpending-summary-empty", "cmd": ["XPENDING", "sg:s", "g1"]}
+{"id": "xgroup-createconsumer-new", "cmd": ["XGROUP", "CREATECONSUMER", "sg:s", "g1", "carol"]}
+{"id": "xgroup-createconsumer-dup", "cmd": ["XGROUP", "CREATECONSUMER", "sg:s", "g1", "carol"]}
+{"id": "xgroup-delconsumer-empty", "cmd": ["XGROUP", "DELCONSUMER", "sg:s", "g1", "carol"]}
+{"id": "xgroup-delconsumer-ghost", "cmd": ["XGROUP", "DELCONSUMER", "sg:s", "g1", "ghost"]}
+{"id": "xreadgroup-noack-setup-add", "cmd": ["XADD", "sg:s", "4-4", "d", "4"]}
+{"id": "xreadgroup-noack", "cmd": ["XREADGROUP", "GROUP", "g1", "alice", "NOACK", "STREAMS", "sg:s", ">"]}
+{"id": "xpending-after-noack", "cmd": ["XPENDING", "sg:s", "g1"]}
+{"id": "xgroup-delconsumer-with-pending-setup-add", "cmd": ["XADD", "sg:s", "5-5", "e", "5"]}
+{"id": "xgroup-delconsumer-with-pending-read", "cmd": ["XREADGROUP", "GROUP", "g1", "dave", "STREAMS", "sg:s", ">"]}
+{"id": "xpending-with-dave", "cmd": ["XPENDING", "sg:s", "g1"]}
+{"id": "xgroup-delconsumer-with-pending", "cmd": ["XGROUP", "DELCONSUMER", "sg:s", "g1", "dave"]}
+{"id": "xpending-after-delconsumer", "cmd": ["XPENDING", "sg:s", "g1"]}
+{"id": "xreadgroup-dollar-rejected", "cmd": ["XREADGROUP", "GROUP", "g1", "alice", "STREAMS", "sg:s", "$"]}
+{"id": "xreadgroup-nogroup-bad-group", "cmd": ["XREADGROUP", "GROUP", "nope", "alice", "STREAMS", "sg:s", ">"]}
+{"id": "xreadgroup-nogroup-missing-key", "cmd": ["XREADGROUP", "GROUP", "g1", "alice", "STREAMS", "sg:absent", ">"]}
+{"id": "xpending-nogroup", "cmd": ["XPENDING", "sg:s", "nope"]}
+{"id": "xack-missing-group", "cmd": ["XACK", "sg:s", "nope", "1-1"]}
+{"id": "xack-missing-key", "cmd": ["XACK", "sg:absent", "g1", "1-1"]}
+{"id": "xinfo-groups-dollar-setup-add-1", "cmd": ["XADD", "sg:d", "1-1", "f", "v"]}
+{"id": "xinfo-groups-dollar-setup-add-2", "cmd": ["XADD", "sg:d", "2-2", "f", "v"]}
+{"id": "xgroup-create-dollar", "cmd": ["XGROUP", "CREATE", "sg:d", "gd", "$"]}
+{"id": "xinfo-groups-dollar", "cmd": ["XINFO", "GROUPS", "sg:d"]}
+{"id": "xgroup-create-after-dollar-add", "cmd": ["XADD", "sg:d", "3-3", "f", "v"]}
+{"id": "xreadgroup-dollar-group", "cmd": ["XREADGROUP", "GROUP", "gd", "c1", "STREAMS", "sg:d", ">"]}
+{"id": "xinfo-groups-dollar-after-read", "cmd": ["XINFO", "GROUPS", "sg:d"]}
+{"id": "xgroup-destroy-ok", "cmd": ["XGROUP", "DESTROY", "sg:d", "gd"]}
+{"id": "xgroup-destroy-already-gone", "cmd": ["XGROUP", "DESTROY", "sg:d", "gd"]}
+{"id": "xinfo-groups-after-destroy", "cmd": ["XINFO", "GROUPS", "sg:d"]}
+{"id": "xinfo-stream-after-destroy", "cmd": ["XINFO", "STREAM", "sg:d"]}
+{"id": "xinfo-stream-missing-key", "cmd": ["XINFO", "STREAM", "sg:absent"]}
+{"id": "xinfo-groups-missing-key", "cmd": ["XINFO", "GROUPS", "sg:absent"]}
+{"id": "xgroup-unknown-subcommand", "cmd": ["XGROUP", "FOO", "sg:s", "g1"]}
+{"id": "xinfo-unknown-subcommand", "cmd": ["XINFO", "BOGUS", "sg:s"]}
+{"id": "wrongtype-setup-string", "cmd": ["SET", "sg:str", "hello"]}
+{"id": "wrongtype-xgroup", "cmd": ["XGROUP", "CREATE", "sg:str", "g", "0"]}
+{"id": "wrongtype-xreadgroup", "cmd": ["XREADGROUP", "GROUP", "g", "c", "STREAMS", "sg:str", ">"]}
+{"id": "wrongtype-xack", "cmd": ["XACK", "sg:str", "g", "1-1"]}
+{"id": "wrongtype-xpending", "cmd": ["XPENDING", "sg:str", "g"]}
+{"id": "wrongtype-xinfo-stream", "cmd": ["XINFO", "STREAM", "sg:str"]}
+{"id": "xinfo-stream-after-xdel-setup-add-1", "cmd": ["XADD", "sg:x", "1-1", "f", "v"]}
+{"id": "xinfo-stream-after-xdel-setup-add-2", "cmd": ["XADD", "sg:x", "2-2", "f", "v"]}
+{"id": "xinfo-stream-after-xdel-setup-add-3", "cmd": ["XADD", "sg:x", "3-3", "f", "v"]}
+{"id": "xinfo-stream-after-xdel-interior", "cmd": ["XDEL", "sg:x", "2-2"]}
+{"id": "xinfo-stream-after-xdel-interior-check", "cmd": ["XINFO", "STREAM", "sg:x"]}
+{"id": "xinfo-stream-after-xdel-first", "cmd": ["XDEL", "sg:x", "1-1"]}
+{"id": "xinfo-stream-after-xdel-first-check", "cmd": ["XINFO", "STREAM", "sg:x"]}
+{"id": "xinfo-stream-after-xtrim-setup-add-1", "cmd": ["XADD", "sg:tr", "1-1", "f", "v"]}
+{"id": "xinfo-stream-after-xtrim-setup-add-2", "cmd": ["XADD", "sg:tr", "2-2", "f", "v"]}
+{"id": "xinfo-stream-after-xtrim-setup-add-3", "cmd": ["XADD", "sg:tr", "3-3", "f", "v"]}
+{"id": "xinfo-stream-after-xtrim", "cmd": ["XTRIM", "sg:tr", "MAXLEN", "1"]}
+{"id": "xinfo-stream-after-xtrim-check", "cmd": ["XINFO", "STREAM", "sg:tr"]}
+{"id": "xinfo-stream-empty-after-deleteall-setup-add", "cmd": ["XADD", "sg:da", "1-1", "f", "v"]}
+{"id": "xinfo-stream-empty-after-deleteall-del", "cmd": ["XDEL", "sg:da", "1-1"]}
+{"id": "xinfo-stream-empty-after-deleteall-check", "cmd": ["XINFO", "STREAM", "sg:da"]}
