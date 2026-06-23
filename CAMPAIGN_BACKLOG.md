@@ -108,7 +108,11 @@ DUMP, RESTORE (RDB-serialization parity). Enables key migration in/out of the ed
 
 ---
 
-## Phase 2 — EdgeStash cold-start  `[~]`  (analysis done; live measurement = interactive)
+## Phase 2 — EdgeStash cold-start  `[x] implemented`  (live measurement = interactive)
+**Option A lazy per-key loading IMPLEMENTED** (2a `d9c8fa6` mechanism + kit, 2b
+`82c9a03` wired into demo + cloudflare, wasm-compiles). Cold cost O(touched) not
+O(state). Only `wrangler deploy` + latency sweep remains (your session). Details:
+`docs/EDGESTASH_COLDSTART_PREP.md`. Below = the original analysis.
 Named open target: ~0.5s cold Durable Object start. **Analysis complete →
 `docs/EDGESTASH_COLDSTART_PREP.md`.** Cost = wasm-instantiate(size) +
 `storage.list()` + O(state) engine rebuild on first request (`edgestash-cloudflare/src/lib.rs`

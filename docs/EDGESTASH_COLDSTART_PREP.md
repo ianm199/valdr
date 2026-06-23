@@ -65,5 +65,20 @@ Instantiation time scales with module size.
    state-size sweep — A should flatten the curve.
 
 ## Status
-Analysis complete. Implementation + measurement deferred to an interactive session
-(cold-start numbers are not reproducible unattended). Tracked in `CAMPAIGN_BACKLOG.md` Phase 2.
+**Option A (lazy per-key loading) is IMPLEMENTED (2026-06-23).**
+- Phase 2a (`d9c8fa6`): `valdr_engine::command_keys(argv) -> KeyAccess{Keys|FullKeyspace}`
+  (faithful valkey key specs; FullKeyspace for scan/keys/dbsize/flushall/randomkey
+  + dynamic-key SORT/EVAL/FCALL), proven by an in-memory kit
+  (`crates/valdr-engine/tests/lazy_loader_kit.rs`): eager-vs-lazy byte-parity over
+  all 2111 fixture commands (0 mismatch) + O(touched) load-count proof.
+- Phase 2b (`82c9a03`): wired into `edgestash-demo` (`EdgeObject::open_lazy`,
+  `ObjectStorage::list` for the FullKeyspace fallback + a `fully_loaded` flag) and
+  the `edgestash-cloudflare` `fetch` path (per-key `Storage::get`, no eager
+  `storage.list()` on cold start). 55 demo+dogfood tests green; the worker
+  **compile-checks clean on `wasm32-unknown-unknown`**. Cold cost is now O(touched
+  keys), not O(state) — a 1000-key DO serving a single-key GET fetches 1 key, 0 lists.
+
+**Remaining = the live measurement only** (not reproducible unattended): `wrangler
+deploy` + a cold-start latency sweep across state sizes (10/1k/10k keys) to quantify
+the win, then Option B (wasm-size shrink) for instantiation time. Deploy mechanism:
+`cloudflare-deploy-blocker` memory.
