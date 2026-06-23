@@ -147,9 +147,9 @@ Prep: profile hotpaths, stage fixes; gate any claim on a clean interactive bench
 
 ## Differential-testable surface COMPLETE (2026-06-23)
 
-After Wave 19, **every in-scope command that the differential oracle can verify is
-implemented** (engine 177 cmds, oracle 1979 fixtures / 1959 pass / 0 diverge / 20
-known-unsupported, 56 cargo tests). The remaining **23 in-scope-missing are genuine
+After Wave 20, **every in-scope command that the differential oracle can verify is
+implemented** (engine 181 cmds, oracle 2007 fixtures / 1989 pass / 0 diverge / 18
+known-unsupported, 56 cargo tests). The remaining **19 in-scope-missing are genuine
 deferrals**, each blocked by a concrete reason — NOT by effort. Run
 `bash harness/oracle/valdr-surface-gap.sh` to see them; categorized:
 
@@ -160,11 +160,6 @@ deferrals**, each blocked by a concrete reason — NOT by effort. Run
   RANDOMKEY. NoopHost has no RNG and a random pick can't match valkey's RNG; only
   trivial cases (singleton / count≥card / empty) are differentially testable.
   Implement once a host-RNG-backed test harness exists.
-- **Scan cursors (4)** — SCAN, HSCAN, SSCAN, ZSCAN. The reply is `[cursor, {set}]`;
-  the engine's HashMap iteration order ≠ valkey's dict order, and no current oracle
-  `compare()` mode handles "cursor exact + elements set-equal". **Harness enhancement:**
-  add a `scan_reply` compare mode (cursor `==`, inner array `set_equal`) → then SCAN
-  family becomes testable. That's the unlock.
 - **Clock-dependent (3)** — XCLAIM, XAUTOCLAIM (consumer idle time), TIME (wall clock).
 - **DUMP / RESTORE (2)** — require byte-identical RDB serialization (the full RDB
   encoder/CRC); large faithful port, separate effort.
@@ -172,6 +167,11 @@ deferrals**, each blocked by a concrete reason — NOT by effort. Run
   doesn't model.
 
 ## Log (newest first)
+- 2026-06-23 — Wave 20 landed (`09a498e`): SCAN/HSCAN/SSCAN/ZSCAN single-pass,
+  unlocked by an additive `scan_reply` oracle mode (`5c33f81`, cursor exact +
+  elements set_equal — verified inert before use). Oracle 1989/0/18 (crossed 2000
+  fixtures). Engine 181 cmds. SORT+GEO+SCAN (the requested list) all done; only
+  DUMP/RESTORE (full RDB byte parity) remains a large separate effort.
 - 2026-06-23 — Waves 17-19 landed: SORT/SORT_RO (`47b2dee`), GEO full surface with
   byte-for-byte GEOPOS/GEODIST float parity (`ac93324`), EVAL_RO/EVALSHA_RO (faithful
   write-command predicate from valkey command flags) + DELIFEQ + MSETEX (`b2351c8`).
