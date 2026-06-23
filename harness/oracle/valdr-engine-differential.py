@@ -10,7 +10,7 @@ Fixture files are JSONL under harness/oracle/valdr-fixtures/. Each line:
     {"id": "<string>",
      "cmd": ["SET", "k", "v"],
      "now_millis": <optional u64, engine host clock; wall clock if absent>,
-     "mode": "exact" | "ttl_band" | "error_prefix" | "type_only" | "set_equal",
+     "mode": "exact" | "ttl_band" | "error_prefix" | "type_only" | "set_equal" | "scan_reply",
      "band": <int, required for ttl_band>,
      "sleep_ms": <optional int, harness sleeps before dispatching this line>,
      "known_unsupported": <optional bool, record-only, never a verdict>}
@@ -33,7 +33,7 @@ import tempfile
 import time
 from pathlib import Path
 
-VALID_MODES = ("exact", "ttl_band", "error_prefix", "type_only", "set_equal")
+VALID_MODES = ("exact", "ttl_band", "error_prefix", "type_only", "set_equal", "scan_reply")
 PORT_RANGE = (38000, 38999)
 
 
@@ -168,6 +168,27 @@ def compare(mode, band, engine_raw, valkey_raw):
             return False
         engine_items = sorted(render(item) for item in engine_node[1])
         valkey_items = sorted(render(item) for item in valkey_node[1])
+        return engine_items == valkey_items
+    if mode == "scan_reply":
+        # SCAN-family reply: a 2-element array [cursor, [elements]]. The cursor is
+        # an opaque, implementation-specific token, so this mode is only valid for
+        # fixtures where the scan COMPLETES IN ONE PASS (both sides return cursor
+        # "0"); the element batch is compared order-independently because the
+        # engine's HashMap iteration order differs from valkey's dict order.
+        if engine_node[0] != "*" or valkey_node[0] != "*":
+            return False
+        if engine_node[1] is None or valkey_node[1] is None:
+            return False
+        if len(engine_node[1]) != 2 or len(valkey_node[1]) != 2:
+            return False
+        engine_cursor, engine_elems = engine_node[1]
+        valkey_cursor, valkey_elems = valkey_node[1]
+        if render(engine_cursor) != render(valkey_cursor):
+            return False
+        if engine_elems[0] != "*" or valkey_elems[0] != "*":
+            return False
+        engine_items = sorted(render(item) for item in (engine_elems[1] or []))
+        valkey_items = sorted(render(item) for item in (valkey_elems[1] or []))
         return engine_items == valkey_items
     raise HarnessError(f"unknown compare mode {mode!r}")
 
