@@ -47,6 +47,8 @@ mod lua_cjson;
 mod lua_cmsgpack;
 #[cfg(feature = "lua-rs-engine")]
 mod lua_rs_backend;
+#[cfg(feature = "lua-rs-engine")]
+mod lua_rs_libs;
 mod lua_sandbox;
 mod resp_bridge;
 mod script_cache;

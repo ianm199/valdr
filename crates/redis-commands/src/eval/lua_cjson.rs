@@ -10,13 +10,13 @@ use mlua::{
 use super::lua_sandbox::readonly_table_proxy;
 
 #[derive(Debug, Clone)]
-struct CjsonConfig {
-    encode_max_depth: usize,
-    decode_max_depth: usize,
-    encode_invalid_numbers: bool,
-    decode_invalid_numbers: bool,
-    encode_keep_buffer: bool,
-    encode_number_precision: i64,
+pub(super) struct CjsonConfig {
+    pub(super) encode_max_depth: usize,
+    pub(super) decode_max_depth: usize,
+    pub(super) encode_invalid_numbers: bool,
+    pub(super) decode_invalid_numbers: bool,
+    pub(super) encode_keep_buffer: bool,
+    pub(super) encode_number_precision: i64,
 }
 
 impl Default for CjsonConfig {
@@ -40,12 +40,15 @@ fn is_cjson_null(value: &LuaValue) -> bool {
     matches!(value, LuaValue::LightUserData(data) if data.0.is_null())
 }
 
-fn json_escape_string(bytes: &[u8]) -> mlua::Result<String> {
+/// Engine-agnostic JSON string escaping. Returns `Err(message)` on failure so
+/// either the mlua or lua-rs binding can wrap it in its own error type.
+pub(super) fn json_escape_string(bytes: &[u8]) -> Result<String, String> {
     serde_json::to_string(String::from_utf8_lossy(bytes).as_ref())
-        .map_err(|err| LuaError::RuntimeError(format!("Cannot serialise string: {}", err)))
+        .map_err(|err| format!("Cannot serialise string: {}", err))
 }
 
-fn encode_json_number(n: f64, allow_invalid: bool) -> mlua::Result<String> {
+/// Engine-agnostic JSON number formatting. Returns `Err(message)` on failure.
+pub(super) fn encode_json_number(n: f64, allow_invalid: bool) -> Result<String, String> {
     if n.is_finite() {
         if n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64 {
             Ok((n as i64).to_string())
@@ -61,9 +64,7 @@ fn encode_json_number(n: f64, allow_invalid: bool) -> mlua::Result<String> {
             Ok("-Infinity".to_string())
         }
     } else {
-        Err(LuaError::RuntimeError(
-            "Cannot serialise number: must not be NaN or Infinity".to_string(),
-        ))
+        Err("Cannot serialise number: must not be NaN or Infinity".to_string())
     }
 }
 
@@ -79,8 +80,12 @@ fn lua_value_to_json_string(
         LuaValue::Nil => Ok("null".to_string()),
         LuaValue::Boolean(v) => Ok(if v { "true" } else { "false" }.to_string()),
         LuaValue::Integer(n) => Ok(n.to_string()),
-        LuaValue::Number(n) => encode_json_number(n, cfg.encode_invalid_numbers),
-        LuaValue::String(s) => json_escape_string(s.as_bytes().as_ref()),
+        LuaValue::Number(n) => {
+            encode_json_number(n, cfg.encode_invalid_numbers).map_err(LuaError::RuntimeError)
+        }
+        LuaValue::String(s) => {
+            json_escape_string(s.as_bytes().as_ref()).map_err(LuaError::RuntimeError)
+        }
         LuaValue::Table(t) => lua_table_to_json_string(t, cfg, depth + 1),
         LuaValue::LightUserData(data) if data.0.is_null() => Ok("null".to_string()),
         _ => Err(LuaError::RuntimeError(
@@ -153,7 +158,9 @@ fn lua_table_to_json_string(
             out.push(',');
         }
         let key_string = match key {
-            LuaValue::String(s) => json_escape_string(s.as_bytes().as_ref())?,
+            LuaValue::String(s) => {
+                json_escape_string(s.as_bytes().as_ref()).map_err(LuaError::RuntimeError)?
+            }
             LuaValue::Integer(i) => serde_json::to_string(&i.to_string())
                 .map_err(|err| LuaError::RuntimeError(err.to_string()))?,
             LuaValue::Number(n)

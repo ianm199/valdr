@@ -9,7 +9,9 @@ use super::lua_sandbox::readonly_table_proxy;
 /// build that Valkey ships: add `2^52 + 2^51`,
 /// then take the low 32 bits of the resulting double. mlua is built with
 /// `lua51` feature, so every Lua number is a `f64`, matching upstream exactly.
-fn bit_barg(n: f64) -> u32 {
+///
+/// Engine-agnostic: shared verbatim by the lua-rs `bit` binding.
+pub(super) fn bit_barg(n: f64) -> u32 {
     const MAGIC: f64 = 6_755_399_441_055_744.0;
     (n + MAGIC).to_bits() as u32
 }
@@ -17,29 +19,44 @@ fn bit_barg(n: f64) -> u32 {
 /// LuaBitOp `BRET`: a bit result is returned to Lua as `(lua_Number)(SBits)b`,
 /// i.e. the 32-bit value reinterpreted as a signed `int32_t` before widening
 /// back to the double `lua_Number`.
-fn bit_bret(b: u32) -> f64 {
+///
+/// Engine-agnostic: shared verbatim by the lua-rs `bit` binding.
+pub(super) fn bit_bret(b: u32) -> f64 {
     f64::from(b as i32)
+}
+
+/// Shared, engine-agnostic body for the variadic `bit.band` / `bit.bor` /
+/// `bit.bxor`. Mirrors `BIT_OP`: seed the accumulator with the first argument,
+/// then fold the rest. Returns `None` when no arguments are given so each
+/// engine can raise its own typed error.
+pub(super) fn bit_fold_values(
+    values: impl IntoIterator<Item = f64>,
+    op: impl Fn(u32, u32) -> u32,
+) -> Option<f64> {
+    let mut iter = values.into_iter();
+    let first = iter.next()?;
+    let mut acc = bit_barg(first);
+    for value in iter {
+        acc = op(acc, bit_barg(value));
+    }
+    Some(bit_bret(acc))
 }
 
 /// Shared body for the variadic `bit.band` / `bit.bor` / `bit.bxor`. Mirrors
 /// `BIT_OP`: seed the accumulator with the first argument, then fold the rest.
 fn bit_fold(args: Variadic<f64>, op: impl Fn(u32, u32) -> u32) -> mlua::Result<f64> {
-    let mut iter = args.into_iter();
-    let first = iter.next().ok_or_else(|| {
+    bit_fold_values(args, op).ok_or_else(|| {
         LuaError::RuntimeError("bad argument #1 to bitop (number expected, got no value)".into())
-    })?;
-    let mut acc = bit_barg(first);
-    for value in iter {
-        acc = op(acc, bit_barg(value));
-    }
-    Ok(bit_bret(acc))
+    })
 }
 
 /// LuaBitOp `bit.tohex`, including
 /// `INT32_MIN` guard that makes `bit.tohex(65535, -2147483648)` resolve
 /// `0000FFFF` (uppercase, clamped to 8 digits) rather than hitting
 /// undefined `-INT32_MIN` negation.
-fn bit_tohex(x: f64, n_arg: Option<f64>) -> String {
+///
+/// Engine-agnostic: shared verbatim by the lua-rs `bit` binding.
+pub(super) fn bit_tohex(x: f64, n_arg: Option<f64>) -> String {
     let mut b = bit_barg(x);
     let mut n: i32 = match n_arg {
         Some(v) => bit_barg(v) as i32,

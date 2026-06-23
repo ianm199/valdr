@@ -381,6 +381,7 @@ pub(super) fn run_script_lua_rs(
         redis_tbl.set("acl_check_cmd", acl_check_fn)?;
         lua.globals().set("redis", redis_tbl.clone())?;
         lua.globals().set("server", redis_tbl)?;
+        super::lua_rs_libs::install_redis_libs_lua_rs(&lua)?;
         install_eval_global_protection_lua_rs(&lua)?;
 
         lua.load(script_body)

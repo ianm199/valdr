@@ -4,7 +4,7 @@ use mlua::{Error as LuaError, Lua, MultiValue, Table as LuaTable, Value as LuaVa
 
 use super::lua_sandbox::readonly_table_proxy;
 
-const CMSGPACK_MAX_NESTING: usize = 16;
+pub(super) const CMSGPACK_MAX_NESTING: usize = 16;
 
 fn cmsgpack_pack(lua: &Lua, args: MultiValue) -> mlua::Result<MultiValue> {
     if args.is_empty() {
@@ -29,7 +29,9 @@ fn cmsgpack_encode_lua_value(
     level: usize,
 ) -> mlua::Result<()> {
     match value {
-        LuaValue::String(s) => cmsgpack_encode_bytes(s.as_bytes().as_ref(), out),
+        LuaValue::String(s) => {
+            cmsgpack_encode_bytes(s.as_bytes().as_ref(), out).map_err(LuaError::RuntimeError)
+        }
         LuaValue::Boolean(v) => {
             out.push(if v { 0xc3 } else { 0xc2 });
             Ok(())
@@ -54,7 +56,7 @@ fn cmsgpack_encode_lua_value(
     }
 }
 
-fn cmsgpack_number_to_i64(n: f64) -> Option<i64> {
+pub(super) fn cmsgpack_number_to_i64(n: f64) -> Option<i64> {
     if !n.is_finite() || n < i64::MIN as f64 || n > i64::MAX as f64 {
         return None;
     }
@@ -66,7 +68,7 @@ fn cmsgpack_number_to_i64(n: f64) -> Option<i64> {
     }
 }
 
-fn cmsgpack_encode_bytes(bytes: &[u8], out: &mut Vec<u8>) -> mlua::Result<()> {
+pub(super) fn cmsgpack_encode_bytes(bytes: &[u8], out: &mut Vec<u8>) -> Result<(), String> {
     let len = bytes.len();
     if len < 32 {
         out.push(0xa0 | len as u8);
@@ -80,15 +82,13 @@ fn cmsgpack_encode_bytes(bytes: &[u8], out: &mut Vec<u8>) -> mlua::Result<()> {
         out.push(0xdb);
         out.extend_from_slice(&(len as u32).to_be_bytes());
     } else {
-        return Err(LuaError::RuntimeError(
-            "String too large for MessagePack".to_string(),
-        ));
+        return Err("String too large for MessagePack".to_string());
     }
     out.extend_from_slice(bytes);
     Ok(())
 }
 
-fn cmsgpack_encode_double(n: f64, out: &mut Vec<u8>) {
+pub(super) fn cmsgpack_encode_double(n: f64, out: &mut Vec<u8>) {
     let as_float = n as f32;
     if as_float as f64 == n {
         out.push(0xca);
@@ -99,7 +99,7 @@ fn cmsgpack_encode_double(n: f64, out: &mut Vec<u8>) {
     }
 }
 
-fn cmsgpack_encode_int(n: i64, out: &mut Vec<u8>) {
+pub(super) fn cmsgpack_encode_int(n: i64, out: &mut Vec<u8>) {
     if n >= 0 {
         if n <= 127 {
             out.push(n as u8);
@@ -133,7 +133,7 @@ fn cmsgpack_encode_int(n: i64, out: &mut Vec<u8>) {
     }
 }
 
-fn cmsgpack_encode_array_len(len: usize, out: &mut Vec<u8>) -> mlua::Result<()> {
+pub(super) fn cmsgpack_encode_array_len(len: usize, out: &mut Vec<u8>) -> Result<(), String> {
     if len <= 15 {
         out.push(0x90 | len as u8);
     } else if len <= 0xffff {
@@ -143,14 +143,12 @@ fn cmsgpack_encode_array_len(len: usize, out: &mut Vec<u8>) -> mlua::Result<()> 
         out.push(0xdd);
         out.extend_from_slice(&(len as u32).to_be_bytes());
     } else {
-        return Err(LuaError::RuntimeError(
-            "Array too large for MessagePack".to_string(),
-        ));
+        return Err("Array too large for MessagePack".to_string());
     }
     Ok(())
 }
 
-fn cmsgpack_encode_map_len(len: usize, out: &mut Vec<u8>) -> mlua::Result<()> {
+pub(super) fn cmsgpack_encode_map_len(len: usize, out: &mut Vec<u8>) -> Result<(), String> {
     if len <= 15 {
         out.push(0x80 | len as u8);
     } else if len <= 0xffff {
@@ -160,9 +158,7 @@ fn cmsgpack_encode_map_len(len: usize, out: &mut Vec<u8>) -> mlua::Result<()> {
         out.push(0xdf);
         out.extend_from_slice(&(len as u32).to_be_bytes());
     } else {
-        return Err(LuaError::RuntimeError(
-            "Map too large for MessagePack".to_string(),
-        ));
+        return Err("Map too large for MessagePack".to_string());
     }
     Ok(())
 }
@@ -179,13 +175,13 @@ fn cmsgpack_encode_table(
     }
 
     if let Some(len) = cmsgpack_table_array_len(&table)? {
-        cmsgpack_encode_array_len(len, out)?;
+        cmsgpack_encode_array_len(len, out).map_err(LuaError::RuntimeError)?;
         for index in 1..=len {
             let value: LuaValue = table.raw_get(index as i64)?;
             cmsgpack_encode_lua_value(lua, value, out, level + 1)?;
         }
     } else {
-        cmsgpack_encode_map_len(cmsgpack_table_len(&table)?, out)?;
+        cmsgpack_encode_map_len(cmsgpack_table_len(&table)?, out).map_err(LuaError::RuntimeError)?;
         for pair in table.pairs::<LuaValue, LuaValue>() {
             let (key, value) = pair?;
             cmsgpack_encode_lua_value(lua, key, out, level + 1)?;

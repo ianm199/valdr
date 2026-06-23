@@ -864,3 +864,156 @@ fn os_dangerous_methods_are_absent() {
     let err = lua.load("os.execute()").exec().unwrap_err();
     assert!(err.to_string().contains("attempt to call field 'execute'"));
 }
+
+#[cfg(feature = "lua-rs-engine")]
+fn lua_rs_eval(client_id: u64, script: &[u8]) -> Vec<u8> {
+    let mut client = redis_core::Client::new(client_id);
+    client.set_args(vec![
+        RedisString::from_bytes(b"EVAL"),
+        RedisString::from_bytes(script),
+        RedisString::from_bytes(b"0"),
+    ]);
+    let mut ctx = CommandContext::new(&mut client);
+    eval_command(&mut ctx).unwrap();
+    client.drain_reply()
+}
+
+#[cfg(feature = "lua-rs-engine")]
+#[test]
+fn lua_rs_cjson_round_trips_numbers_strings_and_nesting() {
+    let reply = lua_rs_eval(
+        910,
+        br#"
+            assert(cjson.decode("[1,2,3,\"foo\"]")[3] == 3)
+            assert(cjson.decode('{"keya": "a", "keyb": "b"}').keya == "a")
+            local m = {n1 = 100, s1 = "x", a1 = {"a", "b"}, b1 = true, b2 = false}
+            local decoded = cjson.decode(cjson.encode(m))
+            assert(decoded.n1 == 100)
+            assert(decoded.s1 == "x")
+            assert(decoded.a1[2] == "b")
+            assert(decoded.b1 == true)
+            return "ok"
+        "#,
+    );
+    assert_eq!(reply, b"$2\r\nok\r\n");
+}
+
+#[cfg(feature = "lua-rs-engine")]
+#[test]
+fn lua_rs_cjson_invalid_number_and_depth_errors() {
+    let reply = lua_rs_eval(
+        911,
+        br#"
+            assert(pcall(cjson.encode, {num1 = 0/0}) == false)
+            cjson.encode_invalid_numbers(true)
+            assert(pcall(cjson.encode, {num1 = 0/0}) == true)
+            cjson.encode_invalid_numbers(false)
+            cjson.encode_max_depth(1)
+            assert(pcall(cjson.encode, {a = {b = 1}}) == false)
+            cjson.encode_max_depth(1000)
+            return "ok"
+        "#,
+    );
+    assert_eq!(reply, b"$2\r\nok\r\n");
+}
+
+#[cfg(feature = "lua-rs-engine")]
+#[test]
+fn lua_rs_cmsgpack_packs_double_and_negative_int64() {
+    let reply = lua_rs_eval(
+        912,
+        br#"
+            local function hex(s)
+                local h = ""
+                for i = 1, #s do h = h .. string.format("%02x", string.byte(s, i)) end
+                return h
+            end
+            assert(hex(cmsgpack.pack(0.1)) == "cb3fb999999999999a")
+            assert(hex(cmsgpack.pack(-1099511627776)) == "d3ffffff0000000000")
+            return "ok"
+        "#,
+    );
+    assert_eq!(reply, b"$2\r\nok\r\n");
+}
+
+#[cfg(feature = "lua-rs-engine")]
+#[test]
+fn lua_rs_cmsgpack_pack_unpack_scalars_and_arrays() {
+    let reply = lua_rs_eval(
+        913,
+        br#"
+            local arr = {1, 2, 3, "x", true}
+            local decoded = cmsgpack.unpack(cmsgpack.pack(arr))
+            assert(decoded[1] == 1)
+            assert(decoded[4] == "x")
+            assert(decoded[5] == true)
+            local a, b, c = cmsgpack.pack("a", "bb", 7)
+            local off, obj = cmsgpack.unpack_limit(a, 1, 0)
+            assert(obj == "a")
+            off, obj = cmsgpack.unpack_limit(a, 1, off)
+            assert(obj == "bb")
+            off, obj = cmsgpack.unpack_limit(a, 1, off)
+            assert(obj == 7)
+            assert(off == -1)
+            return "ok"
+        "#,
+    );
+    assert_eq!(reply, b"$2\r\nok\r\n");
+}
+
+#[cfg(feature = "lua-rs-engine")]
+#[test]
+fn lua_rs_cmsgpack_packs_string_keyed_map() {
+    let reply = lua_rs_eval(
+        914,
+        br#"
+            local m = {a = 1, b = 2, c = "three"}
+            local decoded = cmsgpack.unpack(cmsgpack.pack(m))
+            assert(decoded.a == 1)
+            assert(decoded.b == 2)
+            assert(decoded.c == "three")
+            return "ok"
+        "#,
+    );
+    assert_eq!(reply, b"$2\r\nok\r\n");
+}
+
+#[cfg(feature = "lua-rs-engine")]
+#[test]
+fn lua_rs_bit_minimal_functionality() {
+    let reply = lua_rs_eval(
+        915,
+        br#"
+            assert(bit.tobit(1) == 1)
+            assert(bit.band(1) == 1)
+            assert(bit.bxor(1, 2) == 3)
+            assert(bit.bor(1, 2, 4, 8, 16, 32, 64, 128) == 255)
+            assert(bit.bnot(0) == -1)
+            assert(bit.lshift(1, 4) == 16)
+            assert(bit.rshift(256, 4) == 16)
+            return "ok"
+        "#,
+    );
+    assert_eq!(reply, b"$2\r\nok\r\n");
+}
+
+#[cfg(feature = "lua-rs-engine")]
+#[test]
+fn lua_rs_bit_tohex_bug_compat() {
+    let reply = lua_rs_eval(916, b"return bit.tohex(65535, -2147483648)");
+    assert_eq!(reply, b"$8\r\n0000FFFF\r\n");
+}
+
+#[cfg(feature = "lua-rs-engine")]
+#[test]
+fn lua_rs_injected_libs_are_readonly() {
+    let reply = lua_rs_eval(
+        917,
+        br#"
+            local ok = pcall(function() cjson.encode = function() return 1 end end)
+            assert(ok == false)
+            return "ok"
+        "#,
+    );
+    assert_eq!(reply, b"$2\r\nok\r\n");
+}
