@@ -47,3 +47,20 @@
 {"id": "setex-real-expiry", "cmd": ["SETEX", "gone", "1", "bye"]}
 {"id": "get-after-real-expiry", "cmd": ["GET", "gone"], "sleep_ms": 1300}
 {"id": "exists-after-real-expiry", "cmd": ["EXISTS", "gone"]}
+{"id": "set-with-ttl-for-keepttl", "cmd": ["SET", "ktl", "v1", "EX", "100"]}
+{"id": "ttl-before-keepttl", "cmd": ["TTL", "ktl"], "mode": "ttl_band", "band": 2}
+{"id": "set-keepttl-retains", "cmd": ["SET", "ktl", "v2", "KEEPTTL"]}
+{"id": "ttl-after-keepttl", "cmd": ["TTL", "ktl"], "mode": "ttl_band", "band": 2}
+{"id": "get-after-keepttl", "cmd": ["GET", "ktl"]}
+{"id": "set-plain-clears-ttl", "cmd": ["SET", "ktl", "v3"]}
+{"id": "ttl-after-plain-overwrite", "cmd": ["TTL", "ktl"]}
+{"id": "set-keepttl-no-prior-ttl", "cmd": ["SET", "ktl", "v4", "KEEPTTL"]}
+{"id": "ttl-after-keepttl-no-prior", "cmd": ["TTL", "ktl"]}
+{"id": "set-exat-far-future", "cmd": ["SET", "exk", "v", "EXAT", "99999999999"]}
+{"id": "ttl-after-exat", "cmd": ["TTL", "exk"], "mode": "ttl_band", "band": 5}
+{"id": "set-pxat-far-future", "cmd": ["SET", "pxk", "v", "PXAT", "99999999999000"]}
+{"id": "pttl-after-pxat", "cmd": ["PTTL", "pxk"], "mode": "ttl_band", "band": 5000}
+{"id": "set-keepttl-conflict-with-ex", "cmd": ["SET", "exk", "v", "EX", "10", "KEEPTTL"]}
+{"id": "set-keepttl-before-ex-conflict", "cmd": ["SET", "exk", "v", "KEEPTTL", "EX", "10"]}
+{"id": "set-exat-zero-invalid", "cmd": ["SET", "exk", "v", "EXAT", "0"]}
+{"id": "set-exat-and-px-conflict", "cmd": ["SET", "exk", "v", "EXAT", "99999999999", "PX", "100"]}

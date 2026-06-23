@@ -358,6 +358,22 @@ impl<H: Host> Engine<H> {
             self.incr_command(argv)
         } else if ascii_eq(command, b"INCRBY") {
             self.incrby_command(argv)
+        } else if ascii_eq(command, b"DECR") {
+            self.decr_command(argv)
+        } else if ascii_eq(command, b"DECRBY") {
+            self.decrby_command(argv)
+        } else if ascii_eq(command, b"APPEND") {
+            self.append_command(argv)
+        } else if ascii_eq(command, b"STRLEN") {
+            self.strlen_command(argv)
+        } else if ascii_eq(command, b"SETNX") {
+            self.setnx_command(argv)
+        } else if ascii_eq(command, b"GETSET") {
+            self.getset_command(argv)
+        } else if ascii_eq(command, b"GETDEL") {
+            self.getdel_command(argv)
+        } else if ascii_eq(command, b"MGET") {
+            self.mget_command(argv)
         } else if ascii_eq(command, b"EXPIRE") {
             self.expire_command(argv, 1000)
         } else if ascii_eq(command, b"PEXPIRE") {
@@ -422,6 +438,7 @@ impl<H: Host> Engine<H> {
         let mut nx = false;
         let mut xx = false;
         let mut get = false;
+        let mut keepttl = false;
         let mut index = 3;
         while index < argv.len() {
             if ascii_eq(&argv[index], b"NX") {
@@ -440,7 +457,7 @@ impl<H: Host> Engine<H> {
                 get = true;
                 index += 1;
             } else if ascii_eq(&argv[index], b"PX") || ascii_eq(&argv[index], b"EX") {
-                if expire_at_ms.is_some() {
+                if expire_at_ms.is_some() || keepttl {
                     return err(b"ERR syntax error");
                 }
                 if index + 1 >= argv.len() {
@@ -465,6 +482,31 @@ impl<H: Host> Engine<H> {
                     return invalid_expire_time(b"set");
                 }
                 index += 2;
+            } else if ascii_eq(&argv[index], b"EXAT") || ascii_eq(&argv[index], b"PXAT") {
+                if expire_at_ms.is_some() || keepttl {
+                    return err(b"ERR syntax error");
+                }
+                if index + 1 >= argv.len() {
+                    return err(b"ERR syntax error");
+                }
+                let Some(raw) = parse_i64(&argv[index + 1]) else {
+                    return err(b"ERR value is not an integer or out of range");
+                };
+                if raw <= 0 {
+                    return invalid_expire_time(b"set");
+                }
+                let unit = if ascii_eq(&argv[index], b"PXAT") { 1 } else { 1000 };
+                let Some(absolute) = (raw as u64).checked_mul(unit) else {
+                    return invalid_expire_time(b"set");
+                };
+                expire_at_ms = Some(absolute);
+                index += 2;
+            } else if ascii_eq(&argv[index], b"KEEPTTL") {
+                if expire_at_ms.is_some() {
+                    return err(b"ERR syntax error");
+                }
+                keepttl = true;
+                index += 1;
             } else {
                 return err(b"ERR syntax error");
             }
@@ -491,6 +533,9 @@ impl<H: Host> Engine<H> {
             } else {
                 RespFrame::null_bulk()
             };
+        }
+        if keepttl {
+            expire_at_ms = self.db.get(&argv[1]).and_then(|entry| entry.expire_at_ms);
         }
         self.db.insert(
             argv[1].clone(),
@@ -604,6 +649,142 @@ impl<H: Host> Engine<H> {
         );
         self.note_write(key);
         RespFrame::integer(next)
+    }
+
+    fn decr_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 2 {
+            return wrong_arity(b"decr");
+        }
+        self.apply_increment(&argv[1], -1)
+    }
+
+    fn decrby_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 3 {
+            return wrong_arity(b"decrby");
+        }
+        let Some(delta) = parse_i64(&argv[2]) else {
+            return err(b"ERR value is not an integer or out of range");
+        };
+        let Some(negated) = delta.checked_neg() else {
+            return err(b"ERR decrement would overflow");
+        };
+        self.apply_increment(&argv[1], negated)
+    }
+
+    fn append_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 3 {
+            return wrong_arity(b"append");
+        }
+        self.purge_if_expired(&argv[1]);
+        let new_len = match self.db.get_mut(&argv[1]) {
+            Some(Entry {
+                value: StoredValue::String(value),
+                ..
+            }) => {
+                value.extend_from_slice(&argv[2]);
+                value.len()
+            }
+            Some(_) => return wrong_type(),
+            None => {
+                self.db.insert(
+                    argv[1].clone(),
+                    Entry {
+                        value: StoredValue::String(argv[2].clone()),
+                        expire_at_ms: None,
+                    },
+                );
+                argv[2].len()
+            }
+        };
+        self.note_write(&argv[1]);
+        RespFrame::integer(new_len as i64)
+    }
+
+    fn strlen_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 2 {
+            return wrong_arity(b"strlen");
+        }
+        match self.get_value(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::String(value)) => RespFrame::integer(value.len() as i64),
+            Some(_) => wrong_type(),
+            None => RespFrame::integer(0),
+        }
+    }
+
+    fn setnx_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 3 {
+            return wrong_arity(b"setnx");
+        }
+        self.purge_if_expired(&argv[1]);
+        if self.db.contains_key(&argv[1]) {
+            return RespFrame::integer(0);
+        }
+        self.db.insert(
+            argv[1].clone(),
+            Entry {
+                value: StoredValue::String(argv[2].clone()),
+                expire_at_ms: None,
+            },
+        );
+        self.note_write(&argv[1]);
+        RespFrame::integer(1)
+    }
+
+    fn getset_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 3 {
+            return wrong_arity(b"getset");
+        }
+        self.purge_if_expired(&argv[1]);
+        let old = match self.db.get(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::String(value)) => Some(value.clone()),
+            Some(_) => return wrong_type(),
+            None => None,
+        };
+        self.db.insert(
+            argv[1].clone(),
+            Entry {
+                value: StoredValue::String(argv[2].clone()),
+                expire_at_ms: None,
+            },
+        );
+        self.note_write(&argv[1]);
+        old_string_reply(old)
+    }
+
+    fn getdel_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 2 {
+            return wrong_arity(b"getdel");
+        }
+        self.purge_if_expired(&argv[1]);
+        match self.db.remove(&argv[1]) {
+            Some(Entry {
+                value: StoredValue::String(value),
+                ..
+            }) => {
+                self.note_write(&argv[1]);
+                bulk(value)
+            }
+            Some(other) => {
+                self.db.insert(argv[1].clone(), other);
+                wrong_type()
+            }
+            None => RespFrame::null_bulk(),
+        }
+    }
+
+    fn mget_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 2 {
+            return wrong_arity(b"mget");
+        }
+        let mut items = Vec::with_capacity(argv.len() - 1);
+        for key in &argv[1..] {
+            let item = match self.get_value(key).map(|entry| &entry.value) {
+                Some(StoredValue::String(value)) => bulk(value),
+                _ => RespFrame::null_bulk(),
+            };
+            items.push(item);
+        }
+        RespFrame::array(items)
     }
 
     fn hset_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {

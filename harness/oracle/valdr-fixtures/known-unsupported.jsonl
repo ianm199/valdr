@@ -1,11 +1,3 @@
-{"id": "ku-set-keepttl", "cmd": ["SET", "ku:kt", "v", "KEEPTTL"], "known_unsupported": true}
-{"id": "ku-set-exat", "cmd": ["SET", "ku:exat", "v", "EXAT", "33177117200"], "known_unsupported": true}
-{"id": "ku-append", "cmd": ["APPEND", "ku:app", "v"], "known_unsupported": true}
-{"id": "ku-setnx", "cmd": ["SETNX", "ku:setnx", "v"], "known_unsupported": true}
-{"id": "ku-getdel", "cmd": ["GETDEL", "ku:getdel"], "known_unsupported": true}
-{"id": "ku-mget", "cmd": ["MGET", "ku:m1", "ku:m2"], "known_unsupported": true}
-{"id": "ku-strlen", "cmd": ["STRLEN", "ku:app"], "known_unsupported": true}
-{"id": "ku-decr", "cmd": ["DECR", "ku:decr"], "known_unsupported": true}
 {"id": "ku-hexists", "cmd": ["HEXISTS", "ku:h", "f"], "known_unsupported": true}
 {"id": "ku-hlen", "cmd": ["HLEN", "ku:h"], "known_unsupported": true}
 {"id": "ku-hmget", "cmd": ["HMGET", "ku:h", "f"], "known_unsupported": true}

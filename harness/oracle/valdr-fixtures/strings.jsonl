@@ -31,3 +31,34 @@
 {"id": "exists-single", "cmd": ["EXISTS", "ctr"]}
 {"id": "exists-missing", "cmd": ["EXISTS", "ghost"]}
 {"id": "exists-repeated-keys", "cmd": ["EXISTS", "ctr", "ctr", "ghost", "ctr"]}
+{"id": "append-new-key", "cmd": ["APPEND", "ap", "Hello"]}
+{"id": "append-existing-key", "cmd": ["APPEND", "ap", " World"]}
+{"id": "get-after-append", "cmd": ["GET", "ap"]}
+{"id": "strlen-after-append", "cmd": ["STRLEN", "ap"]}
+{"id": "strlen-missing-key", "cmd": ["STRLEN", "noap"]}
+{"id": "setnx-fresh", "cmd": ["SETNX", "sn", "first"]}
+{"id": "setnx-existing", "cmd": ["SETNX", "sn", "second"]}
+{"id": "get-after-setnx", "cmd": ["GET", "sn"]}
+{"id": "getset-existing", "cmd": ["GETSET", "sn", "third"]}
+{"id": "get-after-getset", "cmd": ["GET", "sn"]}
+{"id": "getset-fresh-key", "cmd": ["GETSET", "gsnew", "init"]}
+{"id": "set-getdel-target", "cmd": ["SET", "gd", "tomb"]}
+{"id": "getdel-existing", "cmd": ["GETDEL", "gd"]}
+{"id": "get-after-getdel", "cmd": ["GET", "gd"]}
+{"id": "getdel-missing", "cmd": ["GETDEL", "gdghost"]}
+{"id": "set-mget-1", "cmd": ["SET", "mg1", "one"]}
+{"id": "mget-mixed", "cmd": ["MGET", "mg1", "mg2", "sn"]}
+{"id": "set-decr-target", "cmd": ["SET", "dc", "10"]}
+{"id": "decr-existing", "cmd": ["DECR", "dc"]}
+{"id": "decrby-existing", "cmd": ["DECRBY", "dc", "4"]}
+{"id": "get-after-decr", "cmd": ["GET", "dc"]}
+{"id": "decr-fresh-key", "cmd": ["DECR", "freshdc"]}
+{"id": "decrby-non-integer", "cmd": ["DECRBY", "dc", "abc"]}
+{"id": "decr-non-integer-value", "cmd": ["DECR", "notnum"]}
+{"id": "hset-wrongtype-target", "cmd": ["HSET", "wt", "f", "v"]}
+{"id": "append-wrongtype", "cmd": ["APPEND", "wt", "x"]}
+{"id": "strlen-wrongtype", "cmd": ["STRLEN", "wt"]}
+{"id": "getset-wrongtype", "cmd": ["GETSET", "wt", "x"]}
+{"id": "getdel-wrongtype", "cmd": ["GETDEL", "wt"]}
+{"id": "mget-wrongtype-returns-nil", "cmd": ["MGET", "wt"]}
+{"id": "wrongtype-key-untouched-after-getdel", "cmd": ["HGET", "wt", "f"]}
