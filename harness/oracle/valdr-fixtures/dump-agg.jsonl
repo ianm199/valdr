@@ -80,3 +80,26 @@
 {"id": "da-hashttl-six-hset", "cmd": ["HSET", "da:ht6", "k1", "1", "k2", "2", "k3", "3", "k4", "4", "k5", "5", "k6", "6"]}
 {"id": "da-hashttl-six-hexpireat", "cmd": ["HEXPIREAT", "da:ht6", "99999999999", "FIELDS", "2", "k2", "k5"]}
 {"id": "da-hashttl-six-dump", "cmd": ["DUMP", "da:ht6"]}
+{"id": "da-stream-single-xadd", "cmd": ["XADD", "da:st1", "1-1", "f", "v"]}
+{"id": "da-stream-single-dump", "cmd": ["DUMP", "da:st1"]}
+{"id": "da-stream-same-xadd1", "cmd": ["XADD", "da:st2", "1-1", "a", "1"]}
+{"id": "da-stream-same-xadd2", "cmd": ["XADD", "da:st2", "2-2", "a", "2"]}
+{"id": "da-stream-same-dump", "cmd": ["DUMP", "da:st2"]}
+{"id": "da-stream-diff-xadd1", "cmd": ["XADD", "da:st3", "5-0", "x", "1"]}
+{"id": "da-stream-diff-xadd2", "cmd": ["XADD", "da:st3", "6-0", "y", "2", "z", "3"]}
+{"id": "da-stream-diff-dump", "cmd": ["DUMP", "da:st3"]}
+{"id": "da-stream-strfields-xadd", "cmd": ["XADD", "da:st4", "5-3", "hello", "world", "foo", "bar"]}
+{"id": "da-stream-strfields-dump", "cmd": ["DUMP", "da:st4"]}
+{"id": "da-stream-xsetid-xadd", "cmd": ["XADD", "da:st5", "1-1", "f", "v"]}
+{"id": "da-stream-xsetid-set", "cmd": ["XSETID", "da:st5", "5-5"]}
+{"id": "da-stream-xsetid-dump", "cmd": ["DUMP", "da:st5"]}
+{"id": "da-stream-group-xadd", "cmd": ["XADD", "da:st6", "1-1", "f", "v"]}
+{"id": "da-stream-group-create", "cmd": ["XGROUP", "CREATE", "da:st6", "grp", "0"]}
+{"id": "da-stream-group-dump", "cmd": ["DUMP", "da:st6"]}
+{"id": "da-stream-emptied-xadd", "cmd": ["XADD", "da:st7", "1-1", "f", "v"]}
+{"id": "da-stream-emptied-xdel", "cmd": ["XDEL", "da:st7", "1-1"]}
+{"id": "da-stream-emptied-dump", "cmd": ["DUMP", "da:st7"]}
+{"id": "da-stream-multi-xadd1", "cmd": ["XADD", "da:st8", "10-0", "a", "1", "b", "2"]}
+{"id": "da-stream-multi-xadd2", "cmd": ["XADD", "da:st8", "11-0", "a", "3", "b", "4"]}
+{"id": "da-stream-multi-xadd3", "cmd": ["XADD", "da:st8", "12-0", "a", "5", "b", "6"]}
+{"id": "da-stream-multi-dump", "cmd": ["DUMP", "da:st8"]}

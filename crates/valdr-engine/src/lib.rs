@@ -12503,6 +12503,34 @@ const RDB_TYPE_HASH_LISTPACK: u8 = 16;
 const RDB_TYPE_ZSET_LISTPACK: u8 = 17;
 const RDB_TYPE_LIST_QUICKLIST_2: u8 = 18;
 const RDB_TYPE_SET_LISTPACK: u8 = 20;
+/// `RDB_TYPE_STREAM_LISTPACKS_3` (type byte 21, `rdb.h`): a stream serialized as
+/// a radix tree of master-entry listpacks plus the stream metadata and consumer
+/// groups. The edge engine emits this for a stream reproducible byte-for-byte —
+/// a **single-node** stream (entries within `stream-node-max-entries=100` and
+/// `stream-node-max-bytes=4096`) that has had **no deletions or trims** (so the
+/// listpack carries no tombstones and the node's primary id equals the minimum
+/// live entry id), with **no pending entries** in any consumer group (PEL
+/// delivery times and consumer seen/active times are host-clock-derived and so
+/// cannot byte-match). Streams outside this subset are deferred.
+const RDB_TYPE_STREAM_LISTPACKS_3: u8 = 21;
+
+/// `STREAM_ITEM_FLAG_*` (`t_stream.c`): per-entry flags in a master-entry
+/// listpack. `SAMEFIELDS` means the entry's field names match the listpack's
+/// primary (first) entry, so only the values are stored; `DELETED` marks a
+/// tombstone (the engine never emits one — a deleted entry is dropped from its
+/// `BTreeMap`, which is exactly why a stream that has had a deletion cannot be
+/// byte-reproduced and is deferred).
+const STREAM_ITEM_FLAG_NONE: i64 = 0;
+const STREAM_ITEM_FLAG_SAMEFIELDS: i64 = 1 << 1;
+
+/// `stream-node-max-entries` / `stream-node-max-bytes` defaults (`config.c`,
+/// confirmed against valkey-server 9.1.0: 100 entries, 4096 bytes). A stream
+/// whose single master-entry listpack stays within both limits is one rax node;
+/// past either, valkey splits into multiple nodes whose boundaries depend on
+/// per-entry byte sizes the engine's flat `BTreeMap` cannot reproduce, so such
+/// streams are deferred.
+const STREAM_NODE_MAX_ENTRIES: usize = 100;
+const STREAM_NODE_MAX_BYTES: usize = 4096;
 /// `RDB_TYPE_HASH_2` (type byte 22, `rdb.h`): a hashtable-encoded hash carrying
 /// per-field expiration, added in RDB 80 (valkey 9.0). The body is a field
 /// count followed by `<field><value><8-byte-LE-i64-expiry-ms>` triples, where
@@ -12793,7 +12821,11 @@ fn rdb_create_dump_payload(value: &StoredValue) -> Option<Vec<u8>> {
                 rdb_save_raw_string(&mut payload, &lp);
             }
         }
-        StoredValue::Stream(_) => return None,
+        StoredValue::Stream(stream) => {
+            let body = rdb_stream_to_dump(stream)?;
+            payload.push(RDB_TYPE_STREAM_LISTPACKS_3);
+            payload.extend_from_slice(&body);
+        }
     }
     payload.push((RDB_DUMP_VERSION & 0xff) as u8);
     payload.push(((RDB_DUMP_VERSION >> 8) & 0xff) as u8);
@@ -12901,6 +12933,156 @@ fn rdb_hash_to_hash2(fields: &IndexMap<Vec<u8>, HashField>) -> Option<Vec<u8>> {
         };
         body.extend_from_slice(&expiry.to_le_bytes());
     }
+    Some(body)
+}
+
+/// `streamEncodeID` (`t_stream.c`): a stream ID as a 16-byte buffer — the `ms`
+/// then the `seq`, each an 8-byte **big-endian** integer (the rax key form).
+fn stream_encode_id(id: StreamId) -> [u8; 16] {
+    let mut buf = [0u8; 16];
+    buf[0..8].copy_from_slice(&id.ms.to_be_bytes());
+    buf[8..16].copy_from_slice(&id.seq.to_be_bytes());
+    buf
+}
+
+/// Build the `RDB_TYPE_STREAM_LISTPACKS_3` body for a stream, mirroring the
+/// `OBJ_STREAM` arm of `rdbSaveObject` (`rdb.c`) and the master-entry listpack
+/// layout of `streamAppendItem` (`t_stream.c`). The reproducible subset is a
+/// single-node, never-deleted, no-pending-entries stream (see
+/// `RDB_TYPE_STREAM_LISTPACKS_3`'s doc); anything else returns `None` so the
+/// caller emits the aggregate-deferral error rather than non-faithful bytes.
+///
+/// Layout: `<rax-node-count>` then, per node, the 16-byte big-endian primary id
+/// (raw string) and the master-entry listpack (raw string). For a non-empty
+/// stream that is one node: the primary id is the minimum live entry id; the
+/// listpack is `[count, deleted=0, num-fields, field_1..field_N, 0]` (the first
+/// entry's fields) then, per entry in id order, `[flags, ms-diff, seq-diff,
+/// (num-fields, field/value pairs if not SAMEFIELDS else values), lp-count]`.
+/// After the nodes: `length`, `last_id` (ms,seq), `first_id` (ms,seq),
+/// `max_deleted_id` (ms,seq), `entries_added`, then the consumer groups
+/// (`<count>` then per group: name, last_id ms/seq, entries_read, an empty
+/// global PEL, and zero consumers).
+fn rdb_stream_to_dump(stream: &StreamValue) -> Option<Vec<u8>> {
+    if stream.entries.len() > STREAM_NODE_MAX_ENTRIES {
+        return None;
+    }
+    // Any pending entry or consumer carries a host-clock-derived timestamp that
+    // cannot byte-match, so a stream with non-empty PEL/consumers is deferred.
+    for group in stream.groups.values() {
+        if !group.pending.is_empty() || !group.consumers.is_empty() {
+            return None;
+        }
+    }
+    // For a non-empty stream, deletions/trims leave tombstones or a stale
+    // primary id the engine's tombstone-free `BTreeMap` cannot reproduce, so the
+    // live entries must be exactly the append history: `max_deleted_id == 0-0`,
+    // `entries_added == length`, and the recorded `first_id` equal to the
+    // minimum live entry id. An *empty* stream needs none of these — its
+    // zero-node listpack is fully determined by the metadata regardless of how
+    // it emptied.
+    if !stream.entries.is_empty() {
+        if stream.max_deleted_id != StreamId::MIN {
+            return None;
+        }
+        if stream.entries_added != stream.entries.len() as u64 {
+            return None;
+        }
+    }
+
+    let mut body = Vec::new();
+
+    if stream.entries.is_empty() {
+        // An emptied stream holds zero rax nodes; only the metadata remains.
+        rdb_save_len(&mut body, 0);
+    } else {
+        let (&primary_id, first_fields) = stream.entries.iter().next()?;
+        if primary_id != stream.first_id {
+            return None;
+        }
+        let primary_fields: Vec<&[u8]> = first_fields.iter().map(|(f, _)| f.as_slice()).collect();
+
+        let mut lp = ListpackWriter::new();
+        // Master entry: count (all entries are live here), zero deleted, the
+        // primary entry's field names, then the zero terminator.
+        lp.append_integer(stream.entries.len() as i64);
+        lp.append_integer(0);
+        lp.append_integer(primary_fields.len() as i64);
+        for field in &primary_fields {
+            lp.append_auto(field);
+        }
+        lp.append_integer(0);
+
+        for (id, fields) in &stream.entries {
+            let same_fields = fields.len() == primary_fields.len()
+                && fields
+                    .iter()
+                    .zip(primary_fields.iter())
+                    .all(|((f, _), pf)| f.as_slice() == *pf);
+            let flags = if same_fields {
+                STREAM_ITEM_FLAG_SAMEFIELDS
+            } else {
+                STREAM_ITEM_FLAG_NONE
+            };
+            lp.append_integer(flags);
+            lp.append_integer((id.ms - primary_id.ms) as i64);
+            lp.append_integer((id.seq - primary_id.seq) as i64);
+            if !same_fields {
+                lp.append_integer(fields.len() as i64);
+            }
+            for (field, value) in fields {
+                if !same_fields {
+                    lp.append_auto(field);
+                }
+                lp.append_auto(value);
+            }
+            // lp-count: the number of listpack pieces composing this entry,
+            // so a reverse scan can find the flags field. 3 fixed (flags,
+            // ms-diff, seq-diff) + values; plus, when not compressed, the
+            // field names and the num-fields piece.
+            let mut lp_count = fields.len() as i64 + 3;
+            if !same_fields {
+                lp_count += fields.len() as i64 + 1;
+            }
+            lp.append_integer(lp_count);
+        }
+
+        let lp_bytes = lp.into_bytes();
+        if lp_bytes.len() >= STREAM_NODE_MAX_BYTES {
+            return None;
+        }
+        rdb_save_len(&mut body, 1);
+        let id_buf = stream_encode_id(primary_id);
+        rdb_save_raw_string(&mut body, &id_buf);
+        rdb_save_raw_string(&mut body, &lp_bytes);
+    }
+
+    rdb_save_len(&mut body, stream.entries.len() as u64);
+    rdb_save_len(&mut body, stream.last_id.ms);
+    rdb_save_len(&mut body, stream.last_id.seq);
+    rdb_save_len(&mut body, stream.first_id.ms);
+    rdb_save_len(&mut body, stream.first_id.seq);
+    rdb_save_len(&mut body, stream.max_deleted_id.ms);
+    rdb_save_len(&mut body, stream.max_deleted_id.seq);
+    rdb_save_len(&mut body, stream.entries_added);
+
+    // Consumer groups, in name order (valkey iterates the cgroups rax, which is
+    // lexicographic by group name).
+    let mut group_names: Vec<&Vec<u8>> = stream.groups.keys().collect();
+    group_names.sort();
+    rdb_save_len(&mut body, group_names.len() as u64);
+    for name in group_names {
+        let group = &stream.groups[name];
+        rdb_save_raw_string(&mut body, name);
+        rdb_save_len(&mut body, group.last_delivered_id.ms);
+        rdb_save_len(&mut body, group.last_delivered_id.seq);
+        // entries_read is the `SCG_INVALID_ENTRIES_READ` (-1) sentinel or a
+        // non-negative count; `rdbSaveLen` of -1 widens to the 64-bit form.
+        rdb_save_len(&mut body, group.entries_read as u64);
+        // Empty global PEL and zero consumers (the deferred-otherwise case).
+        rdb_save_len(&mut body, 0);
+        rdb_save_len(&mut body, 0);
+    }
+
     Some(body)
 }
 
@@ -13441,8 +13623,166 @@ fn rdb_load_dump_value(data: &[u8]) -> Option<StoredValue> {
             }
             Some(StoredValue::Hash(fields))
         }
+        RDB_TYPE_STREAM_LISTPACKS_3 => rdb_load_stream(body, &mut pos),
         _ => None,
     }
+}
+
+/// Decode a `RDB_TYPE_STREAM_LISTPACKS_3` body into a `StreamValue`, mirroring
+/// the `OBJ_STREAM` arm of `rdbLoadObject` (`rdb.c`): the rax nodes (each a
+/// 16-byte primary id plus a master-entry listpack), then the metadata, then the
+/// consumer groups. Only the no-pending-entry subset the engine emits is
+/// reconstructed; a payload carrying a non-empty PEL or any consumer is rejected
+/// (the engine cannot model the clock-derived NACK/consumer timestamps), as is a
+/// malformed listpack. Returns `None` (→ "Bad data format") on any of these.
+fn rdb_load_stream(body: &[u8], pos: &mut usize) -> Option<StoredValue> {
+    let (node_count, _) = rdb_load_len(body, pos)?;
+    let mut entries: std::collections::BTreeMap<StreamId, Vec<(Vec<u8>, Vec<u8>)>> =
+        std::collections::BTreeMap::new();
+    for _ in 0..node_count {
+        let key = rdb_load_string(body, pos)?;
+        if key.len() != 16 {
+            return None;
+        }
+        let primary = StreamId {
+            ms: u64::from_be_bytes(key[0..8].try_into().ok()?),
+            seq: u64::from_be_bytes(key[8..16].try_into().ok()?),
+        };
+        let lp = rdb_load_string(body, pos)?;
+        rdb_load_stream_node(&lp, primary, &mut entries)?;
+    }
+
+    let (length, _) = rdb_load_len(body, pos)?;
+    if length != entries.len() as u64 {
+        return None;
+    }
+    let (last_ms, _) = rdb_load_len(body, pos)?;
+    let (last_seq, _) = rdb_load_len(body, pos)?;
+    let (first_ms, _) = rdb_load_len(body, pos)?;
+    let (first_seq, _) = rdb_load_len(body, pos)?;
+    let (md_ms, _) = rdb_load_len(body, pos)?;
+    let (md_seq, _) = rdb_load_len(body, pos)?;
+    let (entries_added, _) = rdb_load_len(body, pos)?;
+
+    let mut stream = StreamValue {
+        entries,
+        last_id: StreamId {
+            ms: last_ms,
+            seq: last_seq,
+        },
+        max_deleted_id: StreamId {
+            ms: md_ms,
+            seq: md_seq,
+        },
+        entries_added,
+        first_id: StreamId {
+            ms: first_ms,
+            seq: first_seq,
+        },
+        groups: std::collections::HashMap::new(),
+    };
+
+    let (group_count, _) = rdb_load_len(body, pos)?;
+    for _ in 0..group_count {
+        let name = rdb_load_string(body, pos)?;
+        let (gl_ms, _) = rdb_load_len(body, pos)?;
+        let (gl_seq, _) = rdb_load_len(body, pos)?;
+        let (entries_read_raw, _) = rdb_load_len(body, pos)?;
+        // Global PEL: only the empty case is reconstructable.
+        let (pel_count, _) = rdb_load_len(body, pos)?;
+        if pel_count != 0 {
+            return None;
+        }
+        // Consumers: only the zero-consumer case is reconstructable.
+        let (consumer_count, _) = rdb_load_len(body, pos)?;
+        if consumer_count != 0 {
+            return None;
+        }
+        stream.groups.insert(
+            name,
+            Group {
+                last_delivered_id: StreamId {
+                    ms: gl_ms,
+                    seq: gl_seq,
+                },
+                pending: std::collections::BTreeMap::new(),
+                consumers: std::collections::HashMap::new(),
+                entries_read: entries_read_raw as i64,
+            },
+        );
+    }
+
+    Some(StoredValue::Stream(stream))
+}
+
+/// Decode one master-entry listpack node into `entries`, mirroring the reverse
+/// of `streamAppendItem`'s forward layout (`t_stream.c`). The listpack is
+/// `[count, deleted, num-fields, field_1..field_N, 0]` (the primary entry's
+/// fields) then, per entry, `[flags, ms-diff, seq-diff, (num-fields +
+/// field/value pairs unless SAMEFIELDS), value(s), lp-count]`. Entries flagged
+/// `DELETED` are skipped. `primary` is the node's primary id (the rax key), used
+/// as the delta-encoding base. Returns `None` on a malformed listpack.
+fn rdb_load_stream_node(
+    lp: &[u8],
+    primary: StreamId,
+    entries: &mut std::collections::BTreeMap<StreamId, Vec<(Vec<u8>, Vec<u8>)>>,
+) -> Option<()> {
+    let elems = listpack_iter(lp)?;
+    let as_int = |b: &[u8]| -> Option<i64> { std::str::from_utf8(b).ok()?.parse::<i64>().ok() };
+    let mut it = elems.iter();
+    let count = as_int(it.next()?)?;
+    let deleted = as_int(it.next()?)?;
+    let num_primary_fields = as_int(it.next()?)?;
+    if num_primary_fields < 0 {
+        return None;
+    }
+    let mut primary_fields: Vec<Vec<u8>> = Vec::with_capacity(num_primary_fields as usize);
+    for _ in 0..num_primary_fields {
+        primary_fields.push(it.next()?.clone());
+    }
+    // The primary-entry zero terminator.
+    let _terminator = it.next()?;
+
+    let total = count.checked_add(deleted)?;
+    if total < 0 {
+        return None;
+    }
+    for _ in 0..total {
+        let flags = as_int(it.next()?)?;
+        let ms_diff = as_int(it.next()?)?;
+        let seq_diff = as_int(it.next()?)?;
+        let same_fields = flags & STREAM_ITEM_FLAG_SAMEFIELDS != 0;
+        let deleted_flag = flags & 1 != 0;
+
+        let mut fields: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        if same_fields {
+            for pf in &primary_fields {
+                let value = it.next()?.clone();
+                fields.push((pf.clone(), value));
+            }
+        } else {
+            let n = as_int(it.next()?)?;
+            if n < 0 {
+                return None;
+            }
+            for _ in 0..n {
+                let field = it.next()?.clone();
+                let value = it.next()?.clone();
+                fields.push((field, value));
+            }
+        }
+        // The lp-count trailer.
+        let _lp_count = it.next()?;
+
+        let id = StreamId {
+            ms: primary.ms.checked_add(ms_diff as u64)?,
+            seq: primary.seq.checked_add(seq_diff as u64)?,
+        };
+        if !deleted_flag {
+            entries.insert(id, fields);
+        }
+    }
+    Some(())
 }
 
 /// Parse an intset blob (`[encoding:u32-le][length:u32-le][contents]`,
@@ -17302,15 +17642,18 @@ mod tests {
         ));
     }
 
-    /// DUMP of a still-deferred type (a Stream, whose RDB encoding the engine
-    /// does not reproduce) yields the aggregate-deferral error. Wave 22 added
-    /// LIST/ZSET/integer-SET and Wave 23 added plain HASH, so those no longer
-    /// error here; a non-integer SET and a hash-with-field-TTL are also
-    /// deferred (asserted in their own tests).
+    /// DUMP of a still-deferred shape yields the aggregate-deferral error. Wave
+    /// 22 added LIST/ZSET/integer-SET, Wave 23 plain HASH, and the engine-tail
+    /// wave added hash-field-TTL and clean (no-deletion, no-PEL) streams — so a
+    /// plain stream no longer errors. A stream that has had a non-emptying
+    /// deletion is still deferred (it leaves a tombstone the engine's tombstone-
+    /// free `BTreeMap` cannot reproduce), which is what this asserts.
     #[test]
     fn dump_wrong_type_is_deferral_error() {
         let mut engine = Engine::new_in_memory();
         engine.execute(&argv(&[b"XADD", b"st", b"1-1", b"f", b"v"]));
+        engine.execute(&argv(&[b"XADD", b"st", b"2-2", b"f", b"w"]));
+        engine.execute(&argv(&[b"XDEL", b"st", b"1-1"]));
         let reply = engine.execute(&argv(&[b"DUMP", b"st"]));
         assert!(matches!(reply, RespFrame::Error(_)));
     }
@@ -18053,6 +18396,143 @@ mod tests {
         ));
     }
 
+    /// A single-entry stream (`XADD st 1-1 f v`) DUMPs as
+    /// `RDB_TYPE_STREAM_LISTPACKS_3` (type byte 21): one rax node keyed by the
+    /// 16-byte big-endian primary id `1-1`, a master-entry listpack
+    /// `[1, 0, 1, "f", 0]` then the entry `[SAMEFIELDS, 0, 0, "v", 4]`, then the
+    /// metadata (length 1, last/first 1-1, max-deleted 0-0, entries-added 1) and
+    /// zero groups. Captured from valkey-server 9.1.0.
+    #[test]
+    fn dump_byte_parity_stream_single_entry() {
+        let mut engine = Engine::new(NoopHost::new(1_000));
+        engine.execute(&argv(&[b"XADD", b"st", b"1-1", b"f", b"v"]));
+        let got = dump_bytes(&mut engine, b"st");
+        assert_eq!(
+            got,
+            hex("150110000000000000000100000000000000011d1d0000000a0001010001010181660200010201000100018176020401ff010101010100000100500043afd830cbc9020e"),
+            "got {}",
+            hex_encode(&got)
+        );
+    }
+
+    /// Two same-fields entries (`1-1 a 1`, `2-2 a 2`): the second entry is
+    /// SAMEFIELDS-compressed (only its value stored). Captured from valkey 9.1.0.
+    #[test]
+    fn dump_byte_parity_stream_two_same_fields() {
+        let mut engine = Engine::new(NoopHost::new(1_000));
+        engine.execute(&argv(&[b"XADD", b"st", b"1-1", b"a", b"1"]));
+        engine.execute(&argv(&[b"XADD", b"st", b"2-2", b"a", b"2"]));
+        let got = dump_bytes(&mut engine, b"st");
+        assert_eq!(
+            got,
+            hex("1501100000000000000001000000000000000126260000000f0002010001010181610200010201000100010101040102010101010102010401ff020202010100000200500036024c954be8ba7f"),
+            "got {}",
+            hex_encode(&got)
+        );
+    }
+
+    /// Two entries with different field sets (`5-0 x 1`, `6-0 y 2 z 3`): the
+    /// second is NOT SAMEFIELDS, so it stores num-fields + field/value pairs.
+    /// Captured from valkey 9.1.0.
+    #[test]
+    fn dump_byte_parity_stream_diff_fields() {
+        let mut engine = Engine::new(NoopHost::new(1_000));
+        engine.execute(&argv(&[b"XADD", b"st", b"5-0", b"x", b"1"]));
+        engine.execute(&argv(&[b"XADD", b"st", b"6-0", b"y", b"2", b"z", b"3"]));
+        let got = dump_bytes(&mut engine, b"st");
+        assert_eq!(
+            got,
+            hex("15011000000000000000050000000000000000c32a30103000000013000201000101018178020001400a400c00046005400f028179022004067a0203010801ff0206000500000002005000f4e72f90c36036e5"),
+            "got {}",
+            hex_encode(&got)
+        );
+    }
+
+    /// A stream with two string fields per entry (`5-3 hello world foo bar`).
+    /// Captured from valkey 9.1.0.
+    #[test]
+    fn dump_byte_parity_stream_string_fields() {
+        let mut engine = Engine::new(NoopHost::new(1_000));
+        engine.execute(&argv(&[
+            b"XADD", b"st", b"5-3", b"hello", b"world", b"foo", b"bar",
+        ]));
+        let got = dump_bytes(&mut engine, b"st");
+        assert_eq!(
+            got,
+            hex("150110000000000000000500000000000000032f2f0000000c000101000102018568656c6c6f0683666f6f04000102010001000185776f726c640683626172040501ff01050305030000010050002f743f2cbd23471d"),
+            "got {}",
+            hex_encode(&got)
+        );
+    }
+
+    /// XSETID raising the last-generated id without changing the entry: the node
+    /// still holds the original entry; only `last_id` advances. Captured from
+    /// valkey 9.1.0 (`XADD st 1-1 f v; XSETID st 5-5`).
+    #[test]
+    fn dump_byte_parity_stream_xsetid() {
+        let mut engine = Engine::new(NoopHost::new(1_000));
+        engine.execute(&argv(&[b"XADD", b"st", b"1-1", b"f", b"v"]));
+        engine.execute(&argv(&[b"XSETID", b"st", b"5-5"]));
+        let got = dump_bytes(&mut engine, b"st");
+        assert_eq!(
+            got,
+            hex("150110000000000000000100000000000000011d1d0000000a0001010001010181660200010201000100018176020401ff0105050101000001005000354069f069c6339b"),
+            "got {}",
+            hex_encode(&got)
+        );
+    }
+
+    /// A stream with a consumer group that has no pending entries
+    /// (`XADD st 1-1 f v; XGROUP CREATE st grp 0`): the group serializes its
+    /// name, last-id 0-0, the `entries_read` -1 sentinel (64-bit-widened), an
+    /// empty global PEL and zero consumers. Captured from valkey 9.1.0.
+    #[test]
+    fn dump_byte_parity_stream_group_empty_pel() {
+        let mut engine = Engine::new(NoopHost::new(1_000));
+        engine.execute(&argv(&[b"XADD", b"st", b"1-1", b"f", b"v"]));
+        engine.execute(&argv(&[b"XGROUP", b"CREATE", b"st", b"grp", b"0"]));
+        let got = dump_bytes(&mut engine, b"st");
+        assert_eq!(
+            got,
+            hex("150110000000000000000100000000000000011d1d0000000a0001010001010181660200010201000100018176020401ff01010101010000010103677270000081ffffffffffffffff00005000db8f4ee04cf6c7d4"),
+            "got {}",
+            hex_encode(&got)
+        );
+    }
+
+    /// A stream emptied by deleting its only entry (`XADD st 1-1 f v;
+    /// XDEL st 1-1`) DUMPs with zero rax nodes and the metadata reflecting the
+    /// deletion (length 0, last-id 1-1, max-deleted 1-1, entries-added 1).
+    /// Captured from valkey 9.1.0.
+    #[test]
+    fn dump_byte_parity_stream_emptied() {
+        let mut engine = Engine::new(NoopHost::new(1_000));
+        engine.execute(&argv(&[b"XADD", b"st", b"1-1", b"f", b"v"]));
+        engine.execute(&argv(&[b"XDEL", b"st", b"1-1"]));
+        let got = dump_bytes(&mut engine, b"st");
+        assert_eq!(
+            got,
+            hex("15000001010000010101005000117c729587effa69"),
+            "got {}",
+            hex_encode(&got)
+        );
+    }
+
+    /// A stream that has had a non-emptying deletion (`XDEL` of one of two
+    /// entries) leaves a tombstone in valkey's listpack the engine's
+    /// `BTreeMap` cannot reproduce, so its DUMP is deferred.
+    #[test]
+    fn dump_stream_with_deletion_is_deferred() {
+        let mut engine = Engine::new(NoopHost::new(1_000));
+        engine.execute(&argv(&[b"XADD", b"st", b"1-1", b"f", b"a"]));
+        engine.execute(&argv(&[b"XADD", b"st", b"2-2", b"f", b"b"]));
+        engine.execute(&argv(&[b"XDEL", b"st", b"1-1"]));
+        assert!(matches!(
+            engine.execute(&argv(&[b"DUMP", b"st"])),
+            RespFrame::Error(_)
+        ));
+    }
+
     /// In-process DUMP→RESTORE round-trip for each aggregate, asserting the
     /// reconstructed value matches via the read commands.
     #[test]
@@ -18261,6 +18741,104 @@ mod tests {
             resp2(&engine.execute(&argv(&[b"SMEMBERS", b"s"]))),
             b"*2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n"
         );
+    }
+
+    /// In-process DUMP→RESTORE round-trip for a multi-entry stream with mixed
+    /// field sets: the reconstructed stream has the same entries (ids, fields,
+    /// values, order), length, and last-id.
+    #[test]
+    fn dump_restore_round_trip_stream() {
+        let mut engine = Engine::new(NoopHost::new(1_000));
+        engine.execute(&argv(&[b"XADD", b"src", b"5-0", b"x", b"1"]));
+        engine.execute(&argv(&[b"XADD", b"src", b"6-0", b"y", b"2", b"z", b"3"]));
+        engine.execute(&argv(&[b"XADD", b"src", b"7-0", b"x", b"hello world"]));
+        let payload = dump_bytes(&mut engine, b"src");
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"RESTORE", b"dst", b"0", &payload]))),
+            b"+OK\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"TYPE", b"dst"]))),
+            b"+stream\r\n"
+        );
+        assert_eq!(resp2(&engine.execute(&argv(&[b"XLEN", b"dst"]))), b":3\r\n");
+        // XRANGE reconstructs every entry id, field, and value in order.
+        assert_eq!(
+            engine.execute(&argv(&[b"XRANGE", b"dst", b"-", b"+"])),
+            engine_xrange_expected()
+        );
+    }
+
+    fn engine_xrange_expected() -> RespFrame {
+        let entry = |id: &[u8], pairs: &[&[u8]]| {
+            RespFrame::array(vec![
+                RespFrame::bulk(RedisString::from_bytes(id.to_vec())),
+                RespFrame::array(
+                    pairs
+                        .iter()
+                        .map(|p| RespFrame::bulk(RedisString::from_bytes(p.to_vec())))
+                        .collect(),
+                ),
+            ])
+        };
+        RespFrame::array(vec![
+            entry(b"5-0", &[b"x", b"1"]),
+            entry(b"6-0", &[b"y", b"2", b"z", b"3"]),
+            entry(b"7-0", &[b"x", b"hello world"]),
+        ])
+    }
+
+    /// RESTORE of a hardcoded real valkey 9.1.0 stream dump
+    /// (`XADD st 1-1 f v; XGROUP CREATE st grp 0`) reconstructs the entry and
+    /// the empty-PEL consumer group.
+    #[test]
+    fn restore_hardcoded_valkey_stream_dump() {
+        let mut engine = Engine::new(NoopHost::new(1_000));
+        let payload = hex(
+            "150110000000000000000100000000000000011d1d0000000a0001010001010181660200010201000100018176020401ff01010101010000010103677270000081ffffffffffffffff00005000db8f4ee04cf6c7d4",
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"RESTORE", b"st", b"0", &payload]))),
+            b"+OK\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"TYPE", b"st"]))),
+            b"+stream\r\n"
+        );
+        assert_eq!(resp2(&engine.execute(&argv(&[b"XLEN", b"st"]))), b":1\r\n");
+        assert_eq!(
+            engine.execute(&argv(&[b"XRANGE", b"st", b"-", b"+"])),
+            RespFrame::array(vec![RespFrame::array(vec![
+                RespFrame::bulk(RedisString::from_bytes(b"1-1".to_vec())),
+                RespFrame::array(vec![
+                    RespFrame::bulk(RedisString::from_bytes(b"f".to_vec())),
+                    RespFrame::bulk(RedisString::from_bytes(b"v".to_vec())),
+                ]),
+            ])])
+        );
+        // The group survives the round-trip.
+        let groups = engine.execute(&argv(&[b"XINFO", b"GROUPS", b"st"]));
+        let RespFrame::Array(Some(items)) = groups else {
+            panic!("expected groups array, got {groups:?}");
+        };
+        assert_eq!(items.len(), 1);
+    }
+
+    /// DUMP→RESTORE round-trip preserves a stream that was DUMPed straight after
+    /// XADD then re-DUMPs identically (the payload is stable through the
+    /// engine's own decode→encode path).
+    #[test]
+    fn dump_restore_stream_redump_is_stable() {
+        let mut engine = Engine::new(NoopHost::new(1_000));
+        engine.execute(&argv(&[b"XADD", b"src", b"1-1", b"a", b"1"]));
+        engine.execute(&argv(&[b"XADD", b"src", b"2-2", b"a", b"2"]));
+        let payload = dump_bytes(&mut engine, b"src");
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"RESTORE", b"dst", b"0", &payload]))),
+            b"+OK\r\n"
+        );
+        let redump = dump_bytes(&mut engine, b"dst");
+        assert_eq!(payload, redump, "re-DUMP diverged: {}", hex_encode(&redump));
     }
 
     /// In-process DUMP→RESTORE round-trip for a HASH, asserting the
