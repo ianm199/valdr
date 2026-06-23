@@ -145,7 +145,37 @@ Prep: profile hotpaths, stage fixes; gate any claim on a clean interactive bench
 
 ---
 
+## Differential-testable surface COMPLETE (2026-06-23)
+
+After Wave 19, **every in-scope command that the differential oracle can verify is
+implemented** (engine 177 cmds, oracle 1979 fixtures / 1959 pass / 0 diverge / 20
+known-unsupported, 56 cargo tests). The remaining **23 in-scope-missing are genuine
+deferrals**, each blocked by a concrete reason — NOT by effort. Run
+`bash harness/oracle/valdr-surface-gap.sh` to see them; categorized:
+
+- **Blocking (8)** — BLPOP, BRPOP, BLMOVE, BLMPOP, BRPOPLPUSH, BZPOPMIN, BZPOPMAX,
+  BZMPOP. A request/response Durable Object can't block a client across the event
+  loop; these need a different execution model.
+- **Random / needs host RNG (5)** — SPOP, SRANDMEMBER, HRANDFIELD, ZRANDMEMBER,
+  RANDOMKEY. NoopHost has no RNG and a random pick can't match valkey's RNG; only
+  trivial cases (singleton / count≥card / empty) are differentially testable.
+  Implement once a host-RNG-backed test harness exists.
+- **Scan cursors (4)** — SCAN, HSCAN, SSCAN, ZSCAN. The reply is `[cursor, {set}]`;
+  the engine's HashMap iteration order ≠ valkey's dict order, and no current oracle
+  `compare()` mode handles "cursor exact + elements set-equal". **Harness enhancement:**
+  add a `scan_reply` compare mode (cursor `==`, inner array `set_equal`) → then SCAN
+  family becomes testable. That's the unlock.
+- **Clock-dependent (3)** — XCLAIM, XAUTOCLAIM (consumer idle time), TIME (wall clock).
+- **DUMP / RESTORE (2)** — require byte-identical RDB serialization (the full RDB
+  encoder/CRC); large faithful port, separate effort.
+- **OBJECT (1)** — ENCODING/etc. expose listpack/skiplist/intset encodings the engine
+  doesn't model.
+
 ## Log (newest first)
+- 2026-06-23 — Waves 17-19 landed: SORT/SORT_RO (`47b2dee`), GEO full surface with
+  byte-for-byte GEOPOS/GEODIST float parity (`ac93324`), EVAL_RO/EVALSHA_RO (faithful
+  write-command predicate from valkey command flags) + DELIFEQ + MSETEX (`b2351c8`).
+  Oracle 1959/0/20, 56 cargo tests. Engine 177 cmds. Differential-testable surface complete.
 - 2026-06-23 — Waves 14-16 landed: BITFIELD/BITFIELD_RO/BITOP (`5f977af`),
   HyperLogLog PFADD/PFCOUNT/PFMERGE with full estimation parity 1000→1002
   (`238a8c0`), hash-field TTL HEXPIRE/HTTL/HGETEX/HGETDEL/HSETEX (Wave 16,
