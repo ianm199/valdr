@@ -108,13 +108,17 @@ DUMP, RESTORE (RDB-serialization parity). Enables key migration in/out of the ed
 
 ---
 
-## Phase 2 — EdgeStash cold-start  `[ ]`  (needs live measurement → interactive)
-Named open target: ~0.5s cold Durable Object start (new DO + snapshot restore +
-wasm init). Branch `perf/cold-start-eager-jemalloc` has warmup/jemalloc toggles.
-Overnight-safe prep only: identify wasm-init + storage.list() cold-load cost,
-stage candidate optimizations + a measurement script. **Do not deploy
-unattended** — gate real numbers on an interactive `wrangler deploy` + latency run.
-See `harness/` memory `cloudflare-deploy-blocker` for the deploy mechanism.
+## Phase 2 — EdgeStash cold-start  `[~]`  (analysis done; live measurement = interactive)
+Named open target: ~0.5s cold Durable Object start. **Analysis complete →
+`docs/EDGESTASH_COLDSTART_PREP.md`.** Cost = wasm-instantiate(size) +
+`storage.list()` + O(state) engine rebuild on first request (`edgestash-cloudflare/src/lib.rs`
+`load_entries`). Two candidate wins: (A) **lazy per-key loading** — drop the
+eager full `storage.list()`, fetch keys on touch via the per-key persistence
+model → cold-start O(1) not O(state); (B) **shrink the wasm** (opt-z + lto +
+panic=abort + strip + wasm-opt) → faster instantiate. Both need a live
+`wrangler deploy` + cold-start latency sweep to validate — NOT overnight-safe.
+NOTE: branch `perf/cold-start-eager-jemalloc` is single-node-server jemalloc/warmup,
+a DIFFERENT cold-start (not the Worker). Deploy mechanism: `cloudflare-deploy-blocker` memory.
 
 ## Phase 3 — Single-node sub-parity perf  `[ ]`  (bench is noisy → confirm interactively)
 Sub-parity commands: RPUSH 0.89×, RPOP 0.95×, XADD 0.81×, FCALL 0.71×.
@@ -142,6 +146,15 @@ Prep: profile hotpaths, stage fixes; gate any claim on a clean interactive bench
 ---
 
 ## Log (newest first)
+- 2026-06-23 — Wave 12 landed (`450dab8`): +4 INCRBYFLOAT/HINCRBYFLOAT/KEYS/LCS
+  (incl. LCS IDX-map parity; long-double float format probed to byte parity).
+  Oracle 1418/0/20. Gap 62. Engine 138 cmds. **Phase 1 core feature-complete**:
+  all data types + aggregates + transactions + streams core. Verified.
+  Remaining 62 = consumer groups, HLL, bitfield/bitop, scan, hash-field-TTL,
+  dump/restore, sort, geo + genuine deferrals (blocking/random/object/time).
+- 2026-06-23 — Wave 11 landed (`c1ce5a6`): Stream value type (cross-cutting) +
+  non-blocking core (XADD/XLEN/XRANGE/XREVRANGE/XDEL/XTRIM/XSETID/XREAD). Oracle
+  1341/0/22, 41 cargo tests. Gap 66. Consumer groups + blocking deferred (Wave 11b).
 - 2026-06-23 — Wave 10 landed (`3b78b5e`): TRANSACTIONS (MULTI/EXEC/DISCARD/WATCH/
   UNWATCH) + per-key WATCH/CAS versioning; intercept at execute() so scripts stay
   atomic; tx state excluded from snapshots. Oracle 1264/0/22, 40 cargo tests. Gap 74.
