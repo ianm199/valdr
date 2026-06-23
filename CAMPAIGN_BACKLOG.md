@@ -142,6 +142,12 @@ Prep: profile hotpaths, stage fixes; gate any claim on a clean interactive bench
 ---
 
 ## Log (newest first)
+- 2026-06-23 — Wave 10 landed (`3b78b5e`): TRANSACTIONS (MULTI/EXEC/DISCARD/WATCH/
+  UNWATCH) + per-key WATCH/CAS versioning; intercept at execute() so scripts stay
+  atomic; tx state excluded from snapshots. Oracle 1264/0/22, 40 cargo tests. Gap 74.
+  The EdgeStash atomic-decision headline. Verified.
+- 2026-06-23 — Wave 9 landed (`92045ab`): +4 list completion (RPOPLPUSH/LMOVE/LMPOP/
+  LPOS); blocking variants deferred. Oracle 1214/0/22. Gap 79.
 - 2026-06-23 — Wave 8 landed (`ce13532`): +9 zset aggregates (ZUNION/ZINTER/ZDIFF/
   +STORE/ZRANGESTORE/ZINTERCARD/ZMPOP, WEIGHTS+AGGREGATE). Oracle 1135/0/17. Gap 83.
   Verified. Engine 117 cmds.
