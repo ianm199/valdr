@@ -104,17 +104,28 @@ npx wrangler deploy --dry-run --outdir /tmp/edgestash-cloudflare-build
 npx wrangler deploy
 ```
 
-### Local Explorer — the visualize-it loop
+### Inspecting local state (and the Local Explorer caveat)
 
-With a recent wrangler (4.82.1+, what `npx wrangler` pulls), press **`e`** during
-`wrangler dev`, or open `http://127.0.0.1:8787/cdn-cgi/explorer`. Because
-persistence is **per-key** (`k:<hex>` SQLite values, not one opaque blob), the
-Explorer shows the *actual persisted keyspace* of each `EdgeStashObject`: you can
-watch the token-bucket `k:` value mutate as you `POST /v1/limit/{tenant}`, and
-confirm a read-only request wrote nothing. The dashboard at `/` is the product
-view; the Explorer is the storage-internals view. Local DO state lives in
-`.wrangler/state` and persists across `dev` runs — fixtures use a fresh tenant by
-default; `rm -rf .wrangler/state` (or the Explorer) to reset.
+**The Local Explorer cannot introspect this DO.** Its Durable Object browser talks
+to the DO over JS-native RPC, which requires the class to `extends DurableObject`
+(`cloudflare:workers`). The Rust `worker` crate (0.8.4) emits a **fetch-style** DO,
+so the Explorer fails with *"receiving Durable Object does not support RPC …"*. Its
+KV/R2/D1 views still work, but EdgeStash binds **only** a DO, so the Explorer shows
+nothing useful here. The Worker→DO data path (`stub.fetch`) is unaffected — this is
+purely an Explorer↔workers-rs interop gap, not a bug.
+
+To actually see the keyspace, read the local SQLite — one file per tenant DO under
+`.wrangler/state/v3/do/edgestash-valdr-EdgeStashObject/<id>.sqlite`, table `_cf_KV`,
+keys `k:<hex(redis_key)>` (the per-key model; any `valdr-engine-snapshot-v1` rows
+are stale pre-Phase-2 leftovers — local state accumulates across `dev` runs):
+```bash
+f=.wrangler/state/v3/do/edgestash-valdr-EdgeStashObject/<id>.sqlite
+sqlite3 "$f" "SELECT name FROM __miniflare_do_name"      # which tenant this DO is
+sqlite3 "$f" "SELECT key, length(value) FROM _cf_KV"     # its keyspace (hex-decode k:…)
+```
+The product dashboard at `/` is the human view. For a clean storage view that also
+works in production, prefer a small debug keyspace-dump route on the Worker over the
+Explorer. Reset local state with `rm -rf .wrangler/state`.
 
 ## The oracle (the bar — build success is NOT the bar)
 

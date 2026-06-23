@@ -166,7 +166,7 @@ independent of the native-server Tcl suite. EdgeStash is the proof that Valdr
 yields a reusable embeddable engine, not just a TCP server; the lazy per-key
 cold-load (`command_keys` → O(touched), not O(state)) is its scale-to-zero story.
 
-- **Front door / how to run it (press `e` for the Local Explorer):**
+- **Front door / how to run it locally + inspect DO state:**
   [crates/edgestash-cloudflare/CLAUDE.md](crates/edgestash-cloudflare/CLAUDE.md)
 - **Engine internals + the wasm-safety invariant:**
   [crates/valdr-engine/CLAUDE.md](crates/valdr-engine/CLAUDE.md)
