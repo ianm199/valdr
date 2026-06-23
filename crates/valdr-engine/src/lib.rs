@@ -10822,6 +10822,256 @@ fn command_arity(command: &[u8]) -> Option<i64> {
     Some(arity)
 }
 
+/// Which keys a command touches, used to drive lazy per-key loading. A lazy
+/// backing store fetches exactly the keys a command needs before executing it,
+/// so a Durable Object's cold-start cost becomes O(touched) instead of
+/// O(total state).
+///
+/// `Keys(...)` lists the exact data keys the command reads or writes, in the
+/// order they appear in `argv` (duplicates preserved — the loader dedups).
+/// `FullKeyspace` means the command needs the whole keyspace resident before it
+/// can run: either because it enumerates keys (`SCAN`/`KEYS`/`FLUSHALL`/…) or
+/// because its key set is not statically knowable from `argv`
+/// (`SORT` with `BY`/`GET` patterns, `EVAL`/`FCALL` scripts that may
+/// `redis.call` any key).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyAccess {
+    Keys(Vec<Vec<u8>>),
+    FullKeyspace,
+}
+
+impl KeyAccess {
+    /// Fold another command's access into this one. Used to compute the union
+    /// of the commands queued inside a `MULTI`/`EXEC` transaction: the
+    /// transaction touches every key any queued command touches, and degrades
+    /// to `FullKeyspace` if any queued command needs the whole keyspace.
+    pub fn merge(self, other: KeyAccess) -> KeyAccess {
+        match (self, other) {
+            (KeyAccess::FullKeyspace, _) | (_, KeyAccess::FullKeyspace) => KeyAccess::FullKeyspace,
+            (KeyAccess::Keys(mut a), KeyAccess::Keys(b)) => {
+                a.extend(b);
+                KeyAccess::Keys(a)
+            }
+        }
+    }
+}
+
+/// Resolve the keys a single command touches, faithful to valkey's per-command
+/// `key_specs` (`reference/valkey/src/commands/*.json`). Derived from the
+/// `begin_search` + `find_keys` of each spec:
+///
+/// - `index{pos:N}` + `range{lastkey:0}` → one key at `argv[N]`.
+/// - `range{lastkey:-1, step:S}` → every `S`th key from the start position to
+///   the end (`MSET`/`MSETNX` step 2; `DEL`/`MGET`/`PFCOUNT`/`WATCH` step 1).
+/// - `keynum{keynumidx, firstkey, step}` → read the numkeys count then take
+///   that many keys (`LMPOP`/`ZMPOP`/`SINTERCARD`/`ZINTERCARD`/`ZUNION`/… and
+///   the `dst numkeys key…` store variants).
+/// - `keyword{STORE|STOREDIST}` → an optional destination key after a keyword
+///   (`GEORADIUS`/`GEORADIUSBYMEMBER`).
+/// - the `STREAMS` keyword split for `XREAD`/`XREADGROUP`.
+///
+/// `FullKeyspace` is returned for keyspace-enumerating commands and,
+/// conservatively, for the dynamic-key commands whose key set is not statically
+/// knowable: `SORT`/`SORT_RO` (the `BY`/`GET` patterns dereference arbitrary
+/// keys) and `EVAL`/`EVALSHA`/`EVAL_RO`/`EVALSHA_RO`/`FCALL`/`FCALL_RO` (a
+/// script may `redis.call` any key, beyond its declared `KEYS`).
+///
+/// The transaction-control verbs (`MULTI`/`DISCARD`/`UNWATCH`/`EXEC`) touch no
+/// data keys themselves and return `Keys(vec![])`; a lazy loader computes the
+/// union of the queued commands at `EXEC` time via [`KeyAccess::merge`].
+/// Connection / non-data commands (`PING`/`ECHO`/`SCRIPT`/…) also return
+/// `Keys(vec![])`.
+pub fn command_keys(argv: &[Vec<u8>]) -> KeyAccess {
+    let Some(command) = argv.first() else {
+        return KeyAccess::Keys(Vec::new());
+    };
+    let upper = command.to_ascii_uppercase();
+
+    let one_key_at = |pos: usize| -> KeyAccess {
+        match argv.get(pos) {
+            Some(key) => KeyAccess::Keys(vec![key.clone()]),
+            None => KeyAccess::Keys(Vec::new()),
+        }
+    };
+
+    match upper.as_slice() {
+        // ── keyspace-enumerating: need every key ────────────────────────────
+        b"SCAN" | b"KEYS" | b"DBSIZE" | b"RANDOMKEY" | b"FLUSHALL" | b"FLUSHDB"
+        | b"SWAPDB" => KeyAccess::FullKeyspace,
+
+        // ── dynamic-key (key set not statically knowable) ───────────────────
+        // SORT dereferences arbitrary keys via BY/GET patterns; scripts may
+        // redis.call any key. Conservatively load the whole keyspace.
+        b"SORT" | b"SORT_RO" | b"EVAL" | b"EVALSHA" | b"EVAL_RO" | b"EVALSHA_RO"
+        | b"FCALL" | b"FCALL_RO" => KeyAccess::FullKeyspace,
+
+        // ── transaction control: no data keys (EXEC unions the queue) ───────
+        b"MULTI" | b"EXEC" | b"DISCARD" | b"UNWATCH" => KeyAccess::Keys(Vec::new()),
+
+        // ── connection / non-data ───────────────────────────────────────────
+        b"PING" | b"ECHO" | b"SCRIPT" | b"TIME" | b"OBJECT" => KeyAccess::Keys(Vec::new()),
+
+        // ── all key arguments from pos 1, step 1 (range lastkey:-1) ──────────
+        b"DEL" | b"UNLINK" | b"EXISTS" | b"TOUCH" | b"WATCH" | b"MGET" | b"PFCOUNT" => {
+            KeyAccess::Keys(argv[1..].to_vec())
+        }
+
+        // ── alternating key/value from pos 1, step 2 (range lastkey:-1 step 2)
+        b"MSET" | b"MSETNX" => {
+            let mut keys = Vec::new();
+            let mut i = 1;
+            while i < argv.len() {
+                keys.push(argv[i].clone());
+                i += 2;
+            }
+            KeyAccess::Keys(keys)
+        }
+
+        // ── MSETEX numkeys key val key val … (keynum, firstkey 1, step 2) ────
+        b"MSETEX" => keynum_keys(argv, 1, 2),
+
+        // ── two distinct keys (pos 1, pos 2) ────────────────────────────────
+        b"RENAME" | b"RENAMENX" | b"SMOVE" | b"LMOVE" | b"RPOPLPUSH"
+        | b"GEOSEARCHSTORE" | b"ZRANGESTORE" | b"LCS" => {
+            let mut keys = Vec::new();
+            if let Some(k) = argv.get(1) {
+                keys.push(k.clone());
+            }
+            if let Some(k) = argv.get(2) {
+                keys.push(k.clone());
+            }
+            KeyAccess::Keys(keys)
+        }
+
+        // ── COPY src dst [DB n] [REPLACE] — both keys at pos 1, 2 ────────────
+        b"COPY" => {
+            let mut keys = Vec::new();
+            if let Some(k) = argv.get(1) {
+                keys.push(k.clone());
+            }
+            if let Some(k) = argv.get(2) {
+                keys.push(k.clone());
+            }
+            KeyAccess::Keys(keys)
+        }
+
+        // ── dest at pos 1, then all source keys from pos 2 (range lastkey:-1)
+        b"SINTERSTORE" | b"SUNIONSTORE" | b"SDIFFSTORE" | b"PFMERGE" => {
+            KeyAccess::Keys(argv[1..].to_vec())
+        }
+
+        // ── BITOP op dest src… — dest at pos 2, sources from pos 3 ───────────
+        b"BITOP" => {
+            if argv.len() <= 2 {
+                KeyAccess::Keys(Vec::new())
+            } else {
+                KeyAccess::Keys(argv[2..].to_vec())
+            }
+        }
+
+        // ── dest at pos 1, then numkeys-counted source keys at pos 2 ─────────
+        b"ZUNIONSTORE" | b"ZINTERSTORE" | b"ZDIFFSTORE" => {
+            let mut keys = Vec::new();
+            if let Some(dst) = argv.get(1) {
+                keys.push(dst.clone());
+            }
+            if let KeyAccess::Keys(src) = keynum_keys(argv, 2, 1) {
+                keys.extend(src);
+            }
+            KeyAccess::Keys(keys)
+        }
+
+        // ── numkeys-counted keys from pos 1 (keynum, firstkey 1, step 1) ─────
+        b"LMPOP" | b"ZMPOP" | b"SINTERCARD" | b"ZINTERCARD" | b"ZUNION" | b"ZINTER"
+        | b"ZDIFF" => keynum_keys(argv, 1, 1),
+
+        // ── GEORADIUS / GEORADIUSBYMEMBER: source key + optional STORE dest ──
+        b"GEORADIUS" | b"GEORADIUSBYMEMBER" => {
+            let mut keys = Vec::new();
+            if let Some(k) = argv.get(1) {
+                keys.push(k.clone());
+            }
+            keys.extend(geo_store_dest(argv));
+            KeyAccess::Keys(keys)
+        }
+        b"GEORADIUS_RO" | b"GEORADIUSBYMEMBER_RO" | b"GEOSEARCH" => one_key_at(1),
+
+        // ── XREAD / XREADGROUP: keys follow the STREAMS keyword ──────────────
+        b"XREAD" | b"XREADGROUP" => xread_keys(argv),
+
+        // ── everything else: single key at pos 1, when present ──────────────
+        _ => {
+            if argv.len() >= 2 {
+                one_key_at(1)
+            } else {
+                KeyAccess::Keys(Vec::new())
+            }
+        }
+    }
+}
+
+/// Read a numkeys count at `argv[count_pos]` then collect that many keys
+/// starting at `count_pos + 1` with the given step. Mirrors valkey's
+/// `keynum` find-keys spec. A non-numeric or out-of-range count yields no
+/// keys (the command will error at execution; loading nothing is safe).
+fn keynum_keys(argv: &[Vec<u8>], count_pos: usize, step: usize) -> KeyAccess {
+    let Some(raw) = argv.get(count_pos) else {
+        return KeyAccess::Keys(Vec::new());
+    };
+    let Ok(text) = std::str::from_utf8(raw) else {
+        return KeyAccess::Keys(Vec::new());
+    };
+    let Ok(numkeys) = text.parse::<usize>() else {
+        return KeyAccess::Keys(Vec::new());
+    };
+    let mut keys = Vec::with_capacity(numkeys);
+    let mut idx = count_pos + 1;
+    for _ in 0..numkeys {
+        match argv.get(idx) {
+            Some(key) => keys.push(key.clone()),
+            None => break,
+        }
+        idx += step;
+    }
+    KeyAccess::Keys(keys)
+}
+
+/// Find the optional `STORE`/`STOREDIST` destination key of a
+/// `GEORADIUS`/`GEORADIUSBYMEMBER` command. The destination is the argument
+/// immediately following the keyword.
+fn geo_store_dest(argv: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    let mut i = 2;
+    while i < argv.len() {
+        if ascii_eq(&argv[i], b"STORE") || ascii_eq(&argv[i], b"STOREDIST") {
+            if let Some(dest) = argv.get(i + 1) {
+                return vec![dest.clone()];
+            }
+        }
+        i += 1;
+    }
+    Vec::new()
+}
+
+/// Resolve the key list of an `XREAD`/`XREADGROUP`: the arguments between the
+/// `STREAMS` keyword and the trailing ids. After `STREAMS` the remaining tokens
+/// are `key… id…` split exactly in half, mirroring valkey's range spec
+/// (`lastkey:-1, step:1, limit:2`).
+fn xread_keys(argv: &[Vec<u8>]) -> KeyAccess {
+    let mut streams_at = None;
+    for (i, arg) in argv.iter().enumerate().skip(1) {
+        if ascii_eq(arg, b"STREAMS") {
+            streams_at = Some(i);
+            break;
+        }
+    }
+    let Some(start) = streams_at else {
+        return KeyAccess::Keys(Vec::new());
+    };
+    let rest = &argv[start + 1..];
+    let key_count = rest.len() / 2;
+    KeyAccess::Keys(rest[..key_count].to_vec())
+}
+
 fn unknown_command_error(command: &[u8], args: &[Vec<u8>]) -> RespFrame {
     let mut msg = b"ERR unknown command '".to_vec();
     msg.extend_from_slice(command);
@@ -17862,5 +18112,192 @@ mod tests {
         let mut expected = vec![100i64, -5, 70000, 3, i64::MAX, i64::MIN];
         expected.sort_unstable();
         assert_eq!(back, expected);
+    }
+
+    /// Build the `Keys(...)` variant from a list of byte-string literals, so the
+    /// expectation table below reads close to the command argv.
+    fn keys(items: &[&[u8]]) -> KeyAccess {
+        KeyAccess::Keys(items.iter().map(|k| k.to_vec()).collect())
+    }
+
+    #[test]
+    fn command_keys_faithful_to_valkey_key_specs() {
+        let full = KeyAccess::FullKeyspace;
+        let none = KeyAccess::Keys(Vec::new());
+
+        let cases: Vec<(Vec<Vec<u8>>, KeyAccess)> = vec![
+            // single key at pos 1
+            (argv(&[b"GET", b"k"]), keys(&[b"k"])),
+            (argv(&[b"SET", b"k", b"v"]), keys(&[b"k"])),
+            (argv(&[b"INCR", b"k"]), keys(&[b"k"])),
+            (argv(&[b"ZADD", b"z", b"1", b"a"]), keys(&[b"z"])),
+            (argv(&[b"HSET", b"h", b"f", b"v"]), keys(&[b"h"])),
+            (argv(&[b"XADD", b"s", b"*", b"f", b"v"]), keys(&[b"s"])),
+            (argv(&[b"EXPIRE", b"k", b"10"]), keys(&[b"k"])),
+            (argv(&[b"PFADD", b"hll", b"a"]), keys(&[b"hll"])),
+            (argv(&[b"GETEX", b"k"]), keys(&[b"k"])),
+            (argv(&[b"DUMP", b"k"]), keys(&[b"k"])),
+            // all key args (range lastkey:-1 step 1)
+            (argv(&[b"MGET", b"k1", b"k2", b"k3"]), keys(&[b"k1", b"k2", b"k3"])),
+            (argv(&[b"DEL", b"k1", b"k2"]), keys(&[b"k1", b"k2"])),
+            (argv(&[b"EXISTS", b"a", b"b"]), keys(&[b"a", b"b"])),
+            (argv(&[b"TOUCH", b"a", b"b"]), keys(&[b"a", b"b"])),
+            (argv(&[b"UNLINK", b"a"]), keys(&[b"a"])),
+            (argv(&[b"WATCH", b"a", b"b"]), keys(&[b"a", b"b"])),
+            (argv(&[b"PFCOUNT", b"h1", b"h2"]), keys(&[b"h1", b"h2"])),
+            // alternating key/value (range step 2)
+            (argv(&[b"MSET", b"k1", b"v1", b"k2", b"v2"]), keys(&[b"k1", b"k2"])),
+            (argv(&[b"MSETNX", b"k1", b"v1", b"k2", b"v2"]), keys(&[b"k1", b"k2"])),
+            // MSETEX numkeys key val key val
+            (
+                argv(&[b"MSETEX", b"2", b"a", b"1", b"b", b"2"]),
+                keys(&[b"a", b"b"]),
+            ),
+            // two keys
+            (argv(&[b"RENAME", b"a", b"b"]), keys(&[b"a", b"b"])),
+            (argv(&[b"RENAMENX", b"a", b"b"]), keys(&[b"a", b"b"])),
+            (argv(&[b"SMOVE", b"a", b"b", b"m"]), keys(&[b"a", b"b"])),
+            (argv(&[b"LMOVE", b"a", b"b", b"LEFT", b"RIGHT"]), keys(&[b"a", b"b"])),
+            (argv(&[b"RPOPLPUSH", b"a", b"b"]), keys(&[b"a", b"b"])),
+            (argv(&[b"COPY", b"a", b"b"]), keys(&[b"a", b"b"])),
+            (argv(&[b"LCS", b"a", b"b"]), keys(&[b"a", b"b"])),
+            (
+                argv(&[b"ZRANGESTORE", b"dst", b"src", b"0", b"-1"]),
+                keys(&[b"dst", b"src"]),
+            ),
+            (
+                argv(&[b"GEOSEARCHSTORE", b"dst", b"src", b"FROMMEMBER", b"m", b"BYRADIUS", b"1", b"m", b"ASC"]),
+                keys(&[b"dst", b"src"]),
+            ),
+            // dest + all source keys (SINTERSTORE-class)
+            (
+                argv(&[b"SINTERSTORE", b"dst", b"k1", b"k2"]),
+                keys(&[b"dst", b"k1", b"k2"]),
+            ),
+            (
+                argv(&[b"SUNIONSTORE", b"dst", b"k1"]),
+                keys(&[b"dst", b"k1"]),
+            ),
+            (
+                argv(&[b"PFMERGE", b"dst", b"a", b"b"]),
+                keys(&[b"dst", b"a", b"b"]),
+            ),
+            // BITOP op dest src...
+            (
+                argv(&[b"BITOP", b"AND", b"dst", b"a", b"b"]),
+                keys(&[b"dst", b"a", b"b"]),
+            ),
+            // dest + numkeys-counted sources (ZUNIONSTORE-class)
+            (
+                argv(&[b"ZUNIONSTORE", b"dst", b"2", b"k1", b"k2"]),
+                keys(&[b"dst", b"k1", b"k2"]),
+            ),
+            (
+                argv(&[b"ZINTERSTORE", b"dst", b"1", b"k1", b"WEIGHTS", b"3"]),
+                keys(&[b"dst", b"k1"]),
+            ),
+            // numkeys-counted keys (LMPOP/ZMPOP/ZUNION-class)
+            (
+                argv(&[b"LMPOP", b"2", b"k1", b"k2", b"LEFT"]),
+                keys(&[b"k1", b"k2"]),
+            ),
+            (
+                argv(&[b"ZMPOP", b"1", b"z", b"MIN"]),
+                keys(&[b"z"]),
+            ),
+            (
+                argv(&[b"SINTERCARD", b"2", b"k1", b"k2"]),
+                keys(&[b"k1", b"k2"]),
+            ),
+            (
+                argv(&[b"ZINTERCARD", b"2", b"z1", b"z2"]),
+                keys(&[b"z1", b"z2"]),
+            ),
+            (
+                argv(&[b"ZUNION", b"2", b"z1", b"z2", b"WITHSCORES"]),
+                keys(&[b"z1", b"z2"]),
+            ),
+            (
+                argv(&[b"ZDIFF", b"2", b"z1", b"z2"]),
+                keys(&[b"z1", b"z2"]),
+            ),
+            // GEORADIUS source + optional STORE destination
+            (
+                argv(&[b"GEORADIUS", b"src", b"15", b"37", b"200", b"km"]),
+                keys(&[b"src"]),
+            ),
+            (
+                argv(&[b"GEORADIUS", b"src", b"15", b"37", b"200", b"km", b"STORE", b"dst"]),
+                keys(&[b"src", b"dst"]),
+            ),
+            (
+                argv(&[b"GEORADIUSBYMEMBER", b"src", b"m", b"200", b"km", b"STOREDIST", b"dd"]),
+                keys(&[b"src", b"dd"]),
+            ),
+            (
+                argv(&[b"GEOSEARCH", b"src", b"FROMMEMBER", b"m", b"BYRADIUS", b"1", b"km", b"ASC"]),
+                keys(&[b"src"]),
+            ),
+            // XREAD / XREADGROUP split on STREAMS
+            (
+                argv(&[b"XREAD", b"COUNT", b"2", b"STREAMS", b"s1", b"s2", b"0", b"0"]),
+                keys(&[b"s1", b"s2"]),
+            ),
+            (
+                argv(&[b"XREADGROUP", b"GROUP", b"g", b"c", b"STREAMS", b"s1", b">"]),
+                keys(&[b"s1"]),
+            ),
+            // FullKeyspace: enumeration
+            (argv(&[b"SCAN", b"0"]), full.clone()),
+            (argv(&[b"KEYS", b"*"]), full.clone()),
+            (argv(&[b"FLUSHALL"]), full.clone()),
+            (argv(&[b"RANDOMKEY"]), full.clone()),
+            (argv(&[b"DBSIZE"]), full.clone()),
+            // FullKeyspace: dynamic keys
+            (argv(&[b"SORT", b"l", b"BY", b"w_*", b"GET", b"d_*"]), full.clone()),
+            (argv(&[b"SORT_RO", b"l"]), full.clone()),
+            (argv(&[b"EVAL", b"return 1", b"1", b"k"]), full.clone()),
+            (argv(&[b"EVALSHA", b"abc", b"1", b"k"]), full.clone()),
+            (argv(&[b"EVAL_RO", b"return 1", b"0"]), full.clone()),
+            (argv(&[b"EVALSHA_RO", b"abc", b"0"]), full.clone()),
+            // transaction control verbs touch no data keys
+            (argv(&[b"MULTI"]), none.clone()),
+            (argv(&[b"EXEC"]), none.clone()),
+            (argv(&[b"DISCARD"]), none.clone()),
+            (argv(&[b"UNWATCH"]), none.clone()),
+            // connection / non-data
+            (argv(&[b"PING"]), none.clone()),
+            (argv(&[b"ECHO", b"hi"]), none.clone()),
+            (argv(&[b"SCRIPT", b"LOAD", b"return 1"]), none.clone()),
+        ];
+
+        for (cmd, expected) in cases {
+            let got = command_keys(&cmd);
+            assert_eq!(
+                got,
+                expected,
+                "command_keys mismatch for {:?}",
+                cmd.iter()
+                    .map(|a| String::from_utf8_lossy(a).into_owned())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn command_keys_merge_unions_and_degrades() {
+        // Union of Keys accumulates (duplicates preserved for the loader to dedup).
+        let merged = command_keys(&argv(&[b"GET", b"a"]))
+            .merge(command_keys(&argv(&[b"SET", b"b", b"1"])));
+        assert_eq!(merged, keys(&[b"a", b"b"]));
+        // A FullKeyspace member degrades the whole union.
+        let degraded = command_keys(&argv(&[b"GET", b"a"]))
+            .merge(command_keys(&argv(&[b"KEYS", b"*"])));
+        assert_eq!(degraded, KeyAccess::FullKeyspace);
+    }
+
+    #[test]
+    fn command_keys_empty_argv_is_no_keys() {
+        assert_eq!(command_keys(&[]), KeyAccess::Keys(Vec::new()));
     }
 }
