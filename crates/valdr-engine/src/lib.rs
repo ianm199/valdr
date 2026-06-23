@@ -273,6 +273,31 @@ enum SetOp {
     Diff,
 }
 
+/// What a SCAN-family command iterates, mirroring the `o == NULL` vs
+/// `o->type` dispatch in `scanGenericCommand` (`db.c`). `Keyspace` is the plain
+/// `SCAN` over key names (the only variant that accepts `TYPE`); the others are
+/// `HSCAN`/`SSCAN`/`ZSCAN` over one collection's elements. The variant also
+/// gates which terminal option is legal (`NOVALUES` only for `Hash`, `NOSCORES`
+/// only for `ZSet`), matching `parseScanOptionsOrReply`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CollectionScan {
+    Keyspace,
+    Hash,
+    Set,
+    ZSet,
+}
+
+/// Parsed SCAN-family options, mirroring the subset of the C `scanOptions`
+/// struct the edge engine honours: `MATCH` (`stringmatchlen` glob, `None` when
+/// absent or the `*` fast-path), `TYPE` (`Keyspace` only), and the
+/// `NOVALUES`/`NOSCORES` "only keys" flag. `COUNT` is parsed and validated but
+/// not retained — the engine always completes in a single pass.
+struct ScanOptions {
+    pattern: Option<Vec<u8>>,
+    type_filter: Option<Vec<u8>>,
+    only_keys: bool,
+}
+
 /// Which multi-key sorted-set operation a `ZUNION`/`ZINTER`/`ZDIFF` (or its
 /// `*STORE` / `ZINTERCARD` variant) computes, mirroring the `op` argument
 /// threaded through `zunionInterDiffGenericCommand` in `t_zset.c`. `Diff`
@@ -1101,6 +1126,14 @@ impl<H: Host> Engine<H> {
             self.hincrbyfloat_command(argv)
         } else if ascii_eq(command, b"KEYS") {
             self.keys_command(argv)
+        } else if ascii_eq(command, b"SCAN") {
+            self.scan_command(argv)
+        } else if ascii_eq(command, b"HSCAN") {
+            self.collection_scan_command(argv, CollectionScan::Hash)
+        } else if ascii_eq(command, b"SSCAN") {
+            self.collection_scan_command(argv, CollectionScan::Set)
+        } else if ascii_eq(command, b"ZSCAN") {
+            self.collection_scan_command(argv, CollectionScan::ZSet)
         } else if ascii_eq(command, b"LCS") {
             self.lcs_command(argv)
         } else if ascii_eq(command, b"PFADD") {
@@ -7768,6 +7801,143 @@ impl<H: Host> Engine<H> {
         RespFrame::array(matches)
     }
 
+    /// SCAN cursor [MATCH pattern] [COUNT n] [TYPE type] (`scanCommand` →
+    /// `scanGenericCommand`, `db.c`). The engine stores the keyspace in a
+    /// `HashMap` with no stable dict cursor, so this is a single-pass scan: it
+    /// returns cursor `"0"` (a bulk string) plus every matching key in one call.
+    /// That is valid SCAN semantics — the reference also completes in one pass
+    /// (cursor 0) for any collection smaller than `COUNT`. `COUNT` is parsed and
+    /// validated (`< 1` → syntax error) but otherwise ignored. `MATCH` applies
+    /// the `stringmatchlen` glob to the key name; `TYPE` filters by
+    /// `type_name`. Expired keys are skipped (mirroring `keysCommand`).
+    /// Cursor-parse precedes option-parse, matching the C order. Read-only.
+    fn scan_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 2 {
+            return wrong_arity(b"scan");
+        }
+        if parse_scan_cursor(&argv[1]).is_none() {
+            return err(b"ERR invalid cursor");
+        }
+        let opts = match parse_scan_options(&argv[2..], CollectionScan::Keyspace) {
+            Ok(opts) => opts,
+            Err(frame) => return frame,
+        };
+        let now = self.host.now_millis();
+        let mut items = Vec::new();
+        for (key, entry) in &self.db {
+            if entry
+                .expire_at_ms
+                .is_some_and(|deadline| deadline <= now)
+            {
+                continue;
+            }
+            if let Some(type_filter) = &opts.type_filter {
+                if entry.value.type_name() != type_filter.as_slice() {
+                    continue;
+                }
+            }
+            if let Some(pattern) = &opts.pattern {
+                if !string_match_len(pattern, key) {
+                    continue;
+                }
+            }
+            items.push(bulk(key));
+        }
+        scan_reply(items)
+    }
+
+    /// HSCAN/SSCAN/ZSCAN key cursor [MATCH pattern] [COUNT n] [NOVALUES|NOSCORES]
+    /// (`hscanCommand`/`sscanCommand`/`zscanCommand` → `scanGenericCommand`,
+    /// `t_hash.c`/`t_set.c`/`t_zset.c`). Single-pass over the collection: returns
+    /// cursor `"0"` plus every matching element in one call, the same shape the
+    /// reference produces for any listpack-encoded (small) collection. The cursor
+    /// is parsed before the key lookup, matching the C order; a missing key
+    /// replies the shared `emptyscan` frame `["0", []]`; a wrong-typed key is
+    /// WRONGTYPE. `MATCH` applies to the FIELD (HSCAN) / MEMBER (SSCAN/ZSCAN).
+    /// HSCAN emits `field, value` pairs (NOVALUES → fields only); SSCAN emits
+    /// members; ZSCAN emits `member, score` pairs with the score formatted like
+    /// ZSCORE (NOSCORES → members only). Read-only.
+    fn collection_scan_command(&mut self, argv: &[Vec<u8>], kind: CollectionScan) -> RespFrame {
+        let name: &[u8] = match kind {
+            CollectionScan::Hash => b"hscan",
+            CollectionScan::Set => b"sscan",
+            CollectionScan::ZSet => b"zscan",
+            CollectionScan::Keyspace => unreachable!(),
+        };
+        if argv.len() < 3 {
+            return wrong_arity(name);
+        }
+        if parse_scan_cursor(&argv[2]).is_none() {
+            return err(b"ERR invalid cursor");
+        }
+        if matches!(kind, CollectionScan::Hash) {
+            self.purge_expired_fields(&argv[1]);
+        } else {
+            self.purge_if_expired(&argv[1]);
+        }
+        let well_typed = match self.db.get(&argv[1]) {
+            None => return scan_reply(Vec::new()),
+            Some(entry) => matches!(
+                (&entry.value, kind),
+                (StoredValue::Hash(_), CollectionScan::Hash)
+                    | (StoredValue::Set(_), CollectionScan::Set)
+                    | (StoredValue::ZSet(_), CollectionScan::ZSet)
+            ),
+        };
+        if !well_typed {
+            return wrong_type();
+        }
+        let opts = match parse_scan_options(&argv[3..], kind) {
+            Ok(opts) => opts,
+            Err(frame) => return frame,
+        };
+        let entry = self
+            .db
+            .get(&argv[1])
+            .expect("key presence verified before option parse");
+        let mut items = Vec::new();
+        match (&entry.value, kind) {
+            (StoredValue::Hash(fields), CollectionScan::Hash) => {
+                for (field, field_value) in fields {
+                    if let Some(pattern) = &opts.pattern {
+                        if !string_match_len(pattern, field) {
+                            continue;
+                        }
+                    }
+                    items.push(bulk(field));
+                    if !opts.only_keys {
+                        items.push(bulk(&field_value.value));
+                    }
+                }
+            }
+            (StoredValue::Set(members), CollectionScan::Set) => {
+                for member in members {
+                    if let Some(pattern) = &opts.pattern {
+                        if !string_match_len(pattern, member) {
+                            continue;
+                        }
+                    }
+                    items.push(bulk(member));
+                }
+            }
+            (StoredValue::ZSet(members), CollectionScan::ZSet) => {
+                for (member, score) in members {
+                    if let Some(pattern) = &opts.pattern {
+                        if !string_match_len(pattern, member) {
+                            continue;
+                        }
+                    }
+                    items.push(bulk(member));
+                    if !opts.only_keys {
+                        items.push(bulk(format_score(*score)));
+                    }
+                }
+            }
+            _ => unreachable!("collection type verified before option parse"),
+        }
+        scan_reply(items)
+    }
+
     /// LCS key1 key2 [LEN] [IDX] [MINMATCHLEN n] [WITHMATCHLEN] (`lcsCommand`,
     /// `t_string.c`). Computes the longest common subsequence of two string
     /// values (a missing key is treated as the empty string). A non-string key
@@ -10392,6 +10562,7 @@ fn command_arity(command: &[u8]) -> Option<i64> {
         b"HPEXPIREAT" => -6,
         b"HPEXPIRETIME" => -5,
         b"HPTTL" => -5,
+        b"HSCAN" => -3,
         b"HSET" => -4,
         b"HSETEX" => -6,
         b"HSETNX" => 4,
@@ -10432,6 +10603,7 @@ fn command_arity(command: &[u8]) -> Option<i64> {
         b"RPUSH" => -3,
         b"RPUSHX" => -3,
         b"SADD" => -3,
+        b"SCAN" => -2,
         b"SCARD" => 2,
         b"SCRIPT" => -2,
         b"SDIFF" => -2,
@@ -10449,6 +10621,7 @@ fn command_arity(command: &[u8]) -> Option<i64> {
         b"SMISMEMBER" => -3,
         b"SMOVE" => 4,
         b"SREM" => -3,
+        b"SSCAN" => -3,
         b"STRLEN" => 2,
         b"SUBSTR" => 4,
         b"SUNION" => -2,
@@ -10479,6 +10652,7 @@ fn command_arity(command: &[u8]) -> Option<i64> {
         b"ZRANGESTORE" => -5,
         b"ZRANK" => -3,
         b"ZREM" => -3,
+        b"ZSCAN" => -3,
         b"ZREMRANGEBYLEX" => 4,
         b"ZREMRANGEBYRANK" => 4,
         b"ZREMRANGEBYSCORE" => 4,
@@ -11883,6 +12057,93 @@ fn wrong_arity(command: &[u8]) -> RespFrame {
 
 fn checked_ttl_ms(raw: i64, unit_ms: u64) -> Option<u64> {
     u64::try_from(raw).ok()?.checked_mul(unit_ms)
+}
+
+/// `parseScanCursorOrReply` (`db.c`): a SCAN cursor must parse via `string2ull`
+/// — a non-negative integer that fits in an unsigned 64-bit value. Returns the
+/// parsed cursor, or `None` (→ "ERR invalid cursor") on anything else. The
+/// engine ignores the cursor's value (single-pass) but still validates it so a
+/// malformed cursor errors identically to the reference.
+fn parse_scan_cursor(bytes: &[u8]) -> Option<u64> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    text.parse::<u64>().ok()
+}
+
+/// `parseScanOptionsOrReply` (`db.c`), restricted to the options the edge
+/// engine honours. Walks `[MATCH pat] [COUNT n] [TYPE t] [NOVALUES|NOSCORES]`
+/// in order, matching the C error text and check-ordering: `COUNT < 1` →
+/// `shared.syntaxerr`; `TYPE` is keyspace-only and unknown names →
+/// "unknown type name '...'"; `NOVALUES` is HSCAN-only and `NOSCORES` is
+/// ZSCAN-only (each with its specific error); any other token → `syntaxerr`. A
+/// `MATCH *` is treated as "no pattern" (the C `use_pattern` fast-path).
+fn parse_scan_options(
+    args: &[Vec<u8>],
+    kind: CollectionScan,
+) -> Result<ScanOptions, RespFrame> {
+    let mut opts = ScanOptions {
+        pattern: None,
+        type_filter: None,
+        only_keys: false,
+    };
+    let mut i = 0;
+    while i < args.len() {
+        let opt = &args[i];
+        let remaining = args.len() - i;
+        if ascii_eq(opt, b"COUNT") && remaining >= 2 {
+            let Some(count) = parse_i64(&args[i + 1]) else {
+                return Err(err(b"ERR value is not an integer or out of range"));
+            };
+            if count < 1 {
+                return Err(err(b"ERR syntax error"));
+            }
+            i += 2;
+        } else if ascii_eq(opt, b"MATCH") && remaining >= 2 {
+            let pattern = &args[i + 1];
+            opts.pattern = if pattern.as_slice() == b"*" {
+                None
+            } else {
+                Some(pattern.clone())
+            };
+            i += 2;
+        } else if ascii_eq(opt, b"TYPE")
+            && matches!(kind, CollectionScan::Keyspace)
+            && remaining >= 2
+        {
+            let typename = args[i + 1].to_ascii_lowercase();
+            let known: &[&[u8]] = &[b"string", b"list", b"set", b"zset", b"hash", b"stream"];
+            if !known.contains(&typename.as_slice()) {
+                let mut msg = b"ERR unknown type name '".to_vec();
+                msg.extend_from_slice(&args[i + 1]);
+                msg.push(b'\'');
+                return Err(err(&msg));
+            }
+            opts.type_filter = Some(typename);
+            i += 2;
+        } else if ascii_eq(opt, b"NOVALUES") {
+            if !matches!(kind, CollectionScan::Hash) {
+                return Err(err(b"ERR NOVALUES option can only be used in HSCAN"));
+            }
+            opts.only_keys = true;
+            i += 1;
+        } else if ascii_eq(opt, b"NOSCORES") {
+            if !matches!(kind, CollectionScan::ZSet) {
+                return Err(err(b"ERR NOSCORES option can only be used in ZSCAN"));
+            }
+            opts.only_keys = true;
+            i += 1;
+        } else {
+            return Err(err(b"ERR syntax error"));
+        }
+    }
+    Ok(opts)
+}
+
+/// Build a SCAN-family reply: the 2-element `[cursor, [elements]]` array with
+/// the cursor a bulk string `"0"` (mirroring `addReplyBulkLongLong(c, 0)` in
+/// `scanGenericCommand`, e.g. the shared `emptyscan` frame). The engine always
+/// completes in a single pass, so the cursor is unconditionally `"0"`.
+fn scan_reply(items: Vec<RespFrame>) -> RespFrame {
+    RespFrame::array(vec![bulk(b"0"), RespFrame::array(items)])
 }
 
 fn parse_i64(bytes: &[u8]) -> Option<i64> {

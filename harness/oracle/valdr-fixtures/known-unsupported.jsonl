@@ -6,12 +6,10 @@
 {"id": "ku-spop-count", "cmd": ["SPOP", "ku:set", "2"], "known_unsupported": true}
 {"id": "ku-srandmember", "cmd": ["SRANDMEMBER", "ku:set"], "known_unsupported": true}
 {"id": "ku-srandmember-count", "cmd": ["SRANDMEMBER", "ku:set", "3"], "known_unsupported": true}
-{"id": "ku-sscan", "cmd": ["SSCAN", "ku:set", "0"], "known_unsupported": true}
 {"id": "ku-zset-seed-for-random-ops", "cmd": ["ZADD", "ku:zset", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e"]}
 {"id": "ku-zrandmember", "cmd": ["ZRANDMEMBER", "ku:zset"], "known_unsupported": true, "reason": "random selection cannot match valkey differentially (same class as SRANDMEMBER/RANDOMKEY)"}
 {"id": "ku-zrandmember-count", "cmd": ["ZRANDMEMBER", "ku:zset", "3"], "known_unsupported": true, "reason": "random selection cannot match valkey differentially (same class as SRANDMEMBER/RANDOMKEY)"}
 {"id": "ku-zrandmember-withscores", "cmd": ["ZRANDMEMBER", "ku:zset", "3", "WITHSCORES"], "known_unsupported": true, "reason": "random selection cannot match valkey differentially (same class as SRANDMEMBER/RANDOMKEY)"}
-{"id": "ku-zscan", "cmd": ["ZSCAN", "ku:zset", "0"], "known_unsupported": true, "reason": "cursor iteration deferred to a later SCAN-family wave (same class as SSCAN)"}
 {"id": "ku-bitfield-seed", "cmd": ["SET", "ku:bf", "foobar"]}
 {"id": "ku-bitfield", "cmd": ["BITFIELD", "ku:bf", "GET", "u8", "0"], "known_unsupported": true, "reason": "multi-subcommand parser deferred to Wave 7b"}
 {"id": "ku-bitfield-ro", "cmd": ["BITFIELD_RO", "ku:bf", "GET", "u8", "0"], "known_unsupported": true, "reason": "multi-subcommand parser deferred to Wave 7b"}
