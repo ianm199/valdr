@@ -121,6 +121,28 @@ enum SetOp {
     Diff,
 }
 
+/// Which multi-key sorted-set operation a `ZUNION`/`ZINTER`/`ZDIFF` (or its
+/// `*STORE` / `ZINTERCARD` variant) computes, mirroring the `op` argument
+/// threaded through `zunionInterDiffGenericCommand` in `t_zset.c`. `Diff`
+/// subtracts every later source from the first; `Union`/`Inter` combine scores
+/// per the `AGGREGATE` rule after applying per-source `WEIGHTS`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ZSetOp {
+    Inter,
+    Union,
+    Diff,
+}
+
+/// How `ZUNION`/`ZINTER` combine the score of a member present in multiple
+/// sources, mirroring `REDIS_AGGR_*` and `zunionInterAggregate` (`t_zset.c`).
+/// `Sum` is the default; `Sum` of `+inf` and `-inf` yields `0` per the C rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ZAggregate {
+    Sum,
+    Min,
+    Max,
+}
+
 /// Optional trailing condition flag of the EXPIRE family
 /// (`parseExtendedExpireArgumentsOrReply`, `expire.c`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -534,6 +556,24 @@ impl<H: Host> Engine<H> {
             self.zremrangebyscore_command(argv)
         } else if ascii_eq(command, b"ZREMRANGEBYLEX") {
             self.zremrangebylex_command(argv)
+        } else if ascii_eq(command, b"ZUNIONSTORE") {
+            self.zunion_inter_diff_command(argv, ZSetOp::Union, true, false)
+        } else if ascii_eq(command, b"ZINTERSTORE") {
+            self.zunion_inter_diff_command(argv, ZSetOp::Inter, true, false)
+        } else if ascii_eq(command, b"ZDIFFSTORE") {
+            self.zunion_inter_diff_command(argv, ZSetOp::Diff, true, false)
+        } else if ascii_eq(command, b"ZUNION") {
+            self.zunion_inter_diff_command(argv, ZSetOp::Union, false, false)
+        } else if ascii_eq(command, b"ZINTER") {
+            self.zunion_inter_diff_command(argv, ZSetOp::Inter, false, false)
+        } else if ascii_eq(command, b"ZDIFF") {
+            self.zunion_inter_diff_command(argv, ZSetOp::Diff, false, false)
+        } else if ascii_eq(command, b"ZINTERCARD") {
+            self.zunion_inter_diff_command(argv, ZSetOp::Inter, false, true)
+        } else if ascii_eq(command, b"ZRANGESTORE") {
+            self.zrangestore_command(argv)
+        } else if ascii_eq(command, b"ZMPOP") {
+            self.zmpop_command(argv)
         } else if ascii_eq(command, b"LPUSH") {
             self.push_command(argv, ListEnd::Head, false)
         } else if ascii_eq(command, b"RPUSH") {
@@ -2605,6 +2645,455 @@ impl<H: Host> Engine<H> {
             self.note_write(&argv[1]);
         }
         RespFrame::integer(removed)
+    }
+
+    /// ZUNIONSTORE / ZINTERSTORE / ZDIFFSTORE / ZUNION / ZINTER / ZDIFF /
+    /// ZINTERCARD (`zunionInterDiffGenericCommand`, `t_zset.c`).
+    ///
+    /// `store` selects the `*STORE` form: the destination is `argv[1]` and
+    /// `numkeys` starts at `argv[2]`; otherwise `numkeys` starts at `argv[1]`.
+    /// `cardinality_only` selects ZINTERCARD (`op` must be `Inter`). Source keys
+    /// missing = empty, a zset contributes its scores, a set contributes score
+    /// `1.0` per member, and any other type is a WRONGTYPE error. WEIGHTS scales
+    /// each source's scores (default `1.0`); AGGREGATE SUM (default)/MIN/MAX
+    /// combines per-member scores. The store form replies the stored cardinality
+    /// (deleting the destination on an empty result); ZINTERCARD replies the
+    /// intersection cardinality capped by LIMIT (`0` = uncapped); the bare form
+    /// replies the sorted members, optionally with scores.
+    fn zunion_inter_diff_command(
+        &mut self,
+        argv: &[Vec<u8>],
+        op: ZSetOp,
+        store: bool,
+        cardinality_only: bool,
+    ) -> RespFrame {
+        let full_name: &[u8] = match (op, store, cardinality_only) {
+            (ZSetOp::Union, true, _) => b"zunionstore",
+            (ZSetOp::Inter, true, _) => b"zinterstore",
+            (ZSetOp::Diff, true, _) => b"zdiffstore",
+            (ZSetOp::Union, false, _) => b"zunion",
+            (ZSetOp::Inter, false, true) => b"zintercard",
+            (ZSetOp::Inter, false, false) => b"zinter",
+            (ZSetOp::Diff, false, _) => b"zdiff",
+        };
+        let numkeys_index = if store { 2usize } else { 1usize };
+        if argv.len() <= numkeys_index {
+            return wrong_arity(full_name);
+        }
+        let Some(setnum) = parse_i64(&argv[numkeys_index]) else {
+            return err(b"ERR value is not an integer or out of range");
+        };
+        if setnum < 1 {
+            let mut message = b"ERR at least 1 input key is needed for '".to_vec();
+            message.extend_from_slice(full_name);
+            message.extend_from_slice(b"' command");
+            return err(&message);
+        }
+        let setnum = setnum as usize;
+        let first_key = numkeys_index + 1;
+        if setnum > argv.len() - first_key {
+            return err(b"ERR syntax error");
+        }
+
+        let mut weights: Vec<f64> = vec![1.0; setnum];
+        let mut aggregate = ZAggregate::Sum;
+        let mut withscores = false;
+        let mut limit: i64 = 0;
+        let mut j = first_key + setnum;
+        while j < argv.len() {
+            let remaining = argv.len() - j;
+            if op != ZSetOp::Diff
+                && !cardinality_only
+                && remaining >= setnum + 1
+                && ascii_eq(&argv[j], b"WEIGHTS")
+            {
+                j += 1;
+                for weight in weights.iter_mut() {
+                    let Some(value) = parse_score(&argv[j]) else {
+                        return err(b"ERR weight value is not a float");
+                    };
+                    *weight = value;
+                    j += 1;
+                }
+            } else if op != ZSetOp::Diff
+                && !cardinality_only
+                && remaining >= 2
+                && ascii_eq(&argv[j], b"AGGREGATE")
+            {
+                aggregate = if ascii_eq(&argv[j + 1], b"SUM") {
+                    ZAggregate::Sum
+                } else if ascii_eq(&argv[j + 1], b"MIN") {
+                    ZAggregate::Min
+                } else if ascii_eq(&argv[j + 1], b"MAX") {
+                    ZAggregate::Max
+                } else {
+                    return err(b"ERR syntax error");
+                };
+                j += 2;
+            } else if remaining >= 1
+                && !store
+                && !cardinality_only
+                && ascii_eq(&argv[j], b"WITHSCORES")
+            {
+                withscores = true;
+                j += 1;
+            } else if cardinality_only && remaining >= 2 && ascii_eq(&argv[j], b"LIMIT") {
+                let Some(value) = parse_i64(&argv[j + 1]) else {
+                    return err(b"ERR LIMIT can't be negative");
+                };
+                if value < 0 {
+                    return err(b"ERR LIMIT can't be negative");
+                }
+                limit = value;
+                j += 2;
+            } else {
+                return err(b"ERR syntax error");
+            }
+        }
+
+        let mut sources: Vec<HashMap<Vec<u8>, f64>> = Vec::with_capacity(setnum);
+        for key in &argv[first_key..first_key + setnum] {
+            match self.get_value(key).map(|entry| &entry.value) {
+                Some(StoredValue::ZSet(members)) => sources.push(members.clone()),
+                Some(StoredValue::Set(members)) => {
+                    sources.push(members.iter().map(|m| (m.clone(), 1.0)).collect())
+                }
+                Some(_) => return wrong_type(),
+                None => sources.push(HashMap::new()),
+            }
+        }
+
+        if cardinality_only {
+            let cardinality = self.zinter_cardinality(&sources, limit);
+            return RespFrame::integer(cardinality);
+        }
+
+        let result = compute_zset_op(op, &sources, &weights, aggregate);
+
+        if store {
+            let dstkey = argv[1].clone();
+            if result.is_empty() {
+                let existed = self.db.remove(&dstkey).is_some();
+                if existed {
+                    self.note_write(&dstkey);
+                }
+                return RespFrame::integer(0);
+            }
+            let cardinality = result.len() as i64;
+            self.db.insert(
+                dstkey.clone(),
+                Entry {
+                    value: StoredValue::ZSet(result),
+                    expire_at_ms: None,
+                },
+            );
+            self.note_write(&dstkey);
+            return RespFrame::integer(cardinality);
+        }
+
+        let ordered = sorted_zset_entries(&result);
+        let mut items = Vec::new();
+        for (member, score) in ordered {
+            items.push(bulk(&member));
+            if withscores {
+                items.push(bulk(format_score(score)));
+            }
+        }
+        RespFrame::array(items)
+    }
+
+    /// Cardinality of the intersection of `sources` for ZINTERCARD, stopping
+    /// once `limit` members are found (`limit == 0` means uncapped). Weights and
+    /// the aggregate do not affect membership, so only presence matters, exactly
+    /// like the `cardinality_only` branch of `zunionInterDiffGenericCommand`.
+    fn zinter_cardinality(&self, sources: &[HashMap<Vec<u8>, f64>], limit: i64) -> i64 {
+        let Some(smallest) = sources.iter().min_by_key(|set| set.len()) else {
+            return 0;
+        };
+        if smallest.is_empty() {
+            return 0;
+        }
+        let mut cardinality: i64 = 0;
+        for member in smallest.keys() {
+            if sources.iter().all(|set| set.contains_key(member)) {
+                cardinality += 1;
+                if limit > 0 && cardinality >= limit {
+                    break;
+                }
+            }
+        }
+        cardinality
+    }
+
+    /// ZRANGESTORE dst src <ZRANGE range args> (`zrangestoreCommand`,
+    /// `t_zset.c`): computes the same range `ZRANGE` would over `src` and stores
+    /// the `(member, score)` pairs at `dst`, replying the stored cardinality. An
+    /// empty result deletes `dst`. Supports the full ZRANGE grammar
+    /// (BYSCORE/BYLEX/REV/LIMIT) on the source.
+    fn zrangestore_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 5 {
+            return wrong_arity(b"zrangestore");
+        }
+        let entries = match self.zrange_select(&argv[2], &argv[3..]) {
+            Ok(entries) => entries,
+            Err(frame) => return frame,
+        };
+        let dstkey = argv[1].clone();
+        if entries.is_empty() {
+            let existed = self.db.remove(&dstkey).is_some();
+            if existed {
+                self.note_write(&dstkey);
+            }
+            return RespFrame::integer(0);
+        }
+        let cardinality = entries.len() as i64;
+        let members: HashMap<Vec<u8>, f64> = entries.into_iter().collect();
+        self.db.insert(
+            dstkey.clone(),
+            Entry {
+                value: StoredValue::ZSet(members),
+                expire_at_ms: None,
+            },
+        );
+        self.note_write(&dstkey);
+        RespFrame::integer(cardinality)
+    }
+
+    /// Computes the ordered `(member, score)` selection a ZRANGE-family read
+    /// would produce over `key`, given the range arguments `rest` (start, stop,
+    /// then the trailing `[BYSCORE|BYLEX] [REV] [LIMIT offset count]
+    /// [WITHSCORES]` options). Shared by ZRANGESTORE; mirrors
+    /// `zrangeGenericCommand`'s option parsing, validation order, and the
+    /// LIMIT-only-with-BYSCORE/BYLEX guard. Read-only.
+    fn zrange_select(
+        &mut self,
+        key: &[u8],
+        rest: &[Vec<u8>],
+    ) -> Result<Vec<(Vec<u8>, f64)>, RespFrame> {
+        let start_bytes = &rest[0];
+        let stop_bytes = &rest[1];
+        let mut by_score = false;
+        let mut by_lex = false;
+        let mut reverse = false;
+        let mut withscores = false;
+        let mut limit: Option<(i64, i64)> = None;
+        let mut have_limit = false;
+        let mut index = 2;
+        while index < rest.len() {
+            let option = &rest[index];
+            if ascii_eq(option, b"BYSCORE") {
+                by_score = true;
+                index += 1;
+            } else if ascii_eq(option, b"BYLEX") {
+                by_lex = true;
+                index += 1;
+            } else if ascii_eq(option, b"REV") {
+                reverse = true;
+                index += 1;
+            } else if ascii_eq(option, b"WITHSCORES") {
+                withscores = true;
+                index += 1;
+            } else if ascii_eq(option, b"LIMIT") && rest.len() - index - 1 >= 2 {
+                let Some(offset) = parse_limit_arg(&rest[index + 1]) else {
+                    return Err(err(b"ERR value is not an integer or out of range"));
+                };
+                let Some(count) = parse_limit_arg(&rest[index + 2]) else {
+                    return Err(err(b"ERR value is not an integer or out of range"));
+                };
+                limit = Some((offset, count));
+                have_limit = true;
+                index += 3;
+            } else {
+                return Err(err(b"ERR syntax error"));
+            }
+        }
+        let _ = withscores;
+        if by_score && by_lex {
+            return Err(err(b"ERR syntax error"));
+        }
+        if have_limit && !by_score && !by_lex {
+            return Err(err(
+                b"ERR syntax error, LIMIT is only supported in combination with either BYSCORE or BYLEX",
+            ));
+        }
+
+        if by_lex {
+            let (min_arg, max_arg) = if reverse {
+                (stop_bytes, start_bytes)
+            } else {
+                (start_bytes, stop_bytes)
+            };
+            let Some(min) = parse_lex_bound(min_arg) else {
+                return Err(err(b"ERR min or max not valid string range item"));
+            };
+            let Some(max) = parse_lex_bound(max_arg) else {
+                return Err(err(b"ERR min or max not valid string range item"));
+            };
+            let members = match self.get_value(key).map(|entry| &entry.value) {
+                Some(StoredValue::ZSet(members)) => members,
+                Some(_) => return Err(wrong_type()),
+                None => return Ok(Vec::new()),
+            };
+            let mut in_range: Vec<(Vec<u8>, f64)> = sorted_zset_entries(members)
+                .into_iter()
+                .filter(|(member, _)| min.gte_min(member) && max.lte_max(member))
+                .collect();
+            if reverse {
+                in_range.reverse();
+            }
+            return Ok(apply_score_limit(&in_range, limit)
+                .into_iter()
+                .cloned()
+                .collect());
+        }
+
+        if by_score {
+            let (min_arg, max_arg) = if reverse {
+                (stop_bytes, start_bytes)
+            } else {
+                (start_bytes, stop_bytes)
+            };
+            let Some(min) = parse_score_bound(min_arg) else {
+                return Err(err(b"ERR min or max is not a float"));
+            };
+            let Some(max) = parse_score_bound(max_arg) else {
+                return Err(err(b"ERR min or max is not a float"));
+            };
+            let members = match self.get_value(key).map(|entry| &entry.value) {
+                Some(StoredValue::ZSet(members)) => members,
+                Some(_) => return Err(wrong_type()),
+                None => return Ok(Vec::new()),
+            };
+            let mut in_range: Vec<(Vec<u8>, f64)> = sorted_zset_entries(members)
+                .into_iter()
+                .filter(|(_, score)| min.gte_min(*score) && max.lte_max(*score))
+                .collect();
+            if reverse {
+                in_range.reverse();
+            }
+            return Ok(apply_score_limit(&in_range, limit)
+                .into_iter()
+                .cloned()
+                .collect());
+        }
+
+        let Some(start) = parse_i64(start_bytes) else {
+            return Err(err(b"ERR value is not an integer or out of range"));
+        };
+        let Some(stop) = parse_i64(stop_bytes) else {
+            return Err(err(b"ERR value is not an integer or out of range"));
+        };
+        let members = match self.get_value(key).map(|entry| &entry.value) {
+            Some(StoredValue::ZSet(members)) => members,
+            Some(_) => return Err(wrong_type()),
+            None => return Ok(Vec::new()),
+        };
+        let mut ordered = sorted_zset_entries(members);
+        if reverse {
+            ordered.reverse();
+        }
+        let len = ordered.len() as i64;
+        let mut lo = if start < 0 { start + len } else { start };
+        let mut hi = if stop < 0 { stop + len } else { stop };
+        if lo < 0 {
+            lo = 0;
+        }
+        if lo > hi || lo >= len {
+            return Ok(Vec::new());
+        }
+        if hi >= len {
+            hi = len - 1;
+        }
+        Ok(ordered[lo as usize..=hi as usize].to_vec())
+    }
+
+    /// ZMPOP numkeys key [key ...] MIN|MAX [COUNT count] (`zmpopGenericCommand`
+    /// / `genericZpopCommand`, `t_zset.c`, non-blocking only). Pops up to
+    /// `count` (default 1) members from the first non-empty key, in MIN or MAX
+    /// score order. The reply is `[key, [[member, score], ...]]`, or a null
+    /// array when every key is missing/empty. Emptying a key deletes it;
+    /// `note_write` fires for the popped key only.
+    fn zmpop_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 4 {
+            return wrong_arity(b"zmpop");
+        }
+        let Some(numkeys) = parse_i64(&argv[1]) else {
+            return err(b"ERR numkeys should be greater than 0");
+        };
+        if numkeys < 1 {
+            return err(b"ERR numkeys should be greater than 0");
+        }
+        let numkeys = numkeys as usize;
+        let where_idx = 1 + numkeys + 1;
+        if where_idx >= argv.len() {
+            return err(b"ERR syntax error");
+        }
+        let reverse = if ascii_eq(&argv[where_idx], b"MIN") {
+            false
+        } else if ascii_eq(&argv[where_idx], b"MAX") {
+            true
+        } else {
+            return err(b"ERR syntax error");
+        };
+        let mut count: i64 = -1;
+        let mut j = where_idx + 1;
+        while j < argv.len() {
+            let moreargs = (argv.len() - 1) - j;
+            if count == -1 && ascii_eq(&argv[j], b"COUNT") && moreargs > 0 {
+                j += 1;
+                let Some(value) = parse_i64(&argv[j]) else {
+                    return err(b"ERR count should be greater than 0");
+                };
+                if value < 1 {
+                    return err(b"ERR count should be greater than 0");
+                }
+                count = value;
+                j += 1;
+            } else {
+                return err(b"ERR syntax error");
+            }
+        }
+        let count = if count == -1 { 1 } else { count } as usize;
+
+        let keys: Vec<Vec<u8>> = argv[2..2 + numkeys].to_vec();
+        for key in &keys {
+            self.purge_if_expired(key);
+            let mut popped: Vec<(Vec<u8>, f64)> = Vec::new();
+            let became_empty = match self.db.get_mut(key) {
+                Some(Entry {
+                    value: StoredValue::ZSet(members),
+                    ..
+                }) => {
+                    let mut ordered = sorted_zset_entries(members);
+                    if reverse {
+                        ordered.reverse();
+                    }
+                    let take = count.min(ordered.len());
+                    for (member, score) in ordered.into_iter().take(take) {
+                        members.remove(&member);
+                        popped.push((member, score));
+                    }
+                    members.is_empty()
+                }
+                Some(_) => return wrong_type(),
+                None => continue,
+            };
+            if popped.is_empty() {
+                continue;
+            }
+            if became_empty {
+                self.db.remove(key);
+            }
+            self.note_write(key);
+            let pairs: Vec<RespFrame> = popped
+                .into_iter()
+                .map(|(member, score)| {
+                    RespFrame::array(vec![bulk(&member), bulk(format_score(score))])
+                })
+                .collect();
+            return RespFrame::array(vec![bulk(key), RespFrame::array(pairs)]);
+        }
+        RespFrame::null_array()
     }
 
     /// LPUSH / RPUSH / LPUSHX / RPUSHX (`pushGenericCommand`, `t_list.c`).
@@ -4760,6 +5249,118 @@ fn apply_zadd(
         }
     }
     (added, updated)
+}
+
+/// Combine one member's running `target` score with a new contribution `val`
+/// under `aggregate`, mirroring `zunionInterAggregate` (`t_zset.c`). SUM keeps
+/// the valkey rule that `+inf + -inf` collapses to `0` instead of NaN.
+fn zunion_inter_aggregate(target: &mut f64, val: f64, aggregate: ZAggregate) {
+    match aggregate {
+        ZAggregate::Sum => {
+            *target += val;
+            if target.is_nan() {
+                *target = 0.0;
+            }
+        }
+        ZAggregate::Min => {
+            if val < *target {
+                *target = val;
+            }
+        }
+        ZAggregate::Max => {
+            if val > *target {
+                *target = val;
+            }
+        }
+    }
+}
+
+/// Computes a ZUNION/ZINTER/ZDIFF result map from the already-materialised
+/// `sources` (missing keys are empty maps, sets already expanded to score
+/// `1.0`), applying per-source `weights` and the `aggregate` rule. Mirrors the
+/// score math of `zunionInterDiffGenericCommand`: each source score is
+/// multiplied by its weight before aggregation, a weighted score of NaN becomes
+/// `0`, INTER keeps only members present in every source, and DIFF keeps the
+/// first source's members (and unweighted scores) absent from all later
+/// sources. The result is unordered; callers sort it for replies.
+fn compute_zset_op(
+    op: ZSetOp,
+    sources: &[HashMap<Vec<u8>, f64>],
+    weights: &[f64],
+    aggregate: ZAggregate,
+) -> HashMap<Vec<u8>, f64> {
+    match op {
+        ZSetOp::Union => {
+            let mut result: HashMap<Vec<u8>, f64> = HashMap::new();
+            for (index, source) in sources.iter().enumerate() {
+                for (member, raw) in source {
+                    let mut score = weights[index] * raw;
+                    if score.is_nan() {
+                        score = 0.0;
+                    }
+                    match result.get_mut(member) {
+                        Some(existing) => zunion_inter_aggregate(existing, score, aggregate),
+                        None => {
+                            result.insert(member.clone(), score);
+                        }
+                    }
+                }
+            }
+            result
+        }
+        ZSetOp::Inter => {
+            let mut result: HashMap<Vec<u8>, f64> = HashMap::new();
+            let Some(first_index) = (0..sources.len()).min_by_key(|index| sources[*index].len())
+            else {
+                return result;
+            };
+            if sources[first_index].is_empty() {
+                return result;
+            }
+            for (member, raw) in &sources[first_index] {
+                let mut score = weights[first_index] * raw;
+                if score.is_nan() {
+                    score = 0.0;
+                }
+                let mut present_in_all = true;
+                for (index, source) in sources.iter().enumerate() {
+                    if index == first_index {
+                        continue;
+                    }
+                    match source.get(member) {
+                        Some(other) => {
+                            let mut value = weights[index] * other;
+                            if value.is_nan() {
+                                value = 0.0;
+                            }
+                            zunion_inter_aggregate(&mut score, value, aggregate);
+                        }
+                        None => {
+                            present_in_all = false;
+                            break;
+                        }
+                    }
+                }
+                if present_in_all {
+                    result.insert(member.clone(), score);
+                }
+            }
+            result
+        }
+        ZSetOp::Diff => {
+            let mut result: HashMap<Vec<u8>, f64> = HashMap::new();
+            let Some(first) = sources.first() else {
+                return result;
+            };
+            for (member, raw) in first {
+                if sources[1..].iter().any(|source| source.contains_key(member)) {
+                    continue;
+                }
+                result.insert(member.clone(), *raw);
+            }
+            result
+        }
+    }
 }
 
 /// Ascending (score, then member-lexicographic) order, the canonical zset

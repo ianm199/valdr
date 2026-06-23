@@ -1,0 +1,99 @@
+{"id": "agg-setup-a", "cmd": ["ZADD", "za:1", "1", "a", "2", "b", "3", "c"]}
+{"id": "agg-setup-b", "cmd": ["ZADD", "za:2", "10", "b", "20", "c", "30", "d"]}
+{"id": "zunion-withscores", "cmd": ["ZUNION", "2", "za:1", "za:2", "WITHSCORES"]}
+{"id": "zunion-no-scores", "cmd": ["ZUNION", "2", "za:1", "za:2"]}
+{"id": "zinter-withscores", "cmd": ["ZINTER", "2", "za:1", "za:2", "WITHSCORES"]}
+{"id": "zinter-no-scores", "cmd": ["ZINTER", "2", "za:1", "za:2"]}
+{"id": "zdiff-withscores", "cmd": ["ZDIFF", "2", "za:1", "za:2", "WITHSCORES"]}
+{"id": "zdiff-no-scores", "cmd": ["ZDIFF", "2", "za:1", "za:2"]}
+{"id": "zdiff-reverse-empty", "cmd": ["ZDIFF", "2", "za:2", "za:1"]}
+{"id": "zunion-weights", "cmd": ["ZUNION", "2", "za:1", "za:2", "WEIGHTS", "2", "3", "WITHSCORES"]}
+{"id": "zinter-agg-min", "cmd": ["ZINTER", "2", "za:1", "za:2", "AGGREGATE", "MIN", "WITHSCORES"]}
+{"id": "zinter-agg-max", "cmd": ["ZINTER", "2", "za:1", "za:2", "AGGREGATE", "MAX", "WITHSCORES"]}
+{"id": "zunion-agg-min", "cmd": ["ZUNION", "2", "za:1", "za:2", "AGGREGATE", "MIN", "WITHSCORES"]}
+{"id": "zunion-agg-max", "cmd": ["ZUNION", "2", "za:1", "za:2", "AGGREGATE", "MAX", "WITHSCORES"]}
+{"id": "zunion-weights-agg-max", "cmd": ["ZUNION", "2", "za:1", "za:2", "WEIGHTS", "2", "3", "AGGREGATE", "MAX", "WITHSCORES"]}
+{"id": "zunion-missing-key-empty", "cmd": ["ZUNION", "2", "za:1", "za:nope", "WITHSCORES"]}
+{"id": "zinter-missing-key-empty", "cmd": ["ZINTER", "2", "za:1", "za:nope"]}
+{"id": "zdiff-missing-later-key", "cmd": ["ZDIFF", "2", "za:1", "za:nope", "WITHSCORES"]}
+{"id": "zunion-single-key", "cmd": ["ZUNION", "1", "za:1", "WITHSCORES"]}
+{"id": "zunionstore-basic", "cmd": ["ZUNIONSTORE", "za:dst1", "2", "za:1", "za:2"]}
+{"id": "zunionstore-result", "cmd": ["ZRANGE", "za:dst1", "0", "-1", "WITHSCORES"]}
+{"id": "zinterstore-weights", "cmd": ["ZINTERSTORE", "za:dst2", "2", "za:1", "za:2", "WEIGHTS", "2", "3"]}
+{"id": "zinterstore-result", "cmd": ["ZRANGE", "za:dst2", "0", "-1", "WITHSCORES"]}
+{"id": "zdiffstore-basic", "cmd": ["ZDIFFSTORE", "za:dst3", "2", "za:1", "za:2"]}
+{"id": "zdiffstore-result", "cmd": ["ZRANGE", "za:dst3", "0", "-1", "WITHSCORES"]}
+{"id": "zunionstore-overwrite-existing-zset", "cmd": ["ZUNIONSTORE", "za:dst1", "1", "za:2"]}
+{"id": "zunionstore-overwrite-result", "cmd": ["ZRANGE", "za:dst1", "0", "-1", "WITHSCORES"]}
+{"id": "zunionstore-overwrite-string-setup", "cmd": ["SET", "za:dst4", "iamastring"]}
+{"id": "zunionstore-overwrites-string", "cmd": ["ZUNIONSTORE", "za:dst4", "1", "za:1"]}
+{"id": "zunionstore-overwrites-string-type", "cmd": ["TYPE", "za:dst4"]}
+{"id": "zinterstore-empty-deletes-dest-setup", "cmd": ["ZADD", "za:dst5", "1", "x"]}
+{"id": "zinterstore-empty-deletes-dest", "cmd": ["ZINTERSTORE", "za:dst5", "2", "za:1", "za:nope"]}
+{"id": "zinterstore-empty-deletes-dest-gone", "cmd": ["EXISTS", "za:dst5"]}
+{"id": "zdiffstore-empty-deletes-dest-setup", "cmd": ["ZADD", "za:dst6", "1", "x"]}
+{"id": "zdiffstore-empty-deletes-dest", "cmd": ["ZDIFFSTORE", "za:dst6", "2", "za:2", "za:2"]}
+{"id": "zdiffstore-empty-deletes-dest-gone", "cmd": ["EXISTS", "za:dst6"]}
+{"id": "zunionstore-empty-no-dest-returns-zero", "cmd": ["ZUNIONSTORE", "za:neverexisted", "1", "za:nope"]}
+{"id": "zunionstore-empty-no-dest-still-gone", "cmd": ["EXISTS", "za:neverexisted"]}
+{"id": "agg-inf-setup-a", "cmd": ["ZADD", "za:pinf", "1", "m"]}
+{"id": "agg-inf-setup-b", "cmd": ["ZADD", "za:ninf", "1", "m"]}
+{"id": "zunion-inf-minus-inf-is-zero", "cmd": ["ZUNION", "2", "za:pinf", "za:ninf", "WEIGHTS", "inf", "-inf", "WITHSCORES"]}
+{"id": "zset-from-set-setup", "cmd": ["SADD", "za:set1", "x", "y", "z"]}
+{"id": "zunion-set-score-one", "cmd": ["ZUNION", "1", "za:set1", "WITHSCORES"]}
+{"id": "zinter-zset-and-set", "cmd": ["ZADD", "za:zs", "5", "x", "6", "w"]}
+{"id": "zinter-zset-set-result", "cmd": ["ZINTER", "2", "za:zs", "za:set1", "AGGREGATE", "SUM", "WITHSCORES"]}
+{"id": "zunionstore-from-set", "cmd": ["ZUNIONSTORE", "za:dst7", "2", "za:zs", "za:set1"]}
+{"id": "zunionstore-from-set-result", "cmd": ["ZRANGE", "za:dst7", "0", "-1", "WITHSCORES"]}
+{"id": "zintercard-basic", "cmd": ["ZINTERCARD", "2", "za:1", "za:2"]}
+{"id": "zintercard-limit", "cmd": ["ZINTERCARD", "2", "za:1", "za:2", "LIMIT", "1"]}
+{"id": "zintercard-limit-zero-uncapped", "cmd": ["ZINTERCARD", "2", "za:1", "za:2", "LIMIT", "0"]}
+{"id": "zintercard-no-overlap", "cmd": ["ZINTERCARD", "2", "za:1", "za:nope"]}
+{"id": "zintercard-single", "cmd": ["ZINTERCARD", "1", "za:1"]}
+{"id": "zunion-numkeys-zero", "cmd": ["ZUNION", "0", "za:1"]}
+{"id": "zunionstore-numkeys-zero", "cmd": ["ZUNIONSTORE", "za:d", "0", "za:1"]}
+{"id": "zinter-numkeys-negative", "cmd": ["ZINTER", "-1", "za:1"]}
+{"id": "zdiff-numkeys-not-int", "cmd": ["ZDIFF", "notanint", "za:1"]}
+{"id": "zunion-numkeys-too-many", "cmd": ["ZUNION", "5", "za:1", "za:2"]}
+{"id": "zunion-bad-weight", "cmd": ["ZUNION", "2", "za:1", "za:2", "WEIGHTS", "1", "notafloat"]}
+{"id": "zunion-bad-aggregate", "cmd": ["ZUNION", "2", "za:1", "za:2", "AGGREGATE", "BOGUS"]}
+{"id": "zdiff-rejects-weights", "cmd": ["ZDIFF", "2", "za:1", "za:2", "WEIGHTS", "1", "1"]}
+{"id": "zdiff-rejects-aggregate", "cmd": ["ZDIFF", "2", "za:1", "za:2", "AGGREGATE", "SUM"]}
+{"id": "zintercard-bad-limit", "cmd": ["ZINTERCARD", "2", "za:1", "za:2", "LIMIT", "-1"]}
+{"id": "zunion-wrongtype-setup", "cmd": ["SET", "za:str", "x"]}
+{"id": "zunion-wrongtype", "cmd": ["ZUNION", "2", "za:1", "za:str"]}
+{"id": "zunionstore-wrongtype-source", "cmd": ["ZUNIONSTORE", "za:d8", "2", "za:1", "za:str"]}
+{"id": "zrangestore-setup", "cmd": ["ZADD", "za:src", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e"]}
+{"id": "zrangestore-index", "cmd": ["ZRANGESTORE", "za:rs1", "za:src", "0", "2"]}
+{"id": "zrangestore-index-result", "cmd": ["ZRANGE", "za:rs1", "0", "-1", "WITHSCORES"]}
+{"id": "zrangestore-byscore", "cmd": ["ZRANGESTORE", "za:rs2", "za:src", "2", "4", "BYSCORE"]}
+{"id": "zrangestore-byscore-result", "cmd": ["ZRANGE", "za:rs2", "0", "-1", "WITHSCORES"]}
+{"id": "zrangestore-byscore-exclusive", "cmd": ["ZRANGESTORE", "za:rs3", "za:src", "(1", "(4", "BYSCORE"]}
+{"id": "zrangestore-byscore-exclusive-result", "cmd": ["ZRANGE", "za:rs3", "0", "-1", "WITHSCORES"]}
+{"id": "zrangestore-rev", "cmd": ["ZRANGESTORE", "za:rs4", "za:src", "0", "2", "REV"]}
+{"id": "zrangestore-rev-result", "cmd": ["ZRANGE", "za:rs4", "0", "-1", "WITHSCORES"]}
+{"id": "zrangestore-byscore-rev-limit", "cmd": ["ZRANGESTORE", "za:rs5", "za:src", "5", "1", "BYSCORE", "REV", "LIMIT", "1", "2"]}
+{"id": "zrangestore-byscore-rev-limit-result", "cmd": ["ZRANGE", "za:rs5", "0", "-1", "WITHSCORES"]}
+{"id": "zrangestore-bylex", "cmd": ["ZADD", "za:lex", "0", "a", "0", "b", "0", "c", "0", "d"]}
+{"id": "zrangestore-bylex-store", "cmd": ["ZRANGESTORE", "za:rs6", "za:lex", "[a", "[c", "BYLEX"]}
+{"id": "zrangestore-bylex-result", "cmd": ["ZRANGE", "za:rs6", "0", "-1", "WITHSCORES"]}
+{"id": "zrangestore-empty-deletes-dest-setup", "cmd": ["ZADD", "za:rs7", "1", "x"]}
+{"id": "zrangestore-empty-deletes-dest", "cmd": ["ZRANGESTORE", "za:rs7", "za:src", "5", "1"]}
+{"id": "zrangestore-empty-deletes-dest-gone", "cmd": ["EXISTS", "za:rs7"]}
+{"id": "zrangestore-missing-src", "cmd": ["ZRANGESTORE", "za:rs8", "za:nosuchsrc", "0", "-1"]}
+{"id": "zrangestore-missing-src-no-dest", "cmd": ["EXISTS", "za:rs8"]}
+{"id": "zrangestore-limit-without-by", "cmd": ["ZRANGESTORE", "za:rs9", "za:src", "0", "2", "LIMIT", "0", "1"]}
+{"id": "zmpop-setup", "cmd": ["ZADD", "za:m1", "1", "a", "2", "b", "3", "c"]}
+{"id": "zmpop-min", "cmd": ["ZMPOP", "1", "za:m1", "MIN"]}
+{"id": "zmpop-max-count", "cmd": ["ZMPOP", "1", "za:m1", "MAX", "COUNT", "2"]}
+{"id": "zmpop-empties-key-gone", "cmd": ["EXISTS", "za:m1"]}
+{"id": "zmpop-first-non-empty-setup", "cmd": ["ZADD", "za:m3", "5", "x", "6", "y"]}
+{"id": "zmpop-skips-empty-keys", "cmd": ["ZMPOP", "3", "za:mempty1", "za:mempty2", "za:m3", "MIN", "COUNT", "10"]}
+{"id": "zmpop-nil-when-all-empty", "cmd": ["ZMPOP", "2", "za:none1", "za:none2", "MIN"]}
+{"id": "zmpop-count-larger-than-set-setup", "cmd": ["ZADD", "za:m4", "1", "a", "2", "b"]}
+{"id": "zmpop-count-larger-than-set", "cmd": ["ZMPOP", "1", "za:m4", "MIN", "COUNT", "100"]}
+{"id": "zmpop-numkeys-zero", "cmd": ["ZMPOP", "0", "za:m1", "MIN"]}
+{"id": "zmpop-bad-where", "cmd": ["ZMPOP", "1", "za:src", "SIDEWAYS"]}
+{"id": "zmpop-bad-count", "cmd": ["ZMPOP", "1", "za:src", "MIN", "COUNT", "0"]}
+{"id": "zmpop-wrongtype-setup", "cmd": ["SET", "za:mstr", "x"]}
+{"id": "zmpop-wrongtype", "cmd": ["ZMPOP", "1", "za:mstr", "MIN"]}
