@@ -1,0 +1,83 @@
+{"id": "bm-setbit-new-old0", "cmd": ["SETBIT", "bm:b", "7", "1"]}
+{"id": "bm-getbit-set", "cmd": ["GETBIT", "bm:b", "7"]}
+{"id": "bm-getbit-clear", "cmd": ["GETBIT", "bm:b", "6"]}
+{"id": "bm-getbit-beyond", "cmd": ["GETBIT", "bm:b", "100"]}
+{"id": "bm-setbit-clear-old1", "cmd": ["SETBIT", "bm:b", "7", "0"]}
+{"id": "bm-getbit-after-clear", "cmd": ["GETBIT", "bm:b", "7"]}
+{"id": "bm-setbit-extend-old0", "cmd": ["SETBIT", "bm:b", "100", "1"]}
+{"id": "bm-setbit-extend-strlen", "cmd": ["STRLEN", "bm:b"]}
+{"id": "bm-getbit-missing", "cmd": ["GETBIT", "bm:bmiss", "0"]}
+{"id": "bm-setbit-bad-offset", "cmd": ["SETBIT", "bm:bad", "abc", "1"]}
+{"id": "bm-setbit-neg-offset", "cmd": ["SETBIT", "bm:bad", "-1", "1"]}
+{"id": "bm-setbit-bad-bit-two", "cmd": ["SETBIT", "bm:bad", "0", "2"]}
+{"id": "bm-setbit-bad-bit-str", "cmd": ["SETBIT", "bm:bad", "0", "x"]}
+{"id": "bm-getbit-bad-offset", "cmd": ["GETBIT", "bm:b", "abc"]}
+{"id": "bm-bitcount-setup", "cmd": ["SET", "bm:bc", "foobar"]}
+{"id": "bm-bitcount-whole", "cmd": ["BITCOUNT", "bm:bc"]}
+{"id": "bm-bitcount-byte-0-0", "cmd": ["BITCOUNT", "bm:bc", "0", "0"]}
+{"id": "bm-bitcount-byte-1-1", "cmd": ["BITCOUNT", "bm:bc", "1", "1"]}
+{"id": "bm-bitcount-byte-0-neg1", "cmd": ["BITCOUNT", "bm:bc", "0", "-1"]}
+{"id": "bm-bitcount-start-only", "cmd": ["BITCOUNT", "bm:bc", "0"]}
+{"id": "bm-bitcount-start-only-2", "cmd": ["BITCOUNT", "bm:bc", "2"]}
+{"id": "bm-bitcount-start-only-neg", "cmd": ["BITCOUNT", "bm:bc", "-2"]}
+{"id": "bm-bitcount-explicit-byte", "cmd": ["BITCOUNT", "bm:bc", "1", "1", "BYTE"]}
+{"id": "bm-bitcount-bit-5-30", "cmd": ["BITCOUNT", "bm:bc", "5", "30", "BIT"]}
+{"id": "bm-bitcount-bit-0-0", "cmd": ["BITCOUNT", "bm:bc", "0", "0", "BIT"]}
+{"id": "bm-bitcount-bit-0-5", "cmd": ["BITCOUNT", "bm:bc", "0", "5", "BIT"]}
+{"id": "bm-bitcount-bit-neg", "cmd": ["BITCOUNT", "bm:bc", "-16", "-1", "BIT"]}
+{"id": "bm-bitcount-missing", "cmd": ["BITCOUNT", "bm:bcmiss"]}
+{"id": "bm-bitcount-missing-range", "cmd": ["BITCOUNT", "bm:bcmiss", "0", "0"]}
+{"id": "bm-bitcount-bad-unit", "cmd": ["BITCOUNT", "bm:bc", "0", "0", "nibble"]}
+{"id": "bm-bitcount-bad-start", "cmd": ["BITCOUNT", "bm:bc", "x", "0"]}
+{"id": "bm-bitpos-set-byte-setup", "cmd": ["SET", "bm:bp", "foobar"]}
+{"id": "bm-bitpos-find-1", "cmd": ["BITPOS", "bm:bp", "1"]}
+{"id": "bm-bitpos-find-1-start", "cmd": ["BITPOS", "bm:bp", "1", "2"]}
+{"id": "bm-bitpos-find-1-range", "cmd": ["BITPOS", "bm:bp", "1", "0", "-1", "BIT"]}
+{"id": "bm-bitpos-find-0", "cmd": ["BITPOS", "bm:bp", "0"]}
+{"id": "bm-bitpos-find-0-byte-range", "cmd": ["BITPOS", "bm:bp", "0", "2", "5", "BYTE"]}
+{"id": "bm-bitpos-bad-bit", "cmd": ["BITPOS", "bm:bp", "2"]}
+{"id": "bm-bitpos-missing-find-0", "cmd": ["BITPOS", "bm:bpmiss", "0"]}
+{"id": "bm-bitpos-missing-find-1", "cmd": ["BITPOS", "bm:bpmiss", "1"]}
+{"id": "bm-allones-b0", "cmd": ["SETBIT", "bm:allones", "0", "1"]}
+{"id": "bm-allones-b1", "cmd": ["SETBIT", "bm:allones", "1", "1"]}
+{"id": "bm-allones-b2", "cmd": ["SETBIT", "bm:allones", "2", "1"]}
+{"id": "bm-allones-b3", "cmd": ["SETBIT", "bm:allones", "3", "1"]}
+{"id": "bm-allones-b4", "cmd": ["SETBIT", "bm:allones", "4", "1"]}
+{"id": "bm-allones-b5", "cmd": ["SETBIT", "bm:allones", "5", "1"]}
+{"id": "bm-allones-b6", "cmd": ["SETBIT", "bm:allones", "6", "1"]}
+{"id": "bm-allones-b7", "cmd": ["SETBIT", "bm:allones", "7", "1"]}
+{"id": "bm-allones-b8", "cmd": ["SETBIT", "bm:allones", "8", "1"]}
+{"id": "bm-allones-b9", "cmd": ["SETBIT", "bm:allones", "9", "1"]}
+{"id": "bm-allones-b10", "cmd": ["SETBIT", "bm:allones", "10", "1"]}
+{"id": "bm-allones-b11", "cmd": ["SETBIT", "bm:allones", "11", "1"]}
+{"id": "bm-allones-b12", "cmd": ["SETBIT", "bm:allones", "12", "1"]}
+{"id": "bm-allones-b13", "cmd": ["SETBIT", "bm:allones", "13", "1"]}
+{"id": "bm-allones-b14", "cmd": ["SETBIT", "bm:allones", "14", "1"]}
+{"id": "bm-allones-b15", "cmd": ["SETBIT", "bm:allones", "15", "1"]}
+{"id": "bm-allones-strlen", "cmd": ["STRLEN", "bm:allones"]}
+{"id": "bm-allones-bitcount", "cmd": ["BITCOUNT", "bm:allones"]}
+{"id": "bm-allones-find-0-no-end", "cmd": ["BITPOS", "bm:allones", "0"]}
+{"id": "bm-allones-find-0-with-end", "cmd": ["BITPOS", "bm:allones", "0", "0", "-1"]}
+{"id": "bm-allones-find-0-byte-end", "cmd": ["BITPOS", "bm:allones", "0", "0", "1", "BYTE"]}
+{"id": "bm-allones-find-1", "cmd": ["BITPOS", "bm:allones", "1"]}
+{"id": "bm-allzero-b0-clear", "cmd": ["SETBIT", "bm:allzero", "15", "0"]}
+{"id": "bm-allzero-strlen", "cmd": ["STRLEN", "bm:allzero"]}
+{"id": "bm-allzero-find-1", "cmd": ["BITPOS", "bm:allzero", "1"]}
+{"id": "bm-allzero-find-0", "cmd": ["BITPOS", "bm:allzero", "0"]}
+{"id": "bm-allzero-find-0-with-end", "cmd": ["BITPOS", "bm:allzero", "0", "0", "-1"]}
+{"id": "bm-lownib-b4", "cmd": ["SETBIT", "bm:lownib", "4", "1"]}
+{"id": "bm-lownib-b5", "cmd": ["SETBIT", "bm:lownib", "5", "1"]}
+{"id": "bm-lownib-b6", "cmd": ["SETBIT", "bm:lownib", "6", "1"]}
+{"id": "bm-lownib-b7", "cmd": ["SETBIT", "bm:lownib", "7", "1"]}
+{"id": "bm-lownib-find-1", "cmd": ["BITPOS", "bm:lownib", "1"]}
+{"id": "bm-lownib-find-0", "cmd": ["BITPOS", "bm:lownib", "0"]}
+{"id": "bm-lownib-getbit-3", "cmd": ["GETBIT", "bm:lownib", "3"]}
+{"id": "bm-lownib-getbit-4", "cmd": ["GETBIT", "bm:lownib", "4"]}
+{"id": "bm-setbit-ttl-setup", "cmd": ["SET", "bm:ttlk", "abc", "EX", "100"]}
+{"id": "bm-setbit-preserves-ttl", "cmd": ["SETBIT", "bm:ttlk", "0", "1"]}
+{"id": "bm-setbit-ttl-kept", "cmd": ["TTL", "bm:ttlk"], "mode": "ttl_band", "band": 2}
+{"id": "bm-wrongtype-setup", "cmd": ["LPUSH", "bm:wt", "a"]}
+{"id": "bm-setbit-wrongtype", "cmd": ["SETBIT", "bm:wt", "0", "1"]}
+{"id": "bm-getbit-wrongtype", "cmd": ["GETBIT", "bm:wt", "0"]}
+{"id": "bm-bitcount-wrongtype", "cmd": ["BITCOUNT", "bm:wt"]}
+{"id": "bm-bitpos-wrongtype", "cmd": ["BITPOS", "bm:wt", "1"]}

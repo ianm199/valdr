@@ -588,6 +588,26 @@ impl<H: Host> Engine<H> {
             self.set_store_command(argv, SetOp::Union)
         } else if ascii_eq(command, b"SDIFFSTORE") {
             self.set_store_command(argv, SetOp::Diff)
+        } else if ascii_eq(command, b"GETRANGE") || ascii_eq(command, b"SUBSTR") {
+            self.getrange_command(argv)
+        } else if ascii_eq(command, b"SETRANGE") {
+            self.setrange_command(argv)
+        } else if ascii_eq(command, b"MSET") {
+            self.mset_command(argv, false)
+        } else if ascii_eq(command, b"MSETNX") {
+            self.mset_command(argv, true)
+        } else if ascii_eq(command, b"PSETEX") {
+            self.psetex_command(argv)
+        } else if ascii_eq(command, b"GETEX") {
+            self.getex_command(argv)
+        } else if ascii_eq(command, b"SETBIT") {
+            self.setbit_command(argv)
+        } else if ascii_eq(command, b"GETBIT") {
+            self.getbit_command(argv)
+        } else if ascii_eq(command, b"BITCOUNT") {
+            self.bitcount_command(argv)
+        } else if ascii_eq(command, b"BITPOS") {
+            self.bitpos_command(argv)
         } else if ascii_eq(command, b"SCRIPT") {
             self.script_command(argv)
         } else if ascii_eq(command, b"EVAL") {
@@ -965,6 +985,580 @@ impl<H: Host> Engine<H> {
             items.push(item);
         }
         RespFrame::array(items)
+    }
+
+    /// GETRANGE / SUBSTR key start end (`getrangeCommand`, `t_string.c`).
+    /// Both indices are signed byte offsets; negatives count from the end and
+    /// the range is clamped to the string. A missing key, an out-of-range
+    /// window, or an empty string all reply with an empty bulk string.
+    fn getrange_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 4 {
+            return wrong_arity(b"getrange");
+        }
+        let Some(mut start) = parse_i64(&argv[2]) else {
+            return err(b"ERR value is not an integer or out of range");
+        };
+        let Some(mut end) = parse_i64(&argv[3]) else {
+            return err(b"ERR value is not an integer or out of range");
+        };
+        let value = match self.get_value(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::String(value)) => value.clone(),
+            Some(_) => return wrong_type(),
+            None => return bulk(b""),
+        };
+        let strlen = value.len() as i64;
+        if start < 0 && end < 0 && start > end {
+            return bulk(b"");
+        }
+        if start < 0 {
+            start += strlen;
+        }
+        if end < 0 {
+            end += strlen;
+        }
+        if start < 0 {
+            start = 0;
+        }
+        if end < 0 {
+            end = 0;
+        }
+        if end >= strlen {
+            end = strlen - 1;
+        }
+        if start > end || strlen == 0 {
+            bulk(b"")
+        } else {
+            bulk(&value[start as usize..=end as usize])
+        }
+    }
+
+    /// SETRANGE key offset value (`setrangeCommand`, `t_string.c`). Overwrites
+    /// (and zero-pads/extends) the string starting at `offset`, replying with
+    /// the resulting length. Offset 0 with an empty value on a missing key is a
+    /// no-op returning 0; an offset that would exceed the proto byte ceiling is
+    /// an error.
+    fn setrange_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 4 {
+            return wrong_arity(b"setrange");
+        }
+        let Some(offset) = parse_i64(&argv[2]) else {
+            return err(b"ERR value is not an integer or out of range");
+        };
+        if offset < 0 {
+            return err(b"ERR offset is out of range");
+        }
+        let value = &argv[3];
+        self.purge_if_expired(&argv[1]);
+        match self.db.get(&argv[1]).map(|entry| &entry.value) {
+            None => {
+                if value.is_empty() {
+                    return RespFrame::integer(0);
+                }
+                if let Some(frame) = check_string_length(offset, value.len() as i64) {
+                    return frame;
+                }
+            }
+            Some(StoredValue::String(existing)) => {
+                let olen = existing.len();
+                if value.is_empty() {
+                    return RespFrame::integer(olen as i64);
+                }
+                if let Some(frame) = check_string_length(offset, value.len() as i64) {
+                    return frame;
+                }
+            }
+            Some(_) => return wrong_type(),
+        }
+        let offset = offset as usize;
+        let needed = offset + value.len();
+        let (mut bytes, preserved_ttl) = match self.db.remove(&argv[1]) {
+            Some(Entry {
+                value: StoredValue::String(existing),
+                expire_at_ms,
+            }) => (existing, expire_at_ms),
+            _ => (Vec::new(), None),
+        };
+        if bytes.len() < needed {
+            bytes.resize(needed, 0u8);
+        }
+        bytes[offset..needed].copy_from_slice(value);
+        let new_len = bytes.len();
+        self.db.insert(
+            argv[1].clone(),
+            Entry {
+                value: StoredValue::String(bytes),
+                expire_at_ms: preserved_ttl,
+            },
+        );
+        self.note_write(&argv[1]);
+        RespFrame::integer(new_len as i64)
+    }
+
+    /// MSET / MSETNX (`msetGenericCommand`, `t_string.c`). MSET sets every pair
+    /// and replies `+OK`; MSETNX is atomic all-or-nothing — it sets nothing and
+    /// replies `:0` if any target key already exists, otherwise sets all and
+    /// replies `:1`. Both clear any existing TTL on overwrite.
+    fn mset_command(&mut self, argv: &[Vec<u8>], nx: bool) -> RespFrame {
+        if argv.len() < 3 || argv.len() % 2 != 1 {
+            return wrong_arity(if nx { b"msetnx" } else { b"mset" });
+        }
+        if nx {
+            let mut index = 1;
+            while index < argv.len() {
+                self.purge_if_expired(&argv[index]);
+                if self.db.contains_key(&argv[index]) {
+                    return RespFrame::integer(0);
+                }
+                index += 2;
+            }
+        }
+        let mut index = 1;
+        while index < argv.len() {
+            self.db.insert(
+                argv[index].clone(),
+                Entry {
+                    value: StoredValue::String(argv[index + 1].clone()),
+                    expire_at_ms: None,
+                },
+            );
+            self.note_write(&argv[index]);
+            index += 2;
+        }
+        if nx {
+            RespFrame::integer(1)
+        } else {
+            simple(b"OK")
+        }
+    }
+
+    /// PSETEX key milliseconds value (`psetexCommand`, `t_string.c`): SETEX with
+    /// a millisecond TTL. Mirrors `setex_command`'s validation/error shape but
+    /// names the command `psetex` in the invalid-expire-time error.
+    fn psetex_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 4 {
+            return wrong_arity(b"psetex");
+        }
+        let Some(millis) = parse_i64(&argv[2]) else {
+            return err(b"ERR value is not an integer or out of range");
+        };
+        if millis <= 0 {
+            return invalid_expire_time(b"psetex");
+        }
+        let Some(ttl) = checked_ttl_ms(millis, 1) else {
+            return invalid_expire_time(b"psetex");
+        };
+        let Some(expire_at_ms) = self.host.now_millis().checked_add(ttl) else {
+            return invalid_expire_time(b"psetex");
+        };
+        self.db.insert(
+            argv[1].clone(),
+            Entry {
+                value: StoredValue::String(argv[3].clone()),
+                expire_at_ms: Some(expire_at_ms),
+            },
+        );
+        self.note_write(&argv[1]);
+        simple(b"OK")
+    }
+
+    /// GETEX key [EX s|PX ms|EXAT ts|PXAT ts|PERSIST] (`getexCommand`,
+    /// `t_string.c`). Returns the value like GET, but may also set, refresh, or
+    /// drop the TTL. With no option the TTL is left untouched. Mutation is
+    /// recorded only when the TTL actually changes.
+    fn getex_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 2 {
+            return wrong_arity(b"getex");
+        }
+        let mut expire_at_ms: Option<u64> = None;
+        let mut persist = false;
+        let mut absolute_expire = false;
+        let mut already_expired = false;
+        let mut index = 2;
+        while index < argv.len() {
+            if ascii_eq(&argv[index], b"PERSIST") {
+                if expire_at_ms.is_some() || persist {
+                    return err(b"ERR syntax error");
+                }
+                persist = true;
+                index += 1;
+            } else if ascii_eq(&argv[index], b"EX") || ascii_eq(&argv[index], b"PX") {
+                if expire_at_ms.is_some() || persist || index + 1 >= argv.len() {
+                    return err(b"ERR syntax error");
+                }
+                let Some(raw) = parse_i64(&argv[index + 1]) else {
+                    return err(b"ERR value is not an integer or out of range");
+                };
+                let unit = if ascii_eq(&argv[index], b"PX") { 1 } else { 1000 };
+                if raw <= 0 || (unit == 1000 && raw > i64::MAX / 1000) {
+                    return invalid_expire_time(b"getex");
+                }
+                let Some(ttl) = checked_ttl_ms(raw, unit) else {
+                    return invalid_expire_time(b"getex");
+                };
+                let Some(deadline) = self.host.now_millis().checked_add(ttl) else {
+                    return invalid_expire_time(b"getex");
+                };
+                expire_at_ms = Some(deadline);
+                index += 2;
+            } else if ascii_eq(&argv[index], b"EXAT") || ascii_eq(&argv[index], b"PXAT") {
+                if expire_at_ms.is_some() || persist || index + 1 >= argv.len() {
+                    return err(b"ERR syntax error");
+                }
+                let Some(raw) = parse_i64(&argv[index + 1]) else {
+                    return err(b"ERR value is not an integer or out of range");
+                };
+                let unit = if ascii_eq(&argv[index], b"PXAT") { 1 } else { 1000 };
+                if raw <= 0 || (unit == 1000 && raw > i64::MAX / 1000) {
+                    return invalid_expire_time(b"getex");
+                }
+                let Some(absolute) = (raw as u64).checked_mul(unit) else {
+                    return invalid_expire_time(b"getex");
+                };
+                expire_at_ms = Some(absolute);
+                absolute_expire = true;
+                already_expired = absolute <= self.host.now_millis();
+                index += 2;
+            } else {
+                return err(b"ERR syntax error");
+            }
+        }
+        self.purge_if_expired(&argv[1]);
+        let value = match self.db.get(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::String(value)) => value.clone(),
+            Some(_) => return wrong_type(),
+            None => return RespFrame::null_bulk(),
+        };
+        if absolute_expire && already_expired {
+            self.db.remove(&argv[1]);
+            self.note_write(&argv[1]);
+        } else if expire_at_ms.is_some() {
+            if let Some(entry) = self.db.get_mut(&argv[1]) {
+                entry.expire_at_ms = expire_at_ms;
+            }
+            self.note_write(&argv[1]);
+        } else if persist {
+            if let Some(entry) = self.db.get_mut(&argv[1]) {
+                if entry.expire_at_ms.is_some() {
+                    entry.expire_at_ms = None;
+                    self.note_write(&argv[1]);
+                }
+            }
+        }
+        bulk(value)
+    }
+
+    /// SETBIT key offset bit (`setbitCommand`, `bitops.c`). Sets/clears the bit
+    /// at `offset`, growing and zero-padding the string as needed, and replies
+    /// with the bit's prior value.
+    fn setbit_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 4 {
+            return wrong_arity(b"setbit");
+        }
+        let bitoffset = match get_bit_offset_from_arg(&argv[2]) {
+            Ok(offset) => offset,
+            Err(frame) => return frame,
+        };
+        let bit_err = b"ERR bit is not an integer or out of range";
+        let Some(on) = parse_i64(&argv[3]) else {
+            return err(bit_err);
+        };
+        if on & !1 != 0 {
+            return err(bit_err);
+        }
+        let on = on != 0;
+        let min_len = ((bitoffset >> 3) + 1) as usize;
+        self.purge_if_expired(&argv[1]);
+        let key_existed = match self.db.get(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::String(_)) => true,
+            Some(_) => return wrong_type(),
+            None => false,
+        };
+        let (mut bytes, preserved_ttl) = match self.db.remove(&argv[1]) {
+            Some(Entry {
+                value: StoredValue::String(existing),
+                expire_at_ms,
+            }) => (existing, expire_at_ms),
+            _ => (Vec::new(), None),
+        };
+        let existing_len = bytes.len();
+        if bytes.len() < min_len {
+            bytes.resize(min_len, 0u8);
+        }
+        let extended = bytes.len() != existing_len;
+        let byte_idx = (bitoffset >> 3) as usize;
+        let bit_shift = 7 - (bitoffset & 0x7);
+        let byteval = bytes[byte_idx];
+        let bitval = (byteval >> bit_shift) & 1 != 0;
+        bytes[byte_idx] =
+            (byteval & !(1u8 << bit_shift)) | (if on { 1u8 << bit_shift } else { 0 });
+        let changed = !key_existed || extended || bitval != on;
+        self.db.insert(
+            argv[1].clone(),
+            Entry {
+                value: StoredValue::String(bytes),
+                expire_at_ms: preserved_ttl,
+            },
+        );
+        if changed {
+            self.note_write(&argv[1]);
+        }
+        RespFrame::integer(if bitval { 1 } else { 0 })
+    }
+
+    /// GETBIT key offset (`getbitCommand`, `bitops.c`). Replies with the bit at
+    /// `offset`, or 0 when the offset is beyond the string (or the key missing).
+    fn getbit_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 3 {
+            return wrong_arity(b"getbit");
+        }
+        let bitoffset = match get_bit_offset_from_arg(&argv[2]) {
+            Ok(offset) => offset,
+            Err(frame) => return frame,
+        };
+        let bytes = match self.get_value(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::String(value)) => value.clone(),
+            Some(_) => return wrong_type(),
+            None => return RespFrame::integer(0),
+        };
+        let byte_idx = (bitoffset >> 3) as usize;
+        let bit_shift = 7 - (bitoffset & 0x7);
+        let bitval = if byte_idx < bytes.len() {
+            (bytes[byte_idx] >> bit_shift) & 1
+        } else {
+            0
+        };
+        RespFrame::integer(bitval as i64)
+    }
+
+    /// BITCOUNT key [start end [BYTE|BIT]] (`bitcountCommand`, `bitops.c`).
+    /// Counts set bits over the whole string or an optional (negative-aware,
+    /// byte- or bit-granular) range.
+    fn bitcount_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        let argc = argv.len();
+        if argc == 2 {
+            return match self.get_value(&argv[1]).map(|entry| &entry.value) {
+                Some(StoredValue::String(value)) => {
+                    RespFrame::integer(server_popcount(value))
+                }
+                Some(_) => wrong_type(),
+                None => RespFrame::integer(0),
+            };
+        }
+        if argc != 3 && argc != 4 && argc != 5 {
+            return err(b"ERR syntax error");
+        }
+        let Some(mut start) = parse_i64(&argv[2]) else {
+            return err(b"ERR value is not an integer or out of range");
+        };
+        let mut isbit = false;
+        if argc == 5 {
+            if ascii_eq(&argv[4], b"bit") {
+                isbit = true;
+            } else if ascii_eq(&argv[4], b"byte") {
+                isbit = false;
+            } else {
+                return err(b"ERR syntax error");
+            }
+        }
+        let mut end = 0i64;
+        if argc >= 4 {
+            let Some(parsed_end) = parse_i64(&argv[3]) else {
+                return err(b"ERR value is not an integer or out of range");
+            };
+            end = parsed_end;
+        }
+        let bytes = match self.get_value(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::String(value)) => value.clone(),
+            Some(_) => return wrong_type(),
+            None => return RespFrame::integer(0),
+        };
+        let strlen = bytes.len() as i64;
+        let mut totlen = strlen;
+        if argc < 4 {
+            end = totlen - 1;
+        }
+        if start < 0 && end < 0 && start > end {
+            return RespFrame::integer(0);
+        }
+        if isbit {
+            totlen <<= 3;
+        }
+        if start < 0 {
+            start += totlen;
+        }
+        if end < 0 {
+            end += totlen;
+        }
+        if start < 0 {
+            start = 0;
+        }
+        if end < 0 {
+            end = 0;
+        }
+        if end >= totlen {
+            end = totlen - 1;
+        }
+        let mut first_byte_neg_mask: u8 = 0;
+        let mut last_byte_neg_mask: u8 = 0;
+        if isbit && start <= end {
+            first_byte_neg_mask = (!((1u32 << (8 - (start & 7))) - 1) & 0xFF) as u8;
+            last_byte_neg_mask = ((1u32 << (7 - (end & 7))) - 1) as u8;
+            start >>= 3;
+            end >>= 3;
+        }
+        if start > end {
+            return RespFrame::integer(0);
+        }
+        let byte_start = start as usize;
+        let byte_end = end as usize;
+        let mut count = server_popcount(&bytes[byte_start..=byte_end]);
+        if first_byte_neg_mask != 0 || last_byte_neg_mask != 0 {
+            let edge_bytes = [
+                if first_byte_neg_mask != 0 {
+                    bytes[byte_start] & first_byte_neg_mask
+                } else {
+                    0
+                },
+                if last_byte_neg_mask != 0 {
+                    bytes[byte_end] & last_byte_neg_mask
+                } else {
+                    0
+                },
+            ];
+            count -= server_popcount(&edge_bytes);
+        }
+        RespFrame::integer(count)
+    }
+
+    /// BITPOS key bit [start [end [BYTE|BIT]]] (`bitposCommand`, `bitops.c`).
+    /// Finds the first set/clear bit, honoring Valkey's exact not-found rules
+    /// (notably the difference between searching for a 0 with vs. without an
+    /// explicit end on an all-ones string).
+    fn bitpos_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        let argc = argv.len();
+        if !(3..=6).contains(&argc) {
+            return err(b"ERR syntax error");
+        }
+        let Some(bit) = parse_i64(&argv[2]) else {
+            return err(b"ERR value is not an integer or out of range");
+        };
+        if bit != 0 && bit != 1 {
+            return err(b"ERR The bit argument must be 1 or 0.");
+        }
+        let bit = bit as i32;
+        let mut start: i64 = 0;
+        let mut end_opt: Option<i64> = None;
+        let mut end_given = false;
+        let mut isbit = false;
+        if argc >= 4 {
+            let Some(parsed_start) = parse_i64(&argv[3]) else {
+                return err(b"ERR value is not an integer or out of range");
+            };
+            start = parsed_start;
+            if argc >= 5 {
+                if argc == 6 {
+                    if ascii_eq(&argv[5], b"bit") {
+                        isbit = true;
+                    } else if ascii_eq(&argv[5], b"byte") {
+                        isbit = false;
+                    } else {
+                        return err(b"ERR syntax error");
+                    }
+                }
+                let Some(parsed_end) = parse_i64(&argv[4]) else {
+                    return err(b"ERR value is not an integer or out of range");
+                };
+                end_opt = Some(parsed_end);
+                end_given = true;
+            }
+        }
+        let bytes = match self.get_value(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::String(value)) => value.clone(),
+            Some(_) => return wrong_type(),
+            None => return RespFrame::integer(if bit == 1 { -1 } else { 0 }),
+        };
+        let strlen = bytes.len() as i64;
+        let mut end = end_opt.unwrap_or(strlen - 1);
+        let mut totlen = strlen;
+        if isbit {
+            totlen <<= 3;
+        }
+        if start < 0 {
+            start += totlen;
+        }
+        if end < 0 {
+            end += totlen;
+        }
+        if start < 0 {
+            start = 0;
+        }
+        if end < 0 {
+            end = 0;
+        }
+        if end >= totlen {
+            end = totlen - 1;
+        }
+        let mut first_byte_neg_mask: u8 = 0;
+        let mut last_byte_neg_mask: u8 = 0;
+        if isbit && start <= end {
+            first_byte_neg_mask = (!((1u32 << (8 - (start & 7))) - 1) & 0xFF) as u8;
+            last_byte_neg_mask = ((1u32 << (7 - (end & 7))) - 1) as u8;
+            start >>= 3;
+            end >>= 3;
+        }
+        if start > end {
+            return RespFrame::integer(-1);
+        }
+        let p = &bytes;
+        let mut search_start = start;
+        let mut nbytes = end - start + 1;
+        let pos: i64 = 'find_pos: {
+            if first_byte_neg_mask != 0 {
+                let mut tmpchar = if bit == 1 {
+                    p[search_start as usize] & !first_byte_neg_mask
+                } else {
+                    p[search_start as usize] | first_byte_neg_mask
+                };
+                if last_byte_neg_mask != 0 && nbytes == 1 {
+                    tmpchar = if bit == 1 {
+                        tmpchar & !last_byte_neg_mask
+                    } else {
+                        tmpchar | last_byte_neg_mask
+                    };
+                }
+                let pos = server_bitpos(&[tmpchar], 1, bit);
+                if nbytes == 1 || (pos != -1 && pos != 8) {
+                    break 'find_pos pos;
+                }
+                search_start += 1;
+                nbytes -= 1;
+            }
+            let curbytes = nbytes - if last_byte_neg_mask != 0 { 1 } else { 0 };
+            if curbytes > 0 {
+                let slice = &p[search_start as usize..(search_start + curbytes) as usize];
+                let pos = server_bitpos(slice, curbytes as usize, bit);
+                if nbytes == curbytes || (pos != -1 && pos != curbytes << 3) {
+                    break 'find_pos pos;
+                }
+                search_start += curbytes;
+                nbytes -= curbytes;
+            }
+            let tmpchar = if bit == 1 {
+                p[end as usize] & !last_byte_neg_mask
+            } else {
+                p[end as usize] | last_byte_neg_mask
+            };
+            server_bitpos(&[tmpchar], 1, bit)
+        };
+        if end_given && bit == 0 && pos != -1 && pos == nbytes << 3 {
+            return RespFrame::integer(-1);
+        }
+        let final_pos = if pos != -1 {
+            pos + (search_start << 3)
+        } else {
+            -1
+        };
+        RespFrame::integer(final_pos)
     }
 
     fn hset_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
@@ -4025,6 +4619,70 @@ fn invalid_expire_time(command: &[u8]) -> RespFrame {
     msg.extend_from_slice(command);
     msg.extend_from_slice(b"' command");
     err(&msg)
+}
+
+/// `proto-max-bulk-len` default (512 MiB): the configured ceiling on a string
+/// value's byte length, used by SETRANGE/APPEND/SETBIT growth checks.
+const PROTO_MAX_BULK_LEN: i64 = 512 * 1024 * 1024;
+
+/// Mirror of `checkStringLength` (`t_string.c`): returns an error frame when
+/// growing a string to `size + append` bytes would exceed `proto-max-bulk-len`
+/// or overflow, otherwise `None`.
+fn check_string_length(size: i64, append: i64) -> Option<RespFrame> {
+    let total = (size as i128) + (append as i128);
+    if total > PROTO_MAX_BULK_LEN as i128 || total < size as i128 || total < append as i128 {
+        return Some(err(
+            b"ERR string exceeds maximum allowed size (proto-max-bulk-len)",
+        ));
+    }
+    None
+}
+
+/// Parse a GETBIT/SETBIT bit offset (`getBitOffsetFromArgument`, `bitops.c`).
+/// Rejects non-integers, negatives, and offsets whose byte index reaches the
+/// proto byte ceiling, all with the same error text.
+fn get_bit_offset_from_arg(arg: &[u8]) -> Result<u64, RespFrame> {
+    const ERR: &[u8] = b"ERR bit offset is not an integer or out of range";
+    let Some(loffset) = parse_i64(arg) else {
+        return Err(err(ERR));
+    };
+    if loffset < 0 || (loffset >> 3) >= PROTO_MAX_BULK_LEN {
+        return Err(err(ERR));
+    }
+    Ok(loffset as u64)
+}
+
+/// Count set bits across the whole slice (`serverPopcount`, `bitops.c`).
+fn server_popcount(data: &[u8]) -> i64 {
+    data.iter().map(|b| b.count_ones() as i64).sum()
+}
+
+/// Position of the first bit equal to `bit` within `data[..count]`
+/// (`serverBitpos`, `bitops.c`). Returns `count * 8` when searching for a clear
+/// bit and none is found (the string is treated as zero-padded to the right),
+/// or `-1` when searching for a set bit and none is found.
+fn server_bitpos(data: &[u8], count: usize, bit: i32) -> i64 {
+    let target = bit != 0;
+    let skip_byte: u8 = if target { 0x00 } else { 0xFF };
+    let count = count.min(data.len());
+    let mut pos: i64 = 0;
+    let mut i = 0usize;
+    while i < count && data[i] == skip_byte {
+        pos += 8;
+        i += 1;
+    }
+    if i >= count {
+        return if target { -1 } else { pos };
+    }
+    let byte = data[i];
+    for shift in (0u32..8).rev() {
+        let is_set = (byte >> shift) & 1 != 0;
+        if is_set == target {
+            return pos;
+        }
+        pos += 1;
+    }
+    pos
 }
 
 /// Parse the trailing NX|XX|GT|LT flags of the EXPIRE family, mirroring

@@ -62,3 +62,68 @@
 {"id": "getdel-wrongtype", "cmd": ["GETDEL", "wt"]}
 {"id": "mget-wrongtype-returns-nil", "cmd": ["MGET", "wt"]}
 {"id": "wrongtype-key-untouched-after-getdel", "cmd": ["HGET", "wt", "f"]}
+{"id": "sr-getrange-setup", "cmd": ["SET", "sr:gr", "Hello World"]}
+{"id": "sr-getrange-head", "cmd": ["GETRANGE", "sr:gr", "0", "4"]}
+{"id": "sr-getrange-neg-tail", "cmd": ["GETRANGE", "sr:gr", "-5", "-1"]}
+{"id": "sr-getrange-whole-neg", "cmd": ["GETRANGE", "sr:gr", "0", "-1"]}
+{"id": "sr-getrange-clamped-end", "cmd": ["GETRANGE", "sr:gr", "0", "100"]}
+{"id": "sr-getrange-oob", "cmd": ["GETRANGE", "sr:gr", "100", "200"]}
+{"id": "sr-getrange-neg-start-gt-end", "cmd": ["GETRANGE", "sr:gr", "-1", "-5"]}
+{"id": "sr-getrange-start-gt-end", "cmd": ["GETRANGE", "sr:gr", "5", "2"]}
+{"id": "sr-getrange-missing", "cmd": ["GETRANGE", "sr:grmiss", "0", "10"]}
+{"id": "sr-substr-alias", "cmd": ["SUBSTR", "sr:gr", "0", "4"]}
+{"id": "sr-substr-neg", "cmd": ["SUBSTR", "sr:gr", "-5", "-1"]}
+{"id": "sr-getrange-empty-string-set", "cmd": ["SET", "sr:es", ""]}
+{"id": "sr-getrange-empty-string", "cmd": ["GETRANGE", "sr:es", "0", "-1"]}
+{"id": "sr-getrange-bad-start", "cmd": ["GETRANGE", "sr:gr", "x", "4"]}
+{"id": "sr-getrange-wrongtype-setup", "cmd": ["LPUSH", "sr:wt", "a"]}
+{"id": "sr-getrange-wrongtype", "cmd": ["GETRANGE", "sr:wt", "0", "1"]}
+{"id": "sr-setrange-missing-empty", "cmd": ["SETRANGE", "sr:srm", "0", ""]}
+{"id": "sr-setrange-missing-empty-no-create", "cmd": ["EXISTS", "sr:srm"]}
+{"id": "sr-setrange-extend-zeropad", "cmd": ["SETRANGE", "sr:srp", "5", "hi"]}
+{"id": "sr-setrange-extend-len", "cmd": ["STRLEN", "sr:srp"]}
+{"id": "sr-setrange-extend-content", "cmd": ["GET", "sr:srp"]}
+{"id": "sr-setrange-overwrite-setup", "cmd": ["SET", "sr:sro", "Hello World"]}
+{"id": "sr-setrange-overwrite", "cmd": ["SETRANGE", "sr:sro", "6", "Redis"]}
+{"id": "sr-setrange-overwrite-content", "cmd": ["GET", "sr:sro"]}
+{"id": "sr-setrange-existing-empty", "cmd": ["SETRANGE", "sr:sro", "0", ""]}
+{"id": "sr-setrange-neg-offset", "cmd": ["SETRANGE", "sr:sro", "-1", "x"]}
+{"id": "sr-setrange-wrongtype", "cmd": ["SETRANGE", "sr:wt", "0", "x"]}
+{"id": "sr-mset-basic", "cmd": ["MSET", "sr:m1", "a", "sr:m2", "b", "sr:m3", "c"]}
+{"id": "sr-mset-mget", "cmd": ["MGET", "sr:m1", "sr:m2", "sr:m3"]}
+{"id": "sr-mset-overwrite-ttl-setup", "cmd": ["SET", "sr:mttl", "old", "EX", "100"]}
+{"id": "sr-mset-overwrite-clears-ttl", "cmd": ["MSET", "sr:mttl", "new"]}
+{"id": "sr-mset-ttl-cleared", "cmd": ["TTL", "sr:mttl"]}
+{"id": "sr-mset-arity", "cmd": ["MSET", "sr:m1"]}
+{"id": "sr-msetnx-all-new", "cmd": ["MSETNX", "sr:n1", "a", "sr:n2", "b"]}
+{"id": "sr-msetnx-all-new-mget", "cmd": ["MGET", "sr:n1", "sr:n2"]}
+{"id": "sr-msetnx-one-exists", "cmd": ["MSETNX", "sr:n1", "x", "sr:n3", "y"]}
+{"id": "sr-msetnx-atomic-not-set", "cmd": ["EXISTS", "sr:n3"]}
+{"id": "sr-msetnx-arity", "cmd": ["MSETNX", "sr:n1", "v1", "sr:n2"]}
+{"id": "sr-psetex-set", "cmd": ["PSETEX", "sr:px", "100000", "v"]}
+{"id": "sr-psetex-get", "cmd": ["GET", "sr:px"]}
+{"id": "sr-psetex-pttl", "cmd": ["PTTL", "sr:px"], "mode": "ttl_band", "band": 2000}
+{"id": "sr-psetex-bad-ms", "cmd": ["PSETEX", "sr:pxbad", "0", "v"]}
+{"id": "sr-psetex-neg-ms", "cmd": ["PSETEX", "sr:pxbad", "-1", "v"]}
+{"id": "sr-getex-setup", "cmd": ["SET", "sr:gx", "value"]}
+{"id": "sr-getex-no-opt", "cmd": ["GETEX", "sr:gx"]}
+{"id": "sr-getex-no-opt-keeps-no-ttl", "cmd": ["TTL", "sr:gx"]}
+{"id": "sr-getex-ex", "cmd": ["GETEX", "sr:gx", "EX", "100"]}
+{"id": "sr-getex-ex-ttl", "cmd": ["TTL", "sr:gx"], "mode": "ttl_band", "band": 2}
+{"id": "sr-getex-no-opt-keeps-ttl", "cmd": ["GETEX", "sr:gx"]}
+{"id": "sr-getex-no-opt-ttl-unchanged", "cmd": ["TTL", "sr:gx"], "mode": "ttl_band", "band": 2}
+{"id": "sr-getex-px", "cmd": ["GETEX", "sr:gx", "PX", "50000"]}
+{"id": "sr-getex-px-pttl", "cmd": ["PTTL", "sr:gx"], "mode": "ttl_band", "band": 2000}
+{"id": "sr-getex-persist", "cmd": ["GETEX", "sr:gx", "PERSIST"]}
+{"id": "sr-getex-persist-ttl", "cmd": ["TTL", "sr:gx"]}
+{"id": "sr-getex-persist-noop", "cmd": ["GETEX", "sr:gx", "PERSIST"]}
+{"id": "sr-getex-pxat", "cmd": ["GETEX", "sr:gx", "PXAT", "99999999999999"]}
+{"id": "sr-getex-pxat-pttl", "cmd": ["PTTL", "sr:gx"], "mode": "ttl_band", "band": 1000}
+{"id": "sr-getex-exat-past", "cmd": ["GETEX", "sr:gx", "EXAT", "1"]}
+{"id": "sr-getex-exat-past-deleted", "cmd": ["EXISTS", "sr:gx"]}
+{"id": "sr-getex-missing", "cmd": ["GETEX", "sr:gxmiss"]}
+{"id": "sr-getex-bad-expire", "cmd": ["SET", "sr:gx2", "v"]}
+{"id": "sr-getex-ex-zero", "cmd": ["GETEX", "sr:gx2", "EX", "0"]}
+{"id": "sr-getex-conflict", "cmd": ["GETEX", "sr:gx2", "EX", "10", "PX", "20"]}
+{"id": "sr-getex-bad-opt", "cmd": ["GETEX", "sr:gx2", "FOO"]}
+{"id": "sr-getex-wrongtype", "cmd": ["GETEX", "sr:wt"]}

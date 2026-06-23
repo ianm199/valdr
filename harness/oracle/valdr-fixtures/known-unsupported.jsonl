@@ -12,3 +12,13 @@
 {"id": "ku-zrandmember-count", "cmd": ["ZRANDMEMBER", "ku:zset", "3"], "known_unsupported": true, "reason": "random selection cannot match valkey differentially (same class as SRANDMEMBER/RANDOMKEY)"}
 {"id": "ku-zrandmember-withscores", "cmd": ["ZRANDMEMBER", "ku:zset", "3", "WITHSCORES"], "known_unsupported": true, "reason": "random selection cannot match valkey differentially (same class as SRANDMEMBER/RANDOMKEY)"}
 {"id": "ku-zscan", "cmd": ["ZSCAN", "ku:zset", "0"], "known_unsupported": true, "reason": "cursor iteration deferred to a later SCAN-family wave (same class as SSCAN)"}
+{"id": "ku-incrbyfloat-seed", "cmd": ["SET", "ku:fl", "10.5"]}
+{"id": "ku-incrbyfloat", "cmd": ["INCRBYFLOAT", "ku:fl", "0.1"], "known_unsupported": true, "reason": "long-double formatting parity is its own careful wave (deferred Wave 7b)"}
+{"id": "ku-hincrbyfloat-seed", "cmd": ["HSET", "ku:hfl", "f", "10.5"]}
+{"id": "ku-hincrbyfloat", "cmd": ["HINCRBYFLOAT", "ku:hfl", "f", "0.1"], "known_unsupported": true, "reason": "long-double formatting parity is its own careful wave (deferred Wave 7b)"}
+{"id": "ku-bitfield-seed", "cmd": ["SET", "ku:bf", "foobar"]}
+{"id": "ku-bitfield", "cmd": ["BITFIELD", "ku:bf", "GET", "u8", "0"], "known_unsupported": true, "reason": "multi-subcommand parser deferred to Wave 7b"}
+{"id": "ku-bitfield-ro", "cmd": ["BITFIELD_RO", "ku:bf", "GET", "u8", "0"], "known_unsupported": true, "reason": "multi-subcommand parser deferred to Wave 7b"}
+{"id": "ku-bitop-seed-a", "cmd": ["SET", "ku:bopa", "abc"]}
+{"id": "ku-bitop-seed-b", "cmd": ["SET", "ku:bopb", "abd"]}
+{"id": "ku-bitop", "cmd": ["BITOP", "AND", "ku:bopdest", "ku:bopa", "ku:bopb"], "known_unsupported": true, "reason": "multi-key BITOP deferred to Wave 7b"}
