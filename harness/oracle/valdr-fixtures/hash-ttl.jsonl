@@ -1,0 +1,102 @@
+{"id": "seed-hash", "cmd": ["HSET", "ht:h", "f1", "v1", "f2", "v2", "f3", "v3"]}
+{"id": "hexpire-set-one", "cmd": ["HEXPIRE", "ht:h", "100", "FIELDS", "1", "f1"]}
+{"id": "hexpire-missing-field", "cmd": ["HEXPIRE", "ht:h", "100", "FIELDS", "1", "nope"]}
+{"id": "hexpire-missing-key", "cmd": ["HEXPIRE", "ht:ghost", "100", "FIELDS", "2", "a", "b"]}
+{"id": "hpexpire-set-ms", "cmd": ["HPEXPIRE", "ht:h", "250000", "FIELDS", "1", "f2"]}
+{"id": "hexpire-past-deletes-field", "cmd": ["HEXPIRE", "ht:h", "0", "FIELDS", "1", "f3"]}
+{"id": "hget-after-past-expire-gone", "cmd": ["HGET", "ht:h", "f3"]}
+{"id": "hexists-after-past-expire", "cmd": ["HEXISTS", "ht:h", "f3"]}
+{"id": "hpexpireat-past-deletes-field", "cmd": ["HPEXPIREAT", "ht:h", "1", "FIELDS", "1", "f2"]}
+{"id": "hget-after-pexpireat-past-gone", "cmd": ["HGET", "ht:h", "f2"]}
+{"id": "httl-no-ttl-field", "cmd": ["HSET", "ht:h", "f4", "v4"]}
+{"id": "httl-minus-one-no-ttl", "cmd": ["HTTL", "ht:h", "FIELDS", "1", "f4"]}
+{"id": "httl-minus-two-no-field", "cmd": ["HTTL", "ht:h", "FIELDS", "1", "missing"]}
+{"id": "hpttl-minus-two-no-field", "cmd": ["HPTTL", "ht:h", "FIELDS", "1", "missing"]}
+{"id": "httl-missing-key", "cmd": ["HTTL", "ht:ghost", "FIELDS", "1", "a"]}
+{"id": "hexpiretime-no-ttl", "cmd": ["HEXPIRETIME", "ht:h", "FIELDS", "1", "f4"]}
+{"id": "hexpiretime-no-field", "cmd": ["HEXPIRETIME", "ht:h", "FIELDS", "1", "missing"]}
+{"id": "hexpireat-absolute", "cmd": ["HEXPIREAT", "ht:h", "99999999999", "FIELDS", "1", "f4"]}
+{"id": "hexpiretime-absolute-exact", "cmd": ["HEXPIRETIME", "ht:h", "FIELDS", "1", "f4"]}
+{"id": "hpexpiretime-absolute-exact", "cmd": ["HPEXPIRETIME", "ht:h", "FIELDS", "1", "f4"]}
+{"id": "hpersist-removes-ttl", "cmd": ["HPERSIST", "ht:h", "FIELDS", "1", "f4"]}
+{"id": "httl-after-persist", "cmd": ["HTTL", "ht:h", "FIELDS", "1", "f4"]}
+{"id": "hpersist-no-ttl-minus-one", "cmd": ["HPERSIST", "ht:h", "FIELDS", "1", "f4"]}
+{"id": "hpersist-no-field-minus-two", "cmd": ["HPERSIST", "ht:h", "FIELDS", "1", "missing"]}
+{"id": "hpersist-missing-key", "cmd": ["HPERSIST", "ht:ghost", "FIELDS", "1", "a"]}
+{"id": "cond-seed", "cmd": ["HSET", "ht:c", "a", "1", "b", "2"]}
+{"id": "cond-nx-set-first", "cmd": ["HEXPIRE", "ht:c", "100", "NX", "FIELDS", "1", "a"]}
+{"id": "cond-nx-blocked-when-set", "cmd": ["HEXPIRE", "ht:c", "200", "NX", "FIELDS", "1", "a"]}
+{"id": "cond-xx-allowed-when-set", "cmd": ["HEXPIRE", "ht:c", "200", "XX", "FIELDS", "1", "a"]}
+{"id": "cond-xx-blocked-when-unset", "cmd": ["HEXPIRE", "ht:c", "200", "XX", "FIELDS", "1", "b"]}
+{"id": "cond-gt-blocked-lower", "cmd": ["HEXPIRE", "ht:c", "50", "GT", "FIELDS", "1", "a"]}
+{"id": "cond-gt-allowed-higher", "cmd": ["HEXPIRE", "ht:c", "9999", "GT", "FIELDS", "1", "a"]}
+{"id": "cond-gt-blocked-on-no-ttl", "cmd": ["HEXPIRE", "ht:c", "9999", "GT", "FIELDS", "1", "b"]}
+{"id": "cond-lt-allowed-lower", "cmd": ["HEXPIRE", "ht:c", "10", "LT", "FIELDS", "1", "a"]}
+{"id": "cond-lt-allowed-on-no-ttl", "cmd": ["HEXPIRE", "ht:c", "10", "LT", "FIELDS", "1", "b"]}
+{"id": "cond-nx-xx-conflict", "cmd": ["HEXPIRE", "ht:c", "100", "NX", "XX", "FIELDS", "1", "a"]}
+{"id": "cond-gt-lt-conflict", "cmd": ["HEXPIRE", "ht:c", "100", "GT", "LT", "FIELDS", "1", "a"]}
+{"id": "cond-unsupported-opt", "cmd": ["HEXPIRE", "ht:c", "100", "ZZ", "FIELDS", "1", "a"]}
+{"id": "hexpire-numfields-mismatch", "cmd": ["HEXPIRE", "ht:c", "100", "FIELDS", "2", "a"]}
+{"id": "hexpire-bad-int", "cmd": ["HEXPIRE", "ht:c", "abc", "FIELDS", "1", "a"]}
+{"id": "hexpire-negative", "cmd": ["HEXPIRE", "ht:c", "-1", "FIELDS", "1", "a"]}
+{"id": "httl-numfields-mismatch-syntaxerr", "cmd": ["HTTL", "ht:c", "FIELDS", "2", "a"]}
+{"id": "hpersist-numfields-mismatch", "cmd": ["HPERSIST", "ht:c", "FIELDS", "2", "a"]}
+{"id": "getex-seed", "cmd": ["HSET", "ht:g", "f1", "g1", "f2", "g2"]}
+{"id": "hgetex-plain-get", "cmd": ["HGETEX", "ht:g", "FIELDS", "2", "f1", "f2"]}
+{"id": "hgetex-ex-sets-ttl", "cmd": ["HGETEX", "ht:g", "EX", "100", "FIELDS", "1", "f1"]}
+{"id": "hgetex-persist-clears-ttl", "cmd": ["HGETEX", "ht:g", "PERSIST", "FIELDS", "1", "f1"]}
+{"id": "httl-after-getex-persist", "cmd": ["HTTL", "ht:g", "FIELDS", "1", "f1"]}
+{"id": "hgetex-missing-key", "cmd": ["HGETEX", "ht:ghost", "FIELDS", "2", "a", "b"]}
+{"id": "hgetex-missing-field", "cmd": ["HGETEX", "ht:g", "FIELDS", "2", "f1", "missing"]}
+{"id": "hgetex-exat-absolute", "cmd": ["HGETEX", "ht:g", "EXAT", "99999999999", "FIELDS", "1", "f2"]}
+{"id": "hexpiretime-after-getex-exat", "cmd": ["HEXPIRETIME", "ht:g", "FIELDS", "1", "f2"]}
+{"id": "hgetex-ex-zero-deletes", "cmd": ["HGETEX", "ht:g", "EX", "0", "FIELDS", "1", "f2"]}
+{"id": "hget-after-getex-zero-gone", "cmd": ["HGET", "ht:g", "f2"]}
+{"id": "hgetex-bad-flag-syntax", "cmd": ["HGETEX", "ht:g", "EX", "10", "PERSIST", "FIELDS", "1", "f1"]}
+{"id": "getdel-seed", "cmd": ["HSET", "ht:d", "f1", "d1", "f2", "d2", "f3", "d3"]}
+{"id": "hgetdel-removes-and-returns", "cmd": ["HGETDEL", "ht:d", "FIELDS", "2", "f1", "missing"]}
+{"id": "hget-after-getdel-gone", "cmd": ["HGET", "ht:d", "f1"]}
+{"id": "hlen-after-getdel", "cmd": ["HLEN", "ht:d"]}
+{"id": "hgetdel-missing-key", "cmd": ["HGETDEL", "ht:ghost", "FIELDS", "1", "a"]}
+{"id": "hgetdel-empties-deletes-key", "cmd": ["HGETDEL", "ht:d", "FIELDS", "2", "f2", "f3"]}
+{"id": "exists-after-getdel-empty", "cmd": ["EXISTS", "ht:d"]}
+{"id": "hsetex-basic", "cmd": ["HSETEX", "ht:s", "EX", "100", "FIELDS", "2", "a", "1", "b", "2"]}
+{"id": "hget-after-hsetex", "cmd": ["HGET", "ht:s", "a"]}
+{"id": "hsetex-fnx-blocked-existing", "cmd": ["HSETEX", "ht:s", "FNX", "FIELDS", "1", "a", "9"]}
+{"id": "hget-unchanged-after-fnx-block", "cmd": ["HGET", "ht:s", "a"]}
+{"id": "hsetex-fxx-allowed-existing", "cmd": ["HSETEX", "ht:s", "FXX", "EX", "50", "FIELDS", "1", "a", "9"]}
+{"id": "hget-after-fxx", "cmd": ["HGET", "ht:s", "a"]}
+{"id": "hsetex-fxx-blocked-missing", "cmd": ["HSETEX", "ht:s", "FXX", "FIELDS", "1", "miss", "1"]}
+{"id": "hsetex-fnx-blocked-existing2", "cmd": ["HSETEX", "ht:s", "FNX", "FIELDS", "1", "a", "1"]}
+{"id": "hsetex-keepttl-retains", "cmd": ["HSETEX", "ht:s", "KEEPTTL", "FIELDS", "1", "a", "7"]}
+{"id": "hsetex-plain-clears-ttl", "cmd": ["HSETEX", "ht:s", "FIELDS", "1", "a", "8"]}
+{"id": "httl-minus-one-after-plain-hsetex", "cmd": ["HTTL", "ht:s", "FIELDS", "1", "a"]}
+{"id": "hsetex-ex-zero-deletes", "cmd": ["HSETEX", "ht:s", "EX", "0", "FIELDS", "1", "a", "1"]}
+{"id": "hget-after-hsetex-zero-gone", "cmd": ["HGET", "ht:s", "a"]}
+{"id": "hsetex-numfields-mismatch", "cmd": ["HSETEX", "ht:s", "FIELDS", "2", "a", "1"]}
+{"id": "hsetex-conflicting-ex-px", "cmd": ["HSETEX", "ht:s", "EX", "10", "PX", "20", "FIELDS", "1", "a", "1"]}
+{"id": "hsetex-fnx-fxx-conflict", "cmd": ["HSETEX", "ht:s", "FNX", "FXX", "FIELDS", "1", "a", "1"]}
+{"id": "hset-clears-prior-field-ttl-seed", "cmd": ["HSET", "ht:o", "f", "v"]}
+{"id": "hset-clears-set-ttl", "cmd": ["HEXPIRE", "ht:o", "100", "FIELDS", "1", "f"]}
+{"id": "hset-clears-overwrite", "cmd": ["HSET", "ht:o", "f", "v2"]}
+{"id": "httl-minus-one-after-plain-hset", "cmd": ["HTTL", "ht:o", "FIELDS", "1", "f"]}
+{"id": "hincrby-preserves-ttl-seed", "cmd": ["HSET", "ht:i", "n", "5"]}
+{"id": "hincrby-preserves-ttl-set-abs", "cmd": ["HEXPIREAT", "ht:i", "99999999999", "FIELDS", "1", "n"]}
+{"id": "hincrby-preserves-ttl-incr", "cmd": ["HINCRBY", "ht:i", "n", "3"]}
+{"id": "hexpiretime-after-hincrby-preserved", "cmd": ["HEXPIRETIME", "ht:i", "FIELDS", "1", "n"]}
+{"id": "lazy-expiry-seed", "cmd": ["HSET", "ht:lz", "f1", "alive", "f2", "dying"]}
+{"id": "lazy-expiry-set-short", "cmd": ["HPEXPIRE", "ht:lz", "300", "FIELDS", "1", "f2"]}
+{"id": "lazy-expiry-hget-gone", "cmd": ["HGET", "ht:lz", "f2"], "sleep_ms": 600}
+{"id": "lazy-expiry-hlen-after", "cmd": ["HLEN", "ht:lz"]}
+{"id": "lazy-expiry-hexists-after", "cmd": ["HEXISTS", "ht:lz", "f2"]}
+{"id": "lazy-expiry-survivor-present", "cmd": ["HGET", "ht:lz", "f1"]}
+{"id": "lazy-expiry-empty-deletes-key-seed", "cmd": ["HSET", "ht:le", "only", "v"]}
+{"id": "lazy-expiry-empty-set-short", "cmd": ["HPEXPIRE", "ht:le", "200", "FIELDS", "1", "only"]}
+{"id": "lazy-expiry-empty-exists-gone", "cmd": ["EXISTS", "ht:le"], "sleep_ms": 500}
+{"id": "wrongtype-seed", "cmd": ["SET", "ht:str", "plain"]}
+{"id": "wrongtype-hexpire", "cmd": ["HEXPIRE", "ht:str", "100", "FIELDS", "1", "f"]}
+{"id": "wrongtype-httl", "cmd": ["HTTL", "ht:str", "FIELDS", "1", "f"]}
+{"id": "wrongtype-hpersist", "cmd": ["HPERSIST", "ht:str", "FIELDS", "1", "f"]}
+{"id": "wrongtype-hgetex", "cmd": ["HGETEX", "ht:str", "FIELDS", "1", "f"]}
+{"id": "wrongtype-hgetdel", "cmd": ["HGETDEL", "ht:str", "FIELDS", "1", "f"]}
+{"id": "wrongtype-hsetex", "cmd": ["HSETEX", "ht:str", "FIELDS", "1", "a", "1"]}

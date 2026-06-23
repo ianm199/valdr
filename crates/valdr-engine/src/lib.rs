@@ -71,11 +71,34 @@ struct Entry {
 #[derive(Debug, Clone)]
 enum StoredValue {
     String(Vec<u8>),
-    Hash(HashMap<Vec<u8>, Vec<u8>>),
+    Hash(HashMap<Vec<u8>, HashField>),
     ZSet(HashMap<Vec<u8>, f64>),
     List(VecDeque<Vec<u8>>),
     Set(HashSet<Vec<u8>>),
     Stream(StreamValue),
+}
+
+/// One field of a hash value. Mirrors a hashtable-encoded hash `entry`
+/// (`t_hash.c`): the field's bytes plus an optional absolute per-field
+/// expiry deadline in host milliseconds. `expire_at_ms == None` is the C
+/// `EXPIRY_NONE` sentinel — the field has no TTL. The hash-field-TTL command
+/// family (HEXPIRE/HTTL/HPERSIST/HGETEX/HGETDEL/HSETEX) reads and writes this
+/// deadline; a plain HSET/HMSET/HSETNX/HINCRBY overwrite clears it back to
+/// `None`, matching `hashTypeSet(..., EXPIRY_NONE, ...)`.
+#[derive(Debug, Clone)]
+struct HashField {
+    value: Vec<u8>,
+    expire_at_ms: Option<u64>,
+}
+
+impl HashField {
+    /// A field with no TTL (the common case for plain HSET writes).
+    fn new(value: Vec<u8>) -> Self {
+        HashField {
+            value,
+            expire_at_ms: None,
+        }
+    }
 }
 
 /// A stream `ms-seq` ID, mirroring the C `streamID` struct (`stream.h`).
@@ -849,6 +872,30 @@ impl<H: Host> Engine<H> {
             self.hincrby_command(argv)
         } else if ascii_eq(command, b"HMSET") {
             self.hmset_command(argv)
+        } else if ascii_eq(command, b"HEXPIRE") {
+            self.hexpire_command(argv, ExpireUnit::Seconds, false)
+        } else if ascii_eq(command, b"HPEXPIRE") {
+            self.hexpire_command(argv, ExpireUnit::Milliseconds, false)
+        } else if ascii_eq(command, b"HEXPIREAT") {
+            self.hexpire_command(argv, ExpireUnit::Seconds, true)
+        } else if ascii_eq(command, b"HPEXPIREAT") {
+            self.hexpire_command(argv, ExpireUnit::Milliseconds, true)
+        } else if ascii_eq(command, b"HTTL") {
+            self.httl_command(argv, false, false)
+        } else if ascii_eq(command, b"HPTTL") {
+            self.httl_command(argv, true, false)
+        } else if ascii_eq(command, b"HEXPIRETIME") {
+            self.httl_command(argv, false, true)
+        } else if ascii_eq(command, b"HPEXPIRETIME") {
+            self.httl_command(argv, true, true)
+        } else if ascii_eq(command, b"HPERSIST") {
+            self.hpersist_command(argv)
+        } else if ascii_eq(command, b"HGETEX") {
+            self.hgetex_command(argv)
+        } else if ascii_eq(command, b"HGETDEL") {
+            self.hgetdel_command(argv)
+        } else if ascii_eq(command, b"HSETEX") {
+            self.hsetex_command(argv)
         } else if ascii_eq(command, b"ZADD") {
             self.zadd_command(argv)
         } else if ascii_eq(command, b"ZSCORE") {
@@ -2349,7 +2396,7 @@ impl<H: Host> Engine<H> {
         if argv.len() < 4 || argv.len() % 2 != 0 {
             return wrong_arity(b"hset");
         }
-        self.purge_if_expired(&argv[1]);
+        self.purge_expired_fields(&argv[1]);
 
         let expire_at_ms = self.db.get(&argv[1]).and_then(|entry| entry.expire_at_ms);
         match self.db.get_mut(&argv[1]) {
@@ -2359,7 +2406,10 @@ impl<H: Host> Engine<H> {
             }) => {
                 let mut added = 0;
                 for pair in argv[2..].chunks_exact(2) {
-                    if fields.insert(pair[0].clone(), pair[1].clone()).is_none() {
+                    if fields
+                        .insert(pair[0].clone(), HashField::new(pair[1].clone()))
+                        .is_none()
+                    {
                         added += 1;
                     }
                 }
@@ -2374,7 +2424,10 @@ impl<H: Host> Engine<H> {
                 let mut fields = HashMap::new();
                 let mut added = 0;
                 for pair in argv[2..].chunks_exact(2) {
-                    if fields.insert(pair[0].clone(), pair[1].clone()).is_none() {
+                    if fields
+                        .insert(pair[0].clone(), HashField::new(pair[1].clone()))
+                        .is_none()
+                    {
                         added += 1;
                     }
                 }
@@ -2395,9 +2448,10 @@ impl<H: Host> Engine<H> {
         if argv.len() != 3 {
             return wrong_arity(b"hget");
         }
+        self.purge_expired_fields(&argv[1]);
         match self.get_value(&argv[1]).map(|entry| &entry.value) {
             Some(StoredValue::Hash(fields)) => match fields.get(&argv[2]) {
-                Some(value) => bulk(value),
+                Some(field) => bulk(&field.value),
                 None => RespFrame::null_bulk(),
             },
             Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_) | StoredValue::Stream(_)) => {
@@ -2411,14 +2465,15 @@ impl<H: Host> Engine<H> {
         if argv.len() != 2 {
             return wrong_arity(b"hgetall");
         }
+        self.purge_expired_fields(&argv[1]);
         match self.get_value(&argv[1]).map(|entry| &entry.value) {
             Some(StoredValue::Hash(fields)) => {
                 let mut pairs: Vec<_> = fields.iter().collect();
                 pairs.sort_by(|(left, _), (right, _)| left.cmp(right));
                 let mut items = Vec::with_capacity(fields.len() * 2);
-                for (field, value) in pairs {
+                for (field, field_value) in pairs {
                     items.push(bulk(field));
-                    items.push(bulk(value));
+                    items.push(bulk(&field_value.value));
                 }
                 RespFrame::array(items)
             }
@@ -2433,7 +2488,7 @@ impl<H: Host> Engine<H> {
         if argv.len() < 3 {
             return wrong_arity(b"hdel");
         }
-        self.purge_if_expired(&argv[1]);
+        self.purge_expired_fields(&argv[1]);
         let mut remove_empty_hash = false;
         let mut mutated = false;
         let response = match self.db.get_mut(&argv[1]) {
@@ -2470,6 +2525,7 @@ impl<H: Host> Engine<H> {
         if argv.len() != 3 {
             return wrong_arity(b"hexists");
         }
+        self.purge_expired_fields(&argv[1]);
         match self.get_value(&argv[1]).map(|entry| &entry.value) {
             Some(StoredValue::Hash(fields)) => {
                 RespFrame::integer(if fields.contains_key(&argv[2]) { 1 } else { 0 })
@@ -2485,6 +2541,7 @@ impl<H: Host> Engine<H> {
         if argv.len() != 2 {
             return wrong_arity(b"hlen");
         }
+        self.purge_expired_fields(&argv[1]);
         match self.get_value(&argv[1]).map(|entry| &entry.value) {
             Some(StoredValue::Hash(fields)) => RespFrame::integer(fields.len() as i64),
             Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_) | StoredValue::Stream(_)) => {
@@ -2498,12 +2555,13 @@ impl<H: Host> Engine<H> {
         if argv.len() < 3 {
             return wrong_arity(b"hmget");
         }
+        self.purge_expired_fields(&argv[1]);
         match self.get_value(&argv[1]).map(|entry| &entry.value) {
             Some(StoredValue::Hash(fields)) => {
                 let mut items = Vec::with_capacity(argv.len() - 2);
                 for field in &argv[2..] {
                     let item = match fields.get(field) {
-                        Some(value) => bulk(value),
+                        Some(field_value) => bulk(&field_value.value),
                         None => RespFrame::null_bulk(),
                     };
                     items.push(item);
@@ -2524,6 +2582,7 @@ impl<H: Host> Engine<H> {
         if argv.len() != 2 {
             return wrong_arity(b"hkeys");
         }
+        self.purge_expired_fields(&argv[1]);
         match self.get_value(&argv[1]).map(|entry| &entry.value) {
             Some(StoredValue::Hash(fields)) => {
                 let mut keys: Vec<_> = fields.keys().collect();
@@ -2541,11 +2600,17 @@ impl<H: Host> Engine<H> {
         if argv.len() != 2 {
             return wrong_arity(b"hvals");
         }
+        self.purge_expired_fields(&argv[1]);
         match self.get_value(&argv[1]).map(|entry| &entry.value) {
             Some(StoredValue::Hash(fields)) => {
                 let mut pairs: Vec<_> = fields.iter().collect();
                 pairs.sort_by(|(left, _), (right, _)| left.cmp(right));
-                RespFrame::array(pairs.into_iter().map(|(_, value)| bulk(value)).collect())
+                RespFrame::array(
+                    pairs
+                        .into_iter()
+                        .map(|(_, field_value)| bulk(&field_value.value))
+                        .collect(),
+                )
             }
             Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_) | StoredValue::Stream(_)) => {
                 wrong_type()
@@ -2558,9 +2623,10 @@ impl<H: Host> Engine<H> {
         if argv.len() != 3 {
             return wrong_arity(b"hstrlen");
         }
+        self.purge_expired_fields(&argv[1]);
         match self.get_value(&argv[1]).map(|entry| &entry.value) {
             Some(StoredValue::Hash(fields)) => match fields.get(&argv[2]) {
-                Some(value) => RespFrame::integer(value.len() as i64),
+                Some(field) => RespFrame::integer(field.value.len() as i64),
                 None => RespFrame::integer(0),
             },
             Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_) | StoredValue::Stream(_)) => {
@@ -2574,7 +2640,7 @@ impl<H: Host> Engine<H> {
         if argv.len() != 4 {
             return wrong_arity(b"hsetnx");
         }
-        self.purge_if_expired(&argv[1]);
+        self.purge_expired_fields(&argv[1]);
         let expire_at_ms = self.db.get(&argv[1]).and_then(|entry| entry.expire_at_ms);
         match self.db.get_mut(&argv[1]) {
             Some(Entry {
@@ -2584,7 +2650,7 @@ impl<H: Host> Engine<H> {
                 if fields.contains_key(&argv[2]) {
                     return RespFrame::integer(0);
                 }
-                fields.insert(argv[2].clone(), argv[3].clone());
+                fields.insert(argv[2].clone(), HashField::new(argv[3].clone()));
                 self.note_write(&argv[1]);
                 RespFrame::integer(1)
             }
@@ -2594,7 +2660,7 @@ impl<H: Host> Engine<H> {
             }) => wrong_type(),
             None => {
                 let mut fields = HashMap::new();
-                fields.insert(argv[2].clone(), argv[3].clone());
+                fields.insert(argv[2].clone(), HashField::new(argv[3].clone()));
                 self.db.insert(
                     argv[1].clone(),
                     Entry {
@@ -2615,7 +2681,7 @@ impl<H: Host> Engine<H> {
         let Some(incr) = parse_i64(&argv[3]) else {
             return err(b"ERR value is not an integer or out of range");
         };
-        self.purge_if_expired(&argv[1]);
+        self.purge_expired_fields(&argv[1]);
         let expire_at_ms = self.db.get(&argv[1]).and_then(|entry| entry.expire_at_ms);
         let fields = match self.db.get_mut(&argv[1]) {
             Some(Entry {
@@ -2640,17 +2706,26 @@ impl<H: Host> Engine<H> {
                 }
             }
         };
-        let current = match fields.get(&argv[2]) {
-            Some(value) => match parse_i64(value) {
-                Some(n) => n,
+        // HINCRBY preserves an existing field TTL (it does not reset it),
+        // mirroring `hashTypeSet(..., HASH_SET_KEEP_EXPIRY)` for the increment
+        // path in the reference.
+        let (current, field_ttl) = match fields.get(&argv[2]) {
+            Some(field) => match parse_i64(&field.value) {
+                Some(n) => (n, field.expire_at_ms),
                 None => return err(b"ERR hash value is not an integer"),
             },
-            None => 0,
+            None => (0, None),
         };
         let Some(next) = current.checked_add(incr) else {
             return err(b"ERR increment or decrement would overflow");
         };
-        fields.insert(argv[2].clone(), next.to_string().into_bytes());
+        fields.insert(
+            argv[2].clone(),
+            HashField {
+                value: next.to_string().into_bytes(),
+                expire_at_ms: field_ttl,
+            },
+        );
         self.note_write(&argv[1]);
         RespFrame::integer(next)
     }
@@ -2673,7 +2748,7 @@ impl<H: Host> Engine<H> {
         if incr.is_nan() || incr.is_infinite() {
             return err(b"ERR value is NaN or Infinity");
         }
-        self.purge_if_expired(&argv[1]);
+        self.purge_expired_fields(&argv[1]);
         let expire_at_ms = self.db.get(&argv[1]).and_then(|entry| entry.expire_at_ms);
         let fields = match self.db.get_mut(&argv[1]) {
             Some(Entry {
@@ -2695,19 +2770,26 @@ impl<H: Host> Engine<H> {
                 }
             }
         };
-        let current = match fields.get(&argv[2]) {
-            Some(value) => match parse_stored_float(value) {
-                Some(v) => v,
+        // Like HINCRBY, HINCRBYFLOAT preserves an existing field TTL.
+        let (current, field_ttl) = match fields.get(&argv[2]) {
+            Some(field) => match parse_stored_float(&field.value) {
+                Some(v) => (v, field.expire_at_ms),
                 None => return err(b"ERR hash value is not a float"),
             },
-            None => 0.0,
+            None => (0.0, None),
         };
         let next = current + incr;
         if next.is_nan() || next.is_infinite() {
             return err(b"ERR increment would produce NaN or Infinity");
         }
         let formatted = format_human_long_double(next);
-        fields.insert(argv[2].clone(), formatted.clone());
+        fields.insert(
+            argv[2].clone(),
+            HashField {
+                value: formatted.clone(),
+                expire_at_ms: field_ttl,
+            },
+        );
         self.note_write(&argv[1]);
         bulk(formatted)
     }
@@ -2716,7 +2798,7 @@ impl<H: Host> Engine<H> {
         if argv.len() < 4 || argv.len() % 2 != 0 {
             return wrong_arity(b"hmset");
         }
-        self.purge_if_expired(&argv[1]);
+        self.purge_expired_fields(&argv[1]);
         let expire_at_ms = self.db.get(&argv[1]).and_then(|entry| entry.expire_at_ms);
         match self.db.get_mut(&argv[1]) {
             Some(Entry {
@@ -2724,7 +2806,7 @@ impl<H: Host> Engine<H> {
                 ..
             }) => {
                 for pair in argv[2..].chunks_exact(2) {
-                    fields.insert(pair[0].clone(), pair[1].clone());
+                    fields.insert(pair[0].clone(), HashField::new(pair[1].clone()));
                 }
             }
             Some(Entry {
@@ -2734,7 +2816,7 @@ impl<H: Host> Engine<H> {
             None => {
                 let mut fields = HashMap::new();
                 for pair in argv[2..].chunks_exact(2) {
-                    fields.insert(pair[0].clone(), pair[1].clone());
+                    fields.insert(pair[0].clone(), HashField::new(pair[1].clone()));
                 }
                 self.db.insert(
                     argv[1].clone(),
@@ -2747,6 +2829,591 @@ impl<H: Host> Engine<H> {
         }
         self.note_write(&argv[1]);
         simple(b"OK")
+    }
+
+    /// HEXPIRE / HPEXPIRE / HEXPIREAT / HPEXPIREAT
+    /// (`hexpireGenericCommand`, `t_hash.c`). Grammar:
+    /// `HEXPIRE key time [NX|XX|GT|LT] FIELDS numfields field [field...]`.
+    /// `unit` selects seconds vs milliseconds for the time argument; `absolute`
+    /// distinguishes the *AT variants (the time is already an absolute Unix
+    /// deadline rather than a relative TTL). Replies an array of per-field
+    /// status codes: `1` set, `0` condition (NX/XX/GT/LT) not met, `2` field
+    /// immediately expired and deleted (time in the past), `-2` no such field
+    /// (or the key/hash does not exist).
+    fn hexpire_command(
+        &mut self,
+        argv: &[Vec<u8>],
+        unit: ExpireUnit,
+        absolute: bool,
+    ) -> RespFrame {
+        let name: &[u8] = match (unit, absolute) {
+            (ExpireUnit::Seconds, false) => b"hexpire",
+            (ExpireUnit::Milliseconds, false) => b"hpexpire",
+            (ExpireUnit::Seconds, true) => b"hexpireat",
+            (ExpireUnit::Milliseconds, true) => b"hpexpireat",
+        };
+        if argv.len() < 6 {
+            return wrong_arity(name);
+        }
+
+        // Scan for the FIELDS keyword: any NX/XX/GT/LT flags lie between the
+        // time argument (argv[2]) and FIELDS, mirroring the C scan loop.
+        let mut fields_kw: Option<usize> = None;
+        for index in 3..argv.len() - 1 {
+            if ascii_eq(&argv[index], b"FIELDS") {
+                fields_kw = Some(index);
+                break;
+            }
+        }
+        let Some(fields_kw) = fields_kw else {
+            return err(b"ERR Mandatory keyword FIELDS is missing or not at the right position");
+        };
+        let condition = match parse_expire_condition(&argv[3..fields_kw]) {
+            Ok(condition) => condition,
+            Err(frame) => return frame,
+        };
+        if fields_kw + 1 >= argv.len() {
+            return err(
+                b"ERR numfields should be greater than 0 and match the provided number of fields",
+            );
+        }
+        let Some(num_fields) = parse_i64(&argv[fields_kw + 1]) else {
+            return err(b"ERR value is not an integer or out of range");
+        };
+        let provided = (argv.len() - (fields_kw + 2)) as i64;
+        if num_fields <= 0 || num_fields != provided {
+            return err(
+                b"ERR numfields should be greater than 0 and match the provided number of fields",
+            );
+        }
+        let field_args = &argv[fields_kw + 2..];
+
+        // Convert the time argument to an absolute millisecond deadline,
+        // mirroring `convertExpireArgumentToUnixTime`. A negative TTL is the
+        // "invalid expire time" error; the *AT variants take the value as-is.
+        let Some(mut when) = parse_i64(&argv[2]) else {
+            return err(b"ERR value is not an integer or out of range");
+        };
+        if when < 0 {
+            return invalid_expire_time(name);
+        }
+        if unit == ExpireUnit::Seconds {
+            if when > i64::MAX / 1000 {
+                return invalid_expire_time(name);
+            }
+            when *= 1000;
+        }
+        let basetime: i64 = if absolute {
+            0
+        } else {
+            self.host.now_millis() as i64
+        };
+        if when > i64::MAX - basetime {
+            return invalid_expire_time(name);
+        }
+        when += basetime;
+
+        self.purge_expired_fields(&argv[1]);
+        let now = self.host.now_millis() as i64;
+        let time_is_expired = when <= now;
+
+        let fields = match self.db.get_mut(&argv[1]) {
+            Some(Entry {
+                value: StoredValue::Hash(fields),
+                ..
+            }) => fields,
+            Some(_) => return wrong_type(),
+            None => {
+                // No key: -2 for every requested field.
+                let items = field_args.iter().map(|_| RespFrame::integer(-2)).collect();
+                return RespFrame::array(items);
+            }
+        };
+
+        let mut items = Vec::with_capacity(field_args.len());
+        let mut changed = false;
+        for field in field_args {
+            let result = match fields.get_mut(field) {
+                None => -2,
+                Some(stored) => {
+                    let current = stored.expire_at_ms;
+                    let blocked = condition.is_some_and(|condition| match condition {
+                        ExpireCondition::Nx => current.is_some(),
+                        ExpireCondition::Xx => current.is_none(),
+                        ExpireCondition::Gt => match current {
+                            None => true,
+                            Some(value) => (when as u64) <= value,
+                        },
+                        ExpireCondition::Lt => match current {
+                            None => false,
+                            Some(value) => (when as u64) >= value,
+                        },
+                    });
+                    if blocked {
+                        0
+                    } else if time_is_expired {
+                        fields.remove(field);
+                        changed = true;
+                        2
+                    } else {
+                        stored.expire_at_ms = Some(when as u64);
+                        changed = true;
+                        1
+                    }
+                }
+            };
+            items.push(RespFrame::integer(result));
+        }
+
+        if fields.is_empty() {
+            self.db.remove(&argv[1]);
+        }
+        if changed {
+            self.note_write(&argv[1]);
+        }
+        RespFrame::array(items)
+    }
+
+    /// HTTL / HPTTL / HEXPIRETIME / HPEXPIRETIME
+    /// (`httlGenericCommand`, `t_hash.c`). Grammar:
+    /// `HTTL key FIELDS numfields field [field...]` — note these variants do
+    /// NOT take condition flags, so `argv[2]` is the literal FIELDS token,
+    /// `argv[3]` is numfields, and the C code does not actually require the
+    /// token to read "FIELDS". `milliseconds` selects ms vs second output;
+    /// `absolute` returns the absolute deadline instead of the remaining TTL.
+    /// Per field: `-2` no such field/key, `-1` field has no TTL, else the
+    /// TTL/timestamp. A numfields mismatch is a plain syntax error here.
+    fn httl_command(
+        &mut self,
+        argv: &[Vec<u8>],
+        milliseconds: bool,
+        absolute: bool,
+    ) -> RespFrame {
+        let name: &[u8] = match (milliseconds, absolute) {
+            (false, false) => b"httl",
+            (true, false) => b"hpttl",
+            (false, true) => b"hexpiretime",
+            (true, true) => b"hpexpiretime",
+        };
+        if argv.len() < 5 {
+            return wrong_arity(name);
+        }
+        let Some(num_fields) = parse_i64(&argv[3]) else {
+            return err(b"ERR value is not an integer or out of range");
+        };
+        let provided = (argv.len() - 4) as i64;
+        if num_fields <= 0 || num_fields != provided {
+            return err(b"ERR syntax error");
+        }
+        let field_args = &argv[4..];
+
+        self.purge_expired_fields(&argv[1]);
+        let now = self.host.now_millis();
+        let fields = match self.get_value(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::Hash(fields)) => Some(fields),
+            Some(_) => return wrong_type(),
+            None => None,
+        };
+
+        let mut items = Vec::with_capacity(field_args.len());
+        for field in field_args {
+            let result = match fields.and_then(|fields| fields.get(field)) {
+                None => -2,
+                Some(stored) => match stored.expire_at_ms {
+                    None => -1,
+                    Some(deadline) => {
+                        let value = if absolute {
+                            deadline as i64
+                        } else {
+                            let mut remaining = deadline as i64 - now as i64;
+                            if remaining < 0 {
+                                remaining = 0;
+                            }
+                            remaining
+                        };
+                        if milliseconds {
+                            value
+                        } else {
+                            (value + 500) / 1000
+                        }
+                    }
+                },
+            };
+            items.push(RespFrame::integer(result));
+        }
+        RespFrame::array(items)
+    }
+
+    /// HPERSIST (`hpersistCommand`, `t_hash.c`). Grammar:
+    /// `HPERSIST key FIELDS numfields field [field...]`. Like HTTL it does not
+    /// take condition flags and uses argv[3] as numfields. Per field: `1` TTL
+    /// removed, `-1` field exists but has no TTL, `-2` no such field/key. A
+    /// numfields mismatch is the "numfields should be..." error.
+    fn hpersist_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 5 {
+            return wrong_arity(b"hpersist");
+        }
+        let Some(num_fields) = parse_i64(&argv[3]) else {
+            return err(b"ERR value is not an integer or out of range");
+        };
+        let provided = (argv.len() - 4) as i64;
+        if num_fields <= 0 || num_fields != provided {
+            return err(
+                b"ERR numfields should be greater than 0 and match the provided number of fields",
+            );
+        }
+        let field_args = &argv[4..];
+
+        self.purge_expired_fields(&argv[1]);
+        let fields = match self.db.get_mut(&argv[1]) {
+            Some(Entry {
+                value: StoredValue::Hash(fields),
+                ..
+            }) => fields,
+            Some(_) => return wrong_type(),
+            None => {
+                let items = field_args.iter().map(|_| RespFrame::integer(-2)).collect();
+                return RespFrame::array(items);
+            }
+        };
+
+        let mut items = Vec::with_capacity(field_args.len());
+        let mut changed = false;
+        for field in field_args {
+            let result = match fields.get_mut(field) {
+                None => -2,
+                Some(stored) => {
+                    if stored.expire_at_ms.is_some() {
+                        stored.expire_at_ms = None;
+                        changed = true;
+                        1
+                    } else {
+                        -1
+                    }
+                }
+            };
+            items.push(RespFrame::integer(result));
+        }
+        if changed {
+            self.note_write(&argv[1]);
+        }
+        RespFrame::array(items)
+    }
+
+    /// HGETEX (`hgetexCommand`, `t_hash.c`). Grammar:
+    /// `HGETEX key [EX|PX|EXAT|PXAT seconds|PERSIST] FIELDS numfields field...`.
+    /// Replies the field values (like HMGET), and optionally adjusts each
+    /// returned field's TTL: sets a new expiry (EX/PX/EXAT/PXAT — deleting the
+    /// field if already in the past), or clears it (PERSIST).
+    fn hgetex_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 5 {
+            return wrong_arity(b"hgetex");
+        }
+        let Some(fields_kw) = find_fields_keyword(argv) else {
+            return err(b"ERR syntax error");
+        };
+        let opts = match parse_hash_set_options(&argv[2..fields_kw], HashExtMode::HGet) {
+            Ok(opts) => opts,
+            Err(frame) => return frame,
+        };
+        if fields_kw + 1 >= argv.len() {
+            return err(
+                b"ERR numfields should be greater than 0 and match the provided number of fields",
+            );
+        }
+        let Some(num_fields) = parse_i64(&argv[fields_kw + 1]) else {
+            return err(b"ERR value is not an integer or out of range");
+        };
+        let provided = (argv.len() - (fields_kw + 2)) as i64;
+        if num_fields <= 0 || num_fields != provided {
+            return err(
+                b"ERR numfields should be greater than 0 and match the provided number of fields",
+            );
+        }
+        let field_args: Vec<Vec<u8>> = argv[fields_kw + 2..].to_vec();
+
+        // Resolve the requested expiry change (if any) to an absolute deadline.
+        let mut set_deadline: Option<u64> = None;
+        let mut set_expired = false;
+        let mut persist = false;
+        if opts.persist {
+            persist = true;
+        } else if let Some((unit, value, absolute)) = opts.expire {
+            match self.resolve_field_deadline(unit, value, absolute) {
+                Ok(deadline) => {
+                    if deadline <= self.host.now_millis() {
+                        set_expired = true;
+                    } else {
+                        set_deadline = Some(deadline);
+                    }
+                }
+                Err(_) => return invalid_expire_time(b"hgetex"),
+            }
+        }
+
+        self.purge_expired_fields(&argv[1]);
+        let hash_exists = matches!(
+            self.db.get(&argv[1]).map(|entry| &entry.value),
+            Some(StoredValue::Hash(_))
+        );
+        if !hash_exists {
+            match self.db.get(&argv[1]) {
+                Some(_) => return wrong_type(),
+                None => {
+                    let items = field_args.iter().map(|_| RespFrame::null_bulk()).collect();
+                    return RespFrame::array(items);
+                }
+            }
+        }
+
+        let mut items = Vec::with_capacity(field_args.len());
+        let mut changed = false;
+        for field in &field_args {
+            let Some(Entry {
+                value: StoredValue::Hash(fields),
+                ..
+            }) = self.db.get_mut(&argv[1])
+            else {
+                items.push(RespFrame::null_bulk());
+                continue;
+            };
+            match fields.get_mut(field) {
+                None => items.push(RespFrame::null_bulk()),
+                Some(stored) => {
+                    items.push(bulk(&stored.value));
+                    if set_expired {
+                        fields.remove(field);
+                        changed = true;
+                        if fields.is_empty() {
+                            self.db.remove(&argv[1]);
+                        }
+                    } else if let Some(deadline) = set_deadline {
+                        stored.expire_at_ms = Some(deadline);
+                        changed = true;
+                    } else if persist && stored.expire_at_ms.is_some() {
+                        stored.expire_at_ms = None;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if changed {
+            self.note_write(&argv[1]);
+        }
+        RespFrame::array(items)
+    }
+
+    /// HGETDEL (`hgetdelCommand`, `t_hash.c`). Grammar:
+    /// `HGETDEL key FIELDS numfields field [field...]`. Replies the field
+    /// values (like HMGET) and deletes those fields; if the hash becomes
+    /// empty the key is removed.
+    fn hgetdel_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 5 {
+            return wrong_arity(b"hgetdel");
+        }
+        let Some(num_fields) = parse_i64(&argv[3]) else {
+            return err(b"ERR value is not an integer or out of range");
+        };
+        let provided = (argv.len() - 4) as i64;
+        if num_fields <= 0 || num_fields != provided {
+            return err(
+                b"ERR numfields should be greater than 0 and match the provided number of fields",
+            );
+        }
+        let field_args = &argv[4..];
+
+        self.purge_expired_fields(&argv[1]);
+        let fields = match self.db.get_mut(&argv[1]) {
+            Some(Entry {
+                value: StoredValue::Hash(fields),
+                ..
+            }) => fields,
+            Some(_) => return wrong_type(),
+            None => {
+                let items = field_args.iter().map(|_| RespFrame::null_bulk()).collect();
+                return RespFrame::array(items);
+            }
+        };
+
+        let mut items = Vec::with_capacity(field_args.len());
+        let mut changed = false;
+        for field in field_args {
+            match fields.remove(field) {
+                Some(stored) => {
+                    items.push(bulk(&stored.value));
+                    changed = true;
+                }
+                None => items.push(RespFrame::null_bulk()),
+            }
+        }
+        if fields.is_empty() {
+            self.db.remove(&argv[1]);
+        }
+        if changed {
+            self.note_write(&argv[1]);
+        }
+        RespFrame::array(items)
+    }
+
+    /// HSETEX (`hsetexCommand`, `t_hash.c`). Grammar:
+    /// `HSETEX key [FNX|FXX] [EX|PX|EXAT|PXAT seconds|KEEPTTL] FIELDS numfields
+    /// field value [field value...]`. Sets fields, applying the chosen TTL to
+    /// each (or keeping the existing TTL with KEEPTTL; a plain HSETEX with no
+    /// expiry option clears the field TTL). Replies `1` when the write was
+    /// applied, `0` when an FNX/FXX condition blocked it.
+    fn hsetex_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 6 {
+            return wrong_arity(b"hsetex");
+        }
+        let Some(fields_kw) = find_fields_keyword(argv) else {
+            return err(b"ERR syntax error");
+        };
+        let opts = match parse_hash_set_options(&argv[2..fields_kw], HashExtMode::HSet) {
+            Ok(opts) => opts,
+            Err(frame) => return frame,
+        };
+        if fields_kw + 1 >= argv.len() {
+            return err(
+                b"ERR numfields should be greater than 0 and match the provided number of fields",
+            );
+        }
+        let Some(num_fields) = parse_i64(&argv[fields_kw + 1]) else {
+            return err(b"ERR value is not an integer or out of range");
+        };
+        let pair_args = &argv[fields_kw + 2..];
+        if num_fields <= 0
+            || num_fields > i64::MAX / 2
+            || num_fields * 2 != pair_args.len() as i64
+        {
+            return err(
+                b"ERR numfields should be greater than 0 and match the provided number of fields",
+            );
+        }
+
+        // Resolve the chosen expiry option to an absolute deadline up front.
+        let mut set_deadline: Option<u64> = None;
+        let mut set_expired = false;
+        if let Some((unit, value, absolute)) = opts.expire {
+            match self.resolve_field_deadline(unit, value, absolute) {
+                Ok(deadline) => {
+                    if deadline <= self.host.now_millis() {
+                        set_expired = true;
+                    } else {
+                        set_deadline = Some(deadline);
+                    }
+                }
+                Err(_) => return invalid_expire_time(b"hsetex"),
+            }
+        }
+
+        self.purge_expired_fields(&argv[1]);
+        let key_exists = self.db.contains_key(&argv[1]);
+        if let Some(entry) = self.db.get(&argv[1]) {
+            if !matches!(entry.value, StoredValue::Hash(_)) {
+                return wrong_type();
+            }
+        }
+
+        // Key-level NX/XX conditions (HSETEX uses FNX/FXX at field level, but
+        // the parser also accepts NX/XX as key-level conditions per COMMAND_HSET).
+        if (opts.key_nx && key_exists) || (opts.key_xx && !key_exists) {
+            return RespFrame::integer(0);
+        }
+
+        // Field-level FNX/FXX conditions: every pair must satisfy them or the
+        // whole command is a no-op replying 0.
+        if opts.fnx || opts.fxx {
+            let existing: Option<&HashMap<Vec<u8>, HashField>> =
+                match self.db.get(&argv[1]).map(|entry| &entry.value) {
+                    Some(StoredValue::Hash(fields)) => Some(fields),
+                    _ => None,
+                };
+            for pair in pair_args.chunks_exact(2) {
+                let present = existing.is_some_and(|fields| fields.contains_key(&pair[0]));
+                if (opts.fnx && present) || (opts.fxx && !present) {
+                    return RespFrame::integer(0);
+                }
+            }
+        }
+
+        // Ensure the hash exists, then apply every pair.
+        if !self.db.contains_key(&argv[1]) {
+            self.db.insert(
+                argv[1].clone(),
+                Entry {
+                    value: StoredValue::Hash(HashMap::new()),
+                    expire_at_ms: None,
+                },
+            );
+        }
+        let Some(Entry {
+            value: StoredValue::Hash(fields),
+            ..
+        }) = self.db.get_mut(&argv[1])
+        else {
+            unreachable!("hash ensured present above");
+        };
+
+        for pair in pair_args.chunks_exact(2) {
+            if set_expired {
+                fields.remove(&pair[0]);
+            } else if opts.keepttl {
+                // Keep any existing field TTL; new fields get no TTL.
+                let existing_ttl = fields.get(&pair[0]).and_then(|stored| stored.expire_at_ms);
+                fields.insert(
+                    pair[0].clone(),
+                    HashField {
+                        value: pair[1].clone(),
+                        expire_at_ms: existing_ttl,
+                    },
+                );
+            } else {
+                fields.insert(
+                    pair[0].clone(),
+                    HashField {
+                        value: pair[1].clone(),
+                        expire_at_ms: set_deadline,
+                    },
+                );
+            }
+        }
+        if fields.is_empty() {
+            self.db.remove(&argv[1]);
+        }
+        self.note_write(&argv[1]);
+        RespFrame::integer(1)
+    }
+
+    /// Convert a relative/absolute hash-field expiry argument into an absolute
+    /// host-millisecond deadline, mirroring `convertExpireArgumentToUnixTime`.
+    /// Returns `Err(())` for a negative value or an overflow (the caller maps
+    /// that to the "invalid expire time" error).
+    fn resolve_field_deadline(
+        &self,
+        unit: ExpireUnit,
+        value: i64,
+        absolute: bool,
+    ) -> Result<u64, ()> {
+        if value < 0 {
+            return Err(());
+        }
+        let mut when = value;
+        if unit == ExpireUnit::Seconds {
+            if when > i64::MAX / 1000 {
+                return Err(());
+            }
+            when *= 1000;
+        }
+        let basetime: i64 = if absolute {
+            0
+        } else {
+            self.host.now_millis() as i64
+        };
+        if when > i64::MAX - basetime {
+            return Err(());
+        }
+        when += basetime;
+        u64::try_from(when).map_err(|_| ())
     }
 
     /// ZADD with the NX | XX | CH flag subset. Mirrors the reference
@@ -7194,7 +7861,7 @@ impl<H: Host> Engine<H> {
     }
 
     fn get_value(&mut self, key: &[u8]) -> Option<&Entry> {
-        self.purge_if_expired(key);
+        self.purge_expired_fields(key);
         self.db.get(key)
     }
 
@@ -7205,6 +7872,37 @@ impl<H: Host> Engine<H> {
             .and_then(|entry| entry.expire_at_ms)
             .is_some_and(|deadline| deadline <= self.host.now_millis());
         if expired {
+            self.db.remove(key);
+        }
+    }
+
+    /// Lazy per-field expiry for hashes, mirroring how the reference server
+    /// treats expired hash fields as already-deleted on access (active expiry
+    /// is the same effect). First purges a whole-key TTL via `purge_if_expired`;
+    /// then, if `key` holds a hash, drops every field whose `expire_at_ms` has
+    /// passed relative to the host clock. If that empties the hash, the key is
+    /// removed entirely (an empty hash is a deleted key in Valkey). An expired
+    /// field is therefore invisible to every subsequent read or write within
+    /// the same command. This is passive expiry: like `purge_if_expired`, it
+    /// does not bump the mutation epoch or mark the key dirty — absolute
+    /// per-field deadlines make a stale persisted copy harmless, and a real
+    /// mutation in the same command path will call `note_write` itself.
+    fn purge_expired_fields(&mut self, key: &[u8]) {
+        self.purge_if_expired(key);
+        let now = self.host.now_millis();
+        let emptied = match self.db.get_mut(key) {
+            Some(Entry {
+                value: StoredValue::Hash(fields),
+                ..
+            }) => {
+                fields.retain(|_, field| {
+                    !field.expire_at_ms.is_some_and(|deadline| deadline <= now)
+                });
+                fields.is_empty()
+            }
+            _ => false,
+        };
+        if emptied {
             self.db.remove(key);
         }
     }
@@ -7519,11 +8217,19 @@ fn encode_entry(key: &[u8], entry: &Entry) -> JsonMap<String, JsonValue> {
                 JsonValue::Array(
                     field_items
                         .into_iter()
-                        .map(|(field, value)| {
-                            JsonValue::Array(vec![
+                        .map(|(field, field_value)| {
+                            // Two-element `[field, value]` for a field with no
+                            // TTL (round-trips with old snapshots); a third
+                            // element carrying the absolute deadline is added
+                            // only when the field has a per-field expiry.
+                            let mut entry = vec![
                                 JsonValue::String(hex_encode(field)),
-                                JsonValue::String(hex_encode(value)),
-                            ])
+                                JsonValue::String(hex_encode(&field_value.value)),
+                            ];
+                            if let Some(expire_at_ms) = field_value.expire_at_ms {
+                                entry.push(json!(expire_at_ms));
+                            }
+                            JsonValue::Array(entry)
                         })
                         .collect(),
                 ),
@@ -7754,7 +8460,8 @@ fn decode_entry(object: &JsonMap<String, JsonValue>) -> Result<(Vec<u8>, Entry),
                 let pair = pair
                     .as_array()
                     .ok_or(SnapshotError::InvalidField("fields"))?;
-                if pair.len() != 2 {
+                // `[field, value]` (legacy / no-TTL) or `[field, value, ttl]`.
+                if pair.len() != 2 && pair.len() != 3 {
                     return Err(SnapshotError::InvalidField("fields"));
                 }
                 let field = hex_decode(
@@ -7767,7 +8474,15 @@ fn decode_entry(object: &JsonMap<String, JsonValue>) -> Result<(Vec<u8>, Entry),
                         .as_str()
                         .ok_or(SnapshotError::InvalidField("fields"))?,
                 )?;
-                decoded_fields.insert(field, value);
+                let expire_at_ms = match pair.get(2) {
+                    Some(value) => Some(
+                        value
+                            .as_u64()
+                            .ok_or(SnapshotError::InvalidField("fields"))?,
+                    ),
+                    None => None,
+                };
+                decoded_fields.insert(field, HashField { value, expire_at_ms });
             }
             StoredValue::Hash(decoded_fields)
         }
@@ -8542,16 +9257,29 @@ fn command_arity(command: &[u8]) -> Option<i64> {
         b"GETSET" => 3,
         b"HDEL" => -3,
         b"HEXISTS" => 3,
+        b"HEXPIRE" => -6,
+        b"HEXPIREAT" => -6,
+        b"HEXPIRETIME" => -5,
         b"HGET" => 3,
         b"HGETALL" => 2,
+        b"HGETDEL" => -5,
+        b"HGETEX" => -5,
         b"HINCRBY" => 4,
+        b"HINCRBYFLOAT" => 4,
         b"HKEYS" => 2,
         b"HLEN" => 2,
         b"HMGET" => -3,
         b"HMSET" => -4,
+        b"HPERSIST" => -5,
+        b"HPEXPIRE" => -6,
+        b"HPEXPIREAT" => -6,
+        b"HPEXPIRETIME" => -5,
+        b"HPTTL" => -5,
         b"HSET" => -4,
+        b"HSETEX" => -6,
         b"HSETNX" => 4,
         b"HSTRLEN" => 3,
+        b"HTTL" => -5,
         b"HVALS" => 2,
         b"INCR" => 2,
         b"INCRBY" => 3,
@@ -8671,6 +9399,134 @@ fn invalid_expire_time(command: &[u8]) -> RespFrame {
     msg.extend_from_slice(command);
     msg.extend_from_slice(b"' command");
     err(&msg)
+}
+
+/// Which extended command grammar `parse_hash_set_options` is parsing.
+/// `HSet` (HSETEX) accepts NX/XX/FNX/FXX/KEEPTTL plus EX/PX/EXAT/PXAT; `HGet`
+/// (HGETEX) accepts PERSIST plus EX/PX/EXAT/PXAT. Mirrors `COMMAND_HSET` /
+/// `COMMAND_HGET` in `parseExtendedCommandArgumentsOrReply` (`server.c`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HashExtMode {
+    HSet,
+    HGet,
+}
+
+/// Parsed extended options for HSETEX / HGETEX, mirroring the flag set produced
+/// by `parseExtendedCommandArgumentsOrReply`. `expire` carries the chosen
+/// EX/PX/EXAT/PXAT unit, raw value, and whether it is an absolute timestamp.
+#[derive(Debug, Default)]
+struct HashSetOptions {
+    key_nx: bool,
+    key_xx: bool,
+    fnx: bool,
+    fxx: bool,
+    keepttl: bool,
+    persist: bool,
+    expire: Option<(ExpireUnit, i64, bool)>,
+}
+
+/// Locate the mandatory `FIELDS` keyword in HGETEX/HSETEX, scanning the option
+/// region. Mirrors the C scan loop: the keyword cannot be the last argument
+/// (it must be followed by numfields), so the scan stops at `argc - 1`.
+fn find_fields_keyword(argv: &[Vec<u8>]) -> Option<usize> {
+    (2..argv.len().saturating_sub(1)).find(|&index| ascii_eq(&argv[index], b"FIELDS"))
+}
+
+/// Parse the EX/PX/EXAT/PXAT/KEEPTTL/PERSIST/NX/XX/FNX/FXX option region of
+/// HSETEX/HGETEX (the args between the key and the FIELDS keyword), mirroring
+/// `parseExtendedCommandArgumentsOrReply` for `COMMAND_HSET`/`COMMAND_HGET`.
+/// Every conflict (two expiry sources, EX without a value, NX with XX, a flag
+/// not valid for the mode, an unknown token) is the single `ERR syntax error`,
+/// matching the reference's `shared.syntaxerr`.
+fn parse_hash_set_options(
+    opts: &[Vec<u8>],
+    mode: HashExtMode,
+) -> Result<HashSetOptions, RespFrame> {
+    let mut parsed = HashSetOptions::default();
+    let syntax = || Err(err(b"ERR syntax error"));
+    let mut index = 0;
+    while index < opts.len() {
+        let opt = &opts[index];
+        let has_next = index + 1 < opts.len();
+        let expiry_chosen = parsed.expire.is_some();
+        if ascii_eq(opt, b"NX")
+            && mode == HashExtMode::HSet
+            && !parsed.key_xx
+        {
+            parsed.key_nx = true;
+        } else if ascii_eq(opt, b"XX") && mode == HashExtMode::HSet && !parsed.key_nx {
+            parsed.key_xx = true;
+        } else if ascii_eq(opt, b"FNX") && mode == HashExtMode::HSet && !parsed.fxx {
+            parsed.fnx = true;
+        } else if ascii_eq(opt, b"FXX") && mode == HashExtMode::HSet && !parsed.fnx {
+            parsed.fxx = true;
+        } else if ascii_eq(opt, b"KEEPTTL")
+            && mode == HashExtMode::HSet
+            && !parsed.persist
+            && !expiry_chosen
+        {
+            parsed.keepttl = true;
+        } else if ascii_eq(opt, b"PERSIST")
+            && mode == HashExtMode::HGet
+            && !parsed.keepttl
+            && !expiry_chosen
+        {
+            parsed.persist = true;
+        } else if ascii_eq(opt, b"EX")
+            && !parsed.keepttl
+            && !parsed.persist
+            && !expiry_chosen
+            && has_next
+        {
+            parsed.expire = parse_field_expire_value(&opts[index + 1], ExpireUnit::Seconds, false)?;
+            index += 1;
+        } else if ascii_eq(opt, b"PX")
+            && !parsed.keepttl
+            && !parsed.persist
+            && !expiry_chosen
+            && has_next
+        {
+            parsed.expire =
+                parse_field_expire_value(&opts[index + 1], ExpireUnit::Milliseconds, false)?;
+            index += 1;
+        } else if ascii_eq(opt, b"EXAT")
+            && !parsed.keepttl
+            && !parsed.persist
+            && !expiry_chosen
+            && has_next
+        {
+            parsed.expire = parse_field_expire_value(&opts[index + 1], ExpireUnit::Seconds, true)?;
+            index += 1;
+        } else if ascii_eq(opt, b"PXAT")
+            && !parsed.keepttl
+            && !parsed.persist
+            && !expiry_chosen
+            && has_next
+        {
+            parsed.expire =
+                parse_field_expire_value(&opts[index + 1], ExpireUnit::Milliseconds, true)?;
+            index += 1;
+        } else {
+            return syntax();
+        }
+        index += 1;
+    }
+    Ok(parsed)
+}
+
+/// Validate the integer accompanying an EX/PX/EXAT/PXAT flag. The C parser
+/// stores the raw object and only converts it later, but a non-integer here is
+/// ultimately a "value is not an integer or out of range" error; we parse
+/// eagerly and surface that exact message.
+fn parse_field_expire_value(
+    bytes: &[u8],
+    unit: ExpireUnit,
+    absolute: bool,
+) -> Result<Option<(ExpireUnit, i64, bool)>, RespFrame> {
+    match parse_i64(bytes) {
+        Some(value) => Ok(Some((unit, value, absolute))),
+        None => Err(err(b"ERR value is not an integer or out of range")),
+    }
 }
 
 /// `proto-max-bulk-len` default (512 MiB): the configured ceiling on a string
@@ -10327,6 +11183,42 @@ mod tests {
             (&[seed_h], &[b"HGETALL", b"h"]),
             (&[seed_h], &[b"HDEL", b"h", b"f"]),
             (&[seed_h], &[b"HDEL", b"h", b"missing"]),
+            (&[seed_h], &[b"HEXPIRE", b"h", b"100", b"FIELDS", b"1", b"f"]),
+            (&[seed_h], &[b"HPEXPIRE", b"h", b"100000", b"FIELDS", b"1", b"f"]),
+            (
+                &[seed_h],
+                &[b"HEXPIREAT", b"h", b"99999999999", b"FIELDS", b"1", b"f"],
+            ),
+            (&[seed_h], &[b"HEXPIRE", b"h", b"0", b"FIELDS", b"1", b"f"]),
+            (&[seed_h], &[b"HEXPIRE", b"h", b"100", b"FIELDS", b"1", b"nope"]),
+            (&[seed_h], &[b"HTTL", b"h", b"FIELDS", b"1", b"f"]),
+            (&[seed_h], &[b"HPTTL", b"h", b"FIELDS", b"1", b"f"]),
+            (&[seed_h], &[b"HEXPIRETIME", b"h", b"FIELDS", b"1", b"f"]),
+            (
+                &[seed_h, &[b"HEXPIRE", b"h", b"100", b"FIELDS", b"1", b"f"]],
+                &[b"HPERSIST", b"h", b"FIELDS", b"1", b"f"],
+            ),
+            (&[seed_h], &[b"HPERSIST", b"h", b"FIELDS", b"1", b"f"]),
+            (&[seed_h], &[b"HGETEX", b"h", b"FIELDS", b"1", b"f"]),
+            (&[seed_h], &[b"HGETEX", b"h", b"EX", b"100", b"FIELDS", b"1", b"f"]),
+            (
+                &[seed_h, &[b"HEXPIRE", b"h", b"100", b"FIELDS", b"1", b"f"]],
+                &[b"HGETEX", b"h", b"PERSIST", b"FIELDS", b"1", b"f"],
+            ),
+            (&[seed_h], &[b"HGETEX", b"h", b"EX", b"0", b"FIELDS", b"1", b"f"]),
+            (&[seed_h], &[b"HGETDEL", b"h", b"FIELDS", b"1", b"f"]),
+            (&[seed_h], &[b"HGETDEL", b"h", b"FIELDS", b"1", b"missing"]),
+            (&[], &[b"HSETEX", b"hx", b"EX", b"100", b"FIELDS", b"1", b"a", b"1"]),
+            (&[seed_h], &[b"HSETEX", b"h", b"FIELDS", b"1", b"f", b"z"]),
+            (
+                &[seed_h, &[b"HEXPIRE", b"h", b"100", b"FIELDS", b"1", b"f"]],
+                &[b"HSETEX", b"h", b"KEEPTTL", b"FIELDS", b"1", b"f", b"z"],
+            ),
+            (&[seed_h], &[b"HSETEX", b"h", b"EX", b"0", b"FIELDS", b"1", b"f", b"z"]),
+            (&[seed_h], &[b"HSETEX", b"h", b"FNX", b"FIELDS", b"1", b"f", b"z"]),
+            (&[seed_h], &[b"HSETEX", b"h", b"FXX", b"FIELDS", b"1", b"miss", b"z"]),
+            (&[seed_h], &[b"HINCRBY", b"h", b"n", b"3"]),
+            (&[seed_h], &[b"HINCRBYFLOAT", b"h", b"n", b"1.5"]),
             (&[], &[b"ZADD", b"z", b"1", b"a"]),
             (&[seed_z], &[b"ZADD", b"z", b"1", b"a", b"NX"]),
             (&[seed_z], &[b"ZADD", b"z", b"2", b"a"]),
@@ -10728,6 +11620,19 @@ mod tests {
             engine.execute(&argv(&[b"SET", b"volatile", b"soon", b"PX", b"500"])),
             RespFrame::simple("OK")
         );
+        // A hash with a per-field TTL: `capacity` carries a deadline, `refill_ms`
+        // does not. Both must round-trip through the snapshot codec.
+        assert_eq!(
+            engine.execute(&argv(&[
+                b"HPEXPIRE",
+                b"policy",
+                b"500",
+                b"FIELDS",
+                b"1",
+                b"capacity"
+            ])),
+            RespFrame::array(vec![RespFrame::integer(1)])
+        );
 
         let snapshot = engine.export_snapshot();
         let mut restored = Engine::new(NoopHost::new(1_200));
@@ -10745,11 +11650,26 @@ mod tests {
             restored.execute(&argv(&[b"PTTL", b"volatile"])),
             RespFrame::integer(300)
         );
+        // The per-field deadline survived: `capacity` has ~300ms left at now=1200
+        // (deadline 1500), `refill_ms` has no TTL.
+        assert_eq!(
+            restored.execute(&argv(&[b"HPTTL", b"policy", b"FIELDS", b"2", b"capacity", b"refill_ms"])),
+            RespFrame::array(vec![RespFrame::integer(300), RespFrame::integer(-1)])
+        );
 
         restored.host_mut().set_now_millis(1_500);
         assert_eq!(
             restored.execute(&argv(&[b"GET", b"volatile"])),
             RespFrame::null_bulk()
+        );
+        // The field expired at its absolute deadline (1500) after the clock moved.
+        assert_eq!(
+            restored.execute(&argv(&[b"HGET", b"policy", b"capacity"])),
+            RespFrame::null_bulk()
+        );
+        assert_eq!(
+            resp2(&restored.execute(&argv(&[b"HGET", b"policy", b"refill_ms"]))),
+            b"$4\r\n1000\r\n"
         );
     }
 
