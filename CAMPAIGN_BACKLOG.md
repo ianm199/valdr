@@ -133,15 +133,24 @@ Prep: profile hotpaths, stage fixes; gate any claim on a clean interactive bench
 
 ## Phase 4 — Large WIP to return to after Valdr (per `docs/roadmap.md` + lane branches)
 
-- **Replication out of alpha** — prove PSYNC partial-resync instead of always
-  full re-sync. Unmerged lanes: `lane/replication-burn-down`, `lane/repl-observability`
-  (155 commits ahead of `main`, last touched early June). Docs:
-  `docs/REPL_OBSERVABILITY_OVERNIGHT_PLAN.md`, `docs/REPLICATION_INTEGRATION_DASHBOARD.md`.
-  First step: reconcile those lanes vs current `main` (EdgeStash consolidation moved main).
+**Assessed 2026-06-23 (NOT a fast-loop / overnight-safe pivot — different subsystem, slow Tcl gate):**
+- **`lane/repl-observability` is ALREADY FULLY IN MAIN** (0 commits not in main) — no-op, ignore it.
+- **`lane/replication-burn-down` = 41 unmerged commits** (merge-base `31c4433`, 2026-06-03)
+  touching 48 files, of which **32 ALSO changed on `main`** since (dispatch.rs, db.rs,
+  replication.rs, connection.rs, rdb/{load,save,mod}.rs, runtime_owner.rs, client.rs,
+  metrics.rs, multi.rs, info.rs, persist.rs, tcl-survey.py, …). A real
+  conflict-heavy reconciliation in the CORE single-node server, verifiable only by
+  the slow/flaky Tcl suite — do this DELIBERATELY in a fresh session with the
+  single-node oracle, file-by-file; do NOT auto-merge (high risk to `main`).
+- **Replication out of alpha** — the goal those commits serve: PSYNC partial-resync
+  instead of always full re-sync. Docs: `docs/REPL_OBSERVABILITY_OVERNIGHT_PLAN.md`,
+  `docs/REPLICATION_INTEGRATION_DASHBOARD.md`.
 - **HA / Cluster** — `docs/HA_CLUSTER_REPLICATION_ROADMAP.md` is the execution queue.
 - **mlua → lua-rs migration** — `docs/MLUA_EXIT_PLAN.md`. Removes the last embedded
-  C dependency in the data path and the 3 `unsafe` blocks in `eval.rs`; gated on
-  Lua 5.1 compat (number model, setfenv/getfenv) in the sibling `lua-rs-port`.
+  C dependency in the data path and the `unsafe` blocks in `eval.rs`; gated on
+  Lua 5.1 compat in the sibling `lua-rs-port`. **BLOCKED**: omnilua still has the
+  GC use-after-sweep bug (omnilua#189) that the valdr pcall harness works around —
+  don't start until that's fixed upstream (see `omnilua-gc-use-after-sweep` memory).
 - **`#![forbid(unsafe_code)]`** on the zero-unsafe data crates once mlua is gone.
 - **Bigger bets** — I/O threads (Valkey-style), then sharded execution; compact
   encodings (intset/listpack/skiplist) — also applicable to the edge engine.
