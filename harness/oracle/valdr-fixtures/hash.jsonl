@@ -64,3 +64,21 @@
 {"id": "hmset-len", "cmd": ["HLEN", "hm1"]}
 {"id": "hmset-wrongtype", "cmd": ["HMSET", "s1", "f", "v"]}
 {"id": "hmset-bad-arity", "cmd": ["HMSET", "hm1", "onlyfield"]}
+{"id": "hibf-new-field", "cmd": ["HINCRBYFLOAT", "hibf:h", "f", "3.5"]}
+{"id": "hibf-decimal", "cmd": ["HINCRBYFLOAT", "hibf:h", "f", "0.5"]}
+{"id": "hibf-existing-int-set", "cmd": ["HSET", "hibf:h", "g", "5"]}
+{"id": "hibf-int-plus-float", "cmd": ["HINCRBYFLOAT", "hibf:h", "g", "5.0e3"]}
+{"id": "hibf-half-set", "cmd": ["HSET", "hibf:h", "p", "10.5"]}
+{"id": "hibf-half-incr", "cmd": ["HINCRBYFLOAT", "hibf:h", "p", "0.1"]}
+{"id": "hibf-exp", "cmd": ["HINCRBYFLOAT", "hibf:h", "e", "5.0e3"]}
+{"id": "hibf-neg", "cmd": ["HINCRBYFLOAT", "hibf:h", "n", "-5.5"]}
+{"id": "hibf-three-set", "cmd": ["HSET", "hibf:h", "t", "3.0"]}
+{"id": "hibf-three-incr", "cmd": ["HINCRBYFLOAT", "hibf:h", "t", "1.0"]}
+{"id": "hibf-bad-value-set", "cmd": ["HSET", "hibf:h", "bad", "not-a-number"]}
+{"id": "hibf-bad-value", "cmd": ["HINCRBYFLOAT", "hibf:h", "bad", "1.0"]}
+{"id": "hibf-bad-incr", "cmd": ["HINCRBYFLOAT", "hibf:h", "f", "xyz"]}
+{"id": "hibf-inf-guard", "cmd": ["HINCRBYFLOAT", "hibf:h", "f", "inf"]}
+{"id": "hibf-nan-guard", "cmd": ["HINCRBYFLOAT", "hibf:h", "f", "nan"]}
+{"id": "hibf-wrongtype-set", "cmd": ["SET", "hibf:str", "v"]}
+{"id": "hibf-wrongtype", "cmd": ["HINCRBYFLOAT", "hibf:str", "f", "1.0"]}
+{"id": "hibf-arity", "cmd": ["HINCRBYFLOAT", "hibf:h", "f"]}

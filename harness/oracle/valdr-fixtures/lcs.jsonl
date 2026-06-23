@@ -1,0 +1,15 @@
+{"id": "lcs-setup-k1", "cmd": ["SET", "lcs:key1", "ohmytext"]}
+{"id": "lcs-setup-k2", "cmd": ["SET", "lcs:key2", "mynewtext"]}
+{"id": "lcs-plain", "cmd": ["LCS", "lcs:key1", "lcs:key2"]}
+{"id": "lcs-len", "cmd": ["LCS", "lcs:key1", "lcs:key2", "LEN"]}
+{"id": "lcs-idx", "cmd": ["LCS", "lcs:key1", "lcs:key2", "IDX"]}
+{"id": "lcs-idx-minmatchlen", "cmd": ["LCS", "lcs:key1", "lcs:key2", "IDX", "MINMATCHLEN", "4"]}
+{"id": "lcs-idx-withmatchlen", "cmd": ["LCS", "lcs:key1", "lcs:key2", "IDX", "WITHMATCHLEN"]}
+{"id": "lcs-missing-empty", "cmd": ["LCS", "lcs:key1", "lcs:nokey"]}
+{"id": "lcs-both-missing", "cmd": ["LCS", "lcs:ghost1", "lcs:ghost2"]}
+{"id": "lcs-missing-len", "cmd": ["LCS", "lcs:nokey", "lcs:key2", "LEN"]}
+{"id": "lcs-wrongtype-set", "cmd": ["RPUSH", "lcs:list", "x"]}
+{"id": "lcs-wrongtype", "cmd": ["LCS", "lcs:key1", "lcs:list"]}
+{"id": "lcs-len-and-idx", "cmd": ["LCS", "lcs:key1", "lcs:key2", "LEN", "IDX"]}
+{"id": "lcs-bad-opt", "cmd": ["LCS", "lcs:key1", "lcs:key2", "FOO"]}
+{"id": "lcs-arity", "cmd": ["LCS", "lcs:key1"]}

@@ -1,0 +1,22 @@
+{"id": "keys-setup-one", "cmd": ["SET", "one", "v"]}
+{"id": "keys-setup-two", "cmd": ["SET", "two", "v"]}
+{"id": "keys-setup-three", "cmd": ["SET", "three", "v"]}
+{"id": "keys-setup-hello", "cmd": ["SET", "hello", "v"]}
+{"id": "keys-setup-hallo", "cmd": ["SET", "hallo", "v"]}
+{"id": "keys-setup-hxllo", "cmd": ["SET", "hxllo", "v"]}
+{"id": "keys-setup-apple", "cmd": ["SET", "apple", "v"]}
+{"id": "keys-setup-banana", "cmd": ["SET", "banana", "v"]}
+{"id": "keys-setup-cherry", "cmd": ["SET", "cherry", "v"]}
+{"id": "keys-setup-date", "cmd": ["SET", "date", "v"]}
+{"id": "keys-setup-prefix1", "cmd": ["SET", "prefix:1", "v"]}
+{"id": "keys-setup-prefix2", "cmd": ["SET", "prefix:2", "v"]}
+{"id": "keys-star", "cmd": ["KEYS", "*"], "mode": "set_equal"}
+{"id": "keys-prefix", "cmd": ["KEYS", "prefix:*"], "mode": "set_equal"}
+{"id": "keys-qmark", "cmd": ["KEYS", "h?llo"], "mode": "set_equal"}
+{"id": "keys-class-range", "cmd": ["KEYS", "[a-c]*"], "mode": "set_equal"}
+{"id": "keys-class-neg", "cmd": ["KEYS", "[^a-c]*"], "mode": "set_equal"}
+{"id": "keys-class-set", "cmd": ["KEYS", "h[ae]llo"], "mode": "set_equal"}
+{"id": "keys-no-match", "cmd": ["KEYS", "nomatchprefix*"], "mode": "set_equal"}
+{"id": "keys-arity", "cmd": ["KEYS"]}
+{"id": "keys-expire-set", "cmd": ["SET", "willexpire", "v", "PX", "50"]}
+{"id": "keys-expire-skip", "cmd": ["KEYS", "willexpire"], "mode": "set_equal", "sleep_ms": 130}

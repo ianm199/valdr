@@ -127,3 +127,27 @@
 {"id": "sr-getex-conflict", "cmd": ["GETEX", "sr:gx2", "EX", "10", "PX", "20"]}
 {"id": "sr-getex-bad-opt", "cmd": ["GETEX", "sr:gx2", "FOO"]}
 {"id": "sr-getex-wrongtype", "cmd": ["GETEX", "sr:wt"]}
+{"id": "ibf-new-key", "cmd": ["INCRBYFLOAT", "ibf:new", "3.5"]}
+{"id": "ibf-decimal", "cmd": ["INCRBYFLOAT", "ibf:new", "0.5"]}
+{"id": "ibf-existing-int", "cmd": ["SET", "ibf:i", "5"]}
+{"id": "ibf-int-plus-float", "cmd": ["INCRBYFLOAT", "ibf:i", "5.0e3"]}
+{"id": "ibf-half-set", "cmd": ["SET", "ibf:h", "10.5"]}
+{"id": "ibf-half-incr", "cmd": ["INCRBYFLOAT", "ibf:h", "0.1"]}
+{"id": "ibf-exp-set", "cmd": ["SET", "ibf:e", "5.0e3"]}
+{"id": "ibf-exp-incr", "cmd": ["INCRBYFLOAT", "ibf:e", "200"]}
+{"id": "ibf-three-set", "cmd": ["SET", "ibf:t", "3.0"]}
+{"id": "ibf-three-incr", "cmd": ["INCRBYFLOAT", "ibf:t", "1.0"]}
+{"id": "ibf-thousand", "cmd": ["INCRBYFLOAT", "ibf:k", "3.0e3"]}
+{"id": "ibf-neg", "cmd": ["INCRBYFLOAT", "ibf:n", "-5.5"]}
+{"id": "ibf-neg-again", "cmd": ["INCRBYFLOAT", "ibf:n", "-1.25"]}
+{"id": "ibf-small", "cmd": ["INCRBYFLOAT", "ibf:s", "0.0001"]}
+{"id": "ibf-bad-value-set", "cmd": ["SET", "ibf:bv", "not-a-number"]}
+{"id": "ibf-bad-value", "cmd": ["INCRBYFLOAT", "ibf:bv", "1.0"]}
+{"id": "ibf-bad-incr", "cmd": ["INCRBYFLOAT", "ibf:new", "abc"]}
+{"id": "ibf-inf-guard", "cmd": ["INCRBYFLOAT", "ibf:new", "inf"]}
+{"id": "ibf-wrongtype-set", "cmd": ["RPUSH", "ibf:wt", "x"]}
+{"id": "ibf-wrongtype", "cmd": ["INCRBYFLOAT", "ibf:wt", "1.0"]}
+{"id": "ibf-arity", "cmd": ["INCRBYFLOAT", "ibf:new"]}
+{"id": "ibf-ttl-set", "cmd": ["SET", "ibf:tt", "3.0", "EX", "100"]}
+{"id": "ibf-ttl-incr", "cmd": ["INCRBYFLOAT", "ibf:tt", "1.0"]}
+{"id": "ibf-ttl-preserved", "cmd": ["TTL", "ibf:tt"], "mode": "ttl_band", "band": 2}

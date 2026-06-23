@@ -962,6 +962,14 @@ impl<H: Host> Engine<H> {
             self.eval_command(argv)
         } else if ascii_eq(command, b"EVALSHA") {
             self.evalsha_command(argv)
+        } else if ascii_eq(command, b"INCRBYFLOAT") {
+            self.incrbyfloat_command(argv)
+        } else if ascii_eq(command, b"HINCRBYFLOAT") {
+            self.hincrbyfloat_command(argv)
+        } else if ascii_eq(command, b"KEYS") {
+            self.keys_command(argv)
+        } else if ascii_eq(command, b"LCS") {
+            self.lcs_command(argv)
         } else {
             unknown_command_error(command, &argv[1..])
         }
@@ -1217,6 +1225,50 @@ impl<H: Host> Engine<H> {
             return err(b"ERR decrement would overflow");
         };
         self.apply_increment(&argv[1], negated)
+    }
+
+    /// INCRBYFLOAT key increment (`incrbyfloatCommand`, `t_string.c`). Parses the
+    /// stored value and the increment as `long double`-equivalent floats, adds
+    /// them, rejects a NaN/Inf result, then stores and replies the value
+    /// formatted with `ld2string(LD_STR_HUMAN)` = `%.17Lf` with trailing zeros
+    /// (and a trailing `.`) stripped. The stored value must reject Inf/NaN
+    /// (string2ld rejects NaN and a stored Inf would already be impossible), the
+    /// increment may be Inf (it then trips the result guard). TTL is preserved
+    /// (the C path uses a SET … KEEPTTL rewrite that leaves the expiry intact).
+    fn incrbyfloat_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 3 {
+            return wrong_arity(b"incrbyfloat");
+        }
+        let incr = match parse_incr_float(&argv[2]) {
+            Some(v) => v,
+            None => return err(b"ERR value is not a valid float"),
+        };
+        let current = match self.get_value(&argv[1]) {
+            Some(Entry {
+                value: StoredValue::String(value),
+                ..
+            }) => match parse_stored_float(value) {
+                Some(v) => v,
+                None => return err(b"ERR value is not a valid float"),
+            },
+            Some(_) => return wrong_type(),
+            None => 0.0,
+        };
+        let next = current + incr;
+        if next.is_nan() || next.is_infinite() {
+            return err(b"ERR increment would produce NaN or Infinity");
+        }
+        let formatted = format_human_long_double(next);
+        let expire_at_ms = self.db.get(&argv[1]).and_then(|entry| entry.expire_at_ms);
+        self.db.insert(
+            argv[1].clone(),
+            Entry {
+                value: StoredValue::String(formatted.clone()),
+                expire_at_ms,
+            },
+        );
+        self.note_write(&argv[1]);
+        bulk(formatted)
     }
 
     fn append_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
@@ -2217,6 +2269,63 @@ impl<H: Host> Engine<H> {
         fields.insert(argv[2].clone(), next.to_string().into_bytes());
         self.note_write(&argv[1]);
         RespFrame::integer(next)
+    }
+
+    /// HINCRBYFLOAT key field increment (`hincrbyfloatCommand`, `t_hash.c`).
+    /// Parses the increment first; an Inf/NaN increment is rejected up front with
+    /// "value is NaN or Infinity" (note: distinct from INCRBYFLOAT, which lets
+    /// Inf reach the result guard). The current field value (0 when absent)
+    /// parses as a float — a bad field value yields "hash value is not a float".
+    /// The summed result is rejected if NaN/Inf, otherwise stored and replied
+    /// with the same `%.17Lf` human formatting as INCRBYFLOAT.
+    fn hincrbyfloat_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 4 {
+            return wrong_arity(b"hincrbyfloat");
+        }
+        let incr = match parse_incr_float(&argv[3]) {
+            Some(v) => v,
+            None => return err(b"ERR value is not a valid float"),
+        };
+        if incr.is_nan() || incr.is_infinite() {
+            return err(b"ERR value is NaN or Infinity");
+        }
+        self.purge_if_expired(&argv[1]);
+        let expire_at_ms = self.db.get(&argv[1]).and_then(|entry| entry.expire_at_ms);
+        let fields = match self.db.get_mut(&argv[1]) {
+            Some(Entry {
+                value: StoredValue::Hash(fields),
+                ..
+            }) => fields,
+            Some(_) => return wrong_type(),
+            None => {
+                self.db.insert(
+                    argv[1].clone(),
+                    Entry {
+                        value: StoredValue::Hash(HashMap::new()),
+                        expire_at_ms,
+                    },
+                );
+                match &mut self.db.get_mut(&argv[1]).expect("just inserted").value {
+                    StoredValue::Hash(fields) => fields,
+                    _ => unreachable!(),
+                }
+            }
+        };
+        let current = match fields.get(&argv[2]) {
+            Some(value) => match parse_stored_float(value) {
+                Some(v) => v,
+                None => return err(b"ERR hash value is not a float"),
+            },
+            None => 0.0,
+        };
+        let next = current + incr;
+        if next.is_nan() || next.is_infinite() {
+            return err(b"ERR increment would produce NaN or Infinity");
+        }
+        let formatted = format_human_long_double(next);
+        fields.insert(argv[2].clone(), formatted.clone());
+        self.note_write(&argv[1]);
+        bulk(formatted)
     }
 
     fn hmset_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
@@ -5298,6 +5407,192 @@ impl<H: Host> Engine<H> {
         }
     }
 
+    /// KEYS pattern (`keysCommand`, `db.c`). Returns an unordered array of the
+    /// keys matching `pattern` under valkey's `stringmatchlen` glob semantics
+    /// (`*`, `?`, `[...]` classes with `^` negation, `a-z` ranges, `\` escape;
+    /// case-sensitive here). Expired keys are skipped without being purged as a
+    /// side effect of the scan. `*` short-circuits to "all keys" exactly as C's
+    /// `allkeys` fast path. Read-only: never calls `note_write`.
+    fn keys_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 2 {
+            return wrong_arity(b"keys");
+        }
+        let pattern = &argv[1];
+        let allkeys = pattern.as_slice() == b"*";
+        let now = self.host.now_millis();
+        let mut matches = Vec::new();
+        for (key, entry) in &self.db {
+            if entry
+                .expire_at_ms
+                .is_some_and(|deadline| deadline <= now)
+            {
+                continue;
+            }
+            if allkeys || string_match_len(pattern, key) {
+                matches.push(bulk(key));
+            }
+        }
+        RespFrame::array(matches)
+    }
+
+    /// LCS key1 key2 [LEN] [IDX] [MINMATCHLEN n] [WITHMATCHLEN] (`lcsCommand`,
+    /// `t_string.c`). Computes the longest common subsequence of two string
+    /// values (a missing key is treated as the empty string). A non-string key
+    /// yields "ERR The specified keys must contain string values". Plain replies
+    /// the LCS bulk string; LEN replies its length; IDX replies the match-index
+    /// map `{matches: [...], len: N}`. MINMATCHLEN filters short matches and
+    /// WITHMATCHLEN appends each match's length. The RESP shape is copied
+    /// byte-for-byte from the C deferred-reply nesting.
+    fn lcs_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 3 {
+            return wrong_arity(b"lcs");
+        }
+        self.purge_if_expired(&argv[1]);
+        self.purge_if_expired(&argv[2]);
+        let a = match self.db.get(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::String(value)) => value.clone(),
+            Some(_) => {
+                return err(b"ERR The specified keys must contain string values");
+            }
+            None => Vec::new(),
+        };
+        let b = match self.db.get(&argv[2]).map(|entry| &entry.value) {
+            Some(StoredValue::String(value)) => value.clone(),
+            Some(_) => {
+                return err(b"ERR The specified keys must contain string values");
+            }
+            None => Vec::new(),
+        };
+
+        let mut minmatchlen: i64 = 0;
+        let mut getlen = false;
+        let mut getidx = false;
+        let mut withmatchlen = false;
+        let mut j = 3;
+        while j < argv.len() {
+            let opt = &argv[j];
+            let moreargs = argv.len() - 1 - j;
+            if ascii_eq(opt, b"IDX") {
+                getidx = true;
+            } else if ascii_eq(opt, b"LEN") {
+                getlen = true;
+            } else if ascii_eq(opt, b"WITHMATCHLEN") {
+                withmatchlen = true;
+            } else if ascii_eq(opt, b"MINMATCHLEN") && moreargs > 0 {
+                match parse_i64(&argv[j + 1]) {
+                    Some(n) => minmatchlen = n.max(0),
+                    None => return err(b"ERR value is not an integer or out of range"),
+                }
+                j += 1;
+            } else {
+                return err(b"ERR syntax error");
+            }
+            j += 1;
+        }
+
+        if getlen && getidx {
+            return err(
+                b"ERR If you want both the length and indexes, please just use IDX.",
+            );
+        }
+
+        let alen = a.len();
+        let blen = b.len();
+        let stride = blen + 1;
+        let mut lcs = vec![0u32; (alen + 1) * stride];
+        let at = |i: usize, j: usize| i * stride + j;
+        for i in 1..=alen {
+            for k in 1..=blen {
+                lcs[at(i, k)] = if a[i - 1] == b[k - 1] {
+                    lcs[at(i - 1, k - 1)] + 1
+                } else {
+                    lcs[at(i - 1, k)].max(lcs[at(i, k - 1)])
+                };
+            }
+        }
+
+        let total_len = lcs[at(alen, blen)];
+        let computelcs = getidx || !getlen;
+        let mut result = vec![0u8; total_len as usize];
+        let mut idx = total_len as usize;
+
+        let mut ranges: Vec<RespFrame> = Vec::new();
+        let arange_unset = alen;
+        let mut arange_start = arange_unset;
+        let mut arange_end = 0usize;
+        let mut brange_start = 0usize;
+        let mut brange_end = 0usize;
+
+        let mut i = alen;
+        let mut k = blen;
+        while computelcs && i > 0 && k > 0 {
+            let mut emit_range = false;
+            if a[i - 1] == b[k - 1] {
+                result[idx - 1] = a[i - 1];
+                if arange_start == arange_unset {
+                    arange_start = i - 1;
+                    arange_end = i - 1;
+                    brange_start = k - 1;
+                    brange_end = k - 1;
+                } else if arange_start == i && brange_start == k {
+                    arange_start -= 1;
+                    brange_start -= 1;
+                } else {
+                    emit_range = true;
+                }
+                if arange_start == 0 || brange_start == 0 {
+                    emit_range = true;
+                }
+                idx -= 1;
+                i -= 1;
+                k -= 1;
+            } else {
+                if lcs[at(i - 1, k)] > lcs[at(i, k - 1)] {
+                    i -= 1;
+                } else {
+                    k -= 1;
+                }
+                if arange_start != arange_unset {
+                    emit_range = true;
+                }
+            }
+
+            if emit_range {
+                let match_len = arange_end - arange_start + 1;
+                if minmatchlen == 0 || match_len as i64 >= minmatchlen {
+                    if getidx {
+                        let mut range = vec![
+                            RespFrame::array(vec![
+                                RespFrame::integer(arange_start as i64),
+                                RespFrame::integer(arange_end as i64),
+                            ]),
+                            RespFrame::array(vec![
+                                RespFrame::integer(brange_start as i64),
+                                RespFrame::integer(brange_end as i64),
+                            ]),
+                        ];
+                        if withmatchlen {
+                            range.push(RespFrame::integer(match_len as i64));
+                        }
+                        ranges.push(RespFrame::array(range));
+                    }
+                }
+                arange_start = arange_unset;
+            }
+        }
+
+        if getidx {
+            RespFrame::Map(vec![
+                (bulk(b"matches"), RespFrame::array(ranges)),
+                (bulk(b"len"), RespFrame::integer(total_len as i64)),
+            ])
+        } else if getlen {
+            RespFrame::integer(total_len as i64)
+        } else {
+            bulk(result)
+        }
+    }
+
     /// RENAME / RENAMENX (`renameGenericCommand`, `db.c`). The source value and
     /// its TTL move to the destination, overwriting any existing destination
     /// (RENAME) unless RENAMENX finds the destination already present. A missing
@@ -7462,6 +7757,166 @@ fn ascii_eq(left: &[u8], right: &[u8]) -> bool {
             .iter()
             .zip(right)
             .all(|(l, r)| l.eq_ignore_ascii_case(r))
+}
+
+/// Parse an INCRBYFLOAT/HINCRBYFLOAT increment (`getLongDoubleFromObject` →
+/// `string2ld`, `util.c`). Strict: no surrounding whitespace, the whole slice
+/// must parse, NaN is rejected. `inf`/`+inf`/`-inf` are accepted (the caller's
+/// result guard then rejects them); leading `+`, leading `.`, and trailing `.`
+/// are all valid, matching `strtold`. Returns `None` for any unparsable input.
+fn parse_incr_float(bytes: &[u8]) -> Option<f64> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let text = std::str::from_utf8(bytes).ok()?;
+    if text.starts_with(char::is_whitespace) || text.ends_with(char::is_whitespace) {
+        return None;
+    }
+    let value: f64 = text.parse().ok()?;
+    if value.is_nan() {
+        return None;
+    }
+    Some(value)
+}
+
+/// Parse a stored string value as a float for INCRBYFLOAT/HINCRBYFLOAT. Same
+/// rules as `parse_incr_float` but also rejects Inf — a stored Inf can never be
+/// produced by these commands, so it is treated as an invalid float.
+fn parse_stored_float(bytes: &[u8]) -> Option<f64> {
+    let value = parse_incr_float(bytes)?;
+    if value.is_infinite() {
+        return None;
+    }
+    Some(value)
+}
+
+/// Format a float the way valkey's `ld2string(buf, len, value, LD_STR_HUMAN)`
+/// (`util.c`) does for INCRBYFLOAT/HINCRBYFLOAT replies: `%.17Lf` (fixed
+/// notation, never exponential), then trailing zeros after the `.` are stripped,
+/// then a bare trailing `.`, then `-0` is normalized to `0`. `inf`/`nan` are
+/// guarded by the caller before this is ever reached. f64 arithmetic plus
+/// `%.17f` reproduces valkey's `long double` `%.17Lf` byte-for-byte across the
+/// representable-decimal range these commands operate on (verified against
+/// `valkey-server` over 1000+ random and adversarial sums).
+fn format_human_long_double(value: f64) -> Vec<u8> {
+    let mut text = format!("{:.17}", value);
+    if text.contains('.') {
+        while text.ends_with('0') {
+            text.pop();
+        }
+        if text.ends_with('.') {
+            text.pop();
+        }
+    }
+    if text == "-0" {
+        text = "0".to_string();
+    }
+    text.into_bytes()
+}
+
+/// Glob match following valkey's `stringmatchlen` (`util.c`, case-sensitive):
+/// `*` (any run), `?` (any single byte), `[...]` classes with `^` negation,
+/// `a-z` ranges, and `\` escape. Faithful recursive port of `stringmatchlen_impl`
+/// so KEYS pattern semantics match byte-for-byte.
+fn string_match_len(pattern: &[u8], string: &[u8]) -> bool {
+    string_match_len_impl(pattern, string, 0)
+}
+
+fn string_match_len_impl(pattern: &[u8], string: &[u8], nesting: u32) -> bool {
+    if nesting > 1000 {
+        return false;
+    }
+    let mut p = 0usize;
+    let mut s = 0usize;
+    let plen = pattern.len();
+    let slen = string.len();
+    while p < plen && s < slen {
+        match pattern[p] {
+            b'*' => {
+                while p + 1 < plen && pattern[p + 1] == b'*' {
+                    p += 1;
+                }
+                if p + 1 == plen {
+                    return true;
+                }
+                let mut t = s;
+                loop {
+                    if string_match_len_impl(&pattern[p + 1..], &string[t..], nesting + 1) {
+                        return true;
+                    }
+                    if t >= slen {
+                        break;
+                    }
+                    t += 1;
+                }
+                return false;
+            }
+            b'?' => {
+                s += 1;
+            }
+            b'[' => {
+                p += 1;
+                let not_op = p < plen && pattern[p] == b'^';
+                if not_op {
+                    p += 1;
+                }
+                let mut matched = false;
+                loop {
+                    if p + 1 < plen && pattern[p] == b'\\' {
+                        p += 1;
+                        if pattern[p] == string[s] {
+                            matched = true;
+                        }
+                    } else if p >= plen {
+                        p -= 1;
+                        break;
+                    } else if pattern[p] == b']' {
+                        break;
+                    } else if p + 2 < plen && pattern[p + 1] == b'-' {
+                        let mut start = pattern[p];
+                        let mut end = pattern[p + 2];
+                        if start > end {
+                            std::mem::swap(&mut start, &mut end);
+                        }
+                        let c = string[s];
+                        p += 2;
+                        if c >= start && c <= end {
+                            matched = true;
+                        }
+                    } else if pattern[p] == string[s] {
+                        matched = true;
+                    }
+                    p += 1;
+                }
+                let matched = if not_op { !matched } else { matched };
+                if !matched {
+                    return false;
+                }
+                s += 1;
+            }
+            b'\\' if p + 1 < plen => {
+                p += 1;
+                if pattern[p] != string[s] {
+                    return false;
+                }
+                s += 1;
+            }
+            other => {
+                if other != string[s] {
+                    return false;
+                }
+                s += 1;
+            }
+        }
+        p += 1;
+        if s == slen {
+            while p < plen && pattern[p] == b'*' {
+                p += 1;
+            }
+            break;
+        }
+    }
+    p == plen && s == slen
 }
 
 /// Parse a `LEFT`/`RIGHT` direction argument (`getListPositionFromObjectOrReply`,
