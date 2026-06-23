@@ -7,7 +7,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 use lua_rs_runtime::{
     Lua, LuaError, LuaString, LuaVersion, Table as LuaTable, Value as LuaValue, Variadic,
 };
@@ -81,7 +81,17 @@ enum StoredValue {
     Hash(IndexMap<Vec<u8>, HashField>),
     ZSet(HashMap<Vec<u8>, f64>),
     List(VecDeque<Vec<u8>>),
-    Set(HashSet<Vec<u8>>),
+    /// A set value. `IndexSet` preserves **member insertion order** (matching
+    /// valkey's listpack ordering for SMEMBERS/SSCAN on a non-integer set)
+    /// while keeping O(1) membership. New members append at the end; re-adding
+    /// an existing member is a no-op that keeps its position
+    /// (`IndexSet::insert` semantics); removals use `shift_remove` to preserve
+    /// the order of the remaining members, mirroring `setTypeRemove` on a
+    /// listpack. An all-integer set's stored order in valkey is a *sorted*
+    /// intset rather than insertion order; the DUMP path replays valkey's
+    /// `setTypeAddAux` encoding state machine over this insertion order to
+    /// reproduce the exact stored bytes (see `rdb_set_to_dump`).
+    Set(IndexSet<Vec<u8>>),
     Stream(StreamValue),
 }
 
@@ -5657,7 +5667,7 @@ impl<H: Host> Engine<H> {
             }
             Some(_) => return wrong_type(),
             None => {
-                let mut members = HashSet::new();
+                let mut members = IndexSet::new();
                 let mut added = 0i64;
                 for member in &argv[2..] {
                     if members.insert(member.clone()) {
@@ -5695,7 +5705,7 @@ impl<H: Host> Engine<H> {
             }) => {
                 let mut removed = 0i64;
                 for member in &argv[2..] {
-                    if members.remove(member) {
+                    if members.shift_remove(member) {
                         removed += 1;
                     }
                 }
@@ -5770,15 +5780,16 @@ impl<H: Host> Engine<H> {
 
     /// SMEMBERS key (`smembersCommand` -> `sinterCommand` with one key,
     /// `t_set.c`): the set's members as an array, or an empty array for a
-    /// missing key. Order is not part of the contract (fixtures use
-    /// `set_equal`).
+    /// missing key. Members are returned in valkey's stored order
+    /// (`set_member_order`): an all-integer intset is iterated **sorted
+    /// ascending**, a listpack/hashtable set in **insertion order**.
     fn smembers_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
         if argv.len() != 2 {
             return wrong_arity(b"smembers");
         }
         match self.get_value(&argv[1]).map(|entry| &entry.value) {
             Some(StoredValue::Set(members)) => {
-                RespFrame::array(members.iter().map(bulk).collect())
+                RespFrame::array(set_member_order(members).iter().map(bulk).collect())
             }
             Some(_) => wrong_type(),
             None => RespFrame::array(Vec::new()),
@@ -5827,7 +5838,7 @@ impl<H: Host> Engine<H> {
             Some(Entry {
                 value: StoredValue::Set(members),
                 ..
-            }) => members.remove(member),
+            }) => members.shift_remove(member),
             _ => false,
         };
         if !removed {
@@ -5848,7 +5859,7 @@ impl<H: Host> Engine<H> {
                 members.insert(member.clone());
             }
             _ => {
-                let mut members = HashSet::new();
+                let mut members = IndexSet::new();
                 members.insert(member.clone());
                 self.db.insert(
                     argv[2].clone(),
@@ -5976,8 +5987,8 @@ impl<H: Host> Engine<H> {
         &mut self,
         keys: &[Vec<u8>],
         op: SetOp,
-    ) -> Result<HashSet<Vec<u8>>, RespFrame> {
-        let mut sets: Vec<Option<HashSet<Vec<u8>>>> = Vec::with_capacity(keys.len());
+    ) -> Result<IndexSet<Vec<u8>>, RespFrame> {
+        let mut sets: Vec<Option<IndexSet<Vec<u8>>>> = Vec::with_capacity(keys.len());
         for key in keys {
             match self.get_value(key).map(|entry| &entry.value) {
                 Some(StoredValue::Set(members)) => sets.push(Some(members.clone())),
@@ -5988,8 +5999,11 @@ impl<H: Host> Engine<H> {
         let result = match op {
             SetOp::Inter => {
                 if sets.iter().any(|set| set.is_none()) {
-                    HashSet::new()
+                    IndexSet::new()
                 } else {
+                    // Intersection keeps the first set's iteration order, dropping
+                    // members absent from any later set (`sinterGenericCommand`
+                    // walks the first set and tests the rest).
                     let mut iter = sets.into_iter().map(|set| set.unwrap());
                     let mut acc = iter.next().unwrap_or_default();
                     for other in iter {
@@ -6002,18 +6016,23 @@ impl<H: Host> Engine<H> {
                 }
             }
             SetOp::Union => {
-                let mut acc = HashSet::new();
+                // Union appends each source's members in source order, skipping
+                // any already present (`IndexSet::extend` keeps first-seen
+                // position), matching `sunionDiffGenericCommand`'s sequential add.
+                let mut acc = IndexSet::new();
                 for set in sets.into_iter().flatten() {
                     acc.extend(set);
                 }
                 acc
             }
             SetOp::Diff => {
+                // Difference keeps the first set's order minus members present in
+                // any later set.
                 let mut iter = sets.into_iter();
                 let mut acc = iter.next().flatten().unwrap_or_default();
                 for other in iter.flatten() {
                     for member in &other {
-                        acc.remove(member);
+                        acc.shift_remove(member);
                     }
                     if acc.is_empty() {
                         break;
@@ -6030,7 +6049,7 @@ impl<H: Host> Engine<H> {
     /// or reply the members as an array.
     fn finish_set_op(
         &mut self,
-        result: HashSet<Vec<u8>>,
+        result: IndexSet<Vec<u8>>,
         dstkey: Option<&[u8]>,
         cardinality_only: bool,
         limit: Option<usize>,
@@ -9675,14 +9694,15 @@ fn encode_entry(key: &[u8], entry: &Entry) -> JsonMap<String, JsonValue> {
             );
         }
         StoredValue::Set(members) => {
-            let mut member_items: Vec<_> = members.iter().collect();
-            member_items.sort();
+            // Serialize members in insertion order (the `IndexSet` order),
+            // matching valkey's stored listpack order so a DUMP and a snapshot
+            // round-trip both preserve it.
             object.insert("type".to_owned(), JsonValue::String("set".to_owned()));
             object.insert(
                 "members".to_owned(),
                 JsonValue::Array(
-                    member_items
-                        .into_iter()
+                    members
+                        .iter()
                         .map(|member| JsonValue::String(hex_encode(member)))
                         .collect(),
                 ),
@@ -9937,7 +9957,7 @@ fn decode_entry(object: &JsonMap<String, JsonValue>) -> Result<(Vec<u8>, Entry),
                 .get("members")
                 .and_then(JsonValue::as_array)
                 .ok_or(SnapshotError::MissingField("members"))?;
-            let mut decoded_members = HashSet::with_capacity(members.len());
+            let mut decoded_members = IndexSet::with_capacity(members.len());
             for member in members {
                 let member =
                     hex_decode(member.as_str().ok_or(SnapshotError::InvalidField("members"))?)?;
@@ -12196,16 +12216,20 @@ const RDB_ENC_LZF: u8 = 3;
 
 /// RDB object-type bytes (`rdb.h` `enum RdbType`). The engine emits and
 /// accepts the compact small-collection encodings only; the larger
-/// hashtable/skiplist encodings (and non-integer SET, which loses insertion
-/// order through the engine's HashSet) stay deferred. A plain (no-field-TTL)
-/// hash now preserves insertion order (`IndexMap`), so it DUMPs to the compact
+/// hashtable/skiplist encodings stay deferred. A plain (no-field-TTL) hash
+/// preserves insertion order (`IndexMap`), so it DUMPs to the compact
 /// `RDB_TYPE_HASH_LISTPACK`; a hash carrying any per-field TTL is `RDB_TYPE_HASH_2`
-/// (hashtable+expiry, type byte 22) in the reference and stays deferred.
+/// (hashtable+expiry, type byte 22) in the reference and stays deferred. A SET
+/// DUMPs to `RDB_TYPE_SET_INTSET` (all-integer, within intset limits) or to
+/// `RDB_TYPE_SET_LISTPACK` (a small non-integer set, members in the listpack
+/// order valkey would store — reproduced by replaying its encoding state
+/// machine); a set valkey would keep as a hashtable stays deferred.
 const RDB_TYPE_STRING: u8 = 0;
 const RDB_TYPE_SET_INTSET: u8 = 11;
 const RDB_TYPE_HASH_LISTPACK: u8 = 16;
 const RDB_TYPE_ZSET_LISTPACK: u8 = 17;
 const RDB_TYPE_LIST_QUICKLIST_2: u8 = 18;
+const RDB_TYPE_SET_LISTPACK: u8 = 20;
 
 /// `QUICKLIST_NODE_CONTAINER_PACKED` (`quicklist.h`): a quicklist node whose
 /// payload is a listpack (vs `_PLAIN` = 1, a single oversized raw element).
@@ -12220,6 +12244,14 @@ const QUICKLIST_NODE_CONTAINER_PACKED: u64 = 2;
 const ZSET_MAX_LISTPACK_ENTRIES: usize = 128;
 const ZSET_MAX_LISTPACK_VALUE: usize = 64;
 const SET_MAX_INTSET_ENTRIES: usize = 512;
+
+/// `set-max-listpack-entries` / `set-max-listpack-value` defaults (`config.c`,
+/// confirmed against valkey-server 9.1.0: 128 entries, 64-byte member). A set
+/// with any non-integer member stays `OBJ_ENCODING_LISTPACK` only while it has
+/// `< set-max-listpack-entries` members and every member is `<= set-max-listpack-value`
+/// bytes; past either it is a hashtable (`RDB_TYPE_SET`), deferred.
+const SET_MAX_LISTPACK_ENTRIES: usize = 128;
+const SET_MAX_LISTPACK_VALUE: usize = 64;
 
 /// `hash-max-listpack-entries` / `hash-max-listpack-value` defaults (`config.c`,
 /// confirmed against valkey-server 9.1.0: 512 entries, 64-byte field/value).
@@ -12422,8 +12454,9 @@ fn rdb_save_raw_string(out: &mut Vec<u8>, s: &[u8]) {
 /// thresholds), serializes the body byte-identically, then appends the version
 /// footer and CRC64. Returns `None` when the value cannot be reproduced
 /// byte-for-byte — either an unsupported type (Stream), a hash carrying a
-/// per-field TTL (a `RDB_TYPE_HASH_2` hashtable in valkey), a non-integer SET,
-/// or a collection past the compact-encoding thresholds (valkey would have
+/// per-field TTL (a `RDB_TYPE_HASH_2` hashtable in valkey), a SET valkey would
+/// keep as a hashtable, or a collection past the compact-encoding thresholds
+/// (valkey would have
 /// converted it to hashtable/skiplist/multi-node-quicklist, whose iteration
 /// order the engine's flat containers cannot match). The caller turns `None`
 /// into the Wave-21 aggregate-deferral error.
@@ -12449,8 +12482,8 @@ fn rdb_create_dump_payload(value: &StoredValue) -> Option<Vec<u8>> {
             rdb_save_raw_string(&mut payload, &lp);
         }
         StoredValue::Set(members) => {
-            let blob = rdb_set_to_intset(members)?;
-            payload.push(RDB_TYPE_SET_INTSET);
+            let (type_byte, blob) = rdb_set_to_dump(members)?;
+            payload.push(type_byte);
             rdb_save_raw_string(&mut payload, &blob);
         }
         StoredValue::Hash(fields) => {
@@ -12537,21 +12570,152 @@ fn rdb_hash_to_listpack(fields: &IndexMap<Vec<u8>, HashField>) -> Option<Vec<u8>
     Some(lp.into_bytes())
 }
 
-/// Build the intset blob for a SET. Returns `None` unless **every** member is a
-/// canonical integer string (matching `isSdsRepresentableAsLongLong`) and the
-/// set is within `set-max-intset-entries` — exactly the condition under which
-/// valkey keeps the set in `OBJ_ENCODING_INTSET`. A set with any non-integer
-/// member is a listpack/hashtable set in valkey, whose stored order is
-/// insertion order (lost by the engine's `HashSet`), so it is deferred.
-fn rdb_set_to_intset(members: &HashSet<Vec<u8>>) -> Option<Vec<u8>> {
-    if members.len() > SET_MAX_INTSET_ENTRIES {
-        return None;
-    }
-    let mut ints: Vec<i64> = Vec::with_capacity(members.len());
+/// The encoding a SET ends up in, with the contents valkey would store. The
+/// engine reconstructs this by replaying `setTypeAddAux` over the set's
+/// insertion order (the `IndexSet` order), so the resulting `Intset`/`Listpack`
+/// holds members in exactly valkey's stored order — sorted ascending for an
+/// intset, append-order for a listpack (which, for a set that was first an
+/// intset and then converted, means the original integers in sorted order
+/// followed by the later non-integer members).
+enum SetEncoding {
+    Intset(Vec<i64>),
+    Listpack(Vec<Vec<u8>>),
+    Hashtable,
+}
+
+/// Replay valkey's `setTypeAddAux` / `setTypeCreate` encoding state machine
+/// over `members` in insertion order, returning the encoding and stored
+/// contents the reference would hold. `set-max-intset-entries` (512),
+/// `set-max-listpack-entries` (128) and `set-max-listpack-value` (64) gate the
+/// transitions, confirmed against valkey-server 9.1.0:
+/// - The first member chooses the initial encoding (`setTypeCreate`): intset
+///   when it parses as an integer, else listpack.
+/// - Adding an integer to an intset keeps it sorted; crossing 512 entries
+///   converts to hashtable (`maybeConvertIntset`).
+/// - Adding a non-integer to an intset converts to **listpack** (the intset
+///   members iterated in sorted order, then the new member appended) when the
+///   intset length is `< set-max-listpack-entries` and both the new member and
+///   the widest existing integer are `<= set-max-listpack-value`; otherwise to
+///   hashtable.
+/// - Adding to a listpack appends (preserving order) while `lpLength <
+///   set-max-listpack-entries` and the member is `<= set-max-listpack-value`;
+///   otherwise it converts to hashtable.
+///
+/// The `lpSafeToAdd` 1 GiB-listpack guards in the C are omitted: they cannot
+/// trip within these entry/value caps.
+fn simulate_set_encoding(members: &IndexSet<Vec<u8>>) -> SetEncoding {
+    let mut intset: Option<Vec<i64>> = None;
+    let mut listpack: Option<Vec<Vec<u8>>> = None;
+    let mut hashtable = false;
+
     for member in members {
-        ints.push(string2ll(member)?);
+        if hashtable {
+            break;
+        }
+        let as_int = string2ll(member);
+        match (&mut intset, &mut listpack) {
+            (None, None) => {
+                // First member: `setTypeCreate` chooses the initial encoding.
+                match as_int {
+                    Some(v) => intset = Some(vec![v]),
+                    None => listpack = Some(vec![member.clone()]),
+                }
+            }
+            (Some(ints), None) => match as_int {
+                Some(v) => {
+                    // `intsetAdd` keeps the set sorted and unique; the engine's
+                    // `IndexSet` already deduped, so just insert in order.
+                    if let Err(pos) = ints.binary_search(&v) {
+                        ints.insert(pos, v);
+                    }
+                    if ints.len() > SET_MAX_INTSET_ENTRIES {
+                        hashtable = true;
+                    }
+                }
+                None => {
+                    // Non-integer added to an intset: convert to listpack when
+                    // within the listpack thresholds, else hashtable.
+                    let widest_int = ints
+                        .iter()
+                        .map(|v| v.to_string().len())
+                        .max()
+                        .unwrap_or(0);
+                    if ints.len() < SET_MAX_LISTPACK_ENTRIES
+                        && member.len() <= SET_MAX_LISTPACK_VALUE
+                        && widest_int <= SET_MAX_LISTPACK_VALUE
+                    {
+                        let mut lp: Vec<Vec<u8>> = ints
+                            .iter()
+                            .map(|v| v.to_string().into_bytes())
+                            .collect();
+                        lp.push(member.clone());
+                        listpack = Some(lp);
+                        intset = None;
+                    } else {
+                        hashtable = true;
+                    }
+                }
+            },
+            (None, Some(lp)) => {
+                // Listpack: append while within entry/value limits, else convert.
+                if lp.len() < SET_MAX_LISTPACK_ENTRIES && member.len() <= SET_MAX_LISTPACK_VALUE {
+                    lp.push(member.clone());
+                } else {
+                    hashtable = true;
+                }
+            }
+            (Some(_), Some(_)) => unreachable!("a set is in exactly one encoding"),
+        }
     }
-    Some(intset_encode(&mut ints))
+
+    if hashtable {
+        SetEncoding::Hashtable
+    } else if let Some(ints) = intset {
+        SetEncoding::Intset(ints)
+    } else if let Some(lp) = listpack {
+        SetEncoding::Listpack(lp)
+    } else {
+        // An empty set never reaches DUMP (the key is deleted when emptied), but
+        // valkey would create an intset for it.
+        SetEncoding::Intset(Vec::new())
+    }
+}
+
+/// Build the DUMP body for a SET, returning `(type_byte, body)`. Replays
+/// valkey's encoding state machine (`simulate_set_encoding`) so the bytes match
+/// a reference DUMP: an all-integer set within `set-max-intset-entries` is an
+/// `RDB_TYPE_SET_INTSET` blob (sorted); a small non-integer set is an
+/// `RDB_TYPE_SET_LISTPACK` (members in valkey's listpack order). Returns `None`
+/// when the set would be a hashtable in valkey (`RDB_TYPE_SET`), which the
+/// engine cannot reproduce byte-for-byte.
+fn rdb_set_to_dump(members: &IndexSet<Vec<u8>>) -> Option<(u8, Vec<u8>)> {
+    match simulate_set_encoding(members) {
+        SetEncoding::Intset(mut ints) => Some((RDB_TYPE_SET_INTSET, intset_encode(&mut ints))),
+        SetEncoding::Listpack(items) => {
+            let mut lp = ListpackWriter::new();
+            for item in &items {
+                lp.append_auto(item);
+            }
+            Some((RDB_TYPE_SET_LISTPACK, lp.into_bytes()))
+        }
+        SetEncoding::Hashtable => None,
+    }
+}
+
+/// The members of a SET in valkey's stored iteration order, used by SMEMBERS so
+/// the reply matches the reference byte-for-byte. Replays the encoding state
+/// machine: an all-integer intset is iterated **sorted ascending**; a listpack
+/// in its stored append order (the `IndexSet` insertion order, except integers
+/// that were once an intset come out sorted ahead of later non-integers — the
+/// listpack vector already encodes that). A hashtable-encoded set's true
+/// iteration order is dict-bucket order the engine cannot reproduce, so it
+/// falls back to insertion order (still membership-correct).
+fn set_member_order(members: &IndexSet<Vec<u8>>) -> Vec<Vec<u8>> {
+    match simulate_set_encoding(members) {
+        SetEncoding::Intset(ints) => ints.into_iter().map(|v| v.to_string().into_bytes()).collect(),
+        SetEncoding::Listpack(items) => items,
+        SetEncoding::Hashtable => members.iter().cloned().collect(),
+    }
 }
 
 /// Encode a set of `i64` values as an intset blob
@@ -12882,9 +13046,19 @@ fn rdb_load_dump_value(data: &[u8]) -> Option<StoredValue> {
         RDB_TYPE_SET_INTSET => {
             let blob = rdb_load_string(body, &mut pos)?;
             let ints = intset_decode(&blob)?;
-            let mut members: HashSet<Vec<u8>> = HashSet::new();
+            let mut members: IndexSet<Vec<u8>> = IndexSet::new();
             for v in ints {
                 members.insert(v.to_string().into_bytes());
+            }
+            Some(StoredValue::Set(members))
+        }
+        RDB_TYPE_SET_LISTPACK => {
+            // A listpack of set members in valkey's stored (insertion) order.
+            let blob = rdb_load_string(body, &mut pos)?;
+            let entries = listpack_iter(&blob)?;
+            let mut members: IndexSet<Vec<u8>> = IndexSet::with_capacity(entries.len());
+            for member in entries {
+                members.insert(member);
             }
             Some(StoredValue::Set(members))
         }
@@ -17193,12 +17367,112 @@ mod tests {
         );
     }
 
-    /// A SET with a non-integer member is deferred (insertion order is lost by
-    /// the engine's HashSet, so byte-parity is impossible).
+    /// A small non-integer SET → RDB_TYPE_SET_LISTPACK (type byte 20), members
+    /// in insertion order. Both string members survive verbatim. Captured from
+    /// valkey-server 9.1.0 (`SADD s foo bar`).
     #[test]
-    fn dump_non_integer_set_is_deferred() {
+    fn dump_byte_parity_set_listpack_strings() {
         let mut engine = Engine::new_in_memory();
         engine.execute(&argv(&[b"SADD", b"s", b"foo", b"bar"]));
+        let got = dump_bytes(&mut engine, b"s");
+        assert_eq!(
+            got,
+            hex("141111000000020083666f6f048362617204ff5000d21f22b90176bebc"),
+            "got {}",
+            hex_encode(&got)
+        );
+    }
+
+    /// A non-integer SET with single-byte string members (`a b c d`), insertion
+    /// order preserved in the listpack.
+    #[test]
+    fn dump_byte_parity_set_listpack_short_strings() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"SADD", b"s", b"a", b"b", b"c", b"d"]));
+        let got = dump_bytes(&mut engine, b"s");
+        assert_eq!(
+            got,
+            hex("1413130000000400816102816202816302816402ff5000fcd288811fffc033"),
+            "got {}",
+            hex_encode(&got)
+        );
+    }
+
+    /// A single non-integer member SET (`only`).
+    #[test]
+    fn dump_byte_parity_set_listpack_single() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"SADD", b"s", b"only"]));
+        let got = dump_bytes(&mut engine, b"s");
+        assert_eq!(
+            got,
+            hex("140d0d0000000100846f6e6c7905ff5000221b634e081f0d13"),
+            "got {}",
+            hex_encode(&got)
+        );
+    }
+
+    /// A listpack set whose first member is a non-integer, then integers, then a
+    /// string (`hello 1 2 world`): created as a listpack from the start, so each
+    /// member is appended in insertion order — the integers `1`/`2` stored as
+    /// listpack integer entries.
+    #[test]
+    fn dump_byte_parity_set_listpack_mixed_order() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"SADD", b"s", b"hello", b"1", b"2", b"world"]));
+        let got = dump_bytes(&mut engine, b"s");
+        assert_eq!(
+            got,
+            hex("14191900000004008568656c6c6f060101020185776f726c6406ff50005c01682b4367a5f8"),
+            "got {}",
+            hex_encode(&got)
+        );
+    }
+
+    /// A set that begins as an intset (`3 1 2`) and then gains a non-integer
+    /// (`foo`): valkey converts the intset to a listpack, iterating the intset
+    /// in **sorted** order (`1 2 3`) and appending `foo`. The DUMP must
+    /// reproduce that sorted-prefix order, not the engine's raw insertion order.
+    #[test]
+    fn dump_byte_parity_set_intset_to_listpack_sorted_prefix() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"SADD", b"s", b"3", b"1", b"2", b"foo"]));
+        let got = dump_bytes(&mut engine, b"s");
+        assert_eq!(
+            got,
+            hex("141212000000040001010201030183666f6f04ff5000e3f9d88bc095253e"),
+            "got {}",
+            hex_encode(&got)
+        );
+    }
+
+    /// A listpack set containing the empty string member alongside a string
+    /// (`"" foo`).
+    #[test]
+    fn dump_byte_parity_set_listpack_empty_member() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"SADD", b"s", b"", b"foo"]));
+        let got = dump_bytes(&mut engine, b"s");
+        assert_eq!(
+            got,
+            hex("140e0e0000000200800183666f6f04ff500069364761c6b1cbc0"),
+            "got {}",
+            hex_encode(&got)
+        );
+    }
+
+    /// A non-integer SET past `set-max-listpack-entries` (129 short members) is a
+    /// hashtable in valkey (`RDB_TYPE_SET`), which the engine cannot reproduce
+    /// byte-for-byte, so its DUMP is deferred with the aggregate-deferral error.
+    #[test]
+    fn dump_large_non_integer_set_is_deferred() {
+        let mut engine = Engine::new_in_memory();
+        let mut cmd: Vec<Vec<u8>> = vec![b"SADD".to_vec(), b"s".to_vec()];
+        for i in 0..129 {
+            cmd.push(format!("m{i}").into_bytes());
+        }
+        let cmd_refs: Vec<&[u8]> = cmd.iter().map(|v| v.as_slice()).collect();
+        engine.execute(&argv(&cmd_refs));
         assert!(matches!(
             engine.execute(&argv(&[b"DUMP", b"s"])),
             RespFrame::Error(_)
@@ -17429,6 +17703,70 @@ mod tests {
         assert_eq!(
             resp2(&engine.execute(&argv(&[b"SISMEMBER", b"s", b"100"]))),
             b":1\r\n"
+        );
+    }
+
+    /// In-process DUMP→RESTORE round-trip for a non-integer SET (listpack),
+    /// asserting the reconstructed value preserves insertion order via SMEMBERS.
+    #[test]
+    fn dump_restore_round_trip_set_listpack() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[
+            b"SADD", b"src", b"delta", b"alpha", b"charlie", b"bravo",
+        ]));
+        let payload = dump_bytes(&mut engine, b"src");
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"RESTORE", b"dst", b"0", &payload]))),
+            b"+OK\r\n"
+        );
+        assert_eq!(resp2(&engine.execute(&argv(&[b"TYPE", b"dst"]))), b"+set\r\n");
+        // SMEMBERS preserves the original insertion order for a listpack set.
+        let got = engine.execute(&argv(&[b"SMEMBERS", b"dst"]));
+        let RespFrame::Array(Some(items)) = got else {
+            panic!("expected array, got {got:?}");
+        };
+        let members: Vec<Vec<u8>> = items
+            .iter()
+            .map(|f| match f {
+                RespFrame::Bulk(Some(b)) => b.as_bytes().to_vec(),
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            members,
+            vec![
+                b"delta".to_vec(),
+                b"alpha".to_vec(),
+                b"charlie".to_vec(),
+                b"bravo".to_vec(),
+            ]
+        );
+    }
+
+    /// RESTORE a hardcoded real valkey SET_LISTPACK dump (captured from
+    /// valkey-server 9.1.0: `SADD s foo bar`), then verify membership and the
+    /// listpack insertion order.
+    #[test]
+    fn restore_hardcoded_valkey_set_listpack_dump() {
+        let mut engine = Engine::new_in_memory();
+        let payload = hex("141111000000020083666f6f048362617204ff5000d21f22b90176bebc");
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"RESTORE", b"s", b"0", &payload]))),
+            b"+OK\r\n"
+        );
+        assert_eq!(resp2(&engine.execute(&argv(&[b"TYPE", b"s"]))), b"+set\r\n");
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"SISMEMBER", b"s", b"foo"]))),
+            b":1\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"SISMEMBER", b"s", b"bar"]))),
+            b":1\r\n"
+        );
+        // Insertion order is reconstructed (foo, bar).
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"SMEMBERS", b"s"]))),
+            b"*2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n"
         );
     }
 
