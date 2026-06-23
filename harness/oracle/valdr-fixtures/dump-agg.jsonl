@@ -1,0 +1,33 @@
+{"id": "da-missing-nil", "cmd": ["DUMP", "da:absent"]}
+{"id": "da-list-rpush", "cmd": ["RPUSH", "da:l1", "a", "b", "c"]}
+{"id": "da-list-dump", "cmd": ["DUMP", "da:l1"]}
+{"id": "da-list-int-rpush", "cmd": ["RPUSH", "da:l2", "1", "22", "333"]}
+{"id": "da-list-int-dump", "cmd": ["DUMP", "da:l2"]}
+{"id": "da-list-single-rpush", "cmd": ["RPUSH", "da:l3", "solo"]}
+{"id": "da-list-single-dump", "cmd": ["DUMP", "da:l3"]}
+{"id": "da-list-mixed-rpush", "cmd": ["RPUSH", "da:l4", "alpha", "-128", "0", "hello world this is a longer element"]}
+{"id": "da-list-mixed-dump", "cmd": ["DUMP", "da:l4"]}
+{"id": "da-list-neg-int-rpush", "cmd": ["RPUSH", "da:l5", "-1", "-12345", "-99999999"]}
+{"id": "da-list-neg-int-dump", "cmd": ["DUMP", "da:l5"]}
+{"id": "da-zset-int-zadd", "cmd": ["ZADD", "da:z1", "1", "a", "2", "b", "3", "c"]}
+{"id": "da-zset-int-dump", "cmd": ["DUMP", "da:z1"]}
+{"id": "da-zset-float-zadd", "cmd": ["ZADD", "da:z2", "1.5", "x", "2", "y"]}
+{"id": "da-zset-float-dump", "cmd": ["DUMP", "da:z2"]}
+{"id": "da-zset-tie-zadd", "cmd": ["ZADD", "da:z3", "5", "b", "5", "a", "5", "c"]}
+{"id": "da-zset-tie-dump", "cmd": ["DUMP", "da:z3"]}
+{"id": "da-zset-neg-zadd", "cmd": ["ZADD", "da:z4", "-3.25", "first", "-3.25", "alpha", "10", "last"]}
+{"id": "da-zset-neg-dump", "cmd": ["DUMP", "da:z4"]}
+{"id": "da-zset-single-zadd", "cmd": ["ZADD", "da:z5", "42", "only"]}
+{"id": "da-zset-single-dump", "cmd": ["DUMP", "da:z5"]}
+{"id": "da-zset-bigscore-zadd", "cmd": ["ZADD", "da:z6", "3.0e3", "m1", "1000000000000", "m2"]}
+{"id": "da-zset-bigscore-dump", "cmd": ["DUMP", "da:z6"]}
+{"id": "da-intset16-sadd", "cmd": ["SADD", "da:s1", "3", "1", "2", "100"]}
+{"id": "da-intset16-dump", "cmd": ["DUMP", "da:s1"]}
+{"id": "da-intset32-sadd", "cmd": ["SADD", "da:s2", "-5", "70000", "3"]}
+{"id": "da-intset32-dump", "cmd": ["DUMP", "da:s2"]}
+{"id": "da-intset64-sadd", "cmd": ["SADD", "da:s3", "5000000000", "1"]}
+{"id": "da-intset64-dump", "cmd": ["DUMP", "da:s3"]}
+{"id": "da-intset-single-sadd", "cmd": ["SADD", "da:s4", "-2147483648"]}
+{"id": "da-intset-single-dump", "cmd": ["DUMP", "da:s4"]}
+{"id": "da-intset-neg-sadd", "cmd": ["SADD", "da:s5", "-1", "-2", "-3", "0"]}
+{"id": "da-intset-neg-dump", "cmd": ["DUMP", "da:s5"]}

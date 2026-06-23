@@ -1191,12 +1191,9 @@ impl<H: Host> Engine<H> {
             None => return RespFrame::null_bulk(),
             Some(entry) => &entry.value,
         };
-        match value {
-            StoredValue::String(bytes) => {
-                let payload = rdb_create_dump_payload_string(bytes);
-                bulk(&payload)
-            }
-            _ => err(b"ERR DUMP of this value type is not yet supported by the edge engine"),
+        match rdb_create_dump_payload(value) {
+            Some(payload) => bulk(&payload),
+            None => err(b"ERR DUMP of this value type is not yet supported by the edge engine"),
         }
     }
 
@@ -12191,8 +12188,35 @@ const RDB_ENC_INT16: u8 = 1;
 const RDB_ENC_INT32: u8 = 2;
 const RDB_ENC_LZF: u8 = 3;
 
-/// `RDB_TYPE_STRING` — the only value-type byte this wave emits/accepts.
+/// RDB object-type bytes (`rdb.h` `enum RdbType`). The engine emits and
+/// accepts the compact small-collection encodings only; the larger
+/// hashtable/skiplist encodings (and HASH / non-integer SET, which lose
+/// insertion order through the engine's HashMap/HashSet) stay deferred.
 const RDB_TYPE_STRING: u8 = 0;
+const RDB_TYPE_SET_INTSET: u8 = 11;
+const RDB_TYPE_ZSET_LISTPACK: u8 = 17;
+const RDB_TYPE_LIST_QUICKLIST_2: u8 = 18;
+
+/// `QUICKLIST_NODE_CONTAINER_PACKED` (`quicklist.h`): a quicklist node whose
+/// payload is a listpack (vs `_PLAIN` = 1, a single oversized raw element).
+const QUICKLIST_NODE_CONTAINER_PACKED: u64 = 2;
+
+/// Default object-encoding thresholds (`config.c`): the engine only emits the
+/// compact encodings when the collection stays within valkey's defaults, so a
+/// DUMP byte-matches what the reference (running with the same defaults)
+/// produces. A collection past these limits is deferred — valkey would switch
+/// to hashtable/skiplist/quicklist-with-multiple-nodes, which the engine
+/// cannot reproduce byte-for-byte. Confirmed against valkey-server 9.1.0.
+const ZSET_MAX_LISTPACK_ENTRIES: usize = 128;
+const ZSET_MAX_LISTPACK_VALUE: usize = 64;
+const SET_MAX_INTSET_ENTRIES: usize = 512;
+
+/// `list-max-listpack-size` default of `-2` → an 8 KiB per-node byte budget
+/// (`optimization_level[1]`, `quicklist.c`). A small list whose single
+/// listpack fits this budget is stored as a one-node quicklist; a larger list
+/// would spill into multiple nodes (and `OBJ_ENCODING_QUICKLIST`), which the
+/// engine's flat `VecDeque` cannot reproduce, so it is deferred.
+const LIST_MAX_LISTPACK_BYTES: usize = 8192;
 
 const CRC64_REFLECTED_POLY: u64 = 0x95ac9329ac4bc9b5;
 
@@ -12374,18 +12398,341 @@ fn rdb_save_raw_string(out: &mut Vec<u8>, s: &[u8]) {
     out.extend_from_slice(s);
 }
 
-/// `createDumpPayload` (`cluster.c`) for a STRING value: the RDB type byte,
-/// the serialized string, the 2-byte RDB version (LE), and the 8-byte CRC64
-/// (Jones) over everything before it (LE). Byte-identical to the reference.
-fn rdb_create_dump_payload_string(value: &[u8]) -> Vec<u8> {
+/// `createDumpPayload` (`cluster.c`) for any supported value type. Selects the
+/// RDB object-type byte the reference would (given valkey's default encoding
+/// thresholds), serializes the body byte-identically, then appends the version
+/// footer and CRC64. Returns `None` when the value cannot be reproduced
+/// byte-for-byte — either an unsupported type (HASH, non-integer SET, Stream)
+/// or a collection past the compact-encoding thresholds (valkey would have
+/// converted it to hashtable/skiplist/multi-node-quicklist, whose iteration
+/// order the engine's flat containers cannot match). The caller turns `None`
+/// into the Wave-21 aggregate-deferral error.
+fn rdb_create_dump_payload(value: &StoredValue) -> Option<Vec<u8>> {
     let mut payload = Vec::new();
-    payload.push(RDB_TYPE_STRING);
-    rdb_save_raw_string(&mut payload, value);
+    match value {
+        StoredValue::String(bytes) => {
+            payload.push(RDB_TYPE_STRING);
+            rdb_save_raw_string(&mut payload, bytes);
+        }
+        StoredValue::List(items) => {
+            let lp = rdb_list_to_listpack(items)?;
+            payload.push(RDB_TYPE_LIST_QUICKLIST_2);
+            // A list listpack is saved as a single-node quicklist: node count,
+            // the node's container type, then the listpack as a raw string.
+            rdb_save_len(&mut payload, 1);
+            rdb_save_len(&mut payload, QUICKLIST_NODE_CONTAINER_PACKED);
+            rdb_save_raw_string(&mut payload, &lp);
+        }
+        StoredValue::ZSet(members) => {
+            let lp = rdb_zset_to_listpack(members)?;
+            payload.push(RDB_TYPE_ZSET_LISTPACK);
+            rdb_save_raw_string(&mut payload, &lp);
+        }
+        StoredValue::Set(members) => {
+            let blob = rdb_set_to_intset(members)?;
+            payload.push(RDB_TYPE_SET_INTSET);
+            rdb_save_raw_string(&mut payload, &blob);
+        }
+        StoredValue::Hash(_) | StoredValue::Stream(_) => return None,
+    }
     payload.push((RDB_DUMP_VERSION & 0xff) as u8);
     payload.push(((RDB_DUMP_VERSION >> 8) & 0xff) as u8);
     let crc = crc64(0, &payload);
     payload.extend_from_slice(&crc.to_le_bytes());
-    payload
+    Some(payload)
+}
+
+/// Build the listpack body for a LIST, in element order (the engine's
+/// `VecDeque` already holds valkey's order). Returns `None` when the list
+/// would not be a single-node listpack quicklist under valkey's default
+/// `list-max-listpack-size = -2` (8 KiB per node) — i.e. the listpack body
+/// would exceed the byte budget — so such lists are deferred.
+fn rdb_list_to_listpack(items: &VecDeque<Vec<u8>>) -> Option<Vec<u8>> {
+    let mut lp = ListpackWriter::new();
+    for item in items {
+        lp.append_auto(item);
+    }
+    if lp.byte_len() > LIST_MAX_LISTPACK_BYTES {
+        return None;
+    }
+    Some(lp.into_bytes())
+}
+
+/// Build the listpack body for a ZSET. Members are emitted in valkey's stored
+/// order — (score ascending, member lexicographic ascending) — with each
+/// member followed by its score as a separate listpack entry (`zzlInsertAt`,
+/// `t_zset.c`): an integer entry when the score round-trips through
+/// `double2ll`, else the `d2string` text. Returns `None` when the zset is past
+/// valkey's `zset-max-listpack-{entries,value}` defaults (it would be a
+/// skiplist, whose DUMP the engine cannot reproduce).
+fn rdb_zset_to_listpack(members: &HashMap<Vec<u8>, f64>) -> Option<Vec<u8>> {
+    if members.len() > ZSET_MAX_LISTPACK_ENTRIES {
+        return None;
+    }
+    let ordered = sorted_zset_entries(members);
+    let mut lp = ListpackWriter::new();
+    for (member, score) in &ordered {
+        if member.len() > ZSET_MAX_LISTPACK_VALUE {
+            return None;
+        }
+        lp.append_auto(member);
+        match double2ll(*score) {
+            Some(lscore) => lp.append_integer(lscore),
+            None => lp.append_auto(&format_score(*score)),
+        }
+    }
+    Some(lp.into_bytes())
+}
+
+/// Build the intset blob for a SET. Returns `None` unless **every** member is a
+/// canonical integer string (matching `isSdsRepresentableAsLongLong`) and the
+/// set is within `set-max-intset-entries` — exactly the condition under which
+/// valkey keeps the set in `OBJ_ENCODING_INTSET`. A set with any non-integer
+/// member is a listpack/hashtable set in valkey, whose stored order is
+/// insertion order (lost by the engine's `HashSet`), so it is deferred.
+fn rdb_set_to_intset(members: &HashSet<Vec<u8>>) -> Option<Vec<u8>> {
+    if members.len() > SET_MAX_INTSET_ENTRIES {
+        return None;
+    }
+    let mut ints: Vec<i64> = Vec::with_capacity(members.len());
+    for member in members {
+        ints.push(string2ll(member)?);
+    }
+    Some(intset_encode(&mut ints))
+}
+
+/// Encode a set of `i64` values as an intset blob
+/// (`[encoding:u32-le][length:u32-le][sorted contents]`, `intset.c`). The
+/// single encoding width is the widest needed for any member (2/4/8 bytes);
+/// the contents are sorted ascending and written little-endian. `ints` is
+/// sorted in place. Byte-identical to `intsetBlobLen` output.
+fn intset_encode(ints: &mut [i64]) -> Vec<u8> {
+    ints.sort_unstable();
+    let width: usize = ints
+        .iter()
+        .map(|&v| {
+            if v < i32::MIN as i64 || v > i32::MAX as i64 {
+                8
+            } else if v < i16::MIN as i64 || v > i16::MAX as i64 {
+                4
+            } else {
+                2
+            }
+        })
+        .max()
+        .unwrap_or(2);
+    let mut out = Vec::with_capacity(8 + ints.len() * width);
+    out.extend_from_slice(&(width as u32).to_le_bytes());
+    out.extend_from_slice(&(ints.len() as u32).to_le_bytes());
+    for &v in ints.iter() {
+        match width {
+            2 => out.extend_from_slice(&(v as i16).to_le_bytes()),
+            4 => out.extend_from_slice(&(v as i32).to_le_bytes()),
+            _ => out.extend_from_slice(&v.to_le_bytes()),
+        }
+    }
+    out
+}
+
+/// `double2ll` (`util.c`): when `d` is finite, inside the safe `±LLONG_MAX/2`
+/// casting range, and has no fractional part, return the exact `i64` — the
+/// condition under which `zzlInsertAt` stores a score as an integer listpack
+/// entry. Otherwise `None` (the score is then stored via `d2string`).
+fn double2ll(d: f64) -> Option<i64> {
+    let bound = (i64::MAX / 2) as f64;
+    if !d.is_finite() || d < -bound || d > bound {
+        return None;
+    }
+    let ll = d as i64;
+    if ll as f64 == d {
+        Some(ll)
+    } else {
+        None
+    }
+}
+
+/// A minimal append-only listpack builder, byte-compatible with `listpack.c`
+/// (`lpAppend` / `lpAppendInteger`). Header is `[total-bytes:u32-le]
+/// [num-elements:u16-le]`; each entry is `<encoding+data><backlen>` where
+/// `backlen` is the reverse varint length of the encoding+data; the buffer
+/// ends with the `0xff` terminator. This is the same wire format the engine
+/// must emit for LIST/ZSET DUMP byte-parity — the backlen varint is the
+/// finicky part (see `lp_encode_backlen`).
+struct ListpackWriter {
+    /// Entry bytes only (encoding+data+backlen, no header, no terminator).
+    body: Vec<u8>,
+    count: u16,
+}
+
+impl ListpackWriter {
+    const HDR_SIZE: usize = 6;
+
+    fn new() -> Self {
+        ListpackWriter {
+            body: Vec::new(),
+            count: 0,
+        }
+    }
+
+    /// Append a value, auto-detecting a canonical integer exactly as `lpAppend`
+    /// does (the listpack stores `"22"` as a 7-bit-uint entry, not a string).
+    fn append_auto(&mut self, value: &[u8]) {
+        match string2ll(value) {
+            Some(int) => self.append_integer(int),
+            None => self.append_string(value),
+        }
+    }
+
+    fn append_string(&mut self, value: &[u8]) {
+        let mut entry = lp_encode_string(value);
+        let backlen = lp_encode_backlen(entry.len());
+        entry.extend_from_slice(&backlen);
+        self.body.extend_from_slice(&entry);
+        self.count = self.count.saturating_add(1);
+    }
+
+    fn append_integer(&mut self, value: i64) {
+        let mut entry = lp_encode_integer(value);
+        let backlen = lp_encode_backlen(entry.len());
+        entry.extend_from_slice(&backlen);
+        self.body.extend_from_slice(&entry);
+        self.count = self.count.saturating_add(1);
+    }
+
+    /// Total byte length of the finished listpack (header + entries + `0xff`).
+    fn byte_len(&self) -> usize {
+        Self::HDR_SIZE + self.body.len() + 1
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        let total = self.byte_len();
+        let mut out = Vec::with_capacity(total);
+        out.extend_from_slice(&(total as u32).to_le_bytes());
+        // num-elements caps at LP_HDR_NUMELE_UNKNOWN (0xffff); the engine never
+        // emits more than the threshold-bounded element counts, so the cap is
+        // unreachable here, but mirror the field width regardless.
+        out.extend_from_slice(&self.count.to_le_bytes());
+        out.extend_from_slice(&self.body);
+        out.push(0xff);
+        out
+    }
+}
+
+/// `lpEncodeGetType` string path (`listpack.c`): the 6-bit / 12-bit / 32-bit
+/// string encodings, prefix + raw bytes. (The integer auto-detection is done
+/// by the caller via `append_auto`; this path is reached only for genuine
+/// strings.)
+fn lp_encode_string(value: &[u8]) -> Vec<u8> {
+    let len = value.len();
+    let mut out;
+    if len < 64 {
+        out = Vec::with_capacity(1 + len);
+        out.push(0x80 | len as u8);
+    } else if len < 4096 {
+        out = Vec::with_capacity(2 + len);
+        out.push(0xe0 | ((len >> 8) as u8 & 0x0f));
+        out.push((len & 0xff) as u8);
+    } else {
+        out = Vec::with_capacity(5 + len);
+        out.push(0xf0);
+        out.extend_from_slice(&(len as u32).to_le_bytes());
+    }
+    out.extend_from_slice(value);
+    out
+}
+
+/// `lpEncodeGetType` integer path (`listpack.c`): 7-bit uint, 13-bit, 16/24/32/
+/// 64-bit signed encodings. Byte-identical to `lpEncodeIntegerGetType`.
+fn lp_encode_integer(value: i64) -> Vec<u8> {
+    if (0..=127).contains(&value) {
+        vec![value as u8]
+    } else if (-4096..=4095).contains(&value) {
+        let unsigned = if value < 0 {
+            ((1i64 << 13) + value) as u16
+        } else {
+            value as u16
+        };
+        vec![((unsigned >> 8) as u8) | 0xc0, (unsigned & 0xff) as u8]
+    } else if (i16::MIN as i64..=i16::MAX as i64).contains(&value) {
+        let unsigned = if value < 0 {
+            ((1i64 << 16) + value) as u32
+        } else {
+            value as u32
+        };
+        vec![0xf1, (unsigned & 0xff) as u8, (unsigned >> 8) as u8]
+    } else if (-8_388_608..=8_388_607).contains(&value) {
+        let unsigned = if value < 0 {
+            ((1i64 << 24) + value) as u32
+        } else {
+            value as u32
+        };
+        vec![
+            0xf2,
+            (unsigned & 0xff) as u8,
+            ((unsigned >> 8) & 0xff) as u8,
+            (unsigned >> 16) as u8,
+        ]
+    } else if (i32::MIN as i64..=i32::MAX as i64).contains(&value) {
+        let unsigned = if value < 0 {
+            ((1i64 << 32) + value) as u64
+        } else {
+            value as u64
+        };
+        vec![
+            0xf3,
+            (unsigned & 0xff) as u8,
+            ((unsigned >> 8) & 0xff) as u8,
+            ((unsigned >> 16) & 0xff) as u8,
+            (unsigned >> 24) as u8,
+        ]
+    } else {
+        let unsigned = value as u64;
+        vec![
+            0xf4,
+            (unsigned & 0xff) as u8,
+            ((unsigned >> 8) & 0xff) as u8,
+            ((unsigned >> 16) & 0xff) as u8,
+            ((unsigned >> 24) & 0xff) as u8,
+            ((unsigned >> 32) & 0xff) as u8,
+            ((unsigned >> 40) & 0xff) as u8,
+            ((unsigned >> 48) & 0xff) as u8,
+            (unsigned >> 56) as u8,
+        ]
+    }
+}
+
+/// `lpEncodeBacklen` (`listpack.c`): the reverse-varint length of the
+/// `encoding+data` run, 1–5 bytes. Each byte carries 7 bits; the continuation
+/// bit (`0x80`) is set on every byte except the first written (so a backward
+/// reader stops at the byte without it). Byte-identical to the reference — this
+/// is the boundary that makes listpack DUMP parity finicky.
+fn lp_encode_backlen(len: usize) -> Vec<u8> {
+    if len <= 127 {
+        vec![len as u8]
+    } else if len < 16384 {
+        vec![(len >> 7) as u8, (len & 127) as u8 | 128]
+    } else if len < 2_097_152 {
+        vec![
+            (len >> 14) as u8,
+            ((len >> 7) & 127) as u8 | 128,
+            (len & 127) as u8 | 128,
+        ]
+    } else if len < 268_435_456 {
+        vec![
+            (len >> 21) as u8,
+            ((len >> 14) & 127) as u8 | 128,
+            ((len >> 7) & 127) as u8 | 128,
+            (len & 127) as u8 | 128,
+        ]
+    } else {
+        vec![
+            (len >> 28) as u8,
+            ((len >> 21) & 127) as u8 | 128,
+            ((len >> 14) & 127) as u8 | 128,
+            ((len >> 7) & 127) as u8 | 128,
+            (len & 127) as u8 | 128,
+        ]
+    }
 }
 
 /// `verifyDumpPayload` (`cluster.c`): check the 2-byte RDB version (must be
@@ -12427,9 +12774,11 @@ fn rdb_is_version_accepted(rdbver: u16) -> bool {
     true
 }
 
-/// Decode the value carried by a verified DUMP payload. Only `RDB_TYPE_STRING`
-/// is supported this wave — any other type byte yields `None` (→ "Bad data
-/// format"). Mirrors `rdbLoadObjectType` + the string path of `rdbLoadObject`.
+/// Decode the value carried by a verified DUMP payload. Handles the compact
+/// encodings the engine emits (STRING, LIST_QUICKLIST_2, ZSET_LISTPACK,
+/// SET_INTSET) plus their listpack/ziplist siblings that real valkey dumps may
+/// carry. Any other type byte yields `None` (→ "Bad data format"). Mirrors
+/// `rdbLoadObjectType` + the relevant arms of `rdbLoadObject`.
 fn rdb_load_dump_value(data: &[u8]) -> Option<StoredValue> {
     if data.len() < 10 {
         return None;
@@ -12438,13 +12787,187 @@ fn rdb_load_dump_value(data: &[u8]) -> Option<StoredValue> {
     let mut pos = 0usize;
     let type_byte = *body.get(pos)?;
     pos += 1;
-    if type_byte != RDB_TYPE_STRING {
+    match type_byte {
+        RDB_TYPE_STRING => {
+            let bytes = rdb_load_string(body, &mut pos)?;
+            Some(StoredValue::String(bytes))
+        }
+        RDB_TYPE_LIST_QUICKLIST_2 => {
+            // A quicklist_2: a node count, then each node's container type and
+            // its payload (a listpack, raw-string-encoded). Concatenate every
+            // node's entries in order.
+            let (nodes, _) = rdb_load_len(body, &mut pos)?;
+            let mut items: VecDeque<Vec<u8>> = VecDeque::new();
+            for _ in 0..nodes {
+                let (container, _) = rdb_load_len(body, &mut pos)?;
+                let blob = rdb_load_string(body, &mut pos)?;
+                if container == QUICKLIST_NODE_CONTAINER_PACKED {
+                    for entry in listpack_iter(&blob)? {
+                        items.push_back(entry);
+                    }
+                } else {
+                    // PLAIN node: the blob is a single oversized element.
+                    items.push_back(blob);
+                }
+            }
+            Some(StoredValue::List(items))
+        }
+        RDB_TYPE_ZSET_LISTPACK => {
+            let blob = rdb_load_string(body, &mut pos)?;
+            let entries = listpack_iter(&blob)?;
+            if entries.len() % 2 != 0 {
+                return None;
+            }
+            let mut members: HashMap<Vec<u8>, f64> = HashMap::new();
+            let mut it = entries.into_iter();
+            while let (Some(member), Some(score_bytes)) = (it.next(), it.next()) {
+                let score = parse_score(&score_bytes)?;
+                members.insert(member, score);
+            }
+            Some(StoredValue::ZSet(members))
+        }
+        RDB_TYPE_SET_INTSET => {
+            let blob = rdb_load_string(body, &mut pos)?;
+            let ints = intset_decode(&blob)?;
+            let mut members: HashSet<Vec<u8>> = HashSet::new();
+            for v in ints {
+                members.insert(v.to_string().into_bytes());
+            }
+            Some(StoredValue::Set(members))
+        }
+        _ => None,
+    }
+}
+
+/// Parse an intset blob (`[encoding:u32-le][length:u32-le][contents]`,
+/// `intset.c`) into its `i64` members. `None` on a bad encoding width or a
+/// truncated body.
+fn intset_decode(blob: &[u8]) -> Option<Vec<i64>> {
+    if blob.len() < 8 {
         return None;
     }
-    let bytes = rdb_load_string(body, &mut pos)?;
-    // The reference tolerates trailing bytes (it only reads what the type
-    // needs); a faithful string load consumes exactly its encoding.
-    Some(StoredValue::String(bytes))
+    let width = u32::from_le_bytes(blob[0..4].try_into().ok()?) as usize;
+    let length = u32::from_le_bytes(blob[4..8].try_into().ok()?) as usize;
+    if !matches!(width, 2 | 4 | 8) {
+        return None;
+    }
+    if blob.len() < 8 + length * width {
+        return None;
+    }
+    let mut out = Vec::with_capacity(length);
+    let mut pos = 8usize;
+    for _ in 0..length {
+        let v = match width {
+            2 => i16::from_le_bytes(blob[pos..pos + 2].try_into().ok()?) as i64,
+            4 => i32::from_le_bytes(blob[pos..pos + 4].try_into().ok()?) as i64,
+            _ => i64::from_le_bytes(blob[pos..pos + 8].try_into().ok()?),
+        };
+        out.push(v);
+        pos += width;
+    }
+    Some(out)
+}
+
+/// Iterate a listpack body (`[total-bytes:u32-le][num-elements:u16-le]
+/// <entries><0xff>`, `listpack.c`), returning each entry decoded to its bytes
+/// (integer entries become their decimal string, matching how the engine
+/// stores them). `None` on malformed input.
+fn listpack_iter(blob: &[u8]) -> Option<Vec<Vec<u8>>> {
+    if blob.len() < 7 {
+        return None;
+    }
+    let total = u32::from_le_bytes(blob[0..4].try_into().ok()?) as usize;
+    if total != blob.len() || blob[blob.len() - 1] != 0xff {
+        return None;
+    }
+    let mut out = Vec::new();
+    let mut pos = 6usize; // skip 6-byte header
+    while pos < blob.len() {
+        if blob[pos] == 0xff {
+            return Some(out);
+        }
+        let (value, encoded_len) = lp_decode_entry(blob, pos)?;
+        out.push(value);
+        // Advance past encoding+data and the trailing backlen.
+        let backlen_size = lp_backlen_size(encoded_len);
+        pos += encoded_len + backlen_size;
+    }
+    None
+}
+
+/// Decode one listpack entry at `pos`, returning `(bytes, encoded_len)` where
+/// `encoded_len` is the byte length of the encoding+data (excluding the
+/// trailing backlen). Mirrors `lpGet` (`listpack.c`).
+fn lp_decode_entry(data: &[u8], pos: usize) -> Option<(Vec<u8>, usize)> {
+    let byte = *data.get(pos)?;
+    if byte & 0x80 == 0 {
+        // 7-bit uint
+        Some(((byte & 0x7f).to_string().into_bytes(), 1))
+    } else if byte & 0xc0 == 0x80 {
+        // 6-bit string
+        let len = (byte & 0x3f) as usize;
+        let s = data.get(pos + 1..pos + 1 + len)?;
+        Some((s.to_vec(), 1 + len))
+    } else if byte & 0xe0 == 0xc0 {
+        // 13-bit int
+        let b1 = *data.get(pos + 1)? as u16;
+        let uval = (((byte & 0x1f) as u16) << 8) | b1;
+        let val = if uval >= (1 << 12) {
+            uval as i64 - (1 << 13)
+        } else {
+            uval as i64
+        };
+        Some((val.to_string().into_bytes(), 2))
+    } else if byte & 0xff == 0xf1 {
+        // 16-bit int
+        let raw = u16::from_le_bytes(data.get(pos + 1..pos + 3)?.try_into().ok()?);
+        Some(((raw as i16 as i64).to_string().into_bytes(), 3))
+    } else if byte & 0xff == 0xf2 {
+        // 24-bit int
+        let b = data.get(pos + 1..pos + 4)?;
+        let mut raw = (b[0] as u32) | ((b[1] as u32) << 8) | ((b[2] as u32) << 16);
+        if raw & (1 << 23) != 0 {
+            raw |= 0xff00_0000;
+        }
+        Some(((raw as i32 as i64).to_string().into_bytes(), 4))
+    } else if byte & 0xff == 0xf3 {
+        // 32-bit int
+        let raw = u32::from_le_bytes(data.get(pos + 1..pos + 5)?.try_into().ok()?);
+        Some(((raw as i32 as i64).to_string().into_bytes(), 5))
+    } else if byte & 0xff == 0xf4 {
+        // 64-bit int
+        let raw = i64::from_le_bytes(data.get(pos + 1..pos + 9)?.try_into().ok()?);
+        Some((raw.to_string().into_bytes(), 9))
+    } else if byte & 0xf0 == 0xe0 {
+        // 12-bit string
+        let b1 = *data.get(pos + 1)? as usize;
+        let len = (((byte & 0x0f) as usize) << 8) | b1;
+        let s = data.get(pos + 2..pos + 2 + len)?;
+        Some((s.to_vec(), 2 + len))
+    } else if byte == 0xf0 {
+        // 32-bit string
+        let len = u32::from_le_bytes(data.get(pos + 1..pos + 5)?.try_into().ok()?) as usize;
+        let s = data.get(pos + 5..pos + 5 + len)?;
+        Some((s.to_vec(), 5 + len))
+    } else {
+        None
+    }
+}
+
+/// Byte length of the reverse-varint backlen encoding the entry length `len`
+/// (`lpEncodeBacklen` inverse). Matches `lp_encode_backlen`'s output width.
+fn lp_backlen_size(len: usize) -> usize {
+    if len <= 127 {
+        1
+    } else if len < 16384 {
+        2
+    } else if len < 2_097_152 {
+        3
+    } else if len < 268_435_456 {
+        4
+    } else {
+        5
+    }
 }
 
 /// `rdbGenericLoadStringObject` (`rdb.c`) for a STRING: dispatch on the
@@ -16170,11 +16693,14 @@ mod tests {
         ));
     }
 
+    /// DUMP of a still-deferred type (HASH, whose insertion order the engine's
+    /// HashMap cannot reproduce) yields the aggregate-deferral error. Wave 22
+    /// added LIST/ZSET/integer-SET, so those no longer error here.
     #[test]
     fn dump_wrong_type_is_deferral_error() {
         let mut engine = Engine::new_in_memory();
-        engine.execute(&argv(&[b"RPUSH", b"l", b"a"]));
-        let reply = engine.execute(&argv(&[b"DUMP", b"l"]));
+        engine.execute(&argv(&[b"HSET", b"h", b"f", b"v"]));
+        let reply = engine.execute(&argv(&[b"DUMP", b"h"]));
         assert!(matches!(reply, RespFrame::Error(_)));
     }
 
@@ -16473,5 +16999,320 @@ mod tests {
             let back = lzf_decompress(&compressed, input.len()).unwrap();
             assert_eq!(back, input);
         }
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // DUMP / RESTORE — aggregate types (LIST, ZSET, integer SET)
+    //
+    // The expected hex blobs below were captured from valkey-server 9.1.0:
+    // `RPUSH/ZADD/SADD ...; DUMP key` via `valkey-cli --no-raw`. DUMP must be
+    // byte-identical to these.
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// LIST [a, b, c] → RDB_TYPE_LIST_QUICKLIST_2, single PACKED listpack node.
+    #[test]
+    fn dump_byte_parity_list_strings() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"RPUSH", b"l", b"a", b"b", b"c"]));
+        let got = dump_bytes(&mut engine, b"l");
+        assert_eq!(
+            got,
+            hex("12010210100000000300816102816202816302ff50000732709d0b61356a"),
+            "got {}",
+            hex_encode(&got)
+        );
+    }
+
+    /// LIST [1, 22, 333] → members auto-detected as listpack integers.
+    #[test]
+    fn dump_byte_parity_list_integers() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"RPUSH", b"l", b"1", b"22", b"333"]));
+        let got = dump_bytes(&mut engine, b"l");
+        assert_eq!(
+            got,
+            hex("1201020e0e000000030001011601c14d02ff5000457ccc4539bcbb15"),
+            "got {}",
+            hex_encode(&got)
+        );
+    }
+
+    /// ZSET {1:a, 2:b, 3:c} → RDB_TYPE_ZSET_LISTPACK, member+integer-score pairs.
+    #[test]
+    fn dump_byte_parity_zset_integer_scores() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"ZADD", b"z", b"1", b"a", b"2", b"b", b"3", b"c"]));
+        let got = dump_bytes(&mut engine, b"z");
+        assert_eq!(
+            got,
+            hex("1116160000000600816102010181620202018163020301ff5000e131b5549ef85262"),
+            "got {}",
+            hex_encode(&got)
+        );
+    }
+
+    /// ZSET with a fractional score → score stored as the d2string text "1.5".
+    #[test]
+    fn dump_byte_parity_zset_float_score() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"ZADD", b"z", b"1.5", b"x", b"2", b"y"]));
+        let got = dump_bytes(&mut engine, b"z");
+        assert_eq!(
+            got,
+            hex("111414000000040081780283312e35048179020201ff50000f5498e0353675d1"),
+            "got {}",
+            hex_encode(&got)
+        );
+    }
+
+    /// ZSET equal scores → emitted in member-lexicographic order (a, b, c).
+    #[test]
+    fn dump_byte_parity_zset_tiebreak() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"ZADD", b"z", b"5", b"b", b"5", b"a", b"5", b"c"]));
+        let got = dump_bytes(&mut engine, b"z");
+        assert_eq!(
+            got,
+            hex("1116160000000600816102050181620205018163020501ff5000ffa936ad2960f69e"),
+            "got {}",
+            hex_encode(&got)
+        );
+    }
+
+    /// SET of all-integers {3,1,2,100} → RDB_TYPE_SET_INTSET, sorted int16.
+    #[test]
+    fn dump_byte_parity_intset_int16() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"SADD", b"s", b"3", b"1", b"2", b"100"]));
+        let got = dump_bytes(&mut engine, b"s");
+        assert_eq!(
+            got,
+            hex("0b1002000000040000000100020003006400500035ac5286d49d3bbd"),
+            "got {}",
+            hex_encode(&got)
+        );
+    }
+
+    /// Wider members force int32 width for the whole intset.
+    #[test]
+    fn dump_byte_parity_intset_int32() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"SADD", b"s", b"-5", b"70000", b"3"]));
+        let got = dump_bytes(&mut engine, b"s");
+        assert_eq!(
+            got,
+            hex("0b140400000003000000fbffffff03000000701101005000ba94e7d1e8b2e6a5"),
+            "got {}",
+            hex_encode(&got)
+        );
+    }
+
+    /// A 64-bit member forces int64 width.
+    #[test]
+    fn dump_byte_parity_intset_int64() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"SADD", b"s", b"5000000000", b"1"]));
+        let got = dump_bytes(&mut engine, b"s");
+        assert_eq!(
+            got,
+            hex("0b180800000002000000010000000000000000f2052a0100000050009bdf6bfb7955d208"),
+            "got {}",
+            hex_encode(&got)
+        );
+    }
+
+    /// A SET with a non-integer member is deferred (insertion order is lost by
+    /// the engine's HashSet, so byte-parity is impossible).
+    #[test]
+    fn dump_non_integer_set_is_deferred() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"SADD", b"s", b"foo", b"bar"]));
+        assert!(matches!(
+            engine.execute(&argv(&[b"DUMP", b"s"])),
+            RespFrame::Error(_)
+        ));
+    }
+
+    /// A HASH is deferred (insertion order lost).
+    #[test]
+    fn dump_hash_is_deferred() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"HSET", b"h", b"f", b"v"]));
+        assert!(matches!(
+            engine.execute(&argv(&[b"DUMP", b"h"])),
+            RespFrame::Error(_)
+        ));
+    }
+
+    /// In-process DUMP→RESTORE round-trip for each aggregate, asserting the
+    /// reconstructed value matches via the read commands.
+    #[test]
+    fn dump_restore_round_trip_list() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"RPUSH", b"src", b"a", b"22", b"333", b"hello world"]));
+        let payload = dump_bytes(&mut engine, b"src");
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"RESTORE", b"dst", b"0", &payload]))),
+            b"+OK\r\n"
+        );
+        let got = engine.execute(&argv(&[b"LRANGE", b"dst", b"0", b"-1"]));
+        let RespFrame::Array(Some(items)) = got else {
+            panic!("expected array, got {got:?}");
+        };
+        let vals: Vec<Vec<u8>> = items
+            .iter()
+            .map(|f| match f {
+                RespFrame::Bulk(Some(b)) => b.as_bytes().to_vec(),
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            vals,
+            vec![
+                b"a".to_vec(),
+                b"22".to_vec(),
+                b"333".to_vec(),
+                b"hello world".to_vec()
+            ]
+        );
+    }
+
+    #[test]
+    fn dump_restore_round_trip_zset() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"ZADD", b"src", b"1", b"a", b"2.5", b"b", b"3", b"c"]));
+        let payload = dump_bytes(&mut engine, b"src");
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"RESTORE", b"dst", b"0", &payload]))),
+            b"+OK\r\n"
+        );
+        let got = engine.execute(&argv(&[b"ZRANGE", b"dst", b"0", b"-1", b"WITHSCORES"]));
+        let RespFrame::Array(Some(items)) = got else {
+            panic!("expected array, got {got:?}");
+        };
+        let vals: Vec<Vec<u8>> = items
+            .iter()
+            .map(|f| match f {
+                RespFrame::Bulk(Some(b)) => b.as_bytes().to_vec(),
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            vals,
+            vec![
+                b"a".to_vec(),
+                b"1".to_vec(),
+                b"b".to_vec(),
+                b"2.5".to_vec(),
+                b"c".to_vec(),
+                b"3".to_vec()
+            ]
+        );
+    }
+
+    #[test]
+    fn dump_restore_round_trip_intset() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"SADD", b"src", b"3", b"1", b"2", b"100", b"-7"]));
+        let payload = dump_bytes(&mut engine, b"src");
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"RESTORE", b"dst", b"0", &payload]))),
+            b"+OK\r\n"
+        );
+        let mut got: Vec<i64> = match engine.execute(&argv(&[b"SMEMBERS", b"dst"])) {
+            RespFrame::Array(Some(items)) => items
+                .iter()
+                .map(|f| match f {
+                    RespFrame::Bulk(Some(b)) => {
+                        std::str::from_utf8(b.as_bytes()).unwrap().parse().unwrap()
+                    }
+                    other => panic!("unexpected {other:?}"),
+                })
+                .collect(),
+            other => panic!("expected array, got {other:?}"),
+        };
+        got.sort_unstable();
+        assert_eq!(got, vec![-7, 1, 2, 3, 100]);
+    }
+
+    /// RESTORE a hardcoded real valkey LIST dump and assert the reconstruction.
+    #[test]
+    fn restore_hardcoded_valkey_list_dump() {
+        let mut engine = Engine::new_in_memory();
+        let payload = hex("12010210100000000300816102816202816302ff50000732709d0b61356a");
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"RESTORE", b"l", b"0", &payload]))),
+            b"+OK\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"TYPE", b"l"]))),
+            b"+list\r\n"
+        );
+        let got = engine.execute(&argv(&[b"LRANGE", b"l", b"0", b"-1"]));
+        let RespFrame::Array(Some(items)) = got else {
+            panic!("expected array, got {got:?}");
+        };
+        assert_eq!(items.len(), 3);
+    }
+
+    /// RESTORE a hardcoded real valkey ZSET listpack dump.
+    #[test]
+    fn restore_hardcoded_valkey_zset_dump() {
+        let mut engine = Engine::new_in_memory();
+        let payload =
+            hex("1116160000000600816102010181620202018163020301ff5000e131b5549ef85262");
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"RESTORE", b"z", b"0", &payload]))),
+            b"+OK\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"ZSCORE", b"z", b"b"]))),
+            b"$1\r\n2\r\n"
+        );
+    }
+
+    /// RESTORE a hardcoded real valkey SET_INTSET dump.
+    #[test]
+    fn restore_hardcoded_valkey_intset_dump() {
+        let mut engine = Engine::new_in_memory();
+        let payload = hex("0b1002000000040000000100020003006400500035ac5286d49d3bbd");
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"RESTORE", b"s", b"0", &payload]))),
+            b"+OK\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"SCARD", b"s"]))),
+            b":4\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"SISMEMBER", b"s", b"100"]))),
+            b":1\r\n"
+        );
+    }
+
+    /// The intset/listpack encoders are exercised directly for the finicky
+    /// bits: the backlen boundary at 64-byte string members and int widths.
+    #[test]
+    fn listpack_backlen_boundary() {
+        // A 63-byte string: encoding is 1 prefix byte + 63 data = 64, which
+        // still fits a single backlen byte (<= 127). A 64-byte string: same.
+        let mut lp = ListpackWriter::new();
+        let s63 = vec![b'x'; 63];
+        lp.append_string(&s63);
+        let bytes = lp.into_bytes();
+        // header(6) + [0xbf | 63 data | backlen=64] + 0xff
+        assert_eq!(bytes[6], 0x80 | 63);
+        // backlen byte is the entry's encoding+data length (1 + 63 = 64).
+        assert_eq!(bytes[6 + 1 + 63], 64);
+    }
+
+    #[test]
+    fn intset_encode_decode_round_trip() {
+        let mut ints = vec![100i64, -5, 70000, 3, i64::MAX, i64::MIN];
+        let blob = intset_encode(&mut ints);
+        let back = intset_decode(&blob).unwrap();
+        let mut expected = vec![100i64, -5, 70000, 3, i64::MAX, i64::MIN];
+        expected.sort_unstable();
+        assert_eq!(back, expected);
     }
 }
