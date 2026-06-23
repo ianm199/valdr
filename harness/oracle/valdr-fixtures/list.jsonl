@@ -1,0 +1,88 @@
+{"id": "lpush-create-order", "cmd": ["LPUSH", "list:l", "a", "b", "c"]}
+{"id": "lrange-after-lpush-head-order", "cmd": ["LRANGE", "list:l", "0", "-1"]}
+{"id": "rpush-appends-tail", "cmd": ["RPUSH", "list:l", "d", "e"]}
+{"id": "lrange-after-rpush", "cmd": ["LRANGE", "list:l", "0", "-1"]}
+{"id": "llen-basic", "cmd": ["LLEN", "list:l"]}
+{"id": "llen-missing", "cmd": ["LLEN", "list:missing"]}
+{"id": "lindex-zero", "cmd": ["LINDEX", "list:l", "0"]}
+{"id": "lindex-negative", "cmd": ["LINDEX", "list:l", "-1"]}
+{"id": "lindex-mid", "cmd": ["LINDEX", "list:l", "2"]}
+{"id": "lindex-oob-positive", "cmd": ["LINDEX", "list:l", "100"]}
+{"id": "lindex-oob-negative", "cmd": ["LINDEX", "list:l", "-100"]}
+{"id": "lindex-missing-key", "cmd": ["LINDEX", "list:missing", "0"]}
+{"id": "lrange-negative-start", "cmd": ["LRANGE", "list:l", "-2", "-1"]}
+{"id": "lrange-clamped-stop", "cmd": ["LRANGE", "list:l", "0", "100"]}
+{"id": "lrange-inverted-empty", "cmd": ["LRANGE", "list:l", "3", "1"]}
+{"id": "lrange-oob-empty", "cmd": ["LRANGE", "list:l", "50", "60"]}
+{"id": "lrange-missing-key", "cmd": ["LRANGE", "list:missing", "0", "-1"]}
+{"id": "lset-ok", "cmd": ["LSET", "list:l", "0", "C"]}
+{"id": "lset-applied", "cmd": ["LINDEX", "list:l", "0"]}
+{"id": "lset-negative-ok", "cmd": ["LSET", "list:l", "-1", "E"]}
+{"id": "lset-negative-applied", "cmd": ["LINDEX", "list:l", "-1"]}
+{"id": "lset-oob", "cmd": ["LSET", "list:l", "100", "z"], "mode": "error_prefix"}
+{"id": "lset-missing-key", "cmd": ["LSET", "list:missing", "0", "z"], "mode": "error_prefix"}
+{"id": "lpop-no-count", "cmd": ["LPOP", "list:l"]}
+{"id": "rpop-no-count", "cmd": ["RPOP", "list:l"]}
+{"id": "lrange-after-pops", "cmd": ["LRANGE", "list:l", "0", "-1"]}
+{"id": "lpop-count-2", "cmd": ["LPOP", "list:l", "2"]}
+{"id": "lpop-count-larger-than-len", "cmd": ["LPOP", "list:l", "50"]}
+{"id": "llen-after-drain", "cmd": ["LLEN", "list:l"]}
+{"id": "exists-after-drain", "cmd": ["EXISTS", "list:l"]}
+{"id": "type-after-drain", "cmd": ["TYPE", "list:l"]}
+{"id": "lpop-missing-no-count", "cmd": ["LPOP", "list:l"]}
+{"id": "lpop-missing-with-count", "cmd": ["LPOP", "list:l", "3"]}
+{"id": "rpop-missing-with-count", "cmd": ["RPOP", "list:missing", "3"]}
+{"id": "rpush-rebuild", "cmd": ["RPUSH", "list:c", "1", "2", "3", "4", "5"]}
+{"id": "lpop-count-zero", "cmd": ["LPOP", "list:c", "0"]}
+{"id": "rpop-count-zero", "cmd": ["RPOP", "list:c", "0"]}
+{"id": "lpop-count-still-intact", "cmd": ["LRANGE", "list:c", "0", "-1"]}
+{"id": "lpop-negative-count-error", "cmd": ["LPOP", "list:c", "-1"], "mode": "error_prefix"}
+{"id": "lpushx-existing", "cmd": ["LPUSHX", "list:c", "head"]}
+{"id": "rpushx-existing", "cmd": ["RPUSHX", "list:c", "tail"]}
+{"id": "lrange-after-pushx", "cmd": ["LRANGE", "list:c", "0", "-1"]}
+{"id": "lpushx-missing", "cmd": ["LPUSHX", "list:missing", "x"]}
+{"id": "rpushx-missing", "cmd": ["RPUSHX", "list:missing", "x"]}
+{"id": "exists-after-pushx-missing", "cmd": ["EXISTS", "list:missing"]}
+{"id": "type-is-list", "cmd": ["TYPE", "list:c"]}
+{"id": "linsert-before", "cmd": ["LINSERT", "list:c", "BEFORE", "1", "zero"]}
+{"id": "linsert-after", "cmd": ["LINSERT", "list:c", "AFTER", "5", "six"]}
+{"id": "lrange-after-linsert", "cmd": ["LRANGE", "list:c", "0", "-1"]}
+{"id": "linsert-pivot-missing", "cmd": ["LINSERT", "list:c", "BEFORE", "nope", "x"]}
+{"id": "linsert-missing-key", "cmd": ["LINSERT", "list:missing", "BEFORE", "p", "x"]}
+{"id": "linsert-syntax-error", "cmd": ["LINSERT", "list:c", "SIDEWAYS", "1", "x"], "mode": "error_prefix"}
+{"id": "lrem-build", "cmd": ["RPUSH", "list:r", "a", "b", "a", "c", "a"]}
+{"id": "lrem-positive-count", "cmd": ["LREM", "list:r", "2", "a"]}
+{"id": "lrem-after-positive", "cmd": ["LRANGE", "list:r", "0", "-1"]}
+{"id": "lrem-all-remaining", "cmd": ["LREM", "list:r", "0", "a"]}
+{"id": "lrem-after-all", "cmd": ["LRANGE", "list:r", "0", "-1"]}
+{"id": "lrem-build2", "cmd": ["RPUSH", "list:r2", "x", "y", "x", "z", "x"]}
+{"id": "lrem-negative-count", "cmd": ["LREM", "list:r2", "-2", "x"]}
+{"id": "lrem-after-negative", "cmd": ["LRANGE", "list:r2", "0", "-1"]}
+{"id": "lrem-no-match", "cmd": ["LREM", "list:r2", "0", "absent"]}
+{"id": "lrem-missing-key", "cmd": ["LREM", "list:missing", "0", "a"]}
+{"id": "lrem-build-empty", "cmd": ["RPUSH", "list:re", "only"]}
+{"id": "lrem-empties-key", "cmd": ["LREM", "list:re", "0", "only"]}
+{"id": "exists-after-lrem-empty", "cmd": ["EXISTS", "list:re"]}
+{"id": "ltrim-build", "cmd": ["RPUSH", "list:t", "a", "b", "c", "d", "e"]}
+{"id": "ltrim-keep-middle", "cmd": ["LTRIM", "list:t", "1", "3"]}
+{"id": "ltrim-after", "cmd": ["LRANGE", "list:t", "0", "-1"]}
+{"id": "ltrim-negative", "cmd": ["LTRIM", "list:t", "-2", "-1"]}
+{"id": "ltrim-after-negative", "cmd": ["LRANGE", "list:t", "0", "-1"]}
+{"id": "ltrim-oob-empties", "cmd": ["LTRIM", "list:t", "5", "9"]}
+{"id": "exists-after-ltrim-empty", "cmd": ["EXISTS", "list:t"]}
+{"id": "ltrim-missing-key", "cmd": ["LTRIM", "list:missing", "0", "-1"]}
+{"id": "wrongtype-set-string-key", "cmd": ["SET", "list:str", "hello"]}
+{"id": "wrongtype-lpush-on-string", "cmd": ["LPUSH", "list:str", "x"], "mode": "error_prefix"}
+{"id": "wrongtype-rpush-on-string", "cmd": ["RPUSH", "list:str", "x"], "mode": "error_prefix"}
+{"id": "wrongtype-lpop-on-string", "cmd": ["LPOP", "list:str"], "mode": "error_prefix"}
+{"id": "wrongtype-llen-on-string", "cmd": ["LLEN", "list:str"], "mode": "error_prefix"}
+{"id": "wrongtype-lrange-on-string", "cmd": ["LRANGE", "list:str", "0", "-1"], "mode": "error_prefix"}
+{"id": "wrongtype-lset-on-string", "cmd": ["LSET", "list:str", "0", "x"], "mode": "error_prefix"}
+{"id": "wrongtype-build-list", "cmd": ["RPUSH", "list:w", "a", "b"]}
+{"id": "wrongtype-get-on-list", "cmd": ["GET", "list:w"], "mode": "error_prefix"}
+{"id": "wrongtype-incr-on-list", "cmd": ["INCR", "list:w"], "mode": "error_prefix"}
+{"id": "wrongtype-hget-on-list", "cmd": ["HGET", "list:w", "f"], "mode": "error_prefix"}
+{"id": "wrongtype-zadd-on-list", "cmd": ["ZADD", "list:w", "1", "m"], "mode": "error_prefix"}
+{"id": "wrongtype-strlen-on-list", "cmd": ["STRLEN", "list:w"], "mode": "error_prefix"}
+{"id": "lpush-arity-error", "cmd": ["LPUSH", "list:w"], "mode": "error_prefix"}
+{"id": "lindex-non-integer", "cmd": ["LINDEX", "list:w", "notanint"], "mode": "error_prefix"}

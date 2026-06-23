@@ -5,7 +5,7 @@
 //! background workers, native filesystem access, or C Lua.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use lua_rs_runtime::{
     Lua, LuaError, LuaString, LuaVersion, Table as LuaTable, Value as LuaValue, Variadic,
@@ -73,6 +73,7 @@ enum StoredValue {
     String(Vec<u8>),
     Hash(HashMap<Vec<u8>, Vec<u8>>),
     ZSet(HashMap<Vec<u8>, f64>),
+    List(VecDeque<Vec<u8>>),
 }
 
 impl StoredValue {
@@ -84,6 +85,7 @@ impl StoredValue {
             StoredValue::String(_) => b"string",
             StoredValue::Hash(_) => b"hash",
             StoredValue::ZSet(_) => b"zset",
+            StoredValue::List(_) => b"list",
         }
     }
 }
@@ -94,6 +96,15 @@ impl StoredValue {
 enum ExpireUnit {
     Seconds,
     Milliseconds,
+}
+
+/// Which end of a list a push/pop targets, mirroring the `LPUSH`/`RPUSH`
+/// (`where == LIST_HEAD`) vs `RPUSH`/`RPOP` (`where == LIST_TAIL`) split in
+/// `t_list.c`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListEnd {
+    Head,
+    Tail,
 }
 
 /// Optional trailing condition flag of the EXPIRE family
@@ -485,6 +496,32 @@ impl<H: Host> Engine<H> {
             self.zrange_command(argv)
         } else if ascii_eq(command, b"ZRANGEBYSCORE") {
             self.zrangebyscore_command(argv)
+        } else if ascii_eq(command, b"LPUSH") {
+            self.push_command(argv, ListEnd::Head, false)
+        } else if ascii_eq(command, b"RPUSH") {
+            self.push_command(argv, ListEnd::Tail, false)
+        } else if ascii_eq(command, b"LPUSHX") {
+            self.push_command(argv, ListEnd::Head, true)
+        } else if ascii_eq(command, b"RPUSHX") {
+            self.push_command(argv, ListEnd::Tail, true)
+        } else if ascii_eq(command, b"LPOP") {
+            self.pop_command(argv, ListEnd::Head)
+        } else if ascii_eq(command, b"RPOP") {
+            self.pop_command(argv, ListEnd::Tail)
+        } else if ascii_eq(command, b"LLEN") {
+            self.llen_command(argv)
+        } else if ascii_eq(command, b"LRANGE") {
+            self.lrange_command(argv)
+        } else if ascii_eq(command, b"LINDEX") {
+            self.lindex_command(argv)
+        } else if ascii_eq(command, b"LSET") {
+            self.lset_command(argv)
+        } else if ascii_eq(command, b"LINSERT") {
+            self.linsert_command(argv)
+        } else if ascii_eq(command, b"LREM") {
+            self.lrem_command(argv)
+        } else if ascii_eq(command, b"LTRIM") {
+            self.ltrim_command(argv)
         } else if ascii_eq(command, b"SCRIPT") {
             self.script_command(argv)
         } else if ascii_eq(command, b"EVAL") {
@@ -886,7 +923,7 @@ impl<H: Host> Engine<H> {
                 RespFrame::integer(added)
             }
             Some(Entry {
-                value: StoredValue::String(_) | StoredValue::ZSet(_),
+                value: StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_),
                 ..
             }) => wrong_type(),
             None => {
@@ -919,7 +956,9 @@ impl<H: Host> Engine<H> {
                 Some(value) => bulk(value),
                 None => RespFrame::null_bulk(),
             },
-            Some(StoredValue::String(_) | StoredValue::ZSet(_)) => wrong_type(),
+            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_)) => {
+                wrong_type()
+            }
             None => RespFrame::null_bulk(),
         }
     }
@@ -939,7 +978,9 @@ impl<H: Host> Engine<H> {
                 }
                 RespFrame::array(items)
             }
-            Some(StoredValue::String(_) | StoredValue::ZSet(_)) => wrong_type(),
+            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_)) => {
+                wrong_type()
+            }
             None => RespFrame::array(Vec::new()),
         }
     }
@@ -967,7 +1008,7 @@ impl<H: Host> Engine<H> {
                 RespFrame::integer(deleted)
             }
             Some(Entry {
-                value: StoredValue::String(_) | StoredValue::ZSet(_),
+                value: StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_),
                 ..
             }) => wrong_type(),
             None => RespFrame::integer(0),
@@ -989,7 +1030,9 @@ impl<H: Host> Engine<H> {
             Some(StoredValue::Hash(fields)) => {
                 RespFrame::integer(if fields.contains_key(&argv[2]) { 1 } else { 0 })
             }
-            Some(StoredValue::String(_) | StoredValue::ZSet(_)) => wrong_type(),
+            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_)) => {
+                wrong_type()
+            }
             None => RespFrame::integer(0),
         }
     }
@@ -1000,7 +1043,9 @@ impl<H: Host> Engine<H> {
         }
         match self.get_value(&argv[1]).map(|entry| &entry.value) {
             Some(StoredValue::Hash(fields)) => RespFrame::integer(fields.len() as i64),
-            Some(StoredValue::String(_) | StoredValue::ZSet(_)) => wrong_type(),
+            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_)) => {
+                wrong_type()
+            }
             None => RespFrame::integer(0),
         }
     }
@@ -1021,7 +1066,9 @@ impl<H: Host> Engine<H> {
                 }
                 RespFrame::array(items)
             }
-            Some(StoredValue::String(_) | StoredValue::ZSet(_)) => wrong_type(),
+            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_)) => {
+                wrong_type()
+            }
             None => {
                 let items = (2..argv.len()).map(|_| RespFrame::null_bulk()).collect();
                 RespFrame::array(items)
@@ -1039,7 +1086,9 @@ impl<H: Host> Engine<H> {
                 keys.sort();
                 RespFrame::array(keys.into_iter().map(|field| bulk(field)).collect())
             }
-            Some(StoredValue::String(_) | StoredValue::ZSet(_)) => wrong_type(),
+            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_)) => {
+                wrong_type()
+            }
             None => RespFrame::array(Vec::new()),
         }
     }
@@ -1054,7 +1103,9 @@ impl<H: Host> Engine<H> {
                 pairs.sort_by(|(left, _), (right, _)| left.cmp(right));
                 RespFrame::array(pairs.into_iter().map(|(_, value)| bulk(value)).collect())
             }
-            Some(StoredValue::String(_) | StoredValue::ZSet(_)) => wrong_type(),
+            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_)) => {
+                wrong_type()
+            }
             None => RespFrame::array(Vec::new()),
         }
     }
@@ -1068,7 +1119,9 @@ impl<H: Host> Engine<H> {
                 Some(value) => RespFrame::integer(value.len() as i64),
                 None => RespFrame::integer(0),
             },
-            Some(StoredValue::String(_) | StoredValue::ZSet(_)) => wrong_type(),
+            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_)) => {
+                wrong_type()
+            }
             None => RespFrame::integer(0),
         }
     }
@@ -1092,7 +1145,7 @@ impl<H: Host> Engine<H> {
                 RespFrame::integer(1)
             }
             Some(Entry {
-                value: StoredValue::String(_) | StoredValue::ZSet(_),
+                value: StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_),
                 ..
             }) => wrong_type(),
             None => {
@@ -1126,7 +1179,7 @@ impl<H: Host> Engine<H> {
                 ..
             }) => fields,
             Some(Entry {
-                value: StoredValue::String(_) | StoredValue::ZSet(_),
+                value: StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_),
                 ..
             }) => return wrong_type(),
             None => {
@@ -1174,7 +1227,7 @@ impl<H: Host> Engine<H> {
                 }
             }
             Some(Entry {
-                value: StoredValue::String(_) | StoredValue::ZSet(_),
+                value: StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_),
                 ..
             }) => return wrong_type(),
             None => {
@@ -1495,6 +1548,390 @@ impl<H: Host> Engine<H> {
             }
         }
         RespFrame::array(items)
+    }
+
+    /// LPUSH / RPUSH / LPUSHX / RPUSHX (`pushGenericCommand`, `t_list.c`).
+    /// Each value is added to the chosen `end` in argument order, so
+    /// `LPUSH k a b c` yields `c, b, a` at the head. The `x` (LPUSHX/RPUSHX)
+    /// variants never create a missing key — they reply `:0`. A non-list value
+    /// is rejected with WRONGTYPE. Replies the new list length.
+    fn push_command(&mut self, argv: &[Vec<u8>], end: ListEnd, x: bool) -> RespFrame {
+        if argv.len() < 3 {
+            let name: &[u8] = match (end, x) {
+                (ListEnd::Head, false) => b"lpush",
+                (ListEnd::Tail, false) => b"rpush",
+                (ListEnd::Head, true) => b"lpushx",
+                (ListEnd::Tail, true) => b"rpushx",
+            };
+            return wrong_arity(name);
+        }
+        self.purge_if_expired(&argv[1]);
+        let expire_at_ms = self.db.get(&argv[1]).and_then(|entry| entry.expire_at_ms);
+        let new_len = match self.db.get_mut(&argv[1]) {
+            Some(Entry {
+                value: StoredValue::List(items),
+                ..
+            }) => {
+                for value in &argv[2..] {
+                    match end {
+                        ListEnd::Head => items.push_front(value.clone()),
+                        ListEnd::Tail => items.push_back(value.clone()),
+                    }
+                }
+                items.len() as i64
+            }
+            Some(_) => return wrong_type(),
+            None => {
+                if x {
+                    return RespFrame::integer(0);
+                }
+                let mut items = VecDeque::new();
+                for value in &argv[2..] {
+                    match end {
+                        ListEnd::Head => items.push_front(value.clone()),
+                        ListEnd::Tail => items.push_back(value.clone()),
+                    }
+                }
+                let len = items.len() as i64;
+                self.db.insert(
+                    argv[1].clone(),
+                    Entry {
+                        value: StoredValue::List(items),
+                        expire_at_ms,
+                    },
+                );
+                len
+            }
+        };
+        self.note_write(&argv[1]);
+        RespFrame::integer(new_len)
+    }
+
+    /// LPOP / RPOP (`popGenericCommand`, `t_list.c`). Without a count: replies
+    /// a bulk of the popped element, or a null bulk when the key is absent.
+    /// With a count (>= 0): replies an array of up to `count` elements popped
+    /// in order, or a null array (`*-1`) when the key is absent; `count == 0`
+    /// on a present key replies an empty array. A negative count is an error.
+    /// Emptying the list deletes the key.
+    fn pop_command(&mut self, argv: &[Vec<u8>], end: ListEnd) -> RespFrame {
+        if !(2..=3).contains(&argv.len()) {
+            let name: &[u8] = match end {
+                ListEnd::Head => b"lpop",
+                ListEnd::Tail => b"rpop",
+            };
+            return wrong_arity(name);
+        }
+        let count: Option<i64> = if argv.len() == 3 {
+            let Some(n) = parse_i64(&argv[2]) else {
+                return err(b"ERR value is not an integer or out of range");
+            };
+            if n < 0 {
+                return err(b"ERR value is out of range, must be positive");
+            }
+            Some(n)
+        } else {
+            None
+        };
+
+        self.purge_if_expired(&argv[1]);
+        let popped: Option<Vec<Vec<u8>>> = match self.db.get_mut(&argv[1]) {
+            Some(Entry {
+                value: StoredValue::List(items),
+                ..
+            }) => {
+                let take = match count {
+                    None => 1,
+                    Some(n) => (n as usize).min(items.len()),
+                };
+                let mut out = Vec::with_capacity(take);
+                for _ in 0..take {
+                    let next = match end {
+                        ListEnd::Head => items.pop_front(),
+                        ListEnd::Tail => items.pop_back(),
+                    };
+                    match next {
+                        Some(v) => out.push(v),
+                        None => break,
+                    }
+                }
+                Some(out)
+            }
+            Some(_) => return wrong_type(),
+            None => None,
+        };
+
+        let list_now_empty = matches!(
+            self.db.get(&argv[1]),
+            Some(Entry { value: StoredValue::List(items), .. }) if items.is_empty()
+        );
+        if list_now_empty {
+            self.db.remove(&argv[1]);
+        }
+        if popped.as_ref().is_some_and(|out| !out.is_empty()) {
+            self.note_write(&argv[1]);
+        }
+
+        match (count, popped) {
+            (None, None) => RespFrame::null_bulk(),
+            (None, Some(mut out)) => match out.pop() {
+                Some(first) => bulk(first),
+                None => RespFrame::null_bulk(),
+            },
+            (Some(_), None) => RespFrame::null_array(),
+            (Some(_), Some(out)) => {
+                RespFrame::array(out.into_iter().map(bulk).collect())
+            }
+        }
+    }
+
+    /// LLEN key (`llenCommand`, `t_list.c`): the list length, or `:0` for a
+    /// missing key. A non-list value is WRONGTYPE.
+    fn llen_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 2 {
+            return wrong_arity(b"llen");
+        }
+        match self.get_value(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::List(items)) => RespFrame::integer(items.len() as i64),
+            Some(_) => wrong_type(),
+            None => RespFrame::integer(0),
+        }
+    }
+
+    /// LRANGE key start stop (`lrangeCommand`, `t_list.c`). Negative indices
+    /// count from the tail; the range is clamped to `[0, len-1]`. An empty or
+    /// inverted range (or a missing key) replies an empty array.
+    fn lrange_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 4 {
+            return wrong_arity(b"lrange");
+        }
+        let Some(start) = parse_i64(&argv[2]) else {
+            return err(b"ERR value is not an integer or out of range");
+        };
+        let Some(stop) = parse_i64(&argv[3]) else {
+            return err(b"ERR value is not an integer or out of range");
+        };
+        match self.get_value(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::List(items)) => match resolve_list_range(start, stop, items.len()) {
+                None => RespFrame::array(Vec::new()),
+                Some((s, e)) => {
+                    let mut out = Vec::with_capacity(e - s + 1);
+                    for i in s..=e {
+                        if let Some(item) = items.get(i) {
+                            out.push(bulk(item));
+                        }
+                    }
+                    RespFrame::array(out)
+                }
+            },
+            Some(_) => wrong_type(),
+            None => RespFrame::array(Vec::new()),
+        }
+    }
+
+    /// LINDEX key index (`lindexCommand`, `t_list.c`). Negative index counts
+    /// from the tail; an out-of-range index (or missing key) replies a null
+    /// bulk.
+    fn lindex_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 3 {
+            return wrong_arity(b"lindex");
+        }
+        let Some(index) = parse_i64(&argv[2]) else {
+            return err(b"ERR value is not an integer or out of range");
+        };
+        match self.get_value(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::List(items)) => {
+                match resolve_list_index(index, items.len()).and_then(|i| items.get(i)) {
+                    Some(value) => bulk(value),
+                    None => RespFrame::null_bulk(),
+                }
+            }
+            Some(_) => wrong_type(),
+            None => RespFrame::null_bulk(),
+        }
+    }
+
+    /// LSET key index value (`lsetCommand`, `t_list.c`). "ERR no such key" when
+    /// the key is missing, "ERR index out of range" when the (tail-relative)
+    /// index falls outside the list, otherwise sets the slot and replies +OK.
+    fn lset_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 4 {
+            return wrong_arity(b"lset");
+        }
+        let Some(index) = parse_i64(&argv[2]) else {
+            return err(b"ERR value is not an integer or out of range");
+        };
+        self.purge_if_expired(&argv[1]);
+        match self.db.get_mut(&argv[1]) {
+            Some(Entry {
+                value: StoredValue::List(items),
+                ..
+            }) => match resolve_list_index(index, items.len()) {
+                None => err(b"ERR index out of range"),
+                Some(i) => {
+                    items[i] = argv[3].clone();
+                    self.note_write(&argv[1]);
+                    simple(b"OK")
+                }
+            },
+            Some(_) => wrong_type(),
+            None => err(b"ERR no such key"),
+        }
+    }
+
+    /// LINSERT key BEFORE|AFTER pivot element (`linsertCommand`, `t_list.c`).
+    /// Replies the new length on success, `:0` when the key is missing, and
+    /// `:-1` when the pivot is not present.
+    fn linsert_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 5 {
+            return wrong_arity(b"linsert");
+        }
+        let after = if ascii_eq(&argv[2], b"after") {
+            true
+        } else if ascii_eq(&argv[2], b"before") {
+            false
+        } else {
+            return err(b"ERR syntax error");
+        };
+        self.purge_if_expired(&argv[1]);
+        let outcome = match self.db.get_mut(&argv[1]) {
+            Some(Entry {
+                value: StoredValue::List(items),
+                ..
+            }) => {
+                let found = items.iter().position(|item| item == &argv[3]);
+                match found {
+                    None => -1,
+                    Some(i) => {
+                        let insert_at = if after { i + 1 } else { i };
+                        items.insert(insert_at, argv[4].clone());
+                        items.len() as i64
+                    }
+                }
+            }
+            Some(_) => return wrong_type(),
+            None => 0,
+        };
+        if outcome > 0 {
+            self.note_write(&argv[1]);
+        }
+        RespFrame::integer(outcome)
+    }
+
+    /// LREM key count element (`lremCommand`, `t_list.c`). Positive `count`
+    /// removes up to `count` matches scanning from the head, negative scans
+    /// from the tail, `0` removes every match. Replies the number removed and
+    /// deletes the key when the list ends empty.
+    fn lrem_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 4 {
+            return wrong_arity(b"lrem");
+        }
+        let Some(count) = parse_i64(&argv[2]) else {
+            return err(b"ERR value is not an integer or out of range");
+        };
+        self.purge_if_expired(&argv[1]);
+        let removed = match self.db.get_mut(&argv[1]) {
+            Some(Entry {
+                value: StoredValue::List(items),
+                ..
+            }) => {
+                let limit = count.unsigned_abs() as usize;
+                let target = &argv[3];
+                let mut removed: i64 = 0;
+                if count >= 0 {
+                    let mut i = 0usize;
+                    while i < items.len() {
+                        if &items[i] == target {
+                            items.remove(i);
+                            removed += 1;
+                            if count > 0 && removed as usize >= limit {
+                                break;
+                            }
+                        } else {
+                            i += 1;
+                        }
+                    }
+                } else {
+                    let mut i = items.len();
+                    while i > 0 {
+                        i -= 1;
+                        if &items[i] == target {
+                            items.remove(i);
+                            removed += 1;
+                            if removed as usize >= limit {
+                                break;
+                            }
+                        }
+                    }
+                }
+                removed
+            }
+            Some(_) => return wrong_type(),
+            None => return RespFrame::integer(0),
+        };
+        let list_now_empty = matches!(
+            self.db.get(&argv[1]),
+            Some(Entry { value: StoredValue::List(items), .. }) if items.is_empty()
+        );
+        if list_now_empty {
+            self.db.remove(&argv[1]);
+        }
+        if removed > 0 {
+            self.note_write(&argv[1]);
+        }
+        RespFrame::integer(removed)
+    }
+
+    /// LTRIM key start stop (`ltrimCommand`, `t_list.c`). Retains only the
+    /// inclusive `[start, stop]` range (negative indices count from the tail,
+    /// clamped). An empty resulting list deletes the key. Always replies +OK.
+    fn ltrim_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 4 {
+            return wrong_arity(b"ltrim");
+        }
+        let Some(start) = parse_i64(&argv[2]) else {
+            return err(b"ERR value is not an integer or out of range");
+        };
+        let Some(stop) = parse_i64(&argv[3]) else {
+            return err(b"ERR value is not an integer or out of range");
+        };
+        self.purge_if_expired(&argv[1]);
+        let removed = match self.db.get_mut(&argv[1]) {
+            Some(Entry {
+                value: StoredValue::List(items),
+                ..
+            }) => {
+                let len = items.len();
+                match resolve_list_range(start, stop, len) {
+                    None => {
+                        items.clear();
+                        len as i64
+                    }
+                    Some((s, e)) => {
+                        for _ in 0..s {
+                            items.pop_front();
+                        }
+                        let new_len = e - s + 1;
+                        while items.len() > new_len {
+                            items.pop_back();
+                        }
+                        len.saturating_sub(new_len) as i64
+                    }
+                }
+            }
+            Some(_) => return wrong_type(),
+            None => return simple(b"OK"),
+        };
+        let list_now_empty = matches!(
+            self.db.get(&argv[1]),
+            Some(Entry { value: StoredValue::List(items), .. }) if items.is_empty()
+        );
+        if list_now_empty {
+            self.db.remove(&argv[1]);
+        }
+        if removed > 0 {
+            self.note_write(&argv[1]);
+        }
+        simple(b"OK")
     }
 
     /// The generic EXPIRE / PEXPIRE / EXPIREAT / PEXPIREAT implementation,
@@ -2314,6 +2751,18 @@ fn encode_entry(key: &[u8], entry: &Entry) -> JsonMap<String, JsonValue> {
                 ),
             );
         }
+        StoredValue::List(items) => {
+            object.insert("type".to_owned(), JsonValue::String("list".to_owned()));
+            object.insert(
+                "items".to_owned(),
+                JsonValue::Array(
+                    items
+                        .iter()
+                        .map(|item| JsonValue::String(hex_encode(item)))
+                        .collect(),
+                ),
+            );
+        }
     }
     object
 }
@@ -2398,6 +2847,18 @@ fn decode_entry(object: &JsonMap<String, JsonValue>) -> Result<(Vec<u8>, Entry),
             }
             StoredValue::ZSet(decoded_members)
         }
+        "list" => {
+            let items = object
+                .get("items")
+                .and_then(JsonValue::as_array)
+                .ok_or(SnapshotError::MissingField("items"))?;
+            let mut decoded_items = VecDeque::with_capacity(items.len());
+            for item in items {
+                let item = hex_decode(item.as_str().ok_or(SnapshotError::InvalidField("items"))?)?;
+                decoded_items.push_back(item);
+            }
+            StoredValue::List(decoded_items)
+        }
         _ => return Err(SnapshotError::InvalidField("type")),
     };
     Ok((
@@ -2407,6 +2868,39 @@ fn decode_entry(object: &JsonMap<String, JsonValue>) -> Result<(Vec<u8>, Entry),
             expire_at_ms,
         },
     ))
+}
+
+/// Normalise a signed list index into `[0, len)` for read/write access,
+/// mirroring the index handling in `lindexCommand` / `lsetCommand`
+/// (`t_list.c`). Negative indices count from the tail. Returns `None` when
+/// the resolved index is out of range.
+fn resolve_list_index(index: i64, len: usize) -> Option<usize> {
+    let len_i = len as i64;
+    let resolved = if index < 0 { index + len_i } else { index };
+    if resolved < 0 || resolved >= len_i {
+        return None;
+    }
+    Some(resolved as usize)
+}
+
+/// Resolve `start` / `stop` for `LRANGE` / `LTRIM` (`addListRangeReply` /
+/// `ltrimCommand`, `t_list.c`). Negative indices count from the tail; the
+/// result is clamped to `0 <= s <= e < len`. Returns `None` for an empty or
+/// inverted range.
+fn resolve_list_range(start: i64, stop: i64, len: usize) -> Option<(usize, usize)> {
+    let len_i = len as i64;
+    let mut s = if start < 0 { start + len_i } else { start };
+    let mut e = if stop < 0 { stop + len_i } else { stop };
+    if s < 0 {
+        s = 0;
+    }
+    if s > e || s >= len_i {
+        return None;
+    }
+    if e >= len_i {
+        e = len_i - 1;
+    }
+    Some((s as usize, e as usize))
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -3362,6 +3856,7 @@ mod tests {
         let seed_n: &[&[u8]] = &[b"SET", b"n", b"5"];
         let seed_h: &[&[u8]] = &[b"HSET", b"h", b"f", b"v"];
         let seed_z: &[&[u8]] = &[b"ZADD", b"z", b"1", b"a"];
+        let seed_l: &[&[u8]] = &[b"RPUSH", b"l", b"a", b"b", b"c"];
 
         let cases: &[(&[&[&[u8]]], &[&[u8]])] = &[
             (&[], &[b"SET", b"k", b"v"]),
@@ -3430,6 +3925,27 @@ mod tests {
             (&[seed_z], &[b"ZCARD", b"z"]),
             (&[seed_z], &[b"ZRANGE", b"z", b"0", b"-1"]),
             (&[seed_z], &[b"ZRANGEBYSCORE", b"z", b"-inf", b"+inf"]),
+            (&[], &[b"LPUSH", b"l", b"a", b"b", b"c"]),
+            (&[], &[b"RPUSH", b"l", b"a", b"b", b"c"]),
+            (&[seed_l], &[b"LPUSHX", b"l", b"z"]),
+            (&[], &[b"LPUSHX", b"missing", b"z"]),
+            (&[seed_l], &[b"RPUSHX", b"l", b"z"]),
+            (&[seed_l], &[b"LPOP", b"l"]),
+            (&[seed_l], &[b"RPOP", b"l"]),
+            (&[seed_l], &[b"LPOP", b"l", b"2"]),
+            (&[seed_l], &[b"LPOP", b"l", b"9"]),
+            (&[&[b"RPUSH", b"l", b"x"]], &[b"LPOP", b"l"]),
+            (&[], &[b"LPOP", b"missing"]),
+            (&[seed_l], &[b"LLEN", b"l"]),
+            (&[seed_l], &[b"LRANGE", b"l", b"0", b"-1"]),
+            (&[seed_l], &[b"LINDEX", b"l", b"0"]),
+            (&[seed_l], &[b"LSET", b"l", b"0", b"z"]),
+            (&[seed_l], &[b"LINSERT", b"l", b"BEFORE", b"b", b"x"]),
+            (&[seed_l], &[b"LINSERT", b"l", b"AFTER", b"missing", b"x"]),
+            (&[seed_l], &[b"LREM", b"l", b"0", b"a"]),
+            (&[&[b"RPUSH", b"l", b"a", b"a", b"a"]], &[b"LREM", b"l", b"0", b"a"]),
+            (&[seed_l], &[b"LTRIM", b"l", b"1", b"1"]),
+            (&[seed_l], &[b"LTRIM", b"l", b"5", b"9"]),
             (&[], &[b"SCRIPT", b"LOAD", b"return 1"]),
             (&[], &[b"EVAL", b"return 1", b"0"]),
             (
@@ -4516,6 +5032,32 @@ mod tests {
         assert_eq!(
             resp2(&restored.execute(&argv(&[b"ZSCORE", b"edges", b"top"]))),
             b"$3\r\ninf\r\n"
+        );
+    }
+
+    #[test]
+    fn snapshot_round_trip_preserves_list_order() {
+        let mut engine = Engine::new(NoopHost::new(1_000));
+        engine.execute(&argv(&[b"RPUSH", b"queue", b"a", b"b", b"c", b"d"]));
+        engine.execute(&argv(&[b"LPUSH", b"stack", b"x", b"y", b"z"]));
+
+        let snapshot = engine.export_snapshot();
+        let mut restored = Engine::new(NoopHost::new(1_000));
+        restored.import_snapshot(&snapshot).unwrap();
+
+        for key in [&b"queue"[..], b"stack"] {
+            assert_eq!(
+                resp2(&engine.execute(&argv(&[b"LRANGE", key, b"0", b"-1"]))),
+                resp2(&restored.execute(&argv(&[b"LRANGE", key, b"0", b"-1"])))
+            );
+        }
+        assert_eq!(
+            resp2(&restored.execute(&argv(&[b"LRANGE", b"stack", b"0", b"-1"]))),
+            b"*3\r\n$1\r\nz\r\n$1\r\ny\r\n$1\r\nx\r\n"
+        );
+        assert_eq!(
+            resp2(&restored.execute(&argv(&[b"TYPE", b"queue"]))),
+            b"+list\r\n"
         );
     }
 
