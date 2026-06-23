@@ -167,6 +167,13 @@ deferrals**, each blocked by a concrete reason — NOT by effort. Run
   doesn't model.
 
 ## Log (newest first)
+- 2026-06-23 — Wave 21 landed (`cf24ca8`): DUMP/RESTORE for STRING values with
+  full byte-parity incl. LZF-compressed long strings (RDB ver 80, CRC64-Jones;
+  validated vs 2282 captured valkey dumps, 0 diverge). RESTORE via 21 cargo unit
+  tests (binary input can't ride JSON fixtures) incl. hardcoded real-valkey dumps.
+  Oracle 2029/0/18, 77 cargo tests. Aggregate-type DUMP deferred (next: the
+  order-preserving subset list/zset/intset; hash + non-int-set blocked by the
+  engine's HashMap losing valkey's insertion order — a structural limit).
 - 2026-06-23 — Wave 20 landed (`09a498e`): SCAN/HSCAN/SSCAN/ZSCAN single-pass,
   unlocked by an additive `scan_reply` oracle mode (`5c33f81`, cursor exact +
   elements set_equal — verified inert before use). Oracle 1989/0/18 (crossed 2000
