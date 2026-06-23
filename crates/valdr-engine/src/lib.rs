@@ -1037,6 +1037,12 @@ impl<H: Host> Engine<H> {
             self.keys_command(argv)
         } else if ascii_eq(command, b"LCS") {
             self.lcs_command(argv)
+        } else if ascii_eq(command, b"PFADD") {
+            self.pfadd_command(argv)
+        } else if ascii_eq(command, b"PFCOUNT") {
+            self.pfcount_command(argv)
+        } else if ascii_eq(command, b"PFMERGE") {
+            self.pfmerge_command(argv)
         } else {
             unknown_command_error(command, &argv[1..])
         }
@@ -7035,6 +7041,158 @@ impl<H: Host> Engine<H> {
         lua_to_resp(&value)
     }
 
+    /// PFADD key [element ...] (`pfaddCommand`, `hyperloglog.c`).
+    ///
+    /// Adds elements to the HyperLogLog stored at `key`, creating a fresh
+    /// (dense, all-zero) HLL when the key is missing. Replies `:1` when the key
+    /// was created or any register was updated (cardinality estimate may have
+    /// changed), `:0` otherwise. Returns the HLL-specific WRONGTYPE error when
+    /// the existing key holds a value that is not a valid `HYLL` string. A bare
+    /// `PFADD key` with no elements still creates an empty HLL and replies `:1`.
+    ///
+    /// `note_write` is called exactly once, only when the key was created or a
+    /// register changed (mirroring the C `if (updated)` guard around
+    /// `signalModifiedKey`).
+    fn pfadd_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 2 {
+            return wrong_arity(b"pfadd");
+        }
+        self.purge_if_expired(&argv[1]);
+
+        let mut updated = false;
+        let mut buf = match self.db.get(&argv[1]).map(|entry| &entry.value) {
+            None => {
+                updated = true;
+                hll_create_dense()
+            }
+            Some(StoredValue::String(bytes)) => {
+                if !hll_is_valid(bytes) {
+                    return err(HLL_WRONG_TYPE_ERR);
+                }
+                bytes.clone()
+            }
+            Some(_) => return err(HLL_WRONG_TYPE_ERR),
+        };
+
+        let registers = &mut buf[HLL_HDR_SIZE..];
+        for ele in &argv[2..] {
+            if hll_dense_add(registers, ele) {
+                updated = true;
+            }
+        }
+
+        if updated {
+            hll_invalidate_cache(&mut buf);
+            let expire_at_ms = self.db.get(&argv[1]).and_then(|entry| entry.expire_at_ms);
+            self.db.insert(
+                argv[1].clone(),
+                Entry {
+                    value: StoredValue::String(buf),
+                    expire_at_ms,
+                },
+            );
+            self.note_write(&argv[1]);
+            RespFrame::integer(1)
+        } else {
+            RespFrame::integer(0)
+        }
+    }
+
+    /// PFCOUNT key [key ...] (`pfcountCommand`, `hyperloglog.c`).
+    ///
+    /// Returns the approximate cardinality of the HyperLogLog at `key`. With
+    /// more than one key the cardinality of the *union* of the source HLLs is
+    /// returned: the keys are merged into a temporary register array that is
+    /// never written back, so PFCOUNT never mutates the database. Missing keys
+    /// count as empty HLLs. Returns the HLL-specific WRONGTYPE error if any key
+    /// holds a non-HLL value. This handler never calls `note_write` (read-only):
+    /// the C cache write-back is a pure micro-optimisation with no observable
+    /// effect, so the dense-only port recomputes the estimate each time.
+    fn pfcount_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 2 {
+            return wrong_arity(b"pfcount");
+        }
+
+        if argv.len() > 2 {
+            let mut max = vec![0u8; HLL_REGISTERS];
+            for key in &argv[1..] {
+                self.purge_if_expired(key);
+                match self.db.get(key).map(|entry| &entry.value) {
+                    None => continue,
+                    Some(StoredValue::String(bytes)) => {
+                        if !hll_is_valid(bytes) {
+                            return err(HLL_WRONG_TYPE_ERR);
+                        }
+                        hll_merge_dense(&mut max, &bytes[HLL_HDR_SIZE..]);
+                    }
+                    Some(_) => return err(HLL_WRONG_TYPE_ERR),
+                }
+            }
+            return RespFrame::integer(hll_count_raw(&max) as i64);
+        }
+
+        self.purge_if_expired(&argv[1]);
+        match self.db.get(&argv[1]).map(|entry| &entry.value) {
+            None => RespFrame::integer(0),
+            Some(StoredValue::String(bytes)) => {
+                if !hll_is_valid(bytes) {
+                    return err(HLL_WRONG_TYPE_ERR);
+                }
+                RespFrame::integer(hll_count_dense(&bytes[HLL_HDR_SIZE..]) as i64)
+            }
+            Some(_) => err(HLL_WRONG_TYPE_ERR),
+        }
+    }
+
+    /// PFMERGE destkey [srckey ...] (`pfmergeCommand`, `hyperloglog.c`).
+    ///
+    /// Merges all source HLLs *and* the existing destination HLL register-wise
+    /// (taking the max of each of the 16384 registers) and writes the result
+    /// back to `destkey`, creating it if absent. Replies `+OK`. Returns the
+    /// HLL-specific WRONGTYPE error if `destkey` or any source key holds a
+    /// non-HLL value. Always calls `note_write` on the destination (the C
+    /// command unconditionally marks the dest modified).
+    fn pfmerge_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 2 {
+            return wrong_arity(b"pfmerge");
+        }
+
+        let mut max = vec![0u8; HLL_REGISTERS];
+        for key in &argv[1..] {
+            self.purge_if_expired(key);
+            match self.db.get(key).map(|entry| &entry.value) {
+                None => continue,
+                Some(StoredValue::String(bytes)) => {
+                    if !hll_is_valid(bytes) {
+                        return err(HLL_WRONG_TYPE_ERR);
+                    }
+                    hll_merge_dense(&mut max, &bytes[HLL_HDR_SIZE..]);
+                }
+                Some(_) => return err(HLL_WRONG_TYPE_ERR),
+            }
+        }
+
+        let dest_expire = self.db.get(&argv[1]).and_then(|entry| entry.expire_at_ms);
+        let mut dest = hll_create_dense();
+        let registers = &mut dest[HLL_HDR_SIZE..];
+        for (i, &val) in max.iter().enumerate() {
+            if val != 0 {
+                hll_dense_set_register(registers, i, val);
+            }
+        }
+        hll_invalidate_cache(&mut dest);
+
+        self.db.insert(
+            argv[1].clone(),
+            Entry {
+                value: StoredValue::String(dest),
+                expire_at_ms: dest_expire,
+            },
+        );
+        self.note_write(&argv[1]);
+        RespFrame::simple("OK")
+    }
+
     fn get_value(&mut self, key: &[u8]) -> Option<&Entry> {
         self.purge_if_expired(key);
         self.db.get(key)
@@ -9351,6 +9509,249 @@ fn simple(value: &[u8]) -> RespFrame {
     RespFrame::simple(RedisString::from_bytes(value))
 }
 
+// ── HyperLogLog (PFADD / PFCOUNT / PFMERGE) ──────────────────────────────────
+//
+// A faithful port of valkey's `hyperloglog.c` cardinality machinery, reduced to
+// the dense-only path the edge engine needs. An HLL is "just a string": these
+// functions operate on the raw `Vec<u8>` held in `StoredValue::String`, in the
+// exact `HYLL`-header + 16384×6-bit-register byte format valkey uses. Storing
+// dense-only is observationally identical to valkey's sparse form for
+// PFADD/PFCOUNT/PFMERGE: the registers (hence the estimate) are the same, and
+// valkey auto-promotes sparse→dense anyway. We never expose the raw bytes via
+// GET on an HLL key, so the on-disk encoding difference is invisible.
+//
+// Hash: `MurmurHash64A`, seed `0xadc83b19` (`MurmurHash64A`, `hyperloglog.c`).
+// Estimator: Ertl loglog-beta sigma/tau (`hllSigma`/`hllTau`/`hllCount`,
+// arXiv:1702.01284) — the exact estimator the pinned valkey uses, so the
+// integer estimate is byte-for-byte identical at every cardinality.
+
+/// Precision: bits used to index a register (`HLL_P`, `hyperloglog.c`).
+const HLL_P: u32 = 14;
+/// Bits for the leading-zero count (`HLL_Q` = 64 - P = 50).
+const HLL_Q: u32 = 64 - HLL_P;
+/// Number of registers: 2^14 = 16384 (`HLL_REGISTERS`).
+const HLL_REGISTERS: usize = 1 << HLL_P;
+/// Mask to extract the register index from a hash (`HLL_P_MASK`).
+const HLL_P_MASK: u64 = (HLL_REGISTERS as u64) - 1;
+/// Bits stored per register (`HLL_BITS`).
+const HLL_BITS: u32 = 6;
+/// Largest value a 6-bit register can hold (`HLL_REGISTER_MAX` = 63).
+const HLL_REGISTER_MAX: u8 = ((1u32 << HLL_BITS) - 1) as u8;
+/// Size of the fixed 16-byte HLL header (`HLL_HDR_SIZE`).
+const HLL_HDR_SIZE: usize = 16;
+/// Total bytes of a dense HLL: header + ceil(16384*6/8) = 16 + 12288 = 12304
+/// (`HLL_DENSE_SIZE`).
+const HLL_DENSE_SIZE: usize = HLL_HDR_SIZE + (HLL_REGISTERS * HLL_BITS as usize).div_ceil(8);
+/// Dense encoding discriminant stored in header byte [4] (`HLL_DENSE`).
+const HLL_DENSE: u8 = 0;
+/// 0.5/ln(2) bias constant (`HLL_ALPHA_INF`).
+const HLL_ALPHA_INF: f64 = 0.721_347_520_444_481_7;
+/// Byte offset of the cached-cardinality field within the header.
+const HLL_HDR_CARD_OFF: usize = 8;
+/// The HLL-specific WRONGTYPE payload (`hyperloglog.c`, `isHLLObjectOrReply`).
+const HLL_WRONG_TYPE_ERR: &[u8] = b"WRONGTYPE Key is not a valid HyperLogLog string value.";
+
+/// Read dense register `regnum` (6-bit packed) (`HLL_DENSE_GET_REGISTER`).
+#[inline]
+fn hll_dense_get_register(registers: &[u8], regnum: usize) -> u8 {
+    let byte_idx = regnum * HLL_BITS as usize / 8;
+    let fb = (regnum * HLL_BITS as usize) & 7;
+    let fb8 = 8 - fb;
+    let b0 = registers[byte_idx] as u32;
+    let b1 = registers.get(byte_idx + 1).copied().unwrap_or(0) as u32;
+    ((b0 >> fb | b1 << fb8) & HLL_REGISTER_MAX as u32) as u8
+}
+
+/// Write dense register `regnum` to `val` (`HLL_DENSE_SET_REGISTER`).
+#[inline]
+fn hll_dense_set_register(registers: &mut [u8], regnum: usize, val: u8) {
+    let byte_idx = regnum * HLL_BITS as usize / 8;
+    let fb = (regnum * HLL_BITS as usize) & 7;
+    let fb8 = 8 - fb;
+    let v = val as u32;
+    registers[byte_idx] &= !((HLL_REGISTER_MAX as u32) << fb) as u8;
+    registers[byte_idx] |= (v << fb) as u8;
+    if let Some(next) = registers.get_mut(byte_idx + 1) {
+        *next &= !((HLL_REGISTER_MAX as u32) >> fb8) as u8;
+        *next |= (v >> fb8) as u8;
+    }
+}
+
+/// `MurmurHash64A` — the endian-neutral 64-bit Murmur2 variant valkey hashes
+/// HLL elements with (`hyperloglog.c`).
+fn hll_murmur64a(key: &[u8], seed: u32) -> u64 {
+    const M: u64 = 0xc6a4a7935bd1e995;
+    const R: u32 = 47;
+    let len = key.len();
+    let mut h: u64 = (seed as u64) ^ (len as u64).wrapping_mul(M);
+    let chunks = len / 8;
+    for i in 0..chunks {
+        let base = i * 8;
+        let mut k = key[base] as u64;
+        k |= (key[base + 1] as u64) << 8;
+        k |= (key[base + 2] as u64) << 16;
+        k |= (key[base + 3] as u64) << 24;
+        k |= (key[base + 4] as u64) << 32;
+        k |= (key[base + 5] as u64) << 40;
+        k |= (key[base + 6] as u64) << 48;
+        k |= (key[base + 7] as u64) << 56;
+        k = k.wrapping_mul(M);
+        k ^= k >> R;
+        k = k.wrapping_mul(M);
+        h ^= k;
+        h = h.wrapping_mul(M);
+    }
+    let tail = &key[chunks * 8..];
+    let mut i = tail.len();
+    while i > 0 {
+        i -= 1;
+        h ^= (tail[i] as u64) << (8 * i);
+    }
+    if !tail.is_empty() {
+        h = h.wrapping_mul(M);
+    }
+    h ^= h >> R;
+    h = h.wrapping_mul(M);
+    h ^= h >> R;
+    h
+}
+
+/// Hash `ele` to (register-index, pattern-length) (`hllPatLen`). The pattern
+/// length is the position of the first set bit in the upper `HLL_Q` bits of the
+/// hash, 1-indexed and capped via the sentinel `1 << HLL_Q`.
+fn hll_pat_len(ele: &[u8]) -> (usize, u8) {
+    let hash = hll_murmur64a(ele, 0xadc83b19);
+    let index = (hash & HLL_P_MASK) as usize;
+    let mut bits = hash >> HLL_P;
+    bits |= 1u64 << HLL_Q;
+    (index, (bits.trailing_zeros() + 1) as u8)
+}
+
+/// Add `ele` to the dense register array, keeping the max pattern length per
+/// index (`hllDenseSet` via `hllAdd`). Returns true if a register grew.
+fn hll_dense_add(registers: &mut [u8], ele: &[u8]) -> bool {
+    let (index, count) = hll_pat_len(ele);
+    if count > hll_dense_get_register(registers, index) {
+        hll_dense_set_register(registers, index, count);
+        true
+    } else {
+        false
+    }
+}
+
+/// Merge a dense register array `src` into a 1-byte-per-register `max` array,
+/// taking the register-wise maximum (the dense branch of `hllMerge`).
+fn hll_merge_dense(max: &mut [u8], src: &[u8]) {
+    for (i, slot) in max.iter_mut().enumerate() {
+        let v = hll_dense_get_register(src, i);
+        if v > *slot {
+            *slot = v;
+        }
+    }
+}
+
+/// Ertl sigma correction (`hllSigma`, arXiv:1702.01284).
+fn hll_sigma(mut x: f64) -> f64 {
+    if x == 1.0 {
+        return f64::INFINITY;
+    }
+    let mut y = 1.0f64;
+    let mut z = x;
+    loop {
+        x *= x;
+        let z_prime = z;
+        z += x * y;
+        y += y;
+        if z_prime == z {
+            break;
+        }
+    }
+    z
+}
+
+/// Ertl tau correction (`hllTau`, arXiv:1702.01284).
+fn hll_tau(mut x: f64) -> f64 {
+    if x == 0.0 || x == 1.0 {
+        return 0.0;
+    }
+    let mut y = 1.0f64;
+    let mut z = 1.0 - x;
+    loop {
+        x = x.sqrt();
+        let z_prime = z;
+        y *= 0.5;
+        z -= (1.0 - x).powi(2) * y;
+        if z_prime == z {
+            break;
+        }
+    }
+    z / 3.0
+}
+
+/// Estimate cardinality from a 1-byte-per-register array (`hllCount` over the
+/// `HLL_RAW` form: the histogram is the same as the dense form, so a single
+/// estimator serves both PFCOUNT-single and PFCOUNT-union/PFMERGE paths). The
+/// arithmetic matches `hllCount` exactly: `llround(HLL_ALPHA_INF * m*m / z)`.
+fn hll_count_from_histo(reghisto: &[i32; 64]) -> u64 {
+    let m = HLL_REGISTERS as f64;
+    let mut z = m * hll_tau((m - reghisto[HLL_Q as usize + 1] as f64) / m);
+    let mut j = HLL_Q as usize;
+    while j >= 1 {
+        z += reghisto[j] as f64;
+        z *= 0.5;
+        j -= 1;
+    }
+    z += m * hll_sigma(reghisto[0] as f64 / m);
+    (HLL_ALPHA_INF * m * m / z).round() as u64
+}
+
+/// Estimate cardinality from a 1-byte-per-register `max` array — the form
+/// produced by merging HLLs in PFCOUNT-union / PFMERGE (`hllRawRegHisto` +
+/// `hllCount`). Each byte directly holds one register value (0..=63).
+fn hll_count_raw(registers: &[u8]) -> u64 {
+    let mut reghisto = [0i32; 64];
+    for &r in registers.iter() {
+        reghisto[r as usize] += 1;
+    }
+    hll_count_from_histo(&reghisto)
+}
+
+/// Estimate cardinality from a dense key's 6-bit-packed register data
+/// (`hllDenseRegHisto` + `hllCount`). `registers` is the slice *after* the
+/// header.
+fn hll_count_dense(registers: &[u8]) -> u64 {
+    let mut reghisto = [0i32; 64];
+    for j in 0..HLL_REGISTERS {
+        reghisto[hll_dense_get_register(registers, j) as usize] += 1;
+    }
+    hll_count_from_histo(&reghisto)
+}
+
+/// Build a fresh dense, all-zero HLL byte buffer with a valid `HYLL` header
+/// (the `createHLLObject` result, already promoted to dense). All registers are
+/// zero and the cached-cardinality field is left zeroed with a valid cache bit.
+fn hll_create_dense() -> Vec<u8> {
+    let mut buf = vec![0u8; HLL_DENSE_SIZE];
+    buf[0..4].copy_from_slice(b"HYLL");
+    buf[4] = HLL_DENSE;
+    buf
+}
+
+/// Set the cardinality-cache-invalid bit (MSB of the last card byte)
+/// (`HLL_INVALIDATE_CACHE`). The dense-only PFCOUNT recomputes every time, so
+/// this is kept only to preserve a faithful, valid header.
+fn hll_invalidate_cache(buf: &mut [u8]) {
+    buf[HLL_HDR_CARD_OFF + 7] |= 1 << 7;
+}
+
+/// Validate `buf` as a well-formed HLL string: `HYLL` magic, dense encoding,
+/// exact dense length. The edge engine only ever writes dense HLLs, so a valid
+/// HLL here is always dense; a plain string (or any non-`HYLL` value) fails,
+/// yielding the HLL-specific WRONGTYPE (`isHLLObjectOrReply`).
+fn hll_is_valid(buf: &[u8]) -> bool {
+    buf.len() == HLL_DENSE_SIZE && &buf[0..4] == b"HYLL" && buf[4] == HLL_DENSE
+}
+
 fn bulk(value: impl AsRef<[u8]>) -> RespFrame {
     RespFrame::bulk(RedisString::from_bytes(value))
 }
@@ -11524,5 +11925,122 @@ mod tests {
             resp2(&engine.execute(&argv(&[b"GET", b"mx:script"]))),
             b"$1\r\n2\r\n"
         );
+    }
+
+    fn pfcount(engine: &mut Engine<NoopHost>, key: &[u8]) -> i64 {
+        match engine.execute(&argv(&[b"PFCOUNT", key])) {
+            RespFrame::Integer(n) => n,
+            other => panic!("expected integer, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn pfadd_creates_key_and_reports_changes() {
+        let mut engine = Engine::new_in_memory();
+        // New key with elements -> :1.
+        assert_eq!(resp2(&engine.execute(&argv(&[b"PFADD", b"pf:a", b"x", b"y", b"z"]))), b":1\r\n");
+        // Adding an already-seen element -> :0 (no register changed).
+        assert_eq!(resp2(&engine.execute(&argv(&[b"PFADD", b"pf:a", b"x"]))), b":0\r\n");
+        // Small cardinalities are exact.
+        assert_eq!(pfcount(&mut engine, b"pf:a"), 3);
+    }
+
+    #[test]
+    fn pfadd_empty_creates_empty_hll() {
+        let mut engine = Engine::new_in_memory();
+        assert_eq!(resp2(&engine.execute(&argv(&[b"PFADD", b"pf:e"]))), b":1\r\n");
+        assert_eq!(pfcount(&mut engine, b"pf:e"), 0);
+        // Re-running bare PFADD on an existing empty HLL changes nothing.
+        assert_eq!(resp2(&engine.execute(&argv(&[b"PFADD", b"pf:e"]))), b":0\r\n");
+    }
+
+    #[test]
+    fn pfcount_missing_key_is_zero() {
+        let mut engine = Engine::new_in_memory();
+        assert_eq!(pfcount(&mut engine, b"pf:missing"), 0);
+    }
+
+    #[test]
+    fn pfcount_union_of_multiple_keys() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"PFADD", b"pf:u1", b"a", b"b", b"c"]));
+        engine.execute(&argv(&[b"PFADD", b"pf:u2", b"c", b"d", b"e"]));
+        // Union {a,b,c,d,e} = 5; PFCOUNT must not mutate either key.
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"PFCOUNT", b"pf:u1", b"pf:u2"]))),
+            b":5\r\n"
+        );
+        assert_eq!(pfcount(&mut engine, b"pf:u1"), 3);
+        assert_eq!(pfcount(&mut engine, b"pf:u2"), 3);
+    }
+
+    #[test]
+    fn pfmerge_then_count() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"PFADD", b"pf:s1", b"a", b"b", b"c"]));
+        engine.execute(&argv(&[b"PFADD", b"pf:s2", b"c", b"d", b"e"]));
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"PFMERGE", b"pf:dst", b"pf:s1", b"pf:s2"]))),
+            b"+OK\r\n"
+        );
+        assert_eq!(pfcount(&mut engine, b"pf:dst"), 5);
+        // Merging into an existing dest unions in the dest's own registers too.
+        engine.execute(&argv(&[b"PFADD", b"pf:s3", b"f", b"g"]));
+        engine.execute(&argv(&[b"PFMERGE", b"pf:dst", b"pf:s3"]));
+        assert_eq!(pfcount(&mut engine, b"pf:dst"), 7);
+    }
+
+    #[test]
+    fn pf_commands_reject_plain_strings() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"SET", b"pf:str", b"hello"]));
+        let wrong = b"-WRONGTYPE Key is not a valid HyperLogLog string value.\r\n";
+        assert_eq!(resp2(&engine.execute(&argv(&[b"PFADD", b"pf:str", b"x"]))), wrong);
+        assert_eq!(resp2(&engine.execute(&argv(&[b"PFCOUNT", b"pf:str"]))), wrong);
+        assert_eq!(resp2(&engine.execute(&argv(&[b"PFMERGE", b"pf:dst2", b"pf:str"]))), wrong);
+    }
+
+    #[test]
+    fn pfcount_estimation_matches_valkey_at_scale() {
+        let mut engine = Engine::new_in_memory();
+        // Probed against reference valkey-server: these exact integers.
+        for i in 1..=100 {
+            engine.execute(&argv(&[b"PFADD", b"pf:h100", format!("elem-{}", i).as_bytes()]));
+        }
+        assert_eq!(pfcount(&mut engine, b"pf:h100"), 100);
+        for i in 1..=1000 {
+            engine.execute(&argv(&[b"PFADD", b"pf:h1000", format!("item:{}", i).as_bytes()]));
+        }
+        assert_eq!(pfcount(&mut engine, b"pf:h1000"), 1002);
+    }
+
+    #[test]
+    fn pfadd_only_dirties_on_change() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"PFADD", b"pf:d", b"a"]));
+        let epoch = engine.mutation_epoch();
+        let _ = engine.take_dirty();
+        // A no-op PFADD (duplicate) must not bump the epoch or dirty the key.
+        engine.execute(&argv(&[b"PFADD", b"pf:d", b"a"]));
+        assert_eq!(engine.mutation_epoch(), epoch);
+        assert!(engine.take_dirty().is_empty());
+        // PFCOUNT is read-only: no epoch bump, no dirty.
+        let _ = pfcount(&mut engine, b"pf:d");
+        assert_eq!(engine.mutation_epoch(), epoch);
+        assert!(engine.take_dirty().is_empty());
+    }
+
+    #[test]
+    fn hll_dense_register_roundtrips() {
+        // Exercise the 6-bit packed get/set across the byte-straddling cases.
+        let mut regs = vec![0u8; (HLL_REGISTERS * HLL_BITS as usize).div_ceil(8)];
+        for i in 0..HLL_REGISTERS {
+            let v = (i % (HLL_REGISTER_MAX as usize + 1)) as u8;
+            hll_dense_set_register(&mut regs, i, v);
+        }
+        for i in 0..HLL_REGISTERS {
+            let v = (i % (HLL_REGISTER_MAX as usize + 1)) as u8;
+            assert_eq!(hll_dense_get_register(&regs, i), v);
+        }
     }
 }
