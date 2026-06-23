@@ -88,7 +88,7 @@ multi-command decisions). Fixtures: new `multi.jsonl`.
 ### Wave 10 — Scan + introspection  `[ ]`
 SCAN, HSCAN, SSCAN, ZSCAN (cursor model), KEYS, DBSIZE (single-db). Fixtures: new `scan.jsonl`.
 
-### Wave 11 — Streams  `[ ]`  (cross-cutting: new `StoredValue::Stream`; large)
+### Wave 11 — Streams  `[x]`  (core c1ce5a6 + groups c0c77be — feature-complete bar clock-dependent claim ops)
 XADD, XLEN, XRANGE, XREVRANGE, XREAD (non-blocking), XDEL, XTRIM, XSETID, XINFO;
 then consumer groups XGROUP/XREADGROUP/XACK/XPENDING/XCLAIM/XAUTOCLAIM.
 Fixtures: new `stream.jsonl`. Split into sub-waves.
@@ -146,6 +146,10 @@ Prep: profile hotpaths, stage fixes; gate any claim on a clean interactive bench
 ---
 
 ## Log (newest first)
+- 2026-06-23 — Wave 13 landed (`c0c77be`): stream consumer groups (XGROUP/
+  XREADGROUP/XACK/XPENDING summary/XINFO STREAM+GROUPS) + PEL in snapshot codec;
+  fixed a latent Wave-11 trim bug. Oracle 1500/0/20, 42 cargo tests. Gap 57.
+  Streams feature-complete (XCLAIM/XAUTOCLAIM/idle-fields deferred = clock).
 - 2026-06-23 — Wave 12 landed (`450dab8`): +4 INCRBYFLOAT/HINCRBYFLOAT/KEYS/LCS
   (incl. LCS IDX-map parity; long-double float format probed to byte parity).
   Oracle 1418/0/20. Gap 62. Engine 138 cmds. **Phase 1 core feature-complete**:
