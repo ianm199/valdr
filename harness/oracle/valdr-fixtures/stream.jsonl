@@ -1,0 +1,77 @@
+{"id": "xadd-explicit-1", "cmd": ["XADD", "st:a", "1-1", "f1", "v1"]}
+{"id": "xadd-explicit-2", "cmd": ["XADD", "st:a", "1-2", "f2", "v2"]}
+{"id": "xadd-explicit-multi-field", "cmd": ["XADD", "st:a", "2-1", "g1", "w1", "g2", "w2"]}
+{"id": "xlen-after-adds", "cmd": ["XLEN", "st:a"]}
+{"id": "xlen-missing", "cmd": ["XLEN", "st:missing"]}
+{"id": "xadd-smaller-id-error", "cmd": ["XADD", "st:a", "1-1", "f", "v"]}
+{"id": "xadd-equal-id-error", "cmd": ["XADD", "st:a", "2-1", "f", "v"]}
+{"id": "xadd-zero-zero-error", "cmd": ["XADD", "st:z", "0-0", "f", "v"]}
+{"id": "xadd-nomkstream-missing", "cmd": ["XADD", "st:nope", "NOMKSTREAM", "1-1", "f", "v"]}
+{"id": "xlen-nomkstream-still-missing", "cmd": ["XLEN", "st:nope"]}
+{"id": "xadd-msstar-autoseq-1", "cmd": ["XADD", "st:c", "5-*", "f", "v"]}
+{"id": "xadd-msstar-autoseq-2", "cmd": ["XADD", "st:c", "5-*", "f", "v"]}
+{"id": "xadd-msstar-newms", "cmd": ["XADD", "st:c", "6-*", "f", "v"]}
+{"id": "xlen-c", "cmd": ["XLEN", "st:c"]}
+{"id": "xrange-full", "cmd": ["XRANGE", "st:a", "-", "+"]}
+{"id": "xrange-count", "cmd": ["XRANGE", "st:a", "-", "+", "COUNT", "2"]}
+{"id": "xrange-count-zero", "cmd": ["XRANGE", "st:a", "-", "+", "COUNT", "0"]}
+{"id": "xrange-partial-ms", "cmd": ["XRANGE", "st:a", "1", "1"]}
+{"id": "xrange-exclusive-start", "cmd": ["XRANGE", "st:a", "(1-1", "+"]}
+{"id": "xrange-exclusive-end", "cmd": ["XRANGE", "st:a", "-", "(2-1"]}
+{"id": "xrange-empty-window", "cmd": ["XRANGE", "st:a", "3-0", "+"]}
+{"id": "xrange-missing", "cmd": ["XRANGE", "st:missing", "-", "+"]}
+{"id": "xrevrange-full", "cmd": ["XREVRANGE", "st:a", "+", "-"]}
+{"id": "xrevrange-count", "cmd": ["XREVRANGE", "st:a", "+", "-", "COUNT", "1"]}
+{"id": "xrevrange-partial", "cmd": ["XREVRANGE", "st:a", "2", "1"]}
+{"id": "xdel-setup-1", "cmd": ["XADD", "st:d", "1-1", "f", "v"]}
+{"id": "xdel-setup-2", "cmd": ["XADD", "st:d", "2-1", "f", "v"]}
+{"id": "xdel-setup-3", "cmd": ["XADD", "st:d", "3-1", "f", "v"]}
+{"id": "xdel-one", "cmd": ["XDEL", "st:d", "2-1"]}
+{"id": "xdel-missing-and-present", "cmd": ["XDEL", "st:d", "9-9", "1-1"]}
+{"id": "xlen-after-xdel", "cmd": ["XLEN", "st:d"]}
+{"id": "xrange-after-xdel", "cmd": ["XRANGE", "st:d", "-", "+"]}
+{"id": "xadd-after-xdel-monotonic", "cmd": ["XADD", "st:d", "3-1", "f", "v"]}
+{"id": "xdel-missing-key", "cmd": ["XDEL", "st:missing", "1-1"]}
+{"id": "xtrim-setup-1", "cmd": ["XADD", "st:t", "1-1", "f", "v"]}
+{"id": "xtrim-setup-2", "cmd": ["XADD", "st:t", "2-1", "f", "v"]}
+{"id": "xtrim-setup-3", "cmd": ["XADD", "st:t", "3-1", "f", "v"]}
+{"id": "xtrim-maxlen-exact", "cmd": ["XTRIM", "st:t", "MAXLEN", "=", "1"]}
+{"id": "xlen-after-xtrim", "cmd": ["XLEN", "st:t"]}
+{"id": "xrange-after-xtrim", "cmd": ["XRANGE", "st:t", "-", "+"]}
+{"id": "xtrim-maxlen-noeq", "cmd": ["XADD", "st:t2", "1-1", "f", "v"]}
+{"id": "xtrim-maxlen-noeq-2", "cmd": ["XADD", "st:t2", "2-1", "f", "v"]}
+{"id": "xtrim-maxlen-noeq-trim", "cmd": ["XTRIM", "st:t2", "MAXLEN", "1"]}
+{"id": "xtrim-minid", "cmd": ["XADD", "st:m", "1-1", "f", "v"]}
+{"id": "xtrim-minid-2", "cmd": ["XADD", "st:m", "2-1", "f", "v"]}
+{"id": "xtrim-minid-3", "cmd": ["XADD", "st:m", "3-1", "f", "v"]}
+{"id": "xtrim-minid-trim", "cmd": ["XTRIM", "st:m", "MINID", "=", "2"]}
+{"id": "xrange-after-minid", "cmd": ["XRANGE", "st:m", "-", "+"]}
+{"id": "xtrim-missing-key", "cmd": ["XTRIM", "st:missing", "MAXLEN", "5"]}
+{"id": "xadd-maxlen-inline-setup", "cmd": ["XADD", "st:cap", "1-1", "f", "v"]}
+{"id": "xadd-maxlen-inline", "cmd": ["XADD", "st:cap", "MAXLEN", "=", "1", "2-1", "f", "v"]}
+{"id": "xlen-after-inline-cap", "cmd": ["XLEN", "st:cap"]}
+{"id": "xsetid-setup", "cmd": ["XADD", "st:s", "1-1", "f", "v"]}
+{"id": "xsetid-set", "cmd": ["XSETID", "st:s", "5-5"]}
+{"id": "xadd-after-setid-reject", "cmd": ["XADD", "st:s", "2-1", "f", "v"]}
+{"id": "xadd-after-setid-accept", "cmd": ["XADD", "st:s", "6-1", "f", "v"]}
+{"id": "xsetid-smaller-than-top", "cmd": ["XSETID", "st:s", "1-1"]}
+{"id": "xsetid-missing-key", "cmd": ["XSETID", "st:missing", "1-1"]}
+{"id": "xread-setup-1", "cmd": ["XADD", "st:r", "1-1", "f1", "v1"]}
+{"id": "xread-setup-2", "cmd": ["XADD", "st:r", "2-1", "f2", "v2"]}
+{"id": "xread-after-id", "cmd": ["XREAD", "COUNT", "10", "STREAMS", "st:r", "1-1"]}
+{"id": "xread-from-zero", "cmd": ["XREAD", "COUNT", "10", "STREAMS", "st:r", "0"]}
+{"id": "xread-count-limit", "cmd": ["XREAD", "COUNT", "1", "STREAMS", "st:r", "0"]}
+{"id": "xread-dollar-no-new", "cmd": ["XREAD", "COUNT", "10", "STREAMS", "st:r", "$"]}
+{"id": "xread-up-to-date", "cmd": ["XREAD", "COUNT", "10", "STREAMS", "st:r", "2-1"]}
+{"id": "xread-missing-key", "cmd": ["XREAD", "STREAMS", "st:missing", "0"]}
+{"id": "xread-multi-key", "cmd": ["XREAD", "COUNT", "10", "STREAMS", "st:r", "st:a", "0", "0"]}
+{"id": "type-stream", "cmd": ["TYPE", "st:a"]}
+{"id": "wrongtype-setup-string", "cmd": ["SET", "st:str", "hello"]}
+{"id": "wrongtype-xadd-on-string", "cmd": ["XADD", "st:str", "1-1", "f", "v"]}
+{"id": "wrongtype-xlen-on-string", "cmd": ["XLEN", "st:str"]}
+{"id": "wrongtype-xrange-on-string", "cmd": ["XRANGE", "st:str", "-", "+"]}
+{"id": "wrongtype-get-on-stream", "cmd": ["GET", "st:a"]}
+{"id": "wrongtype-lpush-on-stream", "cmd": ["LPUSH", "st:a", "x"]}
+{"id": "xadd-invalid-id", "cmd": ["XADD", "st:a", "notanid", "f", "v"]}
+{"id": "xrange-invalid-id", "cmd": ["XRANGE", "st:a", "notanid", "+"]}
+{"id": "xsetid-invalid-id", "cmd": ["XSETID", "st:a", "notanid"]}

@@ -75,6 +75,83 @@ enum StoredValue {
     ZSet(HashMap<Vec<u8>, f64>),
     List(VecDeque<Vec<u8>>),
     Set(HashSet<Vec<u8>>),
+    Stream(StreamValue),
+}
+
+/// A stream `ms-seq` ID, mirroring the C `streamID` struct (`stream.h`).
+/// Ordering follows `streamCompareID` (`t_stream.c`): compare `ms`, then `seq`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+struct StreamId {
+    ms: u64,
+    seq: u64,
+}
+
+impl StreamId {
+    const MIN: StreamId = StreamId { ms: 0, seq: 0 };
+    const MAX: StreamId = StreamId {
+        ms: u64::MAX,
+        seq: u64::MAX,
+    };
+
+    /// `streamIncrID` (`t_stream.c`): the successor ID. Returns `None` when
+    /// `self` is the maximal possible ID (the C function wraps to 0-0 and
+    /// returns `C_ERR`).
+    fn incr(self) -> Option<StreamId> {
+        if self.seq == u64::MAX {
+            if self.ms == u64::MAX {
+                None
+            } else {
+                Some(StreamId {
+                    ms: self.ms + 1,
+                    seq: 0,
+                })
+            }
+        } else {
+            Some(StreamId {
+                ms: self.ms,
+                seq: self.seq + 1,
+            })
+        }
+    }
+
+    /// `streamDecrID` (`t_stream.c`): the predecessor ID. Returns `None` when
+    /// `self` is the minimal possible ID (0-0).
+    fn decr(self) -> Option<StreamId> {
+        if self.seq == 0 {
+            if self.ms == 0 {
+                None
+            } else {
+                Some(StreamId {
+                    ms: self.ms - 1,
+                    seq: u64::MAX,
+                })
+            }
+        } else {
+            Some(StreamId {
+                ms: self.ms,
+                seq: self.seq - 1,
+            })
+        }
+    }
+
+    /// `createStreamIDString` / `streamID2string` (`t_stream.c`): render as
+    /// `<ms>-<seq>`.
+    fn to_string_bytes(self) -> Vec<u8> {
+        format!("{}-{}", self.ms, self.seq).into_bytes()
+    }
+}
+
+/// The internal state of a single stream value, mirroring the parts of the C
+/// `stream` struct (`stream.h`) the non-blocking core needs. Consumer groups
+/// (`cgroups`) are deferred. Entries are an ordered map by ID; the flat
+/// `BTreeMap` replaces the C radix-tree-of-listpacks but preserves the same
+/// observable ordering and range semantics.
+#[derive(Debug, Clone, Default)]
+struct StreamValue {
+    entries: std::collections::BTreeMap<StreamId, Vec<(Vec<u8>, Vec<u8>)>>,
+    last_id: StreamId,
+    max_deleted_id: StreamId,
+    entries_added: u64,
 }
 
 impl StoredValue {
@@ -88,6 +165,7 @@ impl StoredValue {
             StoredValue::ZSet(_) => b"zset",
             StoredValue::List(_) => b"list",
             StoredValue::Set(_) => b"set",
+            StoredValue::Stream(_) => b"stream",
         }
     }
 }
@@ -842,6 +920,22 @@ impl<H: Host> Engine<H> {
             self.set_store_command(argv, SetOp::Union)
         } else if ascii_eq(command, b"SDIFFSTORE") {
             self.set_store_command(argv, SetOp::Diff)
+        } else if ascii_eq(command, b"XADD") {
+            self.xadd_command(argv)
+        } else if ascii_eq(command, b"XLEN") {
+            self.xlen_command(argv)
+        } else if ascii_eq(command, b"XRANGE") {
+            self.xrange_command(argv, false)
+        } else if ascii_eq(command, b"XREVRANGE") {
+            self.xrange_command(argv, true)
+        } else if ascii_eq(command, b"XDEL") {
+            self.xdel_command(argv)
+        } else if ascii_eq(command, b"XTRIM") {
+            self.xtrim_command(argv)
+        } else if ascii_eq(command, b"XSETID") {
+            self.xsetid_command(argv)
+        } else if ascii_eq(command, b"XREAD") {
+            self.xread_command(argv)
         } else if ascii_eq(command, b"GETRANGE") || ascii_eq(command, b"SUBSTR") {
             self.getrange_command(argv)
         } else if ascii_eq(command, b"SETRANGE") {
@@ -1837,7 +1931,7 @@ impl<H: Host> Engine<H> {
                 RespFrame::integer(added)
             }
             Some(Entry {
-                value: StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_),
+                value: StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_) | StoredValue::Stream(_),
                 ..
             }) => wrong_type(),
             None => {
@@ -1870,7 +1964,7 @@ impl<H: Host> Engine<H> {
                 Some(value) => bulk(value),
                 None => RespFrame::null_bulk(),
             },
-            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_)) => {
+            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_) | StoredValue::Stream(_)) => {
                 wrong_type()
             }
             None => RespFrame::null_bulk(),
@@ -1892,7 +1986,7 @@ impl<H: Host> Engine<H> {
                 }
                 RespFrame::array(items)
             }
-            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_)) => {
+            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_) | StoredValue::Stream(_)) => {
                 wrong_type()
             }
             None => RespFrame::array(Vec::new()),
@@ -1922,7 +2016,7 @@ impl<H: Host> Engine<H> {
                 RespFrame::integer(deleted)
             }
             Some(Entry {
-                value: StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_),
+                value: StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_) | StoredValue::Stream(_),
                 ..
             }) => wrong_type(),
             None => RespFrame::integer(0),
@@ -1944,7 +2038,7 @@ impl<H: Host> Engine<H> {
             Some(StoredValue::Hash(fields)) => {
                 RespFrame::integer(if fields.contains_key(&argv[2]) { 1 } else { 0 })
             }
-            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_)) => {
+            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_) | StoredValue::Stream(_)) => {
                 wrong_type()
             }
             None => RespFrame::integer(0),
@@ -1957,7 +2051,7 @@ impl<H: Host> Engine<H> {
         }
         match self.get_value(&argv[1]).map(|entry| &entry.value) {
             Some(StoredValue::Hash(fields)) => RespFrame::integer(fields.len() as i64),
-            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_)) => {
+            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_) | StoredValue::Stream(_)) => {
                 wrong_type()
             }
             None => RespFrame::integer(0),
@@ -1980,7 +2074,7 @@ impl<H: Host> Engine<H> {
                 }
                 RespFrame::array(items)
             }
-            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_)) => {
+            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_) | StoredValue::Stream(_)) => {
                 wrong_type()
             }
             None => {
@@ -2000,7 +2094,7 @@ impl<H: Host> Engine<H> {
                 keys.sort();
                 RespFrame::array(keys.into_iter().map(|field| bulk(field)).collect())
             }
-            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_)) => {
+            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_) | StoredValue::Stream(_)) => {
                 wrong_type()
             }
             None => RespFrame::array(Vec::new()),
@@ -2017,7 +2111,7 @@ impl<H: Host> Engine<H> {
                 pairs.sort_by(|(left, _), (right, _)| left.cmp(right));
                 RespFrame::array(pairs.into_iter().map(|(_, value)| bulk(value)).collect())
             }
-            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_)) => {
+            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_) | StoredValue::Stream(_)) => {
                 wrong_type()
             }
             None => RespFrame::array(Vec::new()),
@@ -2033,7 +2127,7 @@ impl<H: Host> Engine<H> {
                 Some(value) => RespFrame::integer(value.len() as i64),
                 None => RespFrame::integer(0),
             },
-            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_)) => {
+            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_) | StoredValue::Stream(_)) => {
                 wrong_type()
             }
             None => RespFrame::integer(0),
@@ -2059,7 +2153,7 @@ impl<H: Host> Engine<H> {
                 RespFrame::integer(1)
             }
             Some(Entry {
-                value: StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_),
+                value: StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_) | StoredValue::Stream(_),
                 ..
             }) => wrong_type(),
             None => {
@@ -2093,7 +2187,7 @@ impl<H: Host> Engine<H> {
                 ..
             }) => fields,
             Some(Entry {
-                value: StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_),
+                value: StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_) | StoredValue::Stream(_),
                 ..
             }) => return wrong_type(),
             None => {
@@ -2141,7 +2235,7 @@ impl<H: Host> Engine<H> {
                 }
             }
             Some(Entry {
-                value: StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_),
+                value: StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_) | StoredValue::Stream(_),
                 ..
             }) => return wrong_type(),
             None => {
@@ -4576,6 +4670,620 @@ impl<H: Host> Engine<H> {
         }
     }
 
+    /// XADD key [NOMKSTREAM] [MAXLEN|MINID [~|=] threshold [LIMIT n]] <id|*>
+    /// field value ... (`xaddCommand`, `t_stream.c`). Appends an entry, returns
+    /// its ID as a bulk string. `NOMKSTREAM` on a missing key replies a null
+    /// bulk. An explicit ID must be greater than the stream top item.
+    fn xadd_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 5 {
+            return wrong_arity(b"xadd");
+        }
+        let key = &argv[1];
+
+        let mut trim: Option<StreamTrim> = None;
+        let mut no_mkstream = false;
+        let mut id_arg: Option<&[u8]> = None;
+        let mut field_pos = argv.len();
+
+        let mut i = 2usize;
+        while i < argv.len() {
+            let opt = &argv[i];
+            let moreargs = argv.len() - 1 - i;
+            if opt.len() == 1 && opt[0] == b'*' {
+                id_arg = Some(opt);
+                field_pos = i + 1;
+                break;
+            } else if ascii_eq(opt, b"MAXLEN") && moreargs >= 1 {
+                if trim.is_some() {
+                    return err(b"ERR syntax error, MAXLEN and MINID options at the same time are not compatible");
+                }
+                match self.parse_trim(argv, &mut i, true) {
+                    Ok(t) => trim = Some(t),
+                    Err(frame) => return frame,
+                }
+            } else if ascii_eq(opt, b"MINID") && moreargs >= 1 {
+                if trim.is_some() {
+                    return err(b"ERR syntax error, MAXLEN and MINID options at the same time are not compatible");
+                }
+                match self.parse_trim(argv, &mut i, false) {
+                    Ok(t) => trim = Some(t),
+                    Err(frame) => return frame,
+                }
+            } else if ascii_eq(opt, b"LIMIT") && moreargs >= 1 {
+                if parse_i64(&argv[i + 1]).is_none() {
+                    return err(b"ERR value is not an integer or out of range");
+                }
+                match &mut trim {
+                    Some(t) => t.limit_given = true,
+                    None => {}
+                }
+                i += 1;
+            } else if ascii_eq(opt, b"NOMKSTREAM") {
+                no_mkstream = true;
+            } else {
+                match parse_stream_id_strict(opt, 0) {
+                    Ok(_) => {
+                        id_arg = Some(opt);
+                        field_pos = i + 1;
+                        break;
+                    }
+                    Err(frame) => return frame,
+                }
+            }
+            i += 1;
+        }
+
+        let Some(id_arg) = id_arg else {
+            return wrong_arity(b"xadd");
+        };
+
+        if argv.len() <= field_pos
+            || (argv.len() - field_pos) < 2
+            || (argv.len() - field_pos) % 2 == 1
+        {
+            return wrong_arity(b"xadd");
+        }
+
+        if let Some(t) = &trim {
+            if t.limit_given && !t.approx {
+                return err(b"ERR syntax error, LIMIT cannot be used without the special ~ option");
+            }
+        }
+
+        let auto_id = id_arg.len() == 1 && id_arg[0] == b'*';
+        let (use_id, seq_given) = if auto_id {
+            (None, true)
+        } else {
+            match parse_stream_id_strict(id_arg, 0) {
+                Ok((id, seq_given)) => (Some(id), seq_given),
+                Err(frame) => return frame,
+            }
+        };
+
+        if let Some(id) = use_id {
+            if seq_given && id == StreamId::MIN {
+                return err(b"ERR The ID specified in XADD must be greater than 0-0");
+            }
+        }
+
+        self.purge_if_expired(key);
+        let exists = matches!(
+            self.db.get(key),
+            Some(Entry {
+                value: StoredValue::Stream(_),
+                ..
+            })
+        );
+        match self.db.get(key) {
+            Some(Entry {
+                value: StoredValue::Stream(_),
+                ..
+            })
+            | None => {}
+            Some(_) => return wrong_type(),
+        }
+        if !exists && no_mkstream {
+            return RespFrame::null_bulk();
+        }
+
+        let fields: Vec<(Vec<u8>, Vec<u8>)> = argv[field_pos..]
+            .chunks_exact(2)
+            .map(|pair| (pair[0].clone(), pair[1].clone()))
+            .collect();
+
+        let now = self.host.now_millis();
+        if !exists {
+            self.db.insert(
+                key.clone(),
+                Entry {
+                    value: StoredValue::Stream(StreamValue::default()),
+                    expire_at_ms: None,
+                },
+            );
+        }
+        let stream = match self.db.get_mut(key) {
+            Some(Entry {
+                value: StoredValue::Stream(stream),
+                ..
+            }) => stream,
+            _ => unreachable!("stream just created or verified"),
+        };
+
+        if stream.last_id == StreamId::MAX {
+            return err(
+                b"ERR The stream has exhausted the last possible ID, unable to add more items",
+            );
+        }
+
+        let new_id = match stream_next_append_id(stream.last_id, use_id, seq_given, now) {
+            Some(id) => id,
+            None => {
+                return err(b"ERR The ID specified in XADD is equal or smaller than the target stream top item");
+            }
+        };
+
+        stream.entries.insert(new_id, fields);
+        stream.last_id = new_id;
+        stream.entries_added += 1;
+
+        if let Some(t) = &trim {
+            apply_stream_trim(stream, t);
+        }
+
+        let reply = new_id.to_string_bytes();
+        self.note_write(key);
+        bulk(reply)
+    }
+
+    /// Parse a `MAXLEN`/`MINID [~|=] threshold` trim option in place, advancing
+    /// `i` past the consumed arguments. `is_maxlen` selects the threshold type.
+    fn parse_trim(
+        &self,
+        argv: &[Vec<u8>],
+        i: &mut usize,
+        is_maxlen: bool,
+    ) -> Result<StreamTrim, RespFrame> {
+        let mut approx = false;
+        let mut idx = *i + 1;
+        if idx < argv.len() && argv[idx].len() == 1 && argv[idx][0] == b'~' {
+            approx = true;
+            idx += 1;
+        } else if idx < argv.len() && argv[idx].len() == 1 && argv[idx][0] == b'=' {
+            idx += 1;
+        }
+        if idx >= argv.len() {
+            return Err(err(b"ERR syntax error"));
+        }
+        let threshold = if is_maxlen {
+            let Some(n) = parse_i64(&argv[idx]) else {
+                return Err(err(b"ERR value is not an integer or out of range"));
+            };
+            if n < 0 {
+                return Err(err(b"ERR The MAXLEN argument must be >= 0."));
+            }
+            StreamTrimThreshold::MaxLen(n as u64)
+        } else {
+            match parse_stream_id_strict(&argv[idx], 0) {
+                Ok((id, _)) => StreamTrimThreshold::MinId(id),
+                Err(frame) => return Err(frame),
+            }
+        };
+        *i = idx;
+        Ok(StreamTrim {
+            threshold,
+            approx,
+            limit_given: false,
+        })
+    }
+
+    /// XLEN key (`xlenCommand`, `t_stream.c`): the entry count, `:0` for a
+    /// missing key, WRONGTYPE for a non-stream.
+    fn xlen_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 2 {
+            return wrong_arity(b"xlen");
+        }
+        match self.get_value(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::Stream(stream)) => RespFrame::integer(stream.entries.len() as i64),
+            Some(_) => wrong_type(),
+            None => RespFrame::integer(0),
+        }
+    }
+
+    /// XRANGE key start end [COUNT n] / XREVRANGE key end start [COUNT n]
+    /// (`xrangeGenericCommand`, `t_stream.c`). `-`/`+` are min/max; a partial
+    /// `ms` start gets seq 0 and a partial end gets seq UINT64_MAX; a `(` prefix
+    /// makes the bound exclusive. A missing key replies an empty array.
+    fn xrange_command(&mut self, argv: &[Vec<u8>], rev: bool) -> RespFrame {
+        if argv.len() < 4 {
+            return wrong_arity(if rev { b"xrevrange" } else { b"xrange" });
+        }
+        let start_arg = if rev { &argv[3] } else { &argv[2] };
+        let end_arg = if rev { &argv[2] } else { &argv[3] };
+
+        let startid = match parse_stream_range_id(start_arg, 0) {
+            Ok((id, exclusive)) => {
+                if exclusive {
+                    match id.incr() {
+                        Some(id) => id,
+                        None => return err(b"ERR invalid start ID for the interval"),
+                    }
+                } else {
+                    id
+                }
+            }
+            Err(frame) => return frame,
+        };
+        let endid = match parse_stream_range_id(end_arg, u64::MAX) {
+            Ok((id, exclusive)) => {
+                if exclusive {
+                    match id.decr() {
+                        Some(id) => id,
+                        None => return err(b"ERR invalid end ID for the interval"),
+                    }
+                } else {
+                    id
+                }
+            }
+            Err(frame) => return frame,
+        };
+
+        let mut count: i64 = -1;
+        let mut j = 4usize;
+        while j < argv.len() {
+            let additional = argv.len() - j - 1;
+            if ascii_eq(&argv[j], b"COUNT") && additional >= 1 {
+                let Some(n) = parse_i64(&argv[j + 1]) else {
+                    return err(b"ERR value is not an integer or out of range");
+                };
+                count = if n < 0 { 0 } else { n };
+                j += 1;
+            } else {
+                return err(b"ERR syntax error");
+            }
+            j += 1;
+        }
+
+        let entries: Vec<(StreamId, Vec<(Vec<u8>, Vec<u8>)>)> =
+            match self.get_value(&argv[1]).map(|entry| &entry.value) {
+                Some(StoredValue::Stream(stream)) => {
+                    if count == 0 {
+                        return RespFrame::null_array();
+                    }
+                    if startid > endid {
+                        Vec::new()
+                    } else {
+                        stream
+                            .entries
+                            .range(startid..=endid)
+                            .map(|(id, fields)| (*id, fields.clone()))
+                            .collect()
+                    }
+                }
+                Some(_) => return wrong_type(),
+                None => return RespFrame::array(Vec::new()),
+            };
+
+        let limit = if count <= 0 {
+            entries.len()
+        } else {
+            (count as usize).min(entries.len())
+        };
+        let mut out = Vec::with_capacity(limit);
+        let iter: Box<dyn Iterator<Item = &(StreamId, Vec<(Vec<u8>, Vec<u8>)>)>> = if rev {
+            Box::new(entries.iter().rev())
+        } else {
+            Box::new(entries.iter())
+        };
+        for (id, fields) in iter.take(limit) {
+            out.push(render_stream_entry(*id, fields));
+        }
+        RespFrame::array(out)
+    }
+
+    /// XDEL key id [id ...] (`xdelCommand`, `t_stream.c`): delete the named
+    /// entries, return the count deleted, advance `max_deleted_id`.
+    /// `entries_added` is NOT decremented.
+    fn xdel_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 3 {
+            return wrong_arity(b"xdel");
+        }
+        let mut ids = Vec::with_capacity(argv.len() - 2);
+        for raw in &argv[2..] {
+            match parse_stream_id_strict(raw, 0) {
+                Ok((id, _)) => ids.push(id),
+                Err(frame) => return frame,
+            }
+        }
+        self.purge_if_expired(&argv[1]);
+        let stream = match self.db.get_mut(&argv[1]) {
+            Some(Entry {
+                value: StoredValue::Stream(stream),
+                ..
+            }) => stream,
+            Some(_) => return wrong_type(),
+            None => return RespFrame::integer(0),
+        };
+        let mut deleted = 0i64;
+        for id in ids {
+            if stream.entries.remove(&id).is_some() {
+                if id > stream.max_deleted_id {
+                    stream.max_deleted_id = id;
+                }
+                deleted += 1;
+            }
+        }
+        if deleted > 0 {
+            self.note_write(&argv[1]);
+        }
+        RespFrame::integer(deleted)
+    }
+
+    /// XTRIM key MAXLEN|MINID [~|=] threshold [LIMIT n] (`xtrimCommand`,
+    /// `t_stream.c`): trim the stream and return the number of entries removed.
+    /// A missing key replies `:0`.
+    fn xtrim_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 4 {
+            return wrong_arity(b"xtrim");
+        }
+        let mut trim: Option<StreamTrim> = None;
+        let mut i = 2usize;
+        while i < argv.len() {
+            let opt = &argv[i];
+            let moreargs = argv.len() - 1 - i;
+            if ascii_eq(opt, b"MAXLEN") && moreargs >= 1 {
+                if trim.is_some() {
+                    return err(b"ERR syntax error, MAXLEN and MINID options at the same time are not compatible");
+                }
+                match self.parse_trim(argv, &mut i, true) {
+                    Ok(t) => trim = Some(t),
+                    Err(frame) => return frame,
+                }
+            } else if ascii_eq(opt, b"MINID") && moreargs >= 1 {
+                if trim.is_some() {
+                    return err(b"ERR syntax error, MAXLEN and MINID options at the same time are not compatible");
+                }
+                match self.parse_trim(argv, &mut i, false) {
+                    Ok(t) => trim = Some(t),
+                    Err(frame) => return frame,
+                }
+            } else if ascii_eq(opt, b"LIMIT") && moreargs >= 1 {
+                if parse_i64(&argv[i + 1]).is_none() {
+                    return err(b"ERR value is not an integer or out of range");
+                }
+                if let Some(t) = &mut trim {
+                    t.limit_given = true;
+                }
+                i += 1;
+            } else {
+                return err(b"ERR syntax error");
+            }
+            i += 1;
+        }
+        let Some(trim) = trim else {
+            return err(b"ERR syntax error, XTRIM must be called with a trimming strategy");
+        };
+        if trim.limit_given && !trim.approx {
+            return err(b"ERR syntax error, LIMIT cannot be used without the special ~ option");
+        }
+
+        self.purge_if_expired(&argv[1]);
+        let stream = match self.db.get_mut(&argv[1]) {
+            Some(Entry {
+                value: StoredValue::Stream(stream),
+                ..
+            }) => stream,
+            Some(_) => return wrong_type(),
+            None => return RespFrame::integer(0),
+        };
+        let deleted = apply_stream_trim(stream, &trim);
+        if deleted > 0 {
+            self.note_write(&argv[1]);
+        }
+        RespFrame::integer(deleted as i64)
+    }
+
+    /// XSETID key id [ENTRIESADDED n] [MAXDELETEDID id] (`xsetidCommand`,
+    /// `t_stream.c`): set the stream's last ID (and optionally entries_added /
+    /// max_deleted_id), enforcing the monotonicity rules. Replies +OK.
+    fn xsetid_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 3 {
+            return wrong_arity(b"xsetid");
+        }
+        let (id, _) = match parse_stream_id_strict(&argv[2], 0) {
+            Ok(v) => v,
+            Err(frame) => return frame,
+        };
+        let mut entries_added: Option<u64> = None;
+        let mut max_xdel_id = StreamId::MIN;
+        let mut i = 3usize;
+        while i < argv.len() {
+            let moreargs = argv.len() - 1 - i;
+            let opt = &argv[i];
+            if ascii_eq(opt, b"ENTRIESADDED") && moreargs >= 1 {
+                let Some(n) = parse_i64(&argv[i + 1]) else {
+                    return err(b"ERR value is not an integer or out of range");
+                };
+                if n < 0 {
+                    return err(b"ERR entries_added must be positive");
+                }
+                entries_added = Some(n as u64);
+                i += 2;
+            } else if ascii_eq(opt, b"MAXDELETEDID") && moreargs >= 1 {
+                let (mxid, _) = match parse_stream_id_strict(&argv[i + 1], 0) {
+                    Ok(v) => v,
+                    Err(frame) => return frame,
+                };
+                if id < mxid {
+                    return err(b"ERR The ID specified in XSETID is smaller than the provided max_deleted_entry_id");
+                }
+                max_xdel_id = mxid;
+                i += 2;
+            } else {
+                return err(b"ERR syntax error");
+            }
+        }
+
+        self.purge_if_expired(&argv[1]);
+        let stream = match self.db.get_mut(&argv[1]) {
+            Some(Entry {
+                value: StoredValue::Stream(stream),
+                ..
+            }) => stream,
+            Some(_) => return wrong_type(),
+            None => return err(b"ERR no such key"),
+        };
+
+        if id < stream.max_deleted_id {
+            return err(b"ERR The ID specified in XSETID is smaller than current max_deleted_entry_id");
+        }
+        if !stream.entries.is_empty() {
+            let maxid = *stream.entries.keys().next_back().expect("non-empty");
+            if id < maxid {
+                return err(
+                    b"ERR The ID specified in XSETID is smaller than the target stream top item",
+                );
+            }
+            if let Some(ea) = entries_added {
+                if (stream.entries.len() as u64) > ea {
+                    return err(b"ERR The entries_added specified in XSETID is smaller than the target stream length");
+                }
+            }
+        }
+
+        stream.last_id = id;
+        if let Some(ea) = entries_added {
+            stream.entries_added = ea;
+        }
+        if max_xdel_id != StreamId::MIN {
+            stream.max_deleted_id = max_xdel_id;
+        }
+        self.note_write(&argv[1]);
+        simple(b"OK")
+    }
+
+    /// XREAD [COUNT n] STREAMS key [key ...] id [id ...] (`xreadCommand`,
+    /// `t_stream.c`, non-blocking path only). For each key, returns entries with
+    /// ID greater than the supplied ID. `$` means the stream's last_id (so a
+    /// non-blocking read yields nothing new). Reply: array of
+    /// `[key, [[id,[fields...]]...]]`, or null array if nothing to serve.
+    /// `BLOCK` is parsed but treated as a 0-timeout (non-blocking): if nothing
+    /// can be served immediately, replies a null array.
+    fn xread_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 4 {
+            return wrong_arity(b"xread");
+        }
+        let mut count: i64 = 0;
+        let mut streams_arg: Option<usize> = None;
+        let mut i = 1usize;
+        while i < argv.len() {
+            let moreargs = argv.len() - i - 1;
+            let opt = &argv[i];
+            if ascii_eq(opt, b"BLOCK") && moreargs >= 1 {
+                if parse_i64(&argv[i + 1]).is_none() {
+                    return err(b"ERR timeout is not an integer or out of range");
+                }
+                i += 1;
+            } else if ascii_eq(opt, b"COUNT") && moreargs >= 1 {
+                let Some(n) = parse_i64(&argv[i + 1]) else {
+                    return err(b"ERR value is not an integer or out of range");
+                };
+                count = if n < 0 { 0 } else { n };
+                i += 1;
+            } else if ascii_eq(opt, b"STREAMS") && moreargs >= 1 {
+                streams_arg = Some(i + 1);
+                break;
+            } else {
+                return err(b"ERR syntax error");
+            }
+            i += 1;
+        }
+
+        let Some(streams_arg) = streams_arg else {
+            return err(b"ERR syntax error");
+        };
+        let remaining = argv.len() - streams_arg;
+        if remaining == 0 || remaining % 2 != 0 {
+            return err(b"ERR Unbalanced 'xread' list of streams: for each stream key an ID or '$' must be specified.");
+        }
+        let streams_count = remaining / 2;
+
+        let mut gts: Vec<StreamId> = Vec::with_capacity(streams_count);
+        for k in 0..streams_count {
+            let key = &argv[streams_arg + k];
+            let id_arg = &argv[streams_arg + streams_count + k];
+            if id_arg.len() == 1 && id_arg[0] == b'$' {
+                self.purge_if_expired(key);
+                let last = match self.db.get(key) {
+                    Some(Entry {
+                        value: StoredValue::Stream(stream),
+                        ..
+                    }) => stream.last_id,
+                    Some(_) => return wrong_type(),
+                    None => StreamId::MIN,
+                };
+                gts.push(last);
+            } else if id_arg.len() == 1 && id_arg[0] == b'+' {
+                self.purge_if_expired(key);
+                let last = match self.db.get(key) {
+                    Some(Entry {
+                        value: StoredValue::Stream(stream),
+                        ..
+                    }) if !stream.entries.is_empty() => stream.last_id.decr().unwrap_or(StreamId::MIN),
+                    Some(Entry {
+                        value: StoredValue::Stream(_),
+                        ..
+                    }) => StreamId::MIN,
+                    Some(_) => return wrong_type(),
+                    None => StreamId::MIN,
+                };
+                gts.push(last);
+            } else {
+                match parse_stream_id_strict(id_arg, 0) {
+                    Ok((id, _)) => gts.push(id),
+                    Err(frame) => return frame,
+                }
+            }
+        }
+
+        let mut result = Vec::new();
+        for k in 0..streams_count {
+            let key = &argv[streams_arg + k];
+            self.purge_if_expired(key);
+            let stream = match self.db.get(key) {
+                Some(Entry {
+                    value: StoredValue::Stream(stream),
+                    ..
+                }) => stream,
+                Some(_) => return wrong_type(),
+                None => continue,
+            };
+            let gt = gts[k];
+            let start = match gt.incr() {
+                Some(id) => id,
+                None => continue,
+            };
+            let mut entries = Vec::new();
+            for (id, fields) in stream.entries.range(start..) {
+                entries.push(render_stream_entry(*id, fields));
+                if count > 0 && entries.len() as i64 == count {
+                    break;
+                }
+            }
+            if !entries.is_empty() {
+                result.push(RespFrame::array(vec![
+                    bulk(key),
+                    RespFrame::array(entries),
+                ]));
+            }
+        }
+
+        if result.is_empty() {
+            RespFrame::null_array()
+        } else {
+            RespFrame::array(result)
+        }
+    }
+
     /// TYPE key (`typeCommand`, `db.c`): a simple-string naming the value's
     /// type, or `none` for a missing key. Only the variants the engine models
     /// today are reachable; later type waves extend `StoredValue::type_name`.
@@ -5281,6 +5989,46 @@ fn encode_entry(key: &[u8], entry: &Entry) -> JsonMap<String, JsonValue> {
                 ),
             );
         }
+        StoredValue::Stream(stream) => {
+            object.insert("type".to_owned(), JsonValue::String("stream".to_owned()));
+            object.insert(
+                "entries".to_owned(),
+                JsonValue::Array(
+                    stream
+                        .entries
+                        .iter()
+                        .map(|(id, fields)| {
+                            JsonValue::Array(vec![
+                                JsonValue::String(format!("{}-{}", id.ms, id.seq)),
+                                JsonValue::Array(
+                                    fields
+                                        .iter()
+                                        .flat_map(|(field, value)| {
+                                            [
+                                                JsonValue::String(hex_encode(field)),
+                                                JsonValue::String(hex_encode(value)),
+                                            ]
+                                        })
+                                        .collect(),
+                                ),
+                            ])
+                        })
+                        .collect(),
+                ),
+            );
+            object.insert(
+                "last_id".to_owned(),
+                JsonValue::String(format!("{}-{}", stream.last_id.ms, stream.last_id.seq)),
+            );
+            object.insert(
+                "max_deleted_id".to_owned(),
+                JsonValue::String(format!(
+                    "{}-{}",
+                    stream.max_deleted_id.ms, stream.max_deleted_id.seq
+                )),
+            );
+            object.insert("entries_added".to_owned(), json!(stream.entries_added));
+        }
     }
     object
 }
@@ -5390,6 +6138,69 @@ fn decode_entry(object: &JsonMap<String, JsonValue>) -> Result<(Vec<u8>, Entry),
             }
             StoredValue::Set(decoded_members)
         }
+        "stream" => {
+            let entries = object
+                .get("entries")
+                .and_then(JsonValue::as_array)
+                .ok_or(SnapshotError::MissingField("entries"))?;
+            let mut decoded_entries = std::collections::BTreeMap::new();
+            for entry in entries {
+                let entry = entry
+                    .as_array()
+                    .ok_or(SnapshotError::InvalidField("entries"))?;
+                if entry.len() != 2 {
+                    return Err(SnapshotError::InvalidField("entries"));
+                }
+                let id = decode_stream_id(
+                    entry[0]
+                        .as_str()
+                        .ok_or(SnapshotError::InvalidField("entries"))?,
+                )?;
+                let fields_raw = entry[1]
+                    .as_array()
+                    .ok_or(SnapshotError::InvalidField("entries"))?;
+                if fields_raw.len() % 2 != 0 {
+                    return Err(SnapshotError::InvalidField("entries"));
+                }
+                let mut fields = Vec::with_capacity(fields_raw.len() / 2);
+                for pair in fields_raw.chunks_exact(2) {
+                    let field = hex_decode(
+                        pair[0]
+                            .as_str()
+                            .ok_or(SnapshotError::InvalidField("entries"))?,
+                    )?;
+                    let value = hex_decode(
+                        pair[1]
+                            .as_str()
+                            .ok_or(SnapshotError::InvalidField("entries"))?,
+                    )?;
+                    fields.push((field, value));
+                }
+                decoded_entries.insert(id, fields);
+            }
+            let last_id = decode_stream_id(
+                object
+                    .get("last_id")
+                    .and_then(JsonValue::as_str)
+                    .ok_or(SnapshotError::MissingField("last_id"))?,
+            )?;
+            let max_deleted_id = decode_stream_id(
+                object
+                    .get("max_deleted_id")
+                    .and_then(JsonValue::as_str)
+                    .ok_or(SnapshotError::MissingField("max_deleted_id"))?,
+            )?;
+            let entries_added = object
+                .get("entries_added")
+                .and_then(JsonValue::as_u64)
+                .ok_or(SnapshotError::MissingField("entries_added"))?;
+            StoredValue::Stream(StreamValue {
+                entries: decoded_entries,
+                last_id,
+                max_deleted_id,
+                entries_added,
+            })
+        }
         _ => return Err(SnapshotError::InvalidField("type")),
     };
     Ok((
@@ -5432,6 +6243,205 @@ fn resolve_list_range(start: i64, stop: i64, len: usize) -> Option<(usize, usize
         e = len_i - 1;
     }
     Some((s as usize, e as usize))
+}
+
+/// A parsed `MAXLEN`/`MINID` trim request (`streamAddTrimArgs`, `t_stream.c`).
+/// `approx` records whether `~` was given; in our flat (non-listpack-node)
+/// model trimming is always exact, so `approx` only affects the LIMIT
+/// syntax-check, never the number of entries removed.
+#[derive(Debug, Clone)]
+struct StreamTrim {
+    threshold: StreamTrimThreshold,
+    approx: bool,
+    limit_given: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum StreamTrimThreshold {
+    MaxLen(u64),
+    MinId(StreamId),
+}
+
+/// Apply a trim to a stream in place, returning the number of entries removed
+/// (`streamTrim`, `t_stream.c`). MAXLEN removes the oldest entries until the
+/// length is at most the threshold; MINID removes every entry with an ID
+/// strictly less than the threshold. Always trims exactly (see `StreamTrim`).
+fn apply_stream_trim(stream: &mut StreamValue, trim: &StreamTrim) -> u64 {
+    let mut removed = 0u64;
+    match trim.threshold {
+        StreamTrimThreshold::MaxLen(maxlen) => {
+            while stream.entries.len() as u64 > maxlen {
+                let Some((&id, _)) = stream.entries.iter().next() else {
+                    break;
+                };
+                stream.entries.remove(&id);
+                if id > stream.max_deleted_id {
+                    stream.max_deleted_id = id;
+                }
+                removed += 1;
+            }
+        }
+        StreamTrimThreshold::MinId(minid) => {
+            let to_remove: Vec<StreamId> = stream
+                .entries
+                .range(..minid)
+                .map(|(id, _)| *id)
+                .collect();
+            for id in to_remove {
+                stream.entries.remove(&id);
+                if id > stream.max_deleted_id {
+                    stream.max_deleted_id = id;
+                }
+                removed += 1;
+            }
+        }
+    }
+    removed
+}
+
+/// Compute the ID for a new XADD entry given the stream's current `last_id`
+/// (`streamAppendItem` / `streamNextID`, `t_stream.c`). `use_id` is the
+/// explicit ID (if any); `seq_given` is false for the `ms-*` auto-seq form.
+/// Returns `None` when the resulting ID would not be strictly greater than
+/// `last_id` (the C `EDOM` case).
+fn stream_next_append_id(
+    last_id: StreamId,
+    use_id: Option<StreamId>,
+    seq_given: bool,
+    now_ms: u64,
+) -> Option<StreamId> {
+    let id = match use_id {
+        Some(use_id) => {
+            if seq_given {
+                use_id
+            } else if last_id.ms == use_id.ms {
+                if last_id.seq == u64::MAX {
+                    return None;
+                }
+                StreamId {
+                    ms: last_id.ms,
+                    seq: last_id.seq + 1,
+                }
+            } else {
+                use_id
+            }
+        }
+        None => {
+            if now_ms > last_id.ms {
+                StreamId {
+                    ms: now_ms,
+                    seq: 0,
+                }
+            } else {
+                last_id.incr()?
+            }
+        }
+    };
+    if id <= last_id {
+        return None;
+    }
+    Some(id)
+}
+
+/// Render one stream entry as the RESP `[id-string, [field, value, ...]]`
+/// two-element array (`streamReplyWithRange`, `t_stream.c`).
+fn render_stream_entry(id: StreamId, fields: &[(Vec<u8>, Vec<u8>)]) -> RespFrame {
+    let mut flat = Vec::with_capacity(fields.len() * 2);
+    for (field, value) in fields {
+        flat.push(bulk(field));
+        flat.push(bulk(value));
+    }
+    RespFrame::array(vec![bulk(id.to_string_bytes()), RespFrame::array(flat)])
+}
+
+/// Parse a strict stream ID (`streamParseStrictIDOrReply`, `t_stream.c`):
+/// `-`/`+` are rejected. Forms: `ms` (seq = `missing_seq`), `ms-seq`, `ms-*`
+/// (auto-seq; the returned bool `seq_given` is false). Returns a WRONGTYPE-free
+/// "Invalid stream ID" error frame on a malformed ID.
+fn parse_stream_id_strict(raw: &[u8], missing_seq: u64) -> Result<(StreamId, bool), RespFrame> {
+    if (raw == b"-" || raw == b"+") || raw.is_empty() {
+        return Err(err(
+            b"ERR Invalid stream ID specified as stream command argument",
+        ));
+    }
+    parse_stream_id_inner(raw, missing_seq, true)
+}
+
+/// Parse a range-interval stream ID (`streamParseIntervalIDOrReply`,
+/// `t_stream.c`). A leading `(` makes the bound exclusive (and the remainder is
+/// parsed strictly). `-`/`+` map to the min/max IDs. A partial `ms` uses
+/// `missing_seq` for the seq part (0 for start, UINT64_MAX for end). Returns
+/// `(id, exclusive)`.
+fn parse_stream_range_id(raw: &[u8], missing_seq: u64) -> Result<(StreamId, bool), RespFrame> {
+    if raw.len() > 1 && raw[0] == b'(' {
+        let (id, _) = parse_stream_id_strict(&raw[1..], missing_seq)?;
+        return Ok((id, true));
+    }
+    if raw == b"-" {
+        return Ok((StreamId::MIN, false));
+    }
+    if raw == b"+" {
+        return Ok((StreamId::MAX, false));
+    }
+    let (id, _) = parse_stream_id_inner(raw, missing_seq, false)?;
+    Ok((id, false))
+}
+
+/// Shared `<ms>[-<seq>|-*]` body parser (`streamGenericParseIDOrReply`,
+/// `t_stream.c`). `allow_auto_seq` enables the `ms-*` form (only valid where a
+/// `seq_given` out-param is threaded in C). Returns `(id, seq_given)`.
+fn parse_stream_id_inner(
+    raw: &[u8],
+    missing_seq: u64,
+    allow_auto_seq: bool,
+) -> Result<(StreamId, bool), RespFrame> {
+    let invalid = || err(b"ERR Invalid stream ID specified as stream command argument");
+    let text = match std::str::from_utf8(raw) {
+        Ok(t) => t,
+        Err(_) => return Err(invalid()),
+    };
+    match text.split_once('-') {
+        Some((ms_str, seq_str)) => {
+            let Ok(ms) = ms_str.parse::<u64>() else {
+                return Err(invalid());
+            };
+            if allow_auto_seq && seq_str == "*" {
+                Ok((StreamId { ms, seq: 0 }, false))
+            } else {
+                let Ok(seq) = seq_str.parse::<u64>() else {
+                    return Err(invalid());
+                };
+                Ok((StreamId { ms, seq }, true))
+            }
+        }
+        None => {
+            let Ok(ms) = text.parse::<u64>() else {
+                return Err(invalid());
+            };
+            Ok((
+                StreamId {
+                    ms,
+                    seq: missing_seq,
+                },
+                true,
+            ))
+        }
+    }
+}
+
+/// Decode a snapshot `<ms>-<seq>` stream ID string. Both parts must be present
+/// (the snapshot format always writes the canonical two-part form).
+fn decode_stream_id(text: &str) -> Result<StreamId, SnapshotError> {
+    let (ms, seq) = text
+        .split_once('-')
+        .ok_or(SnapshotError::InvalidField("stream_id"))?;
+    let ms = ms
+        .parse::<u64>()
+        .map_err(|_| SnapshotError::InvalidField("stream_id"))?;
+    let seq = seq
+        .parse::<u64>()
+        .map_err(|_| SnapshotError::InvalidField("stream_id"))?;
+    Ok(StreamId { ms, seq })
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -8040,6 +9050,43 @@ mod tests {
         assert_eq!(
             resp2(&restored.execute(&argv(&[b"SISMEMBER", b"solo", b"only"]))),
             b":1\r\n"
+        );
+    }
+
+    #[test]
+    fn snapshot_round_trip_preserves_stream() {
+        let mut engine = Engine::new(NoopHost::new(1_000));
+        engine.execute(&argv(&[b"XADD", b"s", b"1-1", b"f1", b"v1"]));
+        engine.execute(&argv(&[b"XADD", b"s", b"1-2", b"f2", b"v2", b"f3", b"v3"]));
+        engine.execute(&argv(&[b"XADD", b"s", b"2-1", b"a", b"b"]));
+        engine.execute(&argv(&[b"XDEL", b"s", b"1-1"]));
+        engine.execute(&argv(&[b"XSETID", b"s", b"5-5"]));
+
+        let snapshot = engine.export_snapshot();
+        let mut restored = Engine::new(NoopHost::new(1_000));
+        restored.import_snapshot(&snapshot).unwrap();
+
+        for cmd in [
+            &[b"XLEN".as_ref(), b"s"][..],
+            &[b"XRANGE".as_ref(), b"s", b"-", b"+"][..],
+            &[b"XREVRANGE".as_ref(), b"s", b"+", b"-"][..],
+            &[b"TYPE".as_ref(), b"s"][..],
+        ] {
+            assert_eq!(
+                resp2(&engine.execute(&argv(cmd))),
+                resp2(&restored.execute(&argv(cmd))),
+                "stream round-trip mismatch for {cmd:?}"
+            );
+        }
+        assert_eq!(
+            resp2(&restored.execute(&argv(&[b"TYPE", b"s"]))),
+            b"+stream\r\n"
+        );
+        assert_eq!(resp2(&restored.execute(&argv(&[b"XLEN", b"s"]))), b":2\r\n");
+        assert_eq!(
+            resp2(&restored.execute(&argv(&[b"XADD", b"s", b"6-1", b"x", b"y"]))),
+            b"$3\r\n6-1\r\n",
+            "last_id (5-5 via XSETID) must survive so 6-1 is accepted"
         );
     }
 
