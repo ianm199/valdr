@@ -390,6 +390,24 @@ impl<H: Host> Engine<H> {
             self.hgetall_command(argv)
         } else if ascii_eq(command, b"HDEL") {
             self.hdel_command(argv)
+        } else if ascii_eq(command, b"HEXISTS") {
+            self.hexists_command(argv)
+        } else if ascii_eq(command, b"HLEN") {
+            self.hlen_command(argv)
+        } else if ascii_eq(command, b"HMGET") {
+            self.hmget_command(argv)
+        } else if ascii_eq(command, b"HKEYS") {
+            self.hkeys_command(argv)
+        } else if ascii_eq(command, b"HVALS") {
+            self.hvals_command(argv)
+        } else if ascii_eq(command, b"HSTRLEN") {
+            self.hstrlen_command(argv)
+        } else if ascii_eq(command, b"HSETNX") {
+            self.hsetnx_command(argv)
+        } else if ascii_eq(command, b"HINCRBY") {
+            self.hincrby_command(argv)
+        } else if ascii_eq(command, b"HMSET") {
+            self.hmset_command(argv)
         } else if ascii_eq(command, b"ZADD") {
             self.zadd_command(argv)
         } else if ascii_eq(command, b"ZSCORE") {
@@ -902,6 +920,220 @@ impl<H: Host> Engine<H> {
             self.note_write(&argv[1]);
         }
         response
+    }
+
+    fn hexists_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 3 {
+            return wrong_arity(b"hexists");
+        }
+        match self.get_value(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::Hash(fields)) => {
+                RespFrame::integer(if fields.contains_key(&argv[2]) { 1 } else { 0 })
+            }
+            Some(StoredValue::String(_) | StoredValue::ZSet(_)) => wrong_type(),
+            None => RespFrame::integer(0),
+        }
+    }
+
+    fn hlen_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 2 {
+            return wrong_arity(b"hlen");
+        }
+        match self.get_value(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::Hash(fields)) => RespFrame::integer(fields.len() as i64),
+            Some(StoredValue::String(_) | StoredValue::ZSet(_)) => wrong_type(),
+            None => RespFrame::integer(0),
+        }
+    }
+
+    fn hmget_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 3 {
+            return wrong_arity(b"hmget");
+        }
+        match self.get_value(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::Hash(fields)) => {
+                let mut items = Vec::with_capacity(argv.len() - 2);
+                for field in &argv[2..] {
+                    let item = match fields.get(field) {
+                        Some(value) => bulk(value),
+                        None => RespFrame::null_bulk(),
+                    };
+                    items.push(item);
+                }
+                RespFrame::array(items)
+            }
+            Some(StoredValue::String(_) | StoredValue::ZSet(_)) => wrong_type(),
+            None => {
+                let items = (2..argv.len()).map(|_| RespFrame::null_bulk()).collect();
+                RespFrame::array(items)
+            }
+        }
+    }
+
+    fn hkeys_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 2 {
+            return wrong_arity(b"hkeys");
+        }
+        match self.get_value(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::Hash(fields)) => {
+                let mut keys: Vec<_> = fields.keys().collect();
+                keys.sort();
+                RespFrame::array(keys.into_iter().map(|field| bulk(field)).collect())
+            }
+            Some(StoredValue::String(_) | StoredValue::ZSet(_)) => wrong_type(),
+            None => RespFrame::array(Vec::new()),
+        }
+    }
+
+    fn hvals_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 2 {
+            return wrong_arity(b"hvals");
+        }
+        match self.get_value(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::Hash(fields)) => {
+                let mut pairs: Vec<_> = fields.iter().collect();
+                pairs.sort_by(|(left, _), (right, _)| left.cmp(right));
+                RespFrame::array(pairs.into_iter().map(|(_, value)| bulk(value)).collect())
+            }
+            Some(StoredValue::String(_) | StoredValue::ZSet(_)) => wrong_type(),
+            None => RespFrame::array(Vec::new()),
+        }
+    }
+
+    fn hstrlen_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 3 {
+            return wrong_arity(b"hstrlen");
+        }
+        match self.get_value(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::Hash(fields)) => match fields.get(&argv[2]) {
+                Some(value) => RespFrame::integer(value.len() as i64),
+                None => RespFrame::integer(0),
+            },
+            Some(StoredValue::String(_) | StoredValue::ZSet(_)) => wrong_type(),
+            None => RespFrame::integer(0),
+        }
+    }
+
+    fn hsetnx_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 4 {
+            return wrong_arity(b"hsetnx");
+        }
+        self.purge_if_expired(&argv[1]);
+        let expire_at_ms = self.db.get(&argv[1]).and_then(|entry| entry.expire_at_ms);
+        match self.db.get_mut(&argv[1]) {
+            Some(Entry {
+                value: StoredValue::Hash(fields),
+                ..
+            }) => {
+                if fields.contains_key(&argv[2]) {
+                    return RespFrame::integer(0);
+                }
+                fields.insert(argv[2].clone(), argv[3].clone());
+                self.note_write(&argv[1]);
+                RespFrame::integer(1)
+            }
+            Some(Entry {
+                value: StoredValue::String(_) | StoredValue::ZSet(_),
+                ..
+            }) => wrong_type(),
+            None => {
+                let mut fields = HashMap::new();
+                fields.insert(argv[2].clone(), argv[3].clone());
+                self.db.insert(
+                    argv[1].clone(),
+                    Entry {
+                        value: StoredValue::Hash(fields),
+                        expire_at_ms,
+                    },
+                );
+                self.note_write(&argv[1]);
+                RespFrame::integer(1)
+            }
+        }
+    }
+
+    fn hincrby_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 4 {
+            return wrong_arity(b"hincrby");
+        }
+        let Some(incr) = parse_i64(&argv[3]) else {
+            return err(b"ERR value is not an integer or out of range");
+        };
+        self.purge_if_expired(&argv[1]);
+        let expire_at_ms = self.db.get(&argv[1]).and_then(|entry| entry.expire_at_ms);
+        let fields = match self.db.get_mut(&argv[1]) {
+            Some(Entry {
+                value: StoredValue::Hash(fields),
+                ..
+            }) => fields,
+            Some(Entry {
+                value: StoredValue::String(_) | StoredValue::ZSet(_),
+                ..
+            }) => return wrong_type(),
+            None => {
+                self.db.insert(
+                    argv[1].clone(),
+                    Entry {
+                        value: StoredValue::Hash(HashMap::new()),
+                        expire_at_ms,
+                    },
+                );
+                match &mut self.db.get_mut(&argv[1]).expect("just inserted").value {
+                    StoredValue::Hash(fields) => fields,
+                    _ => unreachable!(),
+                }
+            }
+        };
+        let current = match fields.get(&argv[2]) {
+            Some(value) => match parse_i64(value) {
+                Some(n) => n,
+                None => return err(b"ERR hash value is not an integer"),
+            },
+            None => 0,
+        };
+        let Some(next) = current.checked_add(incr) else {
+            return err(b"ERR increment or decrement would overflow");
+        };
+        fields.insert(argv[2].clone(), next.to_string().into_bytes());
+        self.note_write(&argv[1]);
+        RespFrame::integer(next)
+    }
+
+    fn hmset_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 4 || argv.len() % 2 != 0 {
+            return wrong_arity(b"hmset");
+        }
+        self.purge_if_expired(&argv[1]);
+        let expire_at_ms = self.db.get(&argv[1]).and_then(|entry| entry.expire_at_ms);
+        match self.db.get_mut(&argv[1]) {
+            Some(Entry {
+                value: StoredValue::Hash(fields),
+                ..
+            }) => {
+                for pair in argv[2..].chunks_exact(2) {
+                    fields.insert(pair[0].clone(), pair[1].clone());
+                }
+            }
+            Some(Entry {
+                value: StoredValue::String(_) | StoredValue::ZSet(_),
+                ..
+            }) => return wrong_type(),
+            None => {
+                let mut fields = HashMap::new();
+                for pair in argv[2..].chunks_exact(2) {
+                    fields.insert(pair[0].clone(), pair[1].clone());
+                }
+                self.db.insert(
+                    argv[1].clone(),
+                    Entry {
+                        value: StoredValue::Hash(fields),
+                        expire_at_ms,
+                    },
+                );
+            }
+        }
+        self.note_write(&argv[1]);
+        simple(b"OK")
     }
 
     /// ZADD with the NX | XX | CH flag subset. Mirrors the reference

@@ -21,3 +21,46 @@
 {"id": "wrongtype-hset-on-string", "cmd": ["HSET", "s1", "f", "v"]}
 {"id": "wrongtype-hgetall-on-string", "cmd": ["HGETALL", "s1"]}
 {"id": "wrongtype-hdel-on-string", "cmd": ["HDEL", "s1", "f"]}
+{"id": "hh-seed", "cmd": ["HSET", "hh1", "f1", "v1", "f2", "v2", "f3", "v3"]}
+{"id": "hexists-hit", "cmd": ["HEXISTS", "hh1", "f2"]}
+{"id": "hexists-miss-field", "cmd": ["HEXISTS", "hh1", "nope"]}
+{"id": "hexists-miss-key", "cmd": ["HEXISTS", "ghost2", "f"]}
+{"id": "hexists-wrongtype", "cmd": ["HEXISTS", "s1", "f"]}
+{"id": "hlen-basic", "cmd": ["HLEN", "hh1"]}
+{"id": "hlen-miss-key", "cmd": ["HLEN", "ghost2"]}
+{"id": "hlen-wrongtype", "cmd": ["HLEN", "s1"]}
+{"id": "hmget-mixed", "cmd": ["HMGET", "hh1", "f1", "nope", "f3"]}
+{"id": "hmget-miss-key", "cmd": ["HMGET", "ghost2", "a", "b"]}
+{"id": "hmget-wrongtype", "cmd": ["HMGET", "s1", "f"]}
+{"id": "hkeys-basic", "cmd": ["HKEYS", "hh1"], "mode": "set_equal"}
+{"id": "hkeys-miss-key", "cmd": ["HKEYS", "ghost2"]}
+{"id": "hkeys-wrongtype", "cmd": ["HKEYS", "s1"]}
+{"id": "hvals-basic", "cmd": ["HVALS", "hh1"], "mode": "set_equal"}
+{"id": "hvals-miss-key", "cmd": ["HVALS", "ghost2"]}
+{"id": "hvals-wrongtype", "cmd": ["HVALS", "s1"]}
+{"id": "hstrlen-hit", "cmd": ["HSTRLEN", "hh1", "f1"]}
+{"id": "hstrlen-miss-field", "cmd": ["HSTRLEN", "hh1", "nope"]}
+{"id": "hstrlen-miss-key", "cmd": ["HSTRLEN", "ghost2", "f"]}
+{"id": "hstrlen-wrongtype", "cmd": ["HSTRLEN", "s1", "f"]}
+{"id": "hsetnx-new-key", "cmd": ["HSETNX", "hh2", "a", "1"]}
+{"id": "hsetnx-existing-field", "cmd": ["HSETNX", "hh2", "a", "2"]}
+{"id": "hget-after-hsetnx-noop", "cmd": ["HGET", "hh2", "a"]}
+{"id": "hsetnx-new-field", "cmd": ["HSETNX", "hh2", "b", "9"]}
+{"id": "hget-after-hsetnx-set", "cmd": ["HGET", "hh2", "b"]}
+{"id": "hsetnx-wrongtype", "cmd": ["HSETNX", "s1", "f", "v"]}
+{"id": "hincrby-create", "cmd": ["HINCRBY", "hi1", "n", "5"]}
+{"id": "hincrby-again", "cmd": ["HINCRBY", "hi1", "n", "3"]}
+{"id": "hincrby-negative", "cmd": ["HINCRBY", "hi1", "n", "-10"]}
+{"id": "hincrby-nonint-field", "cmd": ["HSET", "hi1", "txt", "abc"]}
+{"id": "hincrby-nonint-err", "cmd": ["HINCRBY", "hi1", "txt", "1"]}
+{"id": "hincrby-bad-incr", "cmd": ["HINCRBY", "hi1", "n", "notanint"]}
+{"id": "hincrby-overflow-seed", "cmd": ["HSET", "hi1", "big", "9223372036854775807"]}
+{"id": "hincrby-overflow", "cmd": ["HINCRBY", "hi1", "big", "1"]}
+{"id": "hincrby-wrongtype", "cmd": ["HINCRBY", "s1", "f", "1"]}
+{"id": "hmset-create", "cmd": ["HMSET", "hm1", "x", "10", "y", "20"]}
+{"id": "hmset-get-x", "cmd": ["HGET", "hm1", "x"]}
+{"id": "hmset-overwrite", "cmd": ["HMSET", "hm1", "x", "99", "z", "30"]}
+{"id": "hmset-get-x-after", "cmd": ["HGET", "hm1", "x"]}
+{"id": "hmset-len", "cmd": ["HLEN", "hm1"]}
+{"id": "hmset-wrongtype", "cmd": ["HMSET", "s1", "f", "v"]}
+{"id": "hmset-bad-arity", "cmd": ["HMSET", "hm1", "onlyfield"]}

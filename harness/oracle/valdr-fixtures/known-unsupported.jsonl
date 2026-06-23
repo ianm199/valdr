@@ -1,6 +1,3 @@
-{"id": "ku-hexists", "cmd": ["HEXISTS", "ku:h", "f"], "known_unsupported": true}
-{"id": "ku-hlen", "cmd": ["HLEN", "ku:h"], "known_unsupported": true}
-{"id": "ku-hmget", "cmd": ["HMGET", "ku:h", "f"], "known_unsupported": true}
 {"id": "ku-persist", "cmd": ["PERSIST", "ku:app"], "known_unsupported": true}
 {"id": "ku-expireat", "cmd": ["EXPIREAT", "ku:app", "33177117200"], "known_unsupported": true}
 {"id": "ku-expire-nx-option", "cmd": ["EXPIRE", "ku:app", "100", "NX"], "known_unsupported": true}
