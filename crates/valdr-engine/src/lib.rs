@@ -74,6 +74,7 @@ enum StoredValue {
     Hash(HashMap<Vec<u8>, Vec<u8>>),
     ZSet(HashMap<Vec<u8>, f64>),
     List(VecDeque<Vec<u8>>),
+    Set(HashSet<Vec<u8>>),
 }
 
 impl StoredValue {
@@ -86,6 +87,7 @@ impl StoredValue {
             StoredValue::Hash(_) => b"hash",
             StoredValue::ZSet(_) => b"zset",
             StoredValue::List(_) => b"list",
+            StoredValue::Set(_) => b"set",
         }
     }
 }
@@ -105,6 +107,18 @@ enum ExpireUnit {
 enum ListEnd {
     Head,
     Tail,
+}
+
+/// Which multi-key set operation a `SINTER`/`SUNION`/`SDIFF` (or its `*STORE`
+/// / `SINTERCARD` variant) computes, mirroring the `op` argument threaded
+/// through `sinterGenericCommand` / `sunionDiffGenericCommand` in `t_set.c`.
+/// `Diff` is order-sensitive: the result is the first key's set minus every
+/// later key's set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SetOp {
+    Inter,
+    Union,
+    Diff,
 }
 
 /// Optional trailing condition flag of the EXPIRE family
@@ -522,6 +536,34 @@ impl<H: Host> Engine<H> {
             self.lrem_command(argv)
         } else if ascii_eq(command, b"LTRIM") {
             self.ltrim_command(argv)
+        } else if ascii_eq(command, b"SADD") {
+            self.sadd_command(argv)
+        } else if ascii_eq(command, b"SREM") {
+            self.srem_command(argv)
+        } else if ascii_eq(command, b"SCARD") {
+            self.scard_command(argv)
+        } else if ascii_eq(command, b"SISMEMBER") {
+            self.sismember_command(argv)
+        } else if ascii_eq(command, b"SMISMEMBER") {
+            self.smismember_command(argv)
+        } else if ascii_eq(command, b"SMEMBERS") {
+            self.smembers_command(argv)
+        } else if ascii_eq(command, b"SMOVE") {
+            self.smove_command(argv)
+        } else if ascii_eq(command, b"SINTER") {
+            self.set_op_command(argv, SetOp::Inter, None, false)
+        } else if ascii_eq(command, b"SUNION") {
+            self.set_op_command(argv, SetOp::Union, None, false)
+        } else if ascii_eq(command, b"SDIFF") {
+            self.set_op_command(argv, SetOp::Diff, None, false)
+        } else if ascii_eq(command, b"SINTERCARD") {
+            self.sintercard_command(argv)
+        } else if ascii_eq(command, b"SINTERSTORE") {
+            self.set_store_command(argv, SetOp::Inter)
+        } else if ascii_eq(command, b"SUNIONSTORE") {
+            self.set_store_command(argv, SetOp::Union)
+        } else if ascii_eq(command, b"SDIFFSTORE") {
+            self.set_store_command(argv, SetOp::Diff)
         } else if ascii_eq(command, b"SCRIPT") {
             self.script_command(argv)
         } else if ascii_eq(command, b"EVAL") {
@@ -923,7 +965,7 @@ impl<H: Host> Engine<H> {
                 RespFrame::integer(added)
             }
             Some(Entry {
-                value: StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_),
+                value: StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_),
                 ..
             }) => wrong_type(),
             None => {
@@ -956,7 +998,7 @@ impl<H: Host> Engine<H> {
                 Some(value) => bulk(value),
                 None => RespFrame::null_bulk(),
             },
-            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_)) => {
+            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_)) => {
                 wrong_type()
             }
             None => RespFrame::null_bulk(),
@@ -978,7 +1020,7 @@ impl<H: Host> Engine<H> {
                 }
                 RespFrame::array(items)
             }
-            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_)) => {
+            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_)) => {
                 wrong_type()
             }
             None => RespFrame::array(Vec::new()),
@@ -1008,7 +1050,7 @@ impl<H: Host> Engine<H> {
                 RespFrame::integer(deleted)
             }
             Some(Entry {
-                value: StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_),
+                value: StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_),
                 ..
             }) => wrong_type(),
             None => RespFrame::integer(0),
@@ -1030,7 +1072,7 @@ impl<H: Host> Engine<H> {
             Some(StoredValue::Hash(fields)) => {
                 RespFrame::integer(if fields.contains_key(&argv[2]) { 1 } else { 0 })
             }
-            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_)) => {
+            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_)) => {
                 wrong_type()
             }
             None => RespFrame::integer(0),
@@ -1043,7 +1085,7 @@ impl<H: Host> Engine<H> {
         }
         match self.get_value(&argv[1]).map(|entry| &entry.value) {
             Some(StoredValue::Hash(fields)) => RespFrame::integer(fields.len() as i64),
-            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_)) => {
+            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_)) => {
                 wrong_type()
             }
             None => RespFrame::integer(0),
@@ -1066,7 +1108,7 @@ impl<H: Host> Engine<H> {
                 }
                 RespFrame::array(items)
             }
-            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_)) => {
+            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_)) => {
                 wrong_type()
             }
             None => {
@@ -1086,7 +1128,7 @@ impl<H: Host> Engine<H> {
                 keys.sort();
                 RespFrame::array(keys.into_iter().map(|field| bulk(field)).collect())
             }
-            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_)) => {
+            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_)) => {
                 wrong_type()
             }
             None => RespFrame::array(Vec::new()),
@@ -1103,7 +1145,7 @@ impl<H: Host> Engine<H> {
                 pairs.sort_by(|(left, _), (right, _)| left.cmp(right));
                 RespFrame::array(pairs.into_iter().map(|(_, value)| bulk(value)).collect())
             }
-            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_)) => {
+            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_)) => {
                 wrong_type()
             }
             None => RespFrame::array(Vec::new()),
@@ -1119,7 +1161,7 @@ impl<H: Host> Engine<H> {
                 Some(value) => RespFrame::integer(value.len() as i64),
                 None => RespFrame::integer(0),
             },
-            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_)) => {
+            Some(StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_)) => {
                 wrong_type()
             }
             None => RespFrame::integer(0),
@@ -1145,7 +1187,7 @@ impl<H: Host> Engine<H> {
                 RespFrame::integer(1)
             }
             Some(Entry {
-                value: StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_),
+                value: StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_),
                 ..
             }) => wrong_type(),
             None => {
@@ -1179,7 +1221,7 @@ impl<H: Host> Engine<H> {
                 ..
             }) => fields,
             Some(Entry {
-                value: StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_),
+                value: StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_),
                 ..
             }) => return wrong_type(),
             None => {
@@ -1227,7 +1269,7 @@ impl<H: Host> Engine<H> {
                 }
             }
             Some(Entry {
-                value: StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_),
+                value: StoredValue::String(_) | StoredValue::ZSet(_) | StoredValue::List(_) | StoredValue::Set(_),
                 ..
             }) => return wrong_type(),
             None => {
@@ -1932,6 +1974,437 @@ impl<H: Host> Engine<H> {
             self.note_write(&argv[1]);
         }
         simple(b"OK")
+    }
+
+    /// SADD key member [member ...] (`saddCommand`, `t_set.c`). Creates the set
+    /// when missing, adds each member that is not already present, and replies
+    /// the count of newly-added members. Mutates (and bumps the epoch) only
+    /// when at least one member was added. A non-set value is WRONGTYPE.
+    fn sadd_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 3 {
+            return wrong_arity(b"sadd");
+        }
+        self.purge_if_expired(&argv[1]);
+        let added = match self.db.get_mut(&argv[1]) {
+            Some(Entry {
+                value: StoredValue::Set(members),
+                ..
+            }) => {
+                let mut added = 0i64;
+                for member in &argv[2..] {
+                    if members.insert(member.clone()) {
+                        added += 1;
+                    }
+                }
+                added
+            }
+            Some(_) => return wrong_type(),
+            None => {
+                let mut members = HashSet::new();
+                let mut added = 0i64;
+                for member in &argv[2..] {
+                    if members.insert(member.clone()) {
+                        added += 1;
+                    }
+                }
+                self.db.insert(
+                    argv[1].clone(),
+                    Entry {
+                        value: StoredValue::Set(members),
+                        expire_at_ms: None,
+                    },
+                );
+                added
+            }
+        };
+        if added > 0 {
+            self.note_write(&argv[1]);
+        }
+        RespFrame::integer(added)
+    }
+
+    /// SREM key member [member ...] (`sremCommand`, `t_set.c`). Removes each
+    /// present member, replies the count removed, and deletes the key when the
+    /// set becomes empty. Mutates only when at least one member was removed.
+    fn srem_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 3 {
+            return wrong_arity(b"srem");
+        }
+        self.purge_if_expired(&argv[1]);
+        let removed = match self.db.get_mut(&argv[1]) {
+            Some(Entry {
+                value: StoredValue::Set(members),
+                ..
+            }) => {
+                let mut removed = 0i64;
+                for member in &argv[2..] {
+                    if members.remove(member) {
+                        removed += 1;
+                    }
+                }
+                removed
+            }
+            Some(_) => return wrong_type(),
+            None => return RespFrame::integer(0),
+        };
+        let set_now_empty = matches!(
+            self.db.get(&argv[1]),
+            Some(Entry { value: StoredValue::Set(members), .. }) if members.is_empty()
+        );
+        if set_now_empty {
+            self.db.remove(&argv[1]);
+        }
+        if removed > 0 {
+            self.note_write(&argv[1]);
+        }
+        RespFrame::integer(removed)
+    }
+
+    /// SCARD key (`scardCommand`, `t_set.c`): the set cardinality, or `:0` for
+    /// a missing key. A non-set value is WRONGTYPE.
+    fn scard_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 2 {
+            return wrong_arity(b"scard");
+        }
+        match self.get_value(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::Set(members)) => RespFrame::integer(members.len() as i64),
+            Some(_) => wrong_type(),
+            None => RespFrame::integer(0),
+        }
+    }
+
+    /// SISMEMBER key member (`sismemberCommand`, `t_set.c`): `:1` when the
+    /// member is present, `:0` otherwise (including a missing key).
+    fn sismember_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 3 {
+            return wrong_arity(b"sismember");
+        }
+        match self.get_value(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::Set(members)) => {
+                RespFrame::integer(if members.contains(&argv[2]) { 1 } else { 0 })
+            }
+            Some(_) => wrong_type(),
+            None => RespFrame::integer(0),
+        }
+    }
+
+    /// SMISMEMBER key member [member ...] (`smismemberCommand`, `t_set.c`):
+    /// an array of `:1`/`:0` per queried member. A missing key is treated as
+    /// an empty set, so every answer is `:0`.
+    fn smismember_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 3 {
+            return wrong_arity(b"smismember");
+        }
+        match self.get_value(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::Set(members)) => {
+                let items = argv[2..]
+                    .iter()
+                    .map(|member| RespFrame::integer(if members.contains(member) { 1 } else { 0 }))
+                    .collect();
+                RespFrame::array(items)
+            }
+            Some(_) => wrong_type(),
+            None => {
+                let items = argv[2..].iter().map(|_| RespFrame::integer(0)).collect();
+                RespFrame::array(items)
+            }
+        }
+    }
+
+    /// SMEMBERS key (`smembersCommand` -> `sinterCommand` with one key,
+    /// `t_set.c`): the set's members as an array, or an empty array for a
+    /// missing key. Order is not part of the contract (fixtures use
+    /// `set_equal`).
+    fn smembers_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 2 {
+            return wrong_arity(b"smembers");
+        }
+        match self.get_value(&argv[1]).map(|entry| &entry.value) {
+            Some(StoredValue::Set(members)) => {
+                RespFrame::array(members.iter().map(bulk).collect())
+            }
+            Some(_) => wrong_type(),
+            None => RespFrame::array(Vec::new()),
+        }
+    }
+
+    /// SMOVE source destination member (`smoveCommand`, `t_set.c`). Replies
+    /// `:0` when the source is missing or the member is not in the source,
+    /// `:1` when the member moves. WRONGTYPE when either key holds a non-set.
+    /// Removing the last member deletes the source; the destination is created
+    /// when absent.
+    fn smove_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 4 {
+            return wrong_arity(b"smove");
+        }
+        self.purge_if_expired(&argv[1]);
+        self.purge_if_expired(&argv[2]);
+
+        match self.db.get(&argv[1]) {
+            None => return RespFrame::integer(0),
+            Some(Entry {
+                value: StoredValue::Set(_),
+                ..
+            }) => {}
+            Some(_) => return wrong_type(),
+        }
+        match self.db.get(&argv[2]) {
+            None
+            | Some(Entry {
+                value: StoredValue::Set(_),
+                ..
+            }) => {}
+            Some(_) => return wrong_type(),
+        }
+
+        let member = &argv[3];
+        if argv[1] == argv[2] {
+            let present = matches!(
+                self.db.get(&argv[1]),
+                Some(Entry { value: StoredValue::Set(members), .. }) if members.contains(member)
+            );
+            return RespFrame::integer(if present { 1 } else { 0 });
+        }
+
+        let removed = match self.db.get_mut(&argv[1]) {
+            Some(Entry {
+                value: StoredValue::Set(members),
+                ..
+            }) => members.remove(member),
+            _ => false,
+        };
+        if !removed {
+            return RespFrame::integer(0);
+        }
+        let src_now_empty = matches!(
+            self.db.get(&argv[1]),
+            Some(Entry { value: StoredValue::Set(members), .. }) if members.is_empty()
+        );
+        if src_now_empty {
+            self.db.remove(&argv[1]);
+        }
+        match self.db.get_mut(&argv[2]) {
+            Some(Entry {
+                value: StoredValue::Set(members),
+                ..
+            }) => {
+                members.insert(member.clone());
+            }
+            _ => {
+                let mut members = HashSet::new();
+                members.insert(member.clone());
+                self.db.insert(
+                    argv[2].clone(),
+                    Entry {
+                        value: StoredValue::Set(members),
+                        expire_at_ms: None,
+                    },
+                );
+            }
+        }
+        self.note_write(&argv[1]);
+        self.note_write(&argv[2]);
+        RespFrame::integer(1)
+    }
+
+    /// SINTER / SUNION / SDIFF (and their `*STORE` / `SINTERCARD` callers),
+    /// mirroring `sinterGenericCommand` / `sunionDiffGenericCommand`
+    /// (`t_set.c`). Reads the source sets at `argv[key_start..]`, computes the
+    /// `op`, and either replies the result array (when `dstkey` is None and
+    /// `cardinality_only` is false), the integer cardinality (`cardinality_only`),
+    /// or stores into `dstkey`. A missing source key is an empty set; any
+    /// non-set source is WRONGTYPE.
+    fn set_op_command(
+        &mut self,
+        argv: &[Vec<u8>],
+        op: SetOp,
+        dstkey: Option<&[u8]>,
+        cardinality_only: bool,
+    ) -> RespFrame {
+        let name: &[u8] = match (op, dstkey.is_some(), cardinality_only) {
+            (SetOp::Inter, false, false) => b"sinter",
+            (SetOp::Union, false, false) => b"sunion",
+            (SetOp::Diff, false, false) => b"sdiff",
+            (SetOp::Inter, true, _) => b"sinterstore",
+            (SetOp::Union, true, _) => b"sunionstore",
+            (SetOp::Diff, true, _) => b"sdiffstore",
+            (SetOp::Inter, false, true) => b"sintercard",
+            _ => b"set",
+        };
+        let key_start = 1usize;
+        if argv.len() <= key_start {
+            return wrong_arity(name);
+        }
+        let result = match self.collect_set_op(&argv[key_start..], op) {
+            Ok(result) => result,
+            Err(frame) => return frame,
+        };
+        self.finish_set_op(result, dstkey, cardinality_only, None)
+    }
+
+    /// SINTERCARD numkeys key [key ...] [LIMIT limit] (`sinterCardCommand`,
+    /// `t_set.c`). Parses `numkeys` (must be >= 1 and not exceed the supplied
+    /// key count) and an optional non-negative `LIMIT`, then replies the
+    /// integer cardinality of the intersection, capped by the limit when set.
+    fn sintercard_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 3 {
+            return wrong_arity(b"sintercard");
+        }
+        let Some(numkeys) = parse_i64(&argv[1]) else {
+            return err(b"ERR numkeys should be greater than 0");
+        };
+        if numkeys < 1 {
+            return err(b"ERR numkeys should be greater than 0");
+        }
+        let numkeys = numkeys as usize;
+        if numkeys > argv.len() - 2 {
+            return err(b"ERR Number of keys can't be greater than number of args");
+        }
+        let keys = &argv[2..2 + numkeys];
+        let mut limit: i64 = 0;
+        let mut j = 2 + numkeys;
+        while j < argv.len() {
+            let more = (argv.len() - 1) - j;
+            if ascii_eq(&argv[j], b"LIMIT") && more > 0 {
+                j += 1;
+                let Some(value) = parse_i64(&argv[j]) else {
+                    return err(b"ERR LIMIT can't be negative");
+                };
+                if value < 0 {
+                    return err(b"ERR LIMIT can't be negative");
+                }
+                limit = value;
+            } else {
+                return err(b"ERR syntax error");
+            }
+            j += 1;
+        }
+        let result = match self.collect_set_op(keys, SetOp::Inter) {
+            Ok(result) => result,
+            Err(frame) => return frame,
+        };
+        let limit = if limit > 0 { Some(limit as usize) } else { None };
+        self.finish_set_op(result, None, true, limit)
+    }
+
+    /// SINTERSTORE / SUNIONSTORE / SDIFFSTORE destination key [key ...]
+    /// (`sinterstoreCommand` / `sunionstoreCommand` / `sdiffstoreCommand`,
+    /// `t_set.c`). The destination is `argv[1]`; the source keys follow. Stores
+    /// the result into the destination (overwriting any existing value) and
+    /// replies its cardinality, or deletes the destination and replies `:0`
+    /// when the result is empty.
+    fn set_store_command(&mut self, argv: &[Vec<u8>], op: SetOp) -> RespFrame {
+        let name: &[u8] = match op {
+            SetOp::Inter => b"sinterstore",
+            SetOp::Union => b"sunionstore",
+            SetOp::Diff => b"sdiffstore",
+        };
+        if argv.len() < 3 {
+            return wrong_arity(name);
+        }
+        let dstkey = argv[1].clone();
+        let result = match self.collect_set_op(&argv[2..], op) {
+            Ok(result) => result,
+            Err(frame) => return frame,
+        };
+        self.finish_set_op(result, Some(&dstkey), false, None)
+    }
+
+    /// Read the `keys` as sets (missing = empty, non-set = WRONGTYPE error
+    /// frame) and compute `op`. Returns the resulting members; `Diff` subtracts
+    /// every later key's set from the first key's set in order. The result
+    /// order is unspecified, matching the C iterator order being
+    /// implementation-defined.
+    fn collect_set_op(
+        &mut self,
+        keys: &[Vec<u8>],
+        op: SetOp,
+    ) -> Result<HashSet<Vec<u8>>, RespFrame> {
+        let mut sets: Vec<Option<HashSet<Vec<u8>>>> = Vec::with_capacity(keys.len());
+        for key in keys {
+            match self.get_value(key).map(|entry| &entry.value) {
+                Some(StoredValue::Set(members)) => sets.push(Some(members.clone())),
+                Some(_) => return Err(wrong_type()),
+                None => sets.push(None),
+            }
+        }
+        let result = match op {
+            SetOp::Inter => {
+                if sets.iter().any(|set| set.is_none()) {
+                    HashSet::new()
+                } else {
+                    let mut iter = sets.into_iter().map(|set| set.unwrap());
+                    let mut acc = iter.next().unwrap_or_default();
+                    for other in iter {
+                        acc.retain(|member| other.contains(member));
+                        if acc.is_empty() {
+                            break;
+                        }
+                    }
+                    acc
+                }
+            }
+            SetOp::Union => {
+                let mut acc = HashSet::new();
+                for set in sets.into_iter().flatten() {
+                    acc.extend(set);
+                }
+                acc
+            }
+            SetOp::Diff => {
+                let mut iter = sets.into_iter();
+                let mut acc = iter.next().flatten().unwrap_or_default();
+                for other in iter.flatten() {
+                    for member in &other {
+                        acc.remove(member);
+                    }
+                    if acc.is_empty() {
+                        break;
+                    }
+                }
+                acc
+            }
+        };
+        Ok(result)
+    }
+
+    /// Emit the result of a multi-key set op: store it (when `dstkey` is set),
+    /// reply just the cardinality (when `cardinality_only`, capped by `limit`),
+    /// or reply the members as an array.
+    fn finish_set_op(
+        &mut self,
+        result: HashSet<Vec<u8>>,
+        dstkey: Option<&[u8]>,
+        cardinality_only: bool,
+        limit: Option<usize>,
+    ) -> RespFrame {
+        if let Some(dstkey) = dstkey {
+            if result.is_empty() {
+                let existed = self.db.remove(dstkey).is_some();
+                if existed {
+                    self.note_write(dstkey);
+                }
+                return RespFrame::integer(0);
+            }
+            let cardinality = result.len() as i64;
+            self.db.insert(
+                dstkey.to_vec(),
+                Entry {
+                    value: StoredValue::Set(result),
+                    expire_at_ms: None,
+                },
+            );
+            self.note_write(dstkey);
+            return RespFrame::integer(cardinality);
+        }
+        if cardinality_only {
+            let count = match limit {
+                Some(limit) => result.len().min(limit),
+                None => result.len(),
+            };
+            return RespFrame::integer(count as i64);
+        }
+        RespFrame::array(result.iter().map(bulk).collect())
     }
 
     /// The generic EXPIRE / PEXPIRE / EXPIREAT / PEXPIREAT implementation,
@@ -2763,6 +3236,20 @@ fn encode_entry(key: &[u8], entry: &Entry) -> JsonMap<String, JsonValue> {
                 ),
             );
         }
+        StoredValue::Set(members) => {
+            let mut member_items: Vec<_> = members.iter().collect();
+            member_items.sort();
+            object.insert("type".to_owned(), JsonValue::String("set".to_owned()));
+            object.insert(
+                "members".to_owned(),
+                JsonValue::Array(
+                    member_items
+                        .into_iter()
+                        .map(|member| JsonValue::String(hex_encode(member)))
+                        .collect(),
+                ),
+            );
+        }
     }
     object
 }
@@ -2858,6 +3345,19 @@ fn decode_entry(object: &JsonMap<String, JsonValue>) -> Result<(Vec<u8>, Entry),
                 decoded_items.push_back(item);
             }
             StoredValue::List(decoded_items)
+        }
+        "set" => {
+            let members = object
+                .get("members")
+                .and_then(JsonValue::as_array)
+                .ok_or(SnapshotError::MissingField("members"))?;
+            let mut decoded_members = HashSet::with_capacity(members.len());
+            for member in members {
+                let member =
+                    hex_decode(member.as_str().ok_or(SnapshotError::InvalidField("members"))?)?;
+                decoded_members.insert(member);
+            }
+            StoredValue::Set(decoded_members)
         }
         _ => return Err(SnapshotError::InvalidField("type")),
     };
@@ -3857,6 +4357,7 @@ mod tests {
         let seed_h: &[&[u8]] = &[b"HSET", b"h", b"f", b"v"];
         let seed_z: &[&[u8]] = &[b"ZADD", b"z", b"1", b"a"];
         let seed_l: &[&[u8]] = &[b"RPUSH", b"l", b"a", b"b", b"c"];
+        let seed_s: &[&[u8]] = &[b"SADD", b"s", b"a", b"b", b"c"];
 
         let cases: &[(&[&[&[u8]]], &[&[u8]])] = &[
             (&[], &[b"SET", b"k", b"v"]),
@@ -3946,6 +4447,28 @@ mod tests {
             (&[&[b"RPUSH", b"l", b"a", b"a", b"a"]], &[b"LREM", b"l", b"0", b"a"]),
             (&[seed_l], &[b"LTRIM", b"l", b"1", b"1"]),
             (&[seed_l], &[b"LTRIM", b"l", b"5", b"9"]),
+            (&[], &[b"SADD", b"s", b"a", b"b", b"c"]),
+            (&[seed_s], &[b"SADD", b"s", b"a"]),
+            (&[seed_s], &[b"SADD", b"s", b"d"]),
+            (&[seed_s], &[b"SREM", b"s", b"a"]),
+            (&[seed_s], &[b"SREM", b"s", b"missing"]),
+            (&[&[b"SADD", b"s", b"only"]], &[b"SREM", b"s", b"only"]),
+            (&[seed_s], &[b"SCARD", b"s"]),
+            (&[seed_s], &[b"SISMEMBER", b"s", b"a"]),
+            (&[seed_s], &[b"SMISMEMBER", b"s", b"a", b"x"]),
+            (&[seed_s], &[b"SMEMBERS", b"s"]),
+            (&[seed_s], &[b"SMOVE", b"s", b"dst", b"a"]),
+            (&[seed_s], &[b"SMOVE", b"s", b"dst", b"missing"]),
+            (&[&[b"SADD", b"s", b"x"]], &[b"SMOVE", b"s", b"dst", b"x"]),
+            (&[seed_s], &[b"SINTER", b"s"]),
+            (&[seed_s], &[b"SUNION", b"s"]),
+            (&[seed_s], &[b"SDIFF", b"s"]),
+            (&[seed_s], &[b"SINTERCARD", b"1", b"s"]),
+            (&[seed_s], &[b"SINTERCARD", b"1", b"s", b"LIMIT", b"2"]),
+            (&[seed_s], &[b"SINTERSTORE", b"dst", b"s"]),
+            (&[seed_s], &[b"SUNIONSTORE", b"dst", b"s"]),
+            (&[seed_s], &[b"SDIFFSTORE", b"dst", b"s"]),
+            (&[seed_s], &[b"SDIFFSTORE", b"dst", b"s", b"s"]),
             (&[], &[b"SCRIPT", b"LOAD", b"return 1"]),
             (&[], &[b"EVAL", b"return 1", b"0"]),
             (
@@ -5058,6 +5581,41 @@ mod tests {
         assert_eq!(
             resp2(&restored.execute(&argv(&[b"TYPE", b"queue"]))),
             b"+list\r\n"
+        );
+    }
+
+    #[test]
+    fn snapshot_round_trip_preserves_set() {
+        let mut engine = Engine::new(NoopHost::new(1_000));
+        engine.execute(&argv(&[b"SADD", b"tags", b"a", b"b", b"c", b"d"]));
+        engine.execute(&argv(&[b"SADD", b"solo", b"only"]));
+
+        let snapshot = engine.export_snapshot();
+        let mut restored = Engine::new(NoopHost::new(1_000));
+        restored.import_snapshot(&snapshot).unwrap();
+
+        assert_eq!(
+            resp2(&restored.execute(&argv(&[b"SCARD", b"tags"]))),
+            b":4\r\n"
+        );
+        for member in [&b"a"[..], b"b", b"c", b"d"] {
+            assert_eq!(
+                resp2(&restored.execute(&argv(&[b"SISMEMBER", b"tags", member]))),
+                b":1\r\n",
+                "member {member:?} should survive the snapshot round-trip"
+            );
+        }
+        assert_eq!(
+            resp2(&restored.execute(&argv(&[b"SISMEMBER", b"tags", b"missing"]))),
+            b":0\r\n"
+        );
+        assert_eq!(
+            resp2(&restored.execute(&argv(&[b"TYPE", b"tags"]))),
+            b"+set\r\n"
+        );
+        assert_eq!(
+            resp2(&restored.execute(&argv(&[b"SISMEMBER", b"solo", b"only"]))),
+            b":1\r\n"
         );
     }
 

@@ -1,0 +1,88 @@
+{"id": "sadd-create", "cmd": ["SADD", "set:s", "a", "b", "c", "d"]}
+{"id": "sadd-dup-noop", "cmd": ["SADD", "set:s", "a", "b"]}
+{"id": "sadd-mixed-new-dup", "cmd": ["SADD", "set:s", "c", "e"]}
+{"id": "scard-after-adds", "cmd": ["SCARD", "set:s"]}
+{"id": "scard-missing", "cmd": ["SCARD", "set:missing"]}
+{"id": "sismember-present", "cmd": ["SISMEMBER", "set:s", "a"]}
+{"id": "sismember-absent", "cmd": ["SISMEMBER", "set:s", "zzz"]}
+{"id": "sismember-missing-key", "cmd": ["SISMEMBER", "set:missing", "a"]}
+{"id": "smismember-mixed", "cmd": ["SMISMEMBER", "set:s", "a", "zzz", "e"], "mode": "exact"}
+{"id": "smismember-missing-key", "cmd": ["SMISMEMBER", "set:missing", "a", "b"], "mode": "exact"}
+{"id": "smembers", "cmd": ["SMEMBERS", "set:s"], "mode": "set_equal"}
+{"id": "smembers-missing", "cmd": ["SMEMBERS", "set:missing"], "mode": "set_equal"}
+{"id": "type-is-set", "cmd": ["TYPE", "set:s"]}
+{"id": "srem-partial", "cmd": ["SREM", "set:s", "a", "zzz"]}
+{"id": "srem-after-partial-card", "cmd": ["SCARD", "set:s"]}
+{"id": "srem-missing-member", "cmd": ["SREM", "set:s", "nope"]}
+{"id": "srem-build-single", "cmd": ["SADD", "set:one", "only"]}
+{"id": "srem-deletes-key", "cmd": ["SREM", "set:one", "only"]}
+{"id": "exists-after-srem-empty", "cmd": ["EXISTS", "set:one"]}
+{"id": "srem-missing-key", "cmd": ["SREM", "set:missing", "x"]}
+{"id": "smove-build-src", "cmd": ["SADD", "set:src", "m1", "m2", "m3"]}
+{"id": "smove-build-dst", "cmd": ["SADD", "set:dst", "d1"]}
+{"id": "smove-moves-member", "cmd": ["SMOVE", "set:src", "set:dst", "m1"]}
+{"id": "smove-src-after", "cmd": ["SMEMBERS", "set:src"], "mode": "set_equal"}
+{"id": "smove-dst-after", "cmd": ["SMEMBERS", "set:dst"], "mode": "set_equal"}
+{"id": "smove-member-not-in-src", "cmd": ["SMOVE", "set:src", "set:dst", "absent"]}
+{"id": "smove-creates-dst", "cmd": ["SMOVE", "set:src", "set:newdst", "m2"]}
+{"id": "smove-newdst-members", "cmd": ["SMEMBERS", "set:newdst"], "mode": "set_equal"}
+{"id": "smove-missing-src", "cmd": ["SMOVE", "set:nosuch", "set:dst", "x"]}
+{"id": "smove-empties-src", "cmd": ["SMOVE", "set:src", "set:dst", "m3"]}
+{"id": "exists-after-smove-empty-src", "cmd": ["EXISTS", "set:src"]}
+{"id": "sinter-build-a", "cmd": ["SADD", "set:a", "1", "2", "3", "4"]}
+{"id": "sinter-build-b", "cmd": ["SADD", "set:b", "3", "4", "5", "6"]}
+{"id": "sinter-build-c", "cmd": ["SADD", "set:c", "4", "5", "7"]}
+{"id": "sinter-two", "cmd": ["SINTER", "set:a", "set:b"], "mode": "set_equal"}
+{"id": "sinter-three", "cmd": ["SINTER", "set:a", "set:b", "set:c"], "mode": "set_equal"}
+{"id": "sinter-single", "cmd": ["SINTER", "set:a"], "mode": "set_equal"}
+{"id": "sinter-missing-empties", "cmd": ["SINTER", "set:a", "set:missing"], "mode": "set_equal"}
+{"id": "sunion-two", "cmd": ["SUNION", "set:a", "set:b"], "mode": "set_equal"}
+{"id": "sunion-with-missing", "cmd": ["SUNION", "set:a", "set:missing"], "mode": "set_equal"}
+{"id": "sunion-all-missing", "cmd": ["SUNION", "set:missing1", "set:missing2"], "mode": "set_equal"}
+{"id": "sdiff-two", "cmd": ["SDIFF", "set:a", "set:b"], "mode": "set_equal"}
+{"id": "sdiff-three", "cmd": ["SDIFF", "set:a", "set:b", "set:c"], "mode": "set_equal"}
+{"id": "sdiff-first-missing", "cmd": ["SDIFF", "set:missing", "set:a"], "mode": "set_equal"}
+{"id": "sdiff-later-missing", "cmd": ["SDIFF", "set:a", "set:missing"], "mode": "set_equal"}
+{"id": "sintercard-no-limit", "cmd": ["SINTERCARD", "2", "set:a", "set:b"]}
+{"id": "sintercard-with-limit", "cmd": ["SINTERCARD", "2", "set:a", "set:b", "LIMIT", "1"]}
+{"id": "sintercard-limit-zero-uncapped", "cmd": ["SINTERCARD", "2", "set:a", "set:b", "LIMIT", "0"]}
+{"id": "sintercard-three", "cmd": ["SINTERCARD", "3", "set:a", "set:b", "set:c"]}
+{"id": "sintercard-with-missing", "cmd": ["SINTERCARD", "2", "set:a", "set:missing"]}
+{"id": "sintercard-numkeys-zero", "cmd": ["SINTERCARD", "0", "set:a"], "mode": "error_prefix"}
+{"id": "sintercard-numkeys-too-big", "cmd": ["SINTERCARD", "5", "set:a"], "mode": "error_prefix"}
+{"id": "sintercard-numkeys-non-integer", "cmd": ["SINTERCARD", "notint", "set:a"], "mode": "error_prefix"}
+{"id": "sintercard-bad-limit", "cmd": ["SINTERCARD", "1", "set:a", "LIMIT", "-1"], "mode": "error_prefix"}
+{"id": "sintercard-syntax", "cmd": ["SINTERCARD", "1", "set:a", "BOGUS", "1"], "mode": "error_prefix"}
+{"id": "sinterstore-card", "cmd": ["SINTERSTORE", "set:store1", "set:a", "set:b"]}
+{"id": "sinterstore-members", "cmd": ["SMEMBERS", "set:store1"], "mode": "set_equal"}
+{"id": "sunionstore-card", "cmd": ["SUNIONSTORE", "set:store2", "set:a", "set:b"]}
+{"id": "sunionstore-members", "cmd": ["SMEMBERS", "set:store2"], "mode": "set_equal"}
+{"id": "sdiffstore-card", "cmd": ["SDIFFSTORE", "set:store3", "set:a", "set:b"]}
+{"id": "sdiffstore-members", "cmd": ["SMEMBERS", "set:store3"], "mode": "set_equal"}
+{"id": "sdiffstore-empty-build", "cmd": ["SADD", "set:store3", "extra"]}
+{"id": "sdiffstore-empty-deletes-dest", "cmd": ["SDIFFSTORE", "set:store3", "set:a", "set:a"]}
+{"id": "exists-after-store-empty", "cmd": ["EXISTS", "set:store3"]}
+{"id": "store-overwrite-string-seed", "cmd": ["SET", "set:overwrite", "iamastring"]}
+{"id": "store-overwrite-applies", "cmd": ["SINTERSTORE", "set:overwrite", "set:a"]}
+{"id": "store-overwrite-type", "cmd": ["TYPE", "set:overwrite"]}
+{"id": "store-overwrite-members", "cmd": ["SMEMBERS", "set:overwrite"], "mode": "set_equal"}
+{"id": "wrongtype-string-seed", "cmd": ["SET", "set:str", "hello"]}
+{"id": "wrongtype-sadd-on-string", "cmd": ["SADD", "set:str", "x"], "mode": "error_prefix"}
+{"id": "wrongtype-srem-on-string", "cmd": ["SREM", "set:str", "x"], "mode": "error_prefix"}
+{"id": "wrongtype-scard-on-string", "cmd": ["SCARD", "set:str"], "mode": "error_prefix"}
+{"id": "wrongtype-sismember-on-string", "cmd": ["SISMEMBER", "set:str", "x"], "mode": "error_prefix"}
+{"id": "wrongtype-smismember-on-string", "cmd": ["SMISMEMBER", "set:str", "x"], "mode": "error_prefix"}
+{"id": "wrongtype-smembers-on-string", "cmd": ["SMEMBERS", "set:str"], "mode": "error_prefix"}
+{"id": "wrongtype-sinter-on-string", "cmd": ["SINTER", "set:a", "set:str"], "mode": "error_prefix"}
+{"id": "wrongtype-sunion-on-string", "cmd": ["SUNION", "set:str"], "mode": "error_prefix"}
+{"id": "wrongtype-smove-src-on-string", "cmd": ["SMOVE", "set:str", "set:a", "x"], "mode": "error_prefix"}
+{"id": "wrongtype-smove-dst-on-string", "cmd": ["SMOVE", "set:a", "set:str", "1"], "mode": "error_prefix"}
+{"id": "wrongtype-build-set", "cmd": ["SADD", "set:w", "a", "b"]}
+{"id": "wrongtype-get-on-set", "cmd": ["GET", "set:w"], "mode": "error_prefix"}
+{"id": "wrongtype-incr-on-set", "cmd": ["INCR", "set:w"], "mode": "error_prefix"}
+{"id": "wrongtype-hget-on-set", "cmd": ["HGET", "set:w", "f"], "mode": "error_prefix"}
+{"id": "wrongtype-zadd-on-set", "cmd": ["ZADD", "set:w", "1", "m"], "mode": "error_prefix"}
+{"id": "wrongtype-lpush-on-set", "cmd": ["LPUSH", "set:w", "x"], "mode": "error_prefix"}
+{"id": "wrongtype-strlen-on-set", "cmd": ["STRLEN", "set:w"], "mode": "error_prefix"}
+{"id": "sadd-arity-error", "cmd": ["SADD", "set:w"], "mode": "error_prefix"}
+{"id": "smove-arity-error", "cmd": ["SMOVE", "set:a", "set:b"], "mode": "error_prefix"}
