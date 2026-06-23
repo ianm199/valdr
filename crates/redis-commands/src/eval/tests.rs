@@ -1017,3 +1017,186 @@ fn lua_rs_injected_libs_are_readonly() {
     );
     assert_eq!(reply, b"$2\r\nok\r\n");
 }
+
+/// Run a script through the lua-rs EVAL backend and return either the raw RESP
+/// reply (on success) or the error payload bytes. The fast in-memory inner loop
+/// for the Phase B sandbox/converter work — milliseconds per case, no server.
+#[cfg(feature = "lua-rs-engine")]
+fn lua_rs_eval_result(client_id: u64, resp_proto: i32, script: &[u8]) -> Result<Vec<u8>, Vec<u8>> {
+    let mut client = redis_core::Client::new(client_id);
+    client.resp_proto = resp_proto;
+    client.set_args(vec![
+        RedisString::from_bytes(b"EVAL"),
+        RedisString::from_bytes(script),
+        RedisString::from_bytes(b"0"),
+    ]);
+    let mut ctx = CommandContext::new(&mut client);
+    match eval_command(&mut ctx) {
+        Ok(()) => Ok(client.drain_reply()),
+        Err(e) => Err(e.to_resp_payload().as_bytes().to_vec()),
+    }
+}
+
+#[cfg(feature = "lua-rs-engine")]
+fn lua_rs_err_contains(client_id: u64, script: &[u8], needle: &str) {
+    match lua_rs_eval_result(client_id, 2, script) {
+        Ok(reply) => panic!(
+            "expected error containing {needle:?}, got OK reply {:?}",
+            String::from_utf8_lossy(&reply)
+        ),
+        Err(payload) => assert!(
+            payload
+                .windows(needle.len())
+                .any(|w| w == needle.as_bytes()),
+            "expected error containing {needle:?}, got {:?}",
+            String::from_utf8_lossy(&payload)
+        ),
+    }
+}
+
+/// Bucket D: the RESP converter must raw-access return tables so hostile or
+/// raising `__index`/`__pairs` metamethods (and the readonly-`_G` `__index`) are
+/// never tripped. `return _G` and tables with raising metatables must convert
+/// to an empty array, never abort the script.
+#[cfg(feature = "lua-rs-engine")]
+#[test]
+fn lua_rs_converter_uses_raw_table_access() {
+    assert_eq!(
+        lua_rs_eval_result(9001, 2, b"return _G"),
+        Ok(b"*0\r\n".to_vec())
+    );
+    assert_eq!(
+        lua_rs_eval_result(
+            9002,
+            2,
+            b"local a = {}; setmetatable(a,{__index=function() foo() end}) return a"
+        ),
+        Ok(b"*0\r\n".to_vec())
+    );
+    assert_eq!(
+        lua_rs_eval_result(
+            9003,
+            2,
+            b"local a = {}; setmetatable(a,{__index=function() redis.call('set','x','1') end}) return a"
+        ),
+        Ok(b"*0\r\n".to_vec())
+    );
+}
+
+/// Bucket C: `_G` and the `redis`/`server` API table are readonly, even for
+/// keys that already exist, and reading an undeclared global raises Valkey's
+/// exact "nonexistent global" message.
+#[cfg(feature = "lua-rs-engine")]
+#[test]
+fn lua_rs_global_and_redis_table_are_readonly() {
+    lua_rs_err_contains(
+        9010,
+        b"redis = function() return 1 end",
+        "Attempt to modify a readonly table",
+    );
+    lua_rs_err_contains(9011, b"_G = {}", "Attempt to modify a readonly table");
+    lua_rs_err_contains(
+        9012,
+        b"redis.call = function() return 1 end",
+        "Attempt to modify a readonly table",
+    );
+    lua_rs_err_contains(9013, b"a=10", "Attempt to modify a readonly table");
+    lua_rs_err_contains(
+        9014,
+        b"setmetatable(_G, {})",
+        "Attempt to modify a readonly table",
+    );
+    lua_rs_err_contains(
+        9015,
+        b"local g = getmetatable(_G) g.__index = {}",
+        "Attempt to modify a readonly table",
+    );
+    lua_rs_err_contains(
+        9016,
+        b"return a",
+        "Script attempted to access nonexistent global variable 'a'",
+    );
+}
+
+/// Bucket E: `loadstring` resolves to a stub returning nil (it is on Valkey's
+/// allow list), so calling its result yields "attempt to call a nil value"
+/// rather than a "nonexistent global" pre-emption.
+#[cfg(feature = "lua-rs-engine")]
+#[test]
+fn lua_rs_loadstring_is_disabled_nil_stub() {
+    lua_rs_err_contains(
+        9020,
+        b"return loadstring(string.dump(function() return 1 end))()",
+        "attempt to call a nil value",
+    );
+}
+
+/// Bucket B: a Lua table with a `map` field converts to a RESP3 map under RESP3
+/// and to a flat RESP2 array under RESP2, matching the mlua converter.
+#[cfg(feature = "lua-rs-engine")]
+#[test]
+fn lua_rs_resp3_map_conversion() {
+    assert_eq!(
+        lua_rs_eval_result(9030, 3, b"return {map={field='value'}}"),
+        Ok(b"%1\r\n$5\r\nfield\r\n$5\r\nvalue\r\n".to_vec())
+    );
+    assert_eq!(
+        lua_rs_eval_result(9031, 2, b"return {map={field='value'}}"),
+        Ok(b"*2\r\n$5\r\nfield\r\n$5\r\nvalue\r\n".to_vec())
+    );
+    assert_eq!(
+        lua_rs_eval_result(9032, 3, b"return {double=3.5}"),
+        Ok(b",3.5\r\n".to_vec())
+    );
+}
+
+/// Bucket C completeness: the shared metatables of basic types are presented
+/// readonly to scripts, so `getmetatable(t).__index = fn` raises (either
+/// "attempt to index a nil value" when the type has no metatable, or
+/// "Attempt to modify a readonly table" for the string metatable). Method
+/// dispatch (`('abc'):upper()`) must still work.
+#[cfg(feature = "lua-rs-engine")]
+#[test]
+fn lua_rs_basic_type_metatables_are_readonly() {
+    fn assert_index_or_readonly(client_id: u64, script: &[u8]) {
+        match lua_rs_eval_result(client_id, 2, script) {
+            Ok(reply) => panic!(
+                "expected basic-type metatable to be protected, got OK {:?}",
+                String::from_utf8_lossy(&reply)
+            ),
+            Err(payload) => {
+                let s = String::from_utf8_lossy(&payload);
+                assert!(
+                    s.contains("attempt to index a nil value")
+                        || s.contains("Attempt to modify a readonly table"),
+                    "unexpected error for {:?}: {s}",
+                    String::from_utf8_lossy(script)
+                );
+            }
+        }
+    }
+
+    assert_index_or_readonly(9300, b"getmetatable('').__index = function() return 1 end");
+    assert_index_or_readonly(9301, b"getmetatable(nil).__index = function() return 1 end");
+    assert_index_or_readonly(
+        9302,
+        b"getmetatable(123.222).__index = function() return 1 end",
+    );
+    assert_index_or_readonly(
+        9303,
+        b"getmetatable(true).__index = function() return 1 end",
+    );
+    assert_index_or_readonly(
+        9304,
+        b"getmetatable(function() return 1 end).__index = function() return 1 end",
+    );
+    assert_index_or_readonly(
+        9305,
+        b"getmetatable(coroutine.create(function() return 1 end)).__index = function() return 1 end",
+    );
+
+    assert_eq!(
+        lua_rs_eval_result(9306, 2, b"return ('abc'):upper()"),
+        Ok(b"$3\r\nABC\r\n".to_vec())
+    );
+}

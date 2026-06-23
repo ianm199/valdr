@@ -105,12 +105,13 @@ pub(super) fn run_script_lua_rs(
     };
     let stale_replica_blocked = stale_replica_scripts_blocked(ctx);
     let script_allow_stale = script_flags.allow_stale;
+    let insecure_api_enabled = ctx.live_config().lua_enable_insecure_api();
     let lua = Lua::new_versioned(LuaVersion::V51);
 
     install_script_error_wrapper_lua_rs(&lua).map_err(|e| {
         RedisError::runtime(format!("ERR Lua sandbox: {}", e.message_lossy()).into_bytes())
     })?;
-    install_sandbox_lua_rs(&lua).map_err(|e| {
+    install_sandbox_lua_rs(&lua, insecure_api_enabled).map_err(|e| {
         RedisError::runtime(format!("ERR Lua sandbox: {}", e.message_lossy()).into_bytes())
     })?;
     install_keys_argv_lua_rs(&lua, keys, argv).map_err(|e| {
@@ -379,8 +380,9 @@ pub(super) fn run_script_lua_rs(
         redis_tbl.set("setresp", setresp_fn)?;
         redis_tbl.set("log", log_fn)?;
         redis_tbl.set("acl_check_cmd", acl_check_fn)?;
-        lua.globals().set("redis", redis_tbl.clone())?;
-        lua.globals().set("server", redis_tbl)?;
+        let redis_api = readonly_proxy_lua_rs(&lua, redis_tbl)?;
+        lua.globals().set("redis", redis_api.clone())?;
+        lua.globals().set("server", redis_api)?;
         super::lua_rs_libs::install_redis_libs_lua_rs(&lua)?;
         install_eval_global_protection_lua_rs(&lua)?;
 
@@ -481,23 +483,46 @@ fn install_script_error_wrapper_lua_rs(lua: &Lua) -> lua_rs_runtime::Result<()> 
     .exec()
 }
 
-fn install_sandbox_lua_rs(lua: &Lua) -> lua_rs_runtime::Result<()> {
+/// Sandbox the per-script globals: strip filesystem/host builtins and expose a
+/// minimal `os` table holding only `os.clock`.
+///
+/// The deprecated environment builtins (`getfenv`/`setfenv`/`loadstring`) are
+/// captured before removal. When `lua-enable-insecure-api` is on they are
+/// restored verbatim, so `return getfenv()` works (the "Dynamic reset of lua
+/// engine with insecure API config change" tests). When it is off (the
+/// default), `loadstring` is replaced by a stub that returns nil — it stays on
+/// Valkey's globals allow list, so it must resolve to a value rather than raise
+/// "nonexistent global", and calling its nil result yields "attempt to call a
+/// nil value" (the "Binary code loading failed" test).
+fn install_sandbox_lua_rs(lua: &Lua, insecure_api_enabled: bool) -> lua_rs_runtime::Result<()> {
     let globals = lua.globals();
+
+    let builtin_getfenv: LuaValue = globals.get("getfenv")?;
+    let builtin_setfenv: LuaValue = globals.get("setfenv")?;
+    let builtin_loadstring: LuaValue = globals.get("loadstring")?;
+
     for name in [
-        "io",
-        "debug",
-        "package",
-        "require",
-        "load",
-        "loadfile",
-        "dofile",
-        "loadstring",
-        "print",
-        "getfenv",
+        "io", "debug", "package", "require", "load", "loadfile", "dofile", "print", "getfenv",
         "setfenv",
     ] {
         globals.set(name, LuaValue::Nil)?;
     }
+
+    if insecure_api_enabled {
+        globals.set("getfenv", builtin_getfenv)?;
+        globals.set("setfenv", builtin_setfenv)?;
+        globals.set("loadstring", builtin_loadstring)?;
+    } else {
+        globals.set(
+            "loadstring",
+            lua.create_function(
+                |_lua_inner, _args: Variadic<LuaValue>| -> lua_rs_runtime::Result<LuaValue> {
+                    Ok(LuaValue::Nil)
+                },
+            )?,
+        )?;
+    }
+
     let os = lua.create_table()?;
     os.set(
         "clock",
@@ -507,50 +532,178 @@ fn install_sandbox_lua_rs(lua: &Lua) -> lua_rs_runtime::Result<()> {
     Ok(())
 }
 
+/// The Lua error message Valkey raises when a script writes to any readonly
+/// table (`_G`, the `redis`/`server` table, or an injected library table).
+const READONLY_TABLE_ERROR: &str = "Attempt to modify a readonly table";
+
+/// Wrap `inner` in a readonly proxy whose reads transparently fall through to
+/// `inner` (via a raw-installed `__index`) and whose writes raise
+/// "Attempt to modify a readonly table" (via a raw-installed `__newindex`).
+///
+/// Because the proxy table itself carries no raw entries, *every* field write
+/// (including to a key that already exists on `inner`) misses the proxy's own
+/// storage and dispatches to `__newindex` — this is what makes
+/// `redis.call = function() ... end` raise, matching Valkey's recursive
+/// `lua_enablereadonlytable` of the `redis`/`server` API table. The metatable
+/// is installed with the raw `Table::set_metatable` API (no Lua-side
+/// `setmetatable`, which is itself sandbox-protected).
+fn readonly_proxy_lua_rs(lua: &Lua, inner: LuaTable) -> lua_rs_runtime::Result<LuaTable> {
+    let proxy = lua.create_table()?;
+    let metatable = lua.create_table()?;
+    metatable.set("__index", inner)?;
+    metatable.set(
+        "__newindex",
+        lua.create_function(
+            |_lua_inner, _args: Variadic<LuaValue>| -> lua_rs_runtime::Result<()> {
+                Err(lua_runtime_error(READONLY_TABLE_ERROR))
+            },
+        )?,
+    )?;
+    metatable.set("__metatable", false)?;
+    proxy.set_metatable(Some(&metatable))?;
+    Ok(proxy)
+}
+
+/// Install Valkey's global sandbox protection on `_G` using the raw metatable
+/// API (LUA-RS-REDIS-001).
+///
+/// Valkey runs each script with a globals table that is (a) readonly — any
+/// write raises "Attempt to modify a readonly table", even to an existing key —
+/// and (b) error-on-missing — reading an undeclared global raises
+/// "Script attempted to access nonexistent global variable 'X'". Valkey
+/// achieves this with a VM-level readonly flag plus an `__index` error handler.
+///
+/// lua-rs has no VM readonly flag and no `set_environment`, so a plain
+/// `__newindex` metatable on `_G` is insufficient: Lua only dispatches
+/// `__newindex` for keys absent from the table's raw storage, so writing an
+/// *existing* global (`redis = ...`, `_G = ...`) would silently rawset. We
+/// instead move every existing global into a private backing table, clear
+/// `_G`'s raw storage, and install a metatable that reads through to the
+/// backing table and raises on every write. With `_G` raw-empty, *all* reads
+/// dispatch to `__index` (resolving real globals from the backing table or
+/// raising for genuinely undeclared names) and *all* writes dispatch to
+/// `__newindex`.
 fn install_eval_global_protection_lua_rs(lua: &Lua) -> lua_rs_runtime::Result<()> {
+    install_metatable_guards_lua_rs(lua)?;
+
+    let globals = lua.globals();
+    let backing = lua.create_table()?;
+    let entries = globals.raw_pairs()?;
+    for (key, value) in &entries {
+        backing.raw_set(key.clone(), value.clone())?;
+    }
+    for (key, _) in &entries {
+        globals.raw_set(key.clone(), LuaValue::Nil)?;
+    }
+
+    let metatable = lua.create_table()?;
+    let backing_for_index = backing.clone();
+    metatable.set(
+        "__index",
+        lua.create_function(
+            move |_lua_inner,
+                  (_table, key): (LuaValue, LuaValue)|
+                  -> lua_rs_runtime::Result<LuaValue> {
+                let value: LuaValue = backing_for_index.raw_get(key.clone())?;
+                if matches!(value, LuaValue::Nil) {
+                    return Err(lua_runtime_error(&format!(
+                        "Script attempted to access nonexistent global variable '{}'",
+                        lua_global_key_name(&key)
+                    )));
+                }
+                Ok(value)
+            },
+        )?,
+    )?;
+    metatable.set(
+        "__newindex",
+        lua.create_function(
+            |_lua_inner, _args: Variadic<LuaValue>| -> lua_rs_runtime::Result<()> {
+                Err(lua_runtime_error(READONLY_TABLE_ERROR))
+            },
+        )?,
+    )?;
+    metatable.set("__metatable", false)?;
+    globals.set_metatable(Some(&metatable))?;
+    Ok(())
+}
+
+/// Override `setmetatable`/`getmetatable` so that `_G` presents an immutable,
+/// readonly metatable to scripts (LUA-RS-REDIS-001).
+///
+/// Run *before* `_G` is sealed by [`install_eval_global_protection_lua_rs`], so
+/// the wrappers are captured into the backing globals table and remain
+/// reachable to the script. `getmetatable(_G)` returns a `readonly_global_meta`
+/// proxy whose own writes raise "Attempt to modify a readonly table" (so
+/// `getmetatable(_G).__index = {}` raises, matching "Try trick global
+/// protection 2"); `setmetatable(_G, ...)` raises directly (matching "Try trick
+/// global protection 1"). `setmetatable`/`getmetatable` on any other value
+/// behave normally, which keeps the "Try trick readonly table on basic types
+/// metatable" cases (nil/string/number/... metatables) faithful.
+fn install_metatable_guards_lua_rs(lua: &Lua) -> lua_rs_runtime::Result<()> {
     lua.load(
         r#"
         local raw_setmetatable = setmetatable
         local raw_getmetatable = getmetatable
-        local global_meta = {
-            __index = function(_, key)
-                error("Script attempted to access nonexistent global variable '" .. tostring(key) .. "'", 2)
-            end,
-            __newindex = function(_, key, _)
-                error("Attempt to modify a readonly table", 2)
-            end
-        }
+        local raw_rawget = rawget
         local readonly_global_meta = {}
         raw_setmetatable(readonly_global_meta, {
-            __index = global_meta,
             __newindex = function(_, _, _)
                 error("Attempt to modify a readonly table", 2)
             end,
             __metatable = false
         })
-        global_meta.__metatable = readonly_global_meta
-        local protected_setmetatable = function(t, mt)
+        local function readonly_view(inner)
+            local proxy = {}
+            raw_setmetatable(proxy, {
+                __index = inner,
+                __newindex = function(_, _, _)
+                    error("Attempt to modify a readonly table", 2)
+                end,
+                __metatable = false
+            })
+            return proxy
+        end
+        setmetatable = function(t, mt)
             if t == _G then
                 error("Attempt to modify a readonly table", 2)
             end
             return raw_setmetatable(t, mt)
         end
-        local protected_getmetatable = function(t)
+        getmetatable = function(t)
             if t == _G then
                 return readonly_global_meta
             end
-            if type(t) ~= "table" then
-                return nil
+            local mt = raw_getmetatable(t)
+            if type(mt) ~= "table" then
+                return mt
             end
-            return raw_getmetatable(t)
+            -- Valkey marks the shared metatables of basic types (string, etc.)
+            -- readonly. A user table's own metatable stays mutable; only the
+            -- metatables of non-table values are protected here.
+            if type(t) ~= "table" then
+                return readonly_view(mt)
+            end
+            return mt
         end
-        setmetatable = protected_setmetatable
-        getmetatable = protected_getmetatable
-        raw_setmetatable(_G, global_meta)
         "#,
     )
-    .set_name("eval_global_protection")
+    .set_name("eval_metatable_guards")
     .exec()
+}
+
+fn lua_global_key_name(key: &LuaValue) -> String {
+    match key {
+        LuaValue::String(s) => s
+            .as_bytes()
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default(),
+        LuaValue::Integer(n) => n.to_string(),
+        LuaValue::Number(n) => n.to_string(),
+        LuaValue::Boolean(v) => v.to_string(),
+        LuaValue::Nil => "nil".to_string(),
+        _ => String::new(),
+    }
 }
 
 fn install_keys_argv_lua_rs(
@@ -715,10 +868,10 @@ fn lua_rs_to_resp_inner(
             out.extend_from_slice(b"\r\n");
         }
         LuaValue::Table(t) => {
-            if let Some(err) = table_string_bytes(t, "err")? {
+            if let Some(err) = table_string_bytes_raw(t, "err")? {
                 let wire_error = lua_error_reply_wire_bytes(&err);
                 let already_recorded = t
-                    .get::<_, Option<bool>>(LUA_ERROR_ALREADY_RECORDED_FIELD)?
+                    .raw_get::<_, Option<bool>>(LUA_ERROR_ALREADY_RECORDED_FIELD)?
                     .unwrap_or(false);
                 if !already_recorded {
                     record_error_reply(&wire_error);
@@ -727,27 +880,49 @@ fn lua_rs_to_resp_inner(
                 out.extend_from_slice(b"\r\n");
                 return Ok(());
             }
-            if let Some(ok) = table_string_bytes(t, "ok")? {
+            if let Some(ok) = table_string_bytes_raw(t, "ok")? {
                 out.push(b'+');
                 out.extend_from_slice(&ok);
                 out.extend_from_slice(b"\r\n");
                 return Ok(());
             }
-            if let Some(n) = t.get::<_, Option<f64>>("double")? {
+            if let Some(n) = t.raw_get::<_, Option<f64>>("double")? {
                 out.push(b',');
                 out.extend_from_slice(n.to_string().as_bytes());
                 out.extend_from_slice(b"\r\n");
                 return Ok(());
             }
-
-            // TODO(lua-rs-port): Redis RESP3 map/set conversion needs public
-            // table iteration or raw-entry APIs in lua-rs-runtime.
-            let _ = resp3;
+            if let Some(LuaValue::Table(map)) = t.raw_get::<_, Option<LuaValue>>("map")? {
+                let pairs = map.raw_pairs()?;
+                if resp3 {
+                    out.push(b'%');
+                    out.extend_from_slice(pairs.len().to_string().as_bytes());
+                } else {
+                    out.push(b'*');
+                    out.extend_from_slice((pairs.len() * 2).to_string().as_bytes());
+                }
+                out.extend_from_slice(b"\r\n");
+                for (key, value) in &pairs {
+                    lua_rs_to_resp_inner(key, out, resp3, depth + 1)?;
+                    lua_rs_to_resp_inner(value, out, resp3, depth + 1)?;
+                }
+                return Ok(());
+            }
+            if let Some(LuaValue::Table(set)) = t.raw_get::<_, Option<LuaValue>>("set")? {
+                let members = set.raw_pairs()?;
+                out.push(if resp3 { b'~' } else { b'*' });
+                out.extend_from_slice(members.len().to_string().as_bytes());
+                out.extend_from_slice(b"\r\n");
+                for (member, _) in &members {
+                    lua_rs_to_resp_inner(member, out, resp3, depth + 1)?;
+                }
+                return Ok(());
+            }
 
             let mut items: Vec<LuaValue> = Vec::new();
             let mut i: i64 = 1;
             loop {
-                let value = t.get::<_, LuaValue>(i)?;
+                let value = t.raw_get::<_, LuaValue>(i)?;
                 if matches!(value, LuaValue::Nil) {
                     break;
                 }
@@ -766,8 +941,14 @@ fn lua_rs_to_resp_inner(
     Ok(())
 }
 
-fn table_string_bytes(table: &LuaTable, key: &str) -> lua_rs_runtime::Result<Option<Vec<u8>>> {
-    match table.get::<_, Option<LuaString>>(key)? {
+/// Read a string field from a Lua table using raw access so a hostile or
+/// rewriting `__index` metamethod is never triggered, matching how the C
+/// `luaReplyToRedisReply` inspects single-field reply tables (it uses
+/// `lua_rawget`). This is required for converting tables such as `_G` (which
+/// carries the readonly-global `__index` that raises on missing keys) or a
+/// user table with a metatable that raises in `__index`.
+fn table_string_bytes_raw(table: &LuaTable, key: &str) -> lua_rs_runtime::Result<Option<Vec<u8>>> {
+    match table.raw_get::<_, Option<LuaString>>(key)? {
         Some(s) => Ok(Some(s.as_bytes()?)),
         None => Ok(None),
     }
