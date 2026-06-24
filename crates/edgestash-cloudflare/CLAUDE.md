@@ -28,18 +28,24 @@ redeploy the live Worker from here. Otherwise the published wasm goes stale.
 `valdr-engine` via crates.io — is gated on the `redis-protocol → valdr-protocol` rename;
 deferred.)
 
-## Status (live as of 2026-06-13)
+## Status (live as of 2026-06-24)
 
-- **Deployed:** `https://edgestash-valdr.ianmclaughlin1398.workers.dev`. Worker
-  startup ~2 ms; bundle ~1.65 MiB / ~591 KiB gzip.
-- **Measured (single off-edge client):** cold Durable Object start **~0.5 s**
-  (new DO + per-key restore + wasm init); warm round-trip **~66 ms p50 / ~103 ms
-  p90** — of which the engine is ~2 ms, the rest is client→edge RTT.
-- **Oracle:** differential vs pinned `valkey-server` — **352 fixtures, 333 pass,
-  0 divergences, 19 known-unsupported** (`--strict` exits 0).
-- **Phase:** spike hardening. Engine boundary, Cloudflare adapter, per-key
-  persistence, host-time authority, deploy + measurement all landed. **The open
-  target is cold-start cost** (wasm size, lazy script reload, restore cost).
+- **Deployed:** `https://edgestash-valdr.ianmclaughlin1398.workers.dev` — version
+  `626e5bb5`, redeployed 2026-06-24 (includes the `/v1/_debug` route, gated off in
+  prod). Worker startup ~1 ms; bundle **~2.26 MiB / ~812 KiB gzip** (up from ~1.65 MiB
+  as the engine added DUMP + aggregate commands — bundle size is now a cold-start lever).
+- **One-click deploy artifact:** [`github.com/ianm199/edgestash`](https://github.com/ianm199/edgestash)
+  — prebuilt wasm + a "Deploy to Cloudflare" button. This crate is the source of truth
+  (see the Distribution note above).
+- **Measured (single off-edge client, 2026-06-13):** cold Durable Object start **~0.5 s**;
+  warm round-trip **~66 ms p50 / ~103 ms p90** (engine ~2 ms, rest is client→edge RTT).
+- **Oracle:** differential vs pinned `valkey-server` — ~400 fixtures, 0 divergences per
+  the design-doc checkpoint; **re-run `valdr-engine-differential.py --strict` to confirm
+  current HEAD** (several engine waves have landed since the recorded run).
+- **Phase:** spike hardening. Lazy per-key cold-load landed (Phase 2a/2b). **Open target:
+  cold-start — but verify it actually tracks bundle size first** (CF caches compiled
+  modules, so the ~0.5 s may be DO spin-up + per-key restore, not module compile;
+  profiling showed ~half the wasm is un-droppable Lua). See the iteration ladder.
 
 ## The four crates (all workspace members of valdr)
 
