@@ -15,6 +15,19 @@ Authoritative design + dated status log:
 Engine internals + the wasm-safety invariant:
 [`../valdr-engine/CLAUDE.md`](../valdr-engine/CLAUDE.md).
 
+**Distribution / deploy artifact.** This repo (valdr) is the **source of truth** —
+EdgeStash is developed, tested, and oracle-verified here; `build/` is gitignored, so the
+wasm is rebuilt, never committed. The **one-click deploy artifact** lives in a *separate*
+repo, [`github.com/ianm199/edgestash`](https://github.com/ianm199/edgestash): it ships
+only the *prebuilt* `build/index.js` + `index_bg.wasm` behind a "Deploy to Cloudflare"
+button, so deploying needs no Rust toolchain. It is **not** a second source copy — the
+source stays here. When the engine changes and you want the public deploy repo current,
+rerun that repo's `scripts/rebuild-wasm.sh` (it builds from here) + commit there, and
+redeploy the live Worker from here. Otherwise the published wasm goes stale.
+(A future "move the source out" — `edgestash-cloudflare` depending on a published
+`valdr-engine` via crates.io — is gated on the `redis-protocol → valdr-protocol` rename;
+deferred.)
+
 ## Status (live as of 2026-06-13)
 
 - **Deployed:** `https://edgestash-valdr.ianmclaughlin1398.workers.dev`. Worker
