@@ -1,8 +1,11 @@
 # Edge Wasm Valdr Engine
 
-**Status:** Spike hardening (2026-06-12). Engine boundary, Cloudflare adapter,
-differential oracle, host-time authority, hot Durable Object instance, and the
-snapshot budget are in. Real deploy + cold-start measurement still pending.
+**Status:** Spike hardening (updated 2026-06-24). Engine boundary, Cloudflare adapter,
+differential oracle, host-time authority, hot Durable Object, snapshot budget, lazy
+per-key cold-load, and a **deployed live Worker** are all in. The latest deltas
+(`/v1/_debug` route, dashboard Keyspace panel, the standalone deploy repo, bundle
+~2.26 MiB, the cold-start profiling) are in the **Checkpoint 2026-06-24** at the end of
+this doc. Open target: cold-start.
 **Goal:** justify a `wasm32-unknown-unknown` Valdr command-engine build with a
 useful edge product shape, not a novelty port. The API can be Redis-compatible;
 the engine artifact is Valdr.
@@ -611,3 +614,23 @@ If the demo works, we have shown:
 
 The useful first artifact is smaller and sharper: Redis-style atomic edge state
 with Lua scripts, embedded where the request is already executing.
+
+## Checkpoint 2026-06-24
+
+- **Deployed live** (version `626e5bb5`) at `edgestash-valdr.ianmclaughlin1398.workers.dev`.
+- **`/v1/_debug/<tenant>`** keyspace-dump route (dev-only, gated behind
+  `EDGESTASH_ALLOW_DEBUG`, off in prod) + a live **Keyspace panel** on the dashboard.
+  The wrangler Local Explorer can't introspect a workers-rs (fetch-style) Durable Object
+  over RPC, so the debug route is the in-product substitute.
+- **Lazy per-key cold-load** (Phase 2a/2b) is in: cold start is O(touched), not O(state).
+- **One-click deploy artifact:** `github.com/ianm199/edgestash` (prebuilt wasm + a
+  Deploy-to-Cloudflare button). This repo stays the source of truth.
+- **Bundle is now ~2.26 MiB / ~812 KiB gzip** (up from ~1.65 MiB — DUMP + aggregate
+  commands). `cargo bloat` (native proxy): ~half the wasm is Lua (un-droppable, it's the
+  scripting wedge), ~a quarter is command code (droppable via feature-gating). Multi-
+  version support (5.1–5.5) is *not* the bloat — one shared VM with inline `LuaVersion`
+  branches. Filed omnilua#223 to feature-gate sandbox-forbidden stdlib (io/os/debug/package).
+- **Open target: cold-start — but measure whether it tracks bundle size first.** CF caches
+  compiled modules, so the ~0.5 s cold DO start may be isolate/DO spin-up + per-key
+  restore, not module instantiation. Shrinking the wasm helps deploy size + memory
+  regardless, but may not move the 0.5 s.

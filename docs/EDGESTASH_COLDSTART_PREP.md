@@ -82,3 +82,18 @@ Instantiation time scales with module size.
 deploy` + a cold-start latency sweep across state sizes (10/1k/10k keys) to quantify
 the win, then Option B (wasm-size shrink) for instantiation time. Deploy mechanism:
 `cloudflare-deploy-blocker` memory.
+
+## Update 2026-06-24
+- The O(state) eager cold-start described at the top is **historical** — Option A (lazy
+  per-key load) shipped, so a cold DO no longer reads the whole keyspace on the first
+  request.
+- Bundle measured at **~2.26 MiB / ~812 KiB gzip**. `cargo bloat` (native proxy): ~48%
+  of the code is Lua (lua-vm/stdlib/…) — **un-droppable, it's the scripting wedge** — and
+  ~24% is `valdr-engine` command code, **droppable** via feature-gating. Multi-version
+  support (5.1–5.5) is *not* the bloat: one shared VM with inline `LuaVersion` branches,
+  no per-version duplication. Filed **omnilua#223** to feature-gate sandbox-forbidden
+  stdlib (io/os/debug/package) — a separate size + security win.
+- **Before doing Option B, measure whether cold-start tracks bundle size at all.** CF
+  caches compiled Worker modules, so the ~0.5 s on a cold tenant DO may be isolate/DO
+  spin-up + per-key restore, not wasm instantiation. The deploy + latency sweep
+  (Measurement plan above) is still the gating step.

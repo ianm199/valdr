@@ -65,6 +65,14 @@ Cloudflare runs one Durable Object per tenant and delivers its requests one at a
 
 A warm object answers in single-digit milliseconds. A tenant with no recent traffic wakes its object in about half a second, then stays warm.
 
+## Run it yourself
+
+A Worker and one Durable Object, deployed to your own Cloudflare account — no Rust toolchain to install. The [edgestash repo](https://github.com/ianm199/edgestash) ships the prebuilt WebAssembly; the button forks it to your GitHub and deploys it.
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/ianm199/edgestash)
+
+Or clone it and run `npx wrangler deploy`.
+
 ## Status
 
 A working prototype, not a product. The single-node Valdr core underneath it passes Valkey's [test suite](coverage.html); EdgeStash itself is differential-tested against a real `valkey-server` (400+ fixtures, zero divergences) and deployed live. Open source under BSD-3.
