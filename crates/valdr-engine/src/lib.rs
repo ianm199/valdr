@@ -1097,6 +1097,8 @@ impl<H: Host> Engine<H> {
             self.xpending_command(argv)
         } else if ascii_eq(command, b"XCLAIM") {
             self.xclaim_command(argv)
+        } else if ascii_eq(command, b"XAUTOCLAIM") {
+            self.xautoclaim_command(argv)
         } else if ascii_eq(command, b"XINFO") {
             self.xinfo_command(argv)
         } else if ascii_eq(command, b"GETRANGE") || ascii_eq(command, b"SUBSTR") {
@@ -7718,6 +7720,180 @@ impl<H: Host> Engine<H> {
         }
     }
 
+    /// XAUTOCLAIM key group consumer min-idle-time start [COUNT count] [JUSTID]
+    /// (`xautoclaimCommand`, `t_stream.c`): scan the group PEL from `start`,
+    /// claim entries idle >= min-idle-time, purge PEL entries whose stream entry
+    /// was deleted. Returns [cursor, claimed_entries, deleted_ids].
+    fn xautoclaim_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 6 {
+            return wrong_arity(b"xautoclaim");
+        }
+        let key = argv[1].clone();
+        let group_name = argv[2].clone();
+        let consumer_name = argv[3].clone();
+
+        let Some(min_idle_i64) = parse_i64(&argv[4]) else {
+            return err(b"ERR value is not an integer or out of range");
+        };
+        if min_idle_i64 < 0 {
+            return err(b"ERR value is not an integer or out of range");
+        }
+        let min_idle_ms = min_idle_i64 as u64;
+
+        let start_id = match parse_stream_id_strict(&argv[5], 0) {
+            Ok((id, _)) => id,
+            Err(frame) => return frame,
+        };
+
+        let mut count: usize = 100;
+        let mut justid = false;
+        let mut i = 6;
+        while i < argv.len() {
+            let tok = argv[i].to_ascii_uppercase();
+            let moreargs = argv.len() - i - 1;
+            match tok.as_slice() {
+                b"COUNT" if moreargs >= 1 => {
+                    let Some(v) = parse_i64(&argv[i + 1]) else {
+                        return err(b"ERR value is not an integer or out of range");
+                    };
+                    if v < 0 {
+                        return err(b"ERR value is not an integer or out of range");
+                    }
+                    count = if v == 0 { usize::MAX } else { v as usize };
+                    i += 2;
+                }
+                b"JUSTID" => {
+                    justid = true;
+                    i += 1;
+                }
+                _ => return err(b"ERR syntax error"),
+            }
+        }
+
+        let now = self.host.now_millis();
+        self.purge_if_expired(&key);
+
+        // Phase A: read-only scan — collect claimed entries and orphaned PEL IDs.
+        struct AutoClaimEntry {
+            id: StreamId,
+            old_consumer: Vec<u8>,
+            old_count: u64,
+            fields: Option<Vec<(Vec<u8>, Vec<u8>)>>,
+        }
+        let (next_cursor, claims, deleted_ids): (Option<StreamId>, Vec<AutoClaimEntry>, Vec<StreamId>) = {
+            let stream = match self.db.get(&key) {
+                Some(Entry { value: StoredValue::Stream(s), .. }) => s,
+                Some(_) => return wrong_type(),
+                None => {
+                    let mut msg = b"NOGROUP No such key '".to_vec();
+                    msg.extend_from_slice(&key);
+                    msg.extend_from_slice(b"' or consumer group '");
+                    msg.extend_from_slice(&group_name);
+                    msg.push(b'\'');
+                    return err(&msg);
+                }
+            };
+            if !stream.groups.contains_key(group_name.as_slice()) {
+                let mut msg = b"NOGROUP No such key '".to_vec();
+                msg.extend_from_slice(&key);
+                msg.extend_from_slice(b"' or consumer group '");
+                msg.extend_from_slice(&group_name);
+                msg.push(b'\'');
+                return err(&msg);
+            }
+            let group = stream.groups.get(group_name.as_slice()).unwrap();
+
+            let mut claimed: Vec<AutoClaimEntry> = Vec::new();
+            let mut deleted: Vec<StreamId> = Vec::new();
+            let mut cursor: Option<StreamId> = None;
+            let mut scanned: usize = 0;
+
+            for (id, nack) in group.pending.range(start_id..) {
+                if scanned >= count {
+                    cursor = Some(*id);
+                    break;
+                }
+                scanned += 1;
+                let idle = now.saturating_sub(nack.delivery_time_ms);
+                if idle >= min_idle_ms {
+                    if let Some(entry_fields) = stream.entries.get(id) {
+                        let fields = if !justid { Some(entry_fields.clone()) } else { None };
+                        claimed.push(AutoClaimEntry {
+                            id: *id,
+                            old_consumer: nack.consumer.clone(),
+                            old_count: nack.delivery_count,
+                            fields,
+                        });
+                    } else {
+                        deleted.push(*id);
+                    }
+                }
+            }
+            (cursor, claimed, deleted)
+        }; // all borrows on self.db released
+
+        // Phase B: mutation — reassign claimed entries, remove orphaned PEL entries.
+        if !claims.is_empty() || !deleted_ids.is_empty() {
+            let stream = match self.db.get_mut(&key) {
+                Some(Entry { value: StoredValue::Stream(s), .. }) => s,
+                _ => unreachable!("type-checked in phase A"),
+            };
+            let group = stream.groups.get_mut(group_name.as_slice()).unwrap();
+
+            for id in &deleted_ids {
+                if let Some(nack) = group.pending.remove(id) {
+                    if let Some(old_c) = group.consumers.get_mut(&nack.consumer) {
+                        old_c.pending.remove(id);
+                    }
+                }
+            }
+
+            for c in &claims {
+                if let Some(old_c) = group.consumers.get_mut(&c.old_consumer) {
+                    old_c.pending.remove(&c.id);
+                }
+                group.pending.insert(
+                    c.id,
+                    PendingEntry {
+                        consumer: consumer_name.clone(),
+                        delivery_time_ms: now,
+                        delivery_count: c.old_count + 1,
+                    },
+                );
+                let consumer = group.consumers.entry(consumer_name.clone()).or_default();
+                consumer.pending.insert(c.id);
+                consumer.seen_time_ms = now;
+                consumer.active_time_ms = now;
+            }
+            self.note_write(&key);
+        }
+
+        // Phase C: build [cursor, entries, deleted] response.
+        let cursor_frame = match next_cursor {
+            Some(id) => bulk(id.to_string_bytes()),
+            None => bulk(b"0-0"),
+        };
+        let entries_frame = if justid {
+            RespFrame::array(claims.iter().map(|c| bulk(c.id.to_string_bytes())).collect())
+        } else {
+            RespFrame::array(
+                claims
+                    .iter()
+                    .map(|c| match &c.fields {
+                        Some(fields) => render_stream_entry(c.id, fields),
+                        None => RespFrame::array(vec![
+                            bulk(c.id.to_string_bytes()),
+                            RespFrame::null_array(),
+                        ]),
+                    })
+                    .collect(),
+            )
+        };
+        let deleted_frame =
+            RespFrame::array(deleted_ids.iter().map(|id| bulk(id.to_string_bytes())).collect());
+        RespFrame::array(vec![cursor_frame, entries_frame, deleted_frame])
+    }
+
     /// XINFO STREAM|GROUPS (`xinfoCommand`, `t_stream.c`). CONSUMERS is deferred
     /// (it exposes idle/inactive = host clock). STREAM FULL is deferred.
     fn xinfo_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
@@ -11483,6 +11659,7 @@ fn is_write_command(command: &[u8]) -> bool {
             | b"SUNIONSTORE"
             | b"UNLINK"
             | b"XACK"
+            | b"XAUTOCLAIM"
             | b"XCLAIM"
             | b"XADD"
             | b"XDEL"
