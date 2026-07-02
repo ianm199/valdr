@@ -88,3 +88,10 @@
 {"id": "xclaim-verify-pending-after-claim", "cmd": ["XPENDING", "sg:cl", "cg"]}
 {"id": "xclaim-nogroup-bad-group", "cmd": ["XCLAIM", "sg:cl", "nope", "bob", "0", "10-1", "JUSTID"]}
 {"id": "xclaim-nogroup-missing-key", "cmd": ["XCLAIM", "sg:absent", "cg", "bob", "0", "10-1", "JUSTID"]}
+{"id": "xautoclaim-setup-xadd-1", "cmd": ["XADD", "sg:ac", "20-1", "x", "a"]}
+{"id": "xautoclaim-setup-xadd-2", "cmd": ["XADD", "sg:ac", "20-2", "x", "b"]}
+{"id": "xautoclaim-setup-xgroup", "cmd": ["XGROUP", "CREATE", "sg:ac", "acg", "0"]}
+{"id": "xautoclaim-setup-xreadgroup", "cmd": ["XREADGROUP", "GROUP", "acg", "alice", "STREAMS", "sg:ac", ">"]}
+{"id": "xautoclaim-justid-all", "cmd": ["XAUTOCLAIM", "sg:ac", "acg", "bob", "0", "0-0", "JUSTID"], "mode": "exact"}
+{"id": "xautoclaim-nogroup-bad-group", "cmd": ["XAUTOCLAIM", "sg:ac", "nope", "bob", "0", "0-0", "JUSTID"]}
+{"id": "xautoclaim-nogroup-missing-key", "cmd": ["XAUTOCLAIM", "sg:absent", "acg", "bob", "0", "0-0", "JUSTID"]}
