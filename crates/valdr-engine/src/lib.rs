@@ -1095,6 +1095,8 @@ impl<H: Host> Engine<H> {
             self.xack_command(argv)
         } else if ascii_eq(command, b"XPENDING") {
             self.xpending_command(argv)
+        } else if ascii_eq(command, b"XCLAIM") {
+            self.xclaim_command(argv)
         } else if ascii_eq(command, b"XINFO") {
             self.xinfo_command(argv)
         } else if ascii_eq(command, b"GETRANGE") || ascii_eq(command, b"SUBSTR") {
@@ -1599,7 +1601,7 @@ impl<H: Host> Engine<H> {
         if next.is_nan() || next.is_infinite() {
             return err(b"ERR increment would produce NaN or Infinity");
         }
-        let formatted = format_human_long_double(next);
+        let formatted = format_incrbyfloat_result(next);
         let expire_at_ms = self.db.get(&argv[1]).and_then(|entry| entry.expire_at_ms);
         self.db.insert(
             argv[1].clone(),
@@ -3164,7 +3166,7 @@ impl<H: Host> Engine<H> {
         if next.is_nan() || next.is_infinite() {
             return err(b"ERR increment would produce NaN or Infinity");
         }
-        let formatted = format_human_long_double(next);
+        let formatted = format_incrbyfloat_result(next);
         fields.insert(
             argv[2].clone(),
             HashField {
@@ -7470,6 +7472,252 @@ impl<H: Host> Engine<H> {
         ])
     }
 
+    /// XCLAIM key group consumer min-idle-time id [id ...] [IDLE ms] [TIME ms] [RETRYCOUNT n] [FORCE] [JUSTID]
+    /// (`xclaimCommand`, `t_stream.c`): transfer ownership of PEL entries to a new consumer.
+    /// For each requested ID: if the entry is in the group PEL and has been idle ≥ min-idle-time,
+    /// it is reassigned to the named consumer and its delivery_time / delivery_count are updated.
+    /// With FORCE, entries not in the PEL are added if they exist in the stream.
+    /// Returns the claimed entries (or just IDs with JUSTID). Silently skips IDs that do not
+    /// meet the idle-time threshold or are absent from both the PEL and the stream.
+    fn xclaim_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        // XCLAIM key group consumer min-idle-time id [id…] [options]
+        if argv.len() < 6 {
+            return wrong_arity(b"xclaim");
+        }
+        let key = argv[1].clone();
+        let group_name = argv[2].clone();
+        let consumer_name = argv[3].clone();
+
+        let Some(min_idle_i64) = parse_i64(&argv[4]) else {
+            return err(b"ERR value is not an integer or out of range");
+        };
+        if min_idle_i64 < 0 {
+            return err(b"ERR value is not an integer or out of range");
+        }
+        let min_idle_ms = min_idle_i64 as u64;
+
+        // Parse the rest: IDs (parsed first) then option keywords, unified loop
+        // matching valkey's xclaimCommand argument scan order.
+        let mut raw_ids: Vec<StreamId> = Vec::new();
+        let mut opt_idle: Option<u64> = None;
+        let mut opt_time: Option<u64> = None;
+        let mut opt_retry: Option<u64> = None;
+        let mut opt_lastid: Option<StreamId> = None;
+        let mut force = false;
+        let mut justid = false;
+
+        let mut i = 5;
+        while i < argv.len() {
+            // Try stream ID first
+            if let Ok((id, _)) = parse_stream_id_strict(&argv[i], 0) {
+                raw_ids.push(id);
+                i += 1;
+                continue;
+            }
+            // Not a stream ID — try option keyword
+            let moreargs = argv.len() - i - 1;
+            let tok = argv[i].to_ascii_uppercase();
+            match tok.as_slice() {
+                b"IDLE" if moreargs >= 1 => {
+                    let Some(v) = parse_i64(&argv[i + 1]) else {
+                        return err(b"ERR value is not an integer or out of range");
+                    };
+                    if v < 0 {
+                        return err(b"ERR value is not an integer or out of range");
+                    }
+                    opt_idle = Some(v as u64);
+                    i += 2;
+                }
+                b"TIME" if moreargs >= 1 => {
+                    let Some(v) = parse_i64(&argv[i + 1]) else {
+                        return err(b"ERR value is not an integer or out of range");
+                    };
+                    if v < 0 {
+                        return err(b"ERR value is not an integer or out of range");
+                    }
+                    opt_time = Some(v as u64);
+                    i += 2;
+                }
+                b"RETRYCOUNT" if moreargs >= 1 => {
+                    let Some(v) = parse_i64(&argv[i + 1]) else {
+                        return err(b"ERR value is not an integer or out of range");
+                    };
+                    if v < 0 {
+                        return err(b"ERR value is not an integer or out of range");
+                    }
+                    opt_retry = Some(v as u64);
+                    i += 2;
+                }
+                b"LASTID" if moreargs >= 1 => {
+                    match parse_stream_id_strict(&argv[i + 1], 0) {
+                        Ok((id, _)) => opt_lastid = Some(id),
+                        Err(frame) => return frame,
+                    }
+                    i += 2;
+                }
+                b"FORCE" => { force = true; i += 1; }
+                b"JUSTID" => { justid = true; i += 1; }
+                _ => return err(b"ERR syntax error"),
+            }
+        }
+
+        if raw_ids.is_empty() {
+            return wrong_arity(b"xclaim");
+        }
+
+        let now = self.host.now_millis();
+        let new_delivery_time = if let Some(t) = opt_time {
+            t
+        } else if let Some(idle) = opt_idle {
+            now.saturating_sub(idle)
+        } else {
+            now
+        };
+
+        self.purge_if_expired(&key);
+
+        // Phase A: read-only pass — decide which IDs to claim.
+        // All collected data is owned, so borrows on self.db are released after this block.
+        struct ClaimEntry {
+            id: StreamId,
+            old_consumer: Vec<u8>,
+            old_count: u64,
+            is_force_new: bool,
+            fields: Option<Vec<(Vec<u8>, Vec<u8>)>>,
+        }
+        let claims: Vec<ClaimEntry> = {
+            let stream = match self.db.get(&key) {
+                Some(Entry {
+                    value: StoredValue::Stream(s),
+                    ..
+                }) => s,
+                Some(_) => return wrong_type(),
+                None => {
+                    let mut msg = b"NOGROUP No such key '".to_vec();
+                    msg.extend_from_slice(&key);
+                    msg.extend_from_slice(b"' or consumer group '");
+                    msg.extend_from_slice(&group_name);
+                    msg.push(b'\'');
+                    return err(&msg);
+                }
+            };
+            if !stream.groups.contains_key(group_name.as_slice()) {
+                let mut msg = b"NOGROUP No such key '".to_vec();
+                msg.extend_from_slice(&key);
+                msg.extend_from_slice(b"' or consumer group '");
+                msg.extend_from_slice(&group_name);
+                msg.push(b'\'');
+                return err(&msg);
+            }
+            let group = stream.groups.get(group_name.as_slice()).unwrap();
+            raw_ids
+                .iter()
+                .filter_map(|id| {
+                    if let Some(nack) = group.pending.get(id) {
+                        let idle = now.saturating_sub(nack.delivery_time_ms);
+                        if idle >= min_idle_ms {
+                            let fields = if !justid {
+                                stream.entries.get(id).cloned()
+                            } else {
+                                None
+                            };
+                            Some(ClaimEntry {
+                                id: *id,
+                                old_consumer: nack.consumer.clone(),
+                                old_count: nack.delivery_count,
+                                is_force_new: false,
+                                fields,
+                            })
+                        } else {
+                            None
+                        }
+                    } else if force {
+                        stream.entries.get(id).map(|entry_fields| {
+                            let fields =
+                                if !justid { Some(entry_fields.clone()) } else { None };
+                            ClaimEntry {
+                                id: *id,
+                                old_consumer: Vec::new(),
+                                old_count: 0,
+                                is_force_new: true,
+                                fields,
+                            }
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        }; // all borrows on self.db released
+
+        // Phase B: mutation pass — update PEL and consumer bookkeeping.
+        if !claims.is_empty() || opt_lastid.is_some() {
+            {
+                let stream = match self.db.get_mut(&key) {
+                    Some(Entry {
+                        value: StoredValue::Stream(s),
+                        ..
+                    }) => s,
+                    _ => unreachable!("type-checked in phase A"),
+                };
+                let group = stream.groups.get_mut(group_name.as_slice()).unwrap();
+
+                // Apply LASTID: advance group's last_delivered_id if requested.
+                if let Some(last_id) = opt_lastid {
+                    if last_id > group.last_delivered_id {
+                        group.last_delivered_id = last_id;
+                    }
+                }
+
+                for c in &claims {
+                    // Move out of old consumer's pending set.
+                    if !c.is_force_new {
+                        if let Some(old_c) = group.consumers.get_mut(&c.old_consumer) {
+                            old_c.pending.remove(&c.id);
+                        }
+                    }
+                    let new_count =
+                        opt_retry.unwrap_or(if c.is_force_new { 1 } else { c.old_count + 1 });
+                    group.pending.insert(
+                        c.id,
+                        PendingEntry {
+                            consumer: consumer_name.clone(),
+                            delivery_time_ms: new_delivery_time,
+                            delivery_count: new_count,
+                        },
+                    );
+                    let consumer = group.consumers.entry(consumer_name.clone()).or_default();
+                    consumer.pending.insert(c.id);
+                    consumer.seen_time_ms = now;
+                    consumer.active_time_ms = now;
+                    // FORCE: advance last_delivered_id to the claimed entry if needed.
+                    if c.is_force_new && c.id > group.last_delivered_id {
+                        group.last_delivered_id = c.id;
+                    }
+                }
+            } // stream and group dropped, self borrow released
+            self.note_write(&key);
+        }
+
+        // Phase C: build response.
+        if justid {
+            RespFrame::array(claims.iter().map(|c| bulk(c.id.to_string_bytes())).collect())
+        } else {
+            RespFrame::array(
+                claims
+                    .iter()
+                    .map(|c| match &c.fields {
+                        Some(fields) => render_stream_entry(c.id, fields),
+                        None => RespFrame::array(vec![
+                            bulk(c.id.to_string_bytes()),
+                            RespFrame::null_array(),
+                        ]),
+                    })
+                    .collect(),
+            )
+        }
+    }
+
     /// XINFO STREAM|GROUPS (`xinfoCommand`, `t_stream.c`). CONSUMERS is deferred
     /// (it exposes idle/inactive = host clock). STREAM FULL is deferred.
     fn xinfo_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
@@ -11235,6 +11483,7 @@ fn is_write_command(command: &[u8]) -> bool {
             | b"SUNIONSTORE"
             | b"UNLINK"
             | b"XACK"
+            | b"XCLAIM"
             | b"XADD"
             | b"XDEL"
             | b"XREADGROUP"
@@ -14353,14 +14602,32 @@ fn parse_stored_float(bytes: &[u8]) -> Option<f64> {
     Some(value)
 }
 
+/// Format an INCRBYFLOAT / HINCRBYFLOAT result the way Valkey does.
+///
+/// Valkey computes in 80-bit `long double` and formats with `%.17Lg`, which
+/// produces the shortest round-trippable decimal for the long-double result.
+/// For values where `f64` arithmetic gives the same nearest representable
+/// value (e.g. `10.5 + 0.1` → the `f64` closest to 10.6), Rust's default
+/// `Display` (Ryu / shortest round-trip for `f64`) gives the identical string.
+/// `-0` is normalised to `0`; `inf`/`nan` are rejected by the caller.
+fn format_incrbyfloat_result(value: f64) -> Vec<u8> {
+    let text = format!("{}", value);
+    if text == "-0" {
+        b"0".to_vec()
+    } else {
+        text.into_bytes()
+    }
+}
+
 /// Format a float the way valkey's `ld2string(buf, len, value, LD_STR_HUMAN)`
-/// (`util.c`) does for INCRBYFLOAT/HINCRBYFLOAT replies: `%.17Lf` (fixed
-/// notation, never exponential), then trailing zeros after the `.` are stripped,
-/// then a bare trailing `.`, then `-0` is normalized to `0`. `inf`/`nan` are
-/// guarded by the caller before this is ever reached. f64 arithmetic plus
-/// `%.17f` reproduces valkey's `long double` `%.17Lf` byte-for-byte across the
-/// representable-decimal range these commands operate on (verified against
-/// `valkey-server` over 1000+ random and adversarial sums).
+/// (`util.c`) does for **geo-coordinate replies**: `%.17Lf` (fixed notation,
+/// never exponential), then trailing zeros after the `.` are stripped, then a
+/// bare trailing `.`, then `-0` is normalized to `0`. `inf`/`nan` are guarded
+/// by the caller before this is ever reached.
+///
+/// NOTE: do NOT use this for INCRBYFLOAT/HINCRBYFLOAT — use
+/// `format_incrbyfloat_result` instead, which matches Valkey's `%.17Lg`
+/// shortest-round-trip behaviour for those commands.
 fn format_human_long_double(value: f64) -> Vec<u8> {
     let mut text = format!("{:.17}", value);
     if text.contains('.') {
