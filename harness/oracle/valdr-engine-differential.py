@@ -513,7 +513,8 @@ def main():
             cwd=str(repo_root),
             check=True,
         )
-        runner_bin = repo_root / "target" / "debug" / "valdr-fixture-runner"
+        target_root = Path(os.environ["CARGO_TARGET_DIR"]) if os.environ.get("CARGO_TARGET_DIR") else repo_root / "target"
+        runner_bin = target_root / "debug" / "valdr-fixture-runner"
     if not runner_bin.is_file():
         raise HarnessError(f"valdr-fixture-runner binary not found: {runner_bin}")
 
