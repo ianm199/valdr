@@ -1599,7 +1599,7 @@ impl<H: Host> Engine<H> {
         if next.is_nan() || next.is_infinite() {
             return err(b"ERR increment would produce NaN or Infinity");
         }
-        let formatted = format_human_long_double(next);
+        let formatted = format_incrbyfloat_result(next);
         let expire_at_ms = self.db.get(&argv[1]).and_then(|entry| entry.expire_at_ms);
         self.db.insert(
             argv[1].clone(),
@@ -3164,7 +3164,7 @@ impl<H: Host> Engine<H> {
         if next.is_nan() || next.is_infinite() {
             return err(b"ERR increment would produce NaN or Infinity");
         }
-        let formatted = format_human_long_double(next);
+        let formatted = format_incrbyfloat_result(next);
         fields.insert(
             argv[2].clone(),
             HashField {
@@ -14353,14 +14353,32 @@ fn parse_stored_float(bytes: &[u8]) -> Option<f64> {
     Some(value)
 }
 
+/// Format an INCRBYFLOAT / HINCRBYFLOAT result the way Valkey does.
+///
+/// Valkey computes in 80-bit `long double` and formats with `%.17Lg`, which
+/// produces the shortest round-trippable decimal for the long-double result.
+/// For values where `f64` arithmetic gives the same nearest representable
+/// value (e.g. `10.5 + 0.1` → the `f64` closest to 10.6), Rust's default
+/// `Display` (Ryu / shortest round-trip for `f64`) gives the identical string.
+/// `-0` is normalised to `0`; `inf`/`nan` are rejected by the caller.
+fn format_incrbyfloat_result(value: f64) -> Vec<u8> {
+    let text = format!("{}", value);
+    if text == "-0" {
+        b"0".to_vec()
+    } else {
+        text.into_bytes()
+    }
+}
+
 /// Format a float the way valkey's `ld2string(buf, len, value, LD_STR_HUMAN)`
-/// (`util.c`) does for INCRBYFLOAT/HINCRBYFLOAT replies: `%.17Lf` (fixed
-/// notation, never exponential), then trailing zeros after the `.` are stripped,
-/// then a bare trailing `.`, then `-0` is normalized to `0`. `inf`/`nan` are
-/// guarded by the caller before this is ever reached. f64 arithmetic plus
-/// `%.17f` reproduces valkey's `long double` `%.17Lf` byte-for-byte across the
-/// representable-decimal range these commands operate on (verified against
-/// `valkey-server` over 1000+ random and adversarial sums).
+/// (`util.c`) does for **geo-coordinate replies**: `%.17Lf` (fixed notation,
+/// never exponential), then trailing zeros after the `.` are stripped, then a
+/// bare trailing `.`, then `-0` is normalized to `0`. `inf`/`nan` are guarded
+/// by the caller before this is ever reached.
+///
+/// NOTE: do NOT use this for INCRBYFLOAT/HINCRBYFLOAT — use
+/// `format_incrbyfloat_result` instead, which matches Valkey's `%.17Lg`
+/// shortest-round-trip behaviour for those commands.
 fn format_human_long_double(value: f64) -> Vec<u8> {
     let mut text = format!("{:.17}", value);
     if text.contains('.') {
