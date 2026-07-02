@@ -17,13 +17,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use redis_protocol::encode_resp2;
 use serde_json::{json, Value as JsonValue};
-use valdr_engine::Engine;
+use valdr_engine::{Engine, NoopHost};
 
 fn main() {
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut out = stdout.lock();
-    let mut engine = Engine::new_in_memory();
+    let seed = parse_seed();
+    let mut engine = Engine::new(NoopHost::with_seed(0, seed));
 
     for line in stdin.lock().lines() {
         let line = match line {
@@ -65,6 +66,19 @@ fn main() {
         if let Err(error) = out.flush() {
             die(&format!("stdout flush failed: {error}"));
         }
+    }
+}
+
+/// Parses `--seed <u64>` from argv; defaults to 0 for deterministic replay.
+fn parse_seed() -> u64 {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(pos) = args.iter().position(|a| a == "--seed") {
+        match args.get(pos + 1).and_then(|v| v.parse().ok()) {
+            Some(s) => s,
+            None => die("--seed requires a u64 argument"),
+        }
+    } else {
+        0
     }
 }
 
