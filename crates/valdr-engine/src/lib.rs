@@ -42,24 +42,82 @@ pub trait Host {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+/// SplitMix64 — a tiny, wasm-safe, seedable PRNG.
+///
+/// Used by `NoopHost::random_bytes` so the engine never touches OS randomness.
+/// Algorithm from Sebastiano Vigna (2015); single-step period 2^64.
+#[derive(Debug, Clone)]
+struct SplitMix64(u64);
+
+impl SplitMix64 {
+    fn new(seed: u64) -> Self {
+        SplitMix64(seed)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e3779b97f4a7c15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+        z ^ (z >> 31)
+    }
+
+    fn fill_bytes(&mut self, out: &mut [u8]) {
+        let mut i = 0;
+        while i + 8 <= out.len() {
+            out[i..i + 8].copy_from_slice(&self.next_u64().to_le_bytes());
+            i += 8;
+        }
+        if i < out.len() {
+            let tail = out.len() - i;
+            out[i..].copy_from_slice(&self.next_u64().to_le_bytes()[..tail]);
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct NoopHost {
     now_millis: u64,
+    rng: SplitMix64,
+}
+
+impl Default for NoopHost {
+    fn default() -> Self {
+        Self::with_seed(0, 0)
+    }
 }
 
 impl NoopHost {
     pub fn new(now_millis: u64) -> Self {
-        Self { now_millis }
+        Self::with_seed(now_millis, 0)
+    }
+
+    /// Creates a host with an explicit RNG seed for reproducible entropy.
+    pub fn with_seed(now_millis: u64, seed: u64) -> Self {
+        Self {
+            now_millis,
+            rng: SplitMix64::new(seed),
+        }
     }
 
     pub fn set_now_millis(&mut self, now_millis: u64) {
         self.now_millis = now_millis;
+    }
+
+    /// Resets the PRNG to a new seed; useful for deterministic test replay.
+    pub fn set_rng_seed(&mut self, seed: u64) {
+        self.rng = SplitMix64::new(seed);
     }
 }
 
 impl Host for NoopHost {
     fn now_millis(&self) -> u64 {
         self.now_millis
+    }
+
+    fn random_bytes(&mut self, out: &mut [u8]) -> Result<(), HostError> {
+        self.rng.fill_bytes(out);
+        Ok(())
     }
 }
 
@@ -19546,5 +19604,64 @@ mod tests {
     #[test]
     fn command_keys_empty_argv_is_no_keys() {
         assert_eq!(command_keys(&[]), KeyAccess::Keys(Vec::new()));
+    }
+
+    // ── Host RNG ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn splitmix64_known_vector() {
+        // Reference values generated offline with the canonical C implementation
+        // (Vigna 2015): seed 0, first three outputs.
+        let mut rng = SplitMix64::new(0);
+        assert_eq!(rng.next_u64(), 0xe220a8397b1dcdaf);
+        assert_eq!(rng.next_u64(), 0x6e789e6aa1b965f4);
+        assert_eq!(rng.next_u64(), 0x06c45d188009454f);
+    }
+
+    #[test]
+    fn splitmix64_different_seeds_produce_different_streams() {
+        let mut a = SplitMix64::new(1);
+        let mut b = SplitMix64::new(2);
+        assert_ne!(a.next_u64(), b.next_u64());
+    }
+
+    #[test]
+    fn noop_host_random_bytes_is_deterministic_and_seed_reproducible() {
+        let mut buf1 = [0u8; 17];
+        let mut buf2 = [0u8; 17];
+
+        // Same seed → identical output.
+        NoopHost::with_seed(0, 42).random_bytes(&mut buf1).unwrap();
+        NoopHost::with_seed(0, 42).random_bytes(&mut buf2).unwrap();
+        assert_eq!(buf1, buf2);
+
+        // Different seed → different output.
+        NoopHost::with_seed(0, 99).random_bytes(&mut buf2).unwrap();
+        assert_ne!(buf1, buf2);
+    }
+
+    #[test]
+    fn noop_host_set_rng_seed_resets_stream() {
+        let mut host = NoopHost::new(0);
+        let mut a = [0u8; 8];
+        let mut b = [0u8; 8];
+        host.random_bytes(&mut a).unwrap();
+        host.set_rng_seed(0); // reset to same initial state
+        host.random_bytes(&mut b).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn noop_host_random_bytes_fills_unaligned_lengths() {
+        // Exercises the tail-bytes branch (len not a multiple of 8).
+        let mut host = NoopHost::with_seed(0, 7);
+        for len in [0usize, 1, 7, 8, 9, 15, 16, 17, 31, 32, 33] {
+            let mut buf = vec![0u8; len];
+            host.random_bytes(&mut buf).unwrap();
+            // Non-trivial lengths should not be all-zero (astronomically unlikely).
+            if len > 0 {
+                assert!(buf.iter().any(|&b| b != 0), "all-zero output for len={len}");
+            }
+        }
     }
 }
