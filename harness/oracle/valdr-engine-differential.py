@@ -492,6 +492,13 @@ def main():
         action="store_true",
         help="exit 1 if any fixture diverged",
     )
+    parser.add_argument(
+        "--files",
+        default="",
+        help="comma-separated fixture basenames to restrict the run (e.g. 'set.jsonl,hash') "
+        "— default: all *.jsonl. Per-file fresh-engine + FLUSHALL semantics are unchanged, "
+        "so a single-file run's verdict matches that group's verdict in the full run.",
+    )
     args = parser.parse_args()
 
     server_bin = Path(args.server_bin)
@@ -512,6 +519,19 @@ def main():
 
     fixtures_dir = Path(args.fixtures_dir)
     fixture_files = sorted(fixtures_dir.glob("*.jsonl"))
+    if args.files:
+        wanted = {
+            (f if f.endswith(".jsonl") else f + ".jsonl")
+            for f in (s.strip() for s in args.files.split(","))
+            if f
+        }
+        present = {p.name for p in fixture_files}
+        missing = wanted - present
+        if missing:
+            raise HarnessError(
+                f"--files: no such fixture(s) in {fixtures_dir}: {sorted(missing)}"
+            )
+        fixture_files = [p for p in fixture_files if p.name in wanted]
     if not fixture_files:
         raise HarnessError(f"no *.jsonl fixture files in {fixtures_dir}")
 
