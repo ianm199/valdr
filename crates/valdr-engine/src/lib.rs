@@ -7535,7 +7535,11 @@ impl<H: Host> Engine<H> {
     /// XCLAIM key group consumer min-idle-time id [id ...] [IDLE ms] [TIME ms] [RETRYCOUNT n] [FORCE] [JUSTID]
     /// (`xclaimCommand`, `t_stream.c`): transfer ownership of PEL entries to a new consumer.
     /// For each requested ID: if the entry is in the group PEL and has been idle ≥ min-idle-time,
-    /// it is reassigned to the named consumer and its delivery_time / delivery_count are updated.
+    /// it is reassigned to the named consumer and its delivery_time is updated.
+    /// The delivery counter follows valkey's rule (`t_stream.c` ~3275): RETRYCOUNT
+    /// sets it outright; otherwise the base (1 for a fresh FORCE entry, else the
+    /// entry's current count) is incremented only when JUSTID was *not* given, so
+    /// a JUSTID claim never bumps it and FORCE without JUSTID lands on 2.
     /// With FORCE, entries not in the PEL are added if they exist in the stream.
     /// Returns the claimed entries (or just IDs with JUSTID). Silently skips IDs that do not
     /// meet the idle-time threshold or are absent from both the PEL and the stream.
@@ -7736,13 +7740,12 @@ impl<H: Host> Engine<H> {
                             old_c.pending.remove(&c.id);
                         }
                     }
-                    let new_count = opt_retry.unwrap_or(if c.is_force_new {
-                        1
-                    } else if justid {
-                        c.old_count
-                    } else {
-                        c.old_count + 1
-                    });
+                    let base = if c.is_force_new { 1 } else { c.old_count };
+                    let new_count = match opt_retry {
+                        Some(retrycount) => retrycount,
+                        None if justid => base,
+                        None => base + 1,
+                    };
                     group.pending.insert(
                         c.id,
                         PendingEntry {
@@ -19686,5 +19689,115 @@ mod tests {
                 assert!(buf.iter().any(|&b| b != 0), "all-zero output for len={len}");
             }
         }
+    }
+
+    // ── Stream claim delivery-counter fidelity ─────────────────────────────────
+
+    /// Reads the delivery counter of the single pending entry for `group`.
+    ///
+    /// Goes straight to the engine's PEL because the extended XPENDING wire form
+    /// (the only reply that carries per-entry delivery counts) is not implemented
+    /// in this engine wave. Panics unless exactly one entry is pending.
+    fn only_pending_delivery_count(engine: &Engine<NoopHost>, key: &[u8], group: &[u8]) -> u64 {
+        let entry = engine.db.get(key).expect("stream key exists");
+        let stream = match &entry.value {
+            StoredValue::Stream(s) => s,
+            _ => panic!("value at {key:?} is not a stream"),
+        };
+        let g = stream.groups.get(group).expect("consumer group exists");
+        let mut counts = g.pending.values().map(|nack| nack.delivery_count);
+        let first = counts.next().expect("exactly one pending entry expected");
+        assert!(counts.next().is_none(), "helper assumes a single pending entry");
+        first
+    }
+
+    fn seed_delivered_entry(engine: &mut Engine<NoopHost>, group_start: &[u8]) {
+        engine.execute(&argv(&[b"XADD", b"s", b"1-1", b"f", b"v"]));
+        engine.execute(&argv(&[b"XGROUP", b"CREATE", b"s", b"g", group_start]));
+        engine.execute(&argv(&[
+            b"XREADGROUP", b"GROUP", b"g", b"alice", b"COUNT", b"1", b"STREAMS", b"s", b">",
+        ]));
+    }
+
+    #[test]
+    fn xclaim_justid_does_not_increment_delivery_count() {
+        let mut engine = Engine::new_in_memory();
+        seed_delivered_entry(&mut engine, b"0");
+        assert_eq!(only_pending_delivery_count(&engine, b"s", b"g"), 1);
+
+        engine.execute(&argv(&[b"XCLAIM", b"s", b"g", b"bob", b"0", b"1-1", b"JUSTID"]));
+        assert_eq!(
+            only_pending_delivery_count(&engine, b"s", b"g"),
+            1,
+            "a JUSTID claim must not bump the delivery counter (valkey t_stream.c ~3280)"
+        );
+
+        engine.execute(&argv(&[b"XCLAIM", b"s", b"g", b"carol", b"0", b"1-1"]));
+        assert_eq!(
+            only_pending_delivery_count(&engine, b"s", b"g"),
+            2,
+            "a normal claim increments the delivery counter"
+        );
+    }
+
+    #[test]
+    fn xclaim_retrycount_sets_counter_outright_even_with_justid() {
+        let mut engine = Engine::new_in_memory();
+        seed_delivered_entry(&mut engine, b"0");
+        engine.execute(&argv(&[
+            b"XCLAIM", b"s", b"g", b"bob", b"0", b"1-1", b"RETRYCOUNT", b"7", b"JUSTID",
+        ]));
+        assert_eq!(
+            only_pending_delivery_count(&engine, b"s", b"g"),
+            7,
+            "RETRYCOUNT sets the counter outright regardless of JUSTID"
+        );
+    }
+
+    #[test]
+    fn xclaim_force_creates_nack_and_counts_like_valkey() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"XADD", b"s", b"1-1", b"f", b"v"]));
+        engine.execute(&argv(&[b"XGROUP", b"CREATE", b"s", b"g", b"$"]));
+        engine.execute(&argv(&[b"XCLAIM", b"s", b"g", b"bob", b"0", b"1-1", b"FORCE"]));
+        assert_eq!(
+            only_pending_delivery_count(&engine, b"s", b"g"),
+            2,
+            "FORCE creates a NACK at count 1, then a non-JUSTID claim bumps it to 2 (valkey)"
+        );
+    }
+
+    #[test]
+    fn xclaim_force_justid_leaves_fresh_nack_at_one() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"XADD", b"s", b"1-1", b"f", b"v"]));
+        engine.execute(&argv(&[b"XGROUP", b"CREATE", b"s", b"g", b"$"]));
+        engine.execute(&argv(&[b"XCLAIM", b"s", b"g", b"bob", b"0", b"1-1", b"FORCE", b"JUSTID"]));
+        assert_eq!(
+            only_pending_delivery_count(&engine, b"s", b"g"),
+            1,
+            "FORCE + JUSTID leaves the freshly-created NACK at count 1"
+        );
+    }
+
+    #[test]
+    fn xautoclaim_justid_does_not_increment_delivery_count() {
+        let mut engine = Engine::new_in_memory();
+        seed_delivered_entry(&mut engine, b"0");
+        assert_eq!(only_pending_delivery_count(&engine, b"s", b"g"), 1);
+
+        engine.execute(&argv(&[b"XAUTOCLAIM", b"s", b"g", b"bob", b"0", b"0-0", b"JUSTID"]));
+        assert_eq!(
+            only_pending_delivery_count(&engine, b"s", b"g"),
+            1,
+            "XAUTOCLAIM JUSTID must not bump the delivery counter (valkey t_stream.c ~3450)"
+        );
+
+        engine.execute(&argv(&[b"XAUTOCLAIM", b"s", b"g", b"carol", b"0", b"0-0"]));
+        assert_eq!(
+            only_pending_delivery_count(&engine, b"s", b"g"),
+            2,
+            "a normal XAUTOCLAIM increments the delivery counter"
+        );
     }
 }
