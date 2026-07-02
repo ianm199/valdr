@@ -80,3 +80,11 @@
 {"id": "xinfo-stream-empty-after-deleteall-setup-add", "cmd": ["XADD", "sg:da", "1-1", "f", "v"]}
 {"id": "xinfo-stream-empty-after-deleteall-del", "cmd": ["XDEL", "sg:da", "1-1"]}
 {"id": "xinfo-stream-empty-after-deleteall-check", "cmd": ["XINFO", "STREAM", "sg:da"]}
+{"id": "xclaim-setup-xadd-1", "cmd": ["XADD", "sg:cl", "10-1", "k", "v1"]}
+{"id": "xclaim-setup-xadd-2", "cmd": ["XADD", "sg:cl", "10-2", "k", "v2"]}
+{"id": "xclaim-setup-xgroup", "cmd": ["XGROUP", "CREATE", "sg:cl", "cg", "0"]}
+{"id": "xclaim-setup-xreadgroup", "cmd": ["XREADGROUP", "GROUP", "cg", "alice", "STREAMS", "sg:cl", ">"]}
+{"id": "xclaim-justid-claim-both", "cmd": ["XCLAIM", "sg:cl", "cg", "bob", "0", "10-1", "10-2", "JUSTID"], "mode": "exact"}
+{"id": "xclaim-verify-pending-after-claim", "cmd": ["XPENDING", "sg:cl", "cg"]}
+{"id": "xclaim-nogroup-bad-group", "cmd": ["XCLAIM", "sg:cl", "nope", "bob", "0", "10-1", "JUSTID"]}
+{"id": "xclaim-nogroup-missing-key", "cmd": ["XCLAIM", "sg:absent", "cg", "bob", "0", "10-1", "JUSTID"]}
