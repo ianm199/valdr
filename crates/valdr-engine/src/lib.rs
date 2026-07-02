@@ -7736,8 +7736,13 @@ impl<H: Host> Engine<H> {
                             old_c.pending.remove(&c.id);
                         }
                     }
-                    let new_count =
-                        opt_retry.unwrap_or(if c.is_force_new { 1 } else { c.old_count + 1 });
+                    let new_count = opt_retry.unwrap_or(if c.is_force_new {
+                        1
+                    } else if justid {
+                        c.old_count
+                    } else {
+                        c.old_count + 1
+                    });
                     group.pending.insert(
                         c.id,
                         PendingEntry {
@@ -7915,7 +7920,7 @@ impl<H: Host> Engine<H> {
                     PendingEntry {
                         consumer: consumer_name.clone(),
                         delivery_time_ms: now,
-                        delivery_count: c.old_count + 1,
+                        delivery_count: if justid { c.old_count } else { c.old_count + 1 },
                     },
                 );
                 let consumer = group.consumers.entry(consumer_name.clone()).or_default();
