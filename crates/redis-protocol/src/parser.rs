@@ -294,11 +294,7 @@ impl<'a> ParserCursor<'a> {
         self.pos = cr + 2; // advance past CRLF
         let proto = &self.buf[proto_start..self.pos];
 
-        let d = if repr.len() <= MAX_LONG_DOUBLE_CHARS {
-            parse_f64_bytes(repr)
-        } else {
-            0.0
-        };
+        let d = parse_resp3_double(repr);
         cb.on_double(d, proto);
         Ok(())
     }
@@ -404,24 +400,74 @@ fn parse_i64(bytes: &[u8]) -> Result<i64, RedisError> {
     Ok(if negative { -acc } else { acc })
 }
 
+/// Parse a RESP3 double representation, retaining the reference parser's
+/// length guard.
+fn parse_resp3_double(bytes: &[u8]) -> f64 {
+    if bytes.len() <= MAX_LONG_DOUBLE_CHARS {
+        parse_f64_bytes(bytes)
+    } else {
+        0.0
+    }
+}
+
 /// Parse an ASCII floating-point number from `bytes`.
 /// Handles the RESP3 special representations `inf`, `-inf`, and `nan` directly.
-/// All RESP3 double values are guaranteed ASCII by the protocol.
-/// TODO(port): The generic arm returns `0.0` for all non-special values.
-/// Replace with a proper byte-float parser (`fast-float` or `lexical-core`
-/// crate). We cannot use `str::from_utf8`.
-/// RESP floats are always valid ASCII. Phase B should introduce an approved
-/// dependency or a hand-written fast-path.
-/// PERF(port): `valkey_strtod_n` — profile byte-float parsing strategy in Phase B.
+/// Malformed input maps to `0.0`, matching `valkey_strtod_n`'s initialized
+/// output value. RESP3 double representations are ASCII by protocol.
 fn parse_f64_bytes(bytes: &[u8]) -> f64 {
     match bytes {
         b"inf" => f64::INFINITY,
         b"-inf" => f64::NEG_INFINITY,
         b"nan" => f64::NAN,
-        _ => {
-            // TODO(port): implement proper byte→f64 without from_utf8.
-            0.0
+        _ => std::str::from_utf8(bytes)
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0.0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_finite_resp3_doubles() {
+        assert_eq!(parse_resp3_double(b"12.5"), 12.5);
+        assert_eq!(parse_resp3_double(b"-0.125"), -0.125);
+        assert_eq!(parse_resp3_double(b"1.25e2"), 125.0);
+        assert_eq!(parse_resp3_double(b"-4E-2"), -0.04);
+    }
+
+    #[test]
+    fn preserves_signed_zero() {
+        assert_eq!(parse_resp3_double(b"0").to_bits(), 0.0_f64.to_bits());
+        assert_eq!(parse_resp3_double(b"-0").to_bits(), (-0.0_f64).to_bits());
+    }
+
+    #[test]
+    fn parses_resp3_special_values() {
+        assert_eq!(parse_resp3_double(b"inf"), f64::INFINITY);
+        assert_eq!(parse_resp3_double(b"-inf"), f64::NEG_INFINITY);
+        assert!(parse_resp3_double(b"nan").is_nan());
+    }
+
+    #[test]
+    fn malformed_double_representations_are_zero() {
+        let malformed: &[&[u8]] = &[b"", b".", b"+", b"1.2.3", b"nope"];
+        for repr in malformed {
+            assert_eq!(parse_resp3_double(repr), 0.0, "repr: {repr:?}");
         }
+    }
+
+    #[test]
+    fn preserves_overflow_and_length_behavior() {
+        assert_eq!(parse_resp3_double(b"1e9999"), f64::INFINITY);
+
+        let at_limit = vec![b'0'; MAX_LONG_DOUBLE_CHARS];
+        assert_eq!(parse_resp3_double(&at_limit), 0.0);
+
+        let over_limit = vec![b'1'; MAX_LONG_DOUBLE_CHARS + 1];
+        assert_eq!(parse_resp3_double(&over_limit), 0.0);
     }
 }
 
