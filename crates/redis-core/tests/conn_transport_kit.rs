@@ -12,6 +12,7 @@
 
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
@@ -34,14 +35,26 @@ type SharedBuf = Arc<Mutex<VecDeque<u8>>>;
 struct PipeEnd {
     inbound: SharedBuf,
     outbound: SharedBuf,
+    inbound_closed: Arc<AtomicBool>,
+    outbound_closed: Arc<AtomicBool>,
     read_chunk: usize,
     write_chunk: usize,
+}
+
+impl PipeEnd {
+    /// Permanently close this end's write half after already-buffered bytes.
+    fn close_write(&self) {
+        self.outbound_closed.store(true, Ordering::SeqCst);
+    }
 }
 
 impl Read for PipeEnd {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let mut q = self.inbound.lock().unwrap();
         if q.is_empty() {
+            if self.inbound_closed.load(Ordering::SeqCst) {
+                return Ok(0);
+            }
             return Err(io::Error::new(io::ErrorKind::WouldBlock, "no data ready"));
         }
         let n = buf.len().min(self.read_chunk).min(q.len());
@@ -69,15 +82,21 @@ fn pipe_pair(read_chunk: usize, write_chunk: usize) -> (PipeEnd, PipeEnd) {
     assert!(read_chunk >= 1 && write_chunk >= 1);
     let s2c: SharedBuf = Arc::new(Mutex::new(VecDeque::new()));
     let c2s: SharedBuf = Arc::new(Mutex::new(VecDeque::new()));
+    let s2c_closed = Arc::new(AtomicBool::new(false));
+    let c2s_closed = Arc::new(AtomicBool::new(false));
     let server = PipeEnd {
         inbound: c2s.clone(),
         outbound: s2c.clone(),
+        inbound_closed: c2s_closed.clone(),
+        outbound_closed: s2c_closed.clone(),
         read_chunk,
         write_chunk,
     };
     let client = PipeEnd {
         inbound: s2c,
         outbound: c2s,
+        inbound_closed: s2c_closed,
+        outbound_closed: c2s_closed,
         read_chunk,
         write_chunk,
     };
@@ -596,6 +615,61 @@ fn tls_backend_handshake_one_byte_at_a_time() {
     let mut buf = [0u8; 64];
     let n = ct.read(&mut conn, &mut buf).unwrap();
     assert_eq!(&buf[..n], b"+OK\r\n");
+}
+
+#[test]
+fn tls_backend_peer_close_notify_is_clean_eof() {
+    let ct = TlsConnectionType::from_server_config(test_server_config());
+    let mut client = test_client();
+    let (server_end, mut peer) = pipe_pair(16384, 16384);
+    let mut conn = ct.accept_connection(Box::new(server_end)).unwrap();
+    drive_tls_handshake(&ct, &mut conn, &mut client, &mut peer);
+
+    client.send_close_notify();
+    flush_tls(&mut client, &mut peer).unwrap();
+
+    let mut buf = [0u8; 64];
+    assert_eq!(ct.read(&mut conn, &mut buf).unwrap(), 0);
+    assert_eq!(conn.state, ConnectionState::Closed);
+}
+
+#[test]
+fn tls_backend_transport_eof_without_close_notify_is_truncation() {
+    let ct = TlsConnectionType::from_server_config(test_server_config());
+    let mut client = test_client();
+    let (server_end, mut peer) = pipe_pair(16384, 16384);
+    let mut conn = ct.accept_connection(Box::new(server_end)).unwrap();
+    drive_tls_handshake(&ct, &mut conn, &mut client, &mut peer);
+
+    peer.close_write();
+
+    let mut buf = [0u8; 64];
+    assert_eq!(
+        ct.read(&mut conn, &mut buf),
+        Err(RedisError::Io(io::ErrorKind::UnexpectedEof))
+    );
+    assert_eq!(conn.state, ConnectionState::Error);
+}
+
+#[test]
+fn tls_backend_delivers_final_data_before_close_notify() {
+    let ct = TlsConnectionType::from_server_config(test_server_config());
+    let mut client = test_client();
+    let (server_end, mut peer) = pipe_pair(16384, 16384);
+    let mut conn = ct.accept_connection(Box::new(server_end)).unwrap();
+    drive_tls_handshake(&ct, &mut conn, &mut client, &mut peer);
+
+    let final_data = b"+LAST\r\n";
+    client.writer().write_all(final_data).unwrap();
+    client.send_close_notify();
+    flush_tls(&mut client, &mut peer).unwrap();
+
+    let mut buf = [0u8; 64];
+    let n = ct.read(&mut conn, &mut buf).unwrap();
+    assert_eq!(&buf[..n], final_data);
+    assert_eq!(conn.state, ConnectionState::Connected);
+    assert_eq!(ct.read(&mut conn, &mut buf).unwrap(), 0);
+    assert_eq!(conn.state, ConnectionState::Closed);
 }
 
 /// All-chunkings invariant through the real TLS backend: for every
