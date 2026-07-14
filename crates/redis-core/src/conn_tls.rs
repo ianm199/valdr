@@ -176,13 +176,16 @@ impl ConnectionTypeTrait for TlsConnectionType {
             Ok(n) => Ok(n),
             Err(e) if would_block(&e) => {
                 if eof {
-                    conn.state = ConnectionState::Closed;
-                    Ok(0)
+                    conn.state = ConnectionState::Error;
+                    Err(RedisError::io(io::ErrorKind::UnexpectedEof))
                 } else {
                     Err(RedisError::io(io::ErrorKind::WouldBlock))
                 }
             }
-            Err(e) => Err(RedisError::io(e.kind())),
+            Err(e) => {
+                conn.state = ConnectionState::Error;
+                Err(RedisError::io(e.kind()))
+            }
         }
     }
 
