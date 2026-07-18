@@ -1196,9 +1196,13 @@ impl<H: Host> Engine<H> {
     /// representation of the value stored at `key`: a bulk string of
     /// `<type-byte><serialized-value><2-byte RDB version LE><8-byte CRC64 LE>`,
     /// byte-identical to the reference (the differential oracle compares these
-    /// bytes). Returns a null bulk when the key is missing. Aggregate value
-    /// types are deferred this wave; DUMP of a non-string returns a deferral
-    /// error so we never emit a non-faithful payload (see `ku-dump-aggregate`).
+    /// bytes). Returns a null bulk when the key is missing. Covers all
+    /// `StoredValue` variants (string/list/zset/set/hash, including small
+    /// TTL-carrying hashes via `RDB_TYPE_HASH_2`, and streams). `None` from
+    /// `rdb_create_dump_payload` is reserved for encodings this engine cannot
+    /// yet reproduce byte-for-byte (e.g. large hashtable/skiplist-encoded
+    /// collections beyond the listpack thresholds) — those return a deferral
+    /// error rather than emit a non-faithful payload.
     fn dump_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
         if argv.len() != 2 {
             return wrong_arity(b"dump");
@@ -1220,9 +1224,10 @@ impl<H: Host> Engine<H> {
     /// stores it with the requested TTL. Option parsing, check ordering, and
     /// error strings mirror the reference exactly. IDLETIME/FREQ are validated
     /// (range-checked) but otherwise ignored — the edge engine has no
-    /// LRU/LFU eviction. String values are restored faithfully; a payload
-    /// holding a non-string aggregate type errors with "Bad data format"
-    /// (the engine cannot reconstruct aggregate encodings this wave).
+    /// LRU/LFU eviction. All `StoredValue` variants restore faithfully
+    /// (string/list/zset/set/hash incl. `RDB_TYPE_HASH_2` field-TTL, stream);
+    /// a payload whose type byte the engine cannot decode errors with
+    /// "Bad data format", matching the reference's malformed-payload path.
     fn restore_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
         if argv.len() < 4 {
             return wrong_arity(b"restore");
