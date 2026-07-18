@@ -1,9 +1,12 @@
+{"id": "dbsize-empty", "cmd": ["DBSIZE"], "mode": "exact"}
 {"id": "scan-setup-keys", "cmd": ["MSET", "sc:k1", "1", "sc:k2", "2", "sc:k3", "3"]}
+{"id": "dbsize-after-mset", "cmd": ["DBSIZE"], "mode": "exact"}
 {"id": "scan-keyspace-all", "cmd": ["SCAN", "0", "COUNT", "1000"], "mode": "scan_reply"}
 {"id": "scan-keyspace-from-cursor-arg", "cmd": ["SCAN", "99", "COUNT", "1000"], "mode": "scan_reply"}
 {"id": "scan-keyspace-match-glob", "cmd": ["SCAN", "0", "MATCH", "sc:k1*", "COUNT", "1000"], "mode": "scan_reply"}
 {"id": "scan-keyspace-match-none", "cmd": ["SCAN", "0", "MATCH", "nomatch:*", "COUNT", "1000"], "mode": "scan_reply"}
 {"id": "scan-setup-list-for-type", "cmd": ["RPUSH", "sc:lst", "x", "y"]}
+{"id": "dbsize-after-list", "cmd": ["DBSIZE"], "mode": "exact"}
 {"id": "scan-type-string", "cmd": ["SCAN", "0", "TYPE", "string", "COUNT", "1000"], "mode": "scan_reply"}
 {"id": "scan-type-list", "cmd": ["SCAN", "0", "TYPE", "list", "COUNT", "1000"], "mode": "scan_reply"}
 {"id": "scan-invalid-cursor", "cmd": ["SCAN", "notanumber"], "mode": "exact"}
@@ -28,3 +31,38 @@
 {"id": "zscan-noscores", "cmd": ["ZSCAN", "sc:z", "0", "NOSCORES", "COUNT", "1000"], "mode": "scan_reply"}
 {"id": "zscan-missing-key", "cmd": ["ZSCAN", "sc:zmiss", "0", "COUNT", "1000"], "mode": "exact"}
 {"id": "zscan-wrongtype", "cmd": ["ZSCAN", "sc:k1", "0"], "mode": "exact"}
+{"id": "dbsize-final", "cmd": ["DBSIZE"], "mode": "exact"}
+{"id": "dbsize-arity-error", "cmd": ["DBSIZE", "extra"], "mode": "exact"}
+{"id": "dbsize-expiry-setup", "cmd": ["SET", "sc:exp", "v"]}
+{"id": "dbsize-after-expiry-setup", "cmd": ["DBSIZE"], "mode": "exact"}
+{"id": "dbsize-expire-in-past", "cmd": ["PEXPIREAT", "sc:exp", "1"], "mode": "exact"}
+{"id": "dbsize-after-expiry-delete", "cmd": ["DBSIZE"], "mode": "exact"}
+{"id": "dbsize-multi-open", "cmd": ["MULTI"], "mode": "exact"}
+{"id": "dbsize-multi-queued", "cmd": ["DBSIZE"], "mode": "exact"}
+{"id": "dbsize-multi-exec", "cmd": ["EXEC"], "mode": "exact"}
+{"id": "scan-od-flush", "cmd": ["FLUSHALL"]}
+{"id": "scan-od-empty-keyspace", "cmd": ["SCAN", "0", "COUNT", "1000"], "mode": "exact"}
+{"id": "scan-od-single-setup", "cmd": ["SET", "sc:od1", "v1"]}
+{"id": "scan-od-single-keyspace", "cmd": ["SCAN", "0", "COUNT", "1000"], "mode": "exact"}
+{"id": "scan-od-match-one", "cmd": ["SCAN", "0", "MATCH", "sc:od1", "COUNT", "1000"], "mode": "exact"}
+{"id": "scan-od-match-zero", "cmd": ["SCAN", "0", "MATCH", "sc:nomatch*", "COUNT", "1000"], "mode": "exact"}
+{"id": "scan-od-list-setup", "cmd": ["RPUSH", "sc:odlist", "x"]}
+{"id": "scan-od-type-string-one", "cmd": ["SCAN", "0", "TYPE", "string", "COUNT", "1000"], "mode": "exact"}
+{"id": "scan-od-type-list-one", "cmd": ["SCAN", "0", "TYPE", "list", "COUNT", "1000"], "mode": "exact"}
+{"id": "scan-od-type-hash-zero", "cmd": ["SCAN", "0", "TYPE", "hash", "COUNT", "1000"], "mode": "exact"}
+{"id": "hscan-od-setup", "cmd": ["HSET", "sc:odh", "f1", "v1"]}
+{"id": "hscan-od-single", "cmd": ["HSCAN", "sc:odh", "0", "COUNT", "1000"], "mode": "exact"}
+{"id": "hscan-od-novalues-single", "cmd": ["HSCAN", "sc:odh", "0", "NOVALUES", "COUNT", "1000"], "mode": "exact"}
+{"id": "sscan-od-setup", "cmd": ["SADD", "sc:ods", "m1"]}
+{"id": "sscan-od-single", "cmd": ["SSCAN", "sc:ods", "0", "COUNT", "1000"], "mode": "exact"}
+{"id": "zscan-od-setup", "cmd": ["ZADD", "sc:odz", "1", "a"]}
+{"id": "zscan-od-single", "cmd": ["ZSCAN", "sc:odz", "0", "COUNT", "1000"], "mode": "exact"}
+{"id": "zscan-od-noscores-single", "cmd": ["ZSCAN", "sc:odz", "0", "NOSCORES", "COUNT", "1000"], "mode": "exact"}
+{"id": "keys-multi-valid-open", "cmd": ["MULTI"], "mode": "exact"}
+{"id": "keys-multi-valid-queued", "cmd": ["KEYS", "sc:od1"], "mode": "exact"}
+{"id": "keys-multi-valid-exec", "cmd": ["EXEC"], "mode": "exact"}
+{"id": "keys-multi-arity-open", "cmd": ["MULTI"], "mode": "exact"}
+{"id": "keys-multi-arity-bad", "cmd": ["KEYS"], "mode": "exact"}
+{"id": "keys-multi-arity-queue-valid", "cmd": ["SET", "sc:karity", "1"], "mode": "exact"}
+{"id": "keys-multi-arity-exec-aborts", "cmd": ["EXEC"], "mode": "exact"}
+{"id": "keys-multi-arity-not-applied", "cmd": ["GET", "sc:karity"], "mode": "exact"}
