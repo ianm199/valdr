@@ -34,6 +34,11 @@ python3 harness/oracle/valdr-engine-differential.py \
 ```
 Baseline 2026-06-22: **382 pass / 0 diverge / 19 known-unsupported**, engine
 dispatches 27 of 200 in-scope commands (**173 missing**).
+Re-baselined 2026-07-18 (overnight verification run, PRs #11-#13): **2175
+fixtures, 2157 pass / 0 diverge / 18 known-unsupported** — evidence
+`harness/oracle/results/valdr-differential-20260718.txt`. NOTE: the wave
+checkboxes above had drifted far behind the implemented surface; when in doubt
+trust `valdr-surface-gap.sh` + the oracle, not the checkboxes.
 
 Status legend: `[ ]` queued · `[~]` in progress · `[x]` landed (oracle-green, committed) · `[?]` scope-review.
 
@@ -77,15 +82,15 @@ ZUNIONSTORE, ZINTERSTORE, ZDIFFSTORE, ZRANGESTORE, ZINTERCARD, ZMPOP. Fixtures: 
 SETBIT, GETBIT, BITCOUNT, BITPOS, BITOP, BITFIELD, BITFIELD_RO; GETRANGE,
 SETRANGE, SUBSTR, GETEX, PSETEX, MSET, MSETNX. Fixtures: `bitmap.jsonl`, `strings.jsonl`.
 
-### Wave 8 — HyperLogLog  `[ ]`
+### Wave 8 — HyperLogLog  `[x]`  (pre-implemented in an earlier session; PFCOUNT cache write-back divergence found+fixed 2026-07-18, PR #12 — oracle 2157/0/18)
 PFADD, PFCOUNT, PFMERGE (dense/sparse parity vs reference). Fixtures: new `hll.jsonl`.
 
-### Wave 9 — Transactions  `[ ]`
+### Wave 9 — Transactions  `[x]`  (found already fully implemented 2026-07-18 — an earlier session landed it under a mislabeled commit; oracle-confirmed, no delta needed)
 MULTI, EXEC, DISCARD, WATCH, UNWATCH. The DO already serializes, so this is
 command-queue + WATCH/CAS semantics, not concurrency. High edge value (atomic
 multi-command decisions). Fixtures: new `multi.jsonl`.
 
-### Wave 10 — Scan + introspection  `[ ]`
+### Wave 10 — Scan + introspection  `[x]`  (mostly pre-implemented; DBSIZE + MULTI-queue arity fix + deterministic scan fixtures 2026-07-18, PR #11 — oracle 2157/0/18)
 SCAN, HSCAN, SSCAN, ZSCAN (cursor model), KEYS, DBSIZE (single-db). Fixtures: new `scan.jsonl`.
 
 ### Wave 11 — Streams  `[x]`  (core c1ce5a6 + groups c0c77be — feature-complete bar clock-dependent claim ops)
@@ -93,7 +98,7 @@ XADD, XLEN, XRANGE, XREVRANGE, XREAD (non-blocking), XDEL, XTRIM, XSETID, XINFO;
 then consumer groups XGROUP/XREADGROUP/XACK/XPENDING/XCLAIM/XAUTOCLAIM.
 Fixtures: new `stream.jsonl`. Split into sub-waves.
 
-### Wave 12 — DUMP / RESTORE  `[ ]`
+### Wave 12 — DUMP / RESTORE  `[x]`  (found already complete 2026-07-18; doc-comment corrections in PR #13)
 DUMP, RESTORE (RDB-serialization parity). Enables key migration in/out of the edge.
 
 ### Scope-review (in `exclude` or debatable) `[?]`
