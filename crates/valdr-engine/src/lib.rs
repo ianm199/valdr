@@ -883,6 +883,8 @@ impl<H: Host> Engine<H> {
             self.ttl_command(argv, true, true)
         } else if ascii_eq(command, b"TYPE") {
             self.type_command(argv)
+        } else if ascii_eq(command, b"DBSIZE") {
+            self.dbsize_command(argv)
         } else if ascii_eq(command, b"RENAME") {
             self.rename_command(argv, false)
         } else if ascii_eq(command, b"RENAMENX") {
@@ -7953,6 +7955,17 @@ impl<H: Host> Engine<H> {
         RespFrame::array(matches)
     }
 
+    /// DBSIZE (`dbsizeCommand`, `db.c`): the raw key count (`dictSize`/
+    /// `kvstoreSize`). Unlike `KEYS`/`SCAN`, valkey's DBSIZE does not check
+    /// expiry — a logically-expired-but-not-yet-purged key still counts.
+    /// Read-only: never calls `note_write`.
+    fn dbsize_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 1 {
+            return wrong_arity(b"dbsize");
+        }
+        RespFrame::integer(self.db.len() as i64)
+    }
+
     /// SCAN cursor [MATCH pattern] [COUNT n] [TYPE type] (`scanCommand` →
     /// `scanGenericCommand`, `db.c`). The engine stores the keyspace in a
     /// `HashMap` with no stable dict cursor, so this is a single-pass scan: it
@@ -10687,6 +10700,7 @@ fn command_arity(command: &[u8]) -> Option<i64> {
         b"BITOP" => -4,
         b"BITPOS" => -3,
         b"COPY" => -3,
+        b"DBSIZE" => 1,
         b"DECR" => 2,
         b"DECRBY" => 3,
         b"DEL" => -2,
@@ -10748,6 +10762,7 @@ fn command_arity(command: &[u8]) -> Option<i64> {
         b"HVALS" => 2,
         b"INCR" => 2,
         b"INCRBY" => 3,
+        b"KEYS" => 2,
         b"LINDEX" => 3,
         b"LINSERT" => 5,
         b"LLEN" => 2,
