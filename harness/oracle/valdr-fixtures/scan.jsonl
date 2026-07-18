@@ -1,9 +1,12 @@
+{"id": "dbsize-empty", "cmd": ["DBSIZE"], "mode": "exact"}
 {"id": "scan-setup-keys", "cmd": ["MSET", "sc:k1", "1", "sc:k2", "2", "sc:k3", "3"]}
+{"id": "dbsize-after-mset", "cmd": ["DBSIZE"], "mode": "exact"}
 {"id": "scan-keyspace-all", "cmd": ["SCAN", "0", "COUNT", "1000"], "mode": "scan_reply"}
 {"id": "scan-keyspace-from-cursor-arg", "cmd": ["SCAN", "99", "COUNT", "1000"], "mode": "scan_reply"}
 {"id": "scan-keyspace-match-glob", "cmd": ["SCAN", "0", "MATCH", "sc:k1*", "COUNT", "1000"], "mode": "scan_reply"}
 {"id": "scan-keyspace-match-none", "cmd": ["SCAN", "0", "MATCH", "nomatch:*", "COUNT", "1000"], "mode": "scan_reply"}
 {"id": "scan-setup-list-for-type", "cmd": ["RPUSH", "sc:lst", "x", "y"]}
+{"id": "dbsize-after-list", "cmd": ["DBSIZE"], "mode": "exact"}
 {"id": "scan-type-string", "cmd": ["SCAN", "0", "TYPE", "string", "COUNT", "1000"], "mode": "scan_reply"}
 {"id": "scan-type-list", "cmd": ["SCAN", "0", "TYPE", "list", "COUNT", "1000"], "mode": "scan_reply"}
 {"id": "scan-invalid-cursor", "cmd": ["SCAN", "notanumber"], "mode": "exact"}
@@ -28,3 +31,12 @@
 {"id": "zscan-noscores", "cmd": ["ZSCAN", "sc:z", "0", "NOSCORES", "COUNT", "1000"], "mode": "scan_reply"}
 {"id": "zscan-missing-key", "cmd": ["ZSCAN", "sc:zmiss", "0", "COUNT", "1000"], "mode": "exact"}
 {"id": "zscan-wrongtype", "cmd": ["ZSCAN", "sc:k1", "0"], "mode": "exact"}
+{"id": "dbsize-final", "cmd": ["DBSIZE"], "mode": "exact"}
+{"id": "dbsize-arity-error", "cmd": ["DBSIZE", "extra"], "mode": "exact"}
+{"id": "dbsize-expiry-setup", "cmd": ["SET", "sc:exp", "v"]}
+{"id": "dbsize-after-expiry-setup", "cmd": ["DBSIZE"], "mode": "exact"}
+{"id": "dbsize-expire-in-past", "cmd": ["PEXPIREAT", "sc:exp", "1"], "mode": "exact"}
+{"id": "dbsize-after-expiry-delete", "cmd": ["DBSIZE"], "mode": "exact"}
+{"id": "dbsize-multi-open", "cmd": ["MULTI"], "mode": "exact"}
+{"id": "dbsize-multi-queued", "cmd": ["DBSIZE"], "mode": "exact"}
+{"id": "dbsize-multi-exec", "cmd": ["EXEC"], "mode": "exact"}
