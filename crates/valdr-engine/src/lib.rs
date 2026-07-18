@@ -8639,11 +8639,21 @@ impl<H: Host> Engine<H> {
     /// Returns the approximate cardinality of the HyperLogLog at `key`. With
     /// more than one key the cardinality of the *union* of the source HLLs is
     /// returned: the keys are merged into a temporary register array that is
-    /// never written back, so PFCOUNT never mutates the database. Missing keys
-    /// count as empty HLLs. Returns the HLL-specific WRONGTYPE error if any key
-    /// holds a non-HLL value. This handler never calls `note_write` (read-only):
-    /// the C cache write-back is a pure micro-optimisation with no observable
-    /// effect, so the dense-only port recomputes the estimate each time.
+    /// never written back, so the multi-key form never mutates the database
+    /// (matches the reference: the union path only ever reads).
+    ///
+    /// The single-key form mirrors the reference's cache exactly: a valid
+    /// cached cardinality is returned as a pure read (no `note_write`); on a
+    /// cache miss the estimate is recomputed *and written back* into the HLL
+    /// header, and that recompute-and-store **does** call `note_write` — the
+    /// reference calls this "considered a read-only command even if the
+    /// cached value may be modified" and still calls `signalModifiedKey` +
+    /// bumps `server.dirty` on the miss path, so a `WATCH`ed key can be
+    /// self-touched-aborted by its own first post-write `PFCOUNT`. A repeat
+    /// `PFCOUNT` with no intervening write hits the now-valid cache and is a
+    /// pure read. Missing keys count as empty HLLs (reply `0`, no mutation).
+    /// Returns the HLL-specific WRONGTYPE error if any key holds a non-HLL
+    /// value.
     fn pfcount_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
         if argv.len() < 2 {
             return wrong_arity(b"pfcount");
@@ -8668,16 +8678,34 @@ impl<H: Host> Engine<H> {
         }
 
         self.purge_if_expired(&argv[1]);
-        match self.db.get(&argv[1]).map(|entry| &entry.value) {
-            None => RespFrame::integer(0),
+        let bytes = match self.db.get(&argv[1]).map(|entry| &entry.value) {
+            None => return RespFrame::integer(0),
             Some(StoredValue::String(bytes)) => {
                 if !hll_is_valid(bytes) {
                     return err(HLL_WRONG_TYPE_ERR);
                 }
-                RespFrame::integer(hll_count_dense(&bytes[HLL_HDR_SIZE..]) as i64)
+                bytes.clone()
             }
-            Some(_) => err(HLL_WRONG_TYPE_ERR),
+            Some(_) => return err(HLL_WRONG_TYPE_ERR),
+        };
+
+        if hll_valid_cache(&bytes) {
+            return RespFrame::integer(hll_card_read(&bytes) as i64);
         }
+
+        let card = hll_count_dense(&bytes[HLL_HDR_SIZE..]);
+        let mut buf = bytes;
+        hll_card_write(&mut buf, card);
+        let expire_at_ms = self.db.get(&argv[1]).and_then(|entry| entry.expire_at_ms);
+        self.db.insert(
+            argv[1].clone(),
+            Entry {
+                value: StoredValue::String(buf),
+                expire_at_ms,
+            },
+        );
+        self.note_write(&argv[1]);
+        RespFrame::integer(card as i64)
     }
 
     /// PFMERGE destkey [srckey ...] (`pfmergeCommand`, `hyperloglog.c`).
@@ -12449,10 +12477,29 @@ fn hll_create_dense() -> Vec<u8> {
 }
 
 /// Set the cardinality-cache-invalid bit (MSB of the last card byte)
-/// (`HLL_INVALIDATE_CACHE`). The dense-only PFCOUNT recomputes every time, so
-/// this is kept only to preserve a faithful, valid header.
+/// (`HLL_INVALIDATE_CACHE`). Every register-changing write (PFADD, PFMERGE)
+/// invalidates the cache; `PFCOUNT` is what repopulates it on the next read.
 fn hll_invalidate_cache(buf: &mut [u8]) {
     buf[HLL_HDR_CARD_OFF + 7] |= 1 << 7;
+}
+
+/// True if the cached cardinality (MSB of the last card byte clear) is still
+/// valid (`HLL_VALID_CACHE`).
+fn hll_valid_cache(buf: &[u8]) -> bool {
+    buf[HLL_HDR_CARD_OFF + 7] & (1 << 7) == 0
+}
+
+/// Read the little-endian 8-byte cached cardinality field.
+fn hll_card_read(buf: &[u8]) -> u64 {
+    let mut card = [0u8; 8];
+    card.copy_from_slice(&buf[HLL_HDR_CARD_OFF..HLL_HDR_CARD_OFF + 8]);
+    u64::from_le_bytes(card)
+}
+
+/// Write `card` into the cached cardinality field and clear the invalid bit,
+/// making the cache valid (`pfcountCommand`'s cache-miss recompute-and-store).
+fn hll_card_write(buf: &mut [u8], card: u64) {
+    buf[HLL_HDR_CARD_OFF..HLL_HDR_CARD_OFF + 8].copy_from_slice(&card.to_le_bytes());
 }
 
 /// Validate `buf` as a well-formed HLL string: `HYLL` magic, dense encoding,
@@ -15631,6 +15678,18 @@ mod tests {
             (&[seed_s], &[b"SUNIONSTORE", b"dst", b"s"]),
             (&[seed_s], &[b"SDIFFSTORE", b"dst", b"s"]),
             (&[seed_s], &[b"SDIFFSTORE", b"dst", b"s", b"s"]),
+            (&[], &[b"PFADD", b"pf", b"a", b"b", b"c"]),
+            (&[&[b"PFADD", b"pf", b"a"]], &[b"PFADD", b"pf", b"a"]),
+            (&[&[b"PFADD", b"pf", b"a"]], &[b"PFCOUNT", b"pf"]),
+            (
+                &[&[b"PFADD", b"pf", b"a"], &[b"PFCOUNT", b"pf"]],
+                &[b"PFCOUNT", b"pf"],
+            ),
+            (&[], &[b"PFCOUNT", b"missing"]),
+            (
+                &[&[b"PFADD", b"pf1", b"a"], &[b"PFADD", b"pf2", b"b"]],
+                &[b"PFMERGE", b"dst", b"pf1", b"pf2"],
+            ),
             (&[], &[b"SCRIPT", b"LOAD", b"return 1"]),
             (&[], &[b"EVAL", b"return 1", b"0"]),
             (
@@ -17501,19 +17560,30 @@ mod tests {
         assert_eq!(pfcount(&mut engine, b"pf:h1000"), 1002);
     }
 
+    /// A no-op `PFADD` (duplicate element) never touches the cache and must
+    /// not bump the epoch or dirty the key. The first `PFCOUNT` after a real
+    /// write recomputes and caches the cardinality — mirroring
+    /// `pfcountCommand`'s `signalModifiedKey` + `server.dirty++` on a cache
+    /// miss — so it bumps the epoch and dirties the key exactly once. A
+    /// repeat `PFCOUNT` then hits the now-valid cache and is a pure read.
     #[test]
-    fn pfadd_only_dirties_on_change() {
+    fn pfcount_cache_refresh_writes_once_then_reads_are_free() {
         let mut engine = Engine::new_in_memory();
         engine.execute(&argv(&[b"PFADD", b"pf:d", b"a"]));
         let epoch = engine.mutation_epoch();
         let _ = engine.take_dirty();
-        // A no-op PFADD (duplicate) must not bump the epoch or dirty the key.
+
         engine.execute(&argv(&[b"PFADD", b"pf:d", b"a"]));
         assert_eq!(engine.mutation_epoch(), epoch);
         assert!(engine.take_dirty().is_empty());
-        // PFCOUNT is read-only: no epoch bump, no dirty.
+
         let _ = pfcount(&mut engine, b"pf:d");
-        assert_eq!(engine.mutation_epoch(), epoch);
+        assert_ne!(engine.mutation_epoch(), epoch);
+        assert!(!engine.take_dirty().is_empty());
+
+        let epoch_after_refresh = engine.mutation_epoch();
+        let _ = pfcount(&mut engine, b"pf:d");
+        assert_eq!(engine.mutation_epoch(), epoch_after_refresh);
         assert!(engine.take_dirty().is_empty());
     }
 
