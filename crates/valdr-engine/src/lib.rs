@@ -11299,6 +11299,21 @@ fn command_arity(command: &[u8]) -> Option<i64> {
         b"UNLINK" => -2,
         b"UNWATCH" => 1,
         b"WATCH" => -2,
+        b"XACK" => -4,
+        b"XADD" => -5,
+        b"XAUTOCLAIM" => -6,
+        b"XCLAIM" => -6,
+        b"XDEL" => -3,
+        b"XGROUP" => -2,
+        b"XINFO" => -2,
+        b"XLEN" => 2,
+        b"XPENDING" => -3,
+        b"XRANGE" => -4,
+        b"XREAD" => -4,
+        b"XREADGROUP" => -7,
+        b"XREVRANGE" => -4,
+        b"XSETID" => -3,
+        b"XTRIM" => -4,
         b"ZADD" => -4,
         b"ZCARD" => 2,
         b"ZCOUNT" => 4,
@@ -17734,6 +17749,24 @@ mod tests {
         assert_eq!(
             resp2(&engine.execute(&argv(&[b"GET", b"mx:k"]))),
             b"$1\r\n2\r\n"
+        );
+    }
+
+    #[test]
+    fn multi_exec_queues_stream_commands() {
+        let mut engine = Engine::new_in_memory();
+        assert_eq!(resp2(&engine.execute(&argv(&[b"MULTI"]))), b"+OK\r\n");
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"XADD", b"mx:s", b"1-1", b"f", b"v"]))),
+            b"+QUEUED\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"XLEN", b"mx:s"]))),
+            b"+QUEUED\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"EXEC"]))),
+            b"*2\r\n$3\r\n1-1\r\n:1\r\n"
         );
     }
 
