@@ -42,24 +42,82 @@ pub trait Host {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+/// SplitMix64 — a tiny, wasm-safe, seedable PRNG.
+///
+/// Used by `NoopHost::random_bytes` so the engine never touches OS randomness.
+/// Algorithm from Sebastiano Vigna (2015); single-step period 2^64.
+#[derive(Debug, Clone)]
+struct SplitMix64(u64);
+
+impl SplitMix64 {
+    fn new(seed: u64) -> Self {
+        SplitMix64(seed)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e3779b97f4a7c15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+        z ^ (z >> 31)
+    }
+
+    fn fill_bytes(&mut self, out: &mut [u8]) {
+        let mut i = 0;
+        while i + 8 <= out.len() {
+            out[i..i + 8].copy_from_slice(&self.next_u64().to_le_bytes());
+            i += 8;
+        }
+        if i < out.len() {
+            let tail = out.len() - i;
+            out[i..].copy_from_slice(&self.next_u64().to_le_bytes()[..tail]);
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct NoopHost {
     now_millis: u64,
+    rng: SplitMix64,
+}
+
+impl Default for NoopHost {
+    fn default() -> Self {
+        Self::with_seed(0, 0)
+    }
 }
 
 impl NoopHost {
     pub fn new(now_millis: u64) -> Self {
-        Self { now_millis }
+        Self::with_seed(now_millis, 0)
+    }
+
+    /// Creates a host with an explicit RNG seed for reproducible entropy.
+    pub fn with_seed(now_millis: u64, seed: u64) -> Self {
+        Self {
+            now_millis,
+            rng: SplitMix64::new(seed),
+        }
     }
 
     pub fn set_now_millis(&mut self, now_millis: u64) {
         self.now_millis = now_millis;
+    }
+
+    /// Resets the PRNG to a new seed; useful for deterministic test replay.
+    pub fn set_rng_seed(&mut self, seed: u64) {
+        self.rng = SplitMix64::new(seed);
     }
 }
 
 impl Host for NoopHost {
     fn now_millis(&self) -> u64 {
         self.now_millis
+    }
+
+    fn random_bytes(&mut self, out: &mut [u8]) -> Result<(), HostError> {
+        self.rng.fill_bytes(out);
+        Ok(())
     }
 }
 
@@ -1097,6 +1155,10 @@ impl<H: Host> Engine<H> {
             self.xack_command(argv)
         } else if ascii_eq(command, b"XPENDING") {
             self.xpending_command(argv)
+        } else if ascii_eq(command, b"XCLAIM") {
+            self.xclaim_command(argv)
+        } else if ascii_eq(command, b"XAUTOCLAIM") {
+            self.xautoclaim_command(argv)
         } else if ascii_eq(command, b"XINFO") {
             self.xinfo_command(argv)
         } else if ascii_eq(command, b"GETRANGE") || ascii_eq(command, b"SUBSTR") {
@@ -7477,6 +7539,434 @@ impl<H: Host> Engine<H> {
         ])
     }
 
+    /// XCLAIM key group consumer min-idle-time id [id ...] [IDLE ms] [TIME ms] [RETRYCOUNT n] [FORCE] [JUSTID]
+    /// (`xclaimCommand`, `t_stream.c`): transfer ownership of PEL entries to a new consumer.
+    /// For each requested ID: if the entry is in the group PEL and has been idle ≥ min-idle-time,
+    /// it is reassigned to the named consumer and its delivery_time is updated.
+    /// The delivery counter follows valkey's rule (`t_stream.c` ~3275): RETRYCOUNT
+    /// sets it outright; otherwise the base (1 for a fresh FORCE entry, else the
+    /// entry's current count) is incremented only when JUSTID was *not* given, so
+    /// a JUSTID claim never bumps it and FORCE without JUSTID lands on 2.
+    /// With FORCE, entries not in the PEL are added if they exist in the stream.
+    /// Returns the claimed entries (or just IDs with JUSTID). Silently skips IDs that do not
+    /// meet the idle-time threshold or are absent from both the PEL and the stream.
+    fn xclaim_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        // XCLAIM key group consumer min-idle-time id [id…] [options]
+        if argv.len() < 6 {
+            return wrong_arity(b"xclaim");
+        }
+        let key = argv[1].clone();
+        let group_name = argv[2].clone();
+        let consumer_name = argv[3].clone();
+
+        let Some(min_idle_i64) = parse_i64(&argv[4]) else {
+            return err(b"ERR value is not an integer or out of range");
+        };
+        if min_idle_i64 < 0 {
+            return err(b"ERR value is not an integer or out of range");
+        }
+        let min_idle_ms = min_idle_i64 as u64;
+
+        // Parse the rest: IDs (parsed first) then option keywords, unified loop
+        // matching valkey's xclaimCommand argument scan order.
+        let mut raw_ids: Vec<StreamId> = Vec::new();
+        let mut opt_idle: Option<u64> = None;
+        let mut opt_time: Option<u64> = None;
+        let mut opt_retry: Option<u64> = None;
+        let mut opt_lastid: Option<StreamId> = None;
+        let mut force = false;
+        let mut justid = false;
+
+        let mut i = 5;
+        while i < argv.len() {
+            // Try stream ID first
+            if let Ok((id, _)) = parse_stream_id_strict(&argv[i], 0) {
+                raw_ids.push(id);
+                i += 1;
+                continue;
+            }
+            // Not a stream ID — try option keyword
+            let moreargs = argv.len() - i - 1;
+            let tok = argv[i].to_ascii_uppercase();
+            match tok.as_slice() {
+                b"IDLE" if moreargs >= 1 => {
+                    let Some(v) = parse_i64(&argv[i + 1]) else {
+                        return err(b"ERR value is not an integer or out of range");
+                    };
+                    if v < 0 {
+                        return err(b"ERR value is not an integer or out of range");
+                    }
+                    opt_idle = Some(v as u64);
+                    i += 2;
+                }
+                b"TIME" if moreargs >= 1 => {
+                    let Some(v) = parse_i64(&argv[i + 1]) else {
+                        return err(b"ERR value is not an integer or out of range");
+                    };
+                    if v < 0 {
+                        return err(b"ERR value is not an integer or out of range");
+                    }
+                    opt_time = Some(v as u64);
+                    i += 2;
+                }
+                b"RETRYCOUNT" if moreargs >= 1 => {
+                    let Some(v) = parse_i64(&argv[i + 1]) else {
+                        return err(b"ERR value is not an integer or out of range");
+                    };
+                    if v < 0 {
+                        return err(b"ERR value is not an integer or out of range");
+                    }
+                    opt_retry = Some(v as u64);
+                    i += 2;
+                }
+                b"LASTID" if moreargs >= 1 => {
+                    match parse_stream_id_strict(&argv[i + 1], 0) {
+                        Ok((id, _)) => opt_lastid = Some(id),
+                        Err(frame) => return frame,
+                    }
+                    i += 2;
+                }
+                b"FORCE" => { force = true; i += 1; }
+                b"JUSTID" => { justid = true; i += 1; }
+                _ => return err(b"ERR syntax error"),
+            }
+        }
+
+        if raw_ids.is_empty() {
+            return wrong_arity(b"xclaim");
+        }
+
+        let now = self.host.now_millis();
+        let new_delivery_time = if let Some(t) = opt_time {
+            t
+        } else if let Some(idle) = opt_idle {
+            now.saturating_sub(idle)
+        } else {
+            now
+        };
+
+        self.purge_if_expired(&key);
+
+        // Phase A: read-only pass — decide which IDs to claim.
+        // All collected data is owned, so borrows on self.db are released after this block.
+        struct ClaimEntry {
+            id: StreamId,
+            old_consumer: Vec<u8>,
+            old_count: u64,
+            is_force_new: bool,
+            fields: Option<Vec<(Vec<u8>, Vec<u8>)>>,
+        }
+        let claims: Vec<ClaimEntry> = {
+            let stream = match self.db.get(&key) {
+                Some(Entry {
+                    value: StoredValue::Stream(s),
+                    ..
+                }) => s,
+                Some(_) => return wrong_type(),
+                None => {
+                    let mut msg = b"NOGROUP No such key '".to_vec();
+                    msg.extend_from_slice(&key);
+                    msg.extend_from_slice(b"' or consumer group '");
+                    msg.extend_from_slice(&group_name);
+                    msg.push(b'\'');
+                    return err(&msg);
+                }
+            };
+            if !stream.groups.contains_key(group_name.as_slice()) {
+                let mut msg = b"NOGROUP No such key '".to_vec();
+                msg.extend_from_slice(&key);
+                msg.extend_from_slice(b"' or consumer group '");
+                msg.extend_from_slice(&group_name);
+                msg.push(b'\'');
+                return err(&msg);
+            }
+            let group = stream.groups.get(group_name.as_slice()).unwrap();
+            raw_ids
+                .iter()
+                .filter_map(|id| {
+                    if let Some(nack) = group.pending.get(id) {
+                        let idle = now.saturating_sub(nack.delivery_time_ms);
+                        if idle >= min_idle_ms {
+                            let fields = if !justid {
+                                stream.entries.get(id).cloned()
+                            } else {
+                                None
+                            };
+                            Some(ClaimEntry {
+                                id: *id,
+                                old_consumer: nack.consumer.clone(),
+                                old_count: nack.delivery_count,
+                                is_force_new: false,
+                                fields,
+                            })
+                        } else {
+                            None
+                        }
+                    } else if force {
+                        stream.entries.get(id).map(|entry_fields| {
+                            let fields =
+                                if !justid { Some(entry_fields.clone()) } else { None };
+                            ClaimEntry {
+                                id: *id,
+                                old_consumer: Vec::new(),
+                                old_count: 0,
+                                is_force_new: true,
+                                fields,
+                            }
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        }; // all borrows on self.db released
+
+        // Phase B: mutation pass — update PEL and consumer bookkeeping.
+        if !claims.is_empty() || opt_lastid.is_some() {
+            {
+                let stream = match self.db.get_mut(&key) {
+                    Some(Entry {
+                        value: StoredValue::Stream(s),
+                        ..
+                    }) => s,
+                    _ => unreachable!("type-checked in phase A"),
+                };
+                let group = stream.groups.get_mut(group_name.as_slice()).unwrap();
+
+                // Apply LASTID: advance group's last_delivered_id if requested.
+                if let Some(last_id) = opt_lastid {
+                    if last_id > group.last_delivered_id {
+                        group.last_delivered_id = last_id;
+                    }
+                }
+
+                for c in &claims {
+                    // Move out of old consumer's pending set.
+                    if !c.is_force_new {
+                        if let Some(old_c) = group.consumers.get_mut(&c.old_consumer) {
+                            old_c.pending.remove(&c.id);
+                        }
+                    }
+                    let base = if c.is_force_new { 1 } else { c.old_count };
+                    let new_count = match opt_retry {
+                        Some(retrycount) => retrycount,
+                        None if justid => base,
+                        None => base + 1,
+                    };
+                    group.pending.insert(
+                        c.id,
+                        PendingEntry {
+                            consumer: consumer_name.clone(),
+                            delivery_time_ms: new_delivery_time,
+                            delivery_count: new_count,
+                        },
+                    );
+                    let consumer = group.consumers.entry(consumer_name.clone()).or_default();
+                    consumer.pending.insert(c.id);
+                    consumer.seen_time_ms = now;
+                    consumer.active_time_ms = now;
+                    // FORCE: advance last_delivered_id to the claimed entry if needed.
+                    if c.is_force_new && c.id > group.last_delivered_id {
+                        group.last_delivered_id = c.id;
+                    }
+                }
+            } // stream and group dropped, self borrow released
+            self.note_write(&key);
+        }
+
+        // Phase C: build response.
+        if justid {
+            RespFrame::array(claims.iter().map(|c| bulk(c.id.to_string_bytes())).collect())
+        } else {
+            RespFrame::array(
+                claims
+                    .iter()
+                    .map(|c| match &c.fields {
+                        Some(fields) => render_stream_entry(c.id, fields),
+                        None => RespFrame::array(vec![
+                            bulk(c.id.to_string_bytes()),
+                            RespFrame::null_array(),
+                        ]),
+                    })
+                    .collect(),
+            )
+        }
+    }
+
+    /// XAUTOCLAIM key group consumer min-idle-time start [COUNT count] [JUSTID]
+    /// (`xautoclaimCommand`, `t_stream.c`): scan the group PEL from `start`,
+    /// claim entries idle >= min-idle-time, purge PEL entries whose stream entry
+    /// was deleted. Returns [cursor, claimed_entries, deleted_ids].
+    fn xautoclaim_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 6 {
+            return wrong_arity(b"xautoclaim");
+        }
+        let key = argv[1].clone();
+        let group_name = argv[2].clone();
+        let consumer_name = argv[3].clone();
+
+        let Some(min_idle_i64) = parse_i64(&argv[4]) else {
+            return err(b"ERR value is not an integer or out of range");
+        };
+        if min_idle_i64 < 0 {
+            return err(b"ERR value is not an integer or out of range");
+        }
+        let min_idle_ms = min_idle_i64 as u64;
+
+        let start_id = match parse_stream_id_strict(&argv[5], 0) {
+            Ok((id, _)) => id,
+            Err(frame) => return frame,
+        };
+
+        let mut count: usize = 100;
+        let mut justid = false;
+        let mut i = 6;
+        while i < argv.len() {
+            let tok = argv[i].to_ascii_uppercase();
+            let moreargs = argv.len() - i - 1;
+            match tok.as_slice() {
+                b"COUNT" if moreargs >= 1 => {
+                    let Some(v) = parse_i64(&argv[i + 1]) else {
+                        return err(b"ERR value is not an integer or out of range");
+                    };
+                    if v < 0 {
+                        return err(b"ERR value is not an integer or out of range");
+                    }
+                    count = if v == 0 { usize::MAX } else { v as usize };
+                    i += 2;
+                }
+                b"JUSTID" => {
+                    justid = true;
+                    i += 1;
+                }
+                _ => return err(b"ERR syntax error"),
+            }
+        }
+
+        let now = self.host.now_millis();
+        self.purge_if_expired(&key);
+
+        // Phase A: read-only scan — collect claimed entries and orphaned PEL IDs.
+        struct AutoClaimEntry {
+            id: StreamId,
+            old_consumer: Vec<u8>,
+            old_count: u64,
+            fields: Option<Vec<(Vec<u8>, Vec<u8>)>>,
+        }
+        let (next_cursor, claims, deleted_ids): (Option<StreamId>, Vec<AutoClaimEntry>, Vec<StreamId>) = {
+            let stream = match self.db.get(&key) {
+                Some(Entry { value: StoredValue::Stream(s), .. }) => s,
+                Some(_) => return wrong_type(),
+                None => {
+                    let mut msg = b"NOGROUP No such key '".to_vec();
+                    msg.extend_from_slice(&key);
+                    msg.extend_from_slice(b"' or consumer group '");
+                    msg.extend_from_slice(&group_name);
+                    msg.push(b'\'');
+                    return err(&msg);
+                }
+            };
+            if !stream.groups.contains_key(group_name.as_slice()) {
+                let mut msg = b"NOGROUP No such key '".to_vec();
+                msg.extend_from_slice(&key);
+                msg.extend_from_slice(b"' or consumer group '");
+                msg.extend_from_slice(&group_name);
+                msg.push(b'\'');
+                return err(&msg);
+            }
+            let group = stream.groups.get(group_name.as_slice()).unwrap();
+
+            let mut claimed: Vec<AutoClaimEntry> = Vec::new();
+            let mut deleted: Vec<StreamId> = Vec::new();
+            let mut cursor: Option<StreamId> = None;
+            let mut scanned: usize = 0;
+
+            for (id, nack) in group.pending.range(start_id..) {
+                if scanned >= count {
+                    cursor = Some(*id);
+                    break;
+                }
+                scanned += 1;
+                let idle = now.saturating_sub(nack.delivery_time_ms);
+                if idle >= min_idle_ms {
+                    if let Some(entry_fields) = stream.entries.get(id) {
+                        let fields = if !justid { Some(entry_fields.clone()) } else { None };
+                        claimed.push(AutoClaimEntry {
+                            id: *id,
+                            old_consumer: nack.consumer.clone(),
+                            old_count: nack.delivery_count,
+                            fields,
+                        });
+                    } else {
+                        deleted.push(*id);
+                    }
+                }
+            }
+            (cursor, claimed, deleted)
+        }; // all borrows on self.db released
+
+        // Phase B: mutation — reassign claimed entries, remove orphaned PEL entries.
+        if !claims.is_empty() || !deleted_ids.is_empty() {
+            let stream = match self.db.get_mut(&key) {
+                Some(Entry { value: StoredValue::Stream(s), .. }) => s,
+                _ => unreachable!("type-checked in phase A"),
+            };
+            let group = stream.groups.get_mut(group_name.as_slice()).unwrap();
+
+            for id in &deleted_ids {
+                if let Some(nack) = group.pending.remove(id) {
+                    if let Some(old_c) = group.consumers.get_mut(&nack.consumer) {
+                        old_c.pending.remove(id);
+                    }
+                }
+            }
+
+            for c in &claims {
+                if let Some(old_c) = group.consumers.get_mut(&c.old_consumer) {
+                    old_c.pending.remove(&c.id);
+                }
+                group.pending.insert(
+                    c.id,
+                    PendingEntry {
+                        consumer: consumer_name.clone(),
+                        delivery_time_ms: now,
+                        delivery_count: if justid { c.old_count } else { c.old_count + 1 },
+                    },
+                );
+                let consumer = group.consumers.entry(consumer_name.clone()).or_default();
+                consumer.pending.insert(c.id);
+                consumer.seen_time_ms = now;
+                consumer.active_time_ms = now;
+            }
+            self.note_write(&key);
+        }
+
+        // Phase C: build [cursor, entries, deleted] response.
+        let cursor_frame = match next_cursor {
+            Some(id) => bulk(id.to_string_bytes()),
+            None => bulk(b"0-0"),
+        };
+        let entries_frame = if justid {
+            RespFrame::array(claims.iter().map(|c| bulk(c.id.to_string_bytes())).collect())
+        } else {
+            RespFrame::array(
+                claims
+                    .iter()
+                    .map(|c| match &c.fields {
+                        Some(fields) => render_stream_entry(c.id, fields),
+                        None => RespFrame::array(vec![
+                            bulk(c.id.to_string_bytes()),
+                            RespFrame::null_array(),
+                        ]),
+                    })
+                    .collect(),
+            )
+        };
+        let deleted_frame =
+            RespFrame::array(deleted_ids.iter().map(|id| bulk(id.to_string_bytes())).collect());
+        RespFrame::array(vec![cursor_frame, entries_frame, deleted_frame])
+    }
+
     /// XINFO STREAM|GROUPS (`xinfoCommand`, `t_stream.c`). CONSUMERS is deferred
     /// (it exposes idle/inactive = host clock). STREAM FULL is deferred.
     fn xinfo_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
@@ -10857,6 +11347,21 @@ fn command_arity(command: &[u8]) -> Option<i64> {
         b"UNLINK" => -2,
         b"UNWATCH" => 1,
         b"WATCH" => -2,
+        b"XACK" => -4,
+        b"XADD" => -5,
+        b"XAUTOCLAIM" => -6,
+        b"XCLAIM" => -6,
+        b"XDEL" => -3,
+        b"XGROUP" => -2,
+        b"XINFO" => -2,
+        b"XLEN" => 2,
+        b"XPENDING" => -3,
+        b"XRANGE" => -4,
+        b"XREAD" => -4,
+        b"XREADGROUP" => -7,
+        b"XREVRANGE" => -4,
+        b"XSETID" => -3,
+        b"XTRIM" => -4,
         b"ZADD" => -4,
         b"ZCARD" => 2,
         b"ZCOUNT" => 4,
@@ -11283,6 +11788,8 @@ fn is_write_command(command: &[u8]) -> bool {
             | b"SUNIONSTORE"
             | b"UNLINK"
             | b"XACK"
+            | b"XAUTOCLAIM"
+            | b"XCLAIM"
             | b"XADD"
             | b"XDEL"
             | b"XREADGROUP"
@@ -17325,6 +17832,24 @@ mod tests {
     }
 
     #[test]
+    fn multi_exec_queues_stream_commands() {
+        let mut engine = Engine::new_in_memory();
+        assert_eq!(resp2(&engine.execute(&argv(&[b"MULTI"]))), b"+OK\r\n");
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"XADD", b"mx:s", b"1-1", b"f", b"v"]))),
+            b"+QUEUED\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"XLEN", b"mx:s"]))),
+            b"+QUEUED\r\n"
+        );
+        assert_eq!(
+            resp2(&engine.execute(&argv(&[b"EXEC"]))),
+            b"*2\r\n$3\r\n1-1\r\n:1\r\n"
+        );
+    }
+
+    #[test]
     fn exec_without_multi_and_discard_without_multi_error() {
         let mut engine = Engine::new_in_memory();
         assert_eq!(
@@ -19210,5 +19735,174 @@ mod tests {
     #[test]
     fn command_keys_empty_argv_is_no_keys() {
         assert_eq!(command_keys(&[]), KeyAccess::Keys(Vec::new()));
+    }
+
+    // ── Host RNG ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn splitmix64_known_vector() {
+        // Reference values generated offline with the canonical C implementation
+        // (Vigna 2015): seed 0, first three outputs.
+        let mut rng = SplitMix64::new(0);
+        assert_eq!(rng.next_u64(), 0xe220a8397b1dcdaf);
+        assert_eq!(rng.next_u64(), 0x6e789e6aa1b965f4);
+        assert_eq!(rng.next_u64(), 0x06c45d188009454f);
+    }
+
+    #[test]
+    fn splitmix64_different_seeds_produce_different_streams() {
+        let mut a = SplitMix64::new(1);
+        let mut b = SplitMix64::new(2);
+        assert_ne!(a.next_u64(), b.next_u64());
+    }
+
+    #[test]
+    fn noop_host_random_bytes_is_deterministic_and_seed_reproducible() {
+        let mut buf1 = [0u8; 17];
+        let mut buf2 = [0u8; 17];
+
+        // Same seed → identical output.
+        NoopHost::with_seed(0, 42).random_bytes(&mut buf1).unwrap();
+        NoopHost::with_seed(0, 42).random_bytes(&mut buf2).unwrap();
+        assert_eq!(buf1, buf2);
+
+        // Different seed → different output.
+        NoopHost::with_seed(0, 99).random_bytes(&mut buf2).unwrap();
+        assert_ne!(buf1, buf2);
+    }
+
+    #[test]
+    fn noop_host_set_rng_seed_resets_stream() {
+        let mut host = NoopHost::new(0);
+        let mut a = [0u8; 8];
+        let mut b = [0u8; 8];
+        host.random_bytes(&mut a).unwrap();
+        host.set_rng_seed(0); // reset to same initial state
+        host.random_bytes(&mut b).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn noop_host_random_bytes_fills_unaligned_lengths() {
+        // Exercises the tail-bytes branch (len not a multiple of 8).
+        let mut host = NoopHost::with_seed(0, 7);
+        for len in [0usize, 1, 7, 8, 9, 15, 16, 17, 31, 32, 33] {
+            let mut buf = vec![0u8; len];
+            host.random_bytes(&mut buf).unwrap();
+            // Non-trivial lengths should not be all-zero (astronomically unlikely).
+            if len > 0 {
+                assert!(buf.iter().any(|&b| b != 0), "all-zero output for len={len}");
+            }
+        }
+    }
+
+    // ── Stream claim delivery-counter fidelity ─────────────────────────────────
+
+    /// Reads the delivery counter of the single pending entry for `group`.
+    ///
+    /// Goes straight to the engine's PEL because the extended XPENDING wire form
+    /// (the only reply that carries per-entry delivery counts) is not implemented
+    /// in this engine wave. Panics unless exactly one entry is pending.
+    fn only_pending_delivery_count(engine: &Engine<NoopHost>, key: &[u8], group: &[u8]) -> u64 {
+        let entry = engine.db.get(key).expect("stream key exists");
+        let stream = match &entry.value {
+            StoredValue::Stream(s) => s,
+            _ => panic!("value at {key:?} is not a stream"),
+        };
+        let g = stream.groups.get(group).expect("consumer group exists");
+        let mut counts = g.pending.values().map(|nack| nack.delivery_count);
+        let first = counts.next().expect("exactly one pending entry expected");
+        assert!(counts.next().is_none(), "helper assumes a single pending entry");
+        first
+    }
+
+    fn seed_delivered_entry(engine: &mut Engine<NoopHost>, group_start: &[u8]) {
+        engine.execute(&argv(&[b"XADD", b"s", b"1-1", b"f", b"v"]));
+        engine.execute(&argv(&[b"XGROUP", b"CREATE", b"s", b"g", group_start]));
+        engine.execute(&argv(&[
+            b"XREADGROUP", b"GROUP", b"g", b"alice", b"COUNT", b"1", b"STREAMS", b"s", b">",
+        ]));
+    }
+
+    #[test]
+    fn xclaim_justid_does_not_increment_delivery_count() {
+        let mut engine = Engine::new_in_memory();
+        seed_delivered_entry(&mut engine, b"0");
+        assert_eq!(only_pending_delivery_count(&engine, b"s", b"g"), 1);
+
+        engine.execute(&argv(&[b"XCLAIM", b"s", b"g", b"bob", b"0", b"1-1", b"JUSTID"]));
+        assert_eq!(
+            only_pending_delivery_count(&engine, b"s", b"g"),
+            1,
+            "a JUSTID claim must not bump the delivery counter (valkey t_stream.c ~3280)"
+        );
+
+        engine.execute(&argv(&[b"XCLAIM", b"s", b"g", b"carol", b"0", b"1-1"]));
+        assert_eq!(
+            only_pending_delivery_count(&engine, b"s", b"g"),
+            2,
+            "a normal claim increments the delivery counter"
+        );
+    }
+
+    #[test]
+    fn xclaim_retrycount_sets_counter_outright_even_with_justid() {
+        let mut engine = Engine::new_in_memory();
+        seed_delivered_entry(&mut engine, b"0");
+        engine.execute(&argv(&[
+            b"XCLAIM", b"s", b"g", b"bob", b"0", b"1-1", b"RETRYCOUNT", b"7", b"JUSTID",
+        ]));
+        assert_eq!(
+            only_pending_delivery_count(&engine, b"s", b"g"),
+            7,
+            "RETRYCOUNT sets the counter outright regardless of JUSTID"
+        );
+    }
+
+    #[test]
+    fn xclaim_force_creates_nack_and_counts_like_valkey() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"XADD", b"s", b"1-1", b"f", b"v"]));
+        engine.execute(&argv(&[b"XGROUP", b"CREATE", b"s", b"g", b"$"]));
+        engine.execute(&argv(&[b"XCLAIM", b"s", b"g", b"bob", b"0", b"1-1", b"FORCE"]));
+        assert_eq!(
+            only_pending_delivery_count(&engine, b"s", b"g"),
+            2,
+            "FORCE creates a NACK at count 1, then a non-JUSTID claim bumps it to 2 (valkey)"
+        );
+    }
+
+    #[test]
+    fn xclaim_force_justid_leaves_fresh_nack_at_one() {
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"XADD", b"s", b"1-1", b"f", b"v"]));
+        engine.execute(&argv(&[b"XGROUP", b"CREATE", b"s", b"g", b"$"]));
+        engine.execute(&argv(&[b"XCLAIM", b"s", b"g", b"bob", b"0", b"1-1", b"FORCE", b"JUSTID"]));
+        assert_eq!(
+            only_pending_delivery_count(&engine, b"s", b"g"),
+            1,
+            "FORCE + JUSTID leaves the freshly-created NACK at count 1"
+        );
+    }
+
+    #[test]
+    fn xautoclaim_justid_does_not_increment_delivery_count() {
+        let mut engine = Engine::new_in_memory();
+        seed_delivered_entry(&mut engine, b"0");
+        assert_eq!(only_pending_delivery_count(&engine, b"s", b"g"), 1);
+
+        engine.execute(&argv(&[b"XAUTOCLAIM", b"s", b"g", b"bob", b"0", b"0-0", b"JUSTID"]));
+        assert_eq!(
+            only_pending_delivery_count(&engine, b"s", b"g"),
+            1,
+            "XAUTOCLAIM JUSTID must not bump the delivery counter (valkey t_stream.c ~3450)"
+        );
+
+        engine.execute(&argv(&[b"XAUTOCLAIM", b"s", b"g", b"carol", b"0", b"0-0"]));
+        assert_eq!(
+            only_pending_delivery_count(&engine, b"s", b"g"),
+            2,
+            "a normal XAUTOCLAIM increments the delivery counter"
+        );
     }
 }
