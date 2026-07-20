@@ -19921,4 +19921,153 @@ mod tests {
             "a normal XAUTOCLAIM increments the delivery counter"
         );
     }
+
+    /// Reads the group's `last_delivered_id`. Panics if the key/group is missing.
+    fn group_last_delivered_id(engine: &Engine<NoopHost>, key: &[u8], group: &[u8]) -> StreamId {
+        let entry = engine.db.get(key).expect("stream key exists");
+        let stream = match &entry.value {
+            StoredValue::Stream(s) => s,
+            _ => panic!("value at {key:?} is not a stream"),
+        };
+        stream
+            .groups
+            .get(group)
+            .expect("consumer group exists")
+            .last_delivered_id
+    }
+
+    #[test]
+    fn xclaim_deleted_entry_purges_pel_and_omits_from_reply() {
+        // valkey (t_stream.c:3231-3244): a PEL entry whose stream entry was
+        // XDEL'd is purged outright by XCLAIM, not reassigned to the new
+        // consumer and echoed back as `[id, nil]`.
+        let mut engine = Engine::new_in_memory();
+        seed_delivered_entry(&mut engine, b"0");
+        engine.execute(&argv(&[b"XDEL", b"s", b"1-1"]));
+
+        let reply = engine.execute(&argv(&[b"XCLAIM", b"s", b"g", b"bob", b"0", b"1-1"]));
+        assert_eq!(
+            reply,
+            RespFrame::array(vec![]),
+            "a deleted entry must not appear in the XCLAIM reply, not even as [id, nil]"
+        );
+
+        let entry = engine.db.get(b"s".as_slice()).expect("stream key exists");
+        let stream = match &entry.value {
+            StoredValue::Stream(s) => s,
+            _ => panic!("value is not a stream"),
+        };
+        let group = stream.groups.get(b"g".as_slice()).expect("group exists");
+        assert!(
+            group.pending.is_empty(),
+            "the dangling NACK for the deleted entry must be purged from the group PEL"
+        );
+        let alice = group.consumers.get(b"alice".as_slice()).expect("consumer exists");
+        assert!(
+            alice.pending.is_empty(),
+            "the dangling NACK must also be purged from the original consumer's local PEL"
+        );
+    }
+
+    #[test]
+    fn xclaim_force_does_not_advance_last_delivered_id() {
+        // valkey's xclaimCommand only moves group->last_id via the explicit
+        // LASTID option; FORCE-creating a NACK for an undelivered, higher ID
+        // must not advance it as a side effect (observable via XINFO GROUPS).
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"XADD", b"s", b"5-5", b"f", b"v"]));
+        engine.execute(&argv(&[b"XGROUP", b"CREATE", b"s", b"g", b"0"]));
+        assert_eq!(group_last_delivered_id(&engine, b"s", b"g"), StreamId { ms: 0, seq: 0 });
+
+        engine.execute(&argv(&[b"XCLAIM", b"s", b"g", b"bob", b"0", b"5-5", b"FORCE"]));
+        assert_eq!(
+            group_last_delivered_id(&engine, b"s", b"g"),
+            StreamId { ms: 0, seq: 0 },
+            "FORCE must not advance last_delivered_id even though the claimed id is higher"
+        );
+
+        engine.execute(&argv(&[b"XCLAIM", b"s", b"g", b"carol", b"0", b"5-5", b"LASTID", b"5-5"]));
+        assert_eq!(
+            group_last_delivered_id(&engine, b"s", b"g"),
+            StreamId { ms: 5, seq: 5 },
+            "only the explicit LASTID option may advance last_delivered_id"
+        );
+    }
+
+    #[test]
+    fn xclaim_negative_min_idle_time_clamps_to_zero_instead_of_erroring() {
+        let mut engine = Engine::new_in_memory();
+        seed_delivered_entry(&mut engine, b"0");
+
+        let reply = engine.execute(&argv(&[b"XCLAIM", b"s", b"g", b"bob", b"-100", b"1-1"]));
+        match reply {
+            RespFrame::Array(Some(items)) => assert_eq!(
+                items.len(),
+                1,
+                "negative min-idle-time must clamp to 0 and claim the entry, not error"
+            ),
+            other => panic!("negative min-idle-time must not error, got {other:?}"),
+        }
+        assert_eq!(
+            only_pending_delivery_count(&engine, b"s", b"g"),
+            2,
+            "the entry must actually have been claimed"
+        );
+    }
+
+    #[test]
+    fn xautoclaim_negative_min_idle_time_clamps_to_zero_instead_of_erroring() {
+        let mut engine = Engine::new_in_memory();
+        seed_delivered_entry(&mut engine, b"0");
+
+        let reply =
+            engine.execute(&argv(&[b"XAUTOCLAIM", b"s", b"g", b"bob", b"-100", b"0-0"]));
+        match reply {
+            RespFrame::Array(Some(items)) => assert_eq!(items.len(), 3, "cursor, entries, deleted"),
+            other => panic!("negative min-idle-time must not error, got {other:?}"),
+        }
+        assert_eq!(
+            only_pending_delivery_count(&engine, b"s", b"g"),
+            2,
+            "the entry must actually have been claimed (min-idle clamped to 0, not rejected)"
+        );
+    }
+
+    #[test]
+    fn xclaim_negative_idle_and_time_options_normalize_to_now() {
+        let mut engine = Engine::new(NoopHost::new(1_000));
+        seed_delivered_entry(&mut engine, b"0");
+
+        engine.execute(&argv(&[
+            b"XCLAIM", b"s", b"g", b"bob", b"0", b"1-1", b"IDLE", b"-50",
+        ]));
+        assert_eq!(
+            only_pending_delivery_time(&engine, b"s", b"g"),
+            1_000,
+            "a negative IDLE arg computes a delivery time above `now`, which valkey resets to `now` (t_stream.c:3195-3209)"
+        );
+
+        engine.execute(&argv(&[
+            b"XCLAIM", b"s", b"g", b"carol", b"0", b"1-1", b"TIME", b"-500",
+        ]));
+        assert_eq!(
+            only_pending_delivery_time(&engine, b"s", b"g"),
+            1_000,
+            "a negative TIME arg is itself a bogus delivery time, which valkey resets to `now`"
+        );
+    }
+
+    /// Reads the delivery time of the single pending entry for `group`.
+    fn only_pending_delivery_time(engine: &Engine<NoopHost>, key: &[u8], group: &[u8]) -> u64 {
+        let entry = engine.db.get(key).expect("stream key exists");
+        let stream = match &entry.value {
+            StoredValue::Stream(s) => s,
+            _ => panic!("value at {key:?} is not a stream"),
+        };
+        let g = stream.groups.get(group).expect("consumer group exists");
+        let mut times = g.pending.values().map(|nack| nack.delivery_time_ms);
+        let first = times.next().expect("exactly one pending entry expected");
+        assert!(times.next().is_none(), "helper assumes a single pending entry");
+        first
+    }
 }
