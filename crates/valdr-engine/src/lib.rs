@@ -7562,16 +7562,14 @@ impl<H: Host> Engine<H> {
         let Some(min_idle_i64) = parse_i64(&argv[4]) else {
             return err(b"ERR value is not an integer or out of range");
         };
-        if min_idle_i64 < 0 {
-            return err(b"ERR value is not an integer or out of range");
-        }
-        let min_idle_ms = min_idle_i64 as u64;
+        // valkey clamps a negative min-idle-time to 0 rather than erroring (t_stream.c:3137).
+        let min_idle_ms = min_idle_i64.max(0) as u64;
 
         // Parse the rest: IDs (parsed first) then option keywords, unified loop
         // matching valkey's xclaimCommand argument scan order.
         let mut raw_ids: Vec<StreamId> = Vec::new();
-        let mut opt_idle: Option<u64> = None;
-        let mut opt_time: Option<u64> = None;
+        let mut opt_idle: Option<i64> = None;
+        let mut opt_time: Option<i64> = None;
         let mut opt_retry: Option<u64> = None;
         let mut opt_lastid: Option<StreamId> = None;
         let mut force = false;
@@ -7590,23 +7588,19 @@ impl<H: Host> Engine<H> {
             let tok = argv[i].to_ascii_uppercase();
             match tok.as_slice() {
                 b"IDLE" if moreargs >= 1 => {
+                    // A negative IDLE argument is not an error: it is folded into the
+                    // delivery-time sanity clamp below (t_stream.c:3195-3209), same as TIME.
                     let Some(v) = parse_i64(&argv[i + 1]) else {
                         return err(b"ERR value is not an integer or out of range");
                     };
-                    if v < 0 {
-                        return err(b"ERR value is not an integer or out of range");
-                    }
-                    opt_idle = Some(v as u64);
+                    opt_idle = Some(v);
                     i += 2;
                 }
                 b"TIME" if moreargs >= 1 => {
                     let Some(v) = parse_i64(&argv[i + 1]) else {
                         return err(b"ERR value is not an integer or out of range");
                     };
-                    if v < 0 {
-                        return err(b"ERR value is not an integer or out of range");
-                    }
-                    opt_time = Some(v as u64);
+                    opt_time = Some(v);
                     i += 2;
                 }
                 b"RETRYCOUNT" if moreargs >= 1 => {
@@ -7637,10 +7631,20 @@ impl<H: Host> Engine<H> {
         }
 
         let now = self.host.now_millis();
-        let new_delivery_time = if let Some(t) = opt_time {
-            t
-        } else if let Some(idle) = opt_idle {
-            now.saturating_sub(idle)
+        let now_i64 = now as i64;
+        // valkey's sanity clamp (t_stream.c:3195-3209): a bogus (negative or
+        // future) delivery time computed from IDLE/TIME resets to `now` rather
+        // than erroring; absent both options, delivery time is `now`.
+        let new_delivery_time = if opt_time.is_some() || opt_idle.is_some() {
+            let raw = match opt_time {
+                Some(t) => t,
+                None => now_i64.saturating_sub(opt_idle.unwrap()),
+            };
+            if raw < 0 || raw > now_i64 {
+                now
+            } else {
+                raw as u64
+            }
         } else {
             now
         };
@@ -7656,7 +7660,9 @@ impl<H: Host> Engine<H> {
             is_force_new: bool,
             fields: Option<Vec<(Vec<u8>, Vec<u8>)>>,
         }
-        let claims: Vec<ClaimEntry> = {
+        // IDs whose PEL nack must be purged outright: the stream entry was
+        // XDEL'd/trimmed, so there is nothing left to reassign (t_stream.c:3231-3244).
+        let (claims, purge_ids): (Vec<ClaimEntry>, Vec<(StreamId, Vec<u8>)>) = {
             let stream = match self.db.get(&key) {
                 Some(Entry {
                     value: StoredValue::Stream(s),
@@ -7681,48 +7687,53 @@ impl<H: Host> Engine<H> {
                 return err(&msg);
             }
             let group = stream.groups.get(group_name.as_slice()).unwrap();
-            raw_ids
-                .iter()
-                .filter_map(|id| {
-                    if let Some(nack) = group.pending.get(id) {
-                        let idle = now.saturating_sub(nack.delivery_time_ms);
-                        if idle >= min_idle_ms {
-                            let fields = if !justid {
-                                stream.entries.get(id).cloned()
-                            } else {
-                                None
-                            };
-                            Some(ClaimEntry {
-                                id: *id,
-                                old_consumer: nack.consumer.clone(),
-                                old_count: nack.delivery_count,
-                                is_force_new: false,
-                                fields,
-                            })
-                        } else {
-                            None
-                        }
-                    } else if force {
-                        stream.entries.get(id).map(|entry_fields| {
-                            let fields =
-                                if !justid { Some(entry_fields.clone()) } else { None };
-                            ClaimEntry {
-                                id: *id,
-                                old_consumer: Vec::new(),
-                                old_count: 0,
-                                is_force_new: true,
-                                fields,
-                            }
-                        })
+            let mut claims = Vec::new();
+            let mut purge_ids = Vec::new();
+            for id in &raw_ids {
+                let nack = group.pending.get(id);
+                if !stream.entries.contains_key(id) {
+                    // Entry must exist for us to transfer it to another consumer;
+                    // if it was in the PEL, that NACK is now dangling and is purged
+                    // outright (not reassigned, not part of the reply).
+                    if let Some(nack) = nack {
+                        purge_ids.push((*id, nack.consumer.clone()));
+                    }
+                    continue;
+                }
+                if let Some(nack) = nack {
+                    let idle = now.saturating_sub(nack.delivery_time_ms);
+                    if idle < min_idle_ms {
+                        continue;
+                    }
+                    let fields = if !justid {
+                        stream.entries.get(id).cloned()
                     } else {
                         None
-                    }
-                })
-                .collect()
+                    };
+                    claims.push(ClaimEntry {
+                        id: *id,
+                        old_consumer: nack.consumer.clone(),
+                        old_count: nack.delivery_count,
+                        is_force_new: false,
+                        fields,
+                    });
+                } else if force {
+                    let entry_fields = stream.entries.get(id).unwrap();
+                    let fields = if !justid { Some(entry_fields.clone()) } else { None };
+                    claims.push(ClaimEntry {
+                        id: *id,
+                        old_consumer: Vec::new(),
+                        old_count: 0,
+                        is_force_new: true,
+                        fields,
+                    });
+                }
+            }
+            (claims, purge_ids)
         }; // all borrows on self.db released
 
         // Phase B: mutation pass — update PEL and consumer bookkeeping.
-        if !claims.is_empty() || opt_lastid.is_some() {
+        if !claims.is_empty() || opt_lastid.is_some() || !purge_ids.is_empty() {
             {
                 let stream = match self.db.get_mut(&key) {
                     Some(Entry {
@@ -7737,6 +7748,13 @@ impl<H: Host> Engine<H> {
                 if let Some(last_id) = opt_lastid {
                     if last_id > group.last_delivered_id {
                         group.last_delivered_id = last_id;
+                    }
+                }
+
+                for (id, old_consumer) in &purge_ids {
+                    group.pending.remove(id);
+                    if let Some(old_c) = group.consumers.get_mut(old_consumer) {
+                        old_c.pending.remove(id);
                     }
                 }
 
@@ -7765,10 +7783,10 @@ impl<H: Host> Engine<H> {
                     consumer.pending.insert(c.id);
                     consumer.seen_time_ms = now;
                     consumer.active_time_ms = now;
-                    // FORCE: advance last_delivered_id to the claimed entry if needed.
-                    if c.is_force_new && c.id > group.last_delivered_id {
-                        group.last_delivered_id = c.id;
-                    }
+                    // NOTE: FORCE does not advance last_delivered_id — valkey's
+                    // xclaimCommand only ever moves last_delivered_id via the
+                    // explicit LASTID option, never as a side effect of claiming
+                    // (t_stream.c:3211-3303 has no such write).
                 }
             } // stream and group dropped, self borrow released
             self.note_write(&key);
@@ -7808,10 +7826,8 @@ impl<H: Host> Engine<H> {
         let Some(min_idle_i64) = parse_i64(&argv[4]) else {
             return err(b"ERR value is not an integer or out of range");
         };
-        if min_idle_i64 < 0 {
-            return err(b"ERR value is not an integer or out of range");
-        }
-        let min_idle_ms = min_idle_i64 as u64;
+        // valkey clamps a negative min-idle-time to 0 rather than erroring (t_stream.c:3345).
+        let min_idle_ms = min_idle_i64.max(0) as u64;
 
         let start_id = match parse_stream_id_strict(&argv[5], 0) {
             Ok((id, _)) => id,
@@ -19904,5 +19920,162 @@ mod tests {
             2,
             "a normal XAUTOCLAIM increments the delivery counter"
         );
+    }
+
+    /// Reads the group's `last_delivered_id`. Panics if the key/group is missing.
+    fn group_last_delivered_id(engine: &Engine<NoopHost>, key: &[u8], group: &[u8]) -> StreamId {
+        let entry = engine.db.get(key).expect("stream key exists");
+        let stream = match &entry.value {
+            StoredValue::Stream(s) => s,
+            _ => panic!("value at {key:?} is not a stream"),
+        };
+        stream
+            .groups
+            .get(group)
+            .expect("consumer group exists")
+            .last_delivered_id
+    }
+
+    #[test]
+    fn xclaim_deleted_entry_purges_pel_and_omits_from_reply() {
+        // valkey (t_stream.c:3231-3244): a PEL entry whose stream entry was
+        // XDEL'd is purged outright by XCLAIM, not reassigned to the new
+        // consumer and echoed back as `[id, nil]`.
+        let mut engine = Engine::new_in_memory();
+        seed_delivered_entry(&mut engine, b"0");
+        engine.execute(&argv(&[b"XDEL", b"s", b"1-1"]));
+
+        let reply = engine.execute(&argv(&[b"XCLAIM", b"s", b"g", b"bob", b"0", b"1-1"]));
+        assert_eq!(
+            reply,
+            RespFrame::array(vec![]),
+            "a deleted entry must not appear in the XCLAIM reply, not even as [id, nil]"
+        );
+
+        let entry = engine.db.get(b"s".as_slice()).expect("stream key exists");
+        let stream = match &entry.value {
+            StoredValue::Stream(s) => s,
+            _ => panic!("value is not a stream"),
+        };
+        let group = stream.groups.get(b"g".as_slice()).expect("group exists");
+        assert!(
+            group.pending.is_empty(),
+            "the dangling NACK for the deleted entry must be purged from the group PEL"
+        );
+        let alice = group.consumers.get(b"alice".as_slice()).expect("consumer exists");
+        assert!(
+            alice.pending.is_empty(),
+            "the dangling NACK must also be purged from the original consumer's local PEL"
+        );
+    }
+
+    #[test]
+    fn xclaim_force_does_not_advance_last_delivered_id() {
+        // valkey's xclaimCommand only moves group->last_id via the explicit
+        // LASTID option; FORCE-creating a NACK for an undelivered, higher ID
+        // must not advance it as a side effect (observable via XINFO GROUPS).
+        let mut engine = Engine::new_in_memory();
+        engine.execute(&argv(&[b"XADD", b"s", b"5-5", b"f", b"v"]));
+        engine.execute(&argv(&[b"XGROUP", b"CREATE", b"s", b"g", b"0"]));
+        assert_eq!(group_last_delivered_id(&engine, b"s", b"g"), StreamId { ms: 0, seq: 0 });
+
+        engine.execute(&argv(&[b"XCLAIM", b"s", b"g", b"bob", b"0", b"5-5", b"FORCE"]));
+        assert_eq!(
+            group_last_delivered_id(&engine, b"s", b"g"),
+            StreamId { ms: 0, seq: 0 },
+            "FORCE must not advance last_delivered_id even though the claimed id is higher"
+        );
+
+        engine.execute(&argv(&[b"XCLAIM", b"s", b"g", b"carol", b"0", b"5-5", b"LASTID", b"5-5"]));
+        assert_eq!(
+            group_last_delivered_id(&engine, b"s", b"g"),
+            StreamId { ms: 5, seq: 5 },
+            "only the explicit LASTID option may advance last_delivered_id"
+        );
+    }
+
+    #[test]
+    fn xclaim_negative_min_idle_time_clamps_to_zero_instead_of_erroring() {
+        let mut engine = Engine::new_in_memory();
+        seed_delivered_entry(&mut engine, b"0");
+
+        let reply = engine.execute(&argv(&[b"XCLAIM", b"s", b"g", b"bob", b"-100", b"1-1"]));
+        match reply {
+            RespFrame::Array(Some(items)) => assert_eq!(
+                items.len(),
+                1,
+                "negative min-idle-time must clamp to 0 and claim the entry, not error"
+            ),
+            other => panic!("negative min-idle-time must not error, got {other:?}"),
+        }
+        assert_eq!(
+            only_pending_delivery_count(&engine, b"s", b"g"),
+            2,
+            "the entry must actually have been claimed"
+        );
+    }
+
+    #[test]
+    fn xautoclaim_negative_min_idle_time_clamps_to_zero_instead_of_erroring() {
+        let mut engine = Engine::new_in_memory();
+        seed_delivered_entry(&mut engine, b"0");
+
+        let reply =
+            engine.execute(&argv(&[b"XAUTOCLAIM", b"s", b"g", b"bob", b"-100", b"0-0"]));
+        match reply {
+            RespFrame::Array(Some(items)) => assert_eq!(items.len(), 3, "cursor, entries, deleted"),
+            other => panic!("negative min-idle-time must not error, got {other:?}"),
+        }
+        assert_eq!(
+            only_pending_delivery_count(&engine, b"s", b"g"),
+            2,
+            "the entry must actually have been claimed (min-idle clamped to 0, not rejected)"
+        );
+    }
+
+    #[test]
+    fn xclaim_negative_idle_and_time_options_normalize_to_now() {
+        let mut engine = Engine::new(NoopHost::new(1_000));
+        seed_delivered_entry(&mut engine, b"0");
+
+        let idle_reply = engine.execute(&argv(&[
+            b"XCLAIM", b"s", b"g", b"bob", b"0", b"1-1", b"IDLE", b"-50",
+        ]));
+        match &idle_reply {
+            RespFrame::Array(Some(items)) => assert_eq!(items.len(), 1, "negative IDLE must claim, not error"),
+            other => panic!("XCLAIM with negative IDLE must not error: {other:?}"),
+        }
+        assert_eq!(
+            only_pending_delivery_time(&engine, b"s", b"g"),
+            1_000,
+            "a negative IDLE arg computes a delivery time above `now`, which valkey resets to `now` (t_stream.c:3195-3209)"
+        );
+
+        let time_reply = engine.execute(&argv(&[
+            b"XCLAIM", b"s", b"g", b"carol", b"0", b"1-1", b"TIME", b"-500",
+        ]));
+        match &time_reply {
+            RespFrame::Array(Some(items)) => assert_eq!(items.len(), 1, "negative TIME must claim, not error"),
+            other => panic!("XCLAIM with negative TIME must not error: {other:?}"),
+        }
+        assert_eq!(
+            only_pending_delivery_time(&engine, b"s", b"g"),
+            1_000,
+            "a negative TIME arg is itself a bogus delivery time, which valkey resets to `now`"
+        );
+    }
+
+    /// Reads the delivery time of the single pending entry for `group`.
+    fn only_pending_delivery_time(engine: &Engine<NoopHost>, key: &[u8], group: &[u8]) -> u64 {
+        let entry = engine.db.get(key).expect("stream key exists");
+        let stream = match &entry.value {
+            StoredValue::Stream(s) => s,
+            _ => panic!("value at {key:?} is not a stream"),
+        };
+        let g = stream.groups.get(group).expect("consumer group exists");
+        let mut times = g.pending.values().map(|nack| nack.delivery_time_ms);
+        let first = times.next().expect("exactly one pending entry expected");
+        assert!(times.next().is_none(), "helper assumes a single pending entry");
+        first
     }
 }
