@@ -7638,7 +7638,7 @@ impl<H: Host> Engine<H> {
         let new_delivery_time = if opt_time.is_some() || opt_idle.is_some() {
             let raw = match opt_time {
                 Some(t) => t,
-                None => now_i64 - opt_idle.unwrap(),
+                None => now_i64.saturating_sub(opt_idle.unwrap()),
             };
             if raw < 0 || raw > now_i64 {
                 now
@@ -20038,18 +20038,26 @@ mod tests {
         let mut engine = Engine::new(NoopHost::new(1_000));
         seed_delivered_entry(&mut engine, b"0");
 
-        engine.execute(&argv(&[
+        let idle_reply = engine.execute(&argv(&[
             b"XCLAIM", b"s", b"g", b"bob", b"0", b"1-1", b"IDLE", b"-50",
         ]));
+        match &idle_reply {
+            RespFrame::Array(Some(items)) => assert_eq!(items.len(), 1, "negative IDLE must claim, not error"),
+            other => panic!("XCLAIM with negative IDLE must not error: {other:?}"),
+        }
         assert_eq!(
             only_pending_delivery_time(&engine, b"s", b"g"),
             1_000,
             "a negative IDLE arg computes a delivery time above `now`, which valkey resets to `now` (t_stream.c:3195-3209)"
         );
 
-        engine.execute(&argv(&[
+        let time_reply = engine.execute(&argv(&[
             b"XCLAIM", b"s", b"g", b"carol", b"0", b"1-1", b"TIME", b"-500",
         ]));
+        match &time_reply {
+            RespFrame::Array(Some(items)) => assert_eq!(items.len(), 1, "negative TIME must claim, not error"),
+            other => panic!("XCLAIM with negative TIME must not error: {other:?}"),
+        }
         assert_eq!(
             only_pending_delivery_time(&engine, b"s", b"g"),
             1_000,
