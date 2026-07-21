@@ -69,7 +69,7 @@
 {"id": "hibf-existing-int-set", "cmd": ["HSET", "hibf:h", "g", "5"]}
 {"id": "hibf-int-plus-float", "cmd": ["HINCRBYFLOAT", "hibf:h", "g", "5.0e3"]}
 {"id": "hibf-half-set", "cmd": ["HSET", "hibf:h", "p", "10.5"]}
-{"id": "hibf-half-incr", "cmd": ["HINCRBYFLOAT", "hibf:h", "p", "0.1"]}
+{"id": "hibf-half-incr", "cmd": ["HINCRBYFLOAT", "hibf:h", "p", "0.1"], "mode": "float_g10"}
 {"id": "hibf-exp", "cmd": ["HINCRBYFLOAT", "hibf:h", "e", "5.0e3"]}
 {"id": "hibf-neg", "cmd": ["HINCRBYFLOAT", "hibf:h", "n", "-5.5"]}
 {"id": "hibf-three-set", "cmd": ["HSET", "hibf:h", "t", "3.0"]}

@@ -10,7 +10,8 @@ Fixture files are JSONL under harness/oracle/valdr-fixtures/. Each line:
     {"id": "<string>",
      "cmd": ["SET", "k", "v"],
      "now_millis": <optional u64, engine host clock; wall clock if absent>,
-     "mode": "exact" | "ttl_band" | "error_prefix" | "type_only" | "set_equal" | "scan_reply",
+     "mode": "exact" | "ttl_band" | "error_prefix" | "type_only" | "set_equal" | "scan_reply"
+             | "float_g10",
      "band": <int, required for ttl_band>,
      "sleep_ms": <optional int, harness sleeps before dispatching this line>,
      "known_unsupported": <optional bool, record-only, never a verdict>}
@@ -25,6 +26,7 @@ Ports are confined to 38000-38999 (other oracle runners own 36000-37999).
 
 import argparse
 import json
+import math
 import os
 import socket
 import subprocess
@@ -33,7 +35,7 @@ import tempfile
 import time
 from pathlib import Path
 
-VALID_MODES = ("exact", "ttl_band", "error_prefix", "type_only", "set_equal", "scan_reply")
+VALID_MODES = ("exact", "ttl_band", "error_prefix", "type_only", "set_equal", "scan_reply", "float_g10")
 PORT_RANGE = (38000, 38999)
 
 
@@ -143,6 +145,30 @@ def first_error_token(node):
     return value.split(b" ", 1)[0]
 
 
+def canonicalize_float_g10(node):
+    """Render a finite numeric bulk-string frame via `%.10g`, upstream's own
+    tolerance for float replies (`roundFloat`, reference/valkey
+    tests/support/util.tcl:498). Returns None for anything that is not a
+    finite numeric bulk string (wrong RESP type, a non-numeric payload, or
+    inf/nan) so the caller falls back to exact byte comparison instead of
+    ever masking a genuine type or error divergence.
+    """
+    tag, value = node
+    if tag != "$" or value is None:
+        return None
+    try:
+        text = value.decode("ascii")
+    except UnicodeDecodeError:
+        return None
+    try:
+        parsed = float(text)
+    except ValueError:
+        return None
+    if not math.isfinite(parsed):
+        return None
+    return "%.10g" % parsed
+
+
 def compare(mode, band, engine_raw, valkey_raw):
     """Return True when the two raw frames agree under the fixture's mode."""
     if engine_raw == valkey_raw:
@@ -190,6 +216,12 @@ def compare(mode, band, engine_raw, valkey_raw):
         engine_items = sorted(render(item) for item in (engine_elems[1] or []))
         valkey_items = sorted(render(item) for item in (valkey_elems[1] or []))
         return engine_items == valkey_items
+    if mode == "float_g10":
+        engine_canon = canonicalize_float_g10(engine_node)
+        valkey_canon = canonicalize_float_g10(valkey_node)
+        if engine_canon is None or valkey_canon is None:
+            return False
+        return engine_canon == valkey_canon
     raise HarnessError(f"unknown compare mode {mode!r}")
 
 
@@ -458,9 +490,48 @@ def write_report(out_path, results, meta):
     return len(passes), len(diverges) + len(crashes), len(known)
 
 
+def run_selftest():
+    """Assert the float_g10 canonicalizer's documented semantics through
+    `compare()` directly — no valkey binary, no fixture runner. Returns True
+    when every assertion holds; prints each failure to stderr and returns
+    False otherwise.
+    """
+
+    def bulk(text):
+        data = text.encode("ascii")
+        return b"$%d\r\n%s\r\n" % (len(data), data)
+
+    def error(text):
+        return b"-%s\r\n" % text.encode("ascii")
+
+    cases = [
+        ("10.6 canonicalizes equal to 10.59999999999999964", bulk("10.6"), bulk("10.59999999999999964"), True),
+        ("0 does not canonicalize equal to 0.00000000000000000001", bulk("0"), bulk("0.00000000000000000001"), False),
+        ("abc equals abc", bulk("abc"), bulk("abc"), True),
+        ("abc does not equal abd", bulk("abc"), bulk("abd"), False),
+        ("an error reply is never canonicalized against a numeric bulk reply", error("ERR value is not a valid float"), bulk("10.6"), False),
+    ]
+    failures = []
+    for label, engine_raw, valkey_raw, expected in cases:
+        actual = compare("float_g10", 0, engine_raw, valkey_raw)
+        if actual != expected:
+            failures.append(f"{label}: expected {expected}, got {actual}")
+    if failures:
+        for failure in failures:
+            print(f"SELFTEST FAIL: {failure}", file=sys.stderr)
+        return False
+    print(f"valdr float_g10 selftest: {len(cases)}/{len(cases)} assertions passed")
+    return True
+
+
 def main():
     repo_root = Path(__file__).resolve().parents[2]
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--selftest",
+        action="store_true",
+        help="run the float_g10 canonicalizer self-check (no valkey/runner needed) and exit",
+    )
     parser.add_argument(
         "--server-bin",
         default=str(repo_root / "reference" / "valkey" / "src" / "valkey-server"),
@@ -500,6 +571,9 @@ def main():
         "so a single-file run's verdict matches that group's verdict in the full run.",
     )
     args = parser.parse_args()
+
+    if args.selftest:
+        sys.exit(0 if run_selftest() else 1)
 
     server_bin = Path(args.server_bin)
     if not server_bin.is_file():
