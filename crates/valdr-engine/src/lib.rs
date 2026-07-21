@@ -20078,4 +20078,74 @@ mod tests {
         assert!(times.next().is_none(), "helper assumes a single pending entry");
         first
     }
+
+    #[test]
+    fn incrbyfloat_locks_the_f64_percent17f_trim_byte_contract() {
+        let mut engine = Engine::new_in_memory();
+
+        engine.execute(&argv(&[b"SET", b"seed1", b"10.5"]));
+        assert_eq!(
+            engine.execute(&argv(&[b"INCRBYFLOAT", b"seed1", b"0.1"])),
+            bulk(b"10.59999999999999964")
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"GET", b"seed1"])),
+            bulk(b"10.59999999999999964"),
+            "the formatted reply must be the stored value, not just the reply"
+        );
+
+        assert_eq!(
+            engine.execute(&argv(&[b"INCRBYFLOAT", b"fresh", b"1e-20"])),
+            bulk(b"0"),
+            "1e-20 truncates away entirely under %.17f"
+        );
+
+        engine.execute(&argv(&[b"SET", b"seed2", b"0.2"]));
+        assert_eq!(
+            engine.execute(&argv(&[b"INCRBYFLOAT", b"seed2", b"0.1"])),
+            bulk(b"0.30000000000000004")
+        );
+
+        engine.execute(&argv(&[b"SET", b"seed3", b"-0"]));
+        assert_eq!(
+            engine.execute(&argv(&[b"INCRBYFLOAT", b"seed3", b"-0"])),
+            bulk(b"0"),
+            "a -0.0 sum must normalize to the bare 0 reply"
+        );
+    }
+
+    #[test]
+    fn hincrbyfloat_locks_the_f64_percent17f_trim_byte_contract() {
+        let mut engine = Engine::new_in_memory();
+
+        engine.execute(&argv(&[b"HSET", b"h", b"seed1", b"10.5"]));
+        assert_eq!(
+            engine.execute(&argv(&[b"HINCRBYFLOAT", b"h", b"seed1", b"0.1"])),
+            bulk(b"10.59999999999999964")
+        );
+        assert_eq!(
+            engine.execute(&argv(&[b"HGET", b"h", b"seed1"])),
+            bulk(b"10.59999999999999964"),
+            "the formatted reply must be the stored field value, not just the reply"
+        );
+
+        assert_eq!(
+            engine.execute(&argv(&[b"HINCRBYFLOAT", b"h", b"fresh", b"1e-20"])),
+            bulk(b"0"),
+            "1e-20 truncates away entirely under %.17f"
+        );
+
+        engine.execute(&argv(&[b"HSET", b"h", b"seed2", b"0.2"]));
+        assert_eq!(
+            engine.execute(&argv(&[b"HINCRBYFLOAT", b"h", b"seed2", b"0.1"])),
+            bulk(b"0.30000000000000004")
+        );
+
+        engine.execute(&argv(&[b"HSET", b"h", b"seed3", b"-0"]));
+        assert_eq!(
+            engine.execute(&argv(&[b"HINCRBYFLOAT", b"h", b"seed3", b"-0"])),
+            bulk(b"0"),
+            "a -0.0 sum must normalize to the bare 0 reply"
+        );
+    }
 }
