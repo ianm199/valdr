@@ -132,7 +132,7 @@
 {"id": "ibf-existing-int", "cmd": ["SET", "ibf:i", "5"]}
 {"id": "ibf-int-plus-float", "cmd": ["INCRBYFLOAT", "ibf:i", "5.0e3"]}
 {"id": "ibf-half-set", "cmd": ["SET", "ibf:h", "10.5"]}
-{"id": "ibf-half-incr", "cmd": ["INCRBYFLOAT", "ibf:h", "0.1"]}
+{"id": "ibf-half-incr", "cmd": ["INCRBYFLOAT", "ibf:h", "0.1"], "mode": "float_g10"}
 {"id": "ibf-exp-set", "cmd": ["SET", "ibf:e", "5.0e3"]}
 {"id": "ibf-exp-incr", "cmd": ["INCRBYFLOAT", "ibf:e", "200"]}
 {"id": "ibf-three-set", "cmd": ["SET", "ibf:t", "3.0"]}
